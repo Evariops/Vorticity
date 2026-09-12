@@ -46,11 +46,20 @@ BenchmarkDotNet.Artifacts/
 tools/conformance-gen/target/
 **/Cargo.lock.orig
 
-# ---- Conformance corpus (generated artifact, published by CI — never committed) ----
-tests/**/corpus/
+# ---- Conformance corpus (committed, not generated on the fly) ----
+# The pinned golden corpus IS in the repository. It is deterministic (splitmix64 with a recorded
+# master seed), hashed file by file in its own manifest, and re-derivable at any time from
+# tools/conformance-gen -- so committing it costs ~17 MB packed rather than the 122 MB it occupies
+# on disk, and it keeps `dotnet test` working on a bare clone with no Rust toolchain. 54 of the
+# unit-test project's files and all of the conformance project's depend on it.
 tests/**/golden/
+
+# A .vortex file anywhere else is scratch output and is never committed. The corpus and the forged
+# fixtures are the two deliberate exceptions -- the forged one matters: its manifest is tracked, so
+# ignoring the file it describes leaves a clone with a manifest pointing at nothing.
 *.vortex
-!tests/**/fixtures/**/*.vortex
+!tests/Vorticity.Conformance/corpus/**/*.vortex
+!tests/Vorticity.Conformance/forged/**/*.vortex
 
 # ---- Fuzzing ----
 fuzz/artifacts/
