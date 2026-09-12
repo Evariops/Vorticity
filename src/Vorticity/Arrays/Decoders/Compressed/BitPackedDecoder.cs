@@ -165,7 +165,9 @@ public sealed class BitPackedDecoder : ArrayDecoder
         Span<byte> destination = default;
         if (total != 0)
         {
-            output = CompressedValues.Allocate(context, total, width, Id, out destination);
+            // UNINITIALIZED: Unpack writes all `total` bytes, including at bit width 0 where it
+            // clears the span itself rather than inheriting a cleared one. Patches only overwrite.
+            output = CompressedValues.AllocateUninitialized(context, total, width, Id, out destination);
             Unpack(packed.Span, bitWidth, offset, length, width, destination);
         }
 

@@ -101,7 +101,7 @@ internal static class RatioCheck
     /// out red on every axis.
     ///
     ///     axis                    here    BenchmarkDotNet
-    ///     full scan               0.962   0.966
+    ///     full scan               0.953   0.966
     ///     open, footer only       0.732   0.752
     ///     projected scan          0.514   0.392
     ///     open to first batch     0.093   0.060
@@ -114,7 +114,7 @@ internal static class RatioCheck
     /// </remarks>
     private static readonly Axis[] Axes =
     [
-        new Axis("full scan", 0.962, ScanAll, p => RustReader.Require(RustReader.ScanAll(p), "scan")),
+        new Axis("full scan", 0.953, ScanAll, p => RustReader.Require(RustReader.ScanAll(p), "scan")),
         new Axis(
             "projected scan, 1 of 5 columns",
             0.514,

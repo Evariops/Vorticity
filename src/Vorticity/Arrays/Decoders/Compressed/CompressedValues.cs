@@ -624,6 +624,35 @@ internal ref struct DataBufferSet
 /// <summary>Small helpers every compressed decoder needs and none of them may re-invent.</summary>
 internal static class CompressedValues
 {
+    /// <summary>Allocate without the zero-fill, for a decoder that writes every byte.</summary>
+    /// <param name="ctx">The decode context.</param>
+    /// <param name="byteLength">Size in bytes.</param>
+    /// <param name="alignment">A power of two.</param>
+    /// <param name="encodingId">The encoding, for the error message.</param>
+    /// <param name="destination">The writable block, NOT zeroed.</param>
+    /// <returns>A non-owning view over the same bytes.</returns>
+    /// <exception cref="VortexFormatException">The buffer would exceed the ceiling.</exception>
+    /// <remarks>
+    /// Only for a decoder that provably writes every byte; see
+    /// <see cref="CanonicalArena.AllocateUninitialized"/> for why that bar is where it is.
+    /// </remarks>
+    public static VortexBuffer AllocateUninitialized(
+        ArrayDecodeContext ctx, int byteLength, int alignment, string encodingId,
+        out Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(ctx);
+
+        long ceiling = ctx.Options.MaxDecompressedSize;
+        if (byteLength > ceiling)
+        {
+            destination = default;
+            CompressedThrow.Format(
+                $"Decoding {encodingId} would materialize {byteLength} bytes, above the " +
+                $"{ceiling}-byte decompression ceiling.");
+        }
+
+        return ctx.Canonical.AllocateUninitialized(byteLength, alignment, out destination);
+    }
     /// <summary>
     /// Materializes a decoded buffer, refusing one larger than
     /// <see cref="VortexReadOptions.MaxDecompressedSize"/>.

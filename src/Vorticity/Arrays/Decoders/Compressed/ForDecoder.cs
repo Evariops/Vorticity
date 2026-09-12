@@ -120,7 +120,9 @@ public sealed class ForDecoder : ArrayDecoder
                 dtype, produced, child.Validity, ptype, VortexBuffer.Empty);
         }
 
-        VortexBuffer output = CompressedValues.Allocate(
+        // UNINITIALIZED: AddWrapping writes all `total` bytes, and the zero-length case returned
+        // above it.
+        VortexBuffer output = CompressedValues.AllocateUninitialized(
             context, total, width, Id, out Span<byte> destination);
         IntegerKernels.AddWrapping(child.Values.Span[..total], destination, width, referenceBits);
         return context.Canonical.AddPrimitive(dtype, produced, child.Validity, ptype, output);

@@ -595,6 +595,46 @@ public sealed class CanonicalArena
     public VortexBuffer Allocate(int byteLength, int alignment) => Allocate(byteLength, alignment, out _);
 
     /// <summary>
+    /// <see cref="Allocate(int, int, out Span{byte})"/> WITHOUT the zero-fill. The caller must write
+    /// every byte of <paramref name="destination"/> before anything reads it.
+    /// </summary>
+    /// <param name="byteLength">Size in bytes, already validated against the row count.</param>
+    /// <param name="alignment">A power of two in <c>[1, VortexLimits.MaxAlignment]</c>.</param>
+    /// <param name="destination">The writable block, holding WHATEVER WAS THERE BEFORE.</param>
+    /// <returns>A non-owning view over the same bytes.</returns>
+    /// <remarks>
+    /// <para>
+    /// SEPARATE METHOD RATHER THAN A FLAG, because the failure mode is silent. The blocks come from
+    /// a pool that has held other files' bytes, so a buffer this hands out and the caller does not
+    /// completely fill exposes those bytes AS COLUMN VALUES. That is data disclosure, not a wrong
+    /// answer, and it passes every differential test whose oracle is another run of this reader over
+    /// the same file. A boolean argument would let a call site acquire the fast path by accident; a
+    /// distinct name cannot be typed by mistake.
+    /// </para>
+    /// <para>
+    /// The oracle that CAN catch it is the Rust cross-check, which reads what this library wrote
+    /// with an implementation that did not produce the bytes.
+    /// </para>
+    /// <para>
+    /// <b>Eligibility is "provably writes every byte", not "probably".</b> A decoder whose zero-width
+    /// or zero-length branch falls through to the buffer's existing contents is NOT eligible, however
+    /// rare that branch is - <c>fastlanes.bitpacked</c> at bit width 0 qualifies only because it
+    /// clears the span itself rather than inheriting a cleared one.
+    /// </para>
+    /// </remarks>
+    public VortexBuffer AllocateUninitialized(int byteLength, int alignment, out Span<byte> destination)
+    {
+        NativeSegmentOwner owner = _pool.Rent(byteLength, alignment);
+        if (_ownedCount == _owned.Length)
+        {
+            Array.Resize(ref _owned, Grow(_owned.Length));
+        }
+
+        _owned[_ownedCount++] = owner;
+        destination = owner.WritableSpan;
+        return owner.Buffer;
+    }
+    /// <summary>
     /// <see cref="Allocate(int, int)"/>, additionally handing back a writable span over the block.
     /// This is the only way a decoder gets writable memory: a decoder that news up a
     /// <c>byte[]</c> breaks the per-batch zero-allocation invariant, and one that writes into a

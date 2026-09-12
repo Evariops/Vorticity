@@ -36,6 +36,23 @@ internal static class CanonicalSupport
     /// </summary>
     internal const int MaxRequiredAlignment = 16;
 
+    /// <summary>Allocate without the zero-fill, for a decoder that writes every byte.</summary>
+    /// <param name="context">The decode context, for the size ceiling.</param>
+    /// <param name="byteLength">Size in bytes.</param>
+    /// <param name="alignment">A power of two.</param>
+    /// <param name="destination">The writable block, NOT zeroed.</param>
+    /// <returns>A non-owning view over the same bytes.</returns>
+    /// <remarks>
+    /// Only for a decoder that provably writes every byte; see
+    /// <see cref="CanonicalArena.AllocateUninitialized"/> for why that bar is where it is.
+    /// </remarks>
+    internal static VortexBuffer AllocateUninitialized(
+        ArrayDecodeContext context, int byteLength, int alignment, out Span<byte> destination)
+    {
+        RequireWithinBudget(context, byteLength);
+        return context.Canonical.AllocateUninitialized(byteLength, alignment, out destination);
+    }
+
     /// <summary>
     /// Materializes a buffer, refusing one larger than
     /// <see cref="Vorticity.File.VortexReadOptions.MaxDecompressedSize"/>.

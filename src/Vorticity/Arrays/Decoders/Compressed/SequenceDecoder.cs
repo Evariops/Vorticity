@@ -117,7 +117,8 @@ public sealed class SequenceDecoder : ArrayDecoder
         int width = ptype.ByteWidth();
         int produced = selective ? wanted.Length : length;
         int total = ArrayDecodeContext.CheckedMultiply(produced, width, "Sequence values");
-        VortexBuffer output = CompressedValues.Allocate(
+        // UNINITIALIZED: every arm of the switch below generates all `produced` elements.
+        VortexBuffer output = CompressedValues.AllocateUninitialized(
             context, total, width, Id, out Span<byte> destination);
 
         switch (width)

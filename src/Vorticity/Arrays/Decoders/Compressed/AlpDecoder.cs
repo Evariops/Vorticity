@@ -113,7 +113,10 @@ public sealed class AlpDecoder : ArrayDecoder
             context, encodedIndex, encodedPType, produced, Id + " encoded");
 
         int total = ArrayDecodeContext.CheckedMultiply(produced, width, Id + " values");
-        VortexBuffer output = CanonicalSupport.Allocate(context, total, width, out Span<byte> destination);
+        // UNINITIALIZED: both DecodeSingle and DecodeDouble write all `produced` values, and
+        // `produced == 0` means `total == 0`, so there is no uncovered case. Patches only overwrite.
+        VortexBuffer output = CanonicalSupport.AllocateUninitialized(
+            context, total, width, out Span<byte> destination);
         if (produced != 0)
         {
             ReadOnlySpan<byte> source = encoded.Values.Span;
