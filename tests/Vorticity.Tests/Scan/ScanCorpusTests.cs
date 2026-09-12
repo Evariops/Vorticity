@@ -29,8 +29,8 @@ public sealed class ScanCorpusTests
         // A snapshot, not a configuration: if a decoder lands or is withdrawn this number moves,
         // and the test is updated to the new snapshot rather than the computation being replaced by
         // a list. 616 was Phase 1; +32 vortex.decimal_byte_parts, +6 vortex.datetimeparts,
-        // +5 vortex.zstd.
-        Assert.Equal(659, inScope.Count);
+        // +5 vortex.zstd, +33 vortex.alp.
+        Assert.Equal(692, inScope.Count);
     }
 
     [Fact]
@@ -57,7 +57,7 @@ public sealed class ScanCorpusTests
         }
 
         Assert.Equal(string.Empty, failures.ToString());
-        Assert.Equal(659, checkedFiles);
+        Assert.Equal(692, checkedFiles);
     }
 
     [Fact]
@@ -112,8 +112,15 @@ public sealed class ScanCorpusTests
         }
 
         Assert.Equal(string.Empty, wrong.ToString());
-        Assert.Equal(159, named + read);
-        Assert.True(named > 150, "most out-of-scope files must actually reach their missing component");
+        Assert.Equal(126, named + read);
+
+        // A PROPORTION, not a count: the absolute number shrinks with every decoder that lands,
+        // while the property being asserted -- that an out-of-scope file almost always reaches the
+        // component it is missing, rather than being quietly readable -- does not.
+        Assert.True(
+            named * 4 >= (named + read) * 3,
+            $"{named} of {named + read} out-of-scope files reached their missing component; " +
+            "the rest were readable, which should stay the rare case");
     }
 
     private static async Task ScanOne(CorpusEntry entry)

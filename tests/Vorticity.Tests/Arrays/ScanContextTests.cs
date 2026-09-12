@@ -17,7 +17,9 @@ namespace Vorticity.Tests.Arrays;
 
 public sealed class ScanContextTests
 {
-    private static readonly string[] Ids = ["vortex.primitive", "vortex.bool", "vortex.alp"];
+    // Slot 2 is the stand-in for "an id this build does not decode". fastlanes.delta is in no
+    // core edition, so it stays that way as Phase 2 decoders land.
+    private static readonly string[] Ids = ["vortex.primitive", "vortex.bool", "fastlanes.delta"];
 
     [Fact]
     public void ADetachedContextOwnsEveryArenaAndRefusesToInventAFile()
@@ -51,7 +53,7 @@ public sealed class ScanContextTests
         Assert.Equal(ArrayEncodingId.Unknown, scan.ArrayEncodings[2]);
 
         Assert.Equal("vortex.primitive", scan.GetArrayEncodingIdText(0));
-        Assert.Equal("vortex.alp", scan.GetArrayEncodingIdText(2));
+        Assert.Equal("fastlanes.delta", scan.GetArrayEncodingIdText(2));
 
         // An index the footer never declared must not be an index-out-of-range on a throw path.
         Assert.Contains("99", scan.GetArrayEncodingIdText(99), StringComparison.Ordinal);
@@ -108,7 +110,7 @@ public sealed class ScanContextTests
     [Fact]
     public void DecodingANodeThisBuildCannotDecodeFailsAtUseWithTheIdAndTheKind()
     {
-        // Lazy resolution: the blob parsed fine (spec index 2 -> vortex.alp -> Unknown); the throw
+        // Lazy resolution: the blob parsed fine (spec index 2 -> fastlanes.delta -> Unknown); the throw
         // happens here, at the dispatch site, and names the component.
         using ScanContext scan = new ScanContext(Ids);
         LoadOneNode(scan, encoding: 2);
@@ -117,7 +119,7 @@ public sealed class ScanContextTests
         VortexUnsupportedException error = Assert.Throws<VortexUnsupportedException>(
             () => scan.Decode.Decode(scan.Nodes.Root, dtype, 8));
 
-        Assert.Equal("vortex.alp", error.ComponentId);
+        Assert.Equal("fastlanes.delta", error.ComponentId);
         Assert.Equal(VortexComponentKind.Array, error.Kind);
     }
 

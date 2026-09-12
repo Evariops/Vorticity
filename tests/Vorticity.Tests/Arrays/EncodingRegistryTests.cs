@@ -38,13 +38,13 @@ public sealed class EncodingRegistryTests
     [InlineData("vortex.decimal_byte_parts", ArrayEncodingId.DecimalByteParts)]
     [InlineData("vortex.datetimeparts", ArrayEncodingId.DateTimeParts)]
     [InlineData("vortex.zstd", ArrayEncodingId.Zstd)]
+    [InlineData("vortex.alp", ArrayEncodingId.Alp)]
     public void EveryImplementedArrayIdResolves(string id, ArrayEncodingId expected)
     {
         Assert.Equal(expected, EncodingRegistry.ResolveArray(Encoding.UTF8.GetBytes(id)));
     }
 
     [Theory]
-    [InlineData("vortex.alp")]
     [InlineData("vortex.alprd")]
     [InlineData("vortex.fsst")]
     [InlineData("vortex.onpair")]
@@ -135,15 +135,17 @@ public sealed class EncodingRegistryTests
     [Fact]
     public void GettingADecoderForAnUnknownIdNamesTheIdAndTheKind()
     {
+        // fastlanes.delta rather than one of the Phase 2 ids: its note is structural ("in no core
+        // edition"), so unlike "deferred to Phase 2" it does not expire as decoders land.
         VortexUnsupportedException error =
             Assert.Throws<VortexUnsupportedException>(
-                () => ArrayDecoderTable.Get(ArrayEncodingId.Unknown, "vortex.alp"));
+                () => ArrayDecoderTable.Get(ArrayEncodingId.Unknown, "fastlanes.delta"));
 
-        Assert.Equal("vortex.alp", error.ComponentId);
+        Assert.Equal("fastlanes.delta", error.ComponentId);
         Assert.Equal(VortexComponentKind.Array, error.Kind);
-        Assert.Contains("vortex.alp", error.Message, StringComparison.Ordinal);
+        Assert.Contains("fastlanes.delta", error.Message, StringComparison.Ordinal);
         Assert.Contains("array", error.Message, StringComparison.Ordinal);
-        Assert.Contains("Phase 2", error.Message, StringComparison.Ordinal);
+        Assert.Contains("core edition", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -218,6 +218,32 @@ internal static class TestMetadata
         }
     }
 
+    /// <summary><c>vortex.alp</c> metadata with no patches.</summary>
+    /// <param name="exponentE">The e exponent, an index into the inverse scaling table.</param>
+    /// <param name="exponentF">The f exponent, an index into the scaling table.</param>
+    internal static byte[] Alp(uint exponentE, uint exponentF) => AlpBody(new AlpMetadata(exponentE, exponentF));
+
+    /// <summary><c>vortex.alp</c> metadata with a patch descriptor.</summary>
+    /// <param name="exponentE">The e exponent.</param>
+    /// <param name="exponentF">The f exponent.</param>
+    /// <param name="patches">The patch descriptor.</param>
+    internal static byte[] Alp(uint exponentE, uint exponentF, in PatchesMetadata patches) =>
+        AlpBody(new AlpMetadata(exponentE, exponentF, in patches));
+
+    private static byte[] AlpBody(in AlpMetadata value)
+    {
+        ProtoWriter writer = new();
+        try
+        {
+            AlpMetadata.Write(ref writer, in value);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
     /// <summary>A bare <c>ScalarValue</c> message body, as fastlanes.for's metadata and
     /// vortex.constant's / vortex.sparse's buffer 0 carry it.</summary>
     internal static byte[] Scalar(ScalarValue value) => ScalarProtobuf.SerializeValue(value);
@@ -283,6 +309,17 @@ internal static class TestBuffers
     }
 
     /// <summary>An LSB-first bitmap of <paramref name="bits"/>.</summary>
+    internal static byte[] Double(params double[] values)
+    {
+        byte[] bytes = new byte[values.Length * sizeof(double)];
+        for (int i = 0; i < values.Length; i++)
+        {
+            BinaryPrimitives.WriteDoubleLittleEndian(bytes.AsSpan(i * sizeof(double)), values[i]);
+        }
+
+        return bytes;
+    }
+
     internal static byte[] Bitmap(params bool[] bits)
     {
         byte[] bytes = new byte[(bits.Length + 7) / 8];

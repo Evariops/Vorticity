@@ -171,15 +171,6 @@ internal static class UnsupportedCorpusEntries
     /// </summary>
     internal static readonly string[] All =
     [
-        "encodings/alp",
-        "encodings/alp_no_patches",
-        "encodings/alp_no_patches_r1",
-        "encodings/alp_no_patches_r1023",
-        "encodings/alp_no_patches_r1025",
-        "encodings/alp_patched_no_chunk_offsets",
-        "encodings/alp_r1",
-        "encodings/alp_r1023",
-        "encodings/alp_r1025",
         "encodings/alprd",
         "encodings/alprd_r1",
         "encodings/alprd_r1023",

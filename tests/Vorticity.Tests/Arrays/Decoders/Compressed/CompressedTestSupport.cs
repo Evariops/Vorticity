@@ -48,6 +48,7 @@ internal static class TestDecoders
             Register(DecimalBytePartsDecoder.Instance);
             Register(DateTimePartsDecoder.Instance);
             Register(ZstdDecoder.Instance);
+            Register(AlpDecoder.Instance);
 
             Register(new StubPrimitiveDecoder());
             Register(new StubBoolDecoder());
