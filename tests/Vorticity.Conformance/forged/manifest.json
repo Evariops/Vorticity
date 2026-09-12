@@ -1,0 +1,38 @@
+{
+  "format": "vortex-conformance-forged/1",
+  "generator": {
+    "name": "conformance-gen",
+    "version": "0.2.0",
+    "source": "tools/conformance-gen",
+    "vortex_version": "0.86.1"
+  },
+  "about": "Fixtures that no conformant writer can produce, made by byte-patching a corpus file. These are NOT reference-implementation output: they are deliberately malformed or out-of-scope files, and the Rust reader is expected to reject them exactly as a .NET reader should. Each record states the source file, its hash, and the exact byte patch, so the fixture can be re-derived rather than trusted.",
+  "files": [
+    {
+      "id": "negative/unknown_encoding_id",
+      "path": "negative/unknown_encoding_id.vortex",
+      "description": "a structurally valid Vortex file whose array_specs declares `vortex.unknown01`, an encoding id registered in no edition and by no implementation",
+      "source": "containers/uncompressed_canonical.vortex",
+      "source_sha256": "d281211592681b1d7c351c9a3c6ae1a0a602ee90c1fef70e37a1a4dc87901f7a",
+      "patch": {
+        "offset": 99392,
+        "length": 16,
+        "from": "vortex.primitive",
+        "to": "vortex.unknown01",
+        "why_same_length": "the id is a length-prefixed flatbuffer string; an equal-length overwrite keeps every offset in the file valid, and Vortex checksums nothing"
+      },
+      "sha256": "3480ef80d21db8618d5105b177ef37c2e359f71f8db58aa2c02c265059602c9f",
+      "size_bytes": 100256,
+      "row_count": 4096,
+      "columns": {
+        "ints": "the patched column",
+        "strs": "unaffected, vortex.varbinview"
+      },
+      "expectations": [
+        "opening the file and reading its dtype and layout tree succeeds: an unknown id in array_specs is not itself an error",
+        "scanning with a projection of only `strs` succeeds and returns the same values as containers/uncompressed_canonical — this is the lazy-component-resolution test of docs/04-conformance.md §6",
+        "scanning with `ints` projected fails with VortexUnsupportedException, and the message names both the id `vortex.unknown01` and the component kind `array`"
+      ]
+    }
+  ]
+}

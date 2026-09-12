@@ -4,5 +4,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Vorticity.Tests/Vorticity.Tests.csproj" />
+    <Project Path="tests/Vorticity.Conformance/Vorticity.Conformance.csproj" />
   </Folder>
 </Solution>

@@ -1,0 +1,129 @@
+// The other half of the acceptance test: "every file outside scope fails with a named component
+// rather than a wrong answer."
+//
+// docs/03-architecture.md §5 makes the message a requirement, not a courtesy: the exception must
+// name BOTH the component id as the file spells it and the component kind. A reader that throws
+// "unsupported encoding" tells a user nothing about which encoding, which edition introduced it, or
+// which of the three registries refused it - and a requirement no test checks is a wish
+// (docs/04-conformance.md §6).
+//
+// "Rather than a wrong answer" is the other half of that sentence and it is enforced here too. Four
+// of the 203 out-of-scope files carry their unsupported encoding ONLY inside a zone map, which an
+// unfiltered Phase 1 scan never decodes (ZonedLayoutReader: "the zones child is never read"). For
+// those, not throwing is correct - and the harness proves it by requiring the file to read back
+// value for value, exactly as an in-scope file must. Silence alone is never accepted.
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Vorticity.Columns;
+using Vorticity.Conformance.Comparison;
+using Vorticity.Conformance.Corpus;
+using Vorticity.Conformance.Sidecar;
+using Vorticity.File;
+using Vorticity.Scan;
+using Xunit;
+
+namespace Vorticity.Conformance;
+
+public sealed class OutOfScopeTests
+{
+    private static readonly string[] Kinds = ["array", "layout", "dtype"];
+
+    /// <summary>Every file that uses at least one component this build does not implement.</summary>
+    public static TheoryData<string> OutOfScopeFiles()
+    {
+        TheoryData<string> data = new TheoryData<string>();
+        foreach (ScopeVerdict verdict in CorpusCatalog.OutOfScope())
+        {
+            data.Add(verdict.Entry.Id);
+        }
+
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(OutOfScopeFiles))]
+    public async Task FailsWithTheComponentIdAndTheKind(string id)
+    {
+        ScopeVerdict verdict = CorpusCatalog.Verdict(id);
+        CorpusEntry entry = verdict.Entry;
+
+        if (!entry.HasDTypeSegment)
+        {
+            // A file that embeds no DType and is given none cannot be opened at all: that is
+            // malformed input, not an unsupported component (PHASE1-CONTRACTS.md §7.4 row 4). It is
+            // the only such file in the corpus and it is out of scope for other reasons too.
+            await Assert.ThrowsAsync<VortexFormatException>(async () =>
+                await VortexFile.OpenAsync(entry.FullPath, TestContext.Current.CancellationToken));
+            return;
+        }
+
+        Phase1Components.EnsureRegistered();
+
+        List<string> unsupportedOnTheDataPath = UnsupportedOnTheDataPath(verdict);
+        if (unsupportedOnTheDataPath.Count == 0)
+        {
+            await ReadsCorrectlyDespiteAnUnreachableComponentAsync(verdict);
+            return;
+        }
+
+        // Opening must succeed whatever the file uses: ids are classified at open and refused at
+        // use (PHASE1-CONTRACTS.md §2.3). An open that throws here is a lazy-resolution regression.
+        await using VortexFile file = await VortexFile.OpenAsync(entry.FullPath, TestContext.Current.CancellationToken);
+        Assert.Equal(entry.RowCount, file.RowCount);
+
+        VortexUnsupportedException error = await Assert.ThrowsAsync<VortexUnsupportedException>(async () =>
+        {
+            await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+                .WithCancellation(TestContext.Current.CancellationToken))
+            {
+                batch.Dispose();
+            }
+        });
+
+        Assert.Contains(error.ComponentId, unsupportedOnTheDataPath);
+        Assert.Contains(error.Kind, Kinds);
+
+        // docs/03-architecture.md §5: both, in the message a user actually sees.
+        Assert.Contains(error.ComponentId, error.Message, StringComparison.Ordinal);
+        Assert.Contains(error.Kind, error.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A file whose unsupported components are all unreachable must read back exactly, like any
+    /// other file. "It did not throw" is not the assertion; "it returned the right answer" is.
+    /// </summary>
+    private static async Task ReadsCorrectlyDespiteAnUnreachableComponentAsync(ScopeVerdict verdict)
+    {
+        FileResult result = await ConformanceRunner.CompareAsync(
+            verdict.Entry, TestContext.Current.CancellationToken);
+
+        Assert.Null(result.Error);
+        Assert.True(result.Log.IsClean, result.Describe());
+        Assert.Equal(verdict.Entry.RowCount, result.Rows);
+    }
+
+    /// <summary>
+    /// The file's unsupported ids, restricted to the ones an unfiltered scan actually reaches. The
+    /// sidecar's layout tree says where each id lives.
+    /// </summary>
+    internal static List<string> UnsupportedOnTheDataPath(ScopeVerdict verdict)
+    {
+        using SidecarReader sidecar = SidecarReader.Open(verdict.Entry.FullSidecarPath);
+        LayoutComponentIndex index = LayoutComponentIndex.Build(sidecar.LayoutTree);
+
+        List<string> reachable = new List<string>();
+        foreach (string id in verdict.AllUnsupported())
+        {
+            // An unsupported EXTENSION dtype is reached through the dtype rather than the layout,
+            // so it is always on the data path; the corpus has none, and this keeps the day it does
+            // from being silently classified as unreachable.
+            if (index.OnTheDataPath.Contains(id) || !index.InZoneMapsOnly.Contains(id))
+            {
+                reachable.Add(id);
+            }
+        }
+
+        return reachable;
+    }
+}

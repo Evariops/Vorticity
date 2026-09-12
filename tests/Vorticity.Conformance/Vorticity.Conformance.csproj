@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Vorticity.Conformance</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
+    <TestingPlatformCaptureOutput>false</TestingPlatformCaptureOutput>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);xUnit1051</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
+  </ItemGroup>
+
+  <!-- The corpus and the forged fixtures live inside this project directory and are found by
+       walking up from the source file, never copied: 122 MB into bin/ per configuration is not a
+       reasonable build artifact. See CorpusCatalog.FindDirectory. -->
+  <ItemGroup>
+    <None Remove="corpus/**" />
+    <None Remove="forged/**" />
+  </ItemGroup>
+
+</Project>
