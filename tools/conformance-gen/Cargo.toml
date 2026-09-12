@@ -1,0 +1,34 @@
+[package]
+name = "conformance-gen"
+version = "0.2.0"
+edition = "2021"
+publish = false
+description = "Generates the golden Vortex corpus and expected-value sidecars for Vorticity conformance tests."
+
+# Pinned deliberately and exactly. docs/04-conformance.md §3: every release records the Vortex
+# version its corpus was generated against, and a version bump is a corpus regeneration, not a
+# dependency update.
+#
+# 0.86.1 is the version docs/99-sources.md derived the specification against, and the newest
+# release; it can target every frozen core edition up to core2026.08.3, so the corpus can cover
+# every component in our 1.0 scope with nothing left out. It requires rustc >= 1.95 (local
+# toolchain is 1.98.1, verified).
+[dependencies]
+vortex = "=0.86.1"
+# Only needed to name individual compression schemes: `SchemeId` is opaque outside this crate,
+# and the `vortex` facade re-exports the compressor types but not `vortex_btrblocks::schemes`.
+vortex-btrblocks = "=0.86.1"
+# `vortex.onpair` is the one encoding whose array crate the `vortex` facade does not re-export
+# (see `vortex-0.86.1/src/lib.rs`'s `pub mod encodings`), and forcing it needs `onpair_compress`.
+vortex-onpair = "=0.86.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+anyhow = "1"
+# Only for `FutureExt::catch_unwind`: several 0.86.1 writer limitations surface as panics
+# rather than errors, and one unsupported recipe must not take the whole corpus run down.
+futures-lite = "2"
+
+[profile.release]
+opt-level = 1
+debug = false
