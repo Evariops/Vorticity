@@ -165,13 +165,12 @@ internal static class UnsupportedCorpusEntries
     /// <summary>
     /// The single-flat-leaf corpus entries whose array tree still reaches an encoding this build
     /// does not implement - alp, alprd, datetimeparts, fastlanes.delta, fsst, map, onpair,
-    /// parquet_variant, pco, variant and the zstd shapes. The list shrinks as Phase 2 lands.
+    /// parquet_variant, pco, variant and zstd_buffers. The list shrinks as Phase 2 lands.
     /// Decoding one must raise VortexUnsupportedException naming the id - never a wrong value, an
     /// out-of-bounds read or a different exception type (contract §2.3).
     /// </summary>
     internal static readonly string[] All =
     [
-        "containers/zstd_arrays_in_segments",
         "encodings/alp",
         "encodings/alp_no_patches",
         "encodings/alp_no_patches_r1",
@@ -213,13 +212,9 @@ internal static class UnsupportedCorpusEntries
         "encodings/variant_r1",
         "encodings/variant_r1023",
         "encodings/variant_r1025",
-        "encodings/zstd",
         "encodings/zstd_buffers",
         "encodings/zstd_buffers_r1",
         "encodings/zstd_buffers_r1023",
         "encodings/zstd_buffers_r1025",
-        "encodings/zstd_r1",
-        "encodings/zstd_r1023",
-        "encodings/zstd_r1025",
     ];
 }

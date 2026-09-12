@@ -200,6 +200,24 @@ internal static class TestMetadata
         }
     }
 
+    /// <summary><c>vortex.zstd</c> metadata: the dictionary size and one record per frame.</summary>
+    /// <param name="dictionarySize">Bytes of the dictionary buffer, or 0 when there is none.</param>
+    /// <param name="frames">One entry per frame: its uncompressed size and value count.</param>
+    internal static byte[] Zstd(uint dictionarySize, params ZstdFrameMetadata[] frames)
+    {
+        ZstdMetadata value = new(dictionarySize, frames.Length);
+        ProtoWriter writer = new();
+        try
+        {
+            ZstdMetadata.Write(ref writer, in value, frames);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
     /// <summary>A bare <c>ScalarValue</c> message body, as fastlanes.for's metadata and
     /// vortex.constant's / vortex.sparse's buffer 0 carry it.</summary>
     internal static byte[] Scalar(ScalarValue value) => ScalarProtobuf.SerializeValue(value);

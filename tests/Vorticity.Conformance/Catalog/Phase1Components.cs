@@ -36,6 +36,7 @@ internal static class Phase1Components
         "vortex.zigzag",
         "vortex.decimal_byte_parts",
         "vortex.datetimeparts",
+        "vortex.zstd",
     ];
 
     private static readonly object Gate = new object();
@@ -94,6 +95,7 @@ internal static class Phase1Components
         Register(ZigZagDecoder.Instance);
         Register(DecimalBytePartsDecoder.Instance);
         Register(DateTimePartsDecoder.Instance);
+        Register(ZstdDecoder.Instance);
     }
 
     /// <summary>Whether this build has a decoder for the array encoding <paramref name="id"/>.</summary>

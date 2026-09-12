@@ -47,6 +47,7 @@ internal static class TestDecoders
             Register(ByteBoolDecoder.Instance);
             Register(DecimalBytePartsDecoder.Instance);
             Register(DateTimePartsDecoder.Instance);
+            Register(ZstdDecoder.Instance);
 
             Register(new StubPrimitiveDecoder());
             Register(new StubBoolDecoder());
@@ -223,6 +224,29 @@ internal sealed class DecodeHarness : IDisposable
 
     /// <summary>The decoded node at <paramref name="index"/>.</summary>
     internal CanonicalNode Node(int index) => Scan.Canonical.GetNode(index);
+
+    /// <summary>Whether row <paramref name="row"/> of <paramref name="node"/> holds a value.</summary>
+    /// <remarks>
+    /// The library's own ValidityMask is a ref struct over a decode context, which a test that
+    /// already holds the arena does not need. Reading the four kinds directly also keeps a test
+    /// from passing because the mask and the decoder share a bug.
+    /// </remarks>
+    internal bool IsValid(CanonicalNode node, int row)
+    {
+        Validity validity = node.Validity;
+        switch (validity.Kind)
+        {
+            case ValidityKind.NonNullable:
+            case ValidityKind.AllValid:
+                return true;
+            case ValidityKind.AllInvalid:
+                return false;
+            default:
+                CanonicalNode bits = Scan.Canonical.GetNode(validity.CanonicalNodeIndex);
+                int bit = bits.BitOffset + row;
+                return (bits.Bits.Span[bit >> 3] & (1 << (bit & 7))) != 0;
+        }
+    }
 
     public void Dispose() => Scan.Dispose();
 
