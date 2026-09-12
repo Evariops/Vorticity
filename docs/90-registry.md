@@ -141,7 +141,8 @@ documents the fallback honestly everywhere else.
 | `vortex.zigzag`, `vortex.constant`, `vortex.sequence` | pointwise, trivial | **yes** |
 | `vortex.alp` | pointwise over the integers underneath | **yes** — see below |
 | Patches (shared) | merge against the selection — implemented once, used by BitPacked and ALP | **yes** |
-| `vortex.fsst`, `vortex.onpair` | seek each row's codes through `codes_offsets` | **no** — currently the fallback, and that is a defect, not a design. See below |
+| `vortex.fsst` | seek each row's codes through `codes_offsets` | **yes** — 0.99× a full scan to 0.27× |
+| `vortex.onpair` | the same, same children | **no** — still the fallback, and a defect rather than a design. See below |
 | `vortex.alprd` | **fallback**: decode the containing zone, then index | |
 | everything else | **fallback** | |
 
@@ -193,11 +194,24 @@ rows one from each split:
 | the same, string column projected away | — | **242 µs (0.19×)** |
 
 The second row is the attribution, and it is why the first one looks unimpressive: the remaining
-830 µs is the `utf8` column, which is `vortex.onpair` and `vortex.fsst`, which are the fallback by
-design **for now**, and the paragraph above explains why that is a defect rather than a limit. Over
-the four columns the specializations cover, a scattered take went from ~1.0× a full scan to 0.19× —
-and the fallback is now the whole of the residual rather than being hidden inside a number that
-averaged it with everything else, which is what made it worth looking at again.
+830 µs is the `utf8` column. Over the four columns the specializations cover, a scattered take went
+from ~1.0× a full scan to 0.19× — and the fallback is now the whole of the residual rather than
+being hidden inside a number that averaged it with everything else, which is what made it worth
+looking at again.
+
+**That residual is `vortex.onpair` alone, and this section used to say "onpair and fsst".** The
+correction came from a measurement that did not move: a `DecodeSelected` for `vortex.fsst` changed
+that take by no time and *zero bytes of allocation*, because FSST is not in the file. The pair had
+one member here all along, which also meant no axis in the suite could measure an FSST take — one
+exists now, over `encodings/fsst`, where the same change is worth 3.7×:
+
+| `encodings/fsst`, 4096 rows, one utf8 column | take 8 rows | full scan | ratio |
+|---|---|---|---|
+| before `FsstDecoder.DecodeSelected` | 143.2 µs | 144.1 µs | **0.99×** |
+| after | **38.8 µs** | 142.3 µs | **0.27×** |
+
+The full-scan column is the guard: seeking row n through `codes_offsets` must not slow the dense
+path, which decompresses the whole stream in one pass deliberately. It did not move.
 
 The fallback is correct, just not fast. Documenting which encodings take it — and measuring how much
 of the bill it is — is what keeps F5 an engineering claim rather than a slogan.
