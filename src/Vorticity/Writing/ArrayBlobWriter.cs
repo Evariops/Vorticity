@@ -145,6 +145,11 @@ internal static class ArrayBlobWriter
             return WriteFsst(builder, arena, nodeIndex, plan.Fsst!, buffers, encodings);
         }
 
+        if (plan.Scheme == ColumnScheme.Alp)
+        {
+            return WriteAlp(builder, arena, nodeIndex, plan.Alp!, buffers, encodings);
+        }
+
         // The values child of both remaining schemes is the original column gathered down to its
         // representative rows, so a dictionary of strings shares the data buffers it came from.
         // The gathered values child is itself a column, and a dictionary of long strings is
@@ -415,6 +420,89 @@ internal static class ArrayBlobWriter
         {
             writer.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Writes <c>vortex.alp</c>: no buffers, and one, three or four children.
+    /// </summary>
+    /// <remarks>
+    /// There is NO validity child, and that is not an omission. The decoder takes the array's
+    /// validity off the ENCODED child - `decompress_unchunked_core` does - so an ALP array's
+    /// nullability rides on the integers, and writing a validity child here would leave the real
+    /// one unread.
+    ///
+    /// The encoded child goes through the compressor like any other column, which is where the
+    /// saving actually lands: ALP turns doubles into small integers, and frame-of-reference plus
+    /// bit-packing turns small integers into few bits.
+    /// </remarks>
+    private static int WriteAlp(
+        FlatBufferBuilder builder,
+        CanonicalArena arena,
+        int nodeIndex,
+        AlpPlan plan,
+        List<PendingBuffer> buffers,
+        EncodingDictionary encodings)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        int rows = node.Length;
+
+        // The encoded integers carry the float column's own validity, so they are added to the
+        // arena as a node rather than written as a bare buffer.
+        // The dtype arena is the column's own: a DType carries the arena it belongs to, and a
+        // node whose dtype came from a different one would not compare equal downstream.
+        DType encodedType = node.DType.Arena.Primitive(plan.EncodedPType, node.DType.Nullability);
+        VortexBuffer encodedBuffer = arena.Allocate(
+            plan.Encoded.Length, plan.EncodedPType.ByteWidth(), out Span<byte> destination);
+        plan.Encoded.CopyTo(destination);
+        int encodedNode = arena.AddPrimitive(
+            encodedType, rows, node.Validity, plan.EncodedPType, encodedBuffer);
+
+        Span<int> children = stackalloc int[3];
+        children[0] = WriteCompressed(builder, arena, encodedNode, buffers, encodings);
+        int childCount = 1;
+
+        PatchesMetadata patches = default;
+        if (plan.PatchIndices.Length > 0)
+        {
+            PType indicesPType = FsstPlan.IndexPType(rows);
+            patches = PatchesMetadata.Create((ulong)plan.PatchIndices.Length, 0, indicesPType);
+            children[1] = WriteIndexArray(builder, buffers, encodings, plan.PatchIndices, indicesPType);
+            children[2] = WriteRawPrimitive(
+                builder, buffers, encodings, plan.PatchValues, node.DType.PType);
+            childCount = 3;
+        }
+
+        byte[] metadata = AlpBytes(plan.ExponentE, plan.ExponentF, plan.PatchIndices.Length > 0, patches);
+        return Node(
+            builder, encodings, "vortex.alp"u8, metadata, children[..childCount], []);
+    }
+
+    private static byte[] AlpBytes(byte e, byte f, bool hasPatches, in PatchesMetadata patches)
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            AlpMetadata value = hasPatches
+                ? new AlpMetadata(e, f, in patches)
+                : new AlpMetadata(e, f);
+            AlpMetadata.Write(ref writer, in value);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
+    /// <summary>Writes raw little-endian bytes as a non-nullable primitive node.</summary>
+    private static int WriteRawPrimitive(
+        FlatBufferBuilder builder, List<PendingBuffer> buffers, EncodingDictionary encodings,
+        byte[] bytes, PType ptype)
+    {
+        buffers.Add(new PendingBuffer(bytes, Exponent(ptype.ByteWidth())));
+        Span<ushort> indices = stackalloc ushort[1];
+        indices[0] = (ushort)(buffers.Count - 1);
+        return Node(builder, encodings, "vortex.primitive"u8, default, [], indices);
     }
 
     private static int WriteRunEnd(

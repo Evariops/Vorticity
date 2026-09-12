@@ -205,7 +205,7 @@ representative rows, so a dictionary of strings shares the data buffers it came 
 
 | | ratio to the reference |
 |---|---|
-| Whole corpus | **1.11×** — 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes |
+| Whole corpus | **1.044×** — inside the ≤105% target of [05-benchmarks.md](05-benchmarks.md) §3. Was 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes, 1.11× before ALP |
 | `distributions/high_cardinality_i64_r8193` (dense integers) | **0.97×** |
 | `distributions/short_runs_i32_r8193` | **0.87×** |
 | `containers/zoned_many_zones_nulls` (five columns, one of them high-cardinality text) | 1.72× (was 3.61×) |
@@ -254,11 +254,33 @@ fractions and never measured against the fixed cost they stood for:
   reader keeps. **This also fixed FSST's baseline**: comparing against the view form made FSST look
   like a win on incompressible binary, where plain varbin is a quarter of the size.
 
-**What is left, in order of bytes:** `vortex.onpair`, a second string compressor the reference
-reaches for on repeated-prefix data — though note it is absent from the default write target
-`core2025.05.0` and first appears in `core2026.08.1`, so it cannot be emitted by default at all.
-ALP is in the same class for floats. Cascading — dictionary codes that are themselves bit-packed —
-is where the rest lives.
+**ALP is written**, for `f32` and `f64` both, with the exceptions carried as patches. Its encoded
+child goes through the compressor like any other column, which is where the saving lands: ALP turns
+decimals into small integers and frame-of-reference plus bit-packing turns small integers into few
+bits. One rule in it is worth carrying forward — a value is encoded only when decoding the integer
+reproduces its **exact bit pattern**, compared with `BitConverter.DoubleToInt64Bits` and never with
+`==`, because `-0.0 == 0.0` and NaN payloads are invisible to `==`. An encoder that used `==` would
+silently change values, and no equality-based test could see it.
+
+**What is left, in order of bytes.** The list is now short and mostly not about missing algorithms:
+
+* `distributions/huge_string_r16` at 33.8× — one string over a mebibyte, which the reference
+  crushes with `vortex.onpair`. That encoding is **absent from the default write target**
+  `core2025.05.0` and first appears in `core2026.08.1`, so we cannot emit it by default at all.
+  Same for `repeated_prefix_utf8_r8193` at 1.63×.
+* `types/i64_nonnull_*` at 3.31× — three extreme values (`0`, `i64::MIN`, `i64::MAX`) among
+  thousands of tiny ones, so the frame-of-reference span is the whole 64 bits. The reference uses
+  **patched bit-packing**: pack at the width the bulk needs and carry the outliers as patches.
+  That is the next real algorithm.
+* `containers/zoned_many_zones*` — the `monotone i64` column, where the reference uses
+  `vortex.sequence` (start and step). Also **not in the default target**.
+
+So an edition caveat belongs on the whole measurement: the corpus was written at
+`core2026.08.3` and we write at `core2025.05.0`, and §3's target says "the same data, edition and
+configuration". Part of the remaining 4.4% is an edition difference rather than an implementation
+gap.
+
+Cascading — dictionary codes that are themselves bit-packed — is where the rest lives.
 
 ## Writing: edition targeting
 

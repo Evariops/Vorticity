@@ -134,6 +134,9 @@ builder** — back-to-front construction, alignment, and vtable deduplication �
 Phase 0. Vtable dedup is not optional: without it, wide-schema metadata inflates and the 105%
 size target starts with a self-inflicted handicap.
 
+All three are built. The measured corpus write ratio is **1.044×**, inside the ≤105% target; the
+breakdown and what remains are in [90-registry.md](90-registry.md).
+
 ### Phase 3b — Row encoding (parallelizable)
 Independent of the file format and of I/O: it touches neither, so it can be built alongside any
 other phase and is gated only by the `DType`/array model from Phase 0. See

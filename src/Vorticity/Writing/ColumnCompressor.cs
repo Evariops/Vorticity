@@ -52,6 +52,9 @@ internal enum ColumnScheme : byte
     /// </summary>
     Fsst = 4,
 
+    /// <summary>ALP: the scheme decimal-shaped floats want.</summary>
+    Alp = 5,
+
     /// <summary>Frame of reference, then bit-pack: the scheme dense integers want.</summary>
     BitPacked = 3,
 }
@@ -76,6 +79,9 @@ internal readonly struct ColumnPlan
     /// rebuilt by the writer because deciding that FSST pays already required producing it.
     /// </summary>
     internal FsstPlan? Fsst { get; private init; }
+
+    /// <summary>The encoded column, for <see cref="ColumnScheme.Alp"/>.</summary>
+    internal AlpPlan? Alp { get; private init; }
 
     /// <summary>The frame of reference, as the column's own raw bits.</summary>
     internal ulong Reference { get; }
@@ -106,6 +112,9 @@ internal readonly struct ColumnPlan
 
     internal static ColumnPlan ForFsst(FsstPlan plan) =>
         new ColumnPlan(ColumnScheme.Fsst, [], [], 0, 0) { Fsst = plan };
+
+    internal static ColumnPlan ForAlp(AlpPlan plan) =>
+        new ColumnPlan(ColumnScheme.Alp, [], [], 0, 0) { Alp = plan };
 
     internal static ColumnPlan FrameOfReference(ulong reference, int bitWidth) =>
         new ColumnPlan(ColumnScheme.BitPacked, [], [], reference, bitWidth);
@@ -211,6 +220,18 @@ internal static class ColumnCompressor
         // dictionaries and has no frame of reference, which is precisely the case the reference
         // hands to FSST and we used to write out canonically. Tried here rather than earlier
         // because a dictionary is cheaper to decode when it applies.
+        // Floats get their own scheme, for the same reason integers get frame of reference: a
+        // column of prices or coordinates is a column of short decimals, and the integer they
+        // scale to bit-packs where the double never could.
+        if (node.Kind == CanonicalKind.Primitive && node.PType.IsFloat())
+        {
+            AlpPlan? alp = AlpPlan.TryBuild(arena, nodeIndex, plain);
+            if (alp is not null)
+            {
+                return ColumnPlan.ForAlp(alp);
+            }
+        }
+
         if (node.Kind == CanonicalKind.VarBinView)
         {
             // Measured against the BEST plain form, not against the view form. A binary column of
