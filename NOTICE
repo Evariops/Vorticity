@@ -1,0 +1,50 @@
+Third-party notices for Vorticity.
+
+Vorticity is an independent implementation of the Vortex columnar file format
+(https://vortex.dev). It is not affiliated with or endorsed by the Vortex
+project or the Linux Foundation (LF AI & Data).
+
+
+Vendored schemas
+----------------
+
+The files under spec/ are copied verbatim from the Vortex repository
+(https://github.com/vortex-data/vortex) and remain under its license:
+
+    SPDX-License-Identifier: Apache-2.0
+    SPDX-FileCopyrightText: Copyright the Vortex contributors
+
+    spec/flatbuffers/dtype.fbs    vortex-array/flatbuffers/vortex-dtype/dtype.fbs
+    spec/flatbuffers/array.fbs    vortex-array/flatbuffers/vortex-array/array.fbs
+    spec/flatbuffers/layout.fbs   vortex-layout/flatbuffers/vortex-layout/layout.fbs
+    spec/flatbuffers/footer.fbs   vortex-file/flatbuffers/vortex-file/footer.fbs
+    spec/proto/dtype.proto        vortex-array/proto/dtype.proto
+    spec/proto/scalar.proto       vortex-array/proto/scalar.proto
+    spec/proto/expr.proto         vortex-array/proto/expr.proto
+
+
+Documentation
+-------------
+
+docs/ adapts material from https://docs.vortex.dev, licensed CC BY 4.0
+(https://creativecommons.org/licenses/by/4.0/), Copyright the Vortex
+contributors. Changes were made: the material has been condensed, reorganized,
+turned into .NET implementation requirements, and annotated.
+
+
+Algorithm provenance
+--------------------
+
+Policy: docs/09-contracts.md section 6. Entries are appended as components land.
+
+    Component              Origin                        Status
+    ---------------------  ----------------------------  --------------------
+    FlatBuffers runtime    FlatBuffers binary format     Reimplemented from
+                           specification                 specification
+    Protobuf runtime       protobuf.dev encoding spec    Reimplemented from
+                                                         specification
+    DType / Scalar models  spec/ schemas (vendored)      Reimplemented from
+                                                         specification
+
+FastLanes, FSST, ALP and Pcodec originate in published papers and Apache-2.0
+implementations; each is recorded here when implemented.
