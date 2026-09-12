@@ -30,6 +30,7 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Types;
+using Vorticity.Types.Numerics;
 
 namespace Vorticity.Writing;
 
@@ -119,8 +120,11 @@ internal static class ColumnCompressor
     /// </summary>
     private const int RunEndRatio = 4;
 
-    /// <summary>The same, for a dictionary. Higher, because the codes array is not free.</summary>
-    private const int DictRatio = 4;
+    /// <summary>
+    /// What a dictionary costs beyond its codes and entries: two more array nodes and their
+    /// metadata. Same role as <see cref="FrameOfReferenceOverhead"/>, and deliberately generous.
+    /// </summary>
+    private const int DictionaryOverhead = 512;
 
     /// <summary>
     /// What a frame-of-reference node costs beyond its packed bytes: one more array node, its
@@ -194,7 +198,10 @@ internal static class ColumnCompressor
         // A second pass for distinct values, over a column the runs did not capture. The run count
         // bounds the distinct count from above, so this only runs when the data is genuinely
         // interleaved rather than merely repetitive.
-        ColumnPlan dictionary = Dictionary(comparer, length);
+        long plain = node.Kind == CanonicalKind.VarBinView
+            ? PlainBinarySize(arena, node)
+            : DataBytes(node);
+        ColumnPlan dictionary = Dictionary(arena, node, comparer, length, plain);
         if (dictionary.Scheme != ColumnScheme.None)
         {
             return dictionary;
@@ -206,7 +213,12 @@ internal static class ColumnCompressor
         // because a dictionary is cheaper to decode when it applies.
         if (node.Kind == CanonicalKind.VarBinView)
         {
-            FsstPlan? fsst = FsstPlan.TryBuild(arena, nodeIndex, DataBytes(node));
+            // Measured against the BEST plain form, not against the view form. A binary column of
+            // incompressible bytes is smaller as `vortex.varbin` - four-byte offsets rather than
+            // sixteen-byte views - than as anything FSST can do with it, and comparing against the
+            // view form made FSST look like a win on exactly those columns. It is the reference's
+            // own choice there, and it was ours only after this baseline was fixed.
+            FsstPlan? fsst = FsstPlan.TryBuild(arena, nodeIndex, plain);
             if (fsst is not null)
             {
                 return ColumnPlan.ForFsst(fsst);
@@ -334,11 +346,33 @@ internal static class ColumnCompressor
         return any;
     }
 
-    private static ColumnPlan Dictionary(in RowComparer comparer, int length)
+    /// <summary>
+    /// Builds a dictionary and keeps it only when it is SMALLER, in bytes, than the column.
+    /// </summary>
+    /// <remarks>
+    /// The rule used to be a count ratio: at most one distinct value per four rows. Like the
+    /// frame-of-reference fraction it replaced, it had never been measured against what it stands
+    /// for. `types/binary_nonnull_r8193` has 1153 distinct values in 8193 rows and the reference
+    /// dictionary-encodes it into a quarter of our size; per chunk that is about one in 3.5, so the
+    /// ratio refused it by a hair while the byte arithmetic says it wins by 100 kB.
+    ///
+    /// The abandonment guard stays, in a form that still bounds the work: a dictionary whose
+    /// ENTRIES alone already cost more than the whole column can never win, whatever the rest of
+    /// the rows hold.
+    /// </remarks>
+    private static ColumnPlan Dictionary(
+        CanonicalArena arena, CanonicalNode node, in RowComparer comparer, int length, long plain)
     {
         Dictionary<int, List<int>> byHash = new Dictionary<int, List<int>>();
         List<int> firstOccurrences = [];
         int[] codes = new int[length];
+        int minimumEntry = node.Kind switch
+        {
+            CanonicalKind.Primitive => node.PType.ByteWidth(),
+            CanonicalKind.Decimal => DecimalStorage.ByteWidth(node.Storage),
+            CanonicalKind.VarBinView => 1,
+            _ => 1,
+        };
 
         for (int row = 0; row < length; row++)
         {
@@ -365,9 +399,10 @@ internal static class ColumnCompressor
                 firstOccurrences.Add(row);
                 candidates.Add(code);
 
-                // Give up as soon as the dictionary is too large to pay for itself, rather than
-                // building the whole thing and then discarding it.
-                if (firstOccurrences.Count * DictRatio > length)
+                // Give up as soon as the dictionary provably cannot win, rather than building one
+                // and then discarding it: every row needs at least a one-byte code, and every
+                // entry costs at least `minimumEntry` bytes however it is written.
+                if (length + ((long)firstOccurrences.Count * minimumEntry) >= plain)
                 {
                     return ColumnPlan.Canonical;
                 }
@@ -376,7 +411,49 @@ internal static class ColumnCompressor
             codes[row] = code;
         }
 
-        return ColumnPlan.Dictionary([.. firstOccurrences], codes);
+        // Priced, not assumed: codes at the narrowest width that indexes the entries, plus the
+        // entries themselves in whatever form they will actually be written.
+        long encoded = ((long)length * FsstPlan.IndexPType(firstOccurrences.Count).ByteWidth())
+            + EntriesSize(arena, node, firstOccurrences);
+        return encoded + DictionaryOverhead < plain
+            ? ColumnPlan.Dictionary([.. firstOccurrences], codes)
+            : ColumnPlan.Canonical;
+    }
+
+    /// <summary>What the gathered dictionary entries will occupy once written.</summary>
+    private static long EntriesSize(CanonicalArena arena, CanonicalNode node, List<int> rows)
+    {
+        switch (node.Kind)
+        {
+            case CanonicalKind.Bool:
+                return (rows.Count + 7) / 8;
+
+            case CanonicalKind.Primitive:
+                return (long)rows.Count * node.PType.ByteWidth();
+
+            case CanonicalKind.Decimal:
+                return (long)rows.Count * DecimalStorage.ByteWidth(node.Storage);
+
+            default:
+            {
+                // The entries are written as varbin or varbinview, whichever is smaller, exactly
+                // as any other binary column would be.
+                ValidityMask mask = ValidityMask.From(arena, node.Validity);
+                ReadOnlySpan<byte> views = node.Views.Span;
+                long heap = 0;
+                for (int i = 0; i < rows.Count; i++)
+                {
+                    if (mask.IsValid(rows[i]))
+                    {
+                        heap += System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                            views.Slice(rows[i] * 16, 4));
+                    }
+                }
+
+                long varbin = (((long)rows.Count + 1) * FsstPlan.IndexPType(heap).ByteWidth()) + heap;
+                return Math.Min(((long)rows.Count * 16) + heap, varbin);
+            }
+        }
     }
 
     /// <summary>
@@ -409,6 +486,31 @@ internal static class ColumnCompressor
                 return total;
             }
         }
+    }
+
+    /// <summary>
+    /// The smaller of the two plain serializations of a binary column: <c>vortex.varbinview</c>
+    /// (16 bytes of view per row plus its data buffers) and <c>vortex.varbin</c> (one offset per
+    /// row plus a contiguous heap).
+    /// </summary>
+    private static long PlainBinarySize(CanonicalArena arena, CanonicalNode node)
+    {
+        long viewForm = DataBytes(node);
+
+        long heap = 0;
+        ValidityMask mask = ValidityMask.From(arena, node.Validity);
+        ReadOnlySpan<byte> views = node.Views.Span;
+        for (int i = 0; i < node.Length; i++)
+        {
+            if (mask.IsValid(i))
+            {
+                heap += System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                    views.Slice(i * 16, 4));
+            }
+        }
+
+        long varbinForm = (((long)node.Length + 1) * FsstPlan.IndexPType(heap).ByteWidth()) + heap;
+        return Math.Min(viewForm, varbinForm);
     }
 
     /// <summary>Whether a canonical form has a row equality this compressor can compute.</summary>

@@ -205,7 +205,7 @@ representative rows, so a dictionary of strings shares the data buffers it came 
 
 | | ratio to the reference |
 |---|---|
-| Whole corpus | **1.15×** — was 1.95× before FSST, 1.54× before nested columns |
+| Whole corpus | **1.11×** — 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes |
 | `distributions/high_cardinality_i64_r8193` (dense integers) | **0.97×** |
 | `distributions/short_runs_i32_r8193` | **0.87×** |
 | `containers/zoned_many_zones_nulls` (five columns, one of them high-cardinality text) | 1.72× (was 3.61×) |
@@ -234,11 +234,25 @@ list's elements, a fixed-size list's elements, a struct's fields, an extension's
 dictionary's or run-end's values child are all compressed now. Validity bitmaps and a list's
 offsets and sizes are not: they are index machinery, and they are small.
 
-**The frame-of-reference rule now compares bytes.** It was "half the element width or better",
-which refused a 40-bit column of `i64` timestamps — a 37% saving over 8192 rows, declined by a
-heuristic that had never been measured against the fixed cost it stands for. It now compares the
-packed size (block padding included, since FastLanes rounds to 1024) plus a node's overhead against
-the canonical size. Dates and timestamps left the offender list entirely.
+**Every scheme is now priced in bytes rather than by a ratio.** Three rules had been written as
+fractions and never measured against the fixed cost they stood for:
+
+* Frame of reference asked for "half the element width or better", which refused a 40-bit column of
+  `i64` timestamps — a 37% saving over 8192 rows. It now compares the packed size (block padding
+  included, since FastLanes rounds to 1024 and a 100-row column still pays for a whole block) plus
+  a node's overhead against the canonical size. Dates and timestamps left the offender list.
+* A dictionary asked for at most one distinct value per four rows. `types/binary_nonnull_r8193` has
+  1153 distinct values in 8193 rows — about one in 3.5 per chunk — so the ratio refused it by a
+  hair while the byte arithmetic says it wins by 100 kB, which is exactly what the reference does
+  with it. The abandonment guard survives in a form that still bounds the work: every row needs at
+  least a one-byte code and every entry at least its minimum width, so a dictionary that has
+  already exceeded the column cannot recover.
+* A binary column is written `vortex.varbin` when that is smaller than `vortex.varbinview`, which
+  is almost always: four-byte offsets beat sixteen-byte views by twelve bytes a row, and inlining
+  can save at most the twelve bytes the value would have taken in the heap. It costs a copy at
+  write time — the view form can hand its existing buffers straight over — for a saving every
+  reader keeps. **This also fixed FSST's baseline**: comparing against the view form made FSST look
+  like a win on incompressible binary, where plain varbin is a quarter of the size.
 
 **What is left, in order of bytes:** `vortex.onpair`, a second string compressor the reference
 reaches for on repeated-prefix data — though note it is absent from the default write target

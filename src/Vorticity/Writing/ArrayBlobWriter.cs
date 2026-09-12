@@ -636,12 +636,33 @@ internal static class ArrayBlobWriter
         return Node(builder, encodings, "vortex.decimal"u8, metadata, children[..count], bufferIndices);
     }
 
+    /// <remarks>
+    /// Chooses between the two serializations of a binary column, which is a SIZE decision and not
+    /// a compression one.
+    ///
+    /// A canonical VarBinView costs 16 bytes of view per row whatever the values are; `vortex.varbin`
+    /// costs one offset per row plus a contiguous heap, and inlines nothing. Four-byte offsets beat
+    /// sixteen-byte views by twelve bytes a row, and inlining can save at most the twelve bytes a
+    /// value of that length would have occupied in the heap - so varbin is never worse than
+    /// varbinview and is usually much better. The reference reaches the same conclusion: every
+    /// plain binary and utf8 column in the corpus is written `vortex.varbin`.
+    ///
+    /// What it costs US is a copy: the view form can hand the existing data buffers straight to the
+    /// writer, and this has to gather the values into one heap. That is paid once at write time for
+    /// a saving every reader keeps.
+    /// </remarks>
     private static int WriteVarBinView(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
         List<PendingBuffer> buffers, EncodingDictionary encodings)
     {
-        // Data buffers first, views LAST: the reader reaches for views at index `dataBufferCount`.
         int dataCount = node.DataBufferCount;
+        long viewForm = ((long)node.Length * ViewSize) + DataBufferBytes(node, dataCount);
+        if (TryWriteVarBin(builder, arena, node, buffers, encodings, viewForm, out int varbin))
+        {
+            return varbin;
+        }
+
+        // Data buffers first, views LAST: the reader reaches for views at index `dataBufferCount`.
         ushort[] indices = new ushort[dataCount + 1];
         for (int i = 0; i < dataCount; i++)
         {
@@ -653,6 +674,114 @@ internal static class ArrayBlobWriter
         Span<int> children = stackalloc int[1];
         int count = Validity(builder, arena, node, buffers, encodings, children);
         return Node(builder, encodings, "vortex.varbinview"u8, default, children[..count], indices);
+    }
+
+    private static long DataBufferBytes(CanonicalNode node, int dataCount)
+    {
+        long total = 0;
+        for (int i = 0; i < dataCount; i++)
+        {
+            total += node.GetDataBuffer(i).Length;
+        }
+
+        return total;
+    }
+
+    /// <summary>Writes the column as <c>vortex.varbin</c> when that is smaller.</summary>
+    private static bool TryWriteVarBin(
+        FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
+        List<PendingBuffer> buffers, EncodingDictionary encodings, long viewForm, out int result)
+    {
+        result = 0;
+        int rows = node.Length;
+        ValidityMask mask = ValidityMask.From(arena, node.Validity);
+
+        long heapBytes = 0;
+        for (int i = 0; i < rows; i++)
+        {
+            if (mask.IsValid(i))
+            {
+                heapBytes += ViewLength(node, i);
+            }
+        }
+
+        if (heapBytes > int.MaxValue)
+        {
+            return false;
+        }
+
+        PType offsetsPType = FsstPlan.IndexPType(heapBytes);
+        long varbinForm = (((long)rows + 1) * offsetsPType.ByteWidth()) + heapBytes;
+        if (varbinForm >= viewForm)
+        {
+            return false;
+        }
+
+        byte[] heap = new byte[Math.Max((int)heapBytes, 1)];
+        int[] offsets = new int[rows + 1];
+        int written = 0;
+        for (int i = 0; i < rows; i++)
+        {
+            offsets[i] = written;
+            if (!mask.IsValid(i))
+            {
+                // A null row is zero-length: offsets stay monotone and the reader never looks at
+                // the bytes, because validity already told it not to.
+                continue;
+            }
+
+            ReadOnlySpan<byte> value = ViewBytes(node, i);
+            value.CopyTo(heap.AsSpan(written));
+            written += value.Length;
+        }
+
+        offsets[rows] = written;
+
+        int heapBuffer = buffers.Count;
+        buffers.Add(new PendingBuffer(heap.AsSpan(0, written).ToArray(), 0));
+
+        Span<int> children = stackalloc int[2];
+        children[0] = WriteIndexArray(builder, buffers, encodings, offsets, offsetsPType);
+        int count = 1 + Validity(builder, arena, node, buffers, encodings, children[1..]);
+
+        Span<ushort> indices = stackalloc ushort[1];
+        indices[0] = (ushort)heapBuffer;
+        result = Node(
+            builder, encodings, "vortex.varbin"u8, VarBinBytes(offsetsPType),
+            children[..count], indices);
+        return true;
+    }
+
+    private static byte[] VarBinBytes(PType offsetsPType)
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            VarBinMetadata value = new VarBinMetadata(offsetsPType);
+            VarBinMetadata.Write(ref writer, in value);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
+    private static int ViewLength(CanonicalNode node, int row) =>
+        (int)BinaryPrimitives.ReadUInt32LittleEndian(node.Views.Span.Slice(row * ViewSize, 4));
+
+    private static ReadOnlySpan<byte> ViewBytes(CanonicalNode node, int row)
+    {
+        ReadOnlySpan<byte> view = node.Views.Span.Slice(row * ViewSize, ViewSize);
+        uint size = BinaryPrimitives.ReadUInt32LittleEndian(view);
+        if (size <= 12)
+        {
+            return view.Slice(4, (int)size);
+        }
+
+        uint buffer = BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
+        uint offset = BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
+        return node.GetDataBuffer((int)buffer).Span.Slice((int)offset, (int)size);
     }
 
     private static int WriteListView(
