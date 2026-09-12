@@ -9,16 +9,17 @@
 //     encoded, and the constant case falls out for free as the single-run degenerate: a 65536-row
 //     constant column becomes two elements, which is as good as vortex.constant would do.
 //   * DISTINCT COUNT. A column of few distinct values -- a category, a repeated string -- is
-//     dictionary encoded, which is where the win on text lives.
+//     dictionary encoded, which is where the win on text lives. The values child of both of these
+//     is the ORIGINAL column gathered down to its first occurrences, which is exactly
+//     CanonicalFilter.Apply -- so a dictionary of strings shares the data buffers it came from and
+//     copies only 16-byte views.
+//   * RANGE. A dense integer column -- an id, a measurement, a timestamp -- gets frame-of-reference
+//     plus bit-packing: subtract the minimum, then store only the bits the span needs. This is the
+//     scheme the reference's own ratios on numeric data come from.
 //
-// Neither needs a new kernel. The values child of both schemes is the ORIGINAL column gathered down
-// to its first occurrences, which is exactly CanonicalFilter.Apply -- so a dictionary of strings
-// shares the data buffers it came from and copies only 16-byte views.
-//
-// WHAT IS DELIBERATELY NOT HERE, so its absence is a decision rather than an oversight: FoR and
-// bit-packing, which is the scheme that wins on dense integers and the one that needs the FastLanes
-// transposed writer. Until that exists this compressor leaves such a column canonical, which is
-// correct and bigger than it should be.
+// WHAT IS DELIBERATELY NOT HERE, so its absence is a decision rather than an oversight: ALP, FSST
+// and OnPair, each of which is a whole algorithm rather than a kernel, and CASCADING -- dictionary
+// codes that are themselves bit-packed, which is where the last of the reference's ratio lives.
 //
 // The thresholds are ratios, not sizes, and they are conservative on purpose. Compressing a column
 // that barely benefits costs a second array, its metadata and a decode step on every read; the
@@ -42,20 +43,31 @@ internal enum ColumnScheme : byte
 
     /// <summary>Dictionary encode it: one code per row, one entry per distinct value.</summary>
     Dict = 2,
+
+    /// <summary>Frame of reference, then bit-pack: the scheme dense integers want.</summary>
+    BitPacked = 3,
 }
 
 /// <summary>The chosen scheme and the indices it needs.</summary>
 internal readonly struct ColumnPlan
 {
-    private ColumnPlan(ColumnScheme scheme, int[] gather, int[] codes)
+    private ColumnPlan(ColumnScheme scheme, int[] gather, int[] codes, ulong reference, int bitWidth)
     {
         Scheme = scheme;
         Gather = gather;
         Codes = codes;
+        Reference = reference;
+        BitWidth = bitWidth;
     }
 
     /// <summary>Leave the column alone.</summary>
-    internal static ColumnPlan Canonical => new ColumnPlan(ColumnScheme.None, [], []);
+    internal static ColumnPlan Canonical => new ColumnPlan(ColumnScheme.None, [], [], 0, 0);
+
+    /// <summary>The frame of reference, as the column's own raw bits.</summary>
+    internal ulong Reference { get; }
+
+    /// <summary>Bits per packed value.</summary>
+    internal int BitWidth { get; }
 
     /// <summary>What to do.</summary>
     internal ColumnScheme Scheme { get; }
@@ -73,10 +85,13 @@ internal readonly struct ColumnPlan
     internal int[] Codes { get; }
 
     internal static ColumnPlan Runs(int[] starts, int[] ends) =>
-        new ColumnPlan(ColumnScheme.RunEnd, starts, ends);
+        new ColumnPlan(ColumnScheme.RunEnd, starts, ends, 0, 0);
 
     internal static ColumnPlan Dictionary(int[] firstOccurrences, int[] codes) =>
-        new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes);
+        new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes, 0, 0);
+
+    internal static ColumnPlan FrameOfReference(ulong reference, int bitWidth) =>
+        new ColumnPlan(ColumnScheme.BitPacked, [], [], reference, bitWidth);
 }
 
 /// <summary>Decides how to encode one column chunk.</summary>
@@ -129,10 +144,126 @@ internal static class ColumnCompressor
             return ColumnPlan.Runs([.. runStarts], [.. runEnds]);
         }
 
+        // Dense integers before dictionaries: a column of a million distinct measurements has no
+        // dictionary worth building and a very good bit width.
+        if (TryFrameOfReference(arena, node, out ColumnPlan packed))
+        {
+            return packed;
+        }
+
         // A second pass for distinct values, over a column the runs did not capture. The run count
         // bounds the distinct count from above, so this only runs when the data is genuinely
         // interleaved rather than merely repetitive.
         return Dictionary(comparer, length);
+    }
+
+    /// <summary>
+    /// Measures the column's range and decides whether bit-packing it pays.
+    /// </summary>
+    /// <remarks>
+    /// The reference is the MINIMUM, so every encoded value is non-negative and the bit width is
+    /// the span rather than the magnitude: a column of timestamps around 1.7e18 needs 64 bits as
+    /// raw values and perhaps 20 as offsets from its own minimum. Null rows are encoded as the
+    /// reference itself -- their value is never read back, and zero packs better than whatever
+    /// happened to be in the buffer.
+    /// </remarks>
+    private static bool TryFrameOfReference(
+        CanonicalArena arena, CanonicalNode node, out ColumnPlan plan)
+    {
+        plan = ColumnPlan.Canonical;
+        if (node.Kind != CanonicalKind.Primitive || !node.PType.IsInteger())
+        {
+            return false;
+        }
+
+        PType ptype = node.PType;
+        int elementBits = ptype.ByteWidth() * 8;
+        ValidityMask mask = ValidityMask.From(arena, node.Validity);
+        ReadOnlySpan<byte> values = node.Values.Span;
+        bool signed = ptype.IsSignedInteger();
+
+        ulong span;
+        ulong reference;
+        if (signed)
+        {
+            long min = long.MaxValue;
+            long max = long.MinValue;
+            if (!RangeSigned(node.Length, mask, values, ptype, ref min, ref max))
+            {
+                return false;
+            }
+
+            // Unsigned subtraction of two's-complement bit patterns: max - min never overflows
+            // here even when the two straddle zero, which a signed subtraction would.
+            reference = unchecked((ulong)min);
+            span = unchecked((ulong)max) - reference;
+        }
+        else
+        {
+            ulong min = ulong.MaxValue;
+            ulong max = ulong.MinValue;
+            if (!RangeUnsigned(node.Length, mask, values, ptype, ref min, ref max))
+            {
+                return false;
+            }
+
+            reference = min;
+            span = max - min;
+        }
+
+        int bitWidth = span == 0 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount(span);
+
+        // Half the width or better. Below that the second array, its metadata and a decode step on
+        // every read are not bought back.
+        if (bitWidth * 2 > elementBits)
+        {
+            return false;
+        }
+
+        plan = ColumnPlan.FrameOfReference(reference, bitWidth);
+        return true;
+    }
+
+    private static bool RangeSigned(
+        int length, ValidityMask mask, ReadOnlySpan<byte> values, PType ptype,
+        ref long min, ref long max)
+    {
+        bool any = false;
+        for (int i = 0; i < length; i++)
+        {
+            if (!mask.IsValid(i))
+            {
+                continue;
+            }
+
+            any = true;
+            long value = CanonicalSupport.ReadInteger(values, ptype, i);
+            min = Math.Min(min, value);
+            max = Math.Max(max, value);
+        }
+
+        return any;
+    }
+
+    private static bool RangeUnsigned(
+        int length, ValidityMask mask, ReadOnlySpan<byte> values, PType ptype,
+        ref ulong min, ref ulong max)
+    {
+        bool any = false;
+        for (int i = 0; i < length; i++)
+        {
+            if (!mask.IsValid(i))
+            {
+                continue;
+            }
+
+            any = true;
+            ulong value = Arrays.Decoders.Compressed.CompressedValues.ReadUnsigned(values, ptype, i);
+            min = Math.Min(min, value);
+            max = Math.Max(max, value);
+        }
+
+        return any;
     }
 
     private static ColumnPlan Dictionary(in RowComparer comparer, int length)

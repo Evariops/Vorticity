@@ -189,21 +189,35 @@ column and nowhere else:
 | Property | Scheme | Notes |
 |---|---|---|
 | Few runs | `vortex.runend` | the constant case falls out as the single-run degenerate, so `vortex.constant` is not separately emitted |
+| Narrow range | `fastlanes.for` + `fastlanes.bitpacked` | the reference is the minimum, so the bit width is the *span* rather than the magnitude |
 | Few distinct values | `vortex.dict` | codes are non-nullable; a null row is a code pointing at a null dictionary entry |
 | otherwise | canonical | |
 
-Neither needs a new kernel: the values child of both is the original column gathered to its
+Only the third needed a new kernel — `FastLanes.PackBlock`, the inverse of the unpacker — and it is
+verified the only way a packer honestly can be: the Rust cross-check reads every bit-packed file we
+write, which makes our transposition byte-compatible with the reference's unpacker rather than
+merely self-consistent. The values child of run-end and dict is the original column gathered to its
 representative rows, so a dictionary of strings shares the data buffers it came from and copies only
 16-byte views.
 
-**What is missing, and what it costs.** No FoR, no bit-packing, no ALP, no FSST, no OnPair — every
-scheme that needs a write kernel. On the conformance corpus, Vorticity's output is **2.1× the
-reference's**, against the ≤105% target of [05-benchmarks.md](05-benchmarks.md) §3. The gap is
-almost entirely dense integers (which want FoR + bit-packing) and text (which wants FSST or OnPair);
-`vortex.dict` already covers low-cardinality text and `vortex.runend` covers runs and constants.
+**Where the size actually stands**, measured over the whole corpus against the ≤105% target of
+[05-benchmarks.md](05-benchmarks.md) §3:
 
-Cascading is also absent: the reference's ratios come from dictionary codes that are themselves
-bit-packed, and one scheme per column is what can be done correctly without the integer kernels.
+| | ratio to the reference |
+|---|---|
+| Whole corpus | **1.95×** |
+| `distributions/high_cardinality_i64_r8193` (dense integers) | **0.97×** |
+| `distributions/short_runs_i32_r8193` | **0.87×** |
+| `containers/zoned_many_zones_nulls` (five columns, one of them high-cardinality text) | 3.61× |
+
+So the numeric path is already at or below the reference and **the remaining gap is text**: a
+high-cardinality utf8 column falls through every rule above and is written canonically, where the
+reference uses FSST or OnPair. Those two are whole algorithms rather than kernels — docs/01-scope.md
+§3 singles out FSST symbol-table construction as by far the largest write kernel — and ALP is in the
+same class for floats.
+
+Cascading is also absent: dictionary codes that are themselves bit-packed is where the last of the
+reference's ratio lives.
 
 ## Writing: edition targeting
 

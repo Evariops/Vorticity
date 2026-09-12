@@ -167,6 +167,94 @@ internal static class FastLanes
     public static int BlockByteLength(int bitWidth) => BytesPerBlockPerBit * bitWidth;
 
     /// <summary>
+    /// The inverse of <see cref="UnpackBlock{T}(ReadOnlySpan{T}, int, Span{T})"/>: packs one
+    /// 1024-element block at <paramref name="bitWidth"/> bits per value.
+    /// </summary>
+    /// <typeparam name="T">The unsigned element type.</typeparam>
+    /// <param name="values">Exactly <see cref="BlockSize"/> values, each below 2^bitWidth.</param>
+    /// <param name="bitWidth">Bits per value, in <c>[0, sizeof(T) * 8]</c>.</param>
+    /// <param name="packed">Exactly <c>lanes * bitWidth</c> words; overwritten.</param>
+    /// <remarks>
+    /// Written as the literal inverse of the unpack loop rather than from the paper, one statement
+    /// at a time, because the two index functions are easy to conflate and a pack/unpack pair
+    /// written the same wrong way round-trips perfectly while producing a file no other
+    /// implementation can read. The tests assert the crate's known-value table, not a round trip.
+    /// </remarks>
+    /// <exception cref="ArgumentException">A span is the wrong length.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="bitWidth"/> is out of range.</exception>
+    public static void PackBlock<T>(ReadOnlySpan<T> values, int bitWidth, Span<T> packed)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int elementBits = Unsafe.SizeOf<T>() * 8;
+        ArgumentOutOfRangeException.ThrowIfNegative(bitWidth);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(bitWidth, elementBits);
+
+        if (values.Length != BlockSize)
+        {
+            throw new ArgumentException(
+                $"A FastLanes block packs exactly {BlockSize} elements, not {values.Length}.",
+                nameof(values));
+        }
+
+        int lanes = BlockSize / elementBits;
+        if (packed.Length != lanes * bitWidth)
+        {
+            throw new ArgumentException(
+                $"A {bitWidth}-bit block of {elementBits}-bit elements is {lanes * bitWidth} " +
+                $"words, not {packed.Length}.",
+                nameof(packed));
+        }
+
+        // W == 0 stores nothing: every value is known to be zero.
+        if (bitWidth == 0)
+        {
+            return;
+        }
+
+        packed.Clear();
+        ReadOnlySpan<int> index = PackedIndexTable(elementBits);
+
+        if (bitWidth == elementBits)
+        {
+            for (int lane = 0; lane < lanes; lane++)
+            {
+                for (int row = 0; row < elementBits; row++)
+                {
+                    packed[(lanes * row) + lane] = values[index[(row * lanes) + lane]];
+                }
+            }
+
+            return;
+        }
+
+        for (int lane = 0; lane < lanes; lane++)
+        {
+            for (int row = 0; row < elementBits; row++)
+            {
+                T value = values[index[(row * lanes) + lane]] & Mask<T>(bitWidth);
+                int currentWord = row * bitWidth / elementBits;
+                int nextWord = ((row + 1) * bitWidth) / elementBits;
+                int shift = (row * bitWidth) % elementBits;
+
+                packed[(lanes * currentWord) + lane] |= value << shift;
+
+                if (nextWord > currentWord)
+                {
+                    int remainingBits = ((row + 1) * bitWidth) % elementBits;
+                    int currentBits = bitWidth - remainingBits;
+
+                    // Same guard as the unpack, for the same reason: the last row of a lane can
+                    // land exactly on the boundary, leaving no next word to spill into.
+                    if (nextWord < bitWidth)
+                    {
+                        packed[(lanes * nextWord) + lane] |= value >> currentBits;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
     /// Unpacks one 1024-element FastLanes block. Transcribed from the
     /// <c>unpack!</c> macro of fastlanes-0.7.2/src/macros.rs, whose iteration order is the wire
     /// contract - the crate warns it is deliberately not the FastLanes paper's order.

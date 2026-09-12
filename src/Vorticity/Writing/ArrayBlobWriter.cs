@@ -25,8 +25,10 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Compute;
 using Vorticity.Buffers;
@@ -35,6 +37,7 @@ using Vorticity.Serialization.Protobuf;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
+using Vorticity.Types.Serialization;
 
 namespace Vorticity.Writing;
 
@@ -130,7 +133,12 @@ internal static class ArrayBlobWriter
             return WriteNode(builder, arena, nodeIndex, buffers, encodings);
         }
 
-        // The values child of both schemes is the original column gathered down to its
+        if (plan.Scheme == ColumnScheme.BitPacked)
+        {
+            return WriteFrameOfReference(builder, arena, nodeIndex, plan, buffers, encodings);
+        }
+
+        // The values child of both remaining schemes is the original column gathered down to its
         // representative rows, so a dictionary of strings shares the data buffers it came from.
         int values = CanonicalFilter.Apply(arena, nodeIndex, plan.Gather);
 
@@ -138,6 +146,189 @@ internal static class ArrayBlobWriter
             ? WriteRunEnd(builder, arena, nodeIndex, values, plan, buffers, encodings)
             : WriteDict(builder, arena, nodeIndex, values, plan, buffers, encodings);
     }
+
+    /// <summary>
+    /// Writes <c>fastlanes.for</c> over <c>fastlanes.bitpacked</c>: the encoded values are
+    /// <c>value - reference</c> and the reader adds the reference back, wrapping.
+    /// </summary>
+    /// <remarks>
+    /// The nesting is not arbitrary. FoR carries the reference in its metadata and has NO validity
+    /// of its own -- its validity is its child's -- so the validity child belongs to the bitpacked
+    /// node underneath, which is where this puts it.
+    ///
+    /// The subtraction is on RAW BITS, unsigned, and that is what makes a signed column work: a
+    /// column spanning -1000 to 1000 has a span of 2000 and needs 11 bits, which a signed
+    /// subtraction of the extremes would have got right and a signed per-value subtraction would
+    /// have overflowed on. The reader's own kernel is `wrapping_add` for exactly this reason.
+    /// </remarks>
+    private static int WriteFrameOfReference(
+        FlatBufferBuilder builder,
+        CanonicalArena arena,
+        int nodeIndex,
+        in ColumnPlan plan,
+        List<PendingBuffer> buffers,
+        EncodingDictionary encodings)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        PType ptype = node.PType;
+        int width = ptype.ByteWidth();
+        int bitWidth = plan.BitWidth;
+        int length = node.Length;
+
+        byte[] packed = Pack(arena, node, plan.Reference, bitWidth, ptype, length);
+        buffers.Add(new PendingBuffer(packed, Exponent(width)));
+        Span<ushort> packedBuffer = stackalloc ushort[1];
+        packedBuffer[0] = (ushort)(buffers.Count - 1);
+
+        Span<int> validity = stackalloc int[1];
+        int validityCount = Validity(builder, arena, node, buffers, encodings, validity);
+
+        int bitpacked = Node(
+            builder, encodings, "fastlanes.bitpacked"u8, BitPackedBytes((uint)bitWidth),
+            validity[..validityCount], packedBuffer);
+
+        Span<int> children = stackalloc int[1];
+        children[0] = bitpacked;
+        return Node(
+            builder, encodings, "fastlanes.for"u8, ReferenceBytes(plan.Reference, ptype),
+            children, []);
+    }
+
+    /// <summary>Subtracts the reference and bit-packs, one 1024-element block at a time.</summary>
+    private static byte[] Pack(
+        CanonicalArena arena, CanonicalNode node, ulong reference, int bitWidth, PType ptype,
+        int length)
+    {
+        int blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
+        byte[] destination = new byte[(long)blocks * FastLanes.BlockByteLength(bitWidth)];
+        if (bitWidth == 0 || length == 0)
+        {
+            return destination;
+        }
+
+        ReadOnlySpan<byte> values = node.Values.Span;
+        ValidityMask mask = ValidityMask.From(arena, node.Validity);
+        int blockBytes = FastLanes.BlockByteLength(bitWidth);
+
+        ulong[] block = new ulong[FastLanes.BlockSize];
+        for (int b = 0; b < blocks; b++)
+        {
+            int start = b * FastLanes.BlockSize;
+            int count = Math.Min(FastLanes.BlockSize, length - start);
+            Array.Clear(block);
+
+            for (int i = 0; i < count; i++)
+            {
+                int row = start + i;
+
+                // A null row encodes as the reference, so it packs to zero: its value is never
+                // read back and a stable zero compresses better than whatever the buffer held.
+                block[i] = mask.IsValid(row)
+                    ? unchecked(CompressedValues.ReadUnsigned(values, ToUnsigned(ptype), row) - reference)
+                    : 0;
+            }
+
+            PackInto(block, bitWidth, ptype, destination.AsSpan(b * blockBytes, blockBytes));
+        }
+
+        return destination;
+    }
+
+    private static void PackInto(ulong[] block, int bitWidth, PType ptype, Span<byte> destination)
+    {
+        switch (ptype.ByteWidth())
+        {
+            case 1:
+            {
+                byte[] narrow = new byte[FastLanes.BlockSize];
+                for (int i = 0; i < narrow.Length; i++)
+                {
+                    narrow[i] = (byte)block[i];
+                }
+
+                FastLanes.PackBlock<byte>(narrow, bitWidth, destination);
+                return;
+            }
+
+            case 2:
+            {
+                ushort[] narrow = new ushort[FastLanes.BlockSize];
+                for (int i = 0; i < narrow.Length; i++)
+                {
+                    narrow[i] = (ushort)block[i];
+                }
+
+                FastLanes.PackBlock<ushort>(narrow, bitWidth, MemoryMarshal.Cast<byte, ushort>(destination));
+                return;
+            }
+
+            case 4:
+            {
+                uint[] narrow = new uint[FastLanes.BlockSize];
+                for (int i = 0; i < narrow.Length; i++)
+                {
+                    narrow[i] = (uint)block[i];
+                }
+
+                FastLanes.PackBlock<uint>(narrow, bitWidth, MemoryMarshal.Cast<byte, uint>(destination));
+                return;
+            }
+
+            default:
+                FastLanes.PackBlock<ulong>(block, bitWidth, MemoryMarshal.Cast<byte, ulong>(destination));
+                return;
+        }
+    }
+
+    private static PType ToUnsigned(PType ptype) => ptype switch
+    {
+        PType.I8 => PType.U8,
+        PType.I16 => PType.U16,
+        PType.I32 => PType.U32,
+        PType.I64 => PType.U64,
+        _ => ptype,
+    };
+
+    private static byte[] BitPackedBytes(uint bitWidth)
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            BitPackedMetadata value = new BitPackedMetadata(bitWidth, 0);
+            BitPackedMetadata.Write(ref writer, in value);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The FoR reference: a bare protobuf ScalarValue, without its dtype.
+    /// </summary>
+    /// <remarks>
+    /// An EMPTY metadata decodes to a null reference, which the reference implementation's own
+    /// validate_parts rejects with "Reference value cannot be null" -- so this is one of the places
+    /// where writing nothing is not the same as writing the default.
+    /// </remarks>
+    private static byte[] ReferenceBytes(ulong reference, PType ptype)
+    {
+        ScalarStore store = new ScalarStore();
+        ScalarValue value = ptype.IsSignedInteger()
+            ? store.Int64(unchecked((long)SignExtend(reference, ptype)))
+            : store.UInt64(reference);
+        return ScalarProtobuf.SerializeValue(value);
+    }
+
+    /// <summary>Widens a narrow signed value's raw bits back to 64 bits.</summary>
+    private static ulong SignExtend(ulong bits, PType ptype) => ptype switch
+    {
+        PType.I8 => unchecked((ulong)(long)(sbyte)bits),
+        PType.I16 => unchecked((ulong)(long)(short)bits),
+        PType.I32 => unchecked((ulong)(long)(int)bits),
+        _ => bits,
+    };
 
     private static int WriteRunEnd(
         FlatBufferBuilder builder,
