@@ -146,14 +146,26 @@ documents the fallback honestly everywhere else.
 The fallback is correct, just not fast. Documenting which encodings take it is what keeps F5 an
 engineering claim rather than a slogan; the rest move to 1.1 on benchmark evidence.
 
-**Where this actually stands.** `ScanBuilder.Take` is implemented and delivers the half of F5 that
-dominates on object storage: the splits an index list never touches are skipped before a single
-segment is registered, so scattered rows read the splits they live in and nothing else, which
-`TakeTests.ScatteredRowsReadFarFewerSegmentsThanTheWholeFile` measures rather than assumes. What is
-**not** yet implemented is the column of the table above: inside a split that is read, the whole
-split is decoded and the wanted rows gathered out of it, for every encoding. None of the three
-specializations exists yet. They are a CPU optimization within an already-fetched split, not an I/O
-one, and the table stays here as the plan it describes.
+**Where this actually stands, measured.** `ScanBuilder.Take` is implemented and delivers the half
+of F5 that dominates on object storage: the splits an index list never touches are skipped before a
+single segment is registered, so scattered rows read the splits they live in and nothing else,
+which `TakeTests.ScatteredRowsReadFarFewerSegmentsThanTheWholeFile` measures rather than assumes.
+What is **not** implemented is the column of the table above: inside a split that is read, the whole
+split is decoded and the wanted rows are gathered out of it, for every encoding.
+
+`TakeBenchmarks` says what that costs, on `containers/zoned_many_zones_nulls` — 65 536 rows in 64
+splits of 1024:
+
+| | time | against a full scan |
+|---|---|---|
+| full scan, all 65 536 rows | 1284 µs | 1.00 |
+| take 64 rows, one from each of 64 splits | 1309 µs | **1.02×** |
+| take 64 rows, all from one split | 70.5 µs | 0.05× |
+
+So the two halves are visible separately, and the second one is as bad as it could be: **taking
+0.1% of the rows costs 102% of reading all of them** when they are scattered, while taking the same
+number from one split costs 5%. The I/O half works; the decode half does not exist. That is the
+number the table above is worth building against.
 
 ## Compression scheme → emitted wire ID
 
