@@ -6,6 +6,10 @@
 // `-- --ffi-check` is not a benchmark: it verifies that the native comparison harness is present
 // and that both implementations AGREE on what they read. A ratio between two readers that return
 // different row counts is not a ratio, and BenchmarkDotNet would report it just as confidently.
+//
+// `-- --ratio-check` is the gate rather than the report: the same axes, interleaved against one
+// clock, each held to a ceiling. It exits non-zero when one is over, so CI can run it. See
+// RatioCheck.cs for why it does its own timing instead of asserting on a BenchmarkDotNet result.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,6 +29,11 @@ internal static class Program
         if (args.Length > 0 && args[0] == "--ffi-check")
         {
             return await FfiCheck().ConfigureAwait(false);
+        }
+
+        if (args.Length > 0 && args[0] == "--ratio-check")
+        {
+            return await RatioCheck.RunAsync().ConfigureAwait(false);
         }
 
         BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args);
