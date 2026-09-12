@@ -45,6 +45,63 @@ jobs:
         env:
           DOTNET_EnableHWIntrinsic: '0'
 
+  aot:
+    name: native aot over the corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # docs/03-architecture.md §4, invariant 5. A library cannot prove it is AOT-clean; an
+      # executable that opens a file and walks its layout tree can, because a reflection-shaped
+      # mistake is a trim warning at publish or a failure at run. TreatWarningsAsErrors is on, so
+      # an IL2xxx or IL3xxx warning fails this step rather than being scrolled past.
+      - name: Publish vxdump as Native AOT
+        run: dotnet publish tools/vxdump -c Release -r linux-x64
+
+      - name: Run it over every corpus file
+        run: |
+          BIN=tools/vxdump/bin/Release/net11.0/linux-x64/publish/vxdump
+          opened=0
+          refused=0
+          while IFS= read -r f; do
+            if "$BIN" "$f" --all > /dev/null 2>&1; then
+              opened=$((opened + 1))
+            else
+              refused=$((refused + 1))
+            fi
+          done < <(find tests/Vorticity.Conformance/corpus -name '*.vortex')
+          echo "AOT vxdump: $opened opened, $refused refused"
+          # One file uses the experimental vortex.list LAYOUT, which is in no core edition and
+          # fails at open by design (docs/90-registry.md). Anything beyond that is a regression.
+          test "$refused" -le 1
+
+  cross-check:
+    name: Vortex Rust reads what we write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Criterion 2 of docs/01-scope.md §4, and the only check that can catch a writer and a reader
+      # agreeing on the same mistake. The .NET step SKIPS when the variable is unset, so this job
+      # sets it explicitly rather than relying on a default.
+      - name: Write the corpus with Vorticity
+        run: dotnet test Vorticity.slnx -c Release --filter-method '*WritesTheCorpusOutForTheRustCrossCheck*'
+        env:
+          VORTICITY_WRITE_CORPUS: ${{ runner.temp }}/written
+
+      - name: Read it with the reference and compare scalar by scalar
+        working-directory: tools/conformance-gen
+        run: |
+          cargo run --release --example verify_written -- \
+            ../../tests/Vorticity.Conformance/corpus "${{ runner.temp }}/written"
+
   spec-drift:
     name: upstream schema drift
     runs-on: ubuntu-latest

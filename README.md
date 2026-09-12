@@ -27,4 +27,21 @@ file format (LF AI & Data, formerly SpiralDB).
 
 ## Status
 
-Initial specification. No code written yet.
+**Reading is complete for the 1.0 scope; writing produces files the Rust reference reads back.**
+
+| | |
+|---|---|
+| Conformance corpus | 774 of 819 files in scope, **all read back value for value** against the Rust sidecars |
+| The other 45 | need a component deferred upstream to Vortex 1.1, or in no core edition at all |
+| Round trip | all 774 written by Vorticity and read back, 2.38 M rows compared |
+| **Cross-check** | all 774 **read by Vortex Rust**, 2.38 M rows compared scalar by scalar against its own file |
+| Tests | 5026, on a corpus of 819 files |
+| Native AOT | `vxdump` publishes with no trim or AOT warnings and opens 818 of 819 corpus files |
+
+Implemented: the file open path, the layout tree, all 30 array encodings of the 1.0 scope, typed
+column access, scans with projection and row ranges, filter pushdown, zone-map pruning, random
+access by row index, and a canonical uncompressed writer.
+
+Not yet: the sampling compressor and statistics on write, SIMD kernels and the benchmark suite
+against Rust, the byte-sortable row encoding, and parser fuzzing. See
+[docs/90-registry.md](docs/90-registry.md) for the component-by-component state.
