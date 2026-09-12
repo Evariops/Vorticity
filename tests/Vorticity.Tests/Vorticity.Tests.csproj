@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
+    <ProjectReference Include="../../src/Vorticity.RowEncoding/Vorticity.RowEncoding.csproj" />
   </ItemGroup>
 
 </Project>

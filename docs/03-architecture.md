@@ -63,8 +63,10 @@ src/
     File/                         # Postscript, Footer, open path, ISegmentSource
     Compute/                      # SIMD kernels, masks, filter, take, canonicalization
     Expressions/                  # filter expressions + pruning derivation
-    RowEncoding/                  # byte-sortable row encoder (no I/O, synchronous)
     Writing/                      # writer, layout strategies, compressor
+  Vorticity.RowEncoding/        # SEPARATE 0.x package: byte-sortable row encoder, no I/O,
+                                  # synchronous. Separate because the upstream format is
+                                  # experimental (09-contracts.md §3), not because it is optional.
   Vorticity.Arrow/              # OPTIONAL, depends on Apache.Arrow — outside the core
 tests/
   Vorticity.Tests/              # xunit v3 — unit + property tests

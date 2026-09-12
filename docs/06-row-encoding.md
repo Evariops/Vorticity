@@ -161,20 +161,38 @@ This is an unusually good fit for the project's constraints:
   (encode field *f* for all rows, then field *f+1*) beats a row-at-a-time one on both branch
   prediction and vector width — and the two-pass sizing model already assumes column-major work.
 * **Zero-allocation by construction.** Output size is known before writing.
-* **`BE(i128)` needs a helper.** `BinaryPrimitives` has no `Int128` big-endian path: it is two
-  `ulong` halves, byte-swapped and order-swapped. Written once, tested against the golden vectors,
-  never inlined into the encoder.
+* **`BE(i128)` needs no helper on `net11.0`.** This note used to say `BinaryPrimitives` had no
+  `Int128` big-endian path and that we would hand-write one. It has had `WriteInt128BigEndian` and
+  `WriteUInt128BigEndian` since .NET 8, so the encoder calls those directly.
+* **Use `TryWriteBigEndian`, never `WriteBigEndian`.** `IBinaryInteger<T>.WriteBigEndian` is a
+  *default interface method* that the primitive types do not override, so a constrained call to it
+  from a generic kernel has to **box the receiver** to reach the interface's implementation — 24
+  bytes on every row of every fixed-width column, which is exactly the allocation the design
+  promises not to make. `TryWriteBigEndian` is abstract, implemented by each type, devirtualizes,
+  and spells the same bytes. Found by the allocation test, not by review.
 * **Independently testable.** It touches neither the file format nor I/O, so it can proceed in
   parallel with Phase 1 and its correctness is fully characterized by one property: byte order
   equals tuple order.
 
-Public API sketch:
+Public API, as built:
 
 ```csharp
-var fields = new[] { new RowSortField(descending: false, nullsFirst: true), /* … */ };
-int[] sizes = RowEncoder.ComputeSizes(columns, fields, rowCount);   // pass 1
-RowEncoder.Encode(columns, fields, sizes, destination);             // pass 2
+ReadOnlySpan<RowSortField> fields = [new RowSortField(descending: false, nullsFirst: true), /* … */];
+
+// Pooled: three buffers in, one disposable out.
+using RowKeys keys = RowEncoder.Encode(arena, columns, fields);
+keys.SortIndices(indices);                                          // memcmp is the comparator
+
+// Or caller-owned, for a caller that pools its own memory:
+int total = RowEncoder.ComputeSizes(arena, columns, fields, sizes);        // pass 1
+RowEncoder.ComputeOffsets(sizes, offsets);
+RowEncoder.Encode(arena, columns, fields, offsets, cursors, destination);  // pass 2
 ```
+
+`columns` is a `ReadOnlySpan<int>` of canonical node indices into a `CanonicalArena`, because
+`CanonicalNode` is a `ref struct` and cannot be put in an array; a `RecordBatch` overload encodes
+the root struct's fields. `cursors` goes in zeroed and comes back holding each row's size — the
+reference reuses one array for both, and so do we.
 
 Synchronous by design: this is pure CPU work over in-memory arrays, with no I/O to await. The
 async-only rule applies to the I/O and scan surface, not to a comparator.

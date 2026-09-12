@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 0.x ON PURPOSE, and not a placeholder. docs/09-contracts.md §3: upstream marks the row
+       format experimental and reserves the right to change its byte layout between releases.
+       Binding it into the 1.x core would force a choice between breaking our own semver to
+       follow upstream and diverging from Rust, which would cost the byte-exactness that is this
+       feature's entire point. The version that actually matters to a user is the pair
+       (package version, Vortex release transcribed) - see RowEncoding.VortexVersion. -->
+  <PropertyGroup>
+    <RootNamespace>Vorticity.RowEncoding</RootNamespace>
+    <AssemblyName>Vorticity.RowEncoding</AssemblyName>
+    <Version>0.1.0</Version>
+    <Description>Byte-sortable row encoding for Vortex arrays: columns to row keys whose memcmp order is tuple order. Experimental format, versioned 0.x.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Vorticity/Vorticity.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Vorticity.Tests" />
+    <InternalsVisibleTo Include="Vorticity.Benchmarks" />
+  </ItemGroup>
+
+</Project>

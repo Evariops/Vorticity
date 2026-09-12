@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.File;
 using Vorticity.Layouts;
+using Vorticity.RowEncoding;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Scan;
 using Vorticity.Types;
@@ -45,6 +46,7 @@ internal static class Program
                   --stats       file-level statistics, when the file carries them
                   --all         all of the above
                   --scan        read every batch and report rows, batches and null counts
+                  --row-keys    row-encode every batch and report the keys (experimental format)
                 """);
             return args.Length == 0 ? 2 : 0;
         }
@@ -88,6 +90,11 @@ internal static class Program
             if (sections.Scan)
             {
                 await Scan(file).ConfigureAwait(false);
+            }
+
+            if (sections.RowKeys)
+            {
+                await RowKeysSection(file).ConfigureAwait(false);
             }
 
             return 0;
@@ -264,13 +271,89 @@ internal static class Program
             "\nscan\n  batches=" + Text(batches) + "\n  rows=" + Text(rows) + "\n");
     }
 
+    /// <summary>
+    /// Row-encodes every batch. Two reasons this lives in an AOT-published executable rather than
+    /// only in the unit tests: the encoder's kernels are generic over eleven value types and
+    /// dispatch through static abstract interface members, which is precisely the shape that can
+    /// compile cleanly and then fail to find an instantiation at run time under Native AOT; and
+    /// the row format supports a strict subset of the dtypes, so running it over the whole corpus
+    /// is the only cheap way to exercise both the accepted and the refused half.
+    /// </summary>
+    /// <remarks>
+    /// An unsupported dtype is REPORTED, not fatal: most of the corpus contains extensions, lists
+    /// or maps, for which the format defines no ordering at all. Exiting non-zero on those would
+    /// say "vxdump failed" about a file that is perfectly fine.
+    /// </remarks>
+    private static async Task RowKeysSection(VortexFile file)
+    {
+        long rows = 0;
+        long bytes = 0;
+        long batches = 0;
+        string? refusal = null;
+
+        await foreach (Vorticity.Columns.RecordBatch batch in file.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            using (batch)
+            {
+                if (batch.RowCount == 0)
+                {
+                    continue;
+                }
+
+                int columnCount = batch.IsTabular ? batch.FieldCount : 1;
+                if (columnCount == 0)
+                {
+                    continue;
+                }
+
+                int[] columns = new int[columnCount];
+                RowSortField[] fields = new RowSortField[columnCount];
+                CanonicalNode root = batch.Arena.GetNode(batch.RootIndex);
+                for (int i = 0; i < columnCount; i++)
+                {
+                    columns[i] = batch.IsTabular ? root.GetFieldIndex(i) : batch.RootIndex;
+                    fields[i] = new RowSortField(descending: (i & 1) == 1, nullsFirst: (i & 2) == 0);
+                }
+
+                try
+                {
+                    using RowKeys keys = RowEncoder.Encode(batch.Arena, columns, fields);
+                    for (int i = 0; i < keys.RowCount; i++)
+                    {
+                        // Touch every key, so a size the encoder got wrong is a failure here and
+                        // not a wrong answer somewhere downstream.
+                        if (keys.Row(i).Length != keys.Sizes[i])
+                        {
+                            throw new VortexFormatException($"Row {i} is not the length it declared.");
+                        }
+                    }
+
+                    rows += keys.RowCount;
+                    bytes += keys.TotalBytes;
+                    batches++;
+                }
+                catch (VortexUnsupportedException error)
+                {
+                    refusal ??= error.Message;
+                }
+            }
+        }
+
+        Console.Out.Write(
+            "\nrow-keys\n  batches=" + Text(batches) + "\n  rows=" + Text(rows) +
+            "\n  bytes=" + Text(bytes) +
+            (refusal is null ? string.Empty : "\n  unsupported=" + refusal) + "\n");
+    }
+
     private static string Text(long value) => value.ToString(CultureInfo.InvariantCulture);
 
     private static string Text(ulong value) => value.ToString(CultureInfo.InvariantCulture);
 
     private readonly struct Sections
     {
-        private Sections(bool schema, bool encodings, bool layout, bool segments, bool stats, bool scan)
+        private Sections(
+            bool schema, bool encodings, bool layout, bool segments, bool stats, bool scan, bool rowKeys)
         {
             Schema = schema;
             Encodings = encodings;
@@ -278,6 +361,7 @@ internal static class Program
             Segments = segments;
             Stats = stats;
             Scan = scan;
+            RowKeys = rowKeys;
         }
 
         internal bool Schema { get; }
@@ -292,6 +376,8 @@ internal static class Program
 
         internal bool Scan { get; }
 
+        internal bool RowKeys { get; }
+
         internal static Sections Parse(ReadOnlySpan<string> args)
         {
             bool schema = false;
@@ -300,6 +386,7 @@ internal static class Program
             bool segments = false;
             bool stats = false;
             bool scan = false;
+            bool rowKeys = false;
             bool any = false;
 
             foreach (string arg in args)
@@ -312,6 +399,11 @@ internal static class Program
                     case "--segments": segments = any = true; break;
                     case "--stats": stats = any = true; break;
                     case "--scan": scan = any = true; break;
+
+                    // Deliberately NOT part of --all: the row format supports a strict subset of
+                    // the dtypes, so folding it in would make --all report "unsupported" for most
+                    // of a corpus that is entirely well-formed.
+                    case "--row-keys": rowKeys = any = true; break;
                     case "--all":
                         schema = encodings = layout = segments = stats = any = true;
                         break;
@@ -323,8 +415,8 @@ internal static class Program
 
             // No section asked for means the layout tree, which is what F12 names.
             return any
-                ? new Sections(schema, encodings, layout, segments, stats, scan)
-                : new Sections(false, false, true, false, false, false);
+                ? new Sections(schema, encodings, layout, segments, stats, scan, rowKeys)
+                : new Sections(false, false, true, false, false, false, false);
         }
     }
 }

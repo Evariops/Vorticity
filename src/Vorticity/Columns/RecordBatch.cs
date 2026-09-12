@@ -293,10 +293,31 @@ public sealed class RecordBatch : IDisposable
     internal bool IsDisposed => _disposed;
 
     /// <summary>The arena every column view indexes into.</summary>
-    internal CanonicalArena Arena => _arena;
+    /// <remarks>
+    /// Public so a consumer outside this assembly - the writer, the row encoder - can address
+    /// nodes by index rather than through the <c>ref struct</c> column views, which cannot be
+    /// stored. It hands out no capability the <see cref="CanonicalArena"/> type does not already
+    /// expose, but it is bound by the same lifetime as every other batch-borrowed view: the arena
+    /// is reset when this batch is disposed.
+    /// </remarks>
+    public CanonicalArena Arena
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return _arena;
+        }
+    }
 
-    /// <summary>The root node's index in <see cref="Arena"/>, for a writer that re-serializes it.</summary>
-    internal int RootIndex => _root;
+    /// <summary>The root node's index in <see cref="Arena"/>.</summary>
+    public int RootIndex
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return _root;
+        }
+    }
 
     /// <summary>Fetches a canonical node, refusing to touch the arena after disposal.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

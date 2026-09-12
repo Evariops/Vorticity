@@ -78,6 +78,38 @@ jobs:
           # fails at open by design (docs/90-registry.md). Anything beyond that is a regression.
           test "$refused" -le 1
 
+      # The row encoder is generic over eleven value types and dispatches through static abstract
+      # interface members - the shape most likely to compile clean and then fail to find an
+      # instantiation at run time under Native AOT. --row-keys is a separate step rather than part
+      # of --all because it SCANS, so it also meets the encodings no core edition carries.
+      #
+      # Exit 3 (unsupported) and 4 (malformed) are expected answers for parts of this corpus; any
+      # other non-zero exit is an unhandled exception and fails the job. The coverage floor is what
+      # makes "0 failures" mean something: a run where every file refused would otherwise pass.
+      - name: Row-encode every corpus file
+        run: |
+          BIN=tools/vxdump/bin/Release/net11.0/linux-x64/publish/vxdump
+          encoded=0
+          refused=0
+          crashed=0
+          while IFS= read -r f; do
+            if out=$("$BIN" "$f" --row-keys 2>&1); then code=0; else code=$?; fi
+            if [ "$code" = 0 ]; then
+              case "$out" in
+                *unsupported=*) refused=$((refused + 1)) ;;
+                *) encoded=$((encoded + 1)) ;;
+              esac
+            elif [ "$code" = 3 ] || [ "$code" = 4 ]; then
+              refused=$((refused + 1))
+            else
+              echo "vxdump --row-keys exited $code on $f"
+              crashed=$((crashed + 1))
+            fi
+          done < <(find tests/Vorticity.Conformance/corpus -name '*.vortex')
+          echo "AOT row-keys: $encoded encoded, $refused refused, $crashed crashed"
+          test "$crashed" = 0
+          test "$encoded" -ge 600
+
   fuzz:
     name: parser fuzzing
     runs-on: ubuntu-latest
