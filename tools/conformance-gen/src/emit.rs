@@ -132,7 +132,7 @@ impl WriteSpec {
 
     /// The configuration used to force an encoding: verbatim layout, no file statistics (their
     /// own arrays would otherwise add ids the entry never asked for).
-    fn forced() -> Self {
+    pub fn forced() -> Self {
         Self {
             strategy: StrategyKind::Verbatim,
             file_statistics: false,
@@ -225,7 +225,7 @@ fn edition_safe_strategy(session: &VortexSession) -> Arc<dyn LayoutStrategy> {
     )))
 }
 
-fn build_options(session: &VortexSession, spec: &WriteSpec) -> VortexWriteOptions {
+pub fn build_options(session: &VortexSession, spec: &WriteSpec) -> VortexWriteOptions {
     let mut opts = session.write_options();
 
     match &spec.strategy {

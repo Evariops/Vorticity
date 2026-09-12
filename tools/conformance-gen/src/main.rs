@@ -25,6 +25,7 @@ mod forged;
 mod manifest;
 mod schema;
 mod sidecar;
+mod throughput;
 mod util;
 
 use std::collections::BTreeSet;
@@ -68,6 +69,9 @@ struct Args {
     /// Child mode: produce exactly this entry and print its record. Used for the entries that
     /// need process-level environment switches.
     only: Option<String>,
+    /// Write single-encoding BENCHMARK inputs of this many rows instead of the corpus. No
+    /// sidecars, no manifest, not committed - see `throughput.rs`.
+    throughput: Option<usize>,
 }
 
 fn default_out_dir() -> PathBuf {
@@ -83,6 +87,7 @@ fn parse_args() -> anyhow::Result<Args> {
         verify: false,
         prune: false,
         only: None,
+        throughput: None,
     };
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
@@ -100,6 +105,11 @@ fn parse_args() -> anyhow::Result<Args> {
             "--seed" => {
                 let raw = argv.next().context("--seed needs a u64")?;
                 args.seed = raw.parse().context("--seed must be a decimal u64")?;
+            }
+            "--throughput" => {
+                let raw = argv.next().context("--throughput needs a row count")?;
+                args.throughput =
+                    Some(raw.parse().context("--throughput must be a decimal row count")?);
             }
             "--list" => args.list = true,
             "--prune" => args.prune = true,
@@ -121,6 +131,8 @@ fn print_help() {
          --out <dir>        output directory (default: tests/Vorticity.Conformance/corpus)\n\
          --filter <substr>  only entries whose id contains <substr>; repeatable\n\
          --seed <u64>       master PRNG seed (default: the recorded corpus seed)\n\
+         --throughput <n>   write single-encoding BENCHMARK inputs of n rows to --out and stop:\n\
+        \x20                  no sidecars, no manifest, not for committing (see throughput.rs)\n\
          --list             print the plan and exit\n\
          --verify           re-hash the existing corpus against manifest.json and exit\n\
          --prune            delete corpus files the new manifest does not reference\n\
@@ -133,6 +145,21 @@ fn main() -> anyhow::Result<()> {
 
     if args.verify {
         return verify(&args.out);
+    }
+
+    if let Some(rows) = args.throughput {
+        let out = args.out.clone();
+        return block_on(|handle: Handle| async move {
+            let session = VortexSession::default().with_handle(handle.clone());
+            eprintln!(
+                "writing single-encoding benchmark inputs of {rows} rows to {}",
+                out.display()
+            );
+            let n = throughput::write_throughput_corpus(&session, &out, rows).await?;
+            eprintln!("{n} files written. These are NOT corpus files: no sidecar, no manifest, \
+                       nothing should assert a value from them.");
+            Ok(())
+        });
     }
 
     let (entries, static_skips) = emit::plan();

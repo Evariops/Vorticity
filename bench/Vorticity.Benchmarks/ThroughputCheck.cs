@@ -1,0 +1,231 @@
+// ns/value, the axis that gives ABSOLUTES instead of a ranking.
+//
+// bench/BASELINE.md's per-encoding table says of itself: "this is a ranking, not a measurement".
+// The reason is arithmetic. Its files are 4096 rows, and ~35 us of every row in it is the fixed
+// open-and-walk cost both implementations pay before a single value is decoded. `fastlanes.bitpacked`
+// reads 40.9 us against Rust's 35.4 -- five microseconds of decode under thirty-five of overhead --
+// which is why that row moved from 1.26x to 1.18x while its kernel got 3.6x faster. Every ratio in
+// that table is pulled toward 1.0 by a constant neither side can avoid, and the smaller the real
+// difference the harder it is pulled.
+//
+// One million rows per file changes the arithmetic rather than the estimator: the fixed cost is
+// unchanged, so its SHARE falls by roughly the row ratio, and what is left is the decoder.
+//
+// THE INPUTS ARE NOT IN THE REPOSITORY, and Corpus.cs already drew that line for real datasets:
+// "those are gigabytes that do not belong in a repository". These are 322 MB for 48 encodings.
+// Generate them on demand and point this at them:
+//
+//   cd tools/conformance-gen && cargo run --release -j 6 -- --throughput 1000000 --out /tmp/vxthroughput
+//   VORTICITY_THROUGHPUT_CORPUS=/tmp/vxthroughput \
+//     dotnet run -c Release --project bench/Vorticity.Benchmarks -- --throughput
+//
+// They carry NO SIDECAR and nothing asserts a value from them: correctness is the 4096-row corpus's
+// job, and these exist only to push the fixed cost below the noise floor.
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+
+using Vorticity;
+using Vorticity.Columns;
+using Vorticity.File;
+using Vorticity.Scan;
+
+namespace Vorticity.Benchmarks;
+
+/// <summary>Per-encoding decode throughput in nanoseconds per value.</summary>
+internal static class ThroughputCheck
+{
+    /// <summary>The environment variable naming the generated input directory.</summary>
+    private const string Variable = "VORTICITY_THROUGHPUT_CORPUS";
+
+    /// <summary>Wall-clock warm-up per file, for the same reason RatioCheck uses one.</summary>
+    private static readonly TimeSpan WarmupBudget = TimeSpan.FromSeconds(1);
+
+    /// <summary>Timed rounds per file. Odd, so the median is an observation.</summary>
+    private const int Rounds = 7;
+
+    /// <summary>Measures every generated file and reports ns/value for both readers.</summary>
+    /// <returns>0 on success, 2 when the inputs or the harness are absent.</returns>
+    internal static async Task<int> RunAsync()
+    {
+        string? root = Environment.GetEnvironmentVariable(Variable);
+        if (string.IsNullOrEmpty(root) || !Directory.Exists(root))
+        {
+            Console.Error.WriteLine(
+                $"{Variable} is unset or does not name a directory.\n" +
+                "These inputs are generated, not committed -- 322 MB for 48 encodings. Produce them with:\n" +
+                "  cd tools/conformance-gen && cargo run --release -j 6 -- " +
+                "--throughput 1000000 --out /tmp/vxthroughput\n" +
+                $"then set {Variable} to that directory.");
+            return 2;
+        }
+
+        bool rust = RustReader.Available;
+        string[] files = Directory.GetFiles(root, "*.vortex", SearchOption.AllDirectories);
+        Array.Sort(files, StringComparer.Ordinal);
+        if (files.Length == 0)
+        {
+            Console.Error.WriteLine($"no .vortex files under {root}");
+            return 2;
+        }
+
+        Console.Out.WriteLine(
+            $"THROUGHPUT: median of {Rounds} interleaved rounds after a " +
+            $"{WarmupBudget.TotalSeconds.ToString("F0", CultureInfo.InvariantCulture)}s warm-up per file, " +
+            $"from {root}");
+        Console.Out.WriteLine(
+            rust
+                ? "  encoding                             rows batches       ours       rust   ns/value   rust ns/v   ratio"
+                : "  encoding                             rows batches       ours   ns/value   (no vxbench: absolutes only)");
+
+        List<string> failures = [];
+        foreach (string file in files)
+        {
+            string name = Path.GetFileNameWithoutExtension(file);
+            long rows;
+            try
+            {
+                rows = await ScanAll(file).ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is VortexUnsupportedException or VortexFormatException)
+            {
+                // An encoding this build cannot read is not a failure of this axis: the corpus
+                // coverage test owns that question, and reporting it here would duplicate it badly.
+                Console.Out.WriteLine($"  {name,-32} unreadable: {e.GetType().Name}");
+                continue;
+            }
+
+            if (rows == 0)
+            {
+                continue;
+            }
+
+            long batches = await CountBatches(file).ConfigureAwait(false);
+            (double ours, double theirs) = await MeasureAsync(file, rust).ConfigureAwait(false);
+            double nsPerValue = ours * 1000.0 / rows;
+
+            if (rust && theirs > 0)
+            {
+                double rustNs = theirs * 1000.0 / rows;
+                Console.Out.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"  {name,-32} {rows,10} {batches,7} {ours,9:F0}us {theirs,9:F0}us {nsPerValue,10:F2} {rustNs,11:F2} {ours / theirs,7:F2}"));
+            }
+            else
+            {
+                Console.Out.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"  {name,-32} {rows,10} {batches,7} {ours,9:F0}us {nsPerValue,10:F2}"));
+            }
+        }
+
+        if (!rust)
+        {
+            Console.Out.WriteLine(
+                $"\nvxbench not found ({RustReader.ExpectedPath}); the ours column is an absolute " +
+                "and there is no ratio. Build it with: cd tools/vxbench-rs && cargo build --release");
+        }
+
+        foreach (string failure in failures)
+        {
+            Console.Error.WriteLine(failure);
+        }
+
+        return 0;
+    }
+
+    private static async Task<(double Ours, double Theirs)> MeasureAsync(string path, bool rust)
+    {
+        long deadline = Stopwatch.GetTimestamp() +
+            (long)(WarmupBudget.TotalSeconds * Stopwatch.Frequency);
+        do
+        {
+            await ScanAll(path).ConfigureAwait(false);
+            if (rust)
+            {
+                RustReader.ScanAll(path);
+            }
+        }
+        while (Stopwatch.GetTimestamp() < deadline);
+
+        double[] mine = new double[Rounds];
+        double[] theirs = new double[Rounds];
+        for (int round = 0; round < Rounds; round++)
+        {
+            // Alternating, for RatioCheck's reason: a fixed order gives one side the cache-cold
+            // cost every round, which is a stable bias and therefore worse than noise.
+            if (round % 2 == 0)
+            {
+                mine[round] = await TimeAsync(path).ConfigureAwait(false);
+                theirs[round] = rust ? Time(path) : 0;
+            }
+            else
+            {
+                theirs[round] = rust ? Time(path) : 0;
+                mine[round] = await TimeAsync(path).ConfigureAwait(false);
+            }
+        }
+
+        return (Median(mine), Median(theirs));
+    }
+
+    private static async Task<double> TimeAsync(string path)
+    {
+        long start = Stopwatch.GetTimestamp();
+        await ScanAll(path).ConfigureAwait(false);
+        return Stopwatch.GetElapsedTime(start).TotalMicroseconds;
+    }
+
+    private static double Time(string path)
+    {
+        long start = Stopwatch.GetTimestamp();
+        RustReader.ScanAll(path);
+        return Stopwatch.GetElapsedTime(start).TotalMicroseconds;
+    }
+
+    private static double Median(double[] values)
+    {
+        double[] copy = (double[])values.Clone();
+        Array.Sort(copy);
+        return copy[copy.Length / 2];
+    }
+
+    private static async Task<long> ScanAll(string path)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Batches the scan emits, reported beside the timing because it is what explains it.
+    /// </summary>
+    /// <param name="path">The file to count.</param>
+    /// <remarks>
+    /// A file written as ONE chunk of a million rows is read as ~977 batches, and this axis exists
+    /// because that ratio is where the cost lives. Reporting the count turns "the number is large"
+    /// into "the number is large FOR THIS REASON".
+    /// </remarks>
+    private static async Task<long> CountBatches(string path)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        long batches = 0;
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            batches++;
+        }
+
+        return batches;
+    }
+}

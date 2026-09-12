@@ -39,6 +39,11 @@ internal static class Program
             return await RatioCheck.RunAsync().ConfigureAwait(false);
         }
 
+        if (args.Length > 0 && args[0] == "--throughput")
+        {
+            return await ThroughputCheck.RunAsync().ConfigureAwait(false);
+        }
+
         if (args.Length > 1 && args[0] == "--profile")
         {
             double seconds = args.Length > 2 && double.TryParse(
