@@ -22,6 +22,7 @@ using System.Buffers.Binary;
 using System.IO.Compression;
 
 using Vorticity.Arrays;
+using Vorticity.Types;
 
 namespace Vorticity.Writing;
 
@@ -48,7 +49,7 @@ internal sealed class ZstdPlan
     /// Compresses a varbin column's valid values, and keeps the result only if it is worth reading.
     /// </summary>
     /// <param name="arena">The arena holding the canonical node.</param>
-    /// <param name="nodeIndex">The node to encode; must be a <c>VarBinView</c>.</param>
+    /// <param name="nodeIndex">The node to encode; a <c>VarBinView</c> or a <c>Primitive</c>.</param>
     /// <param name="canonicalSize">What the plain form costs, which this must beat.</param>
     /// <returns>The plan, or <see langword="null"/> when zstd is not worth it.</returns>
     /// <remarks>
@@ -59,6 +60,11 @@ internal sealed class ZstdPlan
     internal static ZstdPlan? TryBuild(CanonicalArena arena, int nodeIndex, long canonicalSize)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
+        if (node.Kind == CanonicalKind.Primitive)
+        {
+            return TryBuildPrimitive(arena, node, canonicalSize);
+        }
+
         if (node.Kind != CanonicalKind.VarBinView)
         {
             return null;
@@ -134,6 +140,89 @@ internal sealed class ZstdPlan
             ArrayPool<byte>.Shared.Return(destination);
         }
     }
+
+    /// <summary>
+    /// A primitive column: the stored stream is the valid values back to back, no length prefixes.
+    /// </summary>
+    /// <remarks>
+    /// The varbin form writes `[u32 length][bytes]` per value because the decoder rebuilds views
+    /// from it. A fixed-width column needs none of that - `ZstdDecoder` scatters the decompressed
+    /// values across the null slots using the width alone - so the stream is simply the values.
+    ///
+    /// Worth having because the alternative for these columns is nothing at all. `types/f32_*` sit
+    /// at 1.43-1.46x the reference and are written CANONICALLY: ALP declines them, because ALP
+    /// encodes f32 to i32 and wins only when those integers bit-pack small, and `vortex.alprd` -
+    /// the encoding built for floats ALP cannot take - is one this library reads and has never
+    /// written. Zstd takes that column's 32 764 bytes to 23 465, against a reference file of 23 204.
+    /// </remarks>
+    private static ZstdPlan? TryBuildPrimitive(CanonicalArena arena, CanonicalNode node, long canonicalSize)
+    {
+        int width = node.PType.ByteWidth();
+        if (width == 0)
+        {
+            return null;
+        }
+
+        int rows = node.Length;
+        ReadOnlySpan<byte> source = node.Values.Span;
+        int valueCount = 0;
+        byte[] stream = ArrayPool<byte>.Shared.Rent(rows * width);
+        byte[] destination = ArrayPool<byte>.Shared.Rent(
+            checked((int)ZstandardEncoder.GetMaxCompressedLength(rows * width)));
+        try
+        {
+            for (int i = 0; i < rows; i++)
+            {
+                if (!IsValid(arena, node, i))
+                {
+                    continue;
+                }
+
+                source.Slice(i * width, width).CopyTo(stream.AsSpan(valueCount * width, width));
+                valueCount++;
+            }
+
+            if (valueCount == 0)
+            {
+                return null;
+            }
+
+            int streamBytes = valueCount * width;
+            if (!ZstandardEncoder.TryCompress(
+                    stream.AsSpan(0, streamBytes), destination, out int written) || written <= 0)
+            {
+                return null;
+            }
+
+            // A MUCH LARGER MARGIN THAN VARBIN, and it is a read-time decision rather than a size
+            // one. A primitive column's alternative is bit-packing, which decodes several times
+            // faster than zstd: measured on our own output, `high_cardinality_i64_r8193` came out
+            // 2.5% smaller and 42% SLOWER TO SCAN when zstd took it, while `f32_nonnull_r8191` came
+            // out 28% smaller and slightly faster. Size saving alone does not separate those, so the
+            // gate is set where the big wins are and the marginal ones are left to bit-packing.
+            //
+            // The written-size target is <=105% of the reference and the corpus sits near 0.67x, so
+            // size is not the binding constraint any more - read time is. This is the first encoding
+            // decision in the writer made on that basis.
+            if (written * (long)PrimitiveMarginDenominator >= canonicalSize * (long)PrimitiveMarginNumerator)
+            {
+                return null;
+            }
+
+            return new ZstdPlan(destination.AsSpan(0, written).ToArray(), streamBytes, valueCount);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(stream);
+            ArrayPool<byte>.Shared.Return(destination);
+        }
+    }
+
+    /// <summary>On a primitive column, keep zstd only when it saves at least a quarter.</summary>
+    private const int PrimitiveMarginNumerator = 3;
+
+    /// <summary>Denominator of <see cref="PrimitiveMarginNumerator"/>.</summary>
+    private const int PrimitiveMarginDenominator = 4;
 
     /// <summary>Keep zstd only when it saves at least a tenth of the plain form.</summary>
     private const int MarginNumerator = 9;

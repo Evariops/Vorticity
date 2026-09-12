@@ -188,10 +188,11 @@ internal static class ColumnCompressor
     /// </summary>
     /// <remarks>
     /// A whole zstd pass over a column to discover it loses is the cost §9 caught FSST paying on
-    /// every chunk. 64 kB is where the absolute saving can repay that pass: below it the most zstd
-    /// can win is tens of kilobytes, and it is competing against schemes that have already run.
+    /// every chunk, so a gate there must be. 16 kB rather than the 64 kB this started at, because
+    /// the f32 columns that need it most are 32 kB and the 64 kB gate declined them outright -
+    /// a threshold picked from one file's shape will exclude the next file's.
     /// </remarks>
-    private const long ZstdMinimumBytes = 64 * 1024;
+    private const long ZstdMinimumBytes = 16 * 1024;
 
     /// <summary>Picks a scheme for the canonical node at <paramref name="nodeIndex"/>.</summary>
     /// <param name="arena">The arena holding the node.</param>
@@ -327,7 +328,7 @@ internal static class ColumnCompressor
         // would be that same mistake. Columns below the gate are exactly the ones where the
         // absolute saving cannot repay the pass.
         long zstdBudget = fsst is not null ? Math.Min(plain, fsst.EncodedSize) : plain;
-        if (node.Kind == CanonicalKind.VarBinView
+        if (node.Kind is CanonicalKind.VarBinView or CanonicalKind.Primitive
             && Allows(target, "vortex.zstd")
             && DataBytes(node) >= ZstdMinimumBytes)
         {
