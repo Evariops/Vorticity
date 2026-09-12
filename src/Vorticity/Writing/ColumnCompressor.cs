@@ -57,6 +57,11 @@ internal enum ColumnScheme : byte
     /// <summary>ALP: the scheme decimal-shaped floats want.</summary>
     Alp = 5,
 
+    /// <summary>
+    /// An arithmetic progression, in the metadata: the only scheme that costs nothing per row.
+    /// </summary>
+    Sequence = 6,
+
     /// <summary>Frame of reference, then bit-pack: the scheme dense integers want.</summary>
     BitPacked = 3,
 }
@@ -82,6 +87,9 @@ internal readonly struct ColumnPlan
 
     /// <summary>The encoded column, for <see cref="ColumnScheme.Alp"/>.</summary>
     internal AlpPlan? Alp { get; private init; }
+
+    /// <summary>The base and step, for <see cref="ColumnScheme.Sequence"/>.</summary>
+    internal SequencePlan? Sequence { get; private init; }
 
     /// <summary>
     /// The transform, the width and the exceptions, for <see cref="ColumnScheme.BitPacked"/>.
@@ -117,6 +125,9 @@ internal readonly struct ColumnPlan
 
     internal static ColumnPlan ForBitPacking(BitPackPlan plan) =>
         new ColumnPlan(ColumnScheme.BitPacked, [], []) { BitPack = plan };
+
+    internal static ColumnPlan ForSequence(SequencePlan plan) =>
+        new ColumnPlan(ColumnScheme.Sequence, [], []) { Sequence = plan };
 }
 
 /// <summary>Decides how to encode one column chunk.</summary>
@@ -174,6 +185,19 @@ internal static class ColumnCompressor
         if (!IsComparable(node.Kind) || (length < MinimumRows && DataBytes(node) < MinimumBytes))
         {
             return ColumnPlan.Canonical;
+        }
+
+        // FIRST, because where it applies nothing else can beat it: an arithmetic progression goes
+        // entirely into the metadata, so a `vortex.primitive` node and its whole buffer become one
+        // node and about thirty bytes. There is no byte comparison to make - every other scheme
+        // costs something per row and this one costs nothing.
+        if (Allows(target, "vortex.sequence"))
+        {
+            SequencePlan? sequence = SequencePlan.TryBuild(arena, node);
+            if (sequence is not null)
+            {
+                return ColumnPlan.ForSequence(sequence);
+            }
         }
 
         RowComparer comparer = new RowComparer(arena, nodeIndex);

@@ -204,7 +204,7 @@ representative rows, so a dictionary of strings shares the data buffers it came 
 
 | | ratio to the reference |
 |---|---|
-| Whole corpus | **0.988×** — smaller than the reference, against a ≤105% target. Was 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes, 1.11× before ALP, 1.044× before patched bit-packing, 1.008× before the codes cascade |
+| Whole corpus | **0.894×** — smaller than the reference, against a ≤105% target. Was 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes, 1.11× before ALP, 1.044× before patched bit-packing, 1.008× before the codes cascade, 0.988× before `vortex.sequence` |
 | `distributions/high_cardinality_i64_r8193` (dense integers) | **0.97×** |
 | `distributions/short_runs_i32_r8193` | **0.87×** |
 | `types/i64_nonnull_r8192` | **0.99×** (was 3.31×) |
@@ -269,17 +269,29 @@ follows is a list of individual files we are worse on, not a deficit:
   crushes with `vortex.onpair`. That encoding is **absent from the default write target**
   `core2025.05.0` and first appears in `core2026.08.1`, so we cannot emit it by default at all.
   Same for `repeated_prefix_utf8_r8193` at 1.63×.
-* `containers/zoned_many_zones*` — the `monotone i64` column, where the reference uses
-  `vortex.sequence` (start and step). In our default target since it was raised to
-  `core2026.08.3`, so this one is now an implementation gap rather than an edition one.
-* `types/fsl_i32_3_*` at 23×, `types/date_ms_nonnull_r8193` at 18× and `types/struct_field_names`
-  at 5.2× — each around 45 kB, and each a small file the reference crushes to about 2 kB. Not yet
-  diagnosed; they only became visible at the top of the list once everything above them was fixed.
+* `types/list_*` at about 1.9× and `types/binary_*` at 1.59× — what is left at the top now, and
+  undiagnosed.
 
 So an edition caveat belongs on the whole measurement: the corpus was written at
 `core2026.08.3` and we write at `core2025.05.0`, and §3's target says "the same data, edition and
 configuration". Most of the remaining 0.8% is an edition difference rather than an implementation
 gap.
+
+**`vortex.sequence` is written**, and the story of why it was not is worth more than the encoding.
+docs/90 listed it under "not in the default target" for as long as that target was believed to be
+`core2025.05.0`. It arrived in `core2025.06.0`, and once edition targeting was actually implemented
+the default became `core2026.08.3` — so what had been filed as an edition difference was an
+implementation gap the whole time. Three of the files we were worst on were sequences and nothing
+else: `types/fsl_i32_3_*` at 23×, `types/date_ms_nonnull_r8193` at 18×, `types/struct_field_names`
+at 5.2×, and the `monotone i64` column of `containers/zoned_many_zones*`.
+
+It is tried FIRST, before runs and distinct values, because where it applies nothing can beat it:
+`A[i] = base + i * multiplier` lives entirely in the metadata, so a `vortex.primitive` node and its
+whole buffer become one node and about thirty bytes. It is the one scheme with no overhead to weigh,
+because it replaces a node rather than wrapping one. Nulls disqualify a column outright — the
+encoding has neither children nor buffers, so there is nowhere for a validity bitmap to live.
+
+Worth 0.988× → 0.894×.
 
 **Cascading is done for the codes**, which is where the rest lived. A dictionary's codes and a
 run-end's ends are the one part of those encodings that costs per ROW rather than per distinct

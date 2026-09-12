@@ -40,6 +40,9 @@ public sealed class EditionTargetTests
     [Theory]
     [InlineData("distributions/high_cardinality_i64_r8193")]
     [InlineData("types/i64_nonnull_r8192")]
+    // An arithmetic progression: `vortex.sequence` is the obvious scheme for it and arrived in
+    // core2025.06.0, so the floor has to reach a different one.
+    [InlineData("types/date_ms_nonnull_r8193")]
     [InlineData("types/utf8_nullable_r1025")]
     [InlineData("containers/uncompressed_canonical")]
     public async Task EveryComponentOfAFloorTargetedFileBelongsToTheFloor(string id)

@@ -103,7 +103,10 @@ public sealed class BitPackPlanTests
         long[] values = new long[4096];
         for (int i = 0; i < values.Length; i++)
         {
-            values[i] = 1_700_000_000_000_000_000L + i;
+            // Jittered on purpose: `base + i` is an arithmetic progression, which `vortex.sequence`
+            // now claims before bit-packing is ever asked. The property under test is about
+            // magnitude against span, and it needs data that is not a progression to reach.
+            values[i] = 1_700_000_000_000_000_000L + ((i * 7919) % 4096);
         }
 
         using ColumnFixture fixture = new ColumnFixture();

@@ -150,6 +150,11 @@ internal static class ArrayBlobWriter
             return WriteAlp(builder, arena, nodeIndex, plan.Alp!, buffers, encodings);
         }
 
+        if (plan.Scheme == ColumnScheme.Sequence)
+        {
+            return WriteSequence(builder, arena, nodeIndex, plan.Sequence!, encodings);
+        }
+
         // The values child of both remaining schemes is the original column gathered down to its
         // representative rows, so a dictionary of strings shares the data buffers it came from.
         // The gathered values child is itself a column, and a dictionary of long strings is
@@ -544,6 +549,70 @@ internal static class ArrayBlobWriter
                 ? new AlpMetadata(e, f, in patches)
                 : new AlpMetadata(e, f);
             AlpMetadata.Write(ref writer, in value);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Writes <c>vortex.sequence</c>: no children, no buffers, the whole column in the metadata.
+    /// </summary>
+    /// <remarks>
+    /// The one encoding here that REPLACES a node rather than wrapping one, so it has no overhead
+    /// to weigh against: the primitive node and its buffer both disappear.
+    ///
+    /// There is no validity child because there is nowhere to put one - the encoding has neither
+    /// children nor buffers - which is why the plan refuses any column with a null. A nullable
+    /// dtype still round-trips: the decoder derives AllValid from the nullability, which is what
+    /// the column had.
+    /// </remarks>
+    private static int WriteSequence(
+        FlatBufferBuilder builder,
+        CanonicalArena arena,
+        int nodeIndex,
+        SequencePlan plan,
+        EncodingDictionary encodings)
+    {
+        PType ptype = arena.GetNode(nodeIndex).PType;
+        return Node(builder, encodings, "vortex.sequence"u8, SequenceBytes(plan, ptype), [], []);
+    }
+
+    /// <summary>
+    /// The serialized <c>vortex.sequence</c> metadata, exposed so a test can assert the exact
+    /// bytes against a file the reference wrote.
+    /// </summary>
+    /// <param name="plan">The base and step.</param>
+    /// <param name="ptype">The column's physical type.</param>
+    /// <remarks>
+    /// The wire tag of the multiplier is part of the contract - upstream reads its physical type
+    /// from the proto tag rather than from the dtype - and no round trip through our own reader can
+    /// see a wrong one, because we read either tag happily and produce the same values.
+    /// </remarks>
+    internal static byte[] SequenceMetadataBytesForTests(SequencePlan plan, PType ptype) =>
+        SequenceBytes(plan, ptype);
+
+    private static byte[] SequenceBytes(SequencePlan plan, PType ptype)
+    {
+        ScalarStore store = new ScalarStore();
+
+        // Both fields are bare ScalarValues, and the base is interpreted against the array's own
+        // dtype - so its signedness must match the column's, exactly as the frame of reference's
+        // does. The multiplier's does not: the wire preserves the STEP's signedness, and the
+        // decoder reads its physical type from the proto tag rather than from the dtype.
+        ScalarValue baseValue = ptype.IsSignedInteger()
+            ? store.Int64(unchecked((long)plan.BaseBits))
+            : store.UInt64(plan.BaseBits);
+        ScalarValue multiplier = plan.StepIsUnsigned
+            ? store.UInt64((ulong)plan.Step)
+            : store.Int64((long)plan.Step);
+
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            SequenceMetadata.Write(ref writer, new SequenceMetadata(baseValue, multiplier));
             return writer.WrittenSpan.ToArray();
         }
         finally
