@@ -142,7 +142,7 @@ documents the fallback honestly everywhere else.
 | `vortex.alp` | pointwise over the integers underneath | **yes** — see below |
 | Patches (shared) | merge against the selection — implemented once, used by BitPacked and ALP | **yes** |
 | `vortex.fsst` | seek each row's codes through `codes_offsets` | **yes** — 0.99× a full scan to 0.27× |
-| `vortex.onpair` | the same, same children | **no** — still the fallback, and a defect rather than a design. See below |
+| `vortex.onpair` | the same, same children | **yes** — 0.83× a full scan to 0.34× |
 | `vortex.alprd` | **fallback**: decode the containing zone, then index | |
 | everything else | **fallback** | |
 
@@ -199,7 +199,11 @@ from ~1.0× a full scan to 0.19× — and the fallback is now the whole of the r
 being hidden inside a number that averaged it with everything else, which is what made it worth
 looking at again.
 
-**That residual is `vortex.onpair` alone, and this section used to say "onpair and fsst".** The
+**Both are specialized now.** With `vortex.onpair` decoding selectively too, that scattered take is
+**452 µs, 0.34× a full scan**, and the `strs` residual is 206 µs rather than 825 — 2.4× on the axis
+and 4× on the column. The full scan did not move.
+
+**That residual was `vortex.onpair` alone, and this section used to say "onpair and fsst".** The
 correction came from a measurement that did not move: a `DecodeSelected` for `vortex.fsst` changed
 that take by no time and *zero bytes of allocation*, because FSST is not in the file. The pair had
 one member here all along, which also meant no axis in the suite could measure an FSST take — one
