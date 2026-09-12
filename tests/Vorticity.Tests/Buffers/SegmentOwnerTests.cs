@@ -8,6 +8,22 @@ using Xunit;
 
 namespace Vorticity.Tests.Buffers;
 
+/// <summary>
+/// Runs alone, because two of its tests read a PROCESS-GLOBAL counter.
+/// </summary>
+/// <remarks>
+/// <see cref="NativeSegmentOwner.FinalizedBlockCount"/> counts every block finalized anywhere in
+/// the process, so "the counter did not move" is only a statement about THIS test while no other
+/// test class is dropping blocks on the floor in parallel. Without this it fails roughly one run
+/// in eight, off by exactly however many blocks a neighbouring class happened to abandon - a
+/// flake that reads as a finalizer bug and is not one.
+/// </remarks>
+[CollectionDefinition(nameof(FinalizerCollection), DisableParallelization = true)]
+public sealed class FinalizerCollection
+{
+}
+
+[Collection(nameof(FinalizerCollection))]
 public sealed class SegmentOwnerTests
 {
     /// <summary>A no-memory owner used to observe exactly when <c>FreeCore</c> runs.</summary>

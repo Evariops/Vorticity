@@ -106,8 +106,25 @@ internal static class ColumnCompressor
     /// <summary>The same, for a dictionary. Higher, because the codes array is not free.</summary>
     private const int DictRatio = 4;
 
-    /// <summary>Below this, the arrays are too small for any of it to matter.</summary>
+    /// <summary>Below this many rows, a column is a candidate only if it is big in BYTES.</summary>
     private const int MinimumRows = 64;
+
+    /// <summary>
+    /// ...and this is what "big in bytes" means. A row count alone is the wrong guard: what the
+    /// guard is actually for is the fixed cost of a second array and its metadata, a couple of
+    /// hundred bytes, so the threshold belongs on the quantity that cost is compared against. A
+    /// sixteen-row column holding a megabyte of strings is worth a dictionary; a sixteen-row column
+    /// of integers is not, and neither reads as "sixteen".
+    /// </summary>
+    /// <remarks>
+    /// Honesty about what this bought: NOTHING on the current corpus, whose one small-row-big-bytes
+    /// file (`distributions/huge_string_r16`, sixteen rows around a string over a mebibyte) has
+    /// sixteen distinct values and so defeats runs and dictionaries alike - the reference gets its
+    /// 268x there with `vortex.onpair`, a string compressor we do not write. The rule is still the
+    /// right rule, and `SmallRowCountLargeBytesColumnIsStillCompressed` pins it, but it is not the
+    /// fix for that file.
+    /// </remarks>
+    private const long MinimumBytes = 1024;
 
     /// <summary>Picks a scheme for the canonical node at <paramref name="nodeIndex"/>.</summary>
     /// <param name="arena">The arena holding the node.</param>
@@ -117,7 +134,7 @@ internal static class ColumnCompressor
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         int length = node.Length;
-        if (length < MinimumRows || !IsComparable(node.Kind))
+        if (!IsComparable(node.Kind) || (length < MinimumRows && DataBytes(node) < MinimumBytes))
         {
             return ColumnPlan.Canonical;
         }
@@ -309,6 +326,38 @@ internal static class ColumnCompressor
         }
 
         return ColumnPlan.Dictionary([.. firstOccurrences], codes);
+    }
+
+    /// <summary>
+    /// How many bytes of data the column occupies, for the small-column guard.
+    /// </summary>
+    /// <remarks>
+    /// Only the four comparable forms need an answer, and each of them owns its bytes directly -
+    /// no recursion, and no counting of a validity child, whose size is a rounding error next to
+    /// the values it qualifies.
+    /// </remarks>
+    private static long DataBytes(CanonicalNode node)
+    {
+        switch (node.Kind)
+        {
+            case CanonicalKind.Bool:
+                return node.Bits.Length;
+
+            case CanonicalKind.Primitive:
+            case CanonicalKind.Decimal:
+                return node.Values.Length;
+
+            default:
+            {
+                long total = node.Views.Length;
+                for (int i = 0; i < node.DataBufferCount; i++)
+                {
+                    total += node.GetDataBuffer(i).Length;
+                }
+
+                return total;
+            }
+        }
     }
 
     /// <summary>Whether a canonical form has a row equality this compressor can compute.</summary>

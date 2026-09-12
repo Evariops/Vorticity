@@ -15,6 +15,7 @@ using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Scan;
+using Vorticity.Tests.Columns;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -62,6 +63,57 @@ public sealed class CompressionTests
         long canonical = await Size("distributions/all_null_i64_r1024", compress: false);
         long compressed = await Size("distributions/all_null_i64_r1024", compress: true);
         Assert.True(compressed < canonical, $"{compressed} against {canonical}");
+    }
+
+    /// <summary>
+    /// A column below the row threshold but above the BYTE threshold is still a candidate.
+    /// </summary>
+    /// <remarks>
+    /// The guard exists to skip columns too small for a second array and its metadata to pay for
+    /// themselves, and that cost is measured in bytes. Sixteen rows of two hundred bytes each is
+    /// three kilobytes with two distinct values - exactly the shape a row-count-only guard throws
+    /// away.
+    /// </remarks>
+    [Fact]
+    public void ASmallRowCountButLargeByteColumnIsStillCompressed()
+    {
+        using ColumnFixture fixture = new ColumnFixture();
+        int node = fixture.Utf8Node(TwoDistinct(200), Nullability.NonNullable);
+
+        ColumnPlan plan = ColumnCompressor.Choose(fixture.Arena, node);
+        Assert.NotEqual(ColumnScheme.None, plan.Scheme);
+    }
+
+    /// <summary>
+    /// The other half, without which the test above is satisfied by a compressor that never
+    /// declines: the same sixteen rows of SHORT strings stay canonical, because there the second
+    /// array really would cost more than it saves.
+    /// </summary>
+    [Fact]
+    public void ASmallRowCountAndSmallByteColumnIsLeftAlone()
+    {
+        using ColumnFixture fixture = new ColumnFixture();
+        int node = fixture.Utf8Node(TwoDistinct(4), Nullability.NonNullable);
+
+        ColumnPlan plan = ColumnCompressor.Choose(fixture.Arena, node);
+        Assert.Equal(ColumnScheme.None, plan.Scheme);
+    }
+
+    /// <summary>Sixteen rows over two distinct values of <paramref name="width"/> bytes.</summary>
+    private static byte[]?[] TwoDistinct(int width)
+    {
+        byte[] first = new byte[width];
+        byte[] second = new byte[width];
+        Array.Fill(first, (byte)'a');
+        Array.Fill(second, (byte)'b');
+
+        byte[]?[] values = new byte[]?[16];
+        for (int i = 0; i < values.Length; i++)
+        {
+            values[i] = i < 8 ? first : second;
+        }
+
+        return values;
     }
 
     [Fact]
