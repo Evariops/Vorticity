@@ -96,9 +96,16 @@ public sealed class ZonePruningTests
         //
         // The predicate selects a narrow band of a sorted column, so the great majority of the 64
         // zones cannot contain a match and their data segments should never be requested.
+        //
+        // `monotone` runs 1_000_000 upward in steps of 3, NOT 0 upward, and the band below is
+        // chosen to match ~100 rows for that reason. An earlier version of this test used [1000,
+        // 1100) and passed while matching NOTHING -- pruning a predicate no row satisfies proves
+        // only that a pruner can skip everything, which is the easy half.
         VortexExpr narrow = Expr.And(
-            Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_000L))),
-            Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_100L))));
+            Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_000L))),
+            Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_300L))));
+
+        Assert.NotEmpty(await Read(Zoned, narrow, prune: true));
 
         int withPruning = await CountSegments(Zoned, narrow, prune: true);
         int withoutPruning = await CountSegments(Zoned, narrow, prune: false);

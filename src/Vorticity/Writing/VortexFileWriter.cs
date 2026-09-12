@@ -5,16 +5,20 @@
 // The file it produces is deliberately the simplest valid one:
 //
 //     vortex.struct                 one child per root field (a tabular file)
-//       └ vortex.chunked            one child per batch written
-//           └ vortex.flat           one segment: the batch's column, canonical and uncompressed
+//       └ vortex.zoned              one zone per batch, when the batches are uniform
+//           ├ vortex.chunked        one child per batch written
+//           │   └ vortex.flat       one segment: the batch's column, canonical and uncompressed
+//           └ vortex.flat           one segment: the zones, one row each
 //
 // A file whose root dtype is NOT a struct -- `i64`, `utf8?` -- is legal and common in the corpus,
 // and drops the struct level: the root is the chunked layout itself. Refusing those was the first
 // thing the round-trip test caught.
 //
-// No compression, no zone maps, no statistics. Every one of those is an addition that a reader
-// already tolerates the absence of -- upstream reads a chunked layout with no stats table, and a
-// zoned layout is simply not emitted -- so this is a real file rather than a degenerate one.
+// No compression yet. Zone maps ARE emitted (F11), but only when the batches handed in are uniform
+// except for the last: a zone map declares ONE zone length and zone z covers
+// [z * len, (z + 1) * len), so a ragged chunking has no zone length to declare. Rather than buffer
+// and re-chunk -- which would throw away the streaming property the sink seam exists for -- the
+// writer emits a plain chunked layout in that case, which every reader already handles.
 //
 // THE ORDER OF WRITES IS THE FORMAT'S, NOT A CHOICE. Segments go out as batches arrive, so nothing
 // is buffered; the layout, footer and postscript can only be written once every segment's offset is
@@ -53,7 +57,12 @@ public sealed class VortexFileWriter : IAsyncDisposable
     /// <summary>Per batch, its row count; every field's chunk list has the same shape.</summary>
     private readonly List<long> _chunkRows = [];
 
+    /// <summary>Per root field, one summary per written batch, for the zone map.</summary>
+    private readonly List<ZoneStatistics>[] _columnZones;
+
     private readonly bool _isTabular;
+    private int[]? _zoneSegments;
+    private byte[][]? _zoneMetadata;
     private long _rowCount;
     private bool _started;
     private bool _completed;
@@ -68,9 +77,11 @@ public sealed class VortexFileWriter : IAsyncDisposable
         // A non-struct root is one column whose layout IS the root, with no struct level above it.
         _fieldCount = _isTabular ? schema.FieldCount : 1;
         _columnSegments = new List<int>[Math.Max(_fieldCount, 1)];
+        _columnZones = new List<ZoneStatistics>[Math.Max(_fieldCount, 1)];
         for (int i = 0; i < _columnSegments.Length; i++)
         {
             _columnSegments[i] = [];
+            _columnZones[i] = [];
         }
     }
 
@@ -139,6 +150,10 @@ public sealed class VortexFileWriter : IAsyncDisposable
                 : batch.RootIndex;
             byte[] blob = ArrayBlobWriter.Write(batch.Arena, node, _arrayEncodings);
             _columnSegments[field].Add(await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false));
+
+            // Summarized from the canonical column before the arena is reused, which is the only
+            // moment the values are in hand.
+            _columnZones[field].Add(ZoneStatistics.Compute(batch.Arena, node));
         }
 
         _chunkRows.Add(batch.RowCount);
@@ -158,6 +173,10 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
         // A file with no batches still has to start with the magic.
         await StartAsync(cancellationToken).ConfigureAwait(false);
+
+        // The zones arrays are segments like any other and must be written BEFORE the footer that
+        // records them.
+        await WriteZoneMapsAsync(cancellationToken).ConfigureAwait(false);
 
         long dtypeOffset = _sink.Position;
         byte[] dtype = DTypeFlatBuffers.Serialize(_schema);
@@ -205,6 +224,77 @@ public sealed class VortexFileWriter : IAsyncDisposable
         {
             await disposable.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Builds and writes one zones segment per column, when the chunking allows a zone map at all.
+    /// </summary>
+    /// <remarks>
+    /// The uniformity rule is the format's, not a simplification: ZoneMap documents zone z as
+    /// covering [z * ZoneLength, (z + 1) * ZoneLength) with only the last zone short, so a ragged
+    /// chunking cannot be described by any single zone length. A writer that declared one anyway
+    /// would hand every reader bounds attached to the wrong rows -- the one failure mode
+    /// docs/08-semantics.md §1 says must never happen.
+    /// </remarks>
+    private async ValueTask WriteZoneMapsAsync(CancellationToken cancellationToken)
+    {
+        if (!TryZoneLength(out uint zoneLength))
+        {
+            return;
+        }
+
+        _zoneSegments = new int[_fieldCount];
+        _zoneMetadata = new byte[_fieldCount][];
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            _zoneSegments[field] = -1;
+            DType column = _isTabular ? _schema.GetField(field) : _schema;
+
+            if (!ZoneMapWriter.TryBuild(
+                    column, _columnZones[field], _arrayEncodings, zoneLength,
+                    out byte[] metadata, out byte[] blob))
+            {
+                continue;
+            }
+
+            _zoneMetadata[field] = metadata;
+            _zoneSegments[field] = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The one zone length the written chunks can be described by, if there is one.
+    /// </summary>
+    private bool TryZoneLength(out uint zoneLength)
+    {
+        zoneLength = 0;
+        if (_chunkRows.Count == 0)
+        {
+            return false;
+        }
+
+        long first = _chunkRows[0];
+        if (first <= 0 || first > uint.MaxValue)
+        {
+            return false;
+        }
+
+        // Every chunk but the last must be exactly the zone length; the last may be short.
+        for (int i = 0; i < _chunkRows.Count - 1; i++)
+        {
+            if (_chunkRows[i] != first)
+            {
+                return false;
+            }
+        }
+
+        if (_chunkRows[^1] > first)
+        {
+            return false;
+        }
+
+        zoneLength = (uint)first;
+        return true;
     }
 
     /// <summary>
@@ -260,6 +350,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
         ushort flat = _layoutEncodings.Intern("vortex.flat");
         ushort chunked = _layoutEncodings.Intern("vortex.chunked");
+        ushort zoned = 0;
         ushort structural = _isTabular ? _layoutEncodings.Intern("vortex.struct") : (ushort)0;
 
         // `has_stats_table = false`: the first child is a chunk, not a statistics table.
@@ -280,8 +371,10 @@ public sealed class VortexFileWriter : IAsyncDisposable
                     builder, flat, (ulong)_chunkRows[chunk], default, [], segmentIds);
             }
 
-            fieldLayouts[field] = LayoutWriter.Write(
+            int data = LayoutWriter.Write(
                 builder, chunked, (ulong)_rowCount, chunkedMetadata[..metadataLength], chunks, []);
+
+            fieldLayouts[field] = Zone(builder, field, data, ref zoned);
         }
 
         // A non-struct root has no struct level: its single chunked layout IS the root.
@@ -291,6 +384,40 @@ public sealed class VortexFileWriter : IAsyncDisposable
             : fieldLayouts[0];
 
         return builder.FinishToArray(root);
+    }
+
+    /// <summary>
+    /// Wraps a column's data layout in a <c>vortex.zoned</c> one, when it has a zone map.
+    /// </summary>
+    /// <remarks>
+    /// Child 0 is the data and child 1 is the zones, which is the order ZonedLayoutReader reads and
+    /// the order upstream writes. Getting them the wrong way round produces a file that decodes the
+    /// zones as data and is caught by nothing until a value comes out wrong.
+    /// </remarks>
+    private int Zone(FlatBufferBuilder builder, int field, int data, ref ushort zoned)
+    {
+        if (_zoneSegments is null || _zoneMetadata is null || _zoneSegments[field] < 0)
+        {
+            return data;
+        }
+
+        if (zoned == 0)
+        {
+            zoned = _layoutEncodings.Intern("vortex.zoned");
+        }
+
+        ushort flat = _layoutEncodings.Intern("vortex.flat");
+        Span<uint> segment = stackalloc uint[1];
+        segment[0] = (uint)_zoneSegments[field];
+
+        int zoneCount = _chunkRows.Count;
+        int zones = LayoutWriter.Write(builder, flat, (ulong)zoneCount, default, [], segment);
+
+        Span<int> children = stackalloc int[2];
+        children[0] = data;
+        children[1] = zones;
+        return LayoutWriter.Write(
+            builder, zoned, (ulong)_rowCount, _zoneMetadata[field], children, []);
     }
 
     private byte[] BuildFooter()

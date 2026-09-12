@@ -103,8 +103,8 @@ public class ScanBenchmarks
         // for. Running it both ways in one benchmark is what makes the saving a number rather than
         // a claim.
         VortexExpr filter = Expr.And(
-            Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_000L))),
-            Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_100L))));
+            Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_000L))),
+            Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_300L))));
 
         await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None);
         long rows = 0;
