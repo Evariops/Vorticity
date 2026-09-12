@@ -47,11 +47,29 @@ Phase column refers to [01-scope.md](01-scope.md) §3.
 |---|---|---|
 | `vortex.alp` | Adaptive Lossless Floating Point | encoded ints are i32/i64; validate `exp_e`/`exp_f` |
 | `vortex.alprd` | ALP for real doubles | |
-| `vortex.fsst` | Fast Static Symbol Table | 255 symbols, code 255 = escape |
+| `vortex.fsst` | Fast Static Symbol Table | 255 symbols, code 255 = escape. **Three-buffer shape only** — see below |
 | `vortex.onpair` | string fragmentation | added in `core2026.08.1`; competes with FSST at write time |
 | `vortex.datetimeparts` | decomposed timestamps | days / seconds / subseconds |
 | `vortex.decimal_byte_parts` | decomposed decimals | readers must require `lower_part_count == 0` — wide decimals belong to a future `_v2` ID |
 | `vortex.zstd` | Zstd-compressed array | `core2025.06.0`; decoded with the in-box `ZstandardDecoder` |
+
+### The one shape we decline
+
+`vortex.fsst` has two serialized shapes. The three-buffer one — `[symbols, symbol_lengths, codes]`
+with `uncompressed_lengths` and `codes_offsets` as children — is what every writer since the
+encoding stabilized emits, and it is what all 55 corpus files use. The two-buffer one is upstream's
+`deserialize_legacy`, and it keeps the codes as a nested `vortex.varbin` **array**: offsets plus a
+byte heap, read as a child.
+
+That shape is incompatible with this library's arena, not merely unimplemented. Every child is
+canonicalized on the way in, and a canonical `VarBinView` inlines values of 12 bytes or fewer into
+the views themselves — so the contiguous code stream the decode needs no longer exists by the time
+the child is available. Reconstructing it would mean reading another encoding's serialized form
+directly out of the blob, past the arena.
+
+It is therefore refused by name, with a message that says which shape was found, rather than
+implemented against no test. Revisit if a file in the read-forever range (Vortex 0.36.0 onward)
+turns out to use it; the corpus generator can produce one on demand.
 
 ### Deferred to 1.1
 

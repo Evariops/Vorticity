@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.File;
 using Vorticity.Layouts;
+using Vorticity.Tests.File;
 using Vorticity.Types;
 
 using Xunit;
@@ -18,6 +19,9 @@ namespace Vorticity.Tests.Layouts;
 
 public sealed class LazyResolutionTests
 {
+    /// <summary>The id the fixture's `strs` column is renamed to. Same length as `vortex.fsst`.</summary>
+    private const string ForgedId = "vortex.zzzz";
+
     [Fact]
     public async Task AnUnknownLayoutOnAnUnprojectedFieldDoesNotThrow()
     {
@@ -78,9 +82,14 @@ public sealed class LazyResolutionTests
     [Fact]
     public async Task AnUnknownArrayEncodingOnAnUnprojectedFieldDoesNotThrow()
     {
-        // {ints=i64, strs=utf8}; `strs` is stored with vortex.fsst, which Phase 1 does not decode.
+        // {ints=i64, strs=utf8}, with `strs`'s encoding id renamed to one nothing resolves.
         // Projecting `ints` alone must succeed, and the batch's schema must hold only that field.
-        await using VortexFile file = await LayoutExecutor.OpenAsync("containers/editions_disabled");
+        //
+        // THE HALF THAT GETS DELETED, so it is forged rather than borrowed from a real unsupported
+        // encoding: when this test named vortex.fsst, landing that decoder turned it green for the
+        // opposite reason -- the column became readable, and the "it was never asked for" property
+        // it exists to guard went untested with nothing to say so.
+        await using VortexFile file = await OpenForged();
         LayoutTree tree = LayoutTree.Parse(file);
         using ScanContext context = new ScanContext(file);
 
@@ -101,7 +110,7 @@ public sealed class LazyResolutionTests
     [Fact]
     public async Task ProjectingTheUnknownArrayEncodingThrowsNamingIt()
     {
-        await using VortexFile file = await LayoutExecutor.OpenAsync("containers/editions_disabled");
+        await using VortexFile file = await OpenForged();
         LayoutTree tree = LayoutTree.Parse(file);
         using ScanContext context = new ScanContext(file);
 
@@ -112,7 +121,7 @@ public sealed class LazyResolutionTests
                 file, tree, context, new RowRange(0, file.RowCount), strs));
 
         Assert.Equal(VortexComponentKind.Array, error.Kind);
-        Assert.Equal("vortex.fsst", error.ComponentId);
+        Assert.Equal(ForgedId, error.ComponentId);
     }
 
     [Fact]
@@ -176,6 +185,19 @@ public sealed class LazyResolutionTests
         CanonicalNode node = context.Canonical.GetNode(root);
         Assert.Equal(file.RowCount, node.Length);
         Assert.Equal(0, node.FieldCount);
+    }
+
+    /// <summary>
+    /// <c>containers/editions_disabled</c> ({ints=i64, strs=utf8}) with the encoding id of the
+    /// `strs` column renamed to one no build resolves.
+    /// </summary>
+    private static async Task<VortexFile> OpenForged()
+    {
+        LayoutExecutor.EnsureDecoders();
+        byte[] bytes = ForgedEncodingId.Patch(
+            "containers/editions_disabled", "vortex.fsst"u8, "vortex.zzzz"u8);
+        return await VortexFile.OpenAsync(
+            new TestSegmentSource(bytes), VortexOpenOptions.Default, System.Threading.CancellationToken.None);
     }
 
     [Fact]

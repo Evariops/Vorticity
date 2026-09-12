@@ -109,6 +109,9 @@ public enum ArrayEncodingId : ushort
 
     /// <summary><c>vortex.alprd</c>.</summary>
     AlpRd,
+
+    /// <summary><c>vortex.fsst</c>.</summary>
+    Fsst,
 }
 
 /// <summary>
@@ -144,7 +147,7 @@ public enum LayoutEncodingId : ushort
 public static class EncodingRegistry
 {
     /// <summary>The highest defined <see cref="ArrayEncodingId"/>; the decoder table is sized by it.</summary>
-    internal const int MaxArrayEncodingId = (int)ArrayEncodingId.AlpRd;
+    internal const int MaxArrayEncodingId = (int)ArrayEncodingId.Fsst;
 
     /// <summary>The highest defined <see cref="LayoutEncodingId"/>.</summary>
     internal const int MaxLayoutEncodingId = (int)LayoutEncodingId.Stats;
@@ -177,6 +180,7 @@ public static class EncodingRegistry
                     case (byte)'l': return idUtf8.SequenceEqual("vortex.list"u8) ? ArrayEncodingId.List : ArrayEncodingId.Unknown;
                     case (byte)'d': return idUtf8.SequenceEqual("vortex.dict"u8) ? ArrayEncodingId.Dict : ArrayEncodingId.Unknown;
                     case (byte)'z': return idUtf8.SequenceEqual("vortex.zstd"u8) ? ArrayEncodingId.Zstd : ArrayEncodingId.Unknown;
+                    case (byte)'f': return idUtf8.SequenceEqual("vortex.fsst"u8) ? ArrayEncodingId.Fsst : ArrayEncodingId.Unknown;
                     default: return ArrayEncodingId.Unknown;
                 }
 
@@ -327,8 +331,7 @@ public static class EncodingRegistry
             return "experimental list layout; in no core edition";
         }
 
-        if (idUtf8.SequenceEqual("vortex.fsst"u8) ||
-            idUtf8.SequenceEqual("vortex.onpair"u8))
+        if (idUtf8.SequenceEqual("vortex.onpair"u8))
         {
             return "deferred to Phase 2 of Vorticity";
         }

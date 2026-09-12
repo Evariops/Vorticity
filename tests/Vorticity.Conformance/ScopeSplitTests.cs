@@ -18,9 +18,9 @@ public sealed class ScopeSplitTests
     // Bumped deliberately, one decoder at a time: a moved count is the visible half of a
     // decoder landing, and an unexplained move is the visible half of one being dropped.
     // 616/203 was Phase 1. +32 vortex.decimal_byte_parts, +6 vortex.datetimeparts, +5
-    // vortex.zstd, +33 vortex.alp, +6 vortex.alprd.
-    private const int ExpectedInScope = 698;
-    private const int ExpectedOutOfScope = 121;
+    // vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst.
+    private const int ExpectedInScope = 728;
+    private const int ExpectedOutOfScope = 91;
 
     [Fact]
     public void TheCorpusSplitsIntoTheScopeThisBuildClaims()

@@ -292,6 +292,24 @@ internal static class TestMetadata
         }
     }
 
+    /// <summary><c>vortex.fsst</c> metadata: the two child physical types.</summary>
+    /// <param name="uncompressedLengthsPType">Physical type of the uncompressed-lengths child.</param>
+    /// <param name="codesOffsetsPType">Physical type of the codes-offsets child.</param>
+    internal static byte[] Fsst(PType uncompressedLengthsPType, PType codesOffsetsPType)
+    {
+        FsstMetadata value = new(uncompressedLengthsPType, codesOffsetsPType);
+        ProtoWriter writer = new();
+        try
+        {
+            FsstMetadata.Write(ref writer, in value);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
     /// <summary>A bare <c>ScalarValue</c> message body, as fastlanes.for's metadata and
     /// vortex.constant's / vortex.sparse's buffer 0 carry it.</summary>
     internal static byte[] Scalar(ScalarValue value) => ScalarProtobuf.SerializeValue(value);

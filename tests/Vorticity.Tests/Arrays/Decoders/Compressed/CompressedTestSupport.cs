@@ -50,6 +50,7 @@ internal static class TestDecoders
             Register(ZstdDecoder.Instance);
             Register(AlpDecoder.Instance);
             Register(AlpRdDecoder.Instance);
+            Register(FsstDecoder.Instance);
 
             Register(new StubPrimitiveDecoder());
             Register(new StubBoolDecoder());

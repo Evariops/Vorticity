@@ -1,0 +1,213 @@
+// vortex.fsst - vortex-fsst-0.86.1/src/array.rs `deserialize` and src/canonical.rs
+// `canonicalize_fsst`. The kernel itself is FsstSymbolTable.
+//
+// The layout is unusual in one respect that shapes the whole decode: the ROW BOUNDARIES ARE ON THE
+// DECODED SIDE, not the compressed one. `codes_offsets` splits the code stream per row, but the
+// decode does not use it for that -- it decompresses the entire stream in one pass and then cuts
+// the result with `uncompressed_lengths`. Two consequences worth stating, because both are
+// load-bearing:
+//
+//   * a row's decoded bytes are `lengths[i]`, and the lengths must account for the decoded heap
+//     EXACTLY (upstream asserts it in build_views). So the lengths are not a hint: they are the
+//     only thing that says where a value ends.
+//   * `codes_offsets` is used only to find the code stream's own extent, offsets[0]..offsets[len],
+//     which for an unsliced array is upstream's `codes.sliced_bytes()`.
+//
+// Shapes, from `deserialize`:
+//     3 buffers [symbols, symbol_lengths, codes] -> children [uncompressed_lengths, codes_offsets, validity?]
+//     2 buffers [symbols, symbol_lengths]        -> children [codes: vortex.varbin, uncompressed_lengths]
+//
+// Only the 3-buffer shape is implemented. The 2-buffer one is upstream's `deserialize_legacy`, and
+// it requires the codes child to still BE a vortex.varbin -- offsets plus a byte heap -- while this
+// library canonicalizes every child, and a canonical VarBinView inlines values of 12 bytes or fewer
+// into the views, where a contiguous code stream no longer exists. Reconstructing one would mean
+// reaching past the arena into another encoding's serialized form. No corpus file uses the shape
+// (all 55 are `vortex.fsst/c2/b3` or `/c3/b3`), so it is refused by name rather than implemented
+// untested -- recorded in docs/90-registry.md as the gap it is.
+using System;
+using System.Text.Unicode;
+using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Arrays.Metadata;
+using Vorticity.Buffers;
+using Vorticity.Types;
+
+namespace Vorticity.Arrays.Decoders.Compressed;
+
+/// <summary>Decodes <c>vortex.fsst</c> into a canonical varbin view.</summary>
+public sealed class FsstDecoder : ArrayDecoder
+{
+    /// <summary>The wire id.</summary>
+    public const string Id = "vortex.fsst";
+
+    /// <summary>The shared, stateless instance.</summary>
+    public static readonly FsstDecoder Instance = new FsstDecoder();
+
+    private FsstDecoder()
+    {
+    }
+
+    /// <inheritdoc/>
+    public override ReadOnlySpan<byte> IdUtf8 => "vortex.fsst"u8;
+
+    /// <inheritdoc/>
+    public override ArrayEncodingId EncodingId => ArrayEncodingId.Fsst;
+
+    /// <inheritdoc/>
+    public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        CanonicalSupport.RequireBinaryLike(dtype, Id);
+        if (node.BufferCount == 2)
+        {
+            CompressedThrow.Format(
+                $"{Id} in its two-buffer form stores its codes as a nested vortex.varbin array; " +
+                "this build reads only the three-buffer form.");
+        }
+
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 3, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, 3, Id);
+
+        FsstMetadata metadata = FsstMetadata.Read(node.Metadata);
+        FsstSymbolTable table = FsstSymbolTable.Create(
+            node.GetBuffer(0).Span, node.GetBuffer(1).Span, Id);
+
+        PType lengthsPType = metadata.UncompressedLengthsPType;
+        CanonicalSupport.RequireIntegerPType(lengthsPType, Id + " uncompressed_lengths");
+        DType lengthsType = context.Types.Primitive(lengthsPType, Nullability.NonNullable);
+        int lengthsIndex = context.DecodeChild(in node, 0, lengthsType, length);
+        CanonicalNode uncompressedLengths = CanonicalSupport.RequirePrimitiveChild(
+            context, lengthsIndex, lengthsPType, length, Id + " uncompressed_lengths");
+
+        // VarBin offsets are len + 1, and they bound the code stream rather than the decoded one.
+        PType offsetsPType = metadata.CodesOffsetsPType;
+        CanonicalSupport.RequireIntegerPType(offsetsPType, Id + " codes_offsets");
+        int offsetCount = ArrayDecodeContext.CheckedLength((ulong)length + 1, Id + " codes_offsets");
+        DType offsetsType = context.Types.Primitive(offsetsPType, Nullability.NonNullable);
+        int offsetsIndex = context.DecodeChild(in node, 1, offsetsType, offsetCount);
+        CanonicalNode codesOffsets = CanonicalSupport.RequirePrimitiveChild(
+            context, offsetsIndex, offsetsPType, offsetCount, Id + " codes_offsets");
+
+        Validity validity = context.DecodeValidity(in node, 2, dtype.Nullability, length);
+
+        VortexBuffer codes = node.GetBuffer(2);
+        ReadOnlySpan<byte> stream = CodeStream(codesOffsets, offsetsPType, length, codes);
+
+        int total = TotalDecodedLength(uncompressedLengths, lengthsPType, length);
+        VortexBuffer heap = CanonicalSupport.Allocate(context, total, 1, out Span<byte> destination);
+
+        int written = table.Decode(stream, destination, Id);
+        if (written != total)
+        {
+            CompressedThrow.Format(
+                $"{Id} decoded {written} bytes; its uncompressed lengths sum to {total}.");
+        }
+
+        int viewBytes = ArrayDecodeContext.CheckedMultiply(
+            length, CanonicalSupport.ViewSize, Id + " views");
+        VortexBuffer views = CanonicalSupport.Allocate(
+            context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
+        BuildViews(
+            uncompressedLengths.Values.Span, lengthsPType, destination, writable, length,
+            dtype.Kind == DTypeKind.Utf8);
+
+        if (total == 0)
+        {
+            return context.Canonical.AddVarBinView(dtype, length, validity, views, default);
+        }
+
+        Span<VortexBuffer> single = stackalloc VortexBuffer[1];
+        single[0] = heap;
+        return context.Canonical.AddVarBinView(dtype, length, validity, views, single);
+    }
+
+    /// <summary>
+    /// The extent of the code stream, <c>offsets[0]..offsets[length]</c>, validated against the
+    /// codes buffer.
+    /// </summary>
+    private static ReadOnlySpan<byte> CodeStream(
+        CanonicalNode offsets, PType ptype, int length, VortexBuffer codes)
+    {
+        ReadOnlySpan<byte> raw = offsets.Values.Span;
+        long start = CanonicalSupport.ReadInteger(raw, ptype, 0);
+        long end = CanonicalSupport.ReadInteger(raw, ptype, length);
+
+        if (start < 0 || end < start || end > codes.Length)
+        {
+            // Not the generic throw helper: a ref struct cannot be its type argument.
+            CompressedThrow.Format(
+                $"{Id} codes span [{start}, {end}) of a {codes.Length}-byte codes buffer.");
+        }
+
+        return codes.Span.Slice((int)start, (int)(end - start));
+    }
+
+    /// <summary>The sum of the per-row uncompressed lengths, which is the decoded heap's size.</summary>
+    /// <remarks>
+    /// Summed in <see cref="long"/> and capped: the lengths are file-supplied, and a row count of
+    /// 8192 with a declared length of <c>u64::MAX</c> each would otherwise overflow into a small
+    /// allocation that the decode then overruns.
+    /// </remarks>
+    private static int TotalDecodedLength(CanonicalNode lengths, PType ptype, int length)
+    {
+        ReadOnlySpan<byte> raw = lengths.Values.Span;
+        long total = 0;
+        for (int i = 0; i < length; i++)
+        {
+            long value = CanonicalSupport.ReadInteger(raw, ptype, i);
+            if (value < 0)
+            {
+                CompressedThrow.Format($"{Id} row {i} declares a negative uncompressed length.");
+            }
+
+            total += value;
+            if (total > int.MaxValue)
+            {
+                CompressedThrow.Format(
+                    $"{Id} uncompressed lengths sum past {int.MaxValue} bytes.");
+            }
+        }
+
+        return (int)total;
+    }
+
+    /// <summary>
+    /// Cuts the decoded heap into per-row views, advancing by each row's uncompressed length.
+    /// </summary>
+    /// <remarks>
+    /// Null rows are not special-cased: upstream stores a zero length for them, so they consume
+    /// nothing and get an empty view, which is also what the zeroed allocation already holds.
+    /// </remarks>
+    private static void BuildViews(
+        ReadOnlySpan<byte> lengths,
+        PType ptype,
+        ReadOnlySpan<byte> heap,
+        Span<byte> views,
+        int length,
+        bool requireUtf8)
+    {
+        int offset = 0;
+        for (int i = 0; i < length; i++)
+        {
+            int size = (int)CanonicalSupport.ReadInteger(lengths, ptype, i);
+            ReadOnlySpan<byte> value = heap.Slice(offset, size);
+
+            if (requireUtf8 && !Utf8.IsValid(value))
+            {
+                throw new VortexFormatException($"Row {i} of a Utf8 array is not valid UTF-8.");
+            }
+
+            Span<byte> view = views.Slice(i * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
+            if (size <= CanonicalSupport.MaxInlineViewLength)
+            {
+                CanonicalSupport.WriteInlineView(view, value);
+            }
+            else
+            {
+                CanonicalSupport.WriteReferenceView(view, size, value, bufferIndex: 0, offset: offset);
+            }
+
+            offset += size;
+        }
+    }
+}
