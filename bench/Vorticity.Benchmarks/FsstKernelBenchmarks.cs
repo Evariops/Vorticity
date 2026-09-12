@@ -16,6 +16,24 @@
 //
 // The WIDE copy is duplicated here rather than kept in the library behind a switch: a benchmark may
 // carry a variant it is measuring, a decoder may not carry one it does not use.
+//
+// AND SO IS THE EXACT COPY, WHICH IS THE REPAIR THIS FILE NEEDED. Its `exact copy` arm used to call
+// FsstSymbolTable.Decode - "what the library does" - and the wide store then LANDED in that method.
+// Both arms ran the same shape from that commit on, and the table stopped being able to demonstrate
+// the 7.9x it was written to demonstrate: it read 1.37x instead, with nothing regressed. A benchmark
+// that measures the library and calls the result "the old shape" has a shelf life of exactly one
+// commit. FastLanesKernelBenchmarks never had the problem because it always carried its own scalar
+// loop, and that is now the rule here too.
+//
+// So there are three arms rather than two, and the third is the one that keeps the other two
+// honest:
+//
+//   * EXACT and WIDE are the benchmark's own loops. Their ratio is the SHAPE question, and it is
+//     the claim docs/05 makes. Neither validates, because the question is about the store.
+//   * LIBRARY is FsstSymbolTable.Create plus Decode: what a decoder actually runs, validation
+//     included. Its distance from WIDE is the price of that validation, and measuring it was worth
+//     it - the gap had been attributed in writing to Create, which loops over 200 symbol lengths
+//     and cannot cost what was attributed to it.
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -78,9 +96,99 @@ public class FsstKernelBenchmarks
         _output = new byte[decoded + 64];
     }
 
-    /// <summary>The library's kernel: copy the symbol's real length.</summary>
+    /// <summary>The shape the library REPLACED: copy exactly the symbol's length, every time.</summary>
+    /// <remarks>
+    /// Carried here rather than called through the library, which no longer contains it. Everything
+    /// except the store is identical to <see cref="Wide"/>, so their quotient is about the store and
+    /// nothing else.
+    /// </remarks>
     [Benchmark(Baseline = true, Description = "exact copy")]
     public int Exact()
+    {
+        ReadOnlySpan<byte> symbols = _symbols;
+        ReadOnlySpan<byte> lengths = _lengths;
+        ReadOnlySpan<byte> codes = _codes;
+        Span<byte> destination = _output;
+        int written = 0;
+
+        for (int i = 0; i < codes.Length; i++)
+        {
+            byte code = codes[i];
+            if (code == 255)
+            {
+                destination[written++] = codes[++i];
+                continue;
+            }
+
+            int width = lengths[code];
+            symbols.Slice(code * 8, width).CopyTo(destination.Slice(written, width));
+            written += width;
+        }
+
+        return written;
+    }
+
+    /// <summary>The replaced shape WITH the validation a decoder does, to close the 2x2.</summary>
+    /// <remarks>
+    /// The historical figure this file exists to defend - 306.8 us for "exact copy" - was measured
+    /// by calling Decode back when Decode held the exact copy, so it included validation. The bare
+    /// arm above does not, and comparing the two across that difference is what makes a 7.9x turn
+    /// into a 4.7x for no reason anybody changed. This arm is the like-for-like partner of
+    /// <see cref="Library"/>: same validation, different store.
+    /// </remarks>
+    [Benchmark(Description = "exact copy, validation included")]
+    public int ExactValidated()
+    {
+        ReadOnlySpan<byte> symbols = _symbols;
+        ReadOnlySpan<byte> lengths = _lengths;
+        ReadOnlySpan<byte> codes = _codes;
+        Span<byte> destination = _output;
+        int count = lengths.Length;
+        int written = 0;
+
+        for (int i = 0; i < codes.Length; i++)
+        {
+            byte code = codes[i];
+            if (code == 255)
+            {
+                if (i + 1 >= codes.Length || written >= destination.Length)
+                {
+                    throw new InvalidOperationException("truncated");
+                }
+
+                destination[written++] = codes[++i];
+                continue;
+            }
+
+            if (code >= count)
+            {
+                throw new InvalidOperationException("unknown code");
+            }
+
+            int width = lengths[code];
+            if (written + width > destination.Length)
+            {
+                throw new InvalidOperationException("overrun");
+            }
+
+            symbols.Slice(code * 8, width).CopyTo(destination.Slice(written, width));
+            written += width;
+        }
+
+        return written;
+    }
+
+    /// <summary>What a decoder actually runs: the same wide store, plus the validation.</summary>
+    /// <remarks>
+    /// The third arm exists because the difference between this and <see cref="Wide"/> was once
+    /// written down as the cost of <see cref="FsstSymbolTable.Create"/> without being measured.
+    /// Create validates the table shape and walks the symbol lengths - 200 iterations here - so it
+    /// is not a plausible home for a microsecond figure. What Decode does per CODE and the arms
+    /// above do not is check that the code names a symbol the table holds and that the write stays
+    /// inside the destination: 65 536 of those, against 200 of the other.
+    /// </remarks>
+    [Benchmark(Description = "library, validation included")]
+    public int Library()
     {
         FsstSymbolTable table = FsstSymbolTable.Create(_symbols, _lengths, "vortex.fsst");
         return table.Decode(_codes, _output, "vortex.fsst");

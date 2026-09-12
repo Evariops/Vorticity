@@ -109,27 +109,43 @@ kernel, so the shape was tried: one unaligned 8-byte store per symbol, advancing
 real length, with an exact-copy tail where the slack runs out.
 
 The end-to-end benchmark said it was **8% slower**, and that was nearly written down as a finding.
-It was drift. `FsstKernelBenchmarks` runs both shapes in one process over one code stream, which is
-what §5 prescribes and what should have been done first:
+It was drift. `FsstKernelBenchmarks` runs the candidate shapes in one process over one code stream,
+which is what §5 prescribes and what should have been done first. It now runs **four** arms, a 2×2
+of store shape against validation, because comparing across both at once is what produced two wrong
+numbers in this section's history:
 
-| shape | 64 KiB of codes | ratio |
+| 64 KiB of codes | bare | with a decoder's validation |
 |---|---|---|
-| exact copy (what the library did) | 306.8 µs | 1.00 |
-| **wide store** (what it does now) | **38.8 µs** | **0.13** |
+| exact copy (what the library did) | 184.0 µs | 190.5 µs |
+| **wide store** (what it does now) | **38.7 µs** | **53.5 µs** |
 
-**7.9× faster.** Two lessons, both already in §5: a microbenchmark of the thing being changed beats
-an end-to-end one diluted by a fixed cost, and two candidates must be measured against ONE clock or
-thermal drift picks the winner.
+**4.7× faster like for like**, 3.6× with validation on both sides. Two lessons, both already in §5:
+a microbenchmark of the thing being changed beats an end-to-end one diluted by a fixed cost, and two
+candidates must be measured against ONE clock or thermal drift picks the winner.
 
-**And a third lesson, which cost this table its ability to prove any of that: THE BENCHMARK NO
-LONGER REPRODUCES THE NUMBERS ABOVE.** Running `FsstKernelBenchmarks` today returns 52.4 µs for
-`exact copy` against 38.1 µs for `wide store` — 1.37×, not 7.9×. Nothing regressed. The `exact copy`
-arm calls `FsstSymbolTable.Decode`, and landing the wide store in the library put the wide store
-*inside the baseline arm*: both arms now run the same shape, and the 14 µs between them is the
-`FsstSymbolTable.Create` that only the baseline arm pays. The table above is therefore **history**,
-correct on the day it was measured and unverifiable now. `FastLanesKernelBenchmarks` does not have
-this problem because it carries its own copy of the scalar loop; this one must do the same before
-its rows can be believed again.
+**A third lesson cost this table the ability to prove any of that.** Its `exact copy` arm used to
+call `FsstSymbolTable.Decode` — "what the library does" — and then the wide store landed *in* that
+method. From that commit on, both arms ran the same shape and the table read 1.37×, with nothing
+regressed and no way to tell from the numbers. A benchmark that measures the library and labels the
+result "the old shape" has a shelf life of exactly one commit.
+`FastLanesKernelBenchmarks` never had the problem because it always carried its own scalar loop;
+this one now carries its own exact copy for the same reason.
+
+**A fourth, from repairing it: do not attribute a gap you have not measured.** This section briefly
+said the 14 µs between the two arms was the `FsstSymbolTable.Create` call only the baseline made.
+It is not. `Create` validates the table's shape and walks its 200 symbol lengths — it cannot cost
+microseconds. The gap is the validation `Decode` does **per code**, 65 536 times: that the code names
+a symbol the table holds, and that the write stays inside the destination. The 2×2 above prices it
+directly at 14.8 µs on the wide path and 6.5 µs on the exact one, which is the expected shape — the
+same fixed work is a larger fraction of a faster loop.
+
+**And the figure that does not reproduce, stated as such rather than quietly dropped.** The original
+row read 306.8 µs for the exact copy where the like-for-like arm today reads 190.5 µs. The current
+arm is a faithful transplant of the pre-change `Decode` — same checks, same `Slice().CopyTo()`, read
+back out of the commit that replaced it — and `global.json` pins the same SDK now as then. The
+`wide store` arm reproduces across the same interval to within 2% (38.8 → 38.7 µs), so a 1.6×
+discrepancy confined to the other arm is more likely an artifact of that original run than a change
+in anything since. **The reproducible number is 4.7×.** 7.9× should not be quoted again.
 
 The same trick applies to `vortex.onpair`, whose tokens are at most 16 bytes and now take one
 `Vector128` store each; its decoder also stopped re-reading the token offsets through a
