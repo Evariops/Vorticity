@@ -115,7 +115,7 @@ public sealed class PathAllocationTests
         ("open, first batch", 133_632, FirstBatch),
         ("full scan", 190_976, FullScan),
         ("projected scan, 1 of 5 columns", 134_144, ProjectedScan),
-        ("take 64 rows from 64 splits", 201_728, ScatteredTake),
+        ("take 64 rows from 64 splits", 192_000, ScatteredTake),
         ("selective filter, pruning on", 165_376, PrunedFilter),
     ];
 

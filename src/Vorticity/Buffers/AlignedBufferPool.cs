@@ -37,10 +37,40 @@ public sealed class AlignedBufferPool
 
     private const int MinBlockShift = 12; // log2(MinBlockSize)
 
+    /// <summary>
+    /// Bytes a single size class may retain before <see cref="RetainedFor"/> stops widening it.
+    /// </summary>
+    /// <remarks>
+    /// RETENTION IS BOUNDED IN BYTES, NOT IN BLOCKS, because bytes are what it costs. A flat count
+    /// across classes spanning 4 kB to 8 MB means the same number buys 256 kB at the bottom and
+    /// 512 MB at the top, so any count large enough to help the small classes is reckless in the
+    /// large ones. This budget buys depth exactly where blocks are cheap.
+    /// </remarks>
+    private const int RetentionBudget = 256 * 1024;
+
     /// <summary>Largest permissible <c>maxPooledLength</c>: keeps every rounded size an int.</summary>
     private const int MaxPoolableLength = 1 << 30;
 
     private readonly Bucket[] _buckets;
+
+    /// <summary>Blocks to retain in the class serving <paramref name="blockSize"/>.</summary>
+    /// <param name="floor">The pool's base count, never reduced.</param>
+    /// <param name="blockSize">The class's block size in bytes.</param>
+    /// <remarks>
+    /// MEASURED, not guessed, and the measurement is the reason this function exists at all. A
+    /// scattered take over 64 splits allocated 136 fresh <c>NativeSegmentOwner</c>s per operation
+    /// while its PEAK CONCURRENT DEMAND in the 4 kB class was 12 blocks against the 8 retained. Short
+    /// by four, fresh a hundred and thirty-six times: past the retained set every return is dropped
+    /// and the next rent has to allocate, so the cost is not the shortfall but the churn across it.
+    /// A full scan peaks at 6 in the same class and allocates none, which is the whole asymmetry
+    /// behind "a take of 64 rows allocates more than reading all 65 536".
+    ///
+    /// Depth only helps where demand is bursty and blocks are small, and that is what the budget
+    /// expresses: 64 blocks at 4 kB, halving each class up, and never below <paramref name="floor"/>
+    /// — so every class from 32 kB up retains exactly what it did before this change.
+    /// </remarks>
+    private static int RetainedFor(int floor, int blockSize)
+        => Math.Max(floor, Math.Min(64, RetentionBudget / blockSize));
 
     /// <summary>Creates a pool.</summary>
     /// <param name="maxPooledLength">
@@ -50,6 +80,21 @@ public sealed class AlignedBufferPool
     /// <param name="maxPerBucket">Blocks retained per size class. Zero disables retention.</param>
     /// <exception cref="ArgumentOutOfRangeException">A parameter is outside its range.</exception>
     public AlignedBufferPool(int maxPooledLength = 8 * 1024 * 1024, int maxPerBucket = 8)
+        : this(maxPooledLength, maxPerBucket, graded: false)
+    {
+    }
+
+    /// <param name="graded">
+    /// When set, the small classes retain more than <paramref name="maxPerBucket"/> under
+    /// <see cref="RetentionBudget"/>. PRIVATE ON PURPOSE: the public constructor's count means
+    /// exactly what it says, and two tests assert it — a pool asked for 0 must retain nothing, and
+    /// one asked for 2 must not quietly be handed 64. Grading is a policy for <see cref="Shared"/>,
+    /// not a reinterpretation of a caller's number.
+    /// </param>
+    /// <param name="maxPooledLength">Requests above this length bypass the pool.</param>
+    /// <param name="maxPerBucket">Blocks retained per size class, before grading.</param>
+    /// <summary>Creates a pool, optionally grading retention by size class.</summary>
+    private AlignedBufferPool(int maxPooledLength, int maxPerBucket, bool graded)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(maxPooledLength, MinBlockSize);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(maxPooledLength, MaxPoolableLength);
@@ -63,14 +108,16 @@ public sealed class AlignedBufferPool
         Bucket[] buckets = new Bucket[bucketCount];
         for (int i = 0; i < buckets.Length; i++)
         {
-            buckets[i] = new Bucket(maxPerBucket);
+            buckets[i] = new Bucket(
+                graded ? RetainedFor(maxPerBucket, MinBlockSize << i) : maxPerBucket);
         }
 
         _buckets = buckets;
     }
 
     /// <summary>The process-wide pool used by the default segment sources.</summary>
-    public static AlignedBufferPool Shared { get; } = new AlignedBufferPool();
+    public static AlignedBufferPool Shared { get; }
+        = new AlignedBufferPool(8 * 1024 * 1024, 8, graded: true);
 
     /// <summary>Requests longer than this bypass the pool. A power of two.</summary>
     public int MaxPooledLength { get; }
