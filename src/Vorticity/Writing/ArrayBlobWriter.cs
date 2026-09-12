@@ -145,6 +145,11 @@ internal static class ArrayBlobWriter
             return WriteFsst(builder, arena, nodeIndex, plan.Fsst!, buffers, encodings);
         }
 
+        if (plan.Scheme == ColumnScheme.Zstd)
+        {
+            return WriteZstd(builder, arena, nodeIndex, plan.Zstd!, buffers, encodings);
+        }
+
         if (plan.Scheme == ColumnScheme.Alp)
         {
             return WriteAlp(builder, arena, nodeIndex, plan.Alp!, buffers, encodings);
@@ -468,6 +473,58 @@ internal static class ArrayBlobWriter
 
         byte[] metadata = FsstBytes(lengthsPType, offsetsPType);
         return Node(builder, encodings, "vortex.fsst"u8, metadata, children[..childCount], indices);
+    }
+
+    /// <summary>
+    /// Writes <c>vortex.zstd</c>: one frame buffer, one optional validity child.
+    /// </summary>
+    /// <remarks>
+    /// One frame, not several. The format allows a column to be split across frames so a slice can
+    /// decompress only the part it wants, and nothing in this writer slices - a second frame would
+    /// be unread structure. The decoder walks frames until their cumulative value count covers the
+    /// rows it needs, so a single frame carrying every value is the degenerate case it already
+    /// handles.
+    ///
+    /// No dictionary buffer: `DictionarySize` is 0, which is what the decoder checks to decide
+    /// whether a dictionary buffer is present at all.
+    /// </remarks>
+    private static int WriteZstd(
+        FlatBufferBuilder builder,
+        CanonicalArena arena,
+        int nodeIndex,
+        ZstdPlan plan,
+        List<PendingBuffer> buffers,
+        EncodingDictionary encodings)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        buffers.Add(new PendingBuffer(plan.Frame, 0));
+        int frameBuffer = buffers.Count - 1;
+
+        Span<int> children = stackalloc int[1];
+        int childCount = Validity(builder, arena, node, buffers, encodings, children);
+
+        Span<ushort> indices = stackalloc ushort[1];
+        indices[0] = (ushort)frameBuffer;
+
+        byte[] metadata = ZstdBytes(plan);
+        return Node(builder, encodings, "vortex.zstd"u8, metadata, children[..childCount], indices);
+    }
+
+    private static byte[] ZstdBytes(ZstdPlan plan)
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            Span<ZstdFrameMetadata> frames = stackalloc ZstdFrameMetadata[1];
+            frames[0] = new ZstdFrameMetadata((ulong)plan.UncompressedSize, (ulong)plan.ValueCount);
+            ZstdMetadata value = new ZstdMetadata(dictionarySize: 0, frameCount: 1);
+            ZstdMetadata.Write(ref writer, in value, frames);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
     }
 
     private static byte[] FsstBytes(PType lengthsPType, PType offsetsPType)

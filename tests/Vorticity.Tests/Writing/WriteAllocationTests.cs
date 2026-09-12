@@ -71,8 +71,8 @@ public sealed class WriteAllocationTests
     [
         ("containers/zoned_many_zones_nulls", 60_100_000),
         ("distributions/high_cardinality_i64_r8193", 1_435_000),
-        ("encodings/fsst", 2_180_000),
-        ("encodings/onpair", 610_000),
+        ("encodings/fsst", 2_080_000),
+        ("encodings/onpair", 605_000),
         ("types/utf8_nullable_r1025", 787_000),
     ];
 

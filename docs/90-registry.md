@@ -270,7 +270,7 @@ kernels requires the mapping, not the marketing names:
 | Temporal | `vortex.datetimeparts` | yes |
 | Delta | `fastlanes.delta` | **no** — in no core edition, never emittable by a default writer |
 | Pco | `vortex.pco` | yes, but writer opt-in upstream |
-| Zstd | `vortex.zstd` | yes, but writer opt-in upstream |
+| Zstd | `vortex.zstd` | yes — **written** since the corpus showed a 33.8× file it alone could fix |
 
 ## Writing: what the compressor does today
 
@@ -282,7 +282,16 @@ underneath it, measuring two properties in one pass each:
 | Few runs | `vortex.runend` | the constant case falls out as the single-run degenerate, so `vortex.constant` is not separately emitted |
 | Narrow range | `fastlanes.for` or `vortex.zigzag`, over `fastlanes.bitpacked` | the width minimizes packed bytes plus the cost of the values that do not fit, which ride along as patches |
 | Few distinct values | `vortex.dict` | codes are non-nullable; a null row is a code pointing at a null dictionary entry |
+| Text a symbol table cannot capture | `vortex.zstd` | compared against `min(plain, fsst)`, and only for varbin columns of at least 64 kB |
 | otherwise | canonical | |
+
+**Zstd is compared, not used as a fallback**, and the distinction was measured rather than
+reasoned. Pricing it only after every cheaper scheme declined left `distributions/huge_string_r16`
+untouched at 33.8× the reference, because FSST *wins* there — 1.1 MB down to 139 kB — so zstd was
+never reached, while zstd takes the same bytes to 118. A scheme that wins is not a scheme that wins
+by enough. What keeps that affordable is the 64 kB gate, not the ordering: below it the most zstd
+can save cannot repay a whole compression pass, which is the mistake the profiling session caught
+FSST symbol training making on every chunk.
 
 Only bit-packing needed a new kernel — `FastLanes.PackBlock`, the inverse of the unpacker — and it is
 verified the only way a packer honestly can be: the Rust cross-check reads every bit-packed file we
@@ -296,7 +305,7 @@ representative rows, so a dictionary of strings shares the data buffers it came 
 
 | | ratio to the reference |
 |---|---|
-| Whole corpus | **0.862×** — smaller than the reference, against a ≤105% target. Was 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes, 1.11× before ALP, 1.044× before patched bit-packing, 1.008× before the codes cascade, 0.988× before `vortex.sequence`, 0.894× before the offsets went through the compressor |
+| Whole corpus | **0.822×** — smaller than the reference, against a ≤105% target. Was 0.862× before `vortex.zstd`, 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes, 1.11× before ALP, 1.044× before patched bit-packing, 1.008× before the codes cascade, 0.988× before `vortex.sequence`, 0.894× before the offsets went through the compressor |
 | `distributions/high_cardinality_i64_r8193` (dense integers) | **0.97×** |
 | `distributions/short_runs_i32_r8193` | **0.87×** |
 | `types/i64_nonnull_r8192` | **0.99×** (was 3.31×) |

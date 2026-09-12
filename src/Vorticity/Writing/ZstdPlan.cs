@@ -1,0 +1,181 @@
+// vortex.zstd on the WRITE side, which this library has never had.
+//
+// The gap was found by reading where the corpus loses bytes rather than by reading the plan:
+// `distributions/huge_string_r16` wrote 138 852 bytes against the reference's 4 104 - 33.8x, and
+// more than a third of everything the twelve worst files lose combined, on a file of sixteen rows.
+// ColumnCompressor offered sequence, runend, bit-packing, dictionary, ALP and FSST, and never zstd.
+// Those sixteen values are 1 100 175 bytes raw and compress to 118.
+//
+// THE FORMAT IS THE DECODER'S, read backwards. `ZstdDecoder`'s header states it: for utf8 and
+// binary the stored stream is NOT an Arrow layout but a bare sequence of `[u32 little-endian
+// length][bytes]` records, and NULLS ARE NOT STORED - the frames hold only the valid values, back
+// to back. One frame is written here; the format allows several so a slice can decompress part of
+// a column, and nothing in this writer slices.
+//
+// WHY IT IS PRICED LAST. The profiling session found FSST symbol training at 56% of the whole write
+// path, spent pricing a candidate that usually loses. Compressing every column with zstd to find out
+// whether zstd wins would be that same mistake in a new place, so this runs only after the cheaper
+// candidates have failed to beat the canonical form.
+using System;
+using System.Buffers;
+using System.Buffers.Binary;
+using System.IO.Compression;
+
+using Vorticity.Arrays;
+
+namespace Vorticity.Writing;
+
+/// <summary>A zstd-compressed frame over a column's valid values, with its priced size.</summary>
+internal sealed class ZstdPlan
+{
+    private ZstdPlan(byte[] frame, int uncompressedSize, int valueCount)
+    {
+        Frame = frame;
+        UncompressedSize = uncompressedSize;
+        ValueCount = valueCount;
+    }
+
+    /// <summary>The compressed frame, exactly as it goes into the buffer.</summary>
+    internal byte[] Frame { get; }
+
+    /// <summary>Bytes the frame decompresses to, which the decoder allocates against a cap.</summary>
+    internal int UncompressedSize { get; }
+
+    /// <summary>Values stored in the frame: the column's VALID rows, nulls excluded.</summary>
+    internal int ValueCount { get; }
+
+    /// <summary>
+    /// Compresses a varbin column's valid values, and keeps the result only if it is worth reading.
+    /// </summary>
+    /// <param name="arena">The arena holding the canonical node.</param>
+    /// <param name="nodeIndex">The node to encode; must be a <c>VarBinView</c>.</param>
+    /// <param name="canonicalSize">What the plain form costs, which this must beat.</param>
+    /// <returns>The plan, or <see langword="null"/> when zstd is not worth it.</returns>
+    /// <remarks>
+    /// The margin is the same judgement FSST's is: a zstd array costs a decompression pass and a
+    /// scatter across null slots on every read, so shaving a few percent off the file is not worth
+    /// making every reader pay for it.
+    /// </remarks>
+    internal static ZstdPlan? TryBuild(CanonicalArena arena, int nodeIndex, long canonicalSize)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        if (node.Kind != CanonicalKind.VarBinView)
+        {
+            return null;
+        }
+
+        int rows = node.Length;
+        long streamBytes = 0;
+        int valueCount = 0;
+        for (int i = 0; i < rows; i++)
+        {
+            if (!IsValid(arena, node, i))
+            {
+                continue;
+            }
+
+            valueCount++;
+            streamBytes += sizeof(uint) + ValueOf(node, i).Length;
+            if (streamBytes > int.MaxValue)
+            {
+                return null;
+            }
+        }
+
+        if (valueCount == 0)
+        {
+            return null;
+        }
+
+        // RENTED, not allocated. Pricing zstd on a column means materializing the whole value
+        // stream and a worst-case destination beside it - two buffers the size of the column, for a
+        // candidate that may lose. Allocating them turned `encodings/fsst` 17% heavier to write and
+        // WriteAllocationTests red; the ceiling stayed where it was.
+        byte[] stream = ArrayPool<byte>.Shared.Rent((int)streamBytes);
+        byte[] destination = ArrayPool<byte>.Shared.Rent(
+            checked((int)ZstandardEncoder.GetMaxCompressedLength((int)streamBytes)));
+        try
+        {
+        int offset = 0;
+        for (int i = 0; i < rows; i++)
+        {
+            if (!IsValid(arena, node, i))
+            {
+                continue;
+            }
+
+            ReadOnlySpan<byte> value = ValueOf(node, i);
+            BinaryPrimitives.WriteUInt32LittleEndian(stream.AsSpan(offset, sizeof(uint)), (uint)value.Length);
+            offset += sizeof(uint);
+            value.CopyTo(stream.AsSpan(offset));
+            offset += value.Length;
+        }
+
+        if (!ZstandardEncoder.TryCompress(
+                stream.AsSpan(0, (int)streamBytes), destination, out int written) || written <= 0)
+        {
+            return null;
+        }
+
+        // Priced against the plain form the same way every other candidate is, with the frame's own
+        // bytes as the whole cost: the metadata is two varints and the validity child is written
+        // either way.
+        if (written * (long)MarginDenominator >= canonicalSize * (long)MarginNumerator)
+        {
+            return null;
+        }
+
+        return new ZstdPlan(
+            destination.AsSpan(0, written).ToArray(), (int)streamBytes, valueCount);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(stream);
+            ArrayPool<byte>.Shared.Return(destination);
+        }
+    }
+
+    /// <summary>Keep zstd only when it saves at least a tenth of the plain form.</summary>
+    private const int MarginNumerator = 9;
+
+    /// <summary>Denominator of <see cref="MarginNumerator"/>.</summary>
+    private const int MarginDenominator = 10;
+
+    // Copied verbatim from FsstPlan rather than shared: both are private helpers over the same
+    // canonical shape, and the duplication is two small methods against a refactor of a file this
+    // change has no other reason to touch.
+    private static bool IsValid(CanonicalArena arena, CanonicalNode node, int row)
+    {
+        Validity validity = node.Validity;
+        switch (validity.Kind)
+        {
+            case ValidityKind.NonNullable:
+            case ValidityKind.AllValid:
+                return true;
+            case ValidityKind.AllInvalid:
+                return false;
+            default:
+            {
+                CanonicalNode bits = arena.GetNode(validity.CanonicalNodeIndex);
+                int bit = bits.BitOffset + row;
+                ReadOnlySpan<byte> span = bits.Bits.Span;
+                return (uint)(bit >> 3) < (uint)span.Length
+                    && (span[bit >> 3] & (1 << (bit & 7))) != 0;
+            }
+        }
+    }
+
+    private static ReadOnlySpan<byte> ValueOf(CanonicalNode node, int row)
+    {
+        ReadOnlySpan<byte> view = node.Views.Span.Slice(row * 16, 16);
+        uint size = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view);
+        if (size <= 12)
+        {
+            return view.Slice(4, (int)size);
+        }
+
+        uint buffer = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
+        uint offset = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
+        return node.GetDataBuffer((int)buffer).Span.Slice((int)offset, (int)size);
+    }
+}

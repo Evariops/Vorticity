@@ -64,6 +64,17 @@ internal enum ColumnScheme : byte
 
     /// <summary>Frame of reference, then bit-pack: the scheme dense integers want.</summary>
     BitPacked = 3,
+
+    /// <summary>
+    /// Zstd: general-purpose compression, for text no symbol table can capture.
+    /// </summary>
+    /// <remarks>
+    /// 7 because 6 is taken. The members of this enum are NOT in declaration order - `BitPacked` is
+    /// 3 and sits last - so appending a member and giving it the next number after its neighbour's
+    /// silently aliases `Sequence`, and every sequence column then dispatches to the zstd writer and
+    /// dereferences a null plan. Read the numbers, not the order.
+    /// </remarks>
+    Zstd = 7,
 }
 
 /// <summary>The chosen scheme and the indices it needs.</summary>
@@ -84,6 +95,9 @@ internal readonly struct ColumnPlan
     /// rebuilt by the writer because deciding that FSST pays already required producing it.
     /// </summary>
     internal FsstPlan? Fsst { get; private init; }
+
+    /// <summary>The zstd frame, when <see cref="ColumnScheme.Zstd"/>.</summary>
+    internal ZstdPlan? Zstd { get; init; }
 
     /// <summary>The encoded column, for <see cref="ColumnScheme.Alp"/>.</summary>
     internal AlpPlan? Alp { get; private init; }
@@ -119,6 +133,9 @@ internal readonly struct ColumnPlan
 
     internal static ColumnPlan ForFsst(FsstPlan plan) =>
         new ColumnPlan(ColumnScheme.Fsst, [], []) { Fsst = plan };
+
+    internal static ColumnPlan ForZstd(ZstdPlan plan) =>
+        new ColumnPlan(ColumnScheme.Zstd, [], []) { Zstd = plan };
 
     internal static ColumnPlan ForAlp(AlpPlan plan) =>
         new ColumnPlan(ColumnScheme.Alp, [], []) { Alp = plan };
@@ -165,6 +182,16 @@ internal static class ColumnCompressor
     /// fix for that file.
     /// </remarks>
     private const long MinimumBytes = 1024;
+
+    /// <summary>
+    /// Column bytes below which zstd is not even priced.
+    /// </summary>
+    /// <remarks>
+    /// A whole zstd pass over a column to discover it loses is the cost §9 caught FSST paying on
+    /// every chunk. 64 kB is where the absolute saving can repay that pass: below it the most zstd
+    /// can win is tens of kilobytes, and it is competing against schemes that have already run.
+    /// </remarks>
+    private const long ZstdMinimumBytes = 64 * 1024;
 
     /// <summary>Picks a scheme for the canonical node at <paramref name="nodeIndex"/>.</summary>
     /// <param name="arena">The arena holding the node.</param>
@@ -277,6 +304,7 @@ internal static class ColumnCompressor
             }
         }
 
+        FsstPlan? fsst = null;
         if (node.Kind == CanonicalKind.VarBinView && Allows(target, "vortex.fsst"))
         {
             // Measured against the BEST plain form, not against the view form. A binary column of
@@ -284,11 +312,35 @@ internal static class ColumnCompressor
             // sixteen-byte views - than as anything FSST can do with it, and comparing against the
             // view form made FSST look like a win on exactly those columns. It is the reference's
             // own choice there, and it was ours only after this baseline was fixed.
-            FsstPlan? fsst = FsstPlan.TryBuild(arena, nodeIndex, plain);
-            if (fsst is not null)
+            fsst = FsstPlan.TryBuild(arena, nodeIndex, plain);
+        }
+
+        // ZSTD IS COMPARED WITH FSST, NOT REACHED WHEN FSST FAILS, and the difference is the whole
+        // point. The first version of this ran zstd only after every other scheme had declined,
+        // which is cheap and useless: on `distributions/huge_string_r16` FSST wins - it turns 1.1 MB
+        // into 139 kB - so zstd was never tried, while zstd turns the same bytes into 118. A scheme
+        // that wins is not a scheme that wins by enough.
+        //
+        // What keeps it affordable is the SIZE GATE rather than the ordering. The profiling session
+        // found FSST symbol training at 56% of the whole write path, spent pricing a candidate that
+        // usually loses; compressing every 1024-row chunk of short strings to discover zstd loses
+        // would be that same mistake. Columns below the gate are exactly the ones where the
+        // absolute saving cannot repay the pass.
+        long zstdBudget = fsst is not null ? Math.Min(plain, fsst.EncodedSize) : plain;
+        if (node.Kind == CanonicalKind.VarBinView
+            && Allows(target, "vortex.zstd")
+            && DataBytes(node) >= ZstdMinimumBytes)
+        {
+            ZstdPlan? zstd = ZstdPlan.TryBuild(arena, nodeIndex, zstdBudget);
+            if (zstd is not null)
             {
-                return ColumnPlan.ForFsst(fsst);
+                return ColumnPlan.ForZstd(zstd);
             }
+        }
+
+        if (fsst is not null)
+        {
+            return ColumnPlan.ForFsst(fsst);
         }
 
         return ColumnPlan.Canonical;
