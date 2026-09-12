@@ -7,6 +7,7 @@
 // upstream's, transcribed: binary search for the range start falling back to insertion point - 1,
 // binary search for the end falling back to insertion point.
 using System;
+using System.Buffers;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -62,7 +63,7 @@ public sealed class ChunkedLayoutReader : LayoutReader
         ArgumentNullException.ThrowIfNull(context);
         CheckRange(in node, rows);
 
-        int length = BatchLength(rows);
+        int length = context.HasSelection ? context.Selection.Length : BatchLength(rows);
         ReadOnlySpan<long> offsets = node.ChunkOffsets;
         ChunkRange(offsets, rows, out int first, out int last);
 
@@ -81,7 +82,9 @@ public sealed class ChunkedLayoutReader : LayoutReader
                 }
 
                 LayoutNode chunk = node.GetChild(i);
-                chunks[count++] = ExecuteChild(in chunk, local, in fields, context);
+                chunks[count++] = context.HasSelection
+                    ? ExecuteChunkSelected(in chunk, local, in fields, context, offsets[i])
+                    : ExecuteChild(in chunk, local, in fields, context);
             }
 
             if (count == 0)
@@ -106,6 +109,51 @@ public sealed class ChunkedLayoutReader : LayoutReader
         finally
         {
             scratch.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Executes one chunk with the selection RE-BASED into that chunk's own row space.
+    /// </summary>
+    /// <remarks>
+    /// The only reader that has to do this, and the reason the selection is defined to live in its
+    /// sibling `rows` argument's coordinate space: struct, zoned and stats pass `rows` through
+    /// untouched and therefore pass the selection through by doing nothing, while this one
+    /// re-partitions and so has to re-partition both. A chunk that ends up wanting no rows still
+    /// runs - it produces an empty node, which concatenates to nothing.
+    /// </remarks>
+    private static int ExecuteChunkSelected(
+        in LayoutNode chunk, RowRange local, in FieldMask fields, ScanContext context, long start)
+    {
+        ReadOnlySpan<int> selection = context.Selection;
+        long end = start + chunk.RowCount;
+
+        int[] rebased = ArrayPool<int>.Shared.Rent(Math.Max(selection.Length, 1));
+        try
+        {
+            int count = 0;
+            for (int i = 0; i < selection.Length; i++)
+            {
+                long row = selection[i];
+                if (row >= start && row < end)
+                {
+                    rebased[count++] = (int)(row - start);
+                }
+            }
+
+            (int[]? Buffer, int Count) saved = context.ExchangeSelection(rebased, count);
+            try
+            {
+                return ExecuteChild(in chunk, local, in fields, context);
+            }
+            finally
+            {
+                context.ExchangeSelection(saved.Buffer, saved.Count);
+            }
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(rebased);
         }
     }
 

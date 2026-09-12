@@ -72,6 +72,34 @@ public class TakeBenchmarks
     [Benchmark(Description = "take 64 rows from 1 split")]
     public async Task<long> Clustered() => await Take(_clustered).ConfigureAwait(false);
 
+    /// <summary>
+    /// The same scattered take with the STRING column projected away.
+    /// </summary>
+    /// <remarks>
+    /// The attribution axis, and the reason it is here rather than in a comment: `vortex.fsst` and
+    /// `vortex.onpair` are variable-length, so row n cannot be found without walking rows 0..n-1,
+    /// and [90-registry.md](../../docs/90-registry.md)'s take table gives them the zone-decode
+    /// fallback for that reason. If what is left of a scattered take is that column, the fallback
+    /// is the cost and the remaining specializations would buy nothing - which is a claim worth
+    /// measuring rather than asserting.
+    /// </remarks>
+    [Benchmark(Description = "take 64 rows from 64 splits, no string column")]
+    public async Task<long> ScatteredWithoutStrings()
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan()
+            .Project("monotone", "banded", "nulls", "nans")
+            .Take(_scattered)
+            .ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
     private async Task<long> Take(long[] indices)
     {
         await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None);

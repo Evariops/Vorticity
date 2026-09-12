@@ -94,6 +94,40 @@ public sealed class ArrayDecodeContext
     public int DecodeRoot(in ArrayNode node, DType dtype, int length) => Decode(in node, dtype, length);
 
     /// <summary>
+    /// Decodes only <paramref name="wanted"/> rows of a root node. Resets the depth budget.
+    /// </summary>
+    /// <param name="node">The serialized root node.</param>
+    /// <param name="dtype">The DType this node must produce.</param>
+    /// <param name="length">The row count the node would produce, which bounds the indices.</param>
+    /// <param name="wanted">Row indices, strictly ascending, all in <c>[0, length)</c>.</param>
+    /// <returns>The canonical node's index, holding <c>wanted.Length</c> rows.</returns>
+    public int DecodeRootSelected(
+        in ArrayNode node, DType dtype, int length, ReadOnlySpan<int> wanted)
+    {
+        _depth = 0;
+        return DecodeNodeSelected(in node, dtype, length, wanted);
+    }
+
+    /// <summary>
+    /// Decodes only <paramref name="wanted"/> rows of child <paramref name="childIndex"/>. The
+    /// selective counterpart of <see cref="DecodeChild"/>, and the only way a specialized decoder
+    /// may push a selection into a child.
+    /// </summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">Which child.</param>
+    /// <param name="childDType">The DType the child must produce.</param>
+    /// <param name="childLength">The row count the child would produce.</param>
+    /// <param name="wanted">Row indices into the child, strictly ascending.</param>
+    /// <returns>The canonical node's index, holding <c>wanted.Length</c> rows.</returns>
+    public int DecodeChildSelected(
+        in ArrayNode node, int childIndex, DType childDType, int childLength,
+        ReadOnlySpan<int> wanted)
+    {
+        ArrayNode child = node.GetChild(childIndex);
+        return DecodeNodeSelected(in child, childDType, childLength, wanted);
+    }
+
+    /// <summary>
     /// Decodes child <paramref name="childIndex"/> of <paramref name="node"/>. Charges
     /// <see cref="VortexLimits.MaxArrayDepth"/>, bounds-checks the index, resolves the encoding and
     /// dispatches. <b>Every decoder recurses through this</b>, never through
@@ -315,6 +349,29 @@ public sealed class ArrayDecodeContext
             _scan, node.Encoding, node.EncodingSpecIndex);
 
         int result = decoder.Decode(this, in node, dtype, length);
+        _depth--;
+        return result;
+    }
+
+    private int DecodeNodeSelected(
+        in ArrayNode node, DType dtype, int length, ReadOnlySpan<int> wanted)
+    {
+        VortexLimits.CheckDepth(++_depth, VortexLimits.MaxArrayDepth, "Array");
+
+        if (length < 0)
+        {
+            ArraysThrow.Format($"An array node cannot produce {length} rows.");
+        }
+
+        if (dtype.IsDefault)
+        {
+            throw new ArgumentException("A node cannot be decoded without a DType.", nameof(dtype));
+        }
+
+        ArrayDecoder decoder = ArrayDecoderTable.Require(
+            _scan, node.Encoding, node.EncodingSpecIndex);
+
+        int result = decoder.DecodeSelected(this, in node, dtype, length, wanted);
         _depth--;
         return result;
     }

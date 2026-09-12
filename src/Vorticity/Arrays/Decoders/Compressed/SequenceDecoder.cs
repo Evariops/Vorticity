@@ -36,7 +36,30 @@ public sealed class SequenceDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false);
+    }
 
+    /// <summary>
+    /// <c>A[i] = base + i * multiplier</c> is a closed form, so a take evaluates it at the wanted
+    /// indices and generates nothing else.
+    /// </summary>
+    /// <remarks>
+    /// The cheapest specialization there is, and the one with the largest ratio: generating 64 of
+    /// 65 536 rows instead of all of them. Not in the take table only because the table was written
+    /// before the writer could emit this encoding.
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted, selective: true);
+    }
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted, bool selective)
+    {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 0, Id);
 
@@ -92,37 +115,54 @@ public sealed class SequenceDecoder : ArrayDecoder
         EnsureLastExpressible(ptype, baseBits, multiplierAscending, multiplierMagnitude, length);
 
         int width = ptype.ByteWidth();
-        int total = ArrayDecodeContext.CheckedMultiply(length, width, "Sequence values");
+        int produced = selective ? wanted.Length : length;
+        int total = ArrayDecodeContext.CheckedMultiply(produced, width, "Sequence values");
         VortexBuffer output = CompressedValues.Allocate(
             context, total, width, Id, out Span<byte> destination);
 
         switch (width)
         {
             case 1:
-                Generate<byte>(destination, baseBits, multiplierBits);
+                Generate<byte>(destination, baseBits, multiplierBits, wanted, selective);
                 break;
             case 2:
-                Generate<ushort>(destination, baseBits, multiplierBits);
+                Generate<ushort>(destination, baseBits, multiplierBits, wanted, selective);
                 break;
             case 4:
-                Generate<uint>(destination, baseBits, multiplierBits);
+                Generate<uint>(destination, baseBits, multiplierBits, wanted, selective);
                 break;
             default:
-                Generate<ulong>(destination, baseBits, multiplierBits);
+                Generate<ulong>(destination, baseBits, multiplierBits, wanted, selective);
                 break;
         }
 
         // A sequence has no validity of its own: every generated row is valid.
         return context.Canonical.AddPrimitive(
-            dtype, length, Validity.FromNullability(dtype.Nullability), ptype, output);
+            dtype, produced, Validity.FromNullability(dtype.Nullability), ptype, output);
     }
 
-    private static void Generate<T>(Span<byte> destination, ulong baseBits, ulong multiplierBits)
+    private static void Generate<T>(
+        Span<byte> destination, ulong baseBits, ulong multiplierBits, ReadOnlySpan<int> wanted,
+        bool selective)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
         Span<T> values = MemoryMarshal.Cast<byte, T>(destination);
         T step = T.CreateTruncating(multiplierBits);
-        T accumulator = T.CreateTruncating(baseBits);
+        T start = T.CreateTruncating(baseBits);
+
+        if (selective)
+        {
+            // MULTIPLY rather than accumulate: the wanted rows are scattered, so there is no run to
+            // accumulate along, and `base + i * step` wraps exactly as the running sum would.
+            for (int i = 0; i < wanted.Length; i++)
+            {
+                values[i] = unchecked(start + (T.CreateTruncating((uint)wanted[i]) * step));
+            }
+
+            return;
+        }
+
+        T accumulator = start;
         for (int i = 0; i < values.Length; i++)
         {
             values[i] = accumulator;

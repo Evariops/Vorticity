@@ -282,7 +282,14 @@ internal static class CanonicalFilter
     /// Gathers a validity, collapsing the result: a selection that happens to contain no null is
     /// AllValid, not a bitmap of ones.
     /// </summary>
-    private static Validity FilterValidity(
+    /// <summary>
+    /// Gathers a validity, collapsing to AllValid or AllInvalid where the selection allows.
+    /// </summary>
+    /// <param name="arena">The arena.</param>
+    /// <param name="validity">The validity to gather.</param>
+    /// <param name="indices">The selected rows.</param>
+    /// <remarks>Internal so a specialized selective decoder can reuse it rather than copy it.</remarks>
+    internal static Validity FilterValidity(
         CanonicalArena arena, Validity validity, ReadOnlySpan<int> indices)
     {
         if (validity.Kind != ValidityKind.Bitmap)

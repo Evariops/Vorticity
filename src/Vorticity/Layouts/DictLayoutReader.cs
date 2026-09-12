@@ -62,13 +62,26 @@ public sealed class DictLayoutReader : LayoutReader
         ArgumentNullException.ThrowIfNull(context);
         CheckRange(in node, rows);
 
-        int length = BatchLength(rows);
+        // The selection applies to the CODES and not to the values: this layout's whole point is
+        // that the values are shared across the column, so a take reads every one of them and picks
+        // a subset of the codes. That is the `vortex.dict` row of the take table, at the layout
+        // level rather than the array level.
+        int length = context.HasSelection ? context.Selection.Length : BatchLength(rows);
         LayoutNode valuesLayout = node.GetChild(0);
         LayoutNode codesLayout = node.GetChild(1);
 
         int valuesLength = NodeLength(in valuesLayout);
-        int valuesIndex = ExecuteChild(
-            in valuesLayout, RowRange.FromLength(0, valuesLength), in fields, context);
+        (int[]? Buffer, int Count) saved = context.ExchangeSelection(null, 0);
+        int valuesIndex;
+        try
+        {
+            valuesIndex = ExecuteChild(
+                in valuesLayout, RowRange.FromLength(0, valuesLength), in fields, context);
+        }
+        finally
+        {
+            context.ExchangeSelection(saved.Buffer, saved.Count);
+        }
 
         FieldMask all = FieldMask.All;
         int codesIndex = ExecuteChild(in codesLayout, rows, in all, context);

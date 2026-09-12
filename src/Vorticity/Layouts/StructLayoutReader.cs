@@ -74,7 +74,11 @@ public sealed class StructLayoutReader : LayoutReader
         CheckRange(in node, rows);
 
         DType dtype = RequireStruct(in node);
-        int length = BatchLength(rows);
+
+        // With a selection in force every child produces the SELECTED count, so that is the struct's
+        // length too. Getting this from the range instead would build a struct whose declared length
+        // disagreed with its fields'.
+        int length = context.HasSelection ? context.Selection.Length : BatchLength(rows);
         int validityChildren = dtype.IsNullable ? 1 : 0;
         int fieldCount = dtype.FieldCount;
 

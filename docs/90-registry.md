@@ -132,19 +132,61 @@ F5 is Vortex's headline claim over Parquet, and it is only real if `take` traver
 rather than canonicalizing whole zones. 1.0 specializes the three that dominate real files and
 documents the fallback honestly everywhere else.
 
-| Encoding | 1.0 strategy |
-|---|---|
-| `vortex.dict` | take on codes, values untouched — the child stays encoded |
-| `vortex.runend` | binary search in `ends` (validity of monotonicity per [08-semantics.md](08-semantics.md) §5 class II) |
-| `fastlanes.bitpacked` | O(1) positional access via the inverse transposition. For scattered takes, decode per 1024-block once the hit density within a block exceeds a threshold; per-element below it |
-| `fastlanes.for` | offset add over the child's strategy |
-| `vortex.zigzag`, `vortex.constant`, `vortex.sequence` | pointwise, trivial |
-| Patches (shared) | binary search in patch indices — implemented once, used by BitPacked/ALP/Sparse |
-| `vortex.fsst`, `vortex.onpair`, `vortex.alp`, `vortex.alprd` | **fallback**: decode the containing zone, then index |
-| everything else | **fallback** |
+| Encoding | 1.0 strategy | built |
+|---|---|---|
+| `vortex.dict` | take on codes, values untouched | **yes** |
+| `vortex.runend` | binary search in `ends` (validity of monotonicity per [08-semantics.md](08-semantics.md) §5 class II) | **yes** |
+| `fastlanes.bitpacked` | O(1) positional access via the inverse transposition | **yes** |
+| `fastlanes.for` | offset add over the child's strategy | **yes** |
+| `vortex.zigzag`, `vortex.constant`, `vortex.sequence` | pointwise, trivial | **yes** |
+| `vortex.alp` | pointwise over the integers underneath | **yes** — see below |
+| Patches (shared) | merge against the selection — implemented once, used by BitPacked and ALP | **yes** |
+| `vortex.fsst`, `vortex.onpair`, `vortex.alprd` | **fallback**: decode the containing zone, then index | by design |
+| everything else | **fallback** | |
 
-The fallback is correct, just not fast. Documenting which encodings take it is what keeps F5 an
-engineering claim rather than a slogan; the rest move to 1.1 on benchmark evidence.
+The mechanism is a selection pushed DOWN rather than a gather pulled up. `ArrayDecoder` grows one
+virtual method, `DecodeSelected`, whose default is exactly what the scan used to do afterwards —
+decode the node whole, then gather — so an encoding with nothing to say about takes says nothing and
+behaves as before. The selection reaches it through the layout tree in the same coordinate space as
+the row range beside it, which is what makes the plumbing small: `vortex.chunked` is the only layout
+that re-partitions rows, so it is the only one that re-bases the selection, and struct, zoned and
+stats pass it on by doing nothing at all. `vortex.dict` the LAYOUT keeps the selection for its codes
+child and drops it for its shared values, which is the same strategy one level up.
+
+**Two rows of this table were wrong, and measuring is what showed it.** `vortex.alp` was grouped
+with FSST and OnPair under "decode the zone, then index"; it does not belong there. FSST and OnPair
+are VARIABLE-LENGTH, so row n genuinely cannot be found without walking rows 0..n-1 — that is a real
+reason to give up. ALP is one output per input with the exceptions carried as patches, the same
+shape as `fastlanes.for`, and specializing it was worth more than the bit-packing was. And the
+density threshold the bit-packed row prescribed ("decode per 1024-block once the hit density exceeds
+a threshold") is deliberately **not** implemented: per-element is better than the old behaviour at
+every density below "all of it", and at "all of it" the scan skips the pushdown entirely, so the
+crossover is a measurement nobody has needed to make.
+
+### What it bought, measured
+
+`TakeBenchmarks`, `containers/zoned_many_zones_nulls` — 65 536 rows in 64 splits of 1024, taking 64
+rows one from each split:
+
+| | before | after |
+|---|---|---|
+| take 64 scattered rows, all 5 columns | 1309 µs (**1.02×** a full scan) | 1070 µs (0.82×) |
+| the same, string column projected away | — | **242 µs (0.19×)** |
+
+The second row is the attribution, and it is why the first one looks unimpressive: the remaining
+830 µs is the `utf8` column, which is `vortex.onpair` and `vortex.fsst`, which are the fallback by
+design. Over the four columns the specializations cover, a scattered take went from ~1.0× a full
+scan to 0.19× — and the fallback is now the whole of the residual rather than being hidden inside a
+number that averaged it with everything else.
+
+The fallback is correct, just not fast. Documenting which encodings take it — and measuring how much
+of the bill it is — is what keeps F5 an engineering claim rather than a slogan.
+
+Correctness is a corpus-wide differential: `TakeSpecializationTests` takes a scattered, awkward set
+of indices from every in-scope file (both ends, both sides of the 1024-element block boundary, a
+prime stride between) and asserts every value equals what a full scan put at that index. 565 files,
+5173 values. A specialization is an optimization with a correctness obligation, and the only honest
+oracle for it is the path it replaced.
 
 **Where this actually stands, measured.** `ScanBuilder.Take` is implemented and delivers the half
 of F5 that dominates on object storage: the splits an index list never touches are skipped before a

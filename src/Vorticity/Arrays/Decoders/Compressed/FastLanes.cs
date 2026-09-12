@@ -383,6 +383,55 @@ internal static class FastLanes
     }
 
     /// <summary>
+    /// Unpacks ONE value out of a 1024-element block, without touching the other 1023.
+    /// </summary>
+    /// <typeparam name="T">The unsigned element type.</typeparam>
+    /// <param name="packed">Exactly <c>lanes * bitWidth</c> words: one block.</param>
+    /// <param name="bitWidth">Bits per packed value, in <c>(0, sizeof(T) * 8)</c>.</param>
+    /// <param name="index">A logical index in <c>[0, 1024)</c>.</param>
+    /// <returns>The value at that index.</returns>
+    /// <remarks>
+    /// This is what makes `fastlanes.bitpacked` worth specializing for a take, and it is a property
+    /// of the layout rather than a trick: the bit-packing index is INVERTIBLE in closed form, so a
+    /// logical index maps straight to the (row, lane) pair holding it - `PackedRowTable` and
+    /// `PackedLaneTable` are that inverse, precomputed - and from there the same shift and mask the
+    /// bulk kernel uses extracts the one value. No block is unpacked and nothing is allocated.
+    ///
+    /// The two degenerate widths are the caller's to handle: W == 0 means every value is zero and
+    /// W == T means the packed word IS the value, and neither reaches the arithmetic below.
+    /// </remarks>
+    public static T UnpackOne<T>(ReadOnlySpan<T> packed, int bitWidth, int index)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int elementBits = Unsafe.SizeOf<T>() * 8;
+        int lanes = BlockSize / elementBits;
+        int row = PackedRowTable(elementBits)[index];
+        int lane = PackedLaneTable(elementBits)[index];
+
+        int currentWord = row * bitWidth / elementBits;
+        int nextWord = ((row + 1) * bitWidth) / elementBits;
+        int shift = (row * bitWidth) % elementBits;
+
+        if (nextWord == currentWord)
+        {
+            return (packed[(lanes * currentWord) + lane] >> shift) & Mask<T>(bitWidth);
+        }
+
+        int remainingBits = ((row + 1) * bitWidth) % elementBits;
+        int currentBits = bitWidth - remainingBits;
+        T value = (packed[(lanes * currentWord) + lane] >> shift) & Mask<T>(currentBits);
+
+        // The guard is on the WORD index, not the row: the last row of a lane can spill exactly
+        // onto the boundary, leaving no next word to read.
+        if (nextWord < bitWidth)
+        {
+            value |= (packed[(lanes * nextWord) + lane] & Mask<T>(remainingBits)) << currentBits;
+        }
+
+        return value;
+    }
+
+    /// <summary>
     /// The shape of one row of the unpack, with everything that does not depend on the lane.
     /// </summary>
     /// <remarks>

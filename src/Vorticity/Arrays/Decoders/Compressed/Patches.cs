@@ -92,6 +92,40 @@ public readonly ref struct Patches
     }
 
     /// <summary>
+    /// Overwrites the patched rows that survived a selection, at the positions they now occupy.
+    /// </summary>
+    /// <param name="patches">The validated patch set, over the FULL row space.</param>
+    /// <param name="values">The patch values, one per patch, at <paramref name="width"/> bytes.</param>
+    /// <param name="width">Bytes per value.</param>
+    /// <param name="wanted">The selected rows, strictly ascending.</param>
+    /// <param name="destination">The selected rows' values, in selection order.</param>
+    /// <remarks>
+    /// A MERGE, not a search per patch: both sides are ascending, so one walk over each is enough.
+    /// The patch set is left whole rather than selected into - there are few patches by
+    /// construction, and pushing a second selection into their own child arrays would mean
+    /// re-basing indices that are expressed in the parent's row space.
+    /// </remarks>
+    public static void ApplySelected(
+        in Patches patches, ReadOnlySpan<byte> values, int width, ReadOnlySpan<int> wanted,
+        Span<byte> destination)
+    {
+        int at = 0;
+        for (int i = 0; i < patches.Count && at < wanted.Length; i++)
+        {
+            int position = patches.GetPosition(i);
+            while (at < wanted.Length && wanted[at] < position)
+            {
+                at++;
+            }
+
+            if (at < wanted.Length && wanted[at] == position)
+            {
+                values.Slice(i * width, width).CopyTo(destination.Slice(at * width, width));
+            }
+        }
+    }
+
+    /// <summary>
     /// Validates a decoded patch set. <paramref name="indicesNodeIndex"/> and
     /// <paramref name="valuesNodeIndex"/> are the already-decoded children.
     /// </summary>

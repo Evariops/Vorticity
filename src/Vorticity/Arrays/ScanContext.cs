@@ -118,6 +118,9 @@ public sealed class ScanContext : IDisposable
     /// <summary><see langword="true"/> when this context was built over a <see cref="VortexFile"/>.</summary>
     public bool HasFile => _file is not null;
 
+    private int[]? _selection;
+    private int _selectionCount;
+
     /// <summary>The file being scanned.</summary>
     /// <exception cref="InvalidOperationException">The context was built detached from a file.</exception>
     public VortexFile File => _file ?? ThrowDetached();
@@ -206,8 +209,44 @@ public sealed class ScanContext : IDisposable
     /// canonical node holds non-owning views into segment memory, so resetting the arenas first
     /// would leave a window in which a live view names released pages.
     /// </remarks>
+    /// <summary>
+    /// The rows wanted out of the batch, in the coordinate space of the <c>Execute</c> call that is
+    /// running, or empty for "every row".
+    /// </summary>
+    /// <remarks>
+    /// CARRIED ON THE CONTEXT RATHER THAN PASSED AS A PARAMETER because `LayoutReader.Execute` is a
+    /// public extension point: threading a new argument through it would be a breaking change for
+    /// an out-of-tree reader, and every reader already receives the context.
+    ///
+    /// THE COORDINATE SPACE IS THE INVARIANT. The selection lives in exactly the space its sibling
+    /// `rows` argument lives in, so a reader that re-bases `rows` must re-base this too, and a
+    /// reader that passes `rows` through unchanged passes this through by doing nothing. Only
+    /// `vortex.chunked` re-partitions rows; struct, zoned and flat do not.
+    /// </remarks>
+    internal ReadOnlySpan<int> Selection =>
+        _selection is null ? default : _selection.AsSpan(0, _selectionCount);
+
+    /// <summary>Whether a selection is in force for this batch.</summary>
+    internal bool HasSelection => _selection is not null;
+
+    /// <summary>
+    /// Replaces the selection and returns what was there, for a reader that re-bases it per child.
+    /// </summary>
+    /// <param name="rows">The new selection, or <see langword="null"/> to clear it.</param>
+    /// <param name="count">How many entries of <paramref name="rows"/> are live.</param>
+    /// <returns>The previous buffer and count, to be restored by the caller.</returns>
+    internal (int[]? Buffer, int Count) ExchangeSelection(int[]? rows, int count)
+    {
+        (int[]? Buffer, int Count) previous = (_selection, _selectionCount);
+        _selection = rows;
+        _selectionCount = rows is null ? 0 : count;
+        return previous;
+    }
+
     public void ResetBatch()
     {
+        _selection = null;
+        _selectionCount = 0;
         Segments.Release();
         Nodes.Reset();
         Canonical.Reset();

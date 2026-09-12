@@ -25,6 +25,31 @@ public sealed class ZigZagDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false);
+    }
+
+    /// <summary>
+    /// ZigZag is transparent to a take: it is a bijection on single values, so the rows it is asked
+    /// for are the rows its child is asked for.
+    /// </summary>
+    /// <remarks>
+    /// Not in the take table, and it belongs there for the same reason `fastlanes.for` does: since
+    /// the writer started choosing between them, zigzag is the other thing that sits directly above
+    /// `fastlanes.bitpacked`, and without this the positional access underneath is unreachable on
+    /// every column that took the zigzag branch.
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted, selective: true);
+    }
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted, bool selective)
+    {
 
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 1, Id);
@@ -44,7 +69,10 @@ public sealed class ZigZagDecoder : ArrayDecoder
         PType unsigned = CompressedValues.ToUnsigned(signed);
         DType encodedType = context.Types.Primitive(unsigned, dtype.Nullability);
 
-        int encoded = context.DecodeChild(in node, 0, encodedType, length);
+        int encoded = selective
+            ? context.DecodeChildSelected(in node, 0, encodedType, length, wanted)
+            : context.DecodeChild(in node, 0, encodedType, length);
+        int produced = selective ? wanted.Length : length;
         CanonicalNode child = context.Canonical.GetNode(encoded);
         if (child.Kind != CanonicalKind.Primitive)
         {
@@ -57,22 +85,22 @@ public sealed class ZigZagDecoder : ArrayDecoder
                 $"{Id}'s encoded child decoded as {child.PType.Name()}; {unsigned.Name()} was required.");
         }
 
-        if (child.Length != length)
+        if (child.Length != produced)
         {
-            CompressedThrow.ChildLength(Id, "encoded", child.Length, length);
+            CompressedThrow.ChildLength(Id, "encoded", child.Length, produced);
         }
 
         int width = signed.ByteWidth();
-        int total = ArrayDecodeContext.CheckedMultiply(length, width, "ZigZag values");
+        int total = ArrayDecodeContext.CheckedMultiply(produced, width, "ZigZag values");
         if (total == 0)
         {
             return context.Canonical.AddPrimitive(
-                dtype, length, child.Validity, signed, VortexBuffer.Empty);
+                dtype, produced, child.Validity, signed, VortexBuffer.Empty);
         }
 
         VortexBuffer output = CompressedValues.Allocate(
             context, total, width, Id, out Span<byte> destination);
         IntegerKernels.ZigZagDecode(child.Values.Span[..total], destination, width);
-        return context.Canonical.AddPrimitive(dtype, length, child.Validity, signed, output);
+        return context.Canonical.AddPrimitive(dtype, produced, child.Validity, signed, output);
     }
 }

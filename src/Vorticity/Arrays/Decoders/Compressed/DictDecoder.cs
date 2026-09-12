@@ -40,7 +40,31 @@ public sealed class DictDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false);
+    }
 
+    /// <summary>
+    /// Takes on the CODES and leaves the values alone, which is the whole point of a dictionary.
+    /// </summary>
+    /// <remarks>
+    /// The `vortex.dict` row of the take table, verbatim: "take on codes, values untouched". The
+    /// values child is shared by every row, so a take has to have all of it whatever it asks for;
+    /// the codes are one per row and are where the selection bites. The codes child is very often
+    /// `fastlanes.for` over `fastlanes.bitpacked` - our own writer cascades them there - so this is
+    /// also what lets the positional access underneath be reached at all.
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted, selective: true);
+    }
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted, bool selective)
+    {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, Id);
 
@@ -62,8 +86,11 @@ public sealed class DictDecoder : ArrayDecoder
         };
 
         DType codesType = context.Types.Primitive(metadata.CodesPType, codesNullability);
-        int codesIndex = context.DecodeChild(in node, 0, codesType, length);
+        int codesIndex = selective
+            ? context.DecodeChildSelected(in node, 0, codesType, length, wanted)
+            : context.DecodeChild(in node, 0, codesType, length);
         int valuesIndex = context.DecodeChild(in node, 1, dtype, valuesLength);
+        int produced = selective ? wanted.Length : length;
 
         CanonicalNode codesNode = context.Canonical.GetNode(codesIndex);
         if (codesNode.Kind != CanonicalKind.Primitive)
@@ -78,9 +105,9 @@ public sealed class DictDecoder : ArrayDecoder
                 $"{metadata.CodesPType.Name()} was declared.");
         }
 
-        if (codesNode.Length != length)
+        if (codesNode.Length != produced)
         {
-            CompressedThrow.ChildLength(Id, "codes", codesNode.Length, length);
+            CompressedThrow.ChildLength(Id, "codes", codesNode.Length, produced);
         }
 
         ValueReader values = ValueReader.Of(context.Canonical, valuesIndex, Id);
@@ -99,10 +126,10 @@ public sealed class DictDecoder : ArrayDecoder
         DataBufferSet dataBuffers = DataBufferSet.Collect(context.Canonical, in values, false, default);
         try
         {
-            ValueWriter writer = ValueWriter.Create(context, in values, length, 0, Id);
-            ValidityWriter validity = ValidityWriter.Create(context, length, tracked, Id);
+            ValueWriter writer = ValueWriter.Create(context, in values, produced, 0, Id);
+            ValidityWriter validity = ValidityWriter.Create(context, produced, tracked, Id);
 
-            for (int row = 0; row < length; row++)
+            for (int row = 0; row < produced; row++)
             {
                 if (!codesValidity.IsValid(row))
                 {

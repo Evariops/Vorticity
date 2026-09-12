@@ -30,7 +30,32 @@ public sealed class RunEndDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false);
+    }
 
+    /// <summary>
+    /// Binary-searches each wanted row to its run instead of expanding every run.
+    /// </summary>
+    /// <remarks>
+    /// The `vortex.runend` row of the take table: "binary search in `ends`". The ends and values
+    /// children are one entry per RUN, so they are decoded whole - that is not the expensive part;
+    /// the expansion to one value per ROW is, and it is what this skips.
+    ///
+    /// The search is over the ends MINUS the offset, which is the same space `length` and the
+    /// wanted rows live in, so a sliced run-end array needs no separate translation.
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted, selective: true);
+    }
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted, bool selective)
+    {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, Id);
 
@@ -80,6 +105,13 @@ public sealed class RunEndDecoder : ArrayDecoder
         ValidityReader valuesValidity = ValidityReader.Of(context.Canonical, values.Validity);
         bool tracked = !values.Validity.IsAllValid;
 
+        if (selective)
+        {
+            return Gather(
+                context, dtype, length, runCount, offset, metadata.EndsPType, ends, in values,
+                in valuesValidity, tracked, wanted);
+        }
+
         DataBufferSet dataBuffers = DataBufferSet.Collect(
             context.Canonical, in values, false, default);
         try
@@ -128,6 +160,83 @@ public sealed class RunEndDecoder : ArrayDecoder
         {
             dataBuffers.Dispose();
         }
+    }
+
+    /// <summary>Finds each wanted row's run by binary search and copies that run's value.</summary>
+    private static int Gather(
+        ArrayDecodeContext context,
+        DType dtype,
+        int length,
+        int runCount,
+        int offset,
+        PType endsPType,
+        ReadOnlySpan<byte> ends,
+        in ValueReader values,
+        in ValidityReader valuesValidity,
+        bool tracked,
+        ReadOnlySpan<int> wanted)
+    {
+        int count = wanted.Length;
+        DataBufferSet dataBuffers = DataBufferSet.Collect(context.Canonical, in values, false, default);
+        try
+        {
+            ValueWriter writer = ValueWriter.Create(context, in values, count, 0, Id);
+            ValidityWriter validity = ValidityWriter.Create(context, count, tracked, Id);
+
+            ulong unsignedOffset = (ulong)offset;
+            for (int i = 0; i < count; i++)
+            {
+                // The wanted rows ascend, so each search could start where the last one stopped;
+                // it does not, because a binary search over a run count is already logarithmic and
+                // a resumed linear scan is worse whenever the rows are far apart - which is the
+                // case a take is for.
+                int run = FindRun(ends, endsPType, runCount, unsignedOffset, wanted[i]);
+                if (run < 0)
+                {
+                    CompressedThrow.Format(
+                        $"{Id} row {wanted[i]} falls outside the {length} rows its runs cover.");
+                }
+
+                writer.Copy(in values, run, i);
+                if (tracked && valuesValidity.IsValid(run))
+                {
+                    validity.SetValid(i);
+                }
+            }
+
+            return writer.Complete(
+                context, dtype, validity.Complete(context, dtype, Id), dataBuffers.Buffers);
+        }
+        finally
+        {
+            dataBuffers.Dispose();
+        }
+    }
+
+    /// <summary>The first run whose (offset-adjusted) end is strictly above <paramref name="row"/>.</summary>
+    private static int FindRun(
+        ReadOnlySpan<byte> ends, PType endsPType, int runCount, ulong offset, int row)
+    {
+        ulong target = (ulong)(uint)row;
+        int low = 0;
+        int high = runCount - 1;
+        int found = -1;
+        while (low <= high)
+        {
+            int middle = low + ((high - low) / 2);
+            ulong end = CompressedValues.ReadUnsigned(ends, endsPType, middle) - offset;
+            if (end > target)
+            {
+                found = middle;
+                high = middle - 1;
+            }
+            else
+            {
+                low = middle + 1;
+            }
+        }
+
+        return found;
     }
 
     private static void ValidateEnds(

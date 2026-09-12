@@ -50,7 +50,33 @@ public sealed class AlpDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false);
+    }
 
+    /// <summary>
+    /// ALP is pointwise, so a take reaches straight through it to the integers underneath.
+    /// </summary>
+    /// <remarks>
+    /// [90-registry.md](../../docs/90-registry.md)'s take table puts `vortex.alp` under "decode the
+    /// containing zone, then index", alongside FSST and OnPair. That grouping is wrong and the
+    /// measurement is what showed it: FSST and OnPair are VARIABLE-LENGTH, so row n cannot be found
+    /// without walking rows 0..n-1, which is a real reason to give up. ALP is
+    /// `value * 10^-e * 10^f` per row, one output for one input, with the exceptions carried as
+    /// patches - the same shape as `fastlanes.for`. It reaches the bit-packing underneath, which is
+    /// where the saving actually is.
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted, selective: true);
+    }
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted, bool selective)
+    {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         AlpMetadata metadata = AlpMetadata.Read(node.Metadata);
 
@@ -76,19 +102,22 @@ public sealed class AlpDecoder : ArrayDecoder
         ArrayDecodeContext.RequireChildCount(node.ChildCount, expectedChildren, Id);
 
         DType encodedType = context.Types.Primitive(encodedPType, dtype.Nullability);
-        int encodedIndex = context.DecodeChild(in node, 0, encodedType, length);
+        int encodedIndex = selective
+            ? context.DecodeChildSelected(in node, 0, encodedType, length, wanted)
+            : context.DecodeChild(in node, 0, encodedType, length);
+        int produced = selective ? wanted.Length : length;
         CanonicalNode encoded = CanonicalSupport.RequirePrimitiveChild(
-            context, encodedIndex, encodedPType, length, Id + " encoded");
+            context, encodedIndex, encodedPType, produced, Id + " encoded");
 
-        int total = ArrayDecodeContext.CheckedMultiply(length, width, Id + " values");
+        int total = ArrayDecodeContext.CheckedMultiply(produced, width, Id + " values");
         VortexBuffer output = CanonicalSupport.Allocate(context, total, width, out Span<byte> destination);
-        if (length != 0)
+        if (produced != 0)
         {
             ReadOnlySpan<byte> source = encoded.Values.Span;
             if (isSingle)
             {
                 AlpTables.DecodeSingle(
-                    MemoryMarshal.Cast<byte, int>(source)[..length],
+                    MemoryMarshal.Cast<byte, int>(source)[..produced],
                     MemoryMarshal.Cast<byte, float>(destination),
                     exponentE,
                     exponentF);
@@ -96,7 +125,7 @@ public sealed class AlpDecoder : ArrayDecoder
             else
             {
                 AlpTables.DecodeDouble(
-                    MemoryMarshal.Cast<byte, long>(source)[..length],
+                    MemoryMarshal.Cast<byte, long>(source)[..produced],
                     MemoryMarshal.Cast<byte, double>(destination),
                     exponentE,
                     exponentF);
@@ -105,10 +134,10 @@ public sealed class AlpDecoder : ArrayDecoder
 
         if (metadata.HasPatches)
         {
-            ApplyPatches(context, in node, dtype, length, in metadata, width, destination);
+            ApplyPatches(context, in node, dtype, length, in metadata, width, destination, wanted, selective);
         }
 
-        return context.Canonical.AddPrimitive(dtype, length, encoded.Validity, dtype.PType, output);
+        return context.Canonical.AddPrimitive(dtype, produced, encoded.Validity, dtype.PType, output);
     }
 
     /// <summary>
@@ -127,7 +156,9 @@ public sealed class AlpDecoder : ArrayDecoder
         int length,
         in AlpMetadata metadata,
         int width,
-        Span<byte> destination)
+        Span<byte> destination,
+        ReadOnlySpan<int> wanted,
+        bool selective)
     {
         PatchesMetadata patchesMetadata = metadata.Patches;
         int patchCount = ArrayDecodeContext.CheckedLength(patchesMetadata.Length, $"{Id} patch count");
@@ -176,6 +207,12 @@ public sealed class AlpDecoder : ArrayDecoder
         }
 
         ReadOnlySpan<byte> source = values.Values.Span;
+        if (selective)
+        {
+            Patches.ApplySelected(in patches, source, width, wanted, destination);
+            return;
+        }
+
         for (int i = 0; i < patches.Count; i++)
         {
             int position = patches.GetPosition(i);

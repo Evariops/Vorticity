@@ -376,8 +376,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
             // Cancellation is honoured before the read and after it, never inside a decode kernel
             // (docs/03-architecture.md §1: the granularity is the batch).
             _token.ThrowIfCancellationRequested();
-            int root = Execute(lane.Context, _pending);
-            root = ApplyTake(lane.Context, root, _pending);
+            int root = ExecuteWithTake(lane.Context, _pending);
             root = ApplyFilter(lane.Context, root);
             _current = new RecordBatch(lane.Context, root, _pending.Start);
             return true;
@@ -390,31 +389,57 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
     }
 
     /// <summary>
-    /// Gathers the rows a take asked for out of the split that holds them.
+    /// Executes the split, PUSHING the take's rows down the layout tree rather than gathering them
+    /// back out afterwards.
     /// </summary>
     /// <remarks>
-    /// The split itself was already chosen because it holds at least one of them. What is left is
-    /// the gather, which is the same one the filter uses -- a take and a filter differ only in how
-    /// the surviving rows were chosen.
+    /// The split itself was already chosen because it holds at least one wanted row - that is the
+    /// I/O half of F5 and it was always here. This is the other half: the selection travels down
+    /// the layout tree in the same coordinate space as the row range beside it, so a reader that
+    /// re-partitions rows re-partitions it too and one that does not passes it on by doing nothing.
+    /// At the flat leaf it reaches the array decoders, where an encoding that can honour it does
+    /// (`fastlanes.bitpacked` indexes positionally, `vortex.dict` takes on the codes) and every
+    /// other one falls back to decoding the node and gathering - which is exactly what this method
+    /// used to do for all of them.
+    ///
+    /// The selection is in the SPLIT's coordinate space, and `Execute` is called with the split as
+    /// its row range, so the two agree at the root by construction.
     /// </remarks>
-    private int ApplyTake(ScanContext context, int root, RowRange split)
+    private int ExecuteWithTake(ScanContext context, RowRange split)
     {
         if (_take is null)
         {
-            return root;
+            return Execute(context, split);
         }
 
-        int rows = context.Canonical.GetNode(root).Length;
+        int rows = (int)(split.End - split.Start);
         int[] indices = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
         try
         {
             int count = _take.LocalIndices(split, indices);
             if (count == rows)
             {
-                return root;
+                // Every row of the split is wanted: there is nothing to push down, and pushing an
+                // identity selection would cost a gather for no reason.
+                return Execute(context, split);
             }
 
-            return CanonicalFilter.Apply(context.Canonical, root, indices.AsSpan(0, count));
+            // LocalIndices produces SPLIT-relative rows; the root's row space is the file's, which
+            // is what `split` is expressed in.
+            for (int i = 0; i < count; i++)
+            {
+                indices[i] += (int)split.Start;
+            }
+
+            (int[]? Buffer, int Count) saved = context.ExchangeSelection(indices, count);
+            try
+            {
+                return Execute(context, split);
+            }
+            finally
+            {
+                context.ExchangeSelection(saved.Buffer, saved.Count);
+            }
         }
         finally
         {

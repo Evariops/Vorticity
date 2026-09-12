@@ -33,6 +33,35 @@ internal static class Values
         }
     }
 
+    /// <summary>
+    /// Appends ONE line per row, every column joined, so an entry's position is its row index.
+    /// </summary>
+    /// <param name="batch">The batch.</param>
+    /// <param name="into">The sink.</param>
+    /// <remarks>
+    /// <see cref="Describe"/> is column-major, which is right for a round trip - it compares the
+    /// same values in the same order whatever the batching - and wrong for anything that has to
+    /// index by row, because across several batches an entry's position is not its row.
+    /// </remarks>
+    internal static void DescribeRows(RecordBatch batch, List<string> into)
+    {
+        for (int row = 0; row < batch.RowCount; row++)
+        {
+            System.Text.StringBuilder line = new System.Text.StringBuilder();
+            for (int field = 0; field < batch.FieldCount; field++)
+            {
+                if (field > 0)
+                {
+                    line.Append('\u001f');
+                }
+
+                line.Append(Render(batch.Column(field), row, depth: 0));
+            }
+
+            into.Add(line.ToString());
+        }
+    }
+
     private static string Render(VortexColumn column, int row, int depth)
     {
         if (depth > 8)

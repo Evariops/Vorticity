@@ -67,6 +67,17 @@ public sealed class FlatLayoutReader : LayoutReader
         // The contained array's dtype is exactly the node's and its length exactly the node's row
         // count; neither is carried by the array blob (docs/02-format.md §5.2).
         ArrayNode root = context.Nodes.Root;
+
+        // The selection is in the same space as `rows`, and a flat layout's space IS the segment's,
+        // so the wanted rows need no translation at all - which is the whole reason the selection
+        // is carried in the row argument's coordinate space rather than in absolute file rows.
+        if (context.HasSelection)
+        {
+            int taken = context.Decode.DecodeRootSelected(
+                in root, node.DType, total, context.Selection);
+            return MaskProjection.Apply(context.Decode, taken, in fields);
+        }
+
         int decoded = context.Decode.DecodeRoot(in root, node.DType, total);
 
         int sliced = CanonicalSlice.Slice(context.Decode, decoded, (int)rows.Start, length);

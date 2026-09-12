@@ -46,4 +46,26 @@ public sealed class ConstantDecoder : ArrayDecoder
 
         return ConstantCanonicalizer.Build(context, dtype, length, in scalar);
     }
+
+    /// <summary>
+    /// Every row is the same value, so selecting rows only changes how many are built.
+    /// </summary>
+    /// <remarks>
+    /// The take table calls this one "pointwise, trivial" and it is: the selection's only effect is
+    /// its length. Worth having anyway - a constant column is what a compressor produces from a
+    /// degenerate one, so it is common, and building 65 536 copies to keep 64 is the exact shape of
+    /// waste this whole path exists to remove.
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
+
+        TypedScalar scalar = TypedScalarReader.Read(
+            node.GetBuffer(0).Span, dtype, context.Scalars, context.Types);
+
+        return ConstantCanonicalizer.Build(context, dtype, wanted.Length, in scalar);
+    }
 }

@@ -43,4 +43,37 @@ public abstract class ArrayDecoder
     /// </remarks>
     /// <exception cref="VortexFormatException">The node violates this encoding's contract.</exception>
     public abstract int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length);
+
+    /// <summary>
+    /// Decodes only the rows at <paramref name="wanted"/>, producing a canonical node of
+    /// <c>wanted.Length</c> rows.
+    /// </summary>
+    /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
+    /// <param name="node">The serialized node.</param>
+    /// <param name="dtype">The DType this node must produce.</param>
+    /// <param name="length">The row count the node WOULD produce, which bounds the indices.</param>
+    /// <param name="wanted">
+    /// Row indices into this node, strictly ascending and all in <c>[0, length)</c>.
+    /// </param>
+    /// <returns>The canonical node's index in <c>context.Canonical</c>.</returns>
+    /// <remarks>
+    /// THE DEFAULT IS THE FALLBACK, and it is what every encoding did before any of them were
+    /// specialized: decode the whole node, then gather. Correct for every encoding and wasteful for
+    /// most, which is exactly the trade [90-registry.md](../../docs/90-registry.md)'s `take` table
+    /// describes - it names the encodings worth specializing and documents the zone-decode fallback
+    /// everywhere else, rather than pretending the fallback does not exist.
+    ///
+    /// An override must produce a node INDISTINGUISHABLE from the default's: same dtype, same
+    /// validity, same values in the same order. `TakeSpecializationTests` asserts that against the
+    /// default for every specialized encoding, which is the only way an optimization like this can
+    /// be trusted.
+    /// </remarks>
+    public virtual int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        int decoded = Decode(context, in node, dtype, length);
+        return Compute.CanonicalFilter.Apply(context.Canonical, decoded, wanted);
+    }
 }

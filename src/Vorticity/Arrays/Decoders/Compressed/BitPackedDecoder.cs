@@ -39,6 +39,87 @@ public sealed class BitPackedDecoder : ArrayDecoder
     /// <inheritdoc/>
     public override ArrayEncodingId EncodingId => ArrayEncodingId.FastLanesBitPacked;
 
+    /// <summary>
+    /// Unpacks only the wanted rows, one at a time, without materializing a single block.
+    /// </summary>
+    /// <remarks>
+    /// The `fastlanes.bitpacked` row of the take table: "O(1) positional access via the inverse
+    /// transposition". The table also describes a density threshold - decode a whole 1024-block
+    /// once enough of it is wanted, per element below that - and it is deliberately NOT implemented
+    /// here, because the crossover is a measurement nobody has made. Per-element is strictly better
+    /// than today's behaviour at every density up to "all of it", and at "all of it" the scan does
+    /// not take this path at all: `ExecuteWithTake` skips the pushdown when every row of the split
+    /// is wanted.
+    ///
+    /// PATCHES ARE STILL DECODED IN FULL. There are few of them by construction - a patch that
+    /// paid for itself is rare in the column - and they arrive as their own child arrays, so
+    /// selecting among them would mean pushing a second, differently-based selection into them.
+    /// The gain would be a fraction of a fraction.
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
+        BitPackedMetadata metadata = BitPackedMetadata.Read(node.Metadata);
+        PType ptype = CompressedValues.RequireIntegerPrimitive(dtype, Id);
+        int elementBits = ptype.ByteWidth() * 8;
+
+        if (metadata.BitWidth > (uint)elementBits)
+        {
+            CompressedThrow.Format(
+                $"{Id} bit width {metadata.BitWidth} exceeds the {elementBits} bits of " +
+                $"{ptype.Name()}.");
+        }
+
+        int bitWidth = (int)metadata.BitWidth;
+        int offset = (int)metadata.Offset;
+
+        VortexBuffer packed = node.GetBuffer(0);
+        long blocks = ((long)length + offset + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
+        long expected = blocks * FastLanes.BlockByteLength(bitWidth);
+        if (packed.Length != expected)
+        {
+            CompressedThrow.Format(
+                $"{Id} needs exactly {expected} packed bytes for {length} rows at offset " +
+                $"{offset} and bit width {bitWidth}; the buffer holds {packed.Length}.");
+        }
+
+        int validityChildIndex = metadata.HasPatches
+            ? (metadata.Patches.HasChunkOffsets ? 3 : 2)
+            : 0;
+        ArrayDecodeContext.RequireChildCount(
+            node.ChildCount, validityChildIndex, validityChildIndex + 1, Id);
+
+        int width = ptype.ByteWidth();
+        int count = wanted.Length;
+        int total = ArrayDecodeContext.CheckedMultiply(count, width, "BitPacked values");
+
+        VortexBuffer output = VortexBuffer.Empty;
+        Span<byte> destination = default;
+        if (total != 0)
+        {
+            output = CompressedValues.Allocate(context, total, width, Id, out destination);
+            Gather(packed.Span, bitWidth, offset, width, wanted, destination);
+        }
+
+        if (metadata.HasPatches)
+        {
+            // Applied against the FULL row space and then narrowed, which is the cheap direction:
+            // a patch set is small, and the alternative is a search per wanted row.
+            ApplySelectedPatches(context, in node, dtype, length, in metadata, width, wanted, destination);
+        }
+
+        Validity validity = Compute.CanonicalFilter.FilterValidity(
+            context.Canonical,
+            context.DecodeValidity(in node, validityChildIndex, dtype.Nullability, length),
+            wanted);
+
+        return context.Canonical.AddPrimitive(dtype, count, validity, ptype, output);
+    }
+
     /// <inheritdoc/>
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
@@ -99,6 +180,62 @@ public sealed class BitPackedDecoder : ArrayDecoder
             in node, validityChildIndex, dtype.Nullability, length);
 
         return context.Canonical.AddPrimitive(dtype, length, validity, ptype, output);
+    }
+
+    /// <summary>Extracts the wanted rows one at a time.</summary>
+    private static void Gather(
+        ReadOnlySpan<byte> packed, int bitWidth, int offset, int width, ReadOnlySpan<int> wanted,
+        Span<byte> destination)
+    {
+        switch (width)
+        {
+            case 1:
+                Gather<byte>(packed, bitWidth, offset, wanted, destination);
+                break;
+            case 2:
+                Gather<ushort>(packed, bitWidth, offset, wanted, destination);
+                break;
+            case 4:
+                Gather<uint>(packed, bitWidth, offset, wanted, destination);
+                break;
+            default:
+                Gather<ulong>(packed, bitWidth, offset, wanted, destination);
+                break;
+        }
+    }
+
+    private static void Gather<T>(
+        ReadOnlySpan<byte> packedBytes, int bitWidth, int offset, ReadOnlySpan<int> wanted,
+        Span<byte> destinationBytes)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        Span<T> destination = MemoryMarshal.Cast<byte, T>(destinationBytes);
+
+        if (bitWidth == 0)
+        {
+            destination.Clear();
+            return;
+        }
+
+        ReadOnlySpan<T> packed = MemoryMarshal.Cast<byte, T>(packedBytes);
+        int elementsPerBlock = FastLanes.BlockByteLength(bitWidth) / Unsafe.SizeOf<T>();
+        int elementBits = Unsafe.SizeOf<T>() * 8;
+        int lanes = FastLanes.BlockSize / elementBits;
+
+        for (int i = 0; i < wanted.Length; i++)
+        {
+            int encoded = wanted[i] + offset;
+            int block = encoded / FastLanes.BlockSize;
+            int within = encoded - (block * FastLanes.BlockSize);
+            ReadOnlySpan<T> source = packed.Slice(block * elementsPerBlock, elementsPerBlock);
+
+            // W == T is the copy-through case the bulk kernel branches out too: the packed word at
+            // (row, lane) IS the value, with no shift and no mask.
+            destination[i] = bitWidth == elementBits
+                ? source[(lanes * FastLanes.PackedRowTable(elementBits)[within])
+                    + FastLanes.PackedLaneTable(elementBits)[within]]
+                : FastLanes.UnpackOne(source, bitWidth, within);
+        }
     }
 
     private static void Unpack(
@@ -174,6 +311,69 @@ public sealed class BitPackedDecoder : ArrayDecoder
         {
             ArrayPool<T>.Shared.Return(scratchArray);
         }
+    }
+
+    /// <summary>
+    /// Applies the patches that land on a wanted row, at the position that row now occupies.
+    /// </summary>
+    /// <remarks>
+    /// The validation is the full decode's, unchanged - a malformed patch set must be refused
+    /// whether or not a take happens to skip the row it corrupts.
+    /// </remarks>
+    private static void ApplySelectedPatches(
+        ArrayDecodeContext context,
+        in ArrayNode node,
+        DType dtype,
+        int length,
+        in BitPackedMetadata metadata,
+        int width,
+        ReadOnlySpan<int> wanted,
+        Span<byte> destination)
+    {
+        PatchesMetadata patchesMetadata = metadata.Patches;
+        int patchCount = ArrayDecodeContext.CheckedLength(
+            patchesMetadata.Length, $"{Id} patch count");
+
+        DType indicesType = context.Types.Primitive(
+            patchesMetadata.IndicesPType, Nullability.NonNullable);
+        int indicesIndex = context.DecodeChild(in node, 0, indicesType, patchCount);
+        int valuesIndex = context.DecodeChild(in node, 1, dtype, patchCount);
+
+        if (patchesMetadata.HasChunkOffsets)
+        {
+            int chunkOffsetsLength = ArrayDecodeContext.CheckedLength(
+                patchesMetadata.ChunkOffsetsLength, $"{Id} patch chunk_offsets_len");
+            int chunkOffsets = context.DecodeChild(
+                in node, 2,
+                context.Types.Primitive(patchesMetadata.ChunkOffsetsPType, Nullability.NonNullable),
+                chunkOffsetsLength);
+            CompressedValues.RequireIndexChild(
+                context, chunkOffsets, patchesMetadata.ChunkOffsetsPType, chunkOffsetsLength, Id,
+                "patch_chunk_offsets");
+        }
+
+        Patches patches = Patches.Create(
+            context, in patchesMetadata, length, indicesIndex, valuesIndex, Id);
+
+        CanonicalNode values = context.Canonical.GetNode(valuesIndex);
+        if (values.Kind != CanonicalKind.Primitive)
+        {
+            CompressedThrow.ChildKind(Id, "patch_values", values.Kind, "a Primitive");
+        }
+
+        if (values.PType != dtype.PType)
+        {
+            CompressedThrow.Format(
+                $"{Id}'s patch values decoded as {values.PType.Name()}; " +
+                $"{dtype.PType.Name()} was required.");
+        }
+
+        if (!values.Validity.IsAllValid)
+        {
+            CompressedThrow.Format($"{Id} patch values must not contain nulls.");
+        }
+
+        Patches.ApplySelected(in patches, values.Values.Span, width, wanted, destination);
     }
 
     private static void ApplyPatches(

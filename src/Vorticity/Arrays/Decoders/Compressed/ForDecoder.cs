@@ -31,6 +31,30 @@ public sealed class ForDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false);
+    }
+
+    /// <summary>
+    /// Frame of reference is transparent to a take: it adds a constant to every row, so the rows it
+    /// is asked for are the rows its child is asked for.
+    /// </summary>
+    /// <remarks>
+    /// The `fastlanes.for` row of the take table - "offset add over the child's strategy" - and the
+    /// reason it matters far more than its own cost suggests: the child is almost always
+    /// `fastlanes.bitpacked`, so without this the positional access underneath is never reached.
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted, selective: true);
+    }
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted, bool selective)
+    {
 
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 1, Id);
@@ -55,7 +79,13 @@ public sealed class ForDecoder : ArrayDecoder
 
         // The encoded child carries the array's dtype unchanged, including its nullability, and
         // the FoR node has no validity of its own (ValidityVTableFromChild).
-        int encoded = context.DecodeChild(in node, 0, dtype, length);
+        int encoded = selective
+            ? context.DecodeChildSelected(in node, 0, dtype, length, wanted)
+            : context.DecodeChild(in node, 0, dtype, length);
+
+        // Everything below is expressed in the number of rows PRODUCED, which the selection
+        // shortens; the child's own bound checks still use the node's declared length.
+        int produced = selective ? wanted.Length : length;
 
         // The child is checked BEFORE the zero-reference shortcut, so a child that decoded to the
         // wrong shape is rejected whatever the reference happens to be.
@@ -71,9 +101,9 @@ public sealed class ForDecoder : ArrayDecoder
                 $"{Id}'s encoded child decoded as {child.PType.Name()}; {ptype.Name()} was required.");
         }
 
-        if (child.Length != length)
+        if (child.Length != produced)
         {
-            CompressedThrow.ChildLength(Id, "encoded", child.Length, length);
+            CompressedThrow.ChildLength(Id, "encoded", child.Length, produced);
         }
 
         // Upstream returns the child untouched when the reference is zero. It is free and exactly
@@ -83,17 +113,17 @@ public sealed class ForDecoder : ArrayDecoder
             return encoded;
         }
 
-        int total = ArrayDecodeContext.CheckedMultiply(length, width, "FoR values");
+        int total = ArrayDecodeContext.CheckedMultiply(produced, width, "FoR values");
         if (total == 0)
         {
             return context.Canonical.AddPrimitive(
-                dtype, length, child.Validity, ptype, VortexBuffer.Empty);
+                dtype, produced, child.Validity, ptype, VortexBuffer.Empty);
         }
 
         VortexBuffer output = CompressedValues.Allocate(
             context, total, width, Id, out Span<byte> destination);
         IntegerKernels.AddWrapping(child.Values.Span[..total], destination, width, referenceBits);
-        return context.Canonical.AddPrimitive(dtype, length, child.Validity, ptype, output);
+        return context.Canonical.AddPrimitive(dtype, produced, child.Validity, ptype, output);
     }
 
     private static ulong ReadBits(ReadOnlySpan<byte> value) => value.Length switch

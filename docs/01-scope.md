@@ -29,7 +29,7 @@ stabilization; it is the edition registry that evolves.
 | F2 | **Expose the schema** | Full `DType`: Null, Bool, Primitive (11 ptypes incl. f16), Decimal, Utf8, Binary, Struct, List, FixedSizeList, Extension |
 | F3 | **Full scan** | `IAsyncEnumerable` of batches, decoded to canonical form |
 | F4 | **Projection pushdown** | Read only the segments of requested columns (nested paths included) |
-| F5 | **Row-range / random access** | Read rows `[a, b)` or an index list without touching the rest. Specialized `take` paths for `dict`, `runend` and `fastlanes.bitpacked` (the three that dominate real files); documented zone-decode fallback elsewhere — see [90-registry.md](90-registry.md) |
+| F5 | **Row-range / random access** | Read rows `[a, b)` or an index list without touching the rest. Specialized `take` paths for `dict`, `runend`, `fastlanes.bitpacked`, `for`, `zigzag`, `alp`, `sequence` and `constant`, pushed down through the layout tree; documented zone-decode fallback for the variable-length encodings (`fsst`, `onpair`, `alprd`) — see [90-registry.md](90-registry.md) |
 | F6 | **Zone-map pruning** | Use `vortex.zoned` / `vortex.stats` (min, max, null_count, nan_count) to skip zones |
 | F7 | **Filter pushdown** | Simple predicates (comparisons, AND/OR/NOT, IS NULL, IN) evaluated before materialization |
 | F8 | **Decode the `core` edition** | The 34 array encodings + 6 layouts of `core2026.08.3` — see [90-registry.md](90-registry.md) for the deliberate exceptions |
