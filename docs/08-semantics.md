@@ -165,7 +165,31 @@ back to a streaming loop with a running budget.
 
 ## 7. Buffer-level LZ4
 
-`Buffer.compression` admits `LZ4` ([02-format.md](02-format.md) §5.2). Decision: **1.0 reads it.**
-An LZ4 block decoder is roughly 200 lines, has no dependency, and closes a conformance hole that
-would otherwise be discovered by a user rather than by us. We do not *write* LZ4; the default
-writer emits `None` and so do we.
+`Buffer.compression` admits `LZ4` ([02-format.md](02-format.md) §5.2). The decision here used to be
+"1.0 reads it", on the grounds that an LZ4 block decoder is ~200 lines with no dependency and that a
+conformance hole is better closed by us than found by a user. **That decision is reversed, and the
+reason is not effort.**
+
+Grepping the whole of Vortex 0.86.1 for `lz4` returns four files: the two `.fbs` schemas that
+declare the enum, and the two generated Rust files that mirror it. Nothing else. `vortex-array`'s
+`serde.rs` *writes* `Compression::None` and **never reads `Buffer.compression` at all** — not even
+to reject it — and no vortex crate depends on an lz4 implementation. The enum value is a
+placeholder, exactly like `SegmentSpec._compression`, which `footer.fbs` says outright is "reserved
+for future use ... not used in the current version of the file format".
+
+So there is nothing to be conformant *with*. The schema names an algorithm and stops: it does not
+say whether the bytes are a raw LZ4 block or an LZ4 frame, and — decisively — it provides no
+decompressed length anywhere. `Buffer.length` is documented as "the length of the buffer in bytes"
+and is used by every consumer as the on-disk extent. A raw LZ4 block carries no size of its own, so
+a decoder could not even size its output without inventing a rule. Writing one would mean choosing
+a framing and a length convention and calling the result the format, which is the same mistake as
+inventing an ordering for `List` in the row encoder ([06-row-encoding.md](06-row-encoding.md) §6).
+
+**Decision: 1.0 refuses a compressed buffer**, with `VortexUnsupportedException` naming the id
+`lz4` and the kind `compression`. Note what that buys: the reference, which never inspects the
+field, would read the compressed bytes AS DATA and return silently wrong values. Refusing is not
+merely defensible here, it is the safer of the two behaviours. We do not write LZ4 either; the
+default writer emits `None` and so do we.
+
+This reverses when — and only when — upstream implements it, at which point the framing becomes
+observable in a real file and the ~200 lines can be written against something.

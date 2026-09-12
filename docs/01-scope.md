@@ -57,16 +57,25 @@ stabilization; it is the edition registry that evolves.
 ### Note: segment compression
 
 The footer's `CompressionSpec` allows `None`, `LZ4`, `ZLib`, `ZStd` at the **segment** level, and
-`Buffer.compression` allows `None`/`LZ4` at the **buffer** level. The default Rust writer only
-emits `None`.
+`Buffer.compression` allows `None`/`LZ4` at the **buffer** level. Neither is implemented by any
+Vortex release: the default Rust writer emits `None`, the reader never inspects either field, and
+`footer.fbs` states that the segment spec's pointer into `compression_specs` is "reserved for
+future use ... not used in the current version of the file format".
 
 .NET 11 adds `ZstandardStream`, `ZstandardEncoder`, `ZstandardDecoder`, `ZstandardDictionary`
 and their options types to `System.IO.Compression`, so Zstd costs us no external dependency — the
 span-based one-shot `ZstandardDecoder.TryDecompress` is exactly the shape our buffer decompression
-needs, with no stream allocation. `ZLib` and `Deflate` have always been in the BCL. `LZ4` is the
-only scheme we hand-write (~200 lines for the block decoder). **Decision: 1.0 reads buffer-level
-LZ4**, even though no default writer emits it — it is a legal file shape, and a conformance hole is
-better closed by us than discovered by a user. We never write it.
+needs, with no stream allocation. `ZLib` and `Deflate` have always been in the BCL.
+
+`LZ4` would have been the only scheme we hand-write, and **we do not**: buffer-level LZ4 is
+declared by the schema and implemented by nothing. Vortex 0.86.1 never reads `Buffer.compression`,
+never writes anything but `None`, and depends on no lz4 crate, while `footer.fbs` says in as many
+words that `SegmentSpec._compression` is "reserved for future use ... not used in the current
+version of the file format". With no framing and no decompressed length defined anywhere, a decoder
+could only be written by inventing both. **Decision: 1.0 refuses a compressed buffer** with
+`VortexUnsupportedException(lz4, compression)` — which, since the reference would read the
+compressed bytes as data and return silent garbage, is also the safer behaviour. Reversed the day
+upstream implements it. See [08-semantics.md](08-semantics.md) §7.
 
 This removes the argument for deferring `vortex.zstd`. The library targets `net11.0` only, so the
 support is unconditional — see [03-architecture.md](03-architecture.md) §1.

@@ -44,7 +44,10 @@ writing; the pin is recorded in the corpus manifest) generates:
      writer emits none of them:
      - a file with Zstd-compressed *segments* — forces the "decompress before parsing the footer"
        path;
-     - a file with an LZ4-compressed *buffer* (support decided in [08-semantics.md](08-semantics.md) §7);
+     - ~~a file with an LZ4-compressed *buffer*~~ — dropped: nothing in Vortex 0.86.1 reads or
+       writes `Buffer.compression`, so there is no reference behaviour to match and no framing to
+       decode against ([08-semantics.md](08-semantics.md) §7). The refusal is pinned by a unit
+       test over a hand-built blob instead, which is where a fixture no producer can make belongs;
      - a `vortex.flat` layout with `array_encoding_tree` inlined in layout metadata — the segment
        then holds only buffers, a different offset-reconstruction path;
      - a `vortex.dict` layout;

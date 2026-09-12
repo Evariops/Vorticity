@@ -3,6 +3,7 @@
 // nothing else - never an out-of-bounds read, an unbounded allocation, or a hang.
 using System;
 using System.Buffers.Binary;
+using System.Globalization;
 using Vorticity;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -136,6 +137,20 @@ public sealed class ArrayBlobReaderTests
         Assert.Throws<VortexFormatException>(() => Load(blob));
     }
 
+    /// <summary>
+    /// A compressed buffer is refused, and this is the whole of our LZ4 story.
+    /// </summary>
+    /// <remarks>
+    /// docs/08-semantics.md §7 used to promise a ~200-line LZ4 block decoder. It was dropped for a
+    /// reason no amount of effort fixes: nothing in Vortex 0.86.1 reads or writes
+    /// <c>Buffer.compression</c> - the only four files in the tree mentioning lz4 are the two
+    /// schemas and their generated code - and the schema records neither a framing nor a
+    /// decompressed length, so a decoder could only be written by inventing both.
+    ///
+    /// This test is therefore not a placeholder for a future feature. It pins a decision, and the
+    /// decision is the safer one: the reference never inspects the field, so it would read these
+    /// bytes AS DATA and hand back silently wrong values.
+    /// </remarks>
     [Fact]
     public void ACompressedBufferIsUnsupportedRatherThanSilentlyRawBytes()
     {
@@ -146,6 +161,30 @@ public sealed class ArrayBlobReaderTests
         VortexUnsupportedException error =
             Assert.Throws<VortexUnsupportedException>(() => Load(blob));
         Assert.Equal(VortexComponentKind.Compression, error.Kind);
+
+        // The id as well as the kind: docs/03-architecture.md §5 says the message always names
+        // both, because that pair is what the upstream troubleshooting procedure asks for.
+        Assert.Equal("lz4", error.ComponentId);
+    }
+
+    /// <summary>
+    /// A compression value outside the enum is refused too, and named by its number - there is no
+    /// id text to report, and treating "not LZ4" as "not compressed" would read garbage as data.
+    /// </summary>
+    [Theory]
+    [InlineData(2)]
+    [InlineData(200)]
+    [InlineData(255)]
+    public void AnUnknownBufferCompressionIsUnsupportedAndNamedByItsValue(byte compression)
+    {
+        BufferSpec[] buffers = [new BufferSpec(0, 0, compression, 8)];
+        ForgedNode root = new ForgedNode(0) { BufferIndices = [0] };
+        byte[] blob = BlobBuilder.Build(root, buffers);
+
+        VortexUnsupportedException error =
+            Assert.Throws<VortexUnsupportedException>(() => Load(blob));
+        Assert.Equal(VortexComponentKind.Compression, error.Kind);
+        Assert.Equal(compression.ToString(CultureInfo.InvariantCulture), error.ComponentId);
     }
 
     [Fact]

@@ -50,7 +50,12 @@ public enum BufferCompression : byte
     /// <summary>The buffer is stored verbatim.</summary>
     None = 0,
 
-    /// <summary>The buffer is LZ4-compressed.</summary>
+    /// <summary>
+    /// The buffer is LZ4-compressed. DECLARED BY THE SCHEMA AND IMPLEMENTED BY NOTHING: no Vortex
+    /// release writes this value or reads this field, and the format records neither the framing
+    /// nor a decompressed length, so a buffer carrying it is refused rather than decoded. See
+    /// docs/08-semantics.md §7.
+    /// </summary>
     LZ4 = 1,
 }
 

@@ -387,6 +387,18 @@ public static class ArrayBlobReader
             $"The array node tree expands to more {what} than its FlatBuffer has room to declare; " +
             "it is a shared-child DAG, not a tree.");
 
+    /// <summary>
+    /// Refuses a compressed buffer. NOT a deferral, and not effort: buffer-level compression is
+    /// declared by the schema and implemented by nothing.
+    /// </summary>
+    /// <remarks>
+    /// Vortex 0.86.1 writes <c>Compression::None</c>, never reads this field at all, and depends on
+    /// no lz4 implementation; the schema names an algorithm without saying whether the bytes are a
+    /// raw LZ4 block or a frame, and records no decompressed length anywhere. A decoder could only
+    /// be written by inventing both, so we refuse instead - which is also the safer of the two
+    /// behaviours, since the reference would read these bytes AS DATA and return silent garbage.
+    /// See docs/08-semantics.md §7.
+    /// </remarks>
     [System.Runtime.CompilerServices.MethodImpl(
         System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static void ThrowBufferCompression(int index, byte compression) =>
@@ -395,5 +407,7 @@ public static class ArrayBlobReader
                 ? "lz4"
                 : compression.ToString(System.Globalization.CultureInfo.InvariantCulture),
             VortexComponentKind.Compression,
-            $"Array buffer {index} is compressed; per-buffer compression is deferred to Phase 2.");
+            $"Array buffer {index} declares compression, which no Vortex release implements: " +
+            "the format defines neither its framing nor a decompressed length, so the bytes " +
+            "cannot be decoded without inventing both.");
 }

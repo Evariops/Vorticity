@@ -80,6 +80,7 @@ Facts the prose specs do not state, established from source and cited where they
 | `min`/`max` are computed with `skip_nans()`; NaN is tracked separately in `nan_count` | `vortex-array/src/stats/expr.rs` | [08-semantics.md](08-semantics.md) §2 |
 | The writer filters the compressor's candidate schemes by the edition allowlist **before** sampling | `vortex-file/src/writer.rs` → `retain_allowed_encodings` | [90-registry.md](90-registry.md) |
 | Row encoding propagates the parent's `RowSortField` unchanged to nested children; inversion is applied once, at the leaf | `vortex-row/src/codec.rs` → `encode_struct`, `field_encode` | [06-row-encoding.md](06-row-encoding.md) §3 |
+| `Buffer.compression` and `SegmentSpec._compression` are declared but unimplemented: 0.86.1 writes `None`, never reads either field, and depends on no lz4 crate; `footer.fbs` calls the segment field "reserved for future use" | `vortex-array/src/serde.rs`, `vortex-flatbuffers/flatbuffers/**/*.fbs` (the only four files in the tree mentioning lz4 are the two schemas and their generated code) | [08-semantics.md](08-semantics.md) §7 |
 | The child null sentinel under a null parent is chosen by the *child's* dtype with the *inherited* field, and fixed-width children are zero-filled even when descending | `vortex-row/src/codec.rs` → `child_canonical_null_byte` | [06-row-encoding.md](06-row-encoding.md) §3 |
 
 Each of these would have been a plausible guess in either direction, and each guessed wrong
