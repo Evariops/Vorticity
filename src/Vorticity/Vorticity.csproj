@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Vorticity</RootNamespace>
+    <AssemblyName>Vorticity</AssemblyName>
+    <Description>Pure .NET, dependency-free implementation of the Vortex columnar file format.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Vorticity.Tests" />
+    <InternalsVisibleTo Include="Vorticity.Conformance" />
+    <InternalsVisibleTo Include="Vorticity.Benchmarks" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  build:
+    name: build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # docs/05-benchmarks.md §1: every kernel has a NEON path by contract, so the arm64 leg is
+        # not optional - without it that contract is untested.
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore Vorticity.slnx
+
+      - name: Build
+        run: dotnet build Vorticity.slnx --no-restore -c Release
+
+      - name: Test
+        run: dotnet test Vorticity.slnx --no-build -c Release
+
+      # docs/03-architecture.md §4, invariant 4: every SIMD kernel has a scalar fallback, and the
+      # fallback is only real if it is exercised. Running the whole suite with intrinsics disabled
+      # is the cheapest way to keep that honest as kernels land.
+      - name: Test (intrinsics disabled)
+        run: dotnet test Vorticity.slnx --no-build -c Release
+        env:
+          DOTNET_EnableHWIntrinsic: '0'
+
+  spec-drift:
+    name: upstream schema drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A change here is a format change, not a dependency bump: it must be reviewed against
+      # docs/90-registry.md and the conformance corpus regenerated. This job reports drift on a
+      # schedule-friendly path without blocking unrelated PRs.
+      - name: Re-vendor and diff
+        continue-on-error: true
+        run: |
+          ./spec/refresh.sh
+          if ! git diff --quiet -- spec/; then
+            echo "::warning title=Upstream schema drift::spec/ differs from upstream develop"
+            git diff -- spec/
+          else
+            echo "spec/ matches upstream develop"
+          fi
