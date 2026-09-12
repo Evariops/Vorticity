@@ -80,6 +80,95 @@ public abstract class ComparisonBase
     }
 }
 
+/// <summary>
+/// Per-encoding decode, against Rust. docs/05-benchmarks.md §3 calls this the axis that matters
+/// most during development, and §1 sets it a tighter target than the scan: **within 1.5x**, because
+/// a kernel is the one place where a missing vectorized path has nowhere to hide.
+/// </summary>
+/// <remarks>
+/// Each file was written by the generator with ONE scheme forced, so the number is dominated by
+/// that kernel rather than by whatever a sampler picked. Both sides read the same file from the
+/// same path, so the layout walk and the file I/O are common-mode and cancel in the ratio.
+///
+/// The encodings listed are the ones both implementations read. pco, fastlanes.delta,
+/// zstd_buffers, variant and map are in the corpus and out of our scope, so a ratio for them would
+/// be a ratio against an exception.
+/// </remarks>
+[Config(typeof(BenchmarkConfig))]
+public class DecodeComparison
+{
+    private string _path = string.Empty;
+
+    /// <summary>The corpus entry to decode.</summary>
+    [Params(
+        "encodings/fastlanes_bitpacked",
+        "encodings/fastlanes_for",
+        "encodings/fastlanes_rle",
+        "encodings/runend",
+        "encodings/dict",
+        "encodings/sparse",
+        "encodings/zigzag",
+        "encodings/alp",
+        "encodings/alprd",
+        "encodings/fsst",
+        "encodings/onpair",
+        "encodings/zstd",
+        "encodings/varbinview",
+        "encodings/bool",
+        "encodings/datetimeparts",
+        "encodings/decimal_byte_parts")]
+    public string Encoding { get; set; } = "encodings/fastlanes_bitpacked";
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        if (!RustReader.Available)
+        {
+            throw new InvalidOperationException(
+                $"The native comparison harness is missing (looked for {RustReader.ExpectedPath}). " +
+                "Build it with: cd tools/vxbench-rs && cargo build --release.");
+        }
+
+        _path = Corpus.Path(Encoding);
+        long ours = Managed().GetAwaiter().GetResult();
+        long theirs = RustReader.Require(RustReader.ScanAll(_path), "scan");
+        if (ours != theirs)
+        {
+            throw new InvalidOperationException(
+                $"The two readers disagree on {_path}: {ours} rows versus {theirs}.");
+        }
+    }
+
+    [Benchmark(Baseline = true, Description = "Vorticity")]
+    public Task<long> Managed_Decode() => Managed();
+
+    [Benchmark(Description = "Vortex Rust")]
+    public long Rust_Decode() => RustReader.Require(RustReader.ScanAll(_path), "scan");
+
+    private async Task<long> Managed()
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            for (int field = 0; field < batch.FieldCount; field++)
+            {
+                VortexColumn column = batch.Column(field);
+                for (int row = 0; row < batch.RowCount; row++)
+                {
+                    // Touch every row: a scan that only counts them can skip work a decode cannot.
+                    _ = column.IsValid(row);
+                }
+            }
+
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+}
+
 /// <summary>Full scan, every column decoded: the headline ratio.</summary>
 [Config(typeof(BenchmarkConfig))]
 public class FullScanComparison : ComparisonBase

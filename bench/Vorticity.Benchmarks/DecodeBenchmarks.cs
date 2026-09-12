@@ -33,9 +33,9 @@ public class DecodeBenchmarks
     /// The corpus entry to decode. Each is a file the generator forced onto one scheme.
     /// </summary>
     [Params(
-        "encodings/bitpacked",
-        "encodings/for",
-        "encodings/rle",
+        "encodings/fastlanes_bitpacked",
+        "encodings/fastlanes_for",
+        "encodings/fastlanes_rle",
         "encodings/runend",
         "encodings/dict",
         "encodings/sparse",
@@ -47,7 +47,7 @@ public class DecodeBenchmarks
         "encodings/zstd",
         "encodings/datetimeparts",
         "encodings/decimal_byte_parts")]
-    public string Encoding { get; set; } = "encodings/bitpacked";
+    public string Encoding { get; set; } = "encodings/fastlanes_bitpacked";
 
     [GlobalSetup]
     public void Setup()

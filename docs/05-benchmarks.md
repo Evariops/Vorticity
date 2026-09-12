@@ -32,6 +32,48 @@ batches**, checked before every run:
 | Open → footer only | 41.6 µs | 49.6 µs | 1.19× faster |
 | Empty FFI call | — | 2.5 ns | the floor: noise on every axis above |
 
+**Per-encoding decode**, the axis §3 calls the one that matters most during development, and the
+one §1 holds to a tighter target (**≤ 1.5×**). Each file was written with one scheme forced. Ratios
+are ours ÷ Rust, so above 1.00 is slower:
+
+| Encoding | Vorticity | Vortex Rust | ratio |
+|---|---|---|---|
+| `vortex.fsst` | 135.1 µs | 43.3 µs | **3.12×** |
+| `vortex.onpair` | 117.4 µs | 38.8 µs | **3.03×** |
+| `vortex.zstd` | 74.7 µs | 35.9 µs | **2.08×** |
+| `vortex.alprd` | 59.9 µs | 36.6 µs | **1.64×** |
+| `fastlanes.rle` | 53.9 µs | 36.4 µs | 1.48× |
+| `vortex.dict` | 51.5 µs | 36.1 µs | 1.43× |
+| `vortex.runend` | 47.1 µs | 36.0 µs | 1.31× |
+| `fastlanes.bitpacked` | 44.6 µs | 35.3 µs | 1.26× |
+| `vortex.alp` | 47.7 µs | 37.8 µs | 1.26× |
+| `vortex.sparse` | 45.2 µs | 38.2 µs | 1.18× |
+| `vortex.zigzag` | 43.5 µs | 37.1 µs | 1.17× |
+| `fastlanes.for` | 41.9 µs | 36.3 µs | 1.15× |
+| `vortex.bool` | 39.8 µs | 34.7 µs | 1.15× |
+| `vortex.decimal_byte_parts` | 41.4 µs | 36.5 µs | 1.13× |
+| `vortex.datetimeparts` | 47.3 µs | 42.5 µs | 1.11× |
+| `vortex.varbinview` | 60.2 µs | 67.0 µs | **0.90× — we are faster** |
+
+**Read those ratios knowing what is inside them, because it changes the conclusion.** These corpus
+files hold 4096 rows, and roughly 35 µs of every row above is the open-and-walk-the-layout cost both
+implementations pay before a single value is decoded — Rust's own floor across the easy encodings is
+34–38 µs. Subtracting it turns `vortex.fsst` from 3.1× into something nearer 12×, and
+`fastlanes.bitpacked` from 1.26× into 9 µs against well under one. So the table is a reliable
+RANKING and an understated set of ratios; §3's "ns/value on 1M values, isolated" is the measurement
+that would give honest absolutes, and it wants a bigger dataset than the corpus carries.
+
+What the ranking says is unambiguous: the three byte-oriented decoders — FSST, OnPair and Zstd —
+are the slow ones, and the bit-packing kernels are already close. FSST and OnPair both decode one
+symbol at a time where the reference writes a fixed-width store per symbol and advances by the real
+length; `FsstSymbolTable`'s own comment predicted that "reproducing its shape rather than its
+semantics would buy nothing until the rest of the library is vectorized", and the measurement
+disagrees.
+
+A defect this also found: `DecodeBenchmarks`'s parameter list named `encodings/bitpacked`,
+`encodings/for` and `encodings/rle`, none of which exist — the corpus ids are
+`encodings/fastlanes_*`. That class could never have run.
+
 And the absolute axes the harness does not cover:
 
 | Axis | Mean | Reading |
