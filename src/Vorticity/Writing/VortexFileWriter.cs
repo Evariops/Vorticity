@@ -61,6 +61,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
     private readonly List<ZoneStatistics>[] _columnZones;
 
     private readonly bool _isTabular;
+    private readonly bool _compress;
     private int[]? _zoneSegments;
     private byte[][]? _zoneMetadata;
     private long _rowCount;
@@ -68,10 +69,11 @@ public sealed class VortexFileWriter : IAsyncDisposable
     private bool _completed;
     private byte[] _padding = new byte[VortexLimits.MaxAlignment];
 
-    private VortexFileWriter(ISegmentSink sink, DType schema)
+    private VortexFileWriter(ISegmentSink sink, DType schema, bool compress)
     {
         _sink = sink;
         _schema = schema;
+        _compress = compress;
         _isTabular = schema.Kind == DTypeKind.Struct;
 
         // A non-struct root is one column whose layout IS the root, with no struct level above it.
@@ -97,15 +99,26 @@ public sealed class VortexFileWriter : IAsyncDisposable
     /// <returns>The writer. The caller completes and disposes it.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="sink"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="schema"/> has not been set.</exception>
-    public static VortexFileWriter Create(ISegmentSink sink, DType schema)
+    public static VortexFileWriter Create(ISegmentSink sink, DType schema) =>
+        Create(sink, schema, VortexWriteOptions.Default);
+
+    /// <summary>Starts a file over <paramref name="sink"/> with explicit options.</summary>
+    /// <param name="sink">Where the bytes go.</param>
+    /// <param name="schema">The file's dtype.</param>
+    /// <param name="options">Write-time policy.</param>
+    /// <returns>The writer. The caller completes and disposes it.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="sink"/> or <paramref name="options"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="schema"/> has not been set.</exception>
+    public static VortexFileWriter Create(ISegmentSink sink, DType schema, VortexWriteOptions options)
     {
         ArgumentNullException.ThrowIfNull(sink);
+        ArgumentNullException.ThrowIfNull(options);
         if (schema.IsDefault)
         {
             throw new ArgumentException("The schema has not been set.", nameof(schema));
         }
 
-        return new VortexFileWriter(sink, schema);
+        return new VortexFileWriter(sink, schema, options?.Compress ?? true);
     }
 
     /// <summary>Creates a file at <paramref name="path"/>.</summary>
@@ -113,12 +126,21 @@ public sealed class VortexFileWriter : IAsyncDisposable
     /// <param name="schema">The file's dtype.</param>
     /// <returns>The writer, which owns the underlying stream.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
-    public static VortexFileWriter Create(string path, DType schema)
+    public static VortexFileWriter Create(string path, DType schema) =>
+        Create(path, schema, VortexWriteOptions.Default);
+
+    /// <summary>Creates a file at <paramref name="path"/> with explicit options.</summary>
+    /// <param name="path">The destination path; truncated if it exists.</param>
+    /// <param name="schema">The file's dtype.</param>
+    /// <param name="options">Write-time policy.</param>
+    /// <returns>The writer, which owns the underlying stream.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
+    public static VortexFileWriter Create(string path, DType schema, VortexWriteOptions options)
     {
         ArgumentNullException.ThrowIfNull(path);
         System.IO.FileStream stream = new System.IO.FileStream(
             path, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None);
-        return Create(new StreamSegmentSink(stream, ownsStream: true), schema);
+        return Create(new StreamSegmentSink(stream, ownsStream: true), schema, options);
     }
 
     /// <summary>Appends <paramref name="batch"/> as one chunk of every column.</summary>
@@ -148,7 +170,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
             int node = _isTabular
                 ? batch.Arena.GetNode(batch.RootIndex).GetFieldIndex(field)
                 : batch.RootIndex;
-            byte[] blob = ArrayBlobWriter.Write(batch.Arena, node, _arrayEncodings);
+            byte[] blob = ArrayBlobWriter.Write(batch.Arena, node, _arrayEncodings, _compress);
             _columnSegments[field].Add(await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false));
 
             // Summarized from the canonical column before the arena is reused, which is the only

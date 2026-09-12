@@ -28,6 +28,7 @@ using System.Collections.Generic;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
+using Vorticity.Compute;
 using Vorticity.Buffers;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Protobuf;
@@ -48,14 +49,21 @@ internal static class ArrayBlobWriter
     /// <param name="arena">The arena holding the node.</param>
     /// <param name="nodeIndex">The node to write.</param>
     /// <param name="encodings">The file's array-encoding dictionary, extended as needed.</param>
+    /// <param name="compress">Whether to let ColumnCompressor pick an encoding for the column.</param>
     /// <returns>The blob.</returns>
     /// <exception cref="NotSupportedException">The canonical form has no writer.</exception>
-    internal static byte[] Write(CanonicalArena arena, int nodeIndex, EncodingDictionary encodings)
+    internal static byte[] Write(
+        CanonicalArena arena, int nodeIndex, EncodingDictionary encodings, bool compress = false)
     {
         List<PendingBuffer> buffers = [];
         using FlatBufferBuilder builder = new FlatBufferBuilder();
 
-        int root = WriteNode(builder, arena, nodeIndex, buffers, encodings);
+        // The compressed forms are chosen and MATERIALIZED before the builder starts, because both
+        // of them add canonical nodes to the arena -- the gathered values child -- and a
+        // FlatBuffers table cannot be open while that happens.
+        int root = compress
+            ? WriteCompressed(builder, arena, nodeIndex, buffers, encodings)
+            : WriteNode(builder, arena, nodeIndex, buffers, encodings);
 
         // The Buffer vector records what the layout below will actually write, so the paddings have
         // to be settled before the table that carries them is built.
@@ -97,6 +105,152 @@ internal static class ArrayBlobWriter
             blob.AsSpan((int)(total - sizeof(uint))), (uint)flatBuffer.Length);
 
         return blob;
+    }
+
+    /// <summary>
+    /// Writes the column under whichever scheme ColumnCompressor chose.
+    /// </summary>
+    /// <remarks>
+    /// Compression is applied to the TOP of a column and nowhere else. A cascade -- dictionary
+    /// codes that are themselves bit-packed, which is where the reference's ratios come from --
+    /// needs the integer kernels this build does not have yet, and applying a scheme inside a
+    /// struct or a list would change shapes the reader derives top-down. One level is what can be
+    /// done correctly today (docs/90-registry.md).
+    /// </remarks>
+    private static int WriteCompressed(
+        FlatBufferBuilder builder,
+        CanonicalArena arena,
+        int nodeIndex,
+        List<PendingBuffer> buffers,
+        EncodingDictionary encodings)
+    {
+        ColumnPlan plan = ColumnCompressor.Choose(arena, nodeIndex);
+        if (plan.Scheme == ColumnScheme.None)
+        {
+            return WriteNode(builder, arena, nodeIndex, buffers, encodings);
+        }
+
+        // The values child of both schemes is the original column gathered down to its
+        // representative rows, so a dictionary of strings shares the data buffers it came from.
+        int values = CanonicalFilter.Apply(arena, nodeIndex, plan.Gather);
+
+        return plan.Scheme == ColumnScheme.RunEnd
+            ? WriteRunEnd(builder, arena, nodeIndex, values, plan, buffers, encodings)
+            : WriteDict(builder, arena, nodeIndex, values, plan, buffers, encodings);
+    }
+
+    private static int WriteRunEnd(
+        FlatBufferBuilder builder,
+        CanonicalArena arena,
+        int nodeIndex,
+        int values,
+        in ColumnPlan plan,
+        List<PendingBuffer> buffers,
+        EncodingDictionary encodings)
+    {
+        int length = arena.GetNode(nodeIndex).Length;
+        PType endsPType = IndexPType(length);
+
+        byte[] metadata = RunEndBytes(endsPType, (ulong)plan.Codes.Length);
+        int ends = WriteIndexArray(builder, buffers, encodings, plan.Codes, endsPType);
+        int valuesNode = WriteNode(builder, arena, values, buffers, encodings);
+
+        Span<int> children = stackalloc int[2];
+        children[0] = ends;
+        children[1] = valuesNode;
+        return Node(builder, encodings, "vortex.runend"u8, metadata, children, []);
+    }
+
+    private static int WriteDict(
+        FlatBufferBuilder builder,
+        CanonicalArena arena,
+        int nodeIndex,
+        int values,
+        in ColumnPlan plan,
+        List<PendingBuffer> buffers,
+        EncodingDictionary encodings)
+    {
+        int entries = arena.GetNode(values).Length;
+        PType codesPType = IndexPType(entries);
+
+        // is_nullable_codes = false: a null row is a code pointing at a null DICTIONARY ENTRY, not
+        // a null code. Nullness is part of the value the compressor deduplicated, so at most one
+        // entry is null and every row still has a code.
+        byte[] metadata = DictBytes((uint)entries, codesPType);
+        int codes = WriteIndexArray(builder, buffers, encodings, plan.Codes, codesPType);
+        int valuesNode = WriteNode(builder, arena, values, buffers, encodings);
+
+        Span<int> children = stackalloc int[2];
+        children[0] = codes;
+        children[1] = valuesNode;
+        return Node(builder, encodings, "vortex.dict"u8, metadata, children, []);
+    }
+
+    /// <summary>The narrowest unsigned type that indexes <paramref name="count"/> values.</summary>
+    private static PType IndexPType(int count) => count switch
+    {
+        <= byte.MaxValue => PType.U8,
+        <= ushort.MaxValue => PType.U16,
+        _ => PType.U32,
+    };
+
+    /// <summary>Writes an int array as a non-nullable primitive node of the narrowest width.</summary>
+    private static int WriteIndexArray(
+        FlatBufferBuilder builder, List<PendingBuffer> buffers, EncodingDictionary encodings,
+        int[] values, PType ptype)
+    {
+        int width = ptype.ByteWidth();
+        byte[] bytes = new byte[values.Length * width];
+        for (int i = 0; i < values.Length; i++)
+        {
+            switch (width)
+            {
+                case 1:
+                    bytes[i] = (byte)values[i];
+                    break;
+                case 2:
+                    BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(i * 2), (ushort)values[i]);
+                    break;
+                default:
+                    BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(i * 4), (uint)values[i]);
+                    break;
+            }
+        }
+
+        buffers.Add(new PendingBuffer(bytes, Exponent(width)));
+        Span<ushort> indices = stackalloc ushort[1];
+        indices[0] = (ushort)(buffers.Count - 1);
+        return Node(builder, encodings, "vortex.primitive"u8, default, [], indices);
+    }
+
+    private static byte[] RunEndBytes(PType endsPType, ulong runCount)
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            RunEndMetadata value = new RunEndMetadata(endsPType, runCount, 0);
+            RunEndMetadata.Write(ref writer, in value);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
+    private static byte[] DictBytes(uint valuesLength, PType codesPType)
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            DictMetadata value = new DictMetadata(valuesLength, codesPType, false, null);
+            DictMetadata.Write(ref writer, in value);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
     }
 
     private static int WriteNode(

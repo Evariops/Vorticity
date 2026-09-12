@@ -180,6 +180,31 @@ kernels requires the mapping, not the marketing names:
 | Pco | `vortex.pco` | yes, but writer opt-in upstream |
 | Zstd | `vortex.zstd` | yes, but writer opt-in upstream |
 
+## Writing: what the compressor does today
+
+F10 describes a BtrBlocks-style sampling compressor. What exists is the rule-based chooser
+underneath it, measuring two properties in one pass each and applying the result to the TOP of a
+column and nowhere else:
+
+| Property | Scheme | Notes |
+|---|---|---|
+| Few runs | `vortex.runend` | the constant case falls out as the single-run degenerate, so `vortex.constant` is not separately emitted |
+| Few distinct values | `vortex.dict` | codes are non-nullable; a null row is a code pointing at a null dictionary entry |
+| otherwise | canonical | |
+
+Neither needs a new kernel: the values child of both is the original column gathered to its
+representative rows, so a dictionary of strings shares the data buffers it came from and copies only
+16-byte views.
+
+**What is missing, and what it costs.** No FoR, no bit-packing, no ALP, no FSST, no OnPair — every
+scheme that needs a write kernel. On the conformance corpus, Vorticity's output is **2.1× the
+reference's**, against the ≤105% target of [05-benchmarks.md](05-benchmarks.md) §3. The gap is
+almost entirely dense integers (which want FoR + bit-packing) and text (which wants FSST or OnPair);
+`vortex.dict` already covers low-cardinality text and `vortex.runend` covers runs and constants.
+
+Cascading is also absent: the reference's ratios come from dictionary codes that are themselves
+bit-packed, and one scheme per column is what can be done correctly without the integer kernels.
+
 ## Writing: edition targeting
 
 **The candidate scheme list is derived from the target edition, before sampling** — not filtered
