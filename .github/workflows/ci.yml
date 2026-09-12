@@ -78,6 +78,31 @@ jobs:
           # fails at open by design (docs/90-registry.md). Anything beyond that is a regression.
           test "$refused" -le 1
 
+  fuzz:
+    name: parser fuzzing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # docs/04-conformance.md §5 wants the long campaign nightly rather than per-commit, and the
+      # per-commit half already runs as FuzzSmokeTests. This is the middle: enough mutations to be
+      # worth the minute, with a FIXED SEED so a finding is reproducible from the log alone. The
+      # program exits non-zero on a finding and warns when too few mutations got past the open
+      # path -- a campaign that died in the postscript every time has proved nothing.
+      - name: Fuzz the parser
+        run: |
+          dotnet run --project tests/Vorticity.Fuzz -c Release -- \
+            tests/Vorticity.Conformance/corpus 100000 20260912
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-findings
+          path: fuzz/artifacts/
+
   cross-check:
     name: Vortex Rust reads what we write
     runs-on: ubuntu-latest

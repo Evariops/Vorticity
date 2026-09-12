@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Vorticity.Fuzz</RootNamespace>
+    <AssemblyName>Vorticity.Fuzz</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
+  </ItemGroup>
+
+</Project>

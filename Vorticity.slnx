@@ -11,5 +11,6 @@
   <Folder Name="/tests/">
     <Project Path="tests/Vorticity.Tests/Vorticity.Tests.csproj" />
     <Project Path="tests/Vorticity.Conformance/Vorticity.Conformance.csproj" />
+    <Project Path="tests/Vorticity.Fuzz/Vorticity.Fuzz.csproj" />
   </Folder>
 </Solution>
