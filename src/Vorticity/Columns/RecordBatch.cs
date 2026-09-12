@@ -295,6 +295,9 @@ public sealed class RecordBatch : IDisposable
     /// <summary>The arena every column view indexes into.</summary>
     internal CanonicalArena Arena => _arena;
 
+    /// <summary>The root node's index in <see cref="Arena"/>, for a writer that re-serializes it.</summary>
+    internal int RootIndex => _root;
+
     /// <summary>Fetches a canonical node, refusing to touch the arena after disposal.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal CanonicalNode Node(int index)
