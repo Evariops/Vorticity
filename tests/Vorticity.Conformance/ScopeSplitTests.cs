@@ -20,7 +20,7 @@ public sealed class ScopeSplitTests
     // 616/203 was Phase 1. +32 vortex.decimal_byte_parts, +6 vortex.datetimeparts, +5
     // vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst, +46 vortex.onpair. The 45
     // that remain need a component deferred to Vortex 1.1 or in no core edition at all.
-    private const int ExpectedInScope = 774;
+    private const int ExpectedInScope = 776;
     private const int ExpectedOutOfScope = 45;
 
     [Fact]
@@ -56,7 +56,7 @@ public sealed class ScopeSplitTests
 
         Console.Out.Write(report.ToString());
 
-        Assert.Equal(819, total);
+        Assert.Equal(821, total);
         Assert.Equal(ExpectedInScope, inScope);
         Assert.Equal(ExpectedOutOfScope, outOfScope);
     }

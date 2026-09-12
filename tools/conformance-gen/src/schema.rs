@@ -1171,6 +1171,36 @@ fn dist_single_value_dictionary(rows: usize, _: &mut Rng) -> VortexResult<ArrayR
     build_column_with(&dtype, rows, |_| Ok(Scalar::utf8("only-one-value", NN)))
 }
 
+/// Sorted, with every batch's value set disjoint from every other's.
+///
+/// THE ADVERSARIAL CASE FOR A SHARED DICTIONARY, and it is adversarial to the *decision rule*
+/// rather than to the encoding. The rule for committing a column to a dictionary shared across
+/// chunks reads batch 1's distinct-per-row ratio and treats it as an upper bound on the whole
+/// column's. That much this column obeys — 0.1252 in batch 1 against 0.1251 over the column. It is
+/// still the wrong question, and this file exists to make that visible rather than arguable.
+///
+/// Measured over the corpus file, against the closest thing already in the corpus:
+///
+/// | | distinct per batch | column distinct | a shared dictionary saves |
+/// |---|---|---|---|
+/// | `sorted_disjoint_utf8_r8193` | 513, 513 | 1025 | **one entry** |
+/// | `types/binary_nonnull_r8193` | 1153, 1153 | 1153 | **1153 entries** |
+///
+/// The batches here are disjoint; there, they are identical. A shared dictionary is paid for by
+/// deduplication ACROSS chunks, and distinct-per-row measures repetition WITHIN a batch. The two
+/// are independent: this column's batch-1 ratio is 0.125 against the other's 0.281 — it looks the
+/// MORE dictionary-friendly of the two by the rule that decides — and sharing buys it nothing.
+///
+/// Nothing observable in batch 1 predicts cross-batch overlap, so no refinement of a batch-1 ratio
+/// can separate these two files. A column of timestamped strings is enough to produce the shape,
+/// which is why it is worth a corpus file: sorted-by-time data is ordinary, not exotic.
+fn dist_sorted_disjoint_utf8(rows: usize, _: &mut Rng) -> VortexResult<ArrayRef> {
+    let dtype = DType::Utf8(NN);
+    build_column_with(&dtype, rows, |i| {
+        Ok(Scalar::utf8(format!("2024-06-01T00:{:07}Z", i / 8), NN))
+    })
+}
+
 fn dist_bool_alternating(rows: usize, _: &mut Rng) -> VortexResult<ArrayRef> {
     let dtype = DType::Bool(NUL);
     build_column_with(&dtype, rows, |i| {
@@ -1304,6 +1334,11 @@ pub fn distributions() -> Vec<Distribution> {
             id: "single_value_dictionary",
             description: "one distinct string for the whole column",
             build: dist_single_value_dictionary,
+        },
+        Distribution {
+            id: "sorted_disjoint_utf8",
+            description: "sorted strings whose batches share no value: cross-batch dedup buys nothing",
+            build: dist_sorted_disjoint_utf8,
         },
         Distribution {
             id: "bool_alternating",

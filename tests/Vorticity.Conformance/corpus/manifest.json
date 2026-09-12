@@ -18,9 +18,9 @@
     ]
   },
   "coverage": {
-    "files": 819,
-    "total_bytes": 15001425,
-    "total_rows": 2500806,
+    "files": 821,
+    "total_bytes": 15018413,
+    "total_rows": 2510023,
     "row_counts": [
       0,
       1,
@@ -4313,6 +4313,156 @@
       "expected_array_ids": [],
       "missing_expected_array_ids": [],
       "seed": 14024262883110886697,
+      "env": {},
+      "notes": []
+    },
+    {
+      "id": "distributions/sorted_disjoint_utf8_r1024",
+      "dimension": "C",
+      "description": "sorted strings whose batches share no value: cross-batch dedup buys nothing (1024 rows)",
+      "path": "distributions/sorted_disjoint_utf8_r1024.vortex",
+      "sidecar": "distributions/sorted_disjoint_utf8_r1024.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1024,
+      "dtype": "utf8",
+      "array_ids": [
+        "vortex.bool",
+        "vortex.constant",
+        "vortex.fsst",
+        "vortex.primitive",
+        "vortex.runend",
+        "vortex.sequence",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.bool/c0/b1",
+        "vortex.constant/c0/b1",
+        "vortex.fsst/c2/b3",
+        "vortex.primitive/c0/b1",
+        "vortex.runend/c2/b0",
+        "vortex.sequence/c0/b0",
+        "vortex.struct/c2/b0",
+        "vortex.struct/c3/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.dict",
+        "vortex.flat",
+        "vortex.zoned"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 3,
+      "aggregate_ids": [
+        "vortex.bounded_max",
+        "vortex.bounded_min",
+        "vortex.null_count"
+      ],
+      "aggregate_specs": [
+        "vortex.bounded_max(64)",
+        "vortex.bounded_min(64)",
+        "vortex.null_count()"
+      ],
+      "extension_dtype_ids": [],
+      "sha256": "9b3f399de16ba0e118bebea737bcd26091f578f820fdbbad9801b75809cfe27a",
+      "sidecar_sha256": "340dc0e549336b920a1e26a01972c1712514f2ae4a880a7850eed35030fc44a4",
+      "size_bytes": 4176,
+      "file_format_version": 1,
+      "postscript_bytes": 160,
+      "has_dtype_segment": true,
+      "has_file_statistics": true,
+      "metadata_segments": [],
+      "zone_maps": 1,
+      "total_zones": 1,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [],
+      "missing_expected_array_ids": [],
+      "seed": 15628209286874285867,
+      "env": {},
+      "notes": []
+    },
+    {
+      "id": "distributions/sorted_disjoint_utf8_r8193",
+      "dimension": "C",
+      "description": "sorted strings whose batches share no value: cross-batch dedup buys nothing (8193 rows)",
+      "path": "distributions/sorted_disjoint_utf8_r8193.vortex",
+      "sidecar": "distributions/sorted_disjoint_utf8_r8193.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 8193,
+      "dtype": "utf8",
+      "array_ids": [
+        "fastlanes.bitpacked",
+        "vortex.bool",
+        "vortex.constant",
+        "vortex.dict",
+        "vortex.onpair",
+        "vortex.primitive",
+        "vortex.runend",
+        "vortex.sequence",
+        "vortex.struct",
+        "vortex.varbinview"
+      ],
+      "array_node_shapes": [
+        "fastlanes.bitpacked/c0/b1",
+        "vortex.bool/c0/b1",
+        "vortex.constant/c0/b1",
+        "vortex.dict/c2/b0",
+        "vortex.onpair/c4/b1",
+        "vortex.primitive/c0/b1",
+        "vortex.runend/c2/b0",
+        "vortex.sequence/c0/b0",
+        "vortex.struct/c2/b0",
+        "vortex.struct/c3/b0",
+        "vortex.varbinview/c0/b2"
+      ],
+      "dict_nodes": [
+        "codes=u8 codes_nonnull"
+      ],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.dict",
+        "vortex.flat",
+        "vortex.zoned"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 3,
+      "aggregate_ids": [
+        "vortex.bounded_max",
+        "vortex.bounded_min",
+        "vortex.null_count"
+      ],
+      "aggregate_specs": [
+        "vortex.bounded_max(64)",
+        "vortex.bounded_min(64)",
+        "vortex.null_count()"
+      ],
+      "extension_dtype_ids": [],
+      "sha256": "d1032a63bb412a5baa05f8891cd94954036860ca31cb3cc3ba6aa3e544a5b7b4",
+      "sidecar_sha256": "34a8cd8880da185f5208019347a9ba8544cef44a30b61467920e820ec7e43440",
+      "size_bytes": 12812,
+      "file_format_version": 1,
+      "postscript_bytes": 160,
+      "has_dtype_segment": true,
+      "has_file_statistics": true,
+      "metadata_segments": [],
+      "zone_maps": 1,
+      "total_zones": 2,
+      "zone_maps_with_distinct_zones": 1,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [],
+      "missing_expected_array_ids": [],
+      "seed": 13327442311213221375,
       "env": {},
       "notes": []
     },
