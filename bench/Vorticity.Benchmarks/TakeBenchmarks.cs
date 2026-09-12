@@ -36,6 +36,8 @@ public class TakeBenchmarks
     private string _path = string.Empty;
     private long[] _scattered = [];
     private long[] _clustered = [];
+    private string _fsstPath = string.Empty;
+    private long[] _fsstRows = [];
 
     [GlobalSetup]
     public void Setup()
@@ -49,6 +51,14 @@ public class TakeBenchmarks
         {
             _scattered[i] = (i * 1024L) + 511;
             _clustered[i] = i * 8L;
+        }
+
+        // One column, one scheme forced, 4096 rows in one split: a take here is the encoding.
+        _fsstPath = Corpus.Path("encodings/fsst");
+        _fsstRows = new long[8];
+        for (int i = 0; i < _fsstRows.Length; i++)
+        {
+            _fsstRows[i] = (i * 509L) + 3;
         }
     }
 
@@ -92,6 +102,53 @@ public class TakeBenchmarks
             .Project("monotone", "banded", "nulls", "nans")
             .Take(_scattered)
             .ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// A scattered take over a file whose ONE column is `vortex.fsst`, against a full scan of it.
+    /// </summary>
+    /// <remarks>
+    /// THE AXES ABOVE CANNOT MEASURE FSST, and that was discovered the expensive way: a selective
+    /// decode was written for `vortex.fsst`, and the scattered take above did not move by one byte
+    /// of allocation. The `strs` column of `containers/zoned_many_zones_nulls` is `vortex.onpair`,
+    /// not FSST - so the 837 us that axis leaves on the table is OnPair alone, and docs and commit
+    /// messages saying "FSST and OnPair" were describing a pair where only one is present.
+    ///
+    /// `encodings/fsst` is 4096 rows of one utf8 column written with that scheme forced, so a take
+    /// over it measures the encoding and nothing else. Reported against a full scan of the SAME
+    /// file in the same process, because the ratio is what survives comparison with another run:
+    /// both halves move together under thermal drift, which an absolute microsecond figure does
+    /// not.
+    /// </remarks>
+    [Benchmark(Description = "fsst: take 8 of 4096 rows")]
+    public async Task<long> FsstScattered() => await TakeFrom(_fsstPath, _fsstRows);
+
+    /// <summary>The control for the row above: the same file, every row.</summary>
+    [Benchmark(Description = "fsst: full scan of the same file")]
+    public async Task<long> FsstFullScan()
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(_fsstPath, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
+    private async Task<long> TakeFrom(string path, long[] indices)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().Take(indices).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;

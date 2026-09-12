@@ -56,7 +56,41 @@ public sealed class FsstDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false);
+    }
 
+    /// <summary>
+    /// Decodes only the wanted rows, by decompressing only their codes.
+    /// </summary>
+    /// <remarks>
+    /// THE REASON THIS IS POSSIBLE AT ALL is the child the reference does not decode with:
+    /// `codes_offsets[i]..[i+1]` bounds row i's codes exactly, so a row's compressed bytes are
+    /// addressable without walking the rows before it. The header above explains why the REFERENCE
+    /// does not work that way - it decompresses the whole stream in one pass and cuts the result
+    /// with `uncompressed_lengths`, which is the right choice for a full scan and the wrong one for
+    /// a take. docs/90's take table classified this encoding from that decode strategy rather than
+    /// from the format, and called it a variable-length encoding whose row n cannot be found
+    /// without rows 0..n-1. The argument is sound in general and does not apply here.
+    ///
+    /// What is NOT pushed down is `codes_offsets` itself, deliberately: row i needs offsets i AND
+    /// i+1, so the wanted set for that child is not `wanted` but its union with `wanted + 1`.
+    /// Building that union costs more than it saves - the child is one integer decode of len+1
+    /// values, while the cost this method exists to avoid is the FSST kernel over the whole split,
+    /// the heap allocation that sizes with it, and a view built for every row in it.
+    /// </remarks>
+    /// <inheritdoc/>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted, selective: true);
+    }
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted, bool selective)
+    {
         CanonicalSupport.RequireBinaryLike(dtype, Id);
         if (node.BufferCount == 2)
         {
@@ -72,12 +106,18 @@ public sealed class FsstDecoder : ArrayDecoder
         FsstSymbolTable table = FsstSymbolTable.Create(
             node.GetBuffer(0).Span, node.GetBuffer(1).Span, Id);
 
+        int produced = selective ? wanted.Length : length;
+
+        // The lengths ARE pushed down: one per wanted row is all the views need, and the child is
+        // free to specialize its own take.
         PType lengthsPType = metadata.UncompressedLengthsPType;
         CanonicalSupport.RequireIntegerPType(lengthsPType, Id + " uncompressed_lengths");
         DType lengthsType = context.Types.Primitive(lengthsPType, Nullability.NonNullable);
-        int lengthsIndex = context.DecodeChild(in node, 0, lengthsType, length);
+        int lengthsIndex = selective
+            ? context.DecodeChildSelected(in node, 0, lengthsType, length, wanted)
+            : context.DecodeChild(in node, 0, lengthsType, length);
         CanonicalNode uncompressedLengths = CanonicalSupport.RequirePrimitiveChild(
-            context, lengthsIndex, lengthsPType, length, Id + " uncompressed_lengths");
+            context, lengthsIndex, lengthsPType, produced, Id + " uncompressed_lengths");
 
         // VarBin offsets are len + 1, and they bound the code stream rather than the decoded one.
         PType offsetsPType = metadata.CodesOffsetsPType;
@@ -89,36 +129,100 @@ public sealed class FsstDecoder : ArrayDecoder
             context, offsetsIndex, offsetsPType, offsetCount, Id + " codes_offsets");
 
         Validity validity = context.DecodeValidity(in node, 2, dtype.Nullability, length);
+        if (selective)
+        {
+            validity = Compute.CanonicalFilter.FilterValidity(context.Canonical, validity, wanted);
+        }
 
         VortexBuffer codes = node.GetBuffer(2);
-        ReadOnlySpan<byte> stream = CodeStream(codesOffsets, offsetsPType, length, codes);
 
-        int total = TotalDecodedLength(uncompressedLengths, lengthsPType, length);
+        int total = TotalDecodedLength(uncompressedLengths, lengthsPType, produced);
         VortexBuffer heap = CanonicalSupport.Allocate(context, total, 1, out Span<byte> destination);
 
-        int written = table.Decode(stream, destination, Id);
-        if (written != total)
+        if (selective)
         {
-            CompressedThrow.Format(
-                $"{Id} decoded {written} bytes; its uncompressed lengths sum to {total}.");
+            DecodeRows(table, codesOffsets, offsetsPType, length, codes, uncompressedLengths,
+                lengthsPType, wanted, destination);
+        }
+        else
+        {
+            ReadOnlySpan<byte> stream = CodeStream(codesOffsets, offsetsPType, length, codes);
+            int written = table.Decode(stream, destination, Id);
+            if (written != total)
+            {
+                CompressedThrow.Format(
+                    $"{Id} decoded {written} bytes; its uncompressed lengths sum to {total}.");
+            }
         }
 
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
-            length, CanonicalSupport.ViewSize, Id + " views");
+            produced, CanonicalSupport.ViewSize, Id + " views");
         VortexBuffer views = CanonicalSupport.Allocate(
             context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
         BuildViews(
-            uncompressedLengths.Values.Span, lengthsPType, destination, writable, length,
+            uncompressedLengths.Values.Span, lengthsPType, destination, writable, produced,
             dtype.Kind == DTypeKind.Utf8);
 
         if (total == 0)
         {
-            return context.Canonical.AddVarBinView(dtype, length, validity, views, default);
+            return context.Canonical.AddVarBinView(dtype, produced, validity, views, default);
         }
 
         Span<VortexBuffer> single = stackalloc VortexBuffer[1];
         single[0] = heap;
-        return context.Canonical.AddVarBinView(dtype, length, validity, views, single);
+        return context.Canonical.AddVarBinView(dtype, produced, validity, views, single);
+    }
+
+    /// <summary>
+    /// Decompresses one wanted row at a time, each from its own slice of the code stream.
+    /// </summary>
+    /// <remarks>
+    /// Each row is decoded into the REMAINING heap rather than into a slice of exactly its own
+    /// length, and the difference is not cosmetic. The kernel's fast path is an 8-byte store per
+    /// symbol that it may only take while 8 bytes of slack remain; handed a destination cut to the
+    /// row's exact size, every symbol in every row would fall to the narrow tail path instead. The
+    /// declared length is still enforced - the kernel's return value must equal it - so cutting the
+    /// span adds nothing a check does not already give.
+    /// </remarks>
+    private static void DecodeRows(
+        in FsstSymbolTable table,
+        CanonicalNode offsets,
+        PType offsetsPType,
+        int length,
+        VortexBuffer codes,
+        CanonicalNode lengths,
+        PType lengthsPType,
+        ReadOnlySpan<int> wanted,
+        Span<byte> destination)
+    {
+        ReadOnlySpan<byte> rawOffsets = offsets.Values.Span;
+        ReadOnlySpan<byte> rawLengths = lengths.Values.Span;
+        ReadOnlySpan<byte> stream = codes.Span;
+        int written = 0;
+
+        for (int k = 0; k < wanted.Length; k++)
+        {
+            int row = wanted[k];
+            long start = CanonicalSupport.ReadInteger(rawOffsets, offsetsPType, row);
+            long end = CanonicalSupport.ReadInteger(rawOffsets, offsetsPType, row + 1);
+            if (start < 0 || end < start || end > stream.Length)
+            {
+                CompressedThrow.Format(
+                    $"{Id} row {row} spans codes [{start}, {end}) of a {stream.Length}-byte " +
+                    "codes buffer.");
+            }
+
+            int expected = (int)CanonicalSupport.ReadInteger(rawLengths, lengthsPType, k);
+            int got = table.Decode(
+                stream.Slice((int)start, (int)(end - start)), destination.Slice(written), Id);
+            if (got != expected)
+            {
+                CompressedThrow.Format(
+                    $"{Id} row {row} decoded to {got} bytes; it declares {expected}.");
+            }
+
+            written += got;
+        }
     }
 
     /// <summary>
