@@ -38,6 +38,7 @@ public class TakeBenchmarks
     private long[] _clustered = [];
     private string _fsstPath = string.Empty;
     private long[] _fsstRows = [];
+    private string _dictPath = string.Empty;
 
     [GlobalSetup]
     public void Setup()
@@ -55,6 +56,7 @@ public class TakeBenchmarks
 
         // One column, one scheme forced, 4096 rows in one split: a take here is the encoding.
         _fsstPath = Corpus.Path("encodings/fsst");
+        _dictPath = Corpus.Path("encodings/dict");
         _fsstRows = new long[8];
         for (int i = 0; i < _fsstRows.Length; i++)
         {
@@ -134,6 +136,35 @@ public class TakeBenchmarks
     public async Task<long> FsstFullScan()
     {
         await using VortexFile file = await VortexFile.OpenAsync(_fsstPath, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// A scattered take over a file whose one column is `vortex.dict`, against a full scan of it.
+    /// </summary>
+    /// <remarks>
+    /// THE STRUCTURAL AUDIT'S NUMBER. docs/90's take table describes the dictionary strategy as
+    /// "take the codes, leave the values untouched" - and the arena cannot express it. Every node is
+    /// canonicalized on the way in, so there is no representation in which a child stays encoded:
+    /// `DictDecoder.DecodeSelected` pushes the selection into the codes child and then decodes the
+    /// VALUES child in full, because a canonical dictionary is its values materialized. This pair of
+    /// axes is what that costs, and it is the before-number for a compressed array representation.
+    /// </remarks>
+    [Benchmark(Description = "dict: take 8 of 4096 rows")]
+    public async Task<long> DictScattered() => await TakeFrom(_dictPath, _fsstRows);
+
+    /// <summary>The control for the row above: the same file, every row.</summary>
+    [Benchmark(Description = "dict: full scan of the same file")]
+    public async Task<long> DictFullScan()
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(_dictPath, CancellationToken.None);
         long rows = 0;
         await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
