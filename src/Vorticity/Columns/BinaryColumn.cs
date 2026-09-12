@@ -1,0 +1,161 @@
+// Phase 1 contract §12.2 and docs/07-dotnet-mapping.md §4: spans first, `string` on request.
+//
+// The canonical form for both Utf8 and Binary is VarBinView - Arrow's 16-byte view:
+//
+//   [0..4]   u32 size
+//   size <= 12 : [4..4+size]  the value, inline
+//   size >  12 : [4..8] prefix, [8..12] u32 data buffer index, [12..16] u32 offset
+//
+// vortex-array-0.86.1/src/arrays/varbinview/mod.rs. The decoder validates every view a consumer may
+// dereference but deliberately does NOT validate a null row's view - a null slot's bytes are
+// garbage by construction, and upstream's VarBinViewArray::validate skips them too. So this reader
+// must consult validity BEFORE it reads a view, and it re-checks the bounds it depends on so that a
+// decoder bug cannot become an out-of-bounds read.
+using System;
+using System.Buffers.Binary;
+using System.Text;
+using Vorticity.Arrays;
+using Vorticity.Buffers;
+using Vorticity.Types;
+
+namespace Vorticity.Columns;
+
+/// <summary>A variable-length byte column: <c>Utf8</c> or <c>Binary</c>.</summary>
+/// <remarks>
+/// Spans returned here point into the owning <see cref="RecordBatch"/>'s buffers and are invalid
+/// once that batch is disposed. <see cref="GetString"/> is the one accessor that copies.
+/// </remarks>
+public readonly ref struct BinaryColumn
+{
+    private const int ViewSize = 16;
+    private const int MaxInlineLength = 12;
+
+    private readonly RecordBatch _batch;
+    private readonly int _node;
+
+    internal BinaryColumn(RecordBatch batch, int node)
+    {
+        _batch = batch;
+        _node = node;
+    }
+
+    /// <summary>Rows in this column.</summary>
+    public int Length => _batch.Node(_node).Length;
+
+    /// <summary>Whether row <paramref name="index"/> is not null.</summary>
+    /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
+    public bool IsValid(int index) => ColumnCore.IsValid(_batch, _node, index);
+
+    /// <summary>
+    /// <see langword="true"/> when the dtype is <c>Utf8</c>; the decoder has already verified every
+    /// non-null value is valid UTF-8. <see langword="false"/> for <c>Binary</c>, whose bytes are
+    /// arbitrary.
+    /// </summary>
+    public bool IsUtf8 => _batch.Node(_node).DType.Kind == DTypeKind.Utf8;
+
+    /// <summary>
+    /// The bytes of row <paramref name="index"/>, zero-copy. <b>Empty for a null row</b> - a null
+    /// row's view is never dereferenced. Invalid after the owning batch is disposed.
+    /// </summary>
+    /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
+    /// <exception cref="VortexFormatException">The view escapes its buffer.</exception>
+    public ReadOnlySpan<byte> GetSpan(int index)
+    {
+        CanonicalNode node = _batch.Node(_node);
+        ColumnCore.CheckRow(index, node.Length);
+        if (!ColumnCore.IsValid(_batch, _node, index))
+        {
+            return default;
+        }
+
+        ReadOnlySpan<byte> view = View(node, index);
+        uint size = BinaryPrimitives.ReadUInt32LittleEndian(view);
+        if (size <= MaxInlineLength)
+        {
+            return view.Slice(4, (int)size);
+        }
+
+        uint bufferIndex = BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
+        uint offset = BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
+        if (bufferIndex > int.MaxValue)
+        {
+            ColumnsThrow.Format($"Row {index} names data buffer {bufferIndex}.");
+        }
+
+        // GetDataBuffer bounds-checks the index and throws VortexFormatException.
+        VortexBuffer data = node.GetDataBuffer((int)bufferIndex);
+        if ((ulong)offset + size > (ulong)(uint)data.Length)
+        {
+            ColumnsThrow.Format(
+                $"Row {index} spans [{offset}, {(ulong)offset + size}) of a data buffer holding " +
+                $"{data.Length} bytes.");
+        }
+
+        return data.Span.Slice((int)offset, (int)size);
+    }
+
+    /// <summary>
+    /// The byte length of row <paramref name="index"/>; 0 for a null row.
+    /// </summary>
+    /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
+    /// <exception cref="VortexFormatException">The recorded size does not fit an <see cref="int"/>.</exception>
+    public int GetLength(int index)
+    {
+        CanonicalNode node = _batch.Node(_node);
+        ColumnCore.CheckRow(index, node.Length);
+        if (!ColumnCore.IsValid(_batch, _node, index))
+        {
+            return 0;
+        }
+
+        uint size = BinaryPrimitives.ReadUInt32LittleEndian(View(node, index));
+        if (size > int.MaxValue)
+        {
+            ColumnsThrow.Format($"Row {index} declares a length of {size} bytes.");
+        }
+
+        return (int)size;
+    }
+
+    /// <summary>
+    /// Row <paramref name="index"/> as a <see cref="string"/>, or <see langword="null"/> for a null
+    /// row. <b>ALLOCATES</b>; it is the one accessor here that does, and it exists so a caller can
+    /// keep a value past <see cref="RecordBatch.Dispose"/> (docs/07-dotnet-mapping.md §4).
+    /// </summary>
+    /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
+    /// <returns>The decoded string, or <see langword="null"/> when the row is null.</returns>
+    /// <remarks>
+    /// The bytes are decoded as UTF-8 whether the dtype is <c>Utf8</c> or <c>Binary</c>. For
+    /// <c>Binary</c> that is a lossy interpretation - invalid sequences become U+FFFD - so read
+    /// binary values with <see cref="GetSpan"/> instead.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
+    public string? GetString(int index)
+    {
+        CanonicalNode node = _batch.Node(_node);
+        ColumnCore.CheckRow(index, node.Length);
+        if (!ColumnCore.IsValid(_batch, _node, index))
+        {
+            return null;
+        }
+
+        return Encoding.UTF8.GetString(GetSpan(index));
+    }
+
+    private static ReadOnlySpan<byte> View(CanonicalNode node, int index)
+    {
+        ReadOnlySpan<byte> views = node.Views.Span;
+        long start = (long)index * ViewSize;
+        if (start + ViewSize > views.Length)
+        {
+            ColumnsThrow.Format(
+                $"A varbinview column of {node.Length} rows needs {(long)node.Length * ViewSize} " +
+                $"bytes of views; the buffer holds {views.Length}.");
+        }
+
+        return views.Slice((int)start, ViewSize);
+    }
+}
