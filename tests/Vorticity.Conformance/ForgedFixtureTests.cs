@@ -23,6 +23,7 @@ using System.Threading.Tasks;
 using Vorticity.Columns;
 using Vorticity.Conformance.Corpus;
 using Vorticity.File;
+using Vorticity.IO;
 using Vorticity.Scan;
 using Xunit;
 

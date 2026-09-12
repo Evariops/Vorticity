@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Vorticity.Benchmarks</RootNamespace>
+    <AssemblyName>Vorticity.Benchmarks</AssemblyName>
+
+    <!-- Application properties, per docs/03-architecture.md §1: they belong to the executables. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- BenchmarkDotNet's generated bootstrapper trips a handful of analyzers that the library's
+         own settings turn into errors. The measurements are what matter here, not the generated
+         harness's style. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -15,6 +15,31 @@ an arm64 leg or that contract is untested. Anything worse points at a specific d
 vectorized path, an allocation in a loop), and the benchmark suite must make that defect visible
 rather than just reporting a ratio.
 
+## 1b. Where this actually stands
+
+The FFI harness of §2 does not exist yet, so **no number below is a ratio against Rust** and none
+should be quoted as one. What `bench/Vorticity.Benchmarks` measures today is the other half of the
+protocol: absolute figures per axis, with allocations, on a fixed dataset, which is what makes a
+regression visible and what a SIMD kernel has to beat.
+
+A first run on `containers/zoned_many_zones_nulls` (65 536 rows over five mixed columns, Apple
+arm64, in-process toolchain):
+
+| Axis | Mean | Reading |
+|---|---|---|
+| Full scan | 1.91 ms | ~34 M rows/s across five columns |
+| Projected scan, 1 of 5 columns | 102 µs | 19× the full scan: projection pushdown is real |
+| Open to first batch | 80 µs | the local floor for the 1–2 round trip promise |
+| `Take` of 1 000 scattered rows | 110 µs | |
+| Selective filter, pruning **on** | 58 µs | |
+| Selective filter, pruning **off** | 546 µs | 9.4× — what zone-map pruning is worth here |
+
+One toolchain note, because it is load-bearing rather than incidental: BenchmarkDotNet 0.15.4 does
+not know the `net11.0` moniker and its SDK validator throws before any benchmark runs, so the
+project uses the **in-process** toolchain. That costs process isolation — no cross-runtime or
+cross-GC comparison — and costs the measurement nothing. It reverts to the default toolchain the day
+BenchmarkDotNet ships net11.0 support.
+
 ## 2. Measurement method
 
 **Single process, single timer.** `vortex-ffi` builds as a cdylib exposing a stable C API. The
