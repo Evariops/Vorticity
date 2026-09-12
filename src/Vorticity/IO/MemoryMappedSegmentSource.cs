@@ -1,0 +1,419 @@
+// docs/03-architecture.md §3.5: "MemoryMappedSegmentSource - zero-copy, alignment guaranteed by
+// the writer's padding." Performance invariant 2: a segment view is handed out directly, with no
+// copy. Deliberately NOT MemoryMappedViewAccessor.Read*, which copies.
+using System;
+using System.Diagnostics.CodeAnalysis;
+using System.IO;
+using System.IO.MemoryMappedFiles;
+using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Win32.SafeHandles;
+using Vorticity.Buffers;
+using Vorticity.Serialization.Schemas;
+
+namespace Vorticity.IO;
+
+/// <summary>
+/// A zero-copy <see cref="ISegmentSource"/> over a memory-mapped local file.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The whole file is mapped once at construction and every segment is a pointer into it. There is
+/// no I/O on the read path at all, so <see cref="ReadManyAsync"/> does no coalescing: a run is
+/// only ever a way to turn several small reads into one, and there are no reads.
+/// </para>
+/// <para>
+/// <b>Alignment.</b> A mapping base is page-aligned, so a segment at file offset <c>o</c> sits at
+/// an address congruent to <c>o</c> modulo the page size; a writer that aligned <c>o</c> to
+/// <c>2^k</c> with <c>k ≤ 6</c> therefore yields an address aligned to <c>2^k</c>.
+/// <see cref="ReadRangeAsync"/> is the one entry point that can be asked for an alignment the file
+/// offset does not satisfy, and it copies in exactly that case.
+/// </para>
+/// </remarks>
+public sealed class MemoryMappedSegmentSource : ISegmentSource
+{
+    private readonly MappedFileOwner? _mapping;
+    private readonly SafeFileHandle? _emptyFileHandle;
+    private int _disposed;
+
+    private MemoryMappedSegmentSource(MappedFileOwner? mapping, SafeFileHandle? emptyFileHandle, long length)
+    {
+        _mapping = mapping;
+        _emptyFileHandle = emptyFileHandle;
+        Length = length;
+    }
+
+    /// <summary>The file length in bytes.</summary>
+    public long Length { get; }
+
+    /// <summary>Opens <paramref name="path"/> read-only and maps it.</summary>
+    /// <param name="path">A local file path.</param>
+    /// <returns>A source over the whole file.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
+    /// <exception cref="IOException">The file could not be opened or mapped.</exception>
+    public static MemoryMappedSegmentSource Open(string path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        // System.IO.File spelled out: `Vorticity.File` (PHASE1-CONTRACTS.md §7) shadows a bare `File`
+        // for every file in this assembly, because namespace lookup beats a using directive.
+        SafeFileHandle handle = System.IO.File.OpenHandle(
+            path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.None);
+
+        try
+        {
+            return Create(handle, RandomAccess.GetLength(handle), ownsHandle: true);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Maps an already-open file handle.</summary>
+    /// <param name="handle">A readable file handle.</param>
+    /// <param name="length">The file length in bytes.</param>
+    /// <param name="ownsHandle">
+    /// When true, <see cref="DisposeAsync"/> disposes <paramref name="handle"/> — but only once
+    /// the mapping's last reference is gone, so an outstanding batch can never be unmapped early.
+    /// </param>
+    /// <returns>A source over the whole file.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="handle"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="length"/> is negative.</exception>
+    public static MemoryMappedSegmentSource Create(SafeFileHandle handle, long length, bool ownsHandle)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+
+        // A length larger than the file would map pages past the end, and touching those is a
+        // SIGBUS rather than an exception. One extra stat at open is the price of never being
+        // able to reach that.
+        long actualLength = RandomAccess.GetLength(handle);
+        if (length > actualLength)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(length), length, $"The file holds only {actualLength} bytes.");
+        }
+
+        if (length == 0)
+        {
+            // An empty file cannot be mapped on any platform, and there is nothing to map. The
+            // source still answers GetLengthAsync and still rejects every non-empty read.
+            return new MemoryMappedSegmentSource(null, ownsHandle ? handle : null, 0);
+        }
+
+        MappedFileOwner mapping = MappedFileOwner.Map(handle, length, ownsHandle);
+        return new MemoryMappedSegmentSource(mapping, null, length);
+    }
+
+    /// <inheritdoc/>
+    public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return new ValueTask<long>(Length);
+    }
+
+    /// <inheritdoc/>
+    public ValueTask<SegmentOwner> ReadAsync(SegmentSpec spec, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
+
+        SegmentIo.ValidateSpec(in spec, out long offset, out int length);
+        SegmentIo.CheckInFile(offset, length, Length);
+
+        if (length == 0)
+        {
+            return new ValueTask<SegmentOwner>(new EmptySegmentOwner());
+        }
+
+        MappedFileOwner mapping = AcquireMapping();
+        try
+        {
+            VortexBuffer view = mapping.View(offset, length, spec.AlignmentExponent);
+            return new ValueTask<SegmentOwner>(new SliceSegmentOwner(mapping, view));
+        }
+        finally
+        {
+            mapping.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(requests);
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
+
+        if (requests.IsPopulated)
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        int count = requests.Count;
+        if (count == 0)
+        {
+            requests.Complete();
+            return ValueTask.CompletedTask;
+        }
+
+        MappedFileOwner? mapping = null;
+
+        try
+        {
+            for (int slot = 0; slot < count; slot++)
+            {
+                if (requests.IsFilled(slot))
+                {
+                    continue;
+                }
+
+                SegmentSpec spec = requests.GetSpec(slot);
+                SegmentIo.ValidateSpec(in spec, out long offset, out int length);
+                SegmentIo.CheckInFile(offset, length, Length);
+
+                // Taken lazily: a set of nothing but zero-length segments must not fail on a
+                // source whose file is empty and therefore has no mapping at all.
+                mapping ??= AcquireMapping();
+
+                // One Retain per slot on the single mapping owner; no per-segment object, no copy.
+                requests.SetSharedResult(
+                    slot, mapping, mapping.View(offset, length, spec.AlignmentExponent));
+            }
+
+            requests.Complete();
+        }
+        catch
+        {
+            requests.AbandonPending();
+            throw;
+        }
+        finally
+        {
+            mapping?.Release();
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
+    /// <inheritdoc/>
+    public ValueTask<SegmentOwner> ReadRangeAsync(
+        long offset, int length, int alignment, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
+
+        int actual = SegmentIo.ClampRange(offset, length, alignment, Length);
+        if (actual == 0)
+        {
+            return new ValueTask<SegmentOwner>(new EmptySegmentOwner());
+        }
+
+        MappedFileOwner mapping = AcquireMapping();
+
+        try
+        {
+            if (mapping.IsAlignedAt(offset, alignment))
+            {
+                VortexBuffer view = mapping.View(
+                    offset, actual, BitOperations.TrailingZeroCount(alignment));
+                return new ValueTask<SegmentOwner>(new SliceSegmentOwner(mapping, view));
+            }
+
+            // The tail read starts at `length - 65536`, which is aligned to nothing in particular.
+            // One copy, once per file open, is the honest answer; the alternative is handing back
+            // a buffer that lies about its base.
+            NativeSegmentOwner copy = AlignedBufferPool.Shared.Rent(actual, alignment);
+            try
+            {
+                mapping.CopyTo(offset, copy.WritableSpan);
+            }
+            catch
+            {
+                copy.Dispose();
+                throw;
+            }
+
+            return new ValueTask<SegmentOwner>(copy);
+        }
+        finally
+        {
+            mapping.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        // Drops the creator's reference only. Slices handed to a live batch keep the mapping
+        // alive until that batch releases them.
+        _mapping?.Dispose();
+        _emptyFileHandle?.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// Borrows the mapping for the duration of one operation.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="DisposeAsync"/> on another thread drops the source's reference, and
+    /// <see cref="MappedFileOwner.CopyTo"/> dereferences the base pointer — so without a
+    /// reference held across the operation a concurrent dispose is a use-after-unmap, which on
+    /// every platform is a fault rather than an exception. <see cref="SegmentOwner.Retain"/> is
+    /// atomic and refuses once the count has reached zero, so the race resolves as
+    /// <see cref="ObjectDisposedException"/> instead.
+    /// </remarks>
+    private MappedFileOwner AcquireMapping()
+    {
+        MappedFileOwner? mapping = _mapping;
+        if (mapping is null)
+        {
+            throw new ObjectDisposedException(
+                nameof(MemoryMappedSegmentSource), "The file is empty and was never mapped.");
+        }
+
+        return (MappedFileOwner)mapping.Retain();
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            throw new ObjectDisposedException(nameof(MemoryMappedSegmentSource));
+        }
+    }
+
+    /// <summary>
+    /// The mapping itself, as a <see cref="SegmentOwner"/> so that every slice can refcount it.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="SegmentOwner.Buffer"/> stays <see cref="VortexBuffer.Empty"/>: a file may be
+    /// larger than <see cref="int.MaxValue"/> and a <see cref="VortexBuffer"/> cannot describe it.
+    /// The base pointer and the <see cref="long"/> length live here instead, and
+    /// <see cref="View"/> is the only way to obtain an addressable window.
+    /// </remarks>
+    private sealed unsafe class MappedFileOwner : SegmentOwner
+    {
+        private readonly MemoryMappedFile _file;
+        private readonly MemoryMappedViewAccessor _view;
+        private readonly SafeFileHandle? _ownedHandle;
+        private readonly byte* _base;
+        private readonly long _length;
+
+        private MappedFileOwner(
+            MemoryMappedFile file,
+            MemoryMappedViewAccessor view,
+            SafeFileHandle? ownedHandle,
+            byte* basePointer,
+            long length)
+        {
+            _file = file;
+            _view = view;
+            _ownedHandle = ownedHandle;
+            _base = basePointer;
+            _length = length;
+        }
+
+        internal static MappedFileOwner Map(SafeFileHandle handle, long length, bool ownsHandle)
+        {
+            // leaveOpen: true — the handle's lifetime is ours to manage, and it must outlive the
+            // mapping on platforms where the mapping keeps a reference to it.
+            MemoryMappedFile file = MemoryMappedFile.CreateFromFile(
+                handle,
+                mapName: null,
+                capacity: 0,
+                MemoryMappedFileAccess.Read,
+                HandleInheritability.None,
+                leaveOpen: true);
+
+            MemoryMappedViewAccessor? view = null;
+            bool acquired = false;
+
+            try
+            {
+                view = file.CreateViewAccessor(0, length, MemoryMappedFileAccess.Read);
+
+                byte* pointer = null;
+                view.SafeMemoryMappedViewHandle.AcquirePointer(ref pointer);
+                acquired = true;
+
+                if (pointer is null)
+                {
+                    throw new IOException("The memory mapping produced a null base address.");
+                }
+
+                return new MappedFileOwner(
+                    file,
+                    view,
+                    ownsHandle ? handle : null,
+                    pointer + view.PointerOffset,
+                    length);
+            }
+            catch
+            {
+                if (acquired)
+                {
+                    view!.SafeMemoryMappedViewHandle.ReleasePointer();
+                }
+
+                view?.Dispose();
+                file.Dispose();
+                throw;
+            }
+        }
+
+        /// <summary>An addressable window over <c>[offset, offset + length)</c>.</summary>
+        /// <param name="offset">A validated, in-file offset.</param>
+        /// <param name="length">A validated length that does not escape the file.</param>
+        /// <param name="alignmentExponent">The segment's declared alignment exponent.</param>
+        internal VortexBuffer View(long offset, int length, int alignmentExponent)
+        {
+            // Re-checked here even though every caller validated: this is the one method that
+            // turns a file-supplied number into an address, so it carries the class I check.
+            if ((ulong)offset > (ulong)_length || (ulong)length > (ulong)(_length - offset))
+            {
+                ThrowWindow(offset, length, _length);
+            }
+
+            return VortexBuffer.FromPointer(_base + offset, length, alignmentExponent);
+        }
+
+        internal bool IsAlignedAt(long offset, int alignment) =>
+            ((nuint)(_base + offset) & (nuint)(alignment - 1)) == 0;
+
+        internal void CopyTo(long offset, Span<byte> destination)
+        {
+            if ((ulong)offset > (ulong)_length ||
+                (ulong)destination.Length > (ulong)(_length - offset))
+            {
+                ThrowWindow(offset, destination.Length, _length);
+            }
+
+            new ReadOnlySpan<byte>(_base + offset, destination.Length).CopyTo(destination);
+        }
+
+        /// <inheritdoc/>
+        protected override void FreeCore()
+        {
+            _view.SafeMemoryMappedViewHandle.ReleasePointer();
+            _view.Dispose();
+            _file.Dispose();
+            _ownedHandle?.Dispose();
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        [DoesNotReturn]
+        private static void ThrowWindow(long offset, int length, long mappedLength) =>
+            throw new VortexFormatException(
+                $"Window [{offset}, {offset + (long)length}) escapes a mapping of {mappedLength} bytes.");
+    }
+}
