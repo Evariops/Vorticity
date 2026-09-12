@@ -81,3 +81,6 @@ leak-*
 # ---- OS ----
 .DS_Store
 Thumbs.db
+
+# ---- Notes de travail locales ----
+TODO.md
