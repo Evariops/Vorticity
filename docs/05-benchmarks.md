@@ -17,22 +17,47 @@ rather than just reporting a ratio.
 
 ## 1b. Where this actually stands
 
-The FFI harness of §2 does not exist yet, so **no number below is a ratio against Rust** and none
-should be quoted as one. What `bench/Vorticity.Benchmarks` measures today is the other half of the
-protocol: absolute figures per axis, with allocations, on a fixed dataset, which is what makes a
-regression visible and what a SIMD kernel has to beat.
+The FFI harness of §2 now exists ([`tools/vxbench-rs`](../tools/vxbench-rs)), so the numbers below
+**are** ratios against Rust, measured in one process on the same bytes with the same clock.
 
-A first run on `containers/zoned_many_zones_nulls` (65 536 rows over five mixed columns, Apple
-arm64, in-process toolchain):
+`containers/zoned_many_zones_nulls` — 65 536 rows over five mixed columns, Apple M4 Pro (arm64),
+in-process toolchain, single-threaded on both sides. Both readers return 65 536 rows in **64
+batches**, checked before every run:
+
+| Axis | Vorticity | Vortex Rust | Ratio |
+|---|---|---|---|
+| **Full scan** | 1.878 ms | 1.312 ms | **1.43× slower** — criterion 4 wants ≤ 2× |
+| Projected scan, 1 of 5 columns | 102 µs | 264 µs | 2.6× faster |
+| Open → first batch | 82.5 µs | 1.217 ms | 14.7× faster (see below) |
+| Open → footer only | 41.6 µs | 49.6 µs | 1.19× faster |
+| Empty FFI call | — | 2.5 ns | the floor: noise on every axis above |
+
+And the absolute axes the harness does not cover:
 
 | Axis | Mean | Reading |
 |---|---|---|
-| Full scan | 1.91 ms | ~34 M rows/s across five columns |
-| Projected scan, 1 of 5 columns | 102 µs | 19× the full scan: projection pushdown is real |
-| Open to first batch | 80 µs | the local floor for the 1–2 round trip promise |
 | `Take` of 1 000 scattered rows | 110 µs | |
 | Selective filter, pruning **on** | 58 µs | |
 | Selective filter, pruning **off** | 546 µs | 9.4× — what zone-map pruning is worth here |
+
+**Read the first-batch row carefully.** It is like-for-like in unit of work — both sides emit 64
+batches — but Rust's array stream evidently materializes the whole local scan on its first poll:
+its time to first batch (1.217 ms) is within 8% of its time to scan everything (1.312 ms). So the
+number is a real difference in *latency to first row*, which is what the axis is for, and not a
+decode-speed result. Quoting it as "14× faster than Rust" without that sentence would be
+dishonest.
+
+**One harness bias, found and fixed, because it moved a number.** The first version of the shim
+built a `VortexSession::default()` per call. That registers every edition and initializes the arrow
+and parquet-variant integrations — about 90 µs — which nothing on the .NET side pays per open,
+since `EncodingRegistry` is static. Charging it to Rust made the footer-only axis read 141 µs
+instead of 49.6 µs, and the projected scan 361 µs instead of 264 µs. The session is now built once
+and the *file* is opened from scratch on both sides, which is the comparison that was intended.
+
+The allocation figures (190 KB per full scan, 133 KB of it in the open path and the first batch)
+are not in tension with criterion 3: that criterion is about the *steady state per batch*, which
+works out to under a kilobyte here and is pinned exactly by `ScanAllocationTests` rather than by a
+benchmark total.
 
 One toolchain note, because it is load-bearing rather than incidental: BenchmarkDotNet 0.15.4 does
 not know the `net11.0` moniker and its SDK validator throws before any benchmark runs, so the
@@ -42,11 +67,20 @@ BenchmarkDotNet ships net11.0 support.
 
 ## 2. Measurement method
 
-**Single process, single timer.** `vortex-ffi` builds as a cdylib exposing a stable C API. The
-BenchmarkDotNet harness loads it through `DllImport` and measures both implementations in the same
-process, on the same data, with the same page-cache state and the same clock. This eliminates the
-usual cross-runner noise (different timers, different warm-up, different filesystem state) which
-is exactly the noise that makes a 1.4× ratio unreadable.
+**Single process, single timer.** A cdylib exposing a stable C API is loaded through `DllImport`,
+and the BenchmarkDotNet harness measures both implementations in the same process, on the same
+data, with the same page-cache state and the same clock. This eliminates the usual cross-runner
+noise (different timers, different warm-up, different filesystem state) which is exactly the noise
+that makes a 1.4× ratio unreadable.
+
+This section used to name `vortex-ffi` as that cdylib. It is not: `vortex-ffi` is `publish = false`
+upstream, so using it would mean a second git dependency, and it is a general-purpose C API with
+its own object model whose per-call overhead would land inside the measurement. The shim in
+[`tools/vxbench-rs`](../tools/vxbench-rs) is built against the same crates.io pin the corpus was
+generated with (`vortex = "=0.86.1"`), exposes one entry point per axis, and returns a row count —
+no handles, no allocation across the boundary, nothing to measure but the scan. It is built by
+hand and is not a CI dependency; the comparison benchmarks fail loudly when it is absent rather
+than quietly reporting no ratio.
 
 Caveat to control for: the FFI boundary costs a call. It is amortized by measuring whole-file
 scans and whole-column decodes, never per-value operations. A dedicated empty-call benchmark

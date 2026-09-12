@@ -1,0 +1,19 @@
+[package]
+name = "vxbench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "A cdylib exposing Vortex's Rust reader through a C ABI, so BenchmarkDotNet can measure both implementations in one process against one clock."
+
+[lib]
+crate-type = ["cdylib"]
+
+# The SAME crates.io pin tools/conformance-gen uses. Not a git dependency and not `vortex-ffi`:
+# see the README for why the shim is purpose-built rather than borrowed.
+[dependencies]
+vortex = "=0.86.1"
+futures = "0.3"
+
+[profile.release]
+lto = true
+codegen-units = 1

@@ -45,6 +45,7 @@ BenchmarkDotNet.Artifacts/
 # ---- Rust conformance generator ----
 tools/conformance-gen/target/
 tools/row-vectors/target/
+tools/vxbench-rs/target/
 **/Cargo.lock.orig
 
 # ---- Conformance corpus (committed, not generated on the fly) ----
