@@ -1,0 +1,197 @@
+// vortex.sequence - vortex-sequence-0.86.1/src/array.rs, src/eval.rs and src/compress.rs.
+// A[i] = base + i * multiplier, with NO children and NO buffers: everything is in the metadata.
+//
+// Three things are easy to get wrong and all three are checked here:
+//   * a zero-length sequence is malformed ("SequenceArray length must be greater than zero"),
+//     which is why encodings/sequence_r0 is in the corpus manifest's `skipped` list;
+//   * the multiplier's ptype comes from the PROTO ONEOF TAG, not from the array's dtype:
+//     int64_value -> i64, uint64_value -> u64, anything else is an error
+//     (`multiplier_ptype_from_proto`). The serialized step preserves signedness, not width;
+//   * `base + (n - 1) * multiplier` must fit the output ptype, checked BEFORE a single value is
+//     generated (`ensure_last_expressible`, which has a dedicated upstream test).
+using System;
+using System.Numerics;
+using System.Runtime.InteropServices;
+using Vorticity.Arrays.Metadata;
+using Vorticity.Buffers;
+using Vorticity.Types;
+
+namespace Vorticity.Arrays.Decoders.Compressed;
+
+/// <summary>Decodes <c>vortex.sequence</c> into a materialized primitive array.</summary>
+public sealed class SequenceDecoder : ArrayDecoder
+{
+    private const string Id = "vortex.sequence";
+
+    /// <summary>The shared, stateless instance.</summary>
+    public static readonly SequenceDecoder Instance = new();
+
+    /// <inheritdoc/>
+    public override ReadOnlySpan<byte> IdUtf8 => "vortex.sequence"u8;
+
+    /// <inheritdoc/>
+    public override ArrayEncodingId EncodingId => ArrayEncodingId.Sequence;
+
+    /// <inheritdoc/>
+    public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 0, Id);
+
+        PType ptype = CompressedValues.RequireIntegerPrimitive(dtype, Id);
+
+        if (length <= 0)
+        {
+            CompressedThrow.Format($"{Id} length must be greater than zero; got {length}.");
+        }
+
+        SequenceMetadata metadata = SequenceMetadata.Read(node.Metadata, context.Scalars, context.Types);
+
+        // The base is validated against the OUTPUT ptype, so a base that does not narrow
+        // losslessly is rejected here rather than silently truncated.
+        DType baseType = context.Types.Primitive(ptype, Nullability.NonNullable);
+        TypedScalar baseScalar = TypedScalarReader.Interpret(metadata.Base, baseType);
+        if (baseScalar.IsNull)
+        {
+            CompressedThrow.Format($"{Id} base value cannot be null.");
+        }
+
+        PType multiplierPType = metadata.Multiplier.Kind switch
+        {
+            ScalarValueKind.Int64 => PType.I64,
+            ScalarValueKind.UInt64 => PType.U64,
+            _ => CompressedThrow.Format<PType>(
+                $"{Id} multiplier must be an integer scalar; the wire carried " +
+                $"{metadata.Multiplier.Kind}."),
+        };
+
+        DType multiplierType = context.Types.Primitive(multiplierPType, Nullability.NonNullable);
+        TypedScalar multiplierScalar = TypedScalarReader.Interpret(metadata.Multiplier, multiplierType);
+
+        bool multiplierAscending;
+        ulong multiplierMagnitude;
+        ulong multiplierBits;
+        if (multiplierPType == PType.U64)
+        {
+            ulong step = multiplierScalar.AsUInt64;
+            multiplierAscending = true;
+            multiplierMagnitude = step;
+            multiplierBits = step;
+        }
+        else
+        {
+            long step = multiplierScalar.AsInt64;
+            multiplierAscending = step >= 0;
+            multiplierMagnitude = step >= 0 ? (ulong)step : (ulong)(-(step + 1)) + 1UL;
+            multiplierBits = unchecked((ulong)step);
+        }
+
+        ulong baseBits = ReadBaseBits(baseScalar, ptype);
+        EnsureLastExpressible(ptype, baseBits, multiplierAscending, multiplierMagnitude, length);
+
+        int width = ptype.ByteWidth();
+        int total = ArrayDecodeContext.CheckedMultiply(length, width, "Sequence values");
+        VortexBuffer output = CompressedValues.Allocate(
+            context, total, width, Id, out Span<byte> destination);
+
+        switch (width)
+        {
+            case 1:
+                Generate<byte>(destination, baseBits, multiplierBits);
+                break;
+            case 2:
+                Generate<ushort>(destination, baseBits, multiplierBits);
+                break;
+            case 4:
+                Generate<uint>(destination, baseBits, multiplierBits);
+                break;
+            default:
+                Generate<ulong>(destination, baseBits, multiplierBits);
+                break;
+        }
+
+        // A sequence has no validity of its own: every generated row is valid.
+        return context.Canonical.AddPrimitive(
+            dtype, length, Validity.FromNullability(dtype.Nullability), ptype, output);
+    }
+
+    private static void Generate<T>(Span<byte> destination, ulong baseBits, ulong multiplierBits)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        Span<T> values = MemoryMarshal.Cast<byte, T>(destination);
+        T step = T.CreateTruncating(multiplierBits);
+        T accumulator = T.CreateTruncating(baseBits);
+        for (int i = 0; i < values.Length; i++)
+        {
+            values[i] = accumulator;
+            accumulator = unchecked(accumulator + step);
+        }
+    }
+
+    private static ulong ReadBaseBits(TypedScalar baseScalar, PType ptype)
+    {
+        // The scalar was already range-checked against `ptype`, so the two's-complement bits of
+        // either wire kind are exactly the output representation once truncated.
+        return ptype.IsSignedInteger()
+            ? unchecked((ulong)baseScalar.AsInt64)
+            : baseScalar.AsUInt64;
+    }
+
+    // `SequenceData::ensure_last_expressible`. Measured in the ptype's own signedness so a large
+    // u64 base stays exact, and expressed as `steps <= room / magnitude` so the product is never
+    // formed at all.
+    private static void EnsureLastExpressible(
+        PType ptype, ulong baseBits, bool ascending, ulong magnitude, int length)
+    {
+        ulong steps = (ulong)(length - 1);
+        if (steps == 0 || magnitude == 0)
+        {
+            return;
+        }
+
+        ulong room;
+        if (ptype.IsSignedInteger())
+        {
+            long value = SignExtend(baseBits, ptype);
+            long max = (long)MaxValueAsUInt64(ptype);
+            long bound = ascending ? max : -max - 1;
+            room = AbsoluteDifference(value, bound);
+        }
+        else
+        {
+            room = ascending ? MaxValueAsUInt64(ptype) - baseBits : baseBits;
+        }
+
+        if (steps > room / magnitude)
+        {
+            CompressedThrow.Format(
+                $"{Id}'s final value is not expressible in {ptype.Name()}: {length} rows of " +
+                $"step magnitude {magnitude} from the given base overflow it.");
+        }
+    }
+
+    private static long SignExtend(ulong bits, PType ptype) => ptype switch
+    {
+        PType.I8 => (sbyte)bits,
+        PType.I16 => (short)bits,
+        PType.I32 => (int)bits,
+        _ => unchecked((long)bits),
+    };
+
+    private static ulong MaxValueAsUInt64(PType ptype) => ptype switch
+    {
+        PType.U8 => byte.MaxValue,
+        PType.U16 => ushort.MaxValue,
+        PType.U32 => uint.MaxValue,
+        PType.U64 => ulong.MaxValue,
+        PType.I8 => (ulong)sbyte.MaxValue,
+        PType.I16 => (ulong)short.MaxValue,
+        PType.I32 => (ulong)int.MaxValue,
+        _ => (ulong)long.MaxValue,
+    };
+
+    private static ulong AbsoluteDifference(long a, long b) =>
+        a >= b ? unchecked((ulong)a - (ulong)b) : unchecked((ulong)b - (ulong)a);
+}

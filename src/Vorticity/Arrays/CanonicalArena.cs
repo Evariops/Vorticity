@@ -1,0 +1,763 @@
+// The canonical model of Phase 1 contract §8.4: the nine forms `Canonical` in
+// vortex-array-0.86.1/src/canonical.rs has, minus Map, Union and Variant, which are out of scope
+// and reach the caller as VortexUnsupportedException with kind "dtype".
+//
+// `vortex.list` and `vortex.varbin` have no canonical form of their own - their decoders produce
+// ListView and VarBinView, the same choice upstream makes.
+using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using Vorticity.Buffers;
+using Vorticity.Types;
+using Vorticity.Types.Numerics;
+
+namespace Vorticity.Arrays;
+
+/// <summary>The nine canonical forms Phase 1 produces.</summary>
+public enum CanonicalKind : byte
+{
+    /// <summary>All rows null; no buffers.</summary>
+    Null = 0,
+
+    /// <summary>A bit-packed, LSB-first boolean bitmap with a bit offset below 8.</summary>
+    Bool = 1,
+
+    /// <summary>Fixed-width primitive values.</summary>
+    Primitive = 2,
+
+    /// <summary>Fixed-point decimal values, little-endian two's complement.</summary>
+    Decimal = 3,
+
+    /// <summary>Arrow-style 16-byte views over zero or more data buffers.</summary>
+    VarBinView = 4,
+
+    /// <summary>Offsets plus sizes over a canonical elements child.</summary>
+    ListView = 5,
+
+    /// <summary>A canonical elements child read <c>FixedSize</c> at a time.</summary>
+    FixedSizeList = 6,
+
+    /// <summary>Named fields, each a canonical child.</summary>
+    Struct = 7,
+
+    /// <summary>An extension dtype wrapping a canonical storage child.</summary>
+    Extension = 8,
+}
+
+/// <summary>
+/// One decoded node: a view into a <see cref="CanonicalArena"/>.
+/// </summary>
+/// <remarks>
+/// A <c>ref struct</c> for the same reason <see cref="ArrayNode"/> is: an index is meaningless once
+/// its arena is <see cref="CanonicalArena.Reset"/>, and every buffer it names belongs to the
+/// batch's segments (Phase 1 contract §2.2 rules 4 and 5).
+/// </remarks>
+public readonly ref struct CanonicalNode
+{
+    private readonly CanonicalArena _arena;
+    private readonly int _index;
+
+    internal CanonicalNode(CanonicalArena arena, int index)
+    {
+        _arena = arena;
+        _index = index;
+    }
+
+    /// <summary>This node's index in its arena.</summary>
+    public int Index => _index;
+
+    /// <summary>The arena this node belongs to.</summary>
+    public CanonicalArena Arena => _arena;
+
+    /// <summary>Which canonical form this node is in.</summary>
+    public CanonicalKind Kind => _arena.RecordRef(_index).Kind;
+
+    /// <summary>The dtype the node was decoded against, supplied top-down by its parent.</summary>
+    public DType DType => _arena.RecordRef(_index).DType;
+
+    /// <summary>Row count, also supplied top-down.</summary>
+    public int Length => _arena.RecordRef(_index).Length;
+
+    /// <summary>Per-row validity (contract §2.6).</summary>
+    public Validity Validity => _arena.RecordRef(_index).Validity;
+
+    // ---------------------------------------------------------------------------------- Bool
+
+    /// <summary>Bit-packed, LSB-first boolean bits.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Bool"/>.</exception>
+    public VortexBuffer Bits => Require(CanonicalKind.Bool).BufferA;
+
+    /// <summary>
+    /// The bit position of row 0 inside the first byte, 0..7 - <c>vortex.bool</c>'s
+    /// <c>BoolMetadata.offset</c>. Consumers must apply it; the bitmap is never shifted, because
+    /// that would be an allocation and a copy per batch (contract §2.6 rule 5).
+    /// </summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Bool"/>.</exception>
+    public int BitOffset => Require(CanonicalKind.Bool).BitOffset;
+
+    // ----------------------------------------------------------------------------- Primitive
+
+    /// <summary>The values' physical type.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Primitive"/>.</exception>
+    public PType PType => Require(CanonicalKind.Primitive).PType;
+
+    /// <summary>
+    /// <c>Length * PType.ByteWidth()</c> bytes for a Primitive, or
+    /// <c>Length * DecimalStorage.ByteWidth(Storage)</c> little-endian bytes for a Decimal.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The kind is neither Primitive nor Decimal.</exception>
+    public VortexBuffer Values
+    {
+        get
+        {
+            ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
+            if (r.Kind is not (CanonicalKind.Primitive or CanonicalKind.Decimal))
+            {
+                ArraysThrow.Kind(r.Kind, "Primitive or Decimal");
+            }
+
+            return r.BufferA;
+        }
+    }
+
+    // ------------------------------------------------------------------------------- Decimal
+
+    /// <summary>The decimal storage width.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Decimal"/>.</exception>
+    public DecimalStorageType Storage => Require(CanonicalKind.Decimal).Storage;
+
+    /// <summary>The decimal precision, 1..76.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Decimal"/>.</exception>
+    public byte Precision => Require(CanonicalKind.Decimal).Precision;
+
+    /// <summary>The decimal scale.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Decimal"/>.</exception>
+    public sbyte Scale => Require(CanonicalKind.Decimal).Scale;
+
+    // ---------------------------------------------------------------------------- VarBinView
+
+    /// <summary><c>Length * 16</c> bytes of Arrow-style views, 16-byte aligned.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.VarBinView"/>.</exception>
+    public VortexBuffer Views => Require(CanonicalKind.VarBinView).BufferA;
+
+    /// <summary>How many data buffers the views may reference.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.VarBinView"/>.</exception>
+    public int DataBufferCount => Require(CanonicalKind.VarBinView).DataBufferCount;
+
+    /// <summary>Data buffer <paramref name="index"/>.</summary>
+    /// <param name="index">0-based, below <see cref="DataBufferCount"/>.</param>
+    /// <exception cref="VortexFormatException">The kind is wrong or the index is out of range.</exception>
+    public VortexBuffer GetDataBuffer(int index)
+    {
+        ref readonly CanonicalRecord r = ref Require(CanonicalKind.VarBinView);
+        if ((uint)index >= (uint)r.DataBufferCount)
+        {
+            return ArraysThrow.BufferIndex(index, r.DataBufferCount);
+        }
+
+        return _arena.DataBufferAt(r.DataBufferStart + index);
+    }
+
+    // ------------------------------------------------------------------------------ ListView
+
+    /// <summary>The canonical child holding the flattened elements.</summary>
+    /// <exception cref="VortexFormatException">The kind is neither ListView nor FixedSizeList.</exception>
+    public int ElementsIndex
+    {
+        get
+        {
+            ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
+            if (r.Kind is not (CanonicalKind.ListView or CanonicalKind.FixedSizeList))
+            {
+                ArraysThrow.Kind(r.Kind, "ListView or FixedSizeList");
+            }
+
+            return _arena.ChildAt(r.ChildStart);
+        }
+    }
+
+    /// <summary><see cref="Length"/> elements of <see cref="OffsetPType"/>.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.ListView"/>.</exception>
+    public VortexBuffer Offsets => Require(CanonicalKind.ListView).BufferA;
+
+    /// <summary><see cref="Length"/> elements of <see cref="SizePType"/>.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.ListView"/>.</exception>
+    public VortexBuffer Sizes => Require(CanonicalKind.ListView).BufferB;
+
+    /// <summary>Physical type of <see cref="Offsets"/>.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.ListView"/>.</exception>
+    public PType OffsetPType => Require(CanonicalKind.ListView).PType;
+
+    /// <summary>Physical type of <see cref="Sizes"/>.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.ListView"/>.</exception>
+    public PType SizePType => Require(CanonicalKind.ListView).SizePType;
+
+    // ------------------------------------------------------------------------- FixedSizeList
+
+    /// <summary>
+    /// Elements per row; the elements child holds <c>Length * FixedSize</c> of them. Zero is legal
+    /// and upstream special-cases it, so never divide by it.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.FixedSizeList"/>.</exception>
+    public uint FixedSize => Require(CanonicalKind.FixedSizeList).FixedSize;
+
+    // -------------------------------------------------------------------------------- Struct
+
+    /// <summary>Number of fields.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Struct"/>.</exception>
+    public int FieldCount => Require(CanonicalKind.Struct).ChildCount;
+
+    /// <summary>The canonical child index of field <paramref name="field"/>.</summary>
+    /// <param name="field">0-based, below <see cref="FieldCount"/>.</param>
+    /// <exception cref="VortexFormatException">The kind is wrong or the index is out of range.</exception>
+    public int GetFieldIndex(int field)
+    {
+        ref readonly CanonicalRecord r = ref Require(CanonicalKind.Struct);
+        if ((uint)field >= (uint)r.ChildCount)
+        {
+            ArraysThrow.ChildIndex(field, r.ChildCount);
+        }
+
+        return _arena.ChildAt(r.ChildStart + field);
+    }
+
+    // ----------------------------------------------------------------------------- Extension
+
+    /// <summary>The canonical storage child; the extension's validity is the storage's.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Extension"/>.</exception>
+    public int StorageIndex
+    {
+        get
+        {
+            ref readonly CanonicalRecord r = ref Require(CanonicalKind.Extension);
+            return _arena.ChildAt(r.ChildStart);
+        }
+    }
+
+    private ref readonly CanonicalRecord Require(CanonicalKind kind)
+    {
+        ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
+        if (r.Kind != kind)
+        {
+            ArraysThrow.Kind(r.Kind, kind.ToString());
+        }
+
+        return ref r;
+    }
+}
+
+/// <summary>
+/// The pooled store behind <see cref="CanonicalNode"/>. Owned by a <see cref="ScanContext"/>;
+/// <see cref="Reset"/> per batch.
+/// </summary>
+public sealed class CanonicalArena
+{
+    private CanonicalRecord[] _records;
+    private int _recordCount;
+
+    private int[] _children;
+    private int _childCount;
+
+    private VortexBuffer[] _dataBuffers;
+    private int _dataBufferCount;
+
+    // Blocks handed out by Allocate, returned to the pool on Reset. Never handed to a caller as an
+    // owner: contract §2.2 rule 3 says decoders never Retain or Release anything.
+    private NativeSegmentOwner[] _owned;
+    private int _ownedCount;
+
+    private readonly AlignedBufferPool _pool;
+
+    /// <summary>Creates an arena backed by <see cref="AlignedBufferPool.Shared"/>.</summary>
+    /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialCapacity"/> is not positive.</exception>
+    public CanonicalArena(int initialCapacity = 64)
+        : this(initialCapacity, AlignedBufferPool.Shared)
+    {
+    }
+
+    /// <summary>Creates an arena backed by an explicit pool. Tests use this to observe rentals.</summary>
+    /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
+    /// <param name="pool">The pool <see cref="Allocate(int, int)"/> rents from.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialCapacity"/> is not positive.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="pool"/> is null.</exception>
+    public CanonicalArena(int initialCapacity, AlignedBufferPool pool)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(initialCapacity);
+        ArgumentNullException.ThrowIfNull(pool);
+        _records = new CanonicalRecord[initialCapacity];
+        _children = new int[initialCapacity];
+        _dataBuffers = new VortexBuffer[8];
+        _owned = new NativeSegmentOwner[8];
+        _pool = pool;
+    }
+
+    /// <summary>Number of decoded nodes currently held.</summary>
+    public int NodeCount => _recordCount;
+
+    /// <summary>Node <paramref name="index"/>.</summary>
+    /// <param name="index">0-based, below <see cref="NodeCount"/>.</param>
+    /// <exception cref="VortexFormatException">The index is out of range.</exception>
+    public CanonicalNode GetNode(int index)
+    {
+        if ((uint)index >= (uint)_recordCount)
+        {
+            ArraysThrow.CanonicalIndex(index, _recordCount);
+        }
+
+        return new CanonicalNode(this, index);
+    }
+
+    /// <summary>
+    /// Clears counts and returns every block <see cref="Allocate(int, int)"/> handed out. Does NOT free the
+    /// backing arrays.
+    /// </summary>
+    public void Reset()
+    {
+        for (int i = 0; i < _ownedCount; i++)
+        {
+            NativeSegmentOwner owner = _owned[i];
+            _owned[i] = null!;
+            _pool.Return(owner);
+        }
+
+        _ownedCount = 0;
+        _recordCount = 0;
+        _childCount = 0;
+        _dataBufferCount = 0;
+    }
+
+    // ------------------------------------------------------------------------------- builders
+
+    /// <summary>Adds an all-null node.</summary>
+    /// <param name="dtype">The dtype this node produces.</param>
+    /// <param name="length">Row count.</param>
+    /// <returns>The new node's index.</returns>
+    public int AddNull(DType dtype, int length)
+    {
+        CanonicalRecord r = New(CanonicalKind.Null, dtype, length, Validity.AllInvalid);
+        return Commit(ref r);
+    }
+
+    /// <summary>Adds a boolean node.</summary>
+    /// <param name="dtype">The dtype this node produces.</param>
+    /// <param name="length">Row count.</param>
+    /// <param name="validity">Per-row validity.</param>
+    /// <param name="bits">Bit-packed, LSB-first values.</param>
+    /// <param name="bitOffset">Bit position of row 0 inside the first byte, 0..7.</param>
+    /// <returns>The new node's index.</returns>
+    /// <exception cref="VortexFormatException">
+    /// <paramref name="bitOffset"/> is outside 0..7, or <paramref name="bits"/> is too short for
+    /// <paramref name="length"/> bits at that offset. Both are class I.
+    /// </exception>
+    public int AddBool(DType dtype, int length, Validity validity, VortexBuffer bits, int bitOffset)
+    {
+        if ((uint)bitOffset > 7)
+        {
+            ArraysThrow.Format($"Bool bit offset {bitOffset} is outside [0, 7].");
+        }
+
+        long neededBytes = ((long)bitOffset + length + 7) / 8;
+        if (neededBytes > bits.Length)
+        {
+            ArraysThrow.Format(
+                $"A Bool array of {length} bits at offset {bitOffset} needs {neededBytes} bytes; " +
+                $"the buffer holds {bits.Length}.");
+        }
+
+        CanonicalRecord r = New(CanonicalKind.Bool, dtype, length, validity);
+        r.BufferA = bits;
+        r.BitOffset = bitOffset;
+        return Commit(ref r);
+    }
+
+    /// <summary>Adds a fixed-width primitive node.</summary>
+    /// <param name="dtype">The dtype this node produces.</param>
+    /// <param name="length">Row count.</param>
+    /// <param name="validity">Per-row validity.</param>
+    /// <param name="ptype">The values' physical type.</param>
+    /// <param name="values">Exactly <c>length * ptype.ByteWidth()</c> bytes.</param>
+    /// <returns>The new node's index.</returns>
+    /// <exception cref="VortexFormatException">
+    /// <paramref name="ptype"/> is undefined or <paramref name="values"/> is the wrong length.
+    /// </exception>
+    public int AddPrimitive(DType dtype, int length, Validity validity, PType ptype, VortexBuffer values)
+    {
+        if (!PTypeExtensions.IsDefined(ptype))
+        {
+            ArraysThrow.Format($"PType tag {(byte)ptype} is not defined.");
+        }
+
+        RequireExactLength(values.Length, length, ptype.ByteWidth(), "Primitive");
+        CanonicalRecord r = New(CanonicalKind.Primitive, dtype, length, validity);
+        r.PType = ptype;
+        r.BufferA = values;
+        return Commit(ref r);
+    }
+
+    /// <summary>Adds a decimal node.</summary>
+    /// <param name="dtype">The dtype this node produces.</param>
+    /// <param name="length">Row count.</param>
+    /// <param name="validity">Per-row validity.</param>
+    /// <param name="storage">The storage width.</param>
+    /// <param name="precision">The dtype's precision.</param>
+    /// <param name="scale">The dtype's scale.</param>
+    /// <param name="values">Exactly <c>length * DecimalStorage.ByteWidth(storage)</c> bytes, little-endian.</param>
+    /// <returns>The new node's index.</returns>
+    /// <exception cref="VortexFormatException">
+    /// <paramref name="storage"/> is undefined or <paramref name="values"/> is the wrong length.
+    /// </exception>
+    public int AddDecimal(
+        DType dtype,
+        int length,
+        Validity validity,
+        DecimalStorageType storage,
+        byte precision,
+        sbyte scale,
+        VortexBuffer values)
+    {
+        if (!DecimalStorage.IsDefined(storage))
+        {
+            ArraysThrow.Format($"Decimal storage tag {(byte)storage} is not defined; 0..5 are.");
+        }
+
+        RequireExactLength(values.Length, length, DecimalStorage.ByteWidth(storage), "Decimal");
+        CanonicalRecord r = New(CanonicalKind.Decimal, dtype, length, validity);
+        r.Storage = storage;
+        r.Precision = precision;
+        r.Scale = scale;
+        r.BufferA = values;
+        return Commit(ref r);
+    }
+
+    /// <summary>Adds an Arrow-style varbin view node.</summary>
+    /// <param name="dtype">The dtype this node produces.</param>
+    /// <param name="length">Row count.</param>
+    /// <param name="validity">Per-row validity.</param>
+    /// <param name="views">Exactly <c>length * 16</c> bytes.</param>
+    /// <param name="dataBuffers">The buffers the views may reference.</param>
+    /// <returns>The new node's index.</returns>
+    /// <exception cref="VortexFormatException"><paramref name="views"/> is the wrong length.</exception>
+    public int AddVarBinView(
+        DType dtype,
+        int length,
+        Validity validity,
+        VortexBuffer views,
+        ReadOnlySpan<VortexBuffer> dataBuffers)
+    {
+        RequireExactLength(views.Length, length, 16, "VarBinView");
+        CanonicalRecord r = New(CanonicalKind.VarBinView, dtype, length, validity);
+        r.BufferA = views;
+        r.DataBufferStart = _dataBufferCount;
+        r.DataBufferCount = dataBuffers.Length;
+        for (int i = 0; i < dataBuffers.Length; i++)
+        {
+            AddDataBuffer(dataBuffers[i]);
+        }
+
+        return Commit(ref r);
+    }
+
+    /// <summary>Adds a list-view node.</summary>
+    /// <param name="dtype">The dtype this node produces.</param>
+    /// <param name="length">Row count.</param>
+    /// <param name="validity">Per-row validity.</param>
+    /// <param name="elementsIndex">The canonical child holding the flattened elements.</param>
+    /// <param name="offsets">Exactly <c>length * offsetPType.ByteWidth()</c> bytes.</param>
+    /// <param name="offsetPType">Physical type of <paramref name="offsets"/>.</param>
+    /// <param name="sizes">Exactly <c>length * sizePType.ByteWidth()</c> bytes.</param>
+    /// <param name="sizePType">Physical type of <paramref name="sizes"/>.</param>
+    /// <returns>The new node's index.</returns>
+    /// <exception cref="VortexFormatException">A ptype is undefined or a buffer is the wrong length.</exception>
+    public int AddListView(
+        DType dtype,
+        int length,
+        Validity validity,
+        int elementsIndex,
+        VortexBuffer offsets,
+        PType offsetPType,
+        VortexBuffer sizes,
+        PType sizePType)
+    {
+        if (!PTypeExtensions.IsDefined(offsetPType) || !PTypeExtensions.IsDefined(sizePType))
+        {
+            ArraysThrow.Format("ListView offset and size ptypes must be defined tags.");
+        }
+
+        RequireExactLength(offsets.Length, length, offsetPType.ByteWidth(), "ListView offsets");
+        RequireExactLength(sizes.Length, length, sizePType.ByteWidth(), "ListView sizes");
+        RequireChild(elementsIndex);
+
+        CanonicalRecord r = New(CanonicalKind.ListView, dtype, length, validity);
+        r.PType = offsetPType;
+        r.SizePType = sizePType;
+        r.BufferA = offsets;
+        r.BufferB = sizes;
+        r.ChildStart = AddChild(elementsIndex);
+        r.ChildCount = 1;
+        return Commit(ref r);
+    }
+
+    /// <summary>Adds a fixed-size-list node.</summary>
+    /// <param name="dtype">The dtype this node produces.</param>
+    /// <param name="length">Row count.</param>
+    /// <param name="validity">Per-row validity.</param>
+    /// <param name="elementsIndex">The canonical child holding <c>length * size</c> elements.</param>
+    /// <param name="size">Elements per row; zero is legal.</param>
+    /// <returns>The new node's index.</returns>
+    public int AddFixedSizeList(DType dtype, int length, Validity validity, int elementsIndex, uint size)
+    {
+        RequireChild(elementsIndex);
+        CanonicalRecord r = New(CanonicalKind.FixedSizeList, dtype, length, validity);
+        r.FixedSize = size;
+        r.ChildStart = AddChild(elementsIndex);
+        r.ChildCount = 1;
+        return Commit(ref r);
+    }
+
+    /// <summary>Adds a struct node.</summary>
+    /// <param name="dtype">The dtype this node produces.</param>
+    /// <param name="length">Row count.</param>
+    /// <param name="validity">Per-row validity.</param>
+    /// <param name="fieldIndices">One canonical child index per field, in dtype order.</param>
+    /// <returns>The new node's index.</returns>
+    public int AddStruct(DType dtype, int length, Validity validity, ReadOnlySpan<int> fieldIndices)
+    {
+        CanonicalRecord r = New(CanonicalKind.Struct, dtype, length, validity);
+        r.ChildStart = _childCount;
+        r.ChildCount = fieldIndices.Length;
+        for (int i = 0; i < fieldIndices.Length; i++)
+        {
+            RequireChild(fieldIndices[i]);
+            AddChild(fieldIndices[i]);
+        }
+
+        return Commit(ref r);
+    }
+
+    /// <summary>Adds an extension node. Its validity is the storage child's.</summary>
+    /// <param name="dtype">The extension dtype.</param>
+    /// <param name="length">Row count.</param>
+    /// <param name="storageIndex">The canonical storage child.</param>
+    /// <returns>The new node's index.</returns>
+    public int AddExtension(DType dtype, int length, int storageIndex)
+    {
+        RequireChild(storageIndex);
+        Validity validity = GetNode(storageIndex).Validity;
+        CanonicalRecord r = New(CanonicalKind.Extension, dtype, length, validity);
+        r.ChildStart = AddChild(storageIndex);
+        r.ChildCount = 1;
+        return Commit(ref r);
+    }
+
+    /// <summary>
+    /// Adds a node of <paramref name="kind"/> with only the four common fields set. Contract §8.3
+    /// exposes this through <see cref="ArrayDecodeContext.NewCanonical"/>; prefer the typed
+    /// builders above, which validate their buffers.
+    /// </summary>
+    /// <param name="kind">The canonical form.</param>
+    /// <param name="dtype">The dtype this node produces.</param>
+    /// <param name="length">Row count.</param>
+    /// <param name="validity">Per-row validity.</param>
+    /// <returns>The new node's index.</returns>
+    /// <exception cref="VortexFormatException"><paramref name="kind"/> is not a defined value.</exception>
+    public int AddBare(CanonicalKind kind, DType dtype, int length, Validity validity)
+    {
+        if ((uint)kind > (uint)CanonicalKind.Extension)
+        {
+            ArraysThrow.Format($"CanonicalKind {(byte)kind} is not defined; 0..8 are.");
+        }
+
+        CanonicalRecord r = New(kind, dtype, length, validity);
+        return Commit(ref r);
+    }
+
+    /// <summary>
+    /// Materializes <paramref name="byteLength"/> zeroed bytes owned by this arena, for decoders
+    /// that must produce values rather than borrow them.
+    /// </summary>
+    /// <param name="byteLength">
+    /// Size in bytes. It must ALREADY have been validated against the decoded row count: this
+    /// method has no way to tell a legitimate 8 MiB column from a file-supplied length that was
+    /// never capped.
+    /// </param>
+    /// <param name="alignment">A power of two in <c>[1, VortexLimits.MaxAlignment]</c>.</param>
+    /// <returns>A non-owning view over the block, valid until the next <see cref="Reset"/> call.</returns>
+    /// <remarks>
+    /// The block is ZEROED. The pool hands back recycled native memory, and letting a decoder that
+    /// writes only part of a buffer - a bitmap's trailing bits, a short last FastLanes block -
+    /// publish the rest would leak whatever the previous batch, or the previous process activity,
+    /// left there.
+    /// </remarks>
+    /// <exception cref="VortexFormatException">
+    /// <paramref name="byteLength"/> is negative or <paramref name="alignment"/> is out of range.
+    /// </exception>
+    public VortexBuffer Allocate(int byteLength, int alignment) => Allocate(byteLength, alignment, out _);
+
+    /// <summary>
+    /// <see cref="Allocate(int, int)"/>, additionally handing back a writable span over the block.
+    /// This is the only way a decoder gets writable memory: a decoder that news up a
+    /// <c>byte[]</c> breaks the per-batch zero-allocation invariant, and one that writes into a
+    /// <see cref="VortexBuffer"/> that came from the file corrupts the mapped file.
+    /// </summary>
+    /// <param name="byteLength">Size in bytes, already validated against the row count.</param>
+    /// <param name="alignment">A power of two in <c>[1, VortexLimits.MaxAlignment]</c>.</param>
+    /// <param name="destination">The writable block, zero-filled.</param>
+    /// <returns>A non-owning view over the same bytes.</returns>
+    /// <exception cref="VortexFormatException">
+    /// <paramref name="byteLength"/> is negative or <paramref name="alignment"/> is out of range.
+    /// </exception>
+    public VortexBuffer Allocate(int byteLength, int alignment, out Span<byte> destination)
+    {
+        NativeSegmentOwner owner = _pool.Rent(byteLength, alignment);
+        if (_ownedCount == _owned.Length)
+        {
+            Array.Resize(ref _owned, Grow(_owned.Length));
+        }
+
+        _owned[_ownedCount++] = owner;
+        destination = owner.WritableSpan;
+        destination.Clear();
+        return owner.Buffer;
+    }
+
+    // ------------------------------------------------------------------------------ internals
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ref readonly CanonicalRecord RecordRef(int index)
+    {
+        if ((uint)index >= (uint)_recordCount)
+        {
+            ArraysThrow.CanonicalIndex(index, _recordCount);
+        }
+
+        return ref _records[index];
+    }
+
+    internal int ChildAt(int slot)
+    {
+        if ((uint)slot >= (uint)_childCount)
+        {
+            ArraysThrow.CanonicalIndex(slot, _childCount);
+        }
+
+        return _children[slot];
+    }
+
+    internal VortexBuffer DataBufferAt(int slot)
+    {
+        if ((uint)slot >= (uint)_dataBufferCount)
+        {
+            return ArraysThrow.BufferIndex(slot, _dataBufferCount);
+        }
+
+        return _dataBuffers[slot];
+    }
+
+    private static CanonicalRecord New(CanonicalKind kind, DType dtype, int length, Validity validity)
+    {
+        if (length < 0)
+        {
+            ArraysThrow.Format($"A canonical node cannot have {length} rows.");
+        }
+
+        return new CanonicalRecord
+        {
+            Kind = kind,
+            DType = dtype,
+            Length = length,
+            Validity = validity,
+            ChildStart = -1,
+            DataBufferStart = -1,
+        };
+    }
+
+    private static void RequireExactLength(int actual, int length, int width, string what)
+    {
+        long expected = (long)length * width;
+        if (actual != expected)
+        {
+            ArraysThrow.Format(
+                $"A canonical {what} of {length} rows needs exactly {expected} bytes; the buffer " +
+                $"holds {actual}.");
+        }
+    }
+
+    private void RequireChild(int index)
+    {
+        if ((uint)index >= (uint)_recordCount)
+        {
+            ArraysThrow.CanonicalIndex(index, _recordCount);
+        }
+    }
+
+    private int AddChild(int nodeIndex)
+    {
+        if (_childCount == _children.Length)
+        {
+            Array.Resize(ref _children, Grow(_children.Length));
+        }
+
+        int slot = _childCount;
+        _children[slot] = nodeIndex;
+        _childCount = slot + 1;
+        return slot;
+    }
+
+    private void AddDataBuffer(VortexBuffer buffer)
+    {
+        if (_dataBufferCount == _dataBuffers.Length)
+        {
+            Array.Resize(ref _dataBuffers, Grow(_dataBuffers.Length));
+        }
+
+        _dataBuffers[_dataBufferCount++] = buffer;
+    }
+
+    /// <summary>Doubles a full array, refusing to overflow into a negative capacity.</summary>
+    private static int Grow(int capacity)
+    {
+        if (capacity > int.MaxValue / 2)
+        {
+            ArraysThrow.Format($"A canonical arena of more than {capacity} entries cannot be allocated.");
+        }
+
+        return Math.Max(capacity * 2, 4);
+    }
+
+    private int Commit(ref CanonicalRecord record)
+    {
+        if (_recordCount == _records.Length)
+        {
+            Array.Resize(ref _records, Grow(_records.Length));
+        }
+
+        int index = _recordCount;
+        _records[index] = record;
+        _recordCount = index + 1;
+        return index;
+    }
+}
+
+/// <summary>One decoded node, flattened. Never public: <see cref="CanonicalNode"/> is the view.</summary>
+[StructLayout(LayoutKind.Auto)]
+internal struct CanonicalRecord
+{
+    internal DType DType;
+    internal Validity Validity;
+    internal VortexBuffer BufferA;
+    internal VortexBuffer BufferB;
+    internal int Length;
+    internal int BitOffset;
+    internal int ChildStart;
+    internal int ChildCount;
+    internal int DataBufferStart;
+    internal int DataBufferCount;
+    internal uint FixedSize;
+    internal CanonicalKind Kind;
+    internal PType PType;
+    internal PType SizePType;
+    internal DecimalStorageType Storage;
+    internal byte Precision;
+    internal sbyte Scale;
+}

@@ -1,0 +1,41 @@
+// vortex.null - vortex-array-0.86.1/src/arrays/null/mod.rs `deserialize`.
+// Phase 1 contract §9.1: no children, no buffers, metadata must be empty, and `P` must be
+// DType::Null.
+using System;
+using Vorticity.Arrays.Metadata;
+using Vorticity.Types;
+
+namespace Vorticity.Arrays.Decoders.Canonical;
+
+/// <summary>Decodes <c>vortex.null</c>: an all-null column with no payload at all.</summary>
+public sealed class NullDecoder : ArrayDecoder
+{
+    /// <summary>The wire id, UTF-8.</summary>
+    public const string Id = "vortex.null";
+
+    /// <summary>The shared, stateless instance.</summary>
+    public static readonly NullDecoder Instance = new NullDecoder();
+
+    private NullDecoder()
+    {
+    }
+
+    /// <inheritdoc/>
+    public override ReadOnlySpan<byte> IdUtf8 => "vortex.null"u8;
+
+    /// <inheritdoc/>
+    public override ArrayEncodingId EncodingId => ArrayEncodingId.Null;
+
+    /// <inheritdoc/>
+    public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        EncodingMetadata.RequireEmpty(node.Metadata, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 0, Id);
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
+        CanonicalSupport.RequireKind(dtype, DTypeKind.Null, Id);
+
+        return context.Canonical.AddNull(dtype, length);
+    }
+}
