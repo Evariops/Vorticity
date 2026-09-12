@@ -32,7 +32,7 @@ Phase column refers to [01-scope.md](01-scope.md) §3.
 | ID | Role | Notes |
 |---|---|---|
 | `fastlanes.for` | frame of reference | precedes bit-packing to avoid patches |
-| `fastlanes.bitpacked` | SIMD bit-packing | **1024-element transposed blocks**; optional patches; the single most important kernel |
+| `fastlanes.bitpacked` | SIMD bit-packing | **1024-element transposed blocks**; optional patches; the single most important kernel. Unpack is vectorized — `Vector512`/`256`/`128` with the scalar loop as fallback and oracle ([05-benchmarks.md](05-benchmarks.md) §1b) |
 | `fastlanes.rle` | SIMD run-length | added in `core2025.10.0` |
 | `vortex.zigzag` | zigzag | removes negatives before bit-packing |
 | `vortex.runend` | run-end encoding | Arrow-compatible |

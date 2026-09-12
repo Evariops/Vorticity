@@ -164,8 +164,10 @@ other phase and is gated only by the `DType`/array model from Phase 0. See
 3. Zero managed allocations per batch in steady state on a full scan (excluding output buffers),
    measured with `MemoryDiagnoser`.
 4. Scan throughput within a stated factor of the Rust reader on the same machine and dataset
-   (target: ≤ 2×, see [05-benchmarks.md](05-benchmarks.md)). **Measured: 1.43×** on a full scan,
-   in one process against `vortex = 0.86.1` through [`tools/vxbench-rs`](../tools/vxbench-rs).
+   (target: ≤ 2×, see [05-benchmarks.md](05-benchmarks.md)). **Measured: 0.96×** on a full scan of
+   `containers/zoned_many_zones_nulls`, in one process against `vortex = 0.86.1` through
+   [`tools/vxbench-rs`](../tools/vxbench-rs) — one file on one arm64 machine, not a general claim;
+   §1b states what it does and does not support.
 5. AOT- and trimming-compatible, with no reflection and no `DynamicallyAccessedMembers`.
 6. A file whose *unprojected* columns use unknown encodings still scans successfully; a projected
    one fails with the component ID and kind in the message ([08-semantics.md](08-semantics.md) §4).
