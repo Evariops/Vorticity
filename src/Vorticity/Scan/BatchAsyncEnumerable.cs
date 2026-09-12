@@ -52,6 +52,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     private readonly SplitPlan _plan;
     private readonly int _degree;
     private readonly VortexExpr? _filter;
+    private readonly RowSelection? _take;
     private readonly DType _schema;
 
     /// <param name="file">The open file.</param>
@@ -61,6 +62,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// <param name="plan">The split plan, computed under <paramref name="read"/>.</param>
     /// <param name="degree">How many splits may decode concurrently.</param>
     /// <param name="filter">The predicate, or null.</param>
+    /// <param name="take">The row index list, or null.</param>
     internal BatchAsyncEnumerable(
         VortexFile file,
         LayoutTree tree,
@@ -68,9 +70,11 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Projection keep,
         SplitPlan plan,
         int degree,
-        VortexExpr? filter)
+        VortexExpr? filter,
+        RowSelection? take)
     {
         _file = file;
+        _take = take;
         _tree = tree;
         _read = read;
         _keep = keep;
@@ -119,7 +123,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </remarks>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new BatchAsyncEnumerator(
-            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, pruner: null,
+            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, pruner: null,
             cancellationToken);
 
     /// <summary>Starts a scan whose splits are pruned by <paramref name="pruner"/>.</summary>
@@ -128,7 +132,8 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         ZonePruner? pruner, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
-            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, pruner, cancellationToken);
+            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, pruner,
+            cancellationToken);
 
     /// <summary>The file this scan reads, for the pruning pass that runs before the first batch.</summary>
     internal VortexFile File => _file;
@@ -158,6 +163,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
     private readonly FieldMask _keep;
     private readonly DType _schema;
     private readonly VortexExpr? _filter;
+    private readonly RowSelection? _take;
     private readonly ZonePruner? _pruner;
     private readonly int _maxBatchRows;
     private readonly CancellationToken _token;
@@ -185,10 +191,12 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
         SplitPlan plan,
         int degree,
         VortexExpr? filter,
+        RowSelection? take,
         ZonePruner? pruner,
         CancellationToken cancellationToken)
     {
         _tree = tree;
+        _take = take;
         _pruner = pruner;
         _source = file.Segments;
         _mask = read.RootMask;
@@ -332,6 +340,13 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
     {
         while (_cursor.TryNext(out split))
         {
+            // A take's own skip comes first: it is a binary search over the index list, while a
+            // pruner walks the zones overlapping the split.
+            if (_take is not null && !_take.Touches(split))
+            {
+                continue;
+            }
+
             if (_pruner is null || _pruner.MayMatch(split))
             {
                 return true;
@@ -362,6 +377,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
             // (docs/03-architecture.md §1: the granularity is the batch).
             _token.ThrowIfCancellationRequested();
             int root = Execute(lane.Context, _pending);
+            root = ApplyTake(lane.Context, root, _pending);
             root = ApplyFilter(lane.Context, root);
             _current = new RecordBatch(lane.Context, root, _pending.Start);
             return true;
@@ -370,6 +386,39 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
         {
             lane.Context.ResetBatch();
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Gathers the rows a take asked for out of the split that holds them.
+    /// </summary>
+    /// <remarks>
+    /// The split itself was already chosen because it holds at least one of them. What is left is
+    /// the gather, which is the same one the filter uses -- a take and a filter differ only in how
+    /// the surviving rows were chosen.
+    /// </remarks>
+    private int ApplyTake(ScanContext context, int root, RowRange split)
+    {
+        if (_take is null)
+        {
+            return root;
+        }
+
+        int rows = context.Canonical.GetNode(root).Length;
+        int[] indices = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        try
+        {
+            int count = _take.LocalIndices(split, indices);
+            if (count == rows)
+            {
+                return root;
+            }
+
+            return CanonicalFilter.Apply(context.Canonical, root, indices.AsSpan(0, count));
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(indices);
         }
     }
 

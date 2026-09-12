@@ -146,6 +146,15 @@ documents the fallback honestly everywhere else.
 The fallback is correct, just not fast. Documenting which encodings take it is what keeps F5 an
 engineering claim rather than a slogan; the rest move to 1.1 on benchmark evidence.
 
+**Where this actually stands.** `ScanBuilder.Take` is implemented and delivers the half of F5 that
+dominates on object storage: the splits an index list never touches are skipped before a single
+segment is registered, so scattered rows read the splits they live in and nothing else, which
+`TakeTests.ScatteredRowsReadFarFewerSegmentsThanTheWholeFile` measures rather than assumes. What is
+**not** yet implemented is the column of the table above: inside a split that is read, the whole
+split is decoded and the wanted rows gathered out of it, for every encoding. None of the three
+specializations exists yet. They are a CPU optimization within an already-fetched split, not an I/O
+one, and the table stays here as the plan it describes.
+
 ## Compression scheme → emitted wire ID
 
 The writer's schemes are named after algorithms; editions constrain IDs. Prioritizing write

@@ -1,0 +1,119 @@
+// The row indices a `take` asks for - docs/01-scope.md F5.
+//
+// Sorted and deduplicated ONCE, when the scan is built, so that everything downstream is a binary
+// search rather than a membership test. A caller's order is not preserved and the documentation
+// says so: a scan produces batches in file order, and reordering rows to match an arbitrary index
+// list would mean buffering the whole result.
+//
+// What this buys is the half of F5 that dominates on object storage. The splits an index list never
+// touches are skipped before any segment is registered, so reading a thousand scattered rows out of
+// a billion reads the splits those rows live in and nothing else. What it does NOT yet buy is the
+// other half: within a touched split the whole split is decoded and the wanted rows gathered out of
+// it, rather than the decoders taking the index list into the encodings themselves. That per-encoding
+// specialization -- take on `dict` codes, a binary search in `runend`, positional access into
+// `fastlanes.bitpacked` -- is recorded in docs/90-registry.md as the work it is.
+using System;
+
+using Vorticity.File;
+
+namespace Vorticity.Scan;
+
+/// <summary>A sorted, deduplicated list of the rows a scan should return.</summary>
+internal sealed class RowSelection
+{
+    private readonly long[] _rows;
+
+    private RowSelection(long[] rows) => _rows = rows;
+
+    /// <summary>How many distinct rows were asked for.</summary>
+    internal int Count => _rows.Length;
+
+    /// <summary>The range that covers every requested row.</summary>
+    internal RowRange Bounds =>
+        _rows.Length == 0 ? RowRange.Empty : new RowRange(_rows[0], _rows[^1] + 1);
+
+    /// <summary>Sorts and deduplicates <paramref name="rows"/>, rejecting anything out of range.</summary>
+    /// <param name="rows">The wanted rows, in any order.</param>
+    /// <param name="rowCount">The file's row count.</param>
+    /// <returns>The compiled selection.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">A row is negative or beyond the file.</exception>
+    internal static RowSelection Create(ReadOnlySpan<long> rows, long rowCount)
+    {
+        if (rows.Length == 0)
+        {
+            return new RowSelection([]);
+        }
+
+        long[] sorted = rows.ToArray();
+        Array.Sort(sorted);
+
+        int kept = 1;
+        CheckRow(sorted[0], rowCount);
+        for (int i = 1; i < sorted.Length; i++)
+        {
+            CheckRow(sorted[i], rowCount);
+            if (sorted[i] != sorted[kept - 1])
+            {
+                sorted[kept++] = sorted[i];
+            }
+        }
+
+        return new RowSelection(kept == sorted.Length ? sorted : sorted[..kept]);
+    }
+
+    /// <summary>
+    /// The requested rows inside <paramref name="split"/>, rebased to be local to it.
+    /// </summary>
+    /// <param name="split">The split's row range, in file coordinates.</param>
+    /// <param name="destination">Receives the local indices; must hold <see cref="Count"/>.</param>
+    /// <returns>How many rows of the split were asked for.</returns>
+    internal int LocalIndices(RowRange split, Span<int> destination)
+    {
+        int first = LowerBound(split.Start);
+        int count = 0;
+        for (int i = first; i < _rows.Length && _rows[i] < split.End; i++)
+        {
+            destination[count++] = (int)(_rows[i] - split.Start);
+        }
+
+        return count;
+    }
+
+    /// <summary>Whether any requested row falls inside <paramref name="split"/>.</summary>
+    /// <param name="split">The split's row range.</param>
+    internal bool Touches(RowRange split)
+    {
+        int first = LowerBound(split.Start);
+        return first < _rows.Length && _rows[first] < split.End;
+    }
+
+    /// <summary>The first index whose row is at or after <paramref name="row"/>.</summary>
+    private int LowerBound(long row)
+    {
+        int low = 0;
+        int high = _rows.Length;
+        while (low < high)
+        {
+            int mid = (int)(((uint)low + (uint)high) >> 1);
+            if (_rows[mid] < row)
+            {
+                low = mid + 1;
+            }
+            else
+            {
+                high = mid;
+            }
+        }
+
+        return low;
+    }
+
+    private static void CheckRow(long row, long rowCount)
+    {
+        if (row < 0 || row >= rowCount)
+        {
+            throw new ArgumentOutOfRangeException(
+                "rows", row, $"The file has {rowCount} rows.");
+        }
+    }
+}

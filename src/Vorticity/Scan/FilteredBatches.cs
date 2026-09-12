@@ -32,10 +32,10 @@ namespace Vorticity.Scan;
 internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
 {
     private readonly BatchAsyncEnumerable _inner;
-    private readonly VortexExpr _filter;
+    private readonly VortexExpr? _filter;
     private readonly bool _prune;
 
-    internal FilteredBatches(BatchAsyncEnumerable inner, VortexExpr filter, bool prune)
+    internal FilteredBatches(BatchAsyncEnumerable inner, VortexExpr? filter, bool prune)
     {
         _inner = inner;
         _filter = filter;
@@ -50,13 +50,13 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
     private sealed class Enumerator : IAsyncEnumerator<RecordBatch>
     {
         private readonly BatchAsyncEnumerable _source;
-        private readonly VortexExpr _filter;
+        private readonly VortexExpr? _filter;
         private readonly bool _prune;
         private readonly CancellationToken _token;
         private IAsyncEnumerator<RecordBatch>? _inner;
 
         internal Enumerator(
-            BatchAsyncEnumerable source, VortexExpr filter, bool prune, CancellationToken token)
+            BatchAsyncEnumerable source, VortexExpr? filter, bool prune, CancellationToken token)
         {
             _source = source;
             _filter = filter;
@@ -73,7 +73,7 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
             {
                 // One read of every zone map the filter can use, before the first batch. Its
                 // result is memory-resident for the rest of the scan.
-                ZonePruner? pruner = _prune
+                ZonePruner? pruner = _prune && _filter is not null
                     ? await ZonePruningPlan
                         .BuildAsync(_source.File, _source.Tree, _filter, _token)
                         .ConfigureAwait(false)

@@ -30,6 +30,7 @@ public sealed class ScanBuilder
     private VortexExpr? _filter;
     private List<string>? _filterPaths;
     private bool _prune = true;
+    private RowSelection? _take;
     private RowRange _rows;
     private bool _rowsSet;
     private int _maxBatchRows;
@@ -117,6 +118,12 @@ public sealed class ScanBuilder
     /// </remarks>
     public ScanBuilder Rows(RowRange range)
     {
+        if (_take is not null)
+        {
+            throw new InvalidOperationException(
+                "A scan selects rows by range or by index list, not both.");
+        }
+
         _rows = range;
         _rowsSet = true;
         return this;
@@ -184,6 +191,40 @@ public sealed class ScanBuilder
     }
 
     /// <summary>
+    /// Returns only the rows at <paramref name="rowIndices"/>.
+    /// </summary>
+    /// <param name="rowIndices">
+    /// File row indices, in any order. Duplicates are collapsed and the order is not preserved:
+    /// batches come out in file order, and reordering rows to match an arbitrary list would mean
+    /// buffering the whole result.
+    /// </param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// <para>
+    /// This is F5, Vortex's headline claim over Parquet: the splits the list never touches are
+    /// skipped before a single segment is registered, so a thousand scattered rows out of a billion
+    /// read the splits those rows live in and nothing else.
+    /// </para>
+    /// <para>
+    /// Mutually exclusive with <see cref="Rows(RowRange)"/>, which selects a contiguous range;
+    /// composes with <see cref="Where(VortexExpr)"/>, which is applied to the taken rows.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">A row is negative or beyond the file.</exception>
+    /// <exception cref="InvalidOperationException"><see cref="Rows(RowRange)"/> was already set.</exception>
+    public ScanBuilder Take(ReadOnlySpan<long> rowIndices)
+    {
+        if (_rowsSet)
+        {
+            throw new InvalidOperationException(
+                "A scan selects rows by range or by index list, not both.");
+        }
+
+        _take = RowSelection.Create(rowIndices, _file.RowCount);
+        return this;
+    }
+
+    /// <summary>
     /// Turns zone-map pruning on or off. On by default.
     /// </summary>
     /// <param name="enabled">Whether the scan may skip splits its zone maps rule out.</param>
@@ -243,6 +284,13 @@ public sealed class ScanBuilder
         RowRange whole = new RowRange(0, rootRows);
         RowRange rows = _rowsSet ? _rows.Intersect(whole) : whole;
 
+        // A take narrows the planned range to the span its indices cover, which already skips every
+        // split outside it; the ones inside it that hold no wanted row are skipped per split.
+        if (_take is not null)
+        {
+            rows = _take.Bounds.Intersect(whole);
+        }
+
         Projection keep = _fields is null ? Projection.All : Projection.Create(_fields.Build());
 
         // WHERE THEN PROJECT: the scan reads the union so the filter has its columns, and the
@@ -259,12 +307,17 @@ public sealed class ScanBuilder
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
 
         BatchAsyncEnumerable batches = new BatchAsyncEnumerable(
-            _file, tree, read, keep, plan, _degree, _filter);
+            _file, tree, read, keep, plan, _degree, _filter, _take);
 
         // Only a filtered scan pays for the skip-empty wrapper; an unfiltered one is the same
         // object graph it has always been, which is what keeps the per-batch allocation figure
         // the allocation tests pin unchanged.
-        return _filter is null ? batches : new FilteredBatches(batches, _filter, _prune);
+        // The wrapper exists for the filter's own two jobs -- prune before reading, skip emptied
+        // batches after -- and a take needs the second of them too: a split whose wanted rows are
+        // all it holds still produces a batch, but one gathered down to nothing must not.
+        return _filter is null && _take is null
+            ? batches
+            : new FilteredBatches(batches, _filter, _prune);
     }
 
     /// <summary>The projection widened by every field a filter reads.</summary>
