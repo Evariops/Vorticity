@@ -141,7 +141,8 @@ documents the fallback honestly everywhere else.
 | `vortex.zigzag`, `vortex.constant`, `vortex.sequence` | pointwise, trivial | **yes** |
 | `vortex.alp` | pointwise over the integers underneath | **yes** — see below |
 | Patches (shared) | merge against the selection — implemented once, used by BitPacked and ALP | **yes** |
-| `vortex.fsst`, `vortex.onpair`, `vortex.alprd` | **fallback**: decode the containing zone, then index | by design |
+| `vortex.fsst`, `vortex.onpair` | seek each row's codes through `codes_offsets` | **no** — currently the fallback, and that is a defect, not a design. See below |
+| `vortex.alprd` | **fallback**: decode the containing zone, then index | |
 | everything else | **fallback** | |
 
 The mechanism is a selection pushed DOWN rather than a gather pulled up. `ArrayDecoder` grows one
@@ -153,11 +154,29 @@ that re-partitions rows, so it is the only one that re-bases the selection, and 
 stats pass it on by doing nothing at all. `vortex.dict` the LAYOUT keeps the selection for its codes
 child and drops it for its shared values, which is the same strategy one level up.
 
-**Two rows of this table were wrong, and measuring is what showed it.** `vortex.alp` was grouped
-with FSST and OnPair under "decode the zone, then index"; it does not belong there. FSST and OnPair
-are VARIABLE-LENGTH, so row n genuinely cannot be found without walking rows 0..n-1 — that is a real
-reason to give up. ALP is one output per input with the exceptions carried as patches, the same
-shape as `fastlanes.for`, and specializing it was worth more than the bit-packing was. And the
+**Three rows of this table were wrong.** `vortex.alp` was grouped with FSST and OnPair under "decode
+the zone, then index"; it does not belong there, because it is one output per input with the
+exceptions carried as patches — the same shape as `fastlanes.for` — and specializing it was worth
+more than the bit-packing was.
+
+**And the reason given for keeping FSST and OnPair in the fallback was itself wrong.** It read: they
+are variable-length, so row n cannot be found without walking rows 0..n-1. That argument is sound in
+general and **does not apply to these two**, because both carry a per-row index into the compressed
+stream:
+
+* `vortex.fsst` children are `[uncompressed_lengths, codes_offsets, validity?]`, and
+  `codes_offsets[i]..[i+1]` bounds row i's codes exactly;
+* `vortex.onpair` children are `[dict_offsets, codes, codes_offsets, uncompressed_lengths,
+  validity?]` — the same shape.
+
+Both decoders' own headers say so in as many words ("`codes_offsets` bounds each row's codes"); what
+they also say is that the reference does not *use* it that way, decompressing the whole stream in
+one pass and cutting the result with `uncompressed_lengths`. For a full scan that is the right
+choice. For a take it is not, and the two were classified from the reference's decode strategy
+rather than from what the format makes possible. They are a **defect to fix**, worth 830 µs of the
+1070 µs a scattered take costs — the largest single performance item left in the library.
+
+The
 density threshold the bit-packed row prescribed ("decode per 1024-block once the hit density exceeds
 a threshold") is deliberately **not** implemented: per-element is better than the old behaviour at
 every density below "all of it", and at "all of it" the scan skips the pushdown entirely, so the
@@ -175,9 +194,10 @@ rows one from each split:
 
 The second row is the attribution, and it is why the first one looks unimpressive: the remaining
 830 µs is the `utf8` column, which is `vortex.onpair` and `vortex.fsst`, which are the fallback by
-design. Over the four columns the specializations cover, a scattered take went from ~1.0× a full
-scan to 0.19× — and the fallback is now the whole of the residual rather than being hidden inside a
-number that averaged it with everything else.
+design **for now**, and the paragraph above explains why that is a defect rather than a limit. Over
+the four columns the specializations cover, a scattered take went from ~1.0× a full scan to 0.19× —
+and the fallback is now the whole of the residual rather than being hidden inside a number that
+averaged it with everything else, which is what made it worth looking at again.
 
 The fallback is correct, just not fast. Documenting which encodings take it — and measuring how much
 of the bill it is — is what keeps F5 an engineering claim rather than a slogan.

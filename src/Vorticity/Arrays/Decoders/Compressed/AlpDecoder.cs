@@ -57,13 +57,16 @@ public sealed class AlpDecoder : ArrayDecoder
     /// ALP is pointwise, so a take reaches straight through it to the integers underneath.
     /// </summary>
     /// <remarks>
-    /// [90-registry.md](../../docs/90-registry.md)'s take table puts `vortex.alp` under "decode the
-    /// containing zone, then index", alongside FSST and OnPair. That grouping is wrong and the
-    /// measurement is what showed it: FSST and OnPair are VARIABLE-LENGTH, so row n cannot be found
-    /// without walking rows 0..n-1, which is a real reason to give up. ALP is
+    /// [90-registry.md](../../docs/90-registry.md)'s take table put `vortex.alp` under "decode the
+    /// containing zone, then index", alongside FSST and OnPair. That grouping is wrong: ALP is
     /// `value * 10^-e * 10^f` per row, one output for one input, with the exceptions carried as
     /// patches - the same shape as `fastlanes.for`. It reaches the bit-packing underneath, which is
     /// where the saving actually is.
+    ///
+    /// (The reason once given for keeping FSST and OnPair in the fallback - that a variable-length
+    /// encoding cannot find row n without walking 0..n-1 - turned out to be wrong about those two
+    /// as well: both carry a `codes_offsets` child that bounds each row's codes. docs/90 records it
+    /// as a defect to fix rather than a limit.)
     /// </remarks>
     public override int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
