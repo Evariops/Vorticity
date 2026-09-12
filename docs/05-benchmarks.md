@@ -121,6 +121,16 @@ what §5 prescribes and what should have been done first:
 an end-to-end one diluted by a fixed cost, and two candidates must be measured against ONE clock or
 thermal drift picks the winner.
 
+**And a third lesson, which cost this table its ability to prove any of that: THE BENCHMARK NO
+LONGER REPRODUCES THE NUMBERS ABOVE.** Running `FsstKernelBenchmarks` today returns 52.4 µs for
+`exact copy` against 38.1 µs for `wide store` — 1.37×, not 7.9×. Nothing regressed. The `exact copy`
+arm calls `FsstSymbolTable.Decode`, and landing the wide store in the library put the wide store
+*inside the baseline arm*: both arms now run the same shape, and the 14 µs between them is the
+`FsstSymbolTable.Create` that only the baseline arm pays. The table above is therefore **history**,
+correct on the day it was measured and unverifiable now. `FastLanesKernelBenchmarks` does not have
+this problem because it carries its own copy of the scalar loop; this one must do the same before
+its rows can be believed again.
+
 The same trick applies to `vortex.onpair`, whose tokens are at most 16 bytes and now take one
 `Vector128` store each; its decoder also stopped re-reading the token offsets through a
 physical-type switch twice per code. That one was measured end to end across four separate process
@@ -157,9 +167,14 @@ And the absolute axes the harness does not cover:
 
 | Axis | Mean | Reading |
 |---|---|---|
-| `Take` of 1 000 scattered rows | 110 µs | |
-| Selective filter, pruning **on** | 58 µs | |
-| Selective filter, pruning **off** | 546 µs | 9.4× — what zone-map pruning is worth here |
+| `Take` of 1 000 scattered rows | 86.8 µs | was 110 µs before the take pushdown of `927bf0c` |
+| Selective filter, pruning **on** | 74.2 µs | was 58 µs when first measured — see below |
+| Selective filter, pruning **off** | 546.3 µs | 7.4× — what zone-map pruning is worth here |
+
+The pruning-off arm has not moved since the benchmark project was written (546 → 546.3 µs), which
+rules out thermal drift as the explanation for the pruning-on arm moving 58 → 74.2 µs over the same
+interval. So the 9.4× that row used to read is now 7.4×, and the cause is a real change on the
+pruned path rather than noise on both. Nothing has bisected it yet.
 
 **Read the first-batch row carefully.** It is like-for-like in unit of work — both sides emit 64
 batches — but Rust's array stream evidently materializes the whole local scan on its first poll:
@@ -179,6 +194,11 @@ The allocation figures (190 KB per full scan, 133 KB of it in the open path and 
 are not in tension with criterion 3: that criterion is about the *steady state per batch*, which
 works out to under a kilobyte here and is pinned exactly by `ScanAllocationTests` rather than by a
 benchmark total.
+
+Every figure in this section is restated with its machine, its commit and its reproduction command
+in [bench/BASELINE.md](../bench/BASELINE.md), which is the file that moves in the same commit as any
+change that moves a number. This section explains what the numbers mean; that file records what they
+currently are.
 
 One toolchain note, because it is load-bearing rather than incidental: BenchmarkDotNet 0.15.4 does
 not know the `net11.0` moniker and its SDK validator throws before any benchmark runs, so the
