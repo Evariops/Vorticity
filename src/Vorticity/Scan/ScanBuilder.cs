@@ -1,16 +1,16 @@
 // PHASE1-CONTRACTS.md §13.1. The fluent front door of the library.
 //
-// WHERE `Where` GOES. docs/03-architecture.md §3.4 fixes the order of application as WHERE THEN
-// PROJECT: the filter sees columns the projection does not. Phase 1 has no expressions
-// (docs/01-scope.md §3) and this class therefore has no Where method - a public
-// `throw new InvalidOperationException("not implemented")` would ship in the 1.0 surface, which is
-// worse than the method not existing. When Phase 2 adds it, it belongs BETWEEN Rows and the
-// projection compilation in ExecuteAsync: the filter's own field mask is unioned into the mask
-// handed to RegisterSegments, and the projection is applied to the result.
+// WHERE `Where` GOES, and why it sits where it does. docs/03-architecture.md §3.4 fixes the order
+// of application as WHERE THEN PROJECT: the filter sees columns the projection does not. So
+// ExecuteAsync compiles TWO masks - `keep`, what the caller projected, and `read`, that unioned
+// with every field the filter references - plans the scan under `read`, and hands both to the
+// enumerator, which trims `read` down to `keep` after the filter has run.
 using System;
 using System.Collections.Generic;
 
 using Vorticity.Columns;
+using Vorticity.Compute;
+using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Types;
@@ -27,6 +27,8 @@ public sealed class ScanBuilder
 {
     private readonly VortexFile _file;
     private FieldMaskBuilder? _fields;
+    private VortexExpr? _filter;
+    private List<string>? _filterPaths;
     private RowRange _rows;
     private bool _rowsSet;
     private int _maxBatchRows;
@@ -134,6 +136,52 @@ public sealed class ScanBuilder
         return this;
     }
 
+    /// <summary>
+    /// Keeps only the rows <paramref name="filter"/> evaluates to <c>true</c>.
+    /// </summary>
+    /// <param name="filter">The predicate; build it with <see cref="Expr"/>.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The filter runs before the projection</b> (docs/03-architecture.md §3.4): a column the
+    /// filter names is read even when the caller did not project it, and is dropped from the batch
+    /// afterwards. Calling this twice replaces the filter rather than combining the two - use
+    /// <see cref="Expr.And"/>, which says what it means.
+    /// </para>
+    /// <para>
+    /// Three-valued logic, SQL-style: a row is kept only when the predicate is <c>true</c>, so a
+    /// row whose compared column is null is dropped by <c>x = 1</c> AND by <c>x != 1</c> alike
+    /// (docs/08-semantics.md §3).
+    /// </para>
+    /// <para>
+    /// A batch whose rows are all rejected is not produced at all; the scan moves to the next
+    /// split. So a filtered scan yields fewer batches than an unfiltered one, not empty ones.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="filter"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// The filter references a field the file's schema does not have.
+    /// </exception>
+    public ScanBuilder Where(VortexExpr filter)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+
+        List<string> paths = [];
+        filter.CollectFields(paths);
+
+        // Resolved here rather than per batch, so a typo in a path is an error at build time with
+        // the schema in hand, not an exception from inside an enumeration.
+        FieldMaskBuilder probe = new FieldMaskBuilder();
+        for (int i = 0; i < paths.Count; i++)
+        {
+            Projection.IncludePath(_file.Schema, paths[i], probe, nameof(filter));
+        }
+
+        _filter = filter;
+        _filterPaths = paths;
+        return this;
+    }
+
     /// <summary>Opts in to decoding independent splits concurrently.</summary>
     /// <param name="degree">How many splits may be in flight at once. Must be positive.</param>
     /// <returns>This builder.</returns>
@@ -176,10 +224,11 @@ public sealed class ScanBuilder
         RowRange whole = new RowRange(0, rootRows);
         RowRange rows = _rowsSet ? _rows.Intersect(whole) : whole;
 
-        // WHERE GOES HERE (docs/03-architecture.md §3.4): the filter's field mask is unioned into
-        // `mask` below, so RegisterSegments materializes the filter's columns too, and the
-        // projection is applied to the filtered result.
-        Projection projection = _fields is null ? Projection.All : Projection.Create(_fields.Build());
+        Projection keep = _fields is null ? Projection.All : Projection.Create(_fields.Build());
+
+        // WHERE THEN PROJECT: the scan reads the union so the filter has its columns, and the
+        // enumerator trims back down to `keep` once the filter has decided.
+        Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
 
         long natural = SplitPlan.NaturalBatchRows(tree);
         if (natural > int.MaxValue)
@@ -188,9 +237,28 @@ public sealed class ScanBuilder
         }
 
         long cap = _maxBatchRows > 0 && _maxBatchRows < natural ? _maxBatchRows : natural;
-        SplitPlan plan = SplitPlan.Compute(tree, rows, projection.RootMask, cap);
+        SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
 
-        return new BatchAsyncEnumerable(_file, tree, projection, plan, _degree);
+        BatchAsyncEnumerable batches = new BatchAsyncEnumerable(
+            _file, tree, read, keep, plan, _degree, _filter);
+
+        // Only a filtered scan pays for the skip-empty wrapper; an unfiltered one is the same
+        // object graph it has always been, which is what keeps the per-batch allocation figure
+        // the allocation tests pin unchanged.
+        return _filter is null ? batches : new NonEmptyBatches(batches);
+    }
+
+    /// <summary>The projection widened by every field a filter reads.</summary>
+    private Projection Union(Projection keep, List<string> filterPaths)
+    {
+        FieldMaskBuilder builder = new FieldMaskBuilder();
+        builder.Include(keep.RootMask);
+        for (int i = 0; i < filterPaths.Count; i++)
+        {
+            Projection.IncludePath(_file.Schema, filterPaths[i], builder, "filter");
+        }
+
+        return Projection.Create(builder.Build());
     }
 
     private FieldMaskBuilder Fields() => _fields ??= new FieldMaskBuilder();

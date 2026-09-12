@@ -227,6 +227,41 @@ public sealed class FieldMaskBuilder
     /// <summary>Materializes the immutable mask.</summary>
     public FieldMask Build() => _root.Build();
 
+    /// <summary>
+    /// Merges an already-built mask into this builder.
+    /// </summary>
+    /// <param name="mask">The mask to union in.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// The scan needs this to read the UNION of what a filter references and what the caller
+    /// projected, while keeping the projection itself intact for the trim afterwards
+    /// (docs/03-architecture.md §3.4). Building the union by mutating the projection's own builder
+    /// would leak the filter's columns into a second ExecuteAsync from the same builder.
+    /// </remarks>
+    public FieldMaskBuilder Include(in FieldMask mask)
+    {
+        Merge(_root, in mask);
+        return this;
+    }
+
+    private static void Merge(Level level, in FieldMask mask)
+    {
+        if (mask.IsAll)
+        {
+            level.SelectAll();
+            return;
+        }
+
+        int count = mask.NamedFieldCount;
+        for (int i = 0; i < count; i++)
+        {
+            int field = mask.GetNamedField(i);
+            Level child = level.Child(field);
+            FieldMask childMask = mask.Descend(field);
+            Merge(child, in childMask);
+        }
+    }
+
     private sealed class Level
     {
         private readonly List<int> _fields = new List<int>();

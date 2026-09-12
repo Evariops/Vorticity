@@ -19,6 +19,7 @@
 // with readonly fields, so it cannot be recycled. Nothing else allocates in steady state, and
 // ZeroAllocationsPerBatch asserts exactly that bound rather than a round number.
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -27,6 +28,8 @@ using System.Threading.Tasks.Sources;
 
 using Vorticity.Arrays;
 using Vorticity.Columns;
+using Vorticity.Compute;
+using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Layouts;
@@ -44,27 +47,48 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 {
     private readonly VortexFile _file;
     private readonly LayoutTree _tree;
-    private readonly Projection _projection;
+    private readonly Projection _read;
+    private readonly Projection _keep;
     private readonly SplitPlan _plan;
     private readonly int _degree;
+    private readonly VortexExpr? _filter;
     private readonly DType _schema;
 
+    /// <param name="file">The open file.</param>
+    /// <param name="tree">Its parsed layout tree.</param>
+    /// <param name="read">What the scan decodes: the projection unioned with the filter's columns.</param>
+    /// <param name="keep">What the caller projected, and therefore what a batch carries.</param>
+    /// <param name="plan">The split plan, computed under <paramref name="read"/>.</param>
+    /// <param name="degree">How many splits may decode concurrently.</param>
+    /// <param name="filter">The predicate, or null.</param>
     internal BatchAsyncEnumerable(
-        VortexFile file, LayoutTree tree, Projection projection, SplitPlan plan, int degree)
+        VortexFile file,
+        LayoutTree tree,
+        Projection read,
+        Projection keep,
+        SplitPlan plan,
+        int degree,
+        VortexExpr? filter)
     {
         _file = file;
         _tree = tree;
-        _projection = projection;
+        _read = read;
+        _keep = keep;
         _plan = plan;
         _degree = degree;
+        _filter = filter;
 
         // Computed once, here, and into an arena of this enumerable's own. Deriving it lazily from
         // the LayoutTree's arena would mutate a structure the tree promises is immutable and
         // therefore safe for concurrent scans (docs/09-contracts.md §1), and two threads reading
         // Schema would race on its arrays.
-        _schema = projection.IsAll
+        //
+        // It is the KEEP projection's schema, not the read projection's: a filter's own columns are
+        // dropped before the batch is produced, so they were never part of what a caller was
+        // promised (docs/03-architecture.md §3.4).
+        _schema = keep.IsAll
             ? tree.Root.DType
-            : projection.ProjectedSchema(tree.Root.DType, new DTypeArena());
+            : keep.ProjectedSchema(tree.Root.DType, new DTypeArena());
     }
 
     /// <summary>The schema every batch of this scan carries.</summary>
@@ -75,8 +99,14 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </remarks>
     public DType Schema => _schema;
 
-    /// <summary>The compiled projection this scan runs under.</summary>
-    public Projection Projection => _projection;
+    /// <summary>The compiled projection this scan runs under: what a batch carries.</summary>
+    public Projection Projection => _keep;
+
+    /// <summary>
+    /// What the scan actually decodes. Equal to <see cref="Projection"/> unless a filter reads
+    /// columns the caller did not project.
+    /// </summary>
+    public Projection ReadProjection => _read;
 
     /// <summary>Starts a scan.</summary>
     /// <param name="cancellationToken">Cancels at batch boundaries (contract §13.4).</param>
@@ -88,7 +118,8 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// The token is honoured directly, so <c>WithCancellation</c> behaves identically.
     /// </remarks>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
-        new BatchAsyncEnumerator(_file, _tree, _projection, _plan, _degree, cancellationToken);
+        new BatchAsyncEnumerator(
+            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, cancellationToken);
 }
 
 /// <summary>The hand-written enumerator of docs/03-architecture.md §3.7.</summary>
@@ -109,6 +140,9 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
     private readonly LayoutTree _tree;
     private readonly ISegmentSource _source;
     private readonly FieldMask _mask;
+    private readonly FieldMask _keep;
+    private readonly DType _schema;
+    private readonly VortexExpr? _filter;
     private readonly int _maxBatchRows;
     private readonly CancellationToken _token;
     private readonly Lane[] _lanes;
@@ -129,14 +163,20 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
     internal BatchAsyncEnumerator(
         VortexFile file,
         LayoutTree tree,
-        Projection projection,
+        Projection read,
+        Projection keep,
+        DType schema,
         SplitPlan plan,
         int degree,
+        VortexExpr? filter,
         CancellationToken cancellationToken)
     {
         _tree = tree;
         _source = file.Segments;
-        _mask = projection.RootMask;
+        _mask = read.RootMask;
+        _keep = keep.RootMask;
+        _schema = schema;
+        _filter = filter;
         _maxBatchRows = (int)Math.Min(plan.MaxRows, int.MaxValue);
         _token = cancellationToken;
         _cursor = plan.CreateCursor();
@@ -282,6 +322,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
             // (docs/03-architecture.md §1: the granularity is the batch).
             _token.ThrowIfCancellationRequested();
             int root = Execute(lane.Context, _pending);
+            root = ApplyFilter(lane.Context, root);
             _current = new RecordBatch(lane.Context, root, _pending.Start);
             return true;
         }
@@ -290,6 +331,51 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
             lane.Context.ResetBatch();
             throw;
         }
+    }
+
+    /// <summary>
+    /// Runs the filter over a decoded batch and drops both the rejected rows and the columns only
+    /// the filter needed.
+    /// </summary>
+    /// <remarks>
+    /// Two steps, in the order docs/03-architecture.md §3.4 fixes. The gather is skipped entirely
+    /// when every row passed -- the common case for a filter that selects a whole split -- so a
+    /// non-selective filter costs one evaluation pass and no copying at all.
+    /// </remarks>
+    private int ApplyFilter(ScanContext context, int root)
+    {
+        if (_filter is null)
+        {
+            return root;
+        }
+
+        int rows = context.Canonical.GetNode(root).Length;
+        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
+        int[]? selected = null;
+        try
+        {
+            Span<byte> window = states.AsSpan(0, rows);
+            FilterEvaluator.Evaluate(_filter, context.Canonical, root, rows, window);
+
+            int count = Trilean.CountTrue(window);
+            if (count != rows)
+            {
+                selected = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
+                Span<int> indices = selected.AsSpan(0, count);
+                CanonicalFilter.Select(window, indices);
+                root = CanonicalFilter.Apply(context.Canonical, root, indices);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(states);
+            if (selected is not null)
+            {
+                ArrayPool<int>.Shared.Return(selected);
+            }
+        }
+
+        return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
     }
 
     private void OnReadCompleted()

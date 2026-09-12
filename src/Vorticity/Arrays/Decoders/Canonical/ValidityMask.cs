@@ -28,14 +28,23 @@ internal readonly ref struct ValidityMask
     /// <summary>Resolves <paramref name="validity"/> against the batch's canonical arena.</summary>
     /// <param name="context">The decode context owning the arena.</param>
     /// <param name="validity">The validity to read.</param>
-    internal static ValidityMask From(ArrayDecodeContext context, Validity validity)
+    internal static ValidityMask From(ArrayDecodeContext context, Validity validity) =>
+        From(context.Canonical, validity);
+
+    /// <summary>
+    /// Resolves <paramref name="validity"/> against an arena directly, for a caller that holds one
+    /// without a decode context - the compute layer, which runs after decoding is finished.
+    /// </summary>
+    /// <param name="arena">The arena the validity's bitmap node lives in.</param>
+    /// <param name="validity">The validity to read.</param>
+    internal static ValidityMask From(CanonicalArena arena, Validity validity)
     {
         if (validity.Kind != ValidityKind.Bitmap)
         {
             return new ValidityMask(validity.Kind, default, 0);
         }
 
-        CanonicalNode bits = context.Canonical.GetNode(validity.CanonicalNodeIndex);
+        CanonicalNode bits = arena.GetNode(validity.CanonicalNodeIndex);
         return new ValidityMask(ValidityKind.Bitmap, bits.Bits.Span, bits.BitOffset);
     }
 

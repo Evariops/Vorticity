@@ -43,11 +43,18 @@ The reference computes `min`/`max` with `NumericalAggregateOpts::skip_nans()`
 
 * **Zone `min`/`max` exclude NaN.** A zone containing NaN still reports the min/max of its
   non-NaN values.
-* Filter expressions follow **IEEE 754**: every comparison involving NaN is false, including
-  `NaN == NaN`. This differs from the row encoding, which deliberately defines a *total* order
-  over floats where NaN is ordered by raw bit pattern ([06-row-encoding.md](06-row-encoding.md) §3).
-  The two orderings serve different purposes and must not be unified — an implementer who reuses
-  the row-encoding comparator for filter evaluation introduces a correctness bug.
+* Filter expressions follow **IEEE 754**, which is more precise than "NaN never matches". The five
+  ordering-and-equality predicates — `==`, `<`, `<=`, `>`, `>=` — are all **false** when either
+  operand is NaN, `NaN == NaN` included. **`!=` is the exception**: it is defined as the negation of
+  `==`, so `NaN != x` is **true**, for every `x`, NaN included. C, C#, Rust and SQL all agree on
+  this; a reader that makes `!=` false for NaN "for consistency" drops rows every other
+  implementation returns. That is not a hypothetical — the first draft of this paragraph said every
+  comparison involving NaN is false, and the test written from it failed against a correct
+  implementation.
+* This is all distinct from the row encoding, which deliberately defines a *total* order over floats
+  where NaN is ordered by raw bit pattern ([06-row-encoding.md](06-row-encoding.md) §3). The two
+  orderings serve different purposes and must not be unified — an implementer who reuses the
+  row-encoding comparator for filter evaluation introduces a correctness bug.
 * Therefore a zone with `max <= 10` may be pruned for `x > 10` **even when `nan_count > 0`**,
   because the NaN rows would not have matched anyway. This is only sound given the two facts
   above; it is written down here so it is not rediscovered by guesswork.
