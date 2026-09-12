@@ -1,0 +1,259 @@
+// PHASE1-CONTRACTS.md §13.2. The projection compiler: dotted paths in, a FieldMask tree out.
+//
+// A projection is compiled ONCE per scan, against the file's schema, and never touched again on a
+// decode path. Everything here therefore allocates freely (§1.3: "allocation at open time is
+// permitted and expected") - the result is a small immutable tree proportional to the projection,
+// never to the row count.
+//
+// TWO THINGS THIS FILE DELIBERATELY DOES NOT DO:
+//
+//   * It invents no escaping syntax. A Vortex field name may itself contain a '.' or be empty -
+//     corpus/types/struct_field_names has fields named "a.b", "" and "😀" - so the dotted grammar
+//     genuinely cannot address every column. ScanBuilder.ProjectFields(ReadOnlySpan<int>) plus
+//     StructColumn.GetField(int) is the documented escape hatch (§13.2).
+//   * It never reorders. ProjectedSchema keeps the schema's own field order and nullability,
+//     because a reader that reordered columns would disagree with every other Vortex reader about
+//     what column 0 is (§13 traps).
+using System;
+using System.Buffers;
+using System.Text;
+
+using Vorticity.Arrays;
+using Vorticity.Layouts;
+using Vorticity.Types;
+
+namespace Vorticity.Scan;
+
+/// <summary>
+/// A compiled projection: the set of leaf paths a scan will materialize, as a
+/// <see cref="FieldMask"/> tree over the file schema.
+/// </summary>
+/// <remarks>
+/// <c>default(Projection)</c> is <see cref="All"/>, matching <c>default(FieldMask)</c>: a scan
+/// handed a default projection materializes everything, which is slower than intended but never
+/// wrong. The opposite default would silently drop columns.
+/// </remarks>
+public readonly struct Projection
+{
+    private readonly FieldMask _mask;
+    private readonly int _leafCount;
+
+    private Projection(FieldMask mask, int leafCount)
+    {
+        _mask = mask;
+        _leafCount = leafCount;
+    }
+
+    /// <summary>Every field of every struct, recursively. Also <c>default(Projection)</c>.</summary>
+    public static Projection All => default;
+
+    /// <summary>
+    /// Compiles <paramref name="paths"/> against <paramref name="schema"/>.
+    /// </summary>
+    /// <param name="schema">The file's schema, normally <see cref="Vorticity.File.VortexFile.Schema"/>.</param>
+    /// <param name="paths">
+    /// <c>.</c>-separated field names, matching the sidecar's <c>null_counts</c> paths - <c>"id"</c>,
+    /// <c>"payload.size"</c>. An empty list is <see cref="All"/>: naming nothing narrows nothing.
+    /// </param>
+    /// <returns>The compiled projection.</returns>
+    /// <exception cref="ArgumentException">
+    /// A path does not resolve against <paramref name="schema"/>, descends through a non-struct,
+    /// or names a field of a non-struct root. The message names the offending path. This is a
+    /// caller error, not a file one (§1.4).
+    /// </exception>
+    /// <exception cref="ArgumentNullException">A path is <see langword="null"/>.</exception>
+    public static Projection Parse(DType schema, ReadOnlySpan<string> paths)
+    {
+        if (paths.Length == 0)
+        {
+            return All;
+        }
+
+        FieldMaskBuilder builder = new FieldMaskBuilder();
+        for (int i = 0; i < paths.Length; i++)
+        {
+            IncludePath(schema, paths[i], builder, nameof(paths));
+        }
+
+        return Create(builder.Build());
+    }
+
+    /// <summary><see langword="true"/> when nothing is narrowed.</summary>
+    public bool IsAll => _mask.IsAll;
+
+    /// <summary>
+    /// How many distinct leaf paths this projection names, or <c>-1</c> when it is
+    /// <see cref="All"/> and the count depends on the schema it is applied to. The <c>-1</c>
+    /// spelling matches <see cref="FieldMask.NamedFieldCount"/>, which uses it for the same reason.
+    /// </summary>
+    public int LeafCount => _mask.IsAll ? -1 : _leafCount;
+
+    /// <summary>The mask handed to the root layout reader.</summary>
+    public FieldMask RootMask => _mask;
+
+    /// <summary>
+    /// The dtype of the batch a scan with this projection produces: <paramref name="schema"/> with
+    /// unselected fields removed, preserving field order and nullability.
+    /// </summary>
+    /// <param name="schema">The file's schema.</param>
+    /// <param name="arena">The arena to build the result in; normally <c>ScanContext.Types</c>.</param>
+    /// <returns>The projected schema, a node of <paramref name="arena"/>.</returns>
+    /// <remarks>
+    /// This mirrors <c>StructLayoutReader.Execute</c> exactly: a whole (<see cref="FieldMask.All"/>)
+    /// mask keeps the node's own dtype, and any narrowing rebuilds the struct from the selected
+    /// fields in schema order. The two must agree, because the batch's schema is what the reader
+    /// produced and this is what a caller was promised.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="arena"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentException"><paramref name="schema"/> is <c>default</c>.</exception>
+    public DType ProjectedSchema(DType schema, DTypeArena arena)
+    {
+        ArgumentNullException.ThrowIfNull(arena);
+        if (schema.IsDefault)
+        {
+            throw new ArgumentException("The schema has not been read.", nameof(schema));
+        }
+
+        return Project(arena, schema, in _mask, depth: 1);
+    }
+
+    /// <summary>Wraps a mask a builder produced, counting its leaves once.</summary>
+    /// <param name="mask">The compiled mask.</param>
+    /// <returns>The projection.</returns>
+    internal static Projection Create(FieldMask mask) => new Projection(mask, CountLeaves(in mask, depth: 1));
+
+    /// <summary>
+    /// Resolves one dotted path against <paramref name="schema"/> and adds it to
+    /// <paramref name="builder"/>.
+    /// </summary>
+    /// <param name="schema">The schema to resolve against.</param>
+    /// <param name="path">The dotted path.</param>
+    /// <param name="builder">The mask under construction.</param>
+    /// <param name="parameterName">The caller's parameter name, for the exception.</param>
+    internal static void IncludePath(DType schema, string path, FieldMaskBuilder builder, string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(path, parameterName);
+        ArgumentNullException.ThrowIfNull(builder);
+
+        if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
+        {
+            ScanThrow.NonStructRoot(parameterName);
+        }
+
+        // MaxDTypeDepth bounds the schema, so it bounds any path that resolves against one: a
+        // longer path must have failed on a leaf before it got here. The bound check below is
+        // therefore defensive - it is what keeps a hostile path from writing past this buffer if
+        // that reasoning ever stops holding.
+        Span<int> indices = stackalloc int[VortexLimits.MaxDTypeDepth];
+        int count = 0;
+
+        // One rented byte buffer for the whole path: DType.IndexOfField matches UTF-8, and
+        // transcoding a substring per segment would allocate a string per segment.
+        int maxBytes = Encoding.UTF8.GetMaxByteCount(path.Length);
+        byte[] rented = ArrayPool<byte>.Shared.Rent(maxBytes == 0 ? 1 : maxBytes);
+        try
+        {
+            DType current = schema;
+            int start = 0;
+            while (true)
+            {
+                int dot = path.IndexOf('.', start);
+                int end = dot < 0 ? path.Length : dot;
+                ReadOnlySpan<char> segment = path.AsSpan(start, end - start);
+
+                if (current.IsDefault || current.Kind != DTypeKind.Struct)
+                {
+                    ScanThrow.PathThroughLeaf(path, new string(segment), parameterName);
+                }
+
+                int written = Encoding.UTF8.GetBytes(segment, rented);
+                int field = current.IndexOfField(new ReadOnlySpan<byte>(rented, 0, written));
+                if (field < 0)
+                {
+                    ScanThrow.UnknownPath(path, parameterName);
+                }
+
+                if (count == indices.Length)
+                {
+                    ScanThrow.PathTooDeep(path, parameterName);
+                }
+
+                indices[count++] = field;
+                current = current.GetField(field);
+
+                if (dot < 0)
+                {
+                    break;
+                }
+
+                start = dot + 1;
+            }
+
+            builder.Include(indices[..count]);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    private static int CountLeaves(in FieldMask mask, int depth)
+    {
+        if (mask.IsAll)
+        {
+            return 1;
+        }
+
+        VortexLimits.CheckDepth(depth, VortexLimits.MaxDTypeDepth, "Projection");
+
+        int named = mask.NamedFieldCount;
+        int total = 0;
+        for (int i = 0; i < named; i++)
+        {
+            FieldMask child = mask.Descend(mask.GetNamedField(i));
+            total += CountLeaves(in child, depth + 1);
+        }
+
+        return total;
+    }
+
+    private static DType Project(DTypeArena arena, DType dtype, in FieldMask mask, int depth)
+    {
+        VortexLimits.CheckDepth(depth, VortexLimits.MaxDTypeDepth, "Projection");
+
+        // A mask names struct fields; anything else it reaches is a leaf and travels whole. This is
+        // the same rule MaskProjection.Apply follows on the decoded side.
+        if (mask.IsAll || dtype.IsDefault || dtype.Kind != DTypeKind.Struct)
+        {
+            return DTypeImport.Into(arena, dtype);
+        }
+
+        int fieldCount = dtype.FieldCount;
+        int selected = 0;
+        for (int i = 0; i < fieldCount; i++)
+        {
+            if (mask.Includes(i))
+            {
+                selected++;
+            }
+        }
+
+        int[] names = new int[selected];
+        DType[] fields = new DType[selected];
+        int next = 0;
+        for (int i = 0; i < fieldCount; i++)
+        {
+            if (!mask.Includes(i))
+            {
+                continue;
+            }
+
+            FieldMask child = mask.Descend(i);
+            names[next] = arena.InternName(dtype.GetFieldNameUtf8(i));
+            fields[next] = Project(arena, dtype.GetField(i), in child, depth + 1);
+            next++;
+        }
+
+        return arena.Struct(new ReadOnlySpan<int>(names), new ReadOnlySpan<DType>(fields), dtype.Nullability);
+    }
+}
