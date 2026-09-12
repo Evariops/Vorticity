@@ -717,11 +717,36 @@ internal static class ArrayBlobWriter
             values.Length * width, width, out Span<byte> destination);
         WriteIndices(values, width, destination);
 
+        return WriteIndexBuffer(
+            builder, arena, arena.GetNode(parentIndex).DType.Arena, buffer, ptype, values.Length,
+            buffers, encodings);
+    }
+
+    /// <summary>
+    /// Writes an index buffer that already exists - a varbin's offsets, a list's offsets or
+    /// sizes - through the compressor, without copying it.
+    /// </summary>
+    /// <remarks>
+    /// docs/90-registry.md used to say offsets and sizes "are index machinery, and they are small".
+    /// The first half is true and the second is not: a list of 8193 rows carries 8193 offsets and
+    /// 8193 sizes, 64 kB between them, against elements that may be a fraction of that. They are
+    /// also the most compressible data in the file - offsets are monotone by construction, and a
+    /// list of fixed-width rows has offsets that are an exact arithmetic progression and sizes that
+    /// are constant, which is to say both are `vortex.sequence` and cost nothing at all. The
+    /// reference bit-packs them; `types/list_i32_nonnull_r8193` was 1.95x our size because of it.
+    ///
+    /// Validity bitmaps are still written raw. They genuinely are small - one bit per row - and
+    /// they are the one child the compressor has no scheme for.
+    /// </remarks>
+    private static int WriteIndexBuffer(
+        FlatBufferBuilder builder, CanonicalArena arena, DTypeArena types, VortexBuffer values,
+        PType ptype, int count, List<PendingBuffer> buffers, EncodingDictionary encodings)
+    {
         // The dtype arena is the column's own: a DType carries the arena it belongs to, and a node
         // whose dtype came from a different one would not compare equal downstream.
-        DType dtype = arena.GetNode(parentIndex).DType.Arena.Primitive(ptype, Nullability.NonNullable);
         int node = arena.AddPrimitive(
-            dtype, values.Length, Arrays.Validity.NonNullable, ptype, buffer);
+            types.Primitive(ptype, Nullability.NonNullable), count, Arrays.Validity.NonNullable,
+            ptype, values);
         return WriteCompressed(builder, arena, node, buffers, encodings);
     }
 
@@ -1013,7 +1038,13 @@ internal static class ArrayBlobWriter
         buffers.Add(new PendingBuffer(heap.AsSpan(0, written).ToArray(), 0));
 
         Span<int> children = stackalloc int[2];
-        children[0] = WriteIndexArray(builder, buffers, encodings, offsets, offsetsPType);
+        int width = offsetsPType.ByteWidth();
+        VortexBuffer offsetBuffer = arena.Allocate(
+            offsets.Length * width, width, out Span<byte> offsetBytes);
+        WriteIndices(offsets, width, offsetBytes);
+        children[0] = WriteIndexBuffer(
+            builder, arena, node.DType.Arena, offsetBuffer, offsetsPType, offsets.Length,
+            buffers, encodings);
         int count = 1 + Validity(builder, arena, node, buffers, encodings, children[1..]);
 
         Span<ushort> indices = stackalloc ushort[1];
@@ -1067,9 +1098,16 @@ internal static class ArrayBlobWriter
         // Children in the reader's order: elements, offsets, sizes, then validity.
         Span<int> children = stackalloc int[4];
         children[0] = WriteChild(builder, arena, node.ElementsIndex, buffers, encodings, compress);
-        children[1] = WritePrimitiveBuffer(
-            builder, buffers, encodings, node.Offsets, node.OffsetPType);
-        children[2] = WritePrimitiveBuffer(builder, buffers, encodings, node.Sizes, node.SizePType);
+        children[1] = compress
+            ? WriteIndexBuffer(
+                builder, arena, node.DType.Arena, node.Offsets, node.OffsetPType, node.Length,
+                buffers, encodings)
+            : WritePrimitiveBuffer(builder, buffers, encodings, node.Offsets, node.OffsetPType);
+        children[2] = compress
+            ? WriteIndexBuffer(
+                builder, arena, node.DType.Arena, node.Sizes, node.SizePType, node.Length,
+                buffers, encodings)
+            : WritePrimitiveBuffer(builder, buffers, encodings, node.Sizes, node.SizePType);
 
         int count = 3 + Validity(builder, arena, node, buffers, encodings, children[3..]);
         return Node(builder, encodings, "vortex.listview"u8, metadata, children[..count], []);

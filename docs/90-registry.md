@@ -204,7 +204,7 @@ representative rows, so a dictionary of strings shares the data buffers it came 
 
 | | ratio to the reference |
 |---|---|
-| Whole corpus | **0.894×** — smaller than the reference, against a ≤105% target. Was 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes, 1.11× before ALP, 1.044× before patched bit-packing, 1.008× before the codes cascade, 0.988× before `vortex.sequence` |
+| Whole corpus | **0.862×** — smaller than the reference, against a ≤105% target. Was 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes, 1.11× before ALP, 1.044× before patched bit-packing, 1.008× before the codes cascade, 0.988× before `vortex.sequence`, 0.894× before the offsets went through the compressor |
 | `distributions/high_cardinality_i64_r8193` (dense integers) | **0.97×** |
 | `distributions/short_runs_i32_r8193` | **0.87×** |
 | `types/i64_nonnull_r8192` | **0.99×** (was 3.31×) |
@@ -231,8 +231,17 @@ elements position produces the same dtype as the primitive it replaces — the c
 `list(utf8)` files are written exactly that way by the reference — and the FlatBuffers constraint
 it worried about does not arise, because children are written before the parent table opens. A
 list's elements, a fixed-size list's elements, a struct's fields, an extension's storage and a
-dictionary's or run-end's values child are all compressed now. Validity bitmaps and a list's
-offsets and sizes are not: they are index machinery, and they are small.
+dictionary's or run-end's values child are all compressed now.
+
+That paragraph used to end "validity bitmaps and a list's offsets and sizes are not: they are index
+machinery, and they are small". The first half was true and the second was not. A list of 8193 rows
+carries 8193 offsets and 8193 sizes — 64 kB between them, often more than the elements — and they
+are the most compressible data in the file: offsets are monotone by construction, and a list of
+fixed-width rows has offsets that are an exact arithmetic progression and sizes that are constant,
+which is to say both are `vortex.sequence` and cost nothing at all. The same held for a
+`vortex.varbin`'s offsets, which the reference bit-packs. They all go through the compressor now,
+worth 0.894× → 0.862×. **Validity bitmaps still do not**: those really are one bit per row, and
+they are the one child no scheme here applies to.
 
 **Every scheme is now priced in bytes rather than by a ratio.** Three rules had been written as
 fractions and never measured against the fixed cost they stood for:
@@ -269,8 +278,13 @@ follows is a list of individual files we are worse on, not a deficit:
   crushes with `vortex.onpair`. That encoding is **absent from the default write target**
   `core2025.05.0` and first appears in `core2026.08.1`, so we cannot emit it by default at all.
   Same for `repeated_prefix_utf8_r8193` at 1.63×.
-* `types/list_*` at about 1.9× and `types/binary_*` at 1.59× — what is left at the top now, and
-  undiagnosed.
+* `types/binary_*` at 1.59× and `types/list_*` at about 1.55× — and the diagnosis is the same for
+  both, and is not about encodings. The reference shares ONE dictionary across the whole column
+  using the `vortex.dict` **layout**; we dictionary-encode per chunk, so the 21 kB of distinct
+  values in `types/binary_nonnull_r8193` is written twice. Our chunks are 4097 and 4096 rows
+  because the writer emits one chunk per `WriteAsync` and inherits whatever batching the caller
+  uses. [01-scope.md](01-scope.md) §3 lists "coalesce toward ~1 MiB" as a Phase 3 layout strategy
+  and it is not built; that, or writing the `vortex.dict` layout, is what closes these.
 
 So an edition caveat belongs on the whole measurement: the corpus was written at
 `core2026.08.3` and we write at `core2025.05.0`, and §3's target says "the same data, edition and
