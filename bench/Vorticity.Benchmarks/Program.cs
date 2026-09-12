@@ -7,6 +7,9 @@
 // and that both implementations AGREE on what they read. A ratio between two readers that return
 // different row counts is not a ratio, and BenchmarkDotNet would report it just as confidently.
 //
+// `-- --profile <scenario> [seconds]` is neither: a bare loop for `dotnet-trace` to sample, with no
+// benchmark harness in the profile. See ProfileScenarios.cs.
+//
 // `-- --ratio-check` is the gate rather than the report: the same axes, interleaved against one
 // clock, each held to a ceiling. It exits non-zero when one is over, so CI can run it. See
 // RatioCheck.cs for why it does its own timing instead of asserting on a BenchmarkDotNet result.
@@ -34,6 +37,15 @@ internal static class Program
         if (args.Length > 0 && args[0] == "--ratio-check")
         {
             return await RatioCheck.RunAsync().ConfigureAwait(false);
+        }
+
+        if (args.Length > 1 && args[0] == "--profile")
+        {
+            double seconds = args.Length > 2 && double.TryParse(
+                args[2], System.Globalization.CultureInfo.InvariantCulture, out double parsed)
+                ? parsed
+                : 10.0;
+            return await ProfileScenarios.RunAsync(args[1], seconds).ConfigureAwait(false);
         }
 
         BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args);
