@@ -310,6 +310,28 @@ internal static class TestMetadata
         }
     }
 
+    /// <summary>
+    /// <c>vortex.onpair</c> metadata, with the physical types the fixtures use: u32 dictionary
+    /// offsets, u16 codes, u32 code offsets and u32 uncompressed lengths.
+    /// </summary>
+    /// <param name="dictionarySize">Token count; the offsets child holds one more than this.</param>
+    /// <param name="codesLength">How many codes the code stream holds.</param>
+    internal static byte[] OnPair(uint dictionarySize, ulong codesLength)
+    {
+        OnPairMetadata value = new(
+            PType.U32, dictionarySize, codesLength, PType.U32, PType.U16, PType.U32);
+        ProtoWriter writer = new();
+        try
+        {
+            OnPairMetadata.Write(ref writer, in value);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
     /// <summary>A bare <c>ScalarValue</c> message body, as fastlanes.for's metadata and
     /// vortex.constant's / vortex.sparse's buffer 0 carry it.</summary>
     internal static byte[] Scalar(ScalarValue value) => ScalarProtobuf.SerializeValue(value);

@@ -29,8 +29,8 @@ public sealed class ScanCorpusTests
         // A snapshot, not a configuration: if a decoder lands or is withdrawn this number moves,
         // and the test is updated to the new snapshot rather than the computation being replaced by
         // a list. 616 was Phase 1; +32 vortex.decimal_byte_parts, +6 vortex.datetimeparts,
-        // +5 vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst.
-        Assert.Equal(728, inScope.Count);
+        // +5 vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst, +46 vortex.onpair.
+        Assert.Equal(774, inScope.Count);
     }
 
     [Fact]
@@ -57,7 +57,7 @@ public sealed class ScanCorpusTests
         }
 
         Assert.Equal(string.Empty, failures.ToString());
-        Assert.Equal(728, checkedFiles);
+        Assert.Equal(774, checkedFiles);
     }
 
     [Fact]
@@ -112,7 +112,7 @@ public sealed class ScanCorpusTests
         }
 
         Assert.Equal(string.Empty, wrong.ToString());
-        Assert.Equal(90, named + read);
+        Assert.Equal(44, named + read);
 
         // A PROPORTION, not a count: the absolute number shrinks with every decoder that lands,
         // while the property being asserted -- that an out-of-scope file almost always reaches the

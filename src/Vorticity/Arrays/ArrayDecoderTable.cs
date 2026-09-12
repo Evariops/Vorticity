@@ -65,6 +65,7 @@ public static class ArrayDecoderTable
         Register(AlpDecoder.Instance);
         Register(AlpRdDecoder.Instance);
         Register(FsstDecoder.Instance);
+        Register(OnPairDecoder.Instance);
     }
 
     /// <summary>

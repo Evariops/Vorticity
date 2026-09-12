@@ -114,10 +114,20 @@ public sealed class CoverageGateTests
         Console.Out.Write(
             "UTF-8 COVERAGE: " + inScope.ToString(CultureInfo.InvariantCulture) + " of " +
             total.ToString(CultureInfo.InvariantCulture) + " corpus files carrying non-ASCII or " +
-            "NUL-bearing utf8 values are in Phase 1 scope; the rest are compressed with " +
-            "vortex.fsst or vortex.onpair.\n");
+            "NUL-bearing utf8 values are in scope; the rest reach a component this build does not " +
+            "decode.\n");
 
         Assert.True(total > 0, "the corpus is supposed to carry non-ASCII utf8 somewhere");
+
+        // The number this gate exists for. Every non-ASCII utf8 file in the corpus was out of scope
+        // until vortex.fsst and vortex.onpair landed, so the suite was checking UTF-8 handling
+        // against nothing at all -- multi-byte sequences straddling the 12-byte inline/reference
+        // view boundary, embedded NULs, the lot. A regression that put them back out of scope would
+        // be invisible in the pass count.
+        Assert.True(
+            inScope * 2 > total,
+            $"only {inScope} of {total} non-ASCII utf8 files are in scope; UTF-8 handling is then " +
+            "largely untested whatever the rest of the suite reports");
     }
 
     private static HashSet<string> InScopeArrayIds()

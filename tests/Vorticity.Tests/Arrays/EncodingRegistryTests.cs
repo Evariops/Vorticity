@@ -41,13 +41,13 @@ public sealed class EncodingRegistryTests
     [InlineData("vortex.alp", ArrayEncodingId.Alp)]
     [InlineData("vortex.alprd", ArrayEncodingId.AlpRd)]
     [InlineData("vortex.fsst", ArrayEncodingId.Fsst)]
+    [InlineData("vortex.onpair", ArrayEncodingId.OnPair)]
     public void EveryImplementedArrayIdResolves(string id, ArrayEncodingId expected)
     {
         Assert.Equal(expected, EncodingRegistry.ResolveArray(Encoding.UTF8.GetBytes(id)));
     }
 
     [Theory]
-    [InlineData("vortex.onpair")]
     [InlineData("vortex.zstd_buffers")]
     [InlineData("vortex.pco")]
     [InlineData("vortex.map")]

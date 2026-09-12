@@ -40,6 +40,7 @@ internal static class Phase1Components
         "vortex.alp",
         "vortex.alprd",
         "vortex.fsst",
+        "vortex.onpair",
     ];
 
     private static readonly object Gate = new object();
@@ -102,6 +103,7 @@ internal static class Phase1Components
         Register(AlpDecoder.Instance);
         Register(AlpRdDecoder.Instance);
         Register(FsstDecoder.Instance);
+        Register(OnPairDecoder.Instance);
     }
 
     /// <summary>Whether this build has a decoder for the array encoding <paramref name="id"/>.</summary>

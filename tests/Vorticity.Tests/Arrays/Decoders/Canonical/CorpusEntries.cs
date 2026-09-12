@@ -164,8 +164,8 @@ internal static class UnsupportedCorpusEntries
 {
     /// <summary>
     /// The single-flat-leaf corpus entries whose array tree still reaches an encoding this build
-    /// does not implement - alp, alprd, datetimeparts, fastlanes.delta, fsst, map, onpair,
-    /// parquet_variant, pco, variant and zstd_buffers. The list shrinks as Phase 2 lands.
+    /// does not implement: fastlanes.delta and vortex.patched (in no core edition), and map,
+    /// parquet_variant, pco, variant and zstd_buffers (deferred upstream to Vortex 1.1).
     /// Decoding one must raise VortexUnsupportedException naming the id - never a wrong value, an
     /// out-of-bounds read or a different exception type (contract §2.3).
     /// </summary>
@@ -179,10 +179,6 @@ internal static class UnsupportedCorpusEntries
         "encodings/map_r1",
         "encodings/map_r1023",
         "encodings/map_r1025",
-        "encodings/onpair",
-        "encodings/onpair_r1",
-        "encodings/onpair_r1023",
-        "encodings/onpair_r1025",
         "encodings/parquet_variant",
         "encodings/parquet_variant_r1",
         "encodings/parquet_variant_r1023",
