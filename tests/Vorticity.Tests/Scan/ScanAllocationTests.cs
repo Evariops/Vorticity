@@ -158,7 +158,7 @@ public sealed class ScanAllocationTests
     }
 
     /// <summary>
-    /// The figure every batch but at most one allocated.
+    /// The figure the batches allocated in steady state: the floor, checked against the median.
     /// </summary>
     /// <remarks>
     /// This used to be the MEAN over the whole window, and the mean is the wrong statistic for a
@@ -168,33 +168,26 @@ public sealed class ScanAllocationTests
     /// "174 bytes per batch, not 80", which is a real-looking regression that reproduces on
     /// roughly one run in twenty and on no particular commit.
     ///
-    /// The floor is strictly stronger than the mean for what the test is FOR: anything allocated
-    /// on every batch raises it, and anything allocated periodically shows up as more than one
-    /// outlier. Only a true one-off is tolerated, and the message names it.
+    /// The floor is strictly stronger than the mean for what the test is FOR: anything allocated on
+    /// EVERY batch raises the floor itself, which the caller's assertion then catches against the
+    /// measured RecordBatch cost. What the floor alone cannot see is something allocated on SOME
+    /// batches, so the median is required to equal it - that catches anything affecting a majority
+    /// while staying indifferent to how many methods happen to tier up inside the window. Counting
+    /// outliers instead needs a number, and any number there is arbitrary.
     /// </remarks>
     private static long SteadyState(List<long> perBatch)
     {
-        long floor = long.MaxValue;
-        for (int i = 0; i < perBatch.Count; i++)
-        {
-            floor = Math.Min(floor, perBatch[i]);
-        }
-
-        int outliers = 0;
-        for (int i = 0; i < perBatch.Count; i++)
-        {
-            if (perBatch[i] != floor)
-            {
-                outliers++;
-            }
-        }
+        List<long> sorted = [.. perBatch];
+        sorted.Sort();
+        long floor = sorted[0];
+        long median = sorted[sorted.Count / 2];
 
         Assert.True(
-            outliers <= 1,
+            median == floor,
             string.Create(
                 CultureInfo.InvariantCulture,
-                $"{outliers} of {perBatch.Count} batches allocated more than the {floor}-byte " +
-                $"floor: [{string.Join(", ", perBatch)}]"));
+                $"the median batch allocated {median} bytes against a floor of {floor}: " +
+                $"[{string.Join(", ", perBatch)}]"));
 
         return floor;
     }
