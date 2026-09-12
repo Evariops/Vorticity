@@ -28,6 +28,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using Vorticity.Editions;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -47,8 +48,8 @@ public sealed class VortexFileWriter : IAsyncDisposable
     private readonly ISegmentSink _sink;
     private readonly DType _schema;
     private readonly int _fieldCount;
-    private readonly EncodingDictionary _arrayEncodings = new EncodingDictionary();
-    private readonly EncodingDictionary _layoutEncodings = new EncodingDictionary();
+    private readonly EncodingDictionary _arrayEncodings;
+    private readonly EncodingDictionary _layoutEncodings;
     private readonly List<SegmentSpec> _segments = [];
 
     /// <summary>Per root field, the segment index of each batch's column.</summary>
@@ -62,6 +63,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
     private readonly bool _isTabular;
     private readonly bool _compress;
+    private readonly VortexEdition _target;
     private int[]? _zoneSegments;
     private byte[][]? _zoneMetadata;
     private long _rowCount;
@@ -69,11 +71,14 @@ public sealed class VortexFileWriter : IAsyncDisposable
     private bool _completed;
     private byte[] _padding = new byte[VortexLimits.MaxAlignment];
 
-    private VortexFileWriter(ISegmentSink sink, DType schema, bool compress)
+    private VortexFileWriter(ISegmentSink sink, DType schema, bool compress, VortexEdition target)
     {
         _sink = sink;
         _schema = schema;
         _compress = compress;
+        _target = target;
+        _arrayEncodings = new EncodingDictionary(ComponentKind.Array, target);
+        _layoutEncodings = new EncodingDictionary(ComponentKind.Layout, target);
         _isTabular = schema.Kind == DTypeKind.Struct;
 
         // A non-struct root is one column whose layout IS the root, with no struct level above it.
@@ -118,7 +123,45 @@ public sealed class VortexFileWriter : IAsyncDisposable
             throw new ArgumentException("The schema has not been set.", nameof(schema));
         }
 
-        return new VortexFileWriter(sink, schema, options?.Compress ?? true);
+        // The schema's extension ids are checked HERE rather than where the dtype is serialized:
+        // the answer cannot change once the writer exists, and "this schema cannot be written to
+        // this edition" is worth hearing before the first batch rather than at Complete.
+        RequireSchemaInTarget(schema, options.TargetEdition);
+        return new VortexFileWriter(sink, schema, options.Compress, options.TargetEdition);
+    }
+
+    /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
+    private static void RequireSchemaInTarget(DType dtype, VortexEdition target)
+    {
+        if (dtype.Kind == DTypeKind.Extension)
+        {
+            string id = dtype.ExtensionId;
+            if (!EditionRegistry.Contains(target, ComponentKind.DType, id))
+            {
+                VortexEdition? introduced = EditionRegistry.IntroducedIn(ComponentKind.DType, id);
+                throw new VortexUnsupportedException(
+                    id,
+                    VortexComponentKind.DType,
+                    introduced is null
+                        ? "No core edition contains it, so no target can emit it."
+                        : $"The write targets edition {EditionRegistry.Name(target)}, which does not " +
+                          $"contain it; it was introduced in {EditionRegistry.Name(introduced.Value)}.");
+            }
+        }
+
+        for (int i = 0; i < dtype.FieldCount; i++)
+        {
+            RequireSchemaInTarget(dtype.GetField(i), target);
+        }
+
+        if (dtype.Kind is DTypeKind.List or DTypeKind.FixedSizeList)
+        {
+            RequireSchemaInTarget(dtype.ElementType, target);
+        }
+        else if (dtype.Kind == DTypeKind.Extension)
+        {
+            RequireSchemaInTarget(dtype.StorageType, target);
+        }
     }
 
     /// <summary>Creates a file at <paramref name="path"/>.</summary>
@@ -260,6 +303,15 @@ public sealed class VortexFileWriter : IAsyncDisposable
     /// </remarks>
     private async ValueTask WriteZoneMapsAsync(CancellationToken cancellationToken)
     {
+        // Below core2026.08.0 there is no `vortex.zoned` layout to put one in. Omitted rather than
+        // approximated with the legacy `vortex.stats`: pruning is an optimization, so dropping it
+        // costs correctness nothing, while writing a layout no release of Vortex has ever produced
+        // - 0.86.1 cannot emit `vortex.stats` at all - would ship an untestable format path.
+        if (!EditionRegistry.Contains(_target, ComponentKind.Layout, "vortex.zoned"))
+        {
+            return;
+        }
+
         if (!TryZoneLength(out uint zoneLength))
         {
             return;

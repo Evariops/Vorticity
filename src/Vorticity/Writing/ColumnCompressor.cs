@@ -30,6 +30,7 @@ using System.Collections.Generic;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Editions;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 
@@ -157,8 +158,16 @@ internal static class ColumnCompressor
     /// <summary>Picks a scheme for the canonical node at <paramref name="nodeIndex"/>.</summary>
     /// <param name="arena">The arena holding the node.</param>
     /// <param name="nodeIndex">The column chunk.</param>
+    /// <param name="target">
+    /// The edition being written. The candidate list is derived from it BEFORE anything is
+    /// measured, which is what upstream does (`retain_allowed_encodings` on the BtrBlocks builder)
+    /// and the only arrangement that works: otherwise a scheme is elected on suitable data and the
+    /// write then fails at serialization because the target does not contain its id. Failing the
+    /// write is the right last-resort assertion; it must never be the nominal path.
+    /// </param>
     /// <returns>The plan; <see cref="ColumnPlan.Canonical"/> when nothing wins.</returns>
-    internal static ColumnPlan Choose(CanonicalArena arena, int nodeIndex)
+    internal static ColumnPlan Choose(
+        CanonicalArena arena, int nodeIndex, VortexEdition target = EditionRegistry.Newest)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         int length = node.Length;
@@ -184,14 +193,21 @@ internal static class ColumnCompressor
 
         runEnds.Add(length);
 
-        if (runStarts.Count * RunEndRatio <= length)
+        if (runStarts.Count * RunEndRatio <= length && Allows(target, "vortex.runend"))
         {
             return ColumnPlan.Runs([.. runStarts], [.. runEnds]);
         }
 
         // Dense integers: a column of a million distinct measurements has no dictionary worth
         // building and a very good bit width.
-        BitPackPlan? packed = BitPackPlan.TryBuild(arena, node);
+        BitPackPlan? packed = Allows(target, "fastlanes.bitpacked")
+            ? BitPackPlan.TryBuild(arena, node, zigzag: Allows(target, "vortex.zigzag"))
+            : null;
+        if (packed is not null && packed.Transform == BitPackTransform.Frame
+            && !Allows(target, "fastlanes.for"))
+        {
+            packed = null;
+        }
 
         // ...but "has a good bit width" is not "is the best scheme", and the two are COMPARED
         // rather than ordered. This used to return the bit-packed plan the moment it beat
@@ -208,7 +224,9 @@ internal static class ColumnCompressor
         // interleaved rather than merely repetitive -- and the budget is what the BEST plan so far
         // costs, so a dictionary that cannot beat the bit-packing abandons that much sooner.
         long budget = packed is null ? plain : Math.Min(plain, packed.Cost);
-        ColumnPlan dictionary = Dictionary(arena, node, comparer, length, budget);
+        ColumnPlan dictionary = Allows(target, "vortex.dict")
+            ? Dictionary(arena, node, comparer, length, budget)
+            : ColumnPlan.Canonical;
         if (dictionary.Scheme != ColumnScheme.None)
         {
             return dictionary;
@@ -226,7 +244,7 @@ internal static class ColumnCompressor
         // Floats get their own scheme, for the same reason integers get frame of reference: a
         // column of prices or coordinates is a column of short decimals, and the integer they
         // scale to bit-packs where the double never could.
-        if (node.Kind == CanonicalKind.Primitive && node.PType.IsFloat())
+        if (node.Kind == CanonicalKind.Primitive && node.PType.IsFloat() && Allows(target, "vortex.alp"))
         {
             AlpPlan? alp = AlpPlan.TryBuild(arena, nodeIndex, plain);
             if (alp is not null)
@@ -235,7 +253,7 @@ internal static class ColumnCompressor
             }
         }
 
-        if (node.Kind == CanonicalKind.VarBinView)
+        if (node.Kind == CanonicalKind.VarBinView && Allows(target, "vortex.fsst"))
         {
             // Measured against the BEST plain form, not against the view form. A binary column of
             // incompressible bytes is smaller as `vortex.varbin` - four-byte offsets rather than
@@ -421,6 +439,10 @@ internal static class ColumnCompressor
         long varbinForm = (((long)node.Length + 1) * FsstPlan.IndexPType(heap).ByteWidth()) + heap;
         return Math.Min(viewForm, varbinForm);
     }
+
+    /// <summary>Whether the target edition carries the array id a scheme would emit.</summary>
+    private static bool Allows(VortexEdition target, string id) =>
+        EditionRegistry.Contains(target, ComponentKind.Array, id);
 
     /// <summary>Whether a canonical form has a row equality this compressor can compute.</summary>
     private static bool IsComparable(CanonicalKind kind) =>

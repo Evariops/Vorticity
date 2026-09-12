@@ -33,7 +33,7 @@ stabilization; it is the edition registry that evolves.
 | F6 | **Zone-map pruning** | Use `vortex.zoned` / `vortex.stats` (min, max, null_count, nan_count) to skip zones |
 | F7 | **Filter pushdown** | Simple predicates (comparisons, AND/OR/NOT, IS NULL, IN) evaluated before materialization |
 | F8 | **Decode the `core` edition** | The 34 array encodings + 6 layouts of `core2026.08.3` — see [90-registry.md](90-registry.md) for the deliberate exceptions |
-| F9 | **Write a file** | Conformant writer targeting an explicit edition (`core2025.05.0` by default → readable by any Vortex ≥ 0.36.0) |
+| F9 | **Write a file** | Conformant writer targeting an explicit edition, enforced per component kind. Default `core2026.08.3` — the newest frozen edition, and what the reference writer defaults to; `core2025.05.0` is selectable and honoured, at the cost of the zone map. The floor cannot be the *default* because the writer's own zone maps (`vortex.zoned`, `core2026.08.0`) and `vortex.uuid` (`core2026.08.3`) are outside it — see [90-registry.md](90-registry.md) |
 | F10 | **Compress on write** | BtrBlocks-style cascade: FoR, ZigZag, BitPacking, Dict, RunEnd, Sparse, Constant, FSST, ALP |
 | F11 | **Statistics** | Compute and write file-level statistics and zone maps |
 | F12 | **Diagnostics** | Dump the layout/encoding tree (equivalent of `display_tree`) — indispensable for debugging and cross-testing |
@@ -117,7 +117,7 @@ small and precisely bounded.
 * Zstd buffer and segment decompression.
 
 ### Phase 3 — Writing
-* Canonical uncompressed writer (valid file, targeting `core2025.05.0`) — the milestone that
+* Canonical uncompressed writer (a valid file at an explicit target edition) — the milestone that
   unlocks cross-testing in the Vorticity → Rust direction.
 * Layout strategies: struct split → row blocks (8192 by default) → zone maps → coalesce toward
   ~1 MiB → flat leaves.

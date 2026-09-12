@@ -127,7 +127,7 @@ internal static class ArrayBlobWriter
         List<PendingBuffer> buffers,
         EncodingDictionary encodings)
     {
-        ColumnPlan plan = ColumnCompressor.Choose(arena, nodeIndex);
+        ColumnPlan plan = ColumnCompressor.Choose(arena, nodeIndex, encodings.Target);
         if (plan.Scheme == ColumnScheme.None)
         {
             // Not the end of it: the column itself resisted every scheme, but a struct field or a

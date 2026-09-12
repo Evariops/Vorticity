@@ -128,24 +128,75 @@ public sealed class ScanAllocationTests
                 Assert.True(Next(enumerator));
             }
 
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            int measured = 0;
-            while (Next(enumerator))
+            List<long> perBatch = [];
+            long terminal;
+            while (true)
             {
-                measured++;
+                long before = GC.GetAllocatedBytesForCurrentThread();
+                bool more = Next(enumerator);
+                long delta = GC.GetAllocatedBytesForCurrentThread() - before;
+                if (!more)
+                {
+                    // The final MoveNextAsync returns false and produces no batch. Asserted on its
+                    // own rather than averaged in with the others, which is what the two claims
+                    // actually are: a batch costs one RecordBatch, and ending costs nothing.
+                    terminal = delta;
+                    break;
+                }
+
+                perBatch.Add(delta);
             }
 
-            long after = GC.GetAllocatedBytesForCurrentThread();
-            Assert.True(measured >= 4, "the measurement needs several steady-state batches");
-
-            // The final MoveNextAsync returns false and produces no batch; it is included in the
-            // window on purpose, so a per-call allocation would still be caught.
-            return (after - before) / measured;
+            Assert.Equal(0, terminal);
+            Assert.True(perBatch.Count >= 5, "the measurement needs several steady-state batches");
+            return SteadyState(perBatch);
         }
         finally
         {
             await enumerator.DisposeAsync();
         }
+    }
+
+    /// <summary>
+    /// The figure every batch but at most one allocated.
+    /// </summary>
+    /// <remarks>
+    /// This used to be the MEAN over the whole window, and the mean is the wrong statistic for a
+    /// steady-state claim: a single one-off inside the window - tiered JIT promoting a method on
+    /// its call-count threshold is the usual one - is divided across every batch and lands as a
+    /// plausible-looking per-batch figure. 1.3 kB of rejit over fourteen batches reads as
+    /// "174 bytes per batch, not 80", which is a real-looking regression that reproduces on
+    /// roughly one run in twenty and on no particular commit.
+    ///
+    /// The floor is strictly stronger than the mean for what the test is FOR: anything allocated
+    /// on every batch raises it, and anything allocated periodically shows up as more than one
+    /// outlier. Only a true one-off is tolerated, and the message names it.
+    /// </remarks>
+    private static long SteadyState(List<long> perBatch)
+    {
+        long floor = long.MaxValue;
+        for (int i = 0; i < perBatch.Count; i++)
+        {
+            floor = Math.Min(floor, perBatch[i]);
+        }
+
+        int outliers = 0;
+        for (int i = 0; i < perBatch.Count; i++)
+        {
+            if (perBatch[i] != floor)
+            {
+                outliers++;
+            }
+        }
+
+        Assert.True(
+            outliers <= 1,
+            string.Create(
+                CultureInfo.InvariantCulture,
+                $"{outliers} of {perBatch.Count} batches allocated more than the {floor}-byte " +
+                $"floor: [{string.Join(", ", perBatch)}]"));
+
+        return floor;
     }
 
     private static bool Next(IAsyncEnumerator<RecordBatch> enumerator)

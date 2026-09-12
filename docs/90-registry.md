@@ -311,17 +311,44 @@ Two things this cost, which are the interesting half:
 
 ## Writing: edition targeting
 
-**The candidate scheme list is derived from the target edition, before sampling** — not filtered
-after the fact. This is what upstream does (`vortex-file/src/writer.rs` calls
-`retain_allowed_encodings` on the BtrBlocks builder with the edition's allowed array IDs), and it
-is the only arrangement that works: otherwise the sampler happily elects `Sequence` on suitable
-data and the write then fails at serialization because the default target `core2025.05.0` does not
-contain `vortex.sequence`. Failing the write is the right last-resort assertion; it must never be
-the nominal path.
+`VortexWriteOptions.TargetEdition` names the frozen edition every component in the file must belong
+to, and `spec/editions/core*.toml` is transcribed into `EditionRegistry` as the table that decides
+it. Editions are cumulative within a family, so the table stores *which edition introduced each id*
+and membership is one integer comparison.
 
-With that ordering, the writer's per-kind allowlist (array / layout / dtype / aggregate) becomes an
-invariant that only fires on a bug, and it **fails the write** when a serializer produces an ID
-outside it. Default
-target: `core2025.05.0`, which maximizes the set of readers that can consume our output. Emitting
-a component absent from the target edition is a bug, not a warning — including for aggregates,
-where silently dropping a zone map would quietly change the pruning behavior the caller asked for.
+**The candidate scheme list is derived from the target, before anything is measured** — not
+filtered after the fact. This is what upstream does (`vortex-file/src/writer.rs` calls
+`retain_allowed_encodings` on the BtrBlocks builder with the edition's allowed array IDs), and it
+is the only arrangement that works: otherwise the compressor elects a scheme on suitable data and
+the write then fails at serialization because the target does not contain its ID. Failing the write
+is the right last-resort assertion; it must never be the nominal path.
+
+The per-kind allowlist (array / layout / dtype / aggregate) then only fires on a bug, and it
+**fails the write** rather than producing a file the target's readers cannot open. Array and layout
+IDs are checked in `EncodingDictionary.Intern`, which is the one place every ID in the file passes
+through exactly once — a new serializer cannot forget to ask. Extension dtypes are checked against
+the schema at `Create`, before the first batch. Aggregates are checked in `ZoneMapWriter`, where
+silently dropping a zone map would quietly change the pruning the caller asked for.
+
+### The default, and why it is not the read-forever floor
+
+This section used to say "Default target: `core2025.05.0`, which maximizes the set of readers that
+can consume our output". **That was false, and nothing checked it.** The writer emits `vortex.zoned`
+on every file whose chunking allows a zone map, and `vortex.zoned` together with all six of its
+aggregates first appears in `core2026.08.0`; `vortex.uuid` first appears in `core2026.08.3`. A
+Vortex 0.36.0 reader — the version the floor exists for — would have met an unknown layout ID.
+
+So the default is **`core2026.08.3`**, the newest frozen edition, which is also what the reference
+writer defaults to. Lower targets are honoured rather than approximated:
+
+| Target | What changes |
+|---|---|
+| `core2026.08.0`…`.3` | nothing; this is what the writer emits naturally |
+| below `core2026.08.0` | the zone map is **omitted**. `vortex.stats` is not written in its place: no release of Vortex has ever emitted one — 0.86.1 cannot — so it would be an untestable format path, and pruning is an optimization whose absence costs correctness nothing |
+| below `core2025.10.0` | a List or FixedSizeList column **fails the write**: their canonical forms here are `vortex.listview` and `vortex.fixed_size_list`, both introduced by that edition. `vortex.list` is the Arrow-compatible form that edition does carry, and writing it is the work that would lift this |
+| below `core2026.08.3` | a `vortex.uuid` column fails the write |
+
+Every failure names the ID *and* the edition that introduced it, which is what turns "this does not
+work" into "raise your target to this". `EditionTargetTests` asserts the property on the written
+FILE — reading its encoding dictionaries back — rather than at the call sites, because a writer that
+checks itself and then emits something else would pass any test written the other way round.

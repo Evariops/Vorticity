@@ -17,6 +17,7 @@ using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.Expressions;
+using Vorticity.Editions;
 using Vorticity.Types;
 
 namespace Vorticity.Writing;
@@ -64,8 +65,16 @@ internal static class ZoneMapWriter
         AggregateSpecList specs = new AggregateSpecList();
         List<int> columns = [];
 
+        // The fourth namespace the allowlist covers. It cannot fire today - all six aggregates and
+        // the `vortex.zoned` layout that carries them were introduced by the same edition, so a
+        // target that has the layout has the aggregates - but the two are independent ids in the
+        // spec and a future edition is free to add a seventh. Asserted rather than assumed, because
+        // silently dropping a zone map would quietly change the pruning the caller asked for.
+        RequireAggregate(encodings.Target, "vortex.null_count");
         if (bounds)
         {
+            RequireAggregate(encodings.Target, "vortex.min");
+            RequireAggregate(encodings.Target, "vortex.max");
             specs.Add("vortex.min"u8, SkipNaNs);
             specs.Add("vortex.max"u8, SkipNaNs);
             columns.Add(Bounds(arena, types, column, zones, wantMin: true));
@@ -79,6 +88,23 @@ internal static class ZoneMapWriter
         blob = ArrayBlobWriter.Write(arena, root, encodings);
         metadata = ZonedMetadata.Serialize(ZonedMetadata.Create(zoneLength, specs));
         return true;
+    }
+
+    private static void RequireAggregate(VortexEdition target, string id)
+    {
+        if (EditionRegistry.Contains(target, ComponentKind.Aggregate, id))
+        {
+            return;
+        }
+
+        VortexEdition? introduced = EditionRegistry.IntroducedIn(ComponentKind.Aggregate, id);
+        throw new VortexUnsupportedException(
+            id,
+            VortexComponentKind.Aggregate,
+            introduced is null
+                ? "No core edition contains it, so no target can emit it."
+                : $"The write targets edition {EditionRegistry.Name(target)}, which does not " +
+                  $"contain it; it was introduced in {EditionRegistry.Name(introduced.Value)}.");
     }
 
     private static bool AnyBounds(IReadOnlyList<ZoneStatistics> zones)

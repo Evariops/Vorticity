@@ -106,8 +106,12 @@ internal sealed class BitPackPlan
     /// </summary>
     /// <param name="arena">The arena holding the node.</param>
     /// <param name="node">The column chunk; must be an integer primitive.</param>
+    /// <param name="zigzag">
+    /// Whether <c>vortex.zigzag</c> may be emitted. A candidate the target edition does not carry
+    /// is not weighed and then discarded; it is never weighed, so the frame's own answer stands.
+    /// </param>
     /// <returns>The plan, or <see langword="null"/> when packing does not pay.</returns>
-    internal static BitPackPlan? TryBuild(CanonicalArena arena, CanonicalNode node)
+    internal static BitPackPlan? TryBuild(CanonicalArena arena, CanonicalNode node, bool zigzag = true)
     {
         if (node.Kind != CanonicalKind.Primitive || !node.PType.IsInteger())
         {
@@ -130,10 +134,10 @@ internal sealed class BitPackPlan
         // One pass, both histograms. Entry w counts the values needing exactly w bits, so the
         // number of exceptions at width w is the sum of entries above w - which is what the cost
         // loop accumulates from the top down.
-        Span<int> frame = stackalloc int[65];
-        Span<int> zigzag = stackalloc int[65];
-        frame.Clear();
-        zigzag.Clear();
+        Span<int> frames = stackalloc int[65];
+        Span<int> zigzags = stackalloc int[65];
+        frames.Clear();
+        zigzags.Clear();
         bool signed = ptype.IsSignedInteger();
 
         for (int row = 0; row < length; row++)
@@ -146,26 +150,26 @@ internal sealed class BitPackPlan
                 // it as a raw zero here and letting the transform run cost 37 kB on
                 // `containers/zoned_many_zones_nulls` before the histogram was read against what
                 // Pack actually writes.
-                frame[0]++;
-                zigzag[0]++;
+                frames[0]++;
+                zigzags[0]++;
                 continue;
             }
 
             ulong bits = CompressedValues.ReadUnsigned(values, raw, row);
-            frame[BitLength(Frame(bits, reference, elementBits))]++;
+            frames[BitLength(Frame(bits, reference, elementBits))]++;
             if (signed)
             {
-                zigzag[BitLength(ZigZag(bits, elementBits))]++;
+                zigzags[BitLength(ZigZag(bits, elementBits))]++;
             }
         }
 
         long blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
         long perException = ptype.ByteWidth() + FsstPlan.IndexPType(length).ByteWidth();
 
-        Best best = Cheapest(frame, elementBits, blocks, perException, BitPackTransform.Frame);
-        if (signed)
+        Best best = Cheapest(frames, elementBits, blocks, perException, BitPackTransform.Frame);
+        if (signed && zigzag)
         {
-            Best other = Cheapest(zigzag, elementBits, blocks, perException, BitPackTransform.ZigZag);
+            Best other = Cheapest(zigzags, elementBits, blocks, perException, BitPackTransform.ZigZag);
             if (other.Cost < best.Cost)
             {
                 best = other;
