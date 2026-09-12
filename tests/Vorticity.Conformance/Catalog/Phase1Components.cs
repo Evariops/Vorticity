@@ -38,6 +38,7 @@ internal static class Phase1Components
         "vortex.datetimeparts",
         "vortex.zstd",
         "vortex.alp",
+        "vortex.alprd",
     ];
 
     private static readonly object Gate = new object();
@@ -98,6 +99,7 @@ internal static class Phase1Components
         Register(DateTimePartsDecoder.Instance);
         Register(ZstdDecoder.Instance);
         Register(AlpDecoder.Instance);
+        Register(AlpRdDecoder.Instance);
     }
 
     /// <summary>Whether this build has a decoder for the array encoding <paramref name="id"/>.</summary>

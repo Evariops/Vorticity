@@ -171,10 +171,6 @@ internal static class UnsupportedCorpusEntries
     /// </summary>
     internal static readonly string[] All =
     [
-        "encodings/alprd",
-        "encodings/alprd_r1",
-        "encodings/alprd_r1023",
-        "encodings/alprd_r1025",
         "encodings/fastlanes_delta",
         "encodings/fastlanes_delta_r1",
         "encodings/fastlanes_delta_r1023",

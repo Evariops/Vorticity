@@ -63,6 +63,7 @@ public static class ArrayDecoderTable
         Register(DateTimePartsDecoder.Instance);
         Register(ZstdDecoder.Instance);
         Register(AlpDecoder.Instance);
+        Register(AlpRdDecoder.Instance);
     }
 
     /// <summary>

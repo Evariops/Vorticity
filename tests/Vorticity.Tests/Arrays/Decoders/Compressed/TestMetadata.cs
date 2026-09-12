@@ -244,6 +244,54 @@ internal static class TestMetadata
         }
     }
 
+    /// <summary><c>vortex.alprd</c> metadata.</summary>
+    /// <param name="rightBitWidth">Width of the right parts, in bits.</param>
+    /// <param name="leftPartsPType">Physical type of the left-parts (code) child.</param>
+    /// <param name="dictionary">The left-parts dictionary, in code order.</param>
+    internal static byte[] AlpRd(uint rightBitWidth, PType leftPartsPType, params uint[] dictionary) =>
+        AlpRdBody(
+            new AlpRdMetadata(
+                rightBitWidth, (uint)dictionary.Length, dictionary.Length, leftPartsPType, null),
+            dictionary);
+
+    /// <summary><c>vortex.alprd</c> metadata whose declared dict_len differs from what it carries.</summary>
+    /// <param name="rightBitWidth">Width of the right parts, in bits.</param>
+    /// <param name="leftPartsPType">Physical type of the left-parts child.</param>
+    /// <param name="dictionaryLength">The declared dict_len.</param>
+    /// <param name="dictionary">The entries actually written.</param>
+    internal static byte[] AlpRdRaw(
+        uint rightBitWidth, PType leftPartsPType, uint dictionaryLength, params uint[] dictionary) =>
+        AlpRdBody(
+            new AlpRdMetadata(
+                rightBitWidth, dictionaryLength, dictionary.Length, leftPartsPType, null),
+            dictionary);
+
+    /// <summary><c>vortex.alprd</c> metadata with a patch descriptor.</summary>
+    /// <param name="rightBitWidth">Width of the right parts, in bits.</param>
+    /// <param name="leftPartsPType">Physical type of the left-parts child.</param>
+    /// <param name="patches">The patch descriptor.</param>
+    /// <param name="dictionary">The left-parts dictionary.</param>
+    internal static byte[] AlpRd(
+        uint rightBitWidth, PType leftPartsPType, in PatchesMetadata patches, params uint[] dictionary) =>
+        AlpRdBody(
+            new AlpRdMetadata(
+                rightBitWidth, (uint)dictionary.Length, dictionary.Length, leftPartsPType, patches),
+            dictionary);
+
+    private static byte[] AlpRdBody(in AlpRdMetadata value, ReadOnlySpan<uint> dictionary)
+    {
+        ProtoWriter writer = new();
+        try
+        {
+            AlpRdMetadata.Write(ref writer, in value, dictionary);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
     /// <summary>A bare <c>ScalarValue</c> message body, as fastlanes.for's metadata and
     /// vortex.constant's / vortex.sparse's buffer 0 carry it.</summary>
     internal static byte[] Scalar(ScalarValue value) => ScalarProtobuf.SerializeValue(value);
@@ -315,6 +363,17 @@ internal static class TestBuffers
         for (int i = 0; i < values.Length; i++)
         {
             BinaryPrimitives.WriteDoubleLittleEndian(bytes.AsSpan(i * sizeof(double)), values[i]);
+        }
+
+        return bytes;
+    }
+
+    internal static byte[] Int16(params short[] values)
+    {
+        byte[] bytes = new byte[values.Length * sizeof(short)];
+        for (int i = 0; i < values.Length; i++)
+        {
+            BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(i * sizeof(short)), values[i]);
         }
 
         return bytes;

@@ -49,6 +49,7 @@ internal static class TestDecoders
             Register(DateTimePartsDecoder.Instance);
             Register(ZstdDecoder.Instance);
             Register(AlpDecoder.Instance);
+            Register(AlpRdDecoder.Instance);
 
             Register(new StubPrimitiveDecoder());
             Register(new StubBoolDecoder());
