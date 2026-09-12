@@ -44,6 +44,12 @@ internal enum ColumnScheme : byte
     /// <summary>Dictionary encode it: one code per row, one entry per distinct value.</summary>
     Dict = 2,
 
+    /// <summary>
+    /// FSST: the scheme high-cardinality text wants, and the one the reference uses where every
+    /// other rule here falls through.
+    /// </summary>
+    Fsst = 4,
+
     /// <summary>Frame of reference, then bit-pack: the scheme dense integers want.</summary>
     BitPacked = 3,
 }
@@ -62,6 +68,12 @@ internal readonly struct ColumnPlan
 
     /// <summary>Leave the column alone.</summary>
     internal static ColumnPlan Canonical => new ColumnPlan(ColumnScheme.None, [], [], 0, 0);
+
+    /// <summary>
+    /// The compressed column, for <see cref="ColumnScheme.Fsst"/>. Carried on the plan rather than
+    /// rebuilt by the writer because deciding that FSST pays already required producing it.
+    /// </summary>
+    internal FsstPlan? Fsst { get; private init; }
 
     /// <summary>The frame of reference, as the column's own raw bits.</summary>
     internal ulong Reference { get; }
@@ -89,6 +101,9 @@ internal readonly struct ColumnPlan
 
     internal static ColumnPlan Dictionary(int[] firstOccurrences, int[] codes) =>
         new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes, 0, 0);
+
+    internal static ColumnPlan ForFsst(FsstPlan plan) =>
+        new ColumnPlan(ColumnScheme.Fsst, [], [], 0, 0) { Fsst = plan };
 
     internal static ColumnPlan FrameOfReference(ulong reference, int bitWidth) =>
         new ColumnPlan(ColumnScheme.BitPacked, [], [], reference, bitWidth);
@@ -171,7 +186,26 @@ internal static class ColumnCompressor
         // A second pass for distinct values, over a column the runs did not capture. The run count
         // bounds the distinct count from above, so this only runs when the data is genuinely
         // interleaved rather than merely repetitive.
-        return Dictionary(comparer, length);
+        ColumnPlan dictionary = Dictionary(comparer, length);
+        if (dictionary.Scheme != ColumnScheme.None)
+        {
+            return dictionary;
+        }
+
+        // LAST, and only for text: a high-cardinality string column defeats runs, defeats
+        // dictionaries and has no frame of reference, which is precisely the case the reference
+        // hands to FSST and we used to write out canonically. Tried here rather than earlier
+        // because a dictionary is cheaper to decode when it applies.
+        if (node.Kind == CanonicalKind.VarBinView)
+        {
+            FsstPlan? fsst = FsstPlan.TryBuild(arena, nodeIndex, DataBytes(node));
+            if (fsst is not null)
+            {
+                return ColumnPlan.ForFsst(fsst);
+            }
+        }
+
+        return ColumnPlan.Canonical;
     }
 
     /// <summary>

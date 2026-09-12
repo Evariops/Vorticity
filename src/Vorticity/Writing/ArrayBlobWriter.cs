@@ -138,6 +138,11 @@ internal static class ArrayBlobWriter
             return WriteFrameOfReference(builder, arena, nodeIndex, plan, buffers, encodings);
         }
 
+        if (plan.Scheme == ColumnScheme.Fsst)
+        {
+            return WriteFsst(builder, arena, nodeIndex, plan.Fsst!, buffers, encodings);
+        }
+
         // The values child of both remaining schemes is the original column gathered down to its
         // representative rows, so a dictionary of strings shares the data buffers it came from.
         int values = CanonicalFilter.Apply(arena, nodeIndex, plan.Gather);
@@ -329,6 +334,84 @@ internal static class ArrayBlobWriter
         PType.I32 => unchecked((ulong)(long)(int)bits),
         _ => bits,
     };
+
+    /// <summary>
+    /// Writes <c>vortex.fsst</c>: three buffers and two or three children.
+    /// </summary>
+    /// <remarks>
+    /// The shape is the one FsstDecoder reads, and its unusual property is worth restating at the
+    /// writing end: THE ROW BOUNDARIES ARE ON THE DECODED SIDE. `codes_offsets` bounds each row's
+    /// codes, but the reader decompresses the whole stream in one pass and then cuts the result
+    /// with `uncompressed_lengths` - so the lengths are not a hint, they are the only thing that
+    /// says where a value ends, and they must account for the decoded heap exactly.
+    ///
+    /// The validity child goes last and is present only for a nullable dtype, matching the
+    /// decoder's `DecodeValidity(node, 2, ...)`.
+    /// </remarks>
+    private static int WriteFsst(
+        FlatBufferBuilder builder,
+        CanonicalArena arena,
+        int nodeIndex,
+        FsstPlan plan,
+        List<PendingBuffer> buffers,
+        EncodingDictionary encodings)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        FsstSymbols table = plan.Table;
+        byte[] symbols = new byte[table.Count * 8];
+        byte[] symbolLengths = new byte[table.Count];
+        for (int i = 0; i < table.Count; i++)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(symbols.AsSpan(i * 8), table.SymbolBits(i));
+            symbolLengths[i] = table.SymbolLength(i);
+        }
+
+        buffers.Add(new PendingBuffer(symbols, Exponent(8)));
+        int symbolBuffer = buffers.Count - 1;
+        buffers.Add(new PendingBuffer(symbolLengths, 0));
+        int lengthBuffer = buffers.Count - 1;
+        buffers.Add(new PendingBuffer(plan.Codes.AsSpan(0, plan.CodeLength).ToArray(), 0));
+        int codeBuffer = buffers.Count - 1;
+
+        PType lengthsPType = FsstPlan.IndexPType(FsstPlan.MaxOf(plan.Lengths));
+        PType offsetsPType = FsstPlan.IndexPType(plan.CodeLength);
+
+        int uncompressed = WriteIndexArray(builder, buffers, encodings, plan.Lengths, lengthsPType);
+        int offsets = WriteIndexArray(builder, buffers, encodings, plan.Offsets, offsetsPType);
+
+        Span<int> children = stackalloc int[3];
+        children[0] = uncompressed;
+        children[1] = offsets;
+        Span<int> validity = stackalloc int[1];
+        int childCount = 2 + Validity(builder, arena, node, buffers, encodings, validity);
+        if (childCount == 3)
+        {
+            children[2] = validity[0];
+        }
+
+        Span<ushort> indices = stackalloc ushort[3];
+        indices[0] = (ushort)symbolBuffer;
+        indices[1] = (ushort)lengthBuffer;
+        indices[2] = (ushort)codeBuffer;
+
+        byte[] metadata = FsstBytes(lengthsPType, offsetsPType);
+        return Node(builder, encodings, "vortex.fsst"u8, metadata, children[..childCount], indices);
+    }
+
+    private static byte[] FsstBytes(PType lengthsPType, PType offsetsPType)
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            FsstMetadata value = new FsstMetadata(lengthsPType, offsetsPType);
+            FsstMetadata.Write(ref writer, in value);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
 
     private static int WriteRunEnd(
         FlatBufferBuilder builder,

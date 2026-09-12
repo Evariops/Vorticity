@@ -205,16 +205,32 @@ representative rows, so a dictionary of strings shares the data buffers it came 
 
 | | ratio to the reference |
 |---|---|
-| Whole corpus | **1.95×** |
+| Whole corpus | **1.54×** (was 1.95× before FSST) |
 | `distributions/high_cardinality_i64_r8193` (dense integers) | **0.97×** |
 | `distributions/short_runs_i32_r8193` | **0.87×** |
-| `containers/zoned_many_zones_nulls` (five columns, one of them high-cardinality text) | 3.61× |
+| `containers/zoned_many_zones_nulls` (five columns, one of them high-cardinality text) | 1.73× (was 3.61×) |
 
-So the numeric path is already at or below the reference and **the remaining gap is text**: a
-high-cardinality utf8 column falls through every rule above and is written canonically, where the
-reference uses FSST or OnPair. Those two are whole algorithms rather than kernels — docs/01-scope.md
-§3 singles out FSST symbol-table construction as by far the largest write kernel — and ALP is in the
-same class for floats.
+Measured by `WrittenSizeTests` on every run rather than by hand, with the worst offenders ranked
+by BYTES LOST — a 40× ratio on a 300-byte file moves nothing.
+
+**FSST is written**, which is where that 0.4× came from. It is tried last, only on VarBinView, and
+only when runs, frame-of-reference and dictionaries have all declined — the case the reference
+hands to FSST and we used to write canonically. Two things about it are worth carrying forward:
+
+* The symbol table must be **ordered by length, 2…8 then 1**. The reference validates it
+  (`validate_symbol_lengths`) and refuses the array; our own reader does not, so no round trip
+  through our decoder could see the violation. The Rust cross-check rejected 35 of 774 files until
+  the table was reordered.
+* Deciding that FSST pays *means compressing the column* — there is no cheap estimate — so the plan
+  is built during `Choose` and the bytes are kept rather than produced twice.
+
+**What is left, in order of bytes:** the top offenders are now `list(utf8)` and deeply nested
+structs, at 5–11×. Those are not a missing algorithm: compression is applied to the TOP of a column
+and nowhere else, so a list's elements child and a nested struct's leaves are written canonically
+however compressible they are. After that comes `vortex.onpair` (a second string compressor, and
+the one the reference reaches for on repeated-prefix data) — though note it is absent from the
+default write target `core2025.05.0` and first appears in `core2026.08.1`, so it cannot be emitted
+by default at all. ALP is in the same class for floats.
 
 Cascading is also absent: dictionary codes that are themselves bit-packed is where the last of the
 reference's ratio lives.
