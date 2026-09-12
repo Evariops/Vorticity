@@ -27,6 +27,7 @@
 using System;
 using System.Collections.Generic;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Types;
 
@@ -120,6 +121,13 @@ internal static class ColumnCompressor
 
     /// <summary>The same, for a dictionary. Higher, because the codes array is not free.</summary>
     private const int DictRatio = 4;
+
+    /// <summary>
+    /// What a frame-of-reference node costs beyond its packed bytes: one more array node, its
+    /// metadata and its buffer spec. Deliberately generous - the point is to refuse encodings that
+    /// barely pay, not to squeeze the last byte.
+    /// </summary>
+    private const int FrameOfReferenceOverhead = 256;
 
     /// <summary>Below this many rows, a column is a candidate only if it is big in BYTES.</summary>
     private const int MinimumRows = 64;
@@ -264,9 +272,18 @@ internal static class ColumnCompressor
 
         int bitWidth = span == 0 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount(span);
 
-        // Half the width or better. Below that the second array, its metadata and a decode step on
-        // every read are not bought back.
-        if (bitWidth * 2 > elementBits)
+        // Compared in BYTES, not as a fraction of the element width. The rule used to be "half the
+        // width or better", which refused a 40-bit column of i64 timestamps - a 37% saving on
+        // 8192 rows, tens of kilobytes, declined by a heuristic that had never been measured
+        // against the thing it stands for. What it stands for is the fixed cost of a second node
+        // and a decode step, so that is what it is compared against.
+        //
+        // The padding matters at small row counts: FastLanes packs in blocks of 1024 and the last
+        // block is full-width whatever it holds, so 100 rows at 40 bits cost 1024 of them.
+        long canonical = (long)node.Length * ptype.ByteWidth();
+        long blocks = (node.Length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
+        long packed = blocks * FastLanes.BlockByteLength(bitWidth);
+        if (packed + FrameOfReferenceOverhead >= canonical)
         {
             return false;
         }

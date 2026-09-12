@@ -205,10 +205,10 @@ representative rows, so a dictionary of strings shares the data buffers it came 
 
 | | ratio to the reference |
 |---|---|
-| Whole corpus | **1.54×** (was 1.95× before FSST) |
+| Whole corpus | **1.15×** — was 1.95× before FSST, 1.54× before nested columns |
 | `distributions/high_cardinality_i64_r8193` (dense integers) | **0.97×** |
 | `distributions/short_runs_i32_r8193` | **0.87×** |
-| `containers/zoned_many_zones_nulls` (five columns, one of them high-cardinality text) | 1.73× (was 3.61×) |
+| `containers/zoned_many_zones_nulls` (five columns, one of them high-cardinality text) | 1.72× (was 3.61×) |
 
 Measured by `WrittenSizeTests` on every run rather than by hand, with the worst offenders ranked
 by BYTES LOST — a 40× ratio on a 300-byte file moves nothing.
@@ -224,16 +224,27 @@ hands to FSST and we used to write canonically. Two things about it are worth ca
 * Deciding that FSST pays *means compressing the column* — there is no cheap estimate — so the plan
   is built during `Choose` and the bytes are kept rather than produced twice.
 
-**What is left, in order of bytes:** the top offenders are now `list(utf8)` and deeply nested
-structs, at 5–11×. Those are not a missing algorithm: compression is applied to the TOP of a column
-and nowhere else, so a list's elements child and a nested struct's leaves are written canonically
-however compressible they are. After that comes `vortex.onpair` (a second string compressor, and
-the one the reference reaches for on repeated-prefix data) — though note it is absent from the
-default write target `core2025.05.0` and first appears in `core2026.08.1`, so it cannot be emitted
-by default at all. ALP is in the same class for floats.
+**Compression now reaches nested columns.** It used to be applied to the top of a column and
+nowhere else, on the stated grounds that "applying a scheme inside a struct or a list would change
+shapes the reader derives top-down". That was wrong twice over: a `vortex.dict` node in an
+elements position produces the same dtype as the primitive it replaces — the corpus's own
+`list(utf8)` files are written exactly that way by the reference — and the FlatBuffers constraint
+it worried about does not arise, because children are written before the parent table opens. A
+list's elements, a fixed-size list's elements, a struct's fields, an extension's storage and a
+dictionary's or run-end's values child are all compressed now. Validity bitmaps and a list's
+offsets and sizes are not: they are index machinery, and they are small.
 
-Cascading is also absent: dictionary codes that are themselves bit-packed is where the last of the
-reference's ratio lives.
+**The frame-of-reference rule now compares bytes.** It was "half the element width or better",
+which refused a 40-bit column of `i64` timestamps — a 37% saving over 8192 rows, declined by a
+heuristic that had never been measured against the fixed cost it stands for. It now compares the
+packed size (block padding included, since FastLanes rounds to 1024) plus a node's overhead against
+the canonical size. Dates and timestamps left the offender list entirely.
+
+**What is left, in order of bytes:** `vortex.onpair`, a second string compressor the reference
+reaches for on repeated-prefix data — though note it is absent from the default write target
+`core2025.05.0` and first appears in `core2026.08.1`, so it cannot be emitted by default at all.
+ALP is in the same class for floats. Cascading — dictionary codes that are themselves bit-packed —
+is where the rest lives.
 
 ## Writing: edition targeting
 

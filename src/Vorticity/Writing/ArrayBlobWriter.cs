@@ -66,7 +66,7 @@ internal static class ArrayBlobWriter
         // FlatBuffers table cannot be open while that happens.
         int root = compress
             ? WriteCompressed(builder, arena, nodeIndex, buffers, encodings)
-            : WriteNode(builder, arena, nodeIndex, buffers, encodings);
+            : WriteNode(builder, arena, nodeIndex, buffers, encodings, compress: false);
 
         // The Buffer vector records what the layout below will actually write, so the paddings have
         // to be settled before the table that carries them is built.
@@ -130,7 +130,9 @@ internal static class ArrayBlobWriter
         ColumnPlan plan = ColumnCompressor.Choose(arena, nodeIndex);
         if (plan.Scheme == ColumnScheme.None)
         {
-            return WriteNode(builder, arena, nodeIndex, buffers, encodings);
+            // Not the end of it: the column itself resisted every scheme, but a struct field or a
+            // list's elements underneath it may not.
+            return WriteNode(builder, arena, nodeIndex, buffers, encodings, compress: true);
         }
 
         if (plan.Scheme == ColumnScheme.BitPacked)
@@ -145,6 +147,8 @@ internal static class ArrayBlobWriter
 
         // The values child of both remaining schemes is the original column gathered down to its
         // representative rows, so a dictionary of strings shares the data buffers it came from.
+        // The gathered values child is itself a column, and a dictionary of long strings is
+        // exactly the shape FSST wants underneath: compressed rather than written flat.
         int values = CanonicalFilter.Apply(arena, nodeIndex, plan.Gather);
 
         return plan.Scheme == ColumnScheme.RunEnd
@@ -427,7 +431,7 @@ internal static class ArrayBlobWriter
 
         byte[] metadata = RunEndBytes(endsPType, (ulong)plan.Codes.Length);
         int ends = WriteIndexArray(builder, buffers, encodings, plan.Codes, endsPType);
-        int valuesNode = WriteNode(builder, arena, values, buffers, encodings);
+        int valuesNode = WriteCompressed(builder, arena, values, buffers, encodings);
 
         Span<int> children = stackalloc int[2];
         children[0] = ends;
@@ -452,7 +456,7 @@ internal static class ArrayBlobWriter
         // entry is null and every row still has a code.
         byte[] metadata = DictBytes((uint)entries, codesPType);
         int codes = WriteIndexArray(builder, buffers, encodings, plan.Codes, codesPType);
-        int valuesNode = WriteNode(builder, arena, values, buffers, encodings);
+        int valuesNode = WriteCompressed(builder, arena, values, buffers, encodings);
 
         Span<int> children = stackalloc int[2];
         children[0] = codes;
@@ -527,12 +531,19 @@ internal static class ArrayBlobWriter
         }
     }
 
+    /// <remarks>
+    /// <paramref name="compress"/> says whether the children that are columns in their own right -
+    /// a list's elements, a fixed-size list's elements, a struct's fields, an extension's storage -
+    /// may be compressed. Validity bitmaps and a list's offsets and sizes never are: they are index
+    /// machinery, and they are small.
+    /// </remarks>
     private static int WriteNode(
         FlatBufferBuilder builder,
         CanonicalArena arena,
         int nodeIndex,
         List<PendingBuffer> buffers,
-        EncodingDictionary encodings)
+        EncodingDictionary encodings,
+        bool compress)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         switch (node.Kind)
@@ -553,18 +564,30 @@ internal static class ArrayBlobWriter
                 return WriteVarBinView(builder, arena, node, buffers, encodings);
 
             case CanonicalKind.ListView:
-                return WriteListView(builder, arena, node, buffers, encodings);
+                return WriteListView(builder, arena, node, buffers, encodings, compress);
 
             case CanonicalKind.FixedSizeList:
-                return WriteFixedSizeList(builder, arena, node, buffers, encodings);
+                return WriteFixedSizeList(builder, arena, node, buffers, encodings, compress);
 
             case CanonicalKind.Struct:
-                return WriteStruct(builder, arena, node, buffers, encodings);
+                return WriteStruct(builder, arena, node, buffers, encodings, compress);
 
             default:
-                return WriteExtension(builder, arena, node, buffers, encodings);
+                return WriteExtension(builder, arena, node, buffers, encodings, compress);
         }
     }
+
+    /// <remarks>Writes a child that is a column in its own right, compressing it when asked.</remarks>
+    private static int WriteChild(
+        FlatBufferBuilder builder,
+        CanonicalArena arena,
+        int nodeIndex,
+        List<PendingBuffer> buffers,
+        EncodingDictionary encodings,
+        bool compress) =>
+        compress
+            ? WriteCompressed(builder, arena, nodeIndex, buffers, encodings)
+            : WriteNode(builder, arena, nodeIndex, buffers, encodings, compress: false);
 
     private static int WriteBool(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
@@ -634,7 +657,7 @@ internal static class ArrayBlobWriter
 
     private static int WriteListView(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
-        List<PendingBuffer> buffers, EncodingDictionary encodings)
+        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress)
     {
         CanonicalNode elements = arena.GetNode(node.ElementsIndex);
         byte[] metadata = ListViewBytes(
@@ -642,7 +665,7 @@ internal static class ArrayBlobWriter
 
         // Children in the reader's order: elements, offsets, sizes, then validity.
         Span<int> children = stackalloc int[4];
-        children[0] = WriteNode(builder, arena, node.ElementsIndex, buffers, encodings);
+        children[0] = WriteChild(builder, arena, node.ElementsIndex, buffers, encodings, compress);
         children[1] = WritePrimitiveBuffer(
             builder, buffers, encodings, node.Offsets, node.OffsetPType);
         children[2] = WritePrimitiveBuffer(builder, buffers, encodings, node.Sizes, node.SizePType);
@@ -653,10 +676,10 @@ internal static class ArrayBlobWriter
 
     private static int WriteFixedSizeList(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
-        List<PendingBuffer> buffers, EncodingDictionary encodings)
+        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress)
     {
         Span<int> children = stackalloc int[2];
-        children[0] = WriteNode(builder, arena, node.ElementsIndex, buffers, encodings);
+        children[0] = WriteChild(builder, arena, node.ElementsIndex, buffers, encodings, compress);
         int count = 1 + Validity(builder, arena, node, buffers, encodings, children[1..]);
         return Node(
             builder, encodings, "vortex.fixed_size_list"u8, default, children[..count], []);
@@ -664,7 +687,7 @@ internal static class ArrayBlobWriter
 
     private static int WriteStruct(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
-        List<PendingBuffer> buffers, EncodingDictionary encodings)
+        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress)
     {
         // A struct puts its validity FIRST, unlike every other canonical kind
         // (vortex-array's slot_to_child: `nullable.then_some(0)`).
@@ -675,8 +698,8 @@ internal static class ArrayBlobWriter
 
         for (int i = 0; i < fields; i++)
         {
-            children[validityCount + i] =
-                WriteNode(builder, arena, arena.GetNode(node.Index).GetFieldIndex(i), buffers, encodings);
+            children[validityCount + i] = WriteChild(
+                builder, arena, arena.GetNode(node.Index).GetFieldIndex(i), buffers, encodings, compress);
         }
 
         if (validityCount == 1)
@@ -691,7 +714,7 @@ internal static class ArrayBlobWriter
 
     private static int WriteExtension(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
-        List<PendingBuffer> buffers, EncodingDictionary encodings)
+        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress)
     {
         if (node.Kind != CanonicalKind.Extension)
         {
@@ -699,7 +722,7 @@ internal static class ArrayBlobWriter
         }
 
         Span<int> children = stackalloc int[1];
-        children[0] = WriteNode(builder, arena, node.StorageIndex, buffers, encodings);
+        children[0] = WriteChild(builder, arena, node.StorageIndex, buffers, encodings, compress);
         return Node(builder, encodings, "vortex.ext"u8, default, children, []);
     }
 
@@ -741,8 +764,9 @@ internal static class ArrayBlobWriter
             }
 
             default:
+                // Never compressed: a validity bitmap is index machinery, and it is small.
                 destination[0] = WriteNode(
-                    builder, arena, node.Validity.CanonicalNodeIndex, buffers, encodings);
+                    builder, arena, node.Validity.CanonicalNodeIndex, buffers, encodings, compress: false);
                 return 1;
         }
     }
