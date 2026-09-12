@@ -12,7 +12,9 @@
 //   * Utf8 and Binary are base64 of the BYTES, plus the byte length and the scalar count. All three
 //     are checked - `len != char_count` on every non-ASCII value is the point of carrying both;
 //   * decimals are `{unscaled, storage}` and are compared as the unscaled i256 and the storage
-//     width, never as a `System.Decimal`, which cannot hold precision 76.
+//     width, never as a `System.Decimal`, which cannot hold precision 76. The one documented
+//     relaxation is in IsAcceptableStorageWidening, and it exists because the reference disagrees
+//     with itself rather than because the check was inconvenient.
 //
 // `null` is JSON null and nothing else ever is: an empty string, an empty list and an empty map are
 // values. That is one branch, taken before the dtype is even looked at.
@@ -266,20 +268,68 @@ internal static class ValueComparer
         DecimalColumn decimals = column.AsDecimal();
         VortexDecimal actual = decimals[index];
 
-        string wantedStorage = expected.Find("storage")?.Text ?? "?";
-        string actualStorage = StorageName(decimals.Storage);
-        if (!string.Equals(wantedStorage, actualStorage, StringComparison.Ordinal))
-        {
-            log.Add(path, fileRow, "decimal storage width", wantedStorage, actualStorage);
-        }
-
         string wanted = expected.Find("unscaled")?.Text ?? "?";
         string unscaled = actual.Unscaled.ToString();
-        if (!string.Equals(wanted, unscaled, StringComparison.Ordinal))
+        bool valueMatches = string.Equals(wanted, unscaled, StringComparison.Ordinal);
+        if (!valueMatches)
         {
             log.Add(path, fileRow, "decimal unscaled value", wanted, unscaled);
         }
+
+        string wantedStorage = expected.Find("storage")?.Text ?? "?";
+        string actualStorage = StorageName(decimals.Storage);
+        if (!string.Equals(wantedStorage, actualStorage, StringComparison.Ordinal) &&
+            !IsAcceptableStorageWidening(wantedStorage, actualStorage, valueMatches))
+        {
+            log.Add(path, fileRow, "decimal storage width", wantedStorage, actualStorage);
+        }
     }
+
+    /// <summary>
+    /// Whether a storage width narrower than the sidecar's is the known upstream widening rather
+    /// than a defect.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The reference implementation disagrees with ITSELF about the storage width of a
+    /// <c>vortex.decimal_byte_parts</c> array, and the corpus records the losing side. Its columnar
+    /// path, <c>to_canonical_decimal</c>, builds
+    /// <c>DecimalArray::new_unchecked(prim.to_buffer::&lt;P&gt;(), ..)</c> and so keeps the msp
+    /// child's own width; its scalar path, <c>OperationsVTable::scalar_at</c>, ends in a hardcoded
+    /// <c>ScalarValue::Decimal(DecimalValue::I64(value))</c> and so reports i64 whatever the child
+    /// is. The sidecars are generated from scalars, so every decimal_byte_parts row in the corpus
+    /// claims i64 while the same file's canonical array is i16 or i32 - visible in the corpus
+    /// itself, where <c>types/decimal4_2_nonnull_r1024</c> (byte parts) says i64 and
+    /// <c>types/decimal4_2_nonnull_r1025</c> (plain <c>vortex.decimal</c>, same dtype) says i16.
+    /// </para>
+    /// <para>
+    /// Vorticity follows the columnar path: it is the one a reader materializes, it is zero-copy,
+    /// and the scalar path's widening is a stated upstream shortcut that cannot survive an i128 msp
+    /// (<c>as_::&lt;i64&gt;()</c>). So a width NARROWER than the sidecar's is accepted when the
+    /// unscaled value is identical - the two representations denote the same number. A width WIDER
+    /// than the sidecar's is still a mismatch: nothing upstream produces one, so it would mean we
+    /// invented precision.
+    /// </para>
+    /// </remarks>
+    /// <param name="wantedStorage">The sidecar's storage name.</param>
+    /// <param name="actualStorage">The storage name we produced.</param>
+    /// <param name="valueMatches">Whether the unscaled values were identical.</param>
+    private static bool IsAcceptableStorageWidening(
+        string wantedStorage, string actualStorage, bool valueMatches) =>
+        valueMatches && StorageWidth(actualStorage) < StorageWidth(wantedStorage);
+
+    /// <summary>Byte width of a sidecar storage name, or <c>-1</c> when it is not one.</summary>
+    /// <param name="name">The storage name, e.g. <c>i32</c>.</param>
+    private static int StorageWidth(string name) => name switch
+    {
+        "i8" => 1,
+        "i16" => 2,
+        "i32" => 4,
+        "i64" => 8,
+        "i128" => 16,
+        "i256" => 32,
+        _ => -1,
+    };
 
     private static void CompareBytes(
         JsonValue expected, VortexColumn column, int index, string path, long fileRow, MismatchLog log, bool utf8)

@@ -235,9 +235,24 @@ internal static class SidecarValues
                 Assert.Equal(
                     expected.GetProperty("unscaled").GetString(),
                     decimals[row].Unscaled.ToString());
-                Assert.Equal(
-                    expected.GetProperty("storage").GetString(),
-                    StorageName(decimals.Storage));
+
+                // The storage width, with the one relaxation the corpus forces. A
+                // vortex.decimal_byte_parts array canonicalizes to its msp child's width upstream
+                // (`to_canonical_decimal`), but the sidecars are generated from `scalar_at`, which
+                // hardcodes DecimalValue::I64 whatever the child is - so the corpus asks for i64
+                // where the reference's own columnar path produces i16 or i32. A NARROWER width is
+                // accepted because the unscaled value above already proved the two denote the same
+                // number; a wider one is not, since nothing upstream produces one. The long form of
+                // this is in Vorticity.Conformance's ValueComparer.IsAcceptableStorageWidening.
+                string wantedStorage = expected.GetProperty("storage").GetString()!;
+                string actualStorage = StorageName(decimals.Storage);
+                if (!string.Equals(wantedStorage, actualStorage, StringComparison.Ordinal))
+                {
+                    Assert.True(
+                        StorageWidth(actualStorage) < StorageWidth(wantedStorage),
+                        $"{context}: storage {actualStorage}, sidecar {wantedStorage}");
+                }
+
                 break;
             }
 
@@ -373,6 +388,18 @@ internal static class SidecarValues
         ReadOnlySpan<char> digits = bits.StartsWith("0x", StringComparison.Ordinal) ? bits.AsSpan(2) : bits.AsSpan();
         return ulong.Parse(digits, NumberStyles.HexNumber, CultureInfo.InvariantCulture);
     }
+
+    /// <summary>Byte width of a sidecar storage name, or <c>-1</c> when it is not one.</summary>
+    private static int StorageWidth(string name) => name switch
+    {
+        "i8" => 1,
+        "i16" => 2,
+        "i32" => 4,
+        "i64" => 8,
+        "i128" => 16,
+        "i256" => 32,
+        _ => -1,
+    };
 
     private static string StorageName(Vorticity.Types.Numerics.DecimalStorageType storage) => storage switch
     {

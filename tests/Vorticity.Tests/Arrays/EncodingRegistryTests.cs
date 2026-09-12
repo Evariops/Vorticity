@@ -35,6 +35,7 @@ public sealed class EncodingRegistryTests
     [InlineData("vortex.sparse", ArrayEncodingId.Sparse)]
     [InlineData("vortex.sequence", ArrayEncodingId.Sequence)]
     [InlineData("vortex.bytebool", ArrayEncodingId.ByteBool)]
+    [InlineData("vortex.decimal_byte_parts", ArrayEncodingId.DecimalByteParts)]
     public void EveryImplementedArrayIdResolves(string id, ArrayEncodingId expected)
     {
         Assert.Equal(expected, EncodingRegistry.ResolveArray(Encoding.UTF8.GetBytes(id)));
@@ -46,7 +47,6 @@ public sealed class EncodingRegistryTests
     [InlineData("vortex.fsst")]
     [InlineData("vortex.onpair")]
     [InlineData("vortex.datetimeparts")]
-    [InlineData("vortex.decimal_byte_parts")]
     [InlineData("vortex.zstd")]
     [InlineData("vortex.zstd_buffers")]
     [InlineData("vortex.pco")]

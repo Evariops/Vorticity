@@ -45,6 +45,7 @@ internal static class TestDecoders
             Register(SparseDecoder.Instance);
             Register(SequenceDecoder.Instance);
             Register(ByteBoolDecoder.Instance);
+            Register(DecimalBytePartsDecoder.Instance);
 
             Register(new StubPrimitiveDecoder());
             Register(new StubBoolDecoder());

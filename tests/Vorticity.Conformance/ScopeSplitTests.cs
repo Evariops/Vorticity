@@ -15,11 +15,14 @@ namespace Vorticity.Conformance;
 
 public sealed class ScopeSplitTests
 {
-    private const int ExpectedInScope = 616;
-    private const int ExpectedOutOfScope = 203;
+    // Bumped deliberately, one decoder at a time: a moved count is the visible half of a
+    // decoder landing, and an unexplained move is the visible half of one being dropped.
+    // 616/203 was Phase 1. +32 from vortex.decimal_byte_parts.
+    private const int ExpectedInScope = 648;
+    private const int ExpectedOutOfScope = 171;
 
     [Fact]
-    public void TheCorpusSplitsIntoSixHundredSixteenInScopeAndTwoHundredThreeOut()
+    public void TheCorpusSplitsIntoTheScopeThisBuildClaims()
     {
         int total = CorpusCatalog.Entries.Length;
         int inScope = 0;

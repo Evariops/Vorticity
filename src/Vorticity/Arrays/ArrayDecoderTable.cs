@@ -22,10 +22,10 @@ public static class ArrayDecoderTable
 
     static ArrayDecoderTable()
     {
-        // Phase 1 contract §8.2: the twenty-three decoders Phase 1 owns, named explicitly, in one
-        // place, in encoding-id order. Nothing else in the library registers anything, and nothing
-        // outside it has to: a caller who opens a file and scans it in a process with no test
-        // harness gets a working decoder table.
+        // Phase 1 contract §8.2, plus Phase 2 decoders as they land: every decoder this build owns,
+        // named explicitly, in one place, in encoding-id order. Nothing else in the library
+        // registers anything, and nothing outside it has to: a caller who opens a file and scans it
+        // in a process with no test harness gets a working decoder table.
         //
         // Each decoder exposes a shared, stateless `Instance`; `Register` asserts that its
         // `IdUtf8` resolves back to the slot its `EncodingId` names, so a transposition here is a
@@ -57,6 +57,9 @@ public static class ArrayDecoderTable
         Register(SparseDecoder.Instance);
         Register(SequenceDecoder.Instance);
         Register(ByteBoolDecoder.Instance);
+
+        // Phase 2, as each lands.
+        Register(DecimalBytePartsDecoder.Instance);
     }
 
     /// <summary>

@@ -92,6 +92,11 @@ public enum ArrayEncodingId : ushort
 
     /// <summary><c>vortex.bytebool</c>.</summary>
     ByteBool,
+
+    // ---------------------------------------------------------------- Phase 2 (docs/90-registry.md)
+
+    /// <summary><c>vortex.decimal_byte_parts</c>.</summary>
+    DecimalByteParts,
 }
 
 /// <summary>
@@ -127,7 +132,7 @@ public enum LayoutEncodingId : ushort
 public static class EncodingRegistry
 {
     /// <summary>The highest defined <see cref="ArrayEncodingId"/>; the decoder table is sized by it.</summary>
-    internal const int MaxArrayEncodingId = (int)ArrayEncodingId.ByteBool;
+    internal const int MaxArrayEncodingId = (int)ArrayEncodingId.DecimalByteParts;
 
     /// <summary>The highest defined <see cref="LayoutEncodingId"/>.</summary>
     internal const int MaxLayoutEncodingId = (int)LayoutEncodingId.Stats;
@@ -218,6 +223,11 @@ public static class EncodingRegistry
                     ? ArrayEncodingId.FixedSizeList
                     : ArrayEncodingId.Unknown;
 
+            case 25:
+                return idUtf8.SequenceEqual("vortex.decimal_byte_parts"u8)
+                    ? ArrayEncodingId.DecimalByteParts
+                    : ArrayEncodingId.Unknown;
+
             default:
                 return ArrayEncodingId.Unknown;
         }
@@ -294,7 +304,6 @@ public static class EncodingRegistry
             idUtf8.SequenceEqual("vortex.fsst"u8) ||
             idUtf8.SequenceEqual("vortex.onpair"u8) ||
             idUtf8.SequenceEqual("vortex.datetimeparts"u8) ||
-            idUtf8.SequenceEqual("vortex.decimal_byte_parts"u8) ||
             idUtf8.SequenceEqual("vortex.zstd"u8))
         {
             return "deferred to Phase 2 of Vorticity";

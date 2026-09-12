@@ -26,10 +26,10 @@ public sealed class ScanCorpusTests
 
         List<CorpusEntry> inScope = CorpusManifest.InScope();
 
-        // 616 is the snapshot contract §14.1 records. It is a sanity check, not a constant to
-        // encode: if a decoder lands or is withdrawn this number moves, and the test should be
-        // updated to the new snapshot rather than the computation being replaced by a list.
-        Assert.Equal(616, inScope.Count);
+        // A snapshot, not a configuration: if a decoder lands or is withdrawn this number moves,
+        // and the test is updated to the new snapshot rather than the computation being replaced by
+        // a list. 616 was Phase 1; +32 from vortex.decimal_byte_parts.
+        Assert.Equal(648, inScope.Count);
     }
 
     [Fact]
@@ -56,7 +56,7 @@ public sealed class ScanCorpusTests
         }
 
         Assert.Equal(string.Empty, failures.ToString());
-        Assert.Equal(616, checkedFiles);
+        Assert.Equal(648, checkedFiles);
     }
 
     [Fact]
@@ -111,7 +111,7 @@ public sealed class ScanCorpusTests
         }
 
         Assert.Equal(string.Empty, wrong.ToString());
-        Assert.Equal(202, named + read);
+        Assert.Equal(170, named + read);
         Assert.True(named > 150, "most out-of-scope files must actually reach their missing component");
     }
 

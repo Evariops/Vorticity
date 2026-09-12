@@ -160,6 +160,27 @@ internal static class TestMetadata
         }
     }
 
+    /// <summary>
+    /// <c>vortex.decimal_byte_parts</c> metadata. <c>lower_part_count</c> is not writable here on
+    /// purpose: the codec pins it to zero, so a test that needs a non-zero one hand-rolls the two
+    /// bytes and is testing the codec, not the decoder.
+    /// </summary>
+    /// <param name="zerothChildPType">The msp child's physical type.</param>
+    internal static byte[] DecimalByteParts(PType zerothChildPType)
+    {
+        DecimalBytePartsMetadata value = new(zerothChildPType);
+        ProtoWriter writer = new();
+        try
+        {
+            DecimalBytePartsMetadata.Write(ref writer, in value);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
     /// <summary>A bare <c>ScalarValue</c> message body, as fastlanes.for's metadata and
     /// vortex.constant's / vortex.sparse's buffer 0 carry it.</summary>
     internal static byte[] Scalar(ScalarValue value) => ScalarProtobuf.SerializeValue(value);

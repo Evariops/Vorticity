@@ -34,6 +34,7 @@ internal static class Phase1Components
         "vortex.sequence",
         "vortex.sparse",
         "vortex.zigzag",
+        "vortex.decimal_byte_parts",
     ];
 
     private static readonly object Gate = new object();
@@ -90,6 +91,7 @@ internal static class Phase1Components
         Register(SequenceDecoder.Instance);
         Register(SparseDecoder.Instance);
         Register(ZigZagDecoder.Instance);
+        Register(DecimalBytePartsDecoder.Instance);
     }
 
     /// <summary>Whether this build has a decoder for the array encoding <paramref name="id"/>.</summary>
