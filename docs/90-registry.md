@@ -204,7 +204,7 @@ representative rows, so a dictionary of strings shares the data buffers it came 
 
 | | ratio to the reference |
 |---|---|
-| Whole corpus | **1.008×** — inside the ≤105% target of [05-benchmarks.md](05-benchmarks.md) §3. Was 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes, 1.11× before ALP, 1.044× before patched bit-packing |
+| Whole corpus | **0.988×** — smaller than the reference, against a ≤105% target. Was 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes, 1.11× before ALP, 1.044× before patched bit-packing, 1.008× before the codes cascade |
 | `distributions/high_cardinality_i64_r8193` (dense integers) | **0.97×** |
 | `distributions/short_runs_i32_r8193` | **0.87×** |
 | `types/i64_nonnull_r8192` | **0.99×** (was 3.31×) |
@@ -262,21 +262,35 @@ reproduces its **exact bit pattern**, compared with `BitConverter.DoubleToInt64B
 `==`, because `-0.0 == 0.0` and NaN payloads are invisible to `==`. An encoder that used `==` would
 silently change values, and no equality-based test could see it.
 
-**What is left, in order of bytes.** The list is now short and mostly not about missing algorithms:
+**What is left, in order of bytes.** The whole-corpus figure is now below the reference's, so what
+follows is a list of individual files we are worse on, not a deficit:
 
 * `distributions/huge_string_r16` at 33.8× — one string over a mebibyte, which the reference
   crushes with `vortex.onpair`. That encoding is **absent from the default write target**
   `core2025.05.0` and first appears in `core2026.08.1`, so we cannot emit it by default at all.
   Same for `repeated_prefix_utf8_r8193` at 1.63×.
 * `containers/zoned_many_zones*` — the `monotone i64` column, where the reference uses
-  `vortex.sequence` (start and step). Also **not in the default target**.
+  `vortex.sequence` (start and step). In our default target since it was raised to
+  `core2026.08.3`, so this one is now an implementation gap rather than an edition one.
+* `types/fsl_i32_3_*` at 23×, `types/date_ms_nonnull_r8193` at 18× and `types/struct_field_names`
+  at 5.2× — each around 45 kB, and each a small file the reference crushes to about 2 kB. Not yet
+  diagnosed; they only became visible at the top of the list once everything above them was fixed.
 
 So an edition caveat belongs on the whole measurement: the corpus was written at
 `core2026.08.3` and we write at `core2025.05.0`, and §3's target says "the same data, edition and
 configuration". Most of the remaining 0.8% is an edition difference rather than an implementation
 gap.
 
-Cascading — dictionary codes that are themselves bit-packed — is where the rest lives.
+**Cascading is done for the codes**, which is where the rest lived. A dictionary's codes and a
+run-end's ends are the one part of those encodings that costs per ROW rather than per distinct
+value, and they are the most bit-packable data in a file by construction: non-negative, dense, and
+bounded by the entry count. A column with 1153 distinct values carries u16 codes and needs eleven
+bits. They now go through the compressor like any other column instead of being written raw, which
+is legal because the reader derives the codes child's dtype from `codes_ptype` and then decodes it
+like any other child. The recursion terminates on the arithmetic rather than on a depth counter:
+every scheme has to beat the level above it by its own overhead, so the sizes strictly decrease.
+
+Worth 1.008× → 0.988× on its own.
 
 **Bit-packing is patched, and chooses its own transform.** `types/i64_nonnull_r8192` is `0`,
 `i64::MIN`, `i64::MAX` and then eight thousand values alternating either side of zero: three rows

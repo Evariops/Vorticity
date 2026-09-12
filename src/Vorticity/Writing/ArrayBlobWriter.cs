@@ -576,7 +576,8 @@ internal static class ArrayBlobWriter
         PType endsPType = IndexPType(length);
 
         byte[] metadata = RunEndBytes(endsPType, (ulong)plan.Codes.Length);
-        int ends = WriteIndexArray(builder, buffers, encodings, plan.Codes, endsPType);
+        int ends = WriteIndexColumn(
+            builder, arena, nodeIndex, plan.Codes, endsPType, buffers, encodings);
         int valuesNode = WriteCompressed(builder, arena, values, buffers, encodings);
 
         Span<int> children = stackalloc int[2];
@@ -601,7 +602,8 @@ internal static class ArrayBlobWriter
         // a null code. Nullness is part of the value the compressor deduplicated, so at most one
         // entry is null and every row still has a code.
         byte[] metadata = DictBytes((uint)entries, codesPType);
-        int codes = WriteIndexArray(builder, buffers, encodings, plan.Codes, codesPType);
+        int codes = WriteIndexColumn(
+            builder, arena, nodeIndex, plan.Codes, codesPType, buffers, encodings);
         int valuesNode = WriteCompressed(builder, arena, values, buffers, encodings);
 
         Span<int> children = stackalloc int[2];
@@ -619,6 +621,61 @@ internal static class ArrayBlobWriter
     };
 
     /// <summary>Writes an int array as a non-nullable primitive node of the narrowest width.</summary>
+    /// <summary>
+    /// Writes a column of indices - dictionary codes, run ends - THROUGH THE COMPRESSOR.
+    /// </summary>
+    /// <remarks>
+    /// This is the cascade docs/90-registry.md has been calling "where the rest lives": codes are
+    /// the one part of a dictionary that costs a byte per ROW rather than per distinct value, and
+    /// they are the most bit-packable data in the file by construction - non-negative, dense, and
+    /// bounded by the entry count. A column with 1153 distinct values carries u16 codes and needs
+    /// eleven bits.
+    ///
+    /// Legal because the reader derives the codes child's dtype from the metadata's
+    /// `codes_ptype` and then decodes it like any other child: `fastlanes.for` over
+    /// `fastlanes.bitpacked` produces exactly the u16 primitive the dict decoder then checks for.
+    ///
+    /// The recursion terminates on the arithmetic rather than on a depth counter: every scheme
+    /// must beat the level above it by its own overhead - 512 bytes for a dictionary, 256 for a
+    /// bit-packing - so the sizes strictly decrease.
+    /// </remarks>
+    private static int WriteIndexColumn(
+        FlatBufferBuilder builder, CanonicalArena arena, int parentIndex, int[] values, PType ptype,
+        List<PendingBuffer> buffers, EncodingDictionary encodings)
+    {
+        int width = ptype.ByteWidth();
+        VortexBuffer buffer = arena.Allocate(
+            values.Length * width, width, out Span<byte> destination);
+        WriteIndices(values, width, destination);
+
+        // The dtype arena is the column's own: a DType carries the arena it belongs to, and a node
+        // whose dtype came from a different one would not compare equal downstream.
+        DType dtype = arena.GetNode(parentIndex).DType.Arena.Primitive(ptype, Nullability.NonNullable);
+        int node = arena.AddPrimitive(
+            dtype, values.Length, Arrays.Validity.NonNullable, ptype, buffer);
+        return WriteCompressed(builder, arena, node, buffers, encodings);
+    }
+
+    private static void WriteIndices(int[] values, int width, Span<byte> destination)
+    {
+        for (int i = 0; i < values.Length; i++)
+        {
+            Span<byte> at = destination.Slice(i * width, width);
+            switch (width)
+            {
+                case 1:
+                    at[0] = (byte)values[i];
+                    break;
+                case 2:
+                    BinaryPrimitives.WriteUInt16LittleEndian(at, (ushort)values[i]);
+                    break;
+                default:
+                    BinaryPrimitives.WriteUInt32LittleEndian(at, (uint)values[i]);
+                    break;
+            }
+        }
+    }
+
     private static int WriteIndexArray(
         FlatBufferBuilder builder, List<PendingBuffer> buffers, EncodingDictionary encodings,
         int[] values, PType ptype)

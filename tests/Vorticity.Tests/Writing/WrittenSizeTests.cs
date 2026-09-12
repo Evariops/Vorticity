@@ -38,7 +38,7 @@ public sealed class WrittenSizeTests
     /// failing number and become a guard on a passing one: the target itself would no longer
     /// notice a regression.
     /// </summary>
-    private const double CorpusCeiling = 1.02;
+    private const double CorpusCeiling = 1.00;
 
     /// <summary>How many of the worst offenders to name, so the number is actionable.</summary>
     private const int Worst = 12;
