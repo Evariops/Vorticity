@@ -29,6 +29,7 @@ public sealed class ScanBuilder
     private FieldMaskBuilder? _fields;
     private VortexExpr? _filter;
     private List<string>? _filterPaths;
+    private bool _prune = true;
     private RowRange _rows;
     private bool _rowsSet;
     private int _maxBatchRows;
@@ -182,6 +183,24 @@ public sealed class ScanBuilder
         return this;
     }
 
+    /// <summary>
+    /// Turns zone-map pruning on or off. On by default.
+    /// </summary>
+    /// <param name="enabled">Whether the scan may skip splits its zone maps rule out.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// Pruning never changes which ROWS a scan returns -- docs/08-semantics.md §1 makes "pruning may
+    /// never eliminate a row that full materialization would have returned" the invariant the whole
+    /// feature rests on. Turning it off is therefore a diagnostic, not a semantic: it is how the
+    /// property test compares a pruned scan against an unpruned one, and how a caller who suspects
+    /// a file's statistics can check.
+    /// </remarks>
+    public ScanBuilder WithPruning(bool enabled)
+    {
+        _prune = enabled;
+        return this;
+    }
+
     /// <summary>Opts in to decoding independent splits concurrently.</summary>
     /// <param name="degree">How many splits may be in flight at once. Must be positive.</param>
     /// <returns>This builder.</returns>
@@ -245,7 +264,7 @@ public sealed class ScanBuilder
         // Only a filtered scan pays for the skip-empty wrapper; an unfiltered one is the same
         // object graph it has always been, which is what keeps the per-batch allocation figure
         // the allocation tests pin unchanged.
-        return _filter is null ? batches : new NonEmptyBatches(batches);
+        return _filter is null ? batches : new FilteredBatches(batches, _filter, _prune);
     }
 
     /// <summary>The projection widened by every field a filter reads.</summary>

@@ -39,7 +39,7 @@ namespace Vorticity.Scan;
 
 /// <summary>The batches of one compiled scan.</summary>
 /// <remarks>
-/// Re-enumerable: every <see cref="GetAsyncEnumerator"/> call builds a fresh enumerator with its
+/// Re-enumerable: every <see cref="GetAsyncEnumerator(System.Threading.CancellationToken)"/> call builds a fresh enumerator with its
 /// own <see cref="ScanContext"/>, so two enumerations may run concurrently over one open file
 /// (docs/09-contracts.md §1: the file is thread-safe, a scan is not).
 /// </remarks>
@@ -119,7 +119,22 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </remarks>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new BatchAsyncEnumerator(
-            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, cancellationToken);
+            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, pruner: null,
+            cancellationToken);
+
+    /// <summary>Starts a scan whose splits are pruned by <paramref name="pruner"/>.</summary>
+    /// <param name="pruner">The zone-map pruner, or null.</param>
+    /// <param name="cancellationToken">Cancels at batch boundaries.</param>
+    internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
+        ZonePruner? pruner, CancellationToken cancellationToken) =>
+        new BatchAsyncEnumerator(
+            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, pruner, cancellationToken);
+
+    /// <summary>The file this scan reads, for the pruning pass that runs before the first batch.</summary>
+    internal VortexFile File => _file;
+
+    /// <summary>The layout tree the pruning pass walks.</summary>
+    internal LayoutTree Tree => _tree;
 }
 
 /// <summary>The hand-written enumerator of docs/03-architecture.md §3.7.</summary>
@@ -143,6 +158,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
     private readonly FieldMask _keep;
     private readonly DType _schema;
     private readonly VortexExpr? _filter;
+    private readonly ZonePruner? _pruner;
     private readonly int _maxBatchRows;
     private readonly CancellationToken _token;
     private readonly Lane[] _lanes;
@@ -169,9 +185,11 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
         SplitPlan plan,
         int degree,
         VortexExpr? filter,
+        ZonePruner? pruner,
         CancellationToken cancellationToken)
     {
         _tree = tree;
+        _pruner = pruner;
         _source = file.Segments;
         _mask = read.RootMask;
         _keep = keep.RootMask;
@@ -229,7 +247,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
             return ValueTask.FromCanceled<bool>(_token);
         }
 
-        if (_drained || !_cursor.TryNext(out RowRange split))
+        if (_drained || !TryNextSplit(out RowRange split))
         {
             _drained = true;
             return new ValueTask<bool>(false);
@@ -300,6 +318,28 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
         _core.OnCompleted(continuation, state, token, flags);
 
     // ------------------------------------------------------------------------------ the two phases
+
+    /// <summary>
+    /// Advances to the next split the zone maps do not rule out.
+    /// </summary>
+    /// <remarks>
+    /// The prune happens HERE, before RegisterSegments, which is the whole point: a split the zone
+    /// maps exclude costs no segment registration and therefore no bytes read. Skipping is a
+    /// synchronous loop over the cursor because a pruner answers from memory -- the zone maps were
+    /// read once, before the first batch (docs/01-scope.md F6).
+    /// </remarks>
+    private bool TryNextSplit(out RowRange split)
+    {
+        while (_cursor.TryNext(out split))
+        {
+            if (_pruner is null || _pruner.MayMatch(split))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private void Register(ScanContext context, RowRange rows)
     {
@@ -465,7 +505,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
         int lanes = _lanes.Length;
         while (_started - _delivered < lanes)
         {
-            if (_drained || !_cursor.TryNext(out RowRange split))
+            if (_drained || !TryNextSplit(out RowRange split))
             {
                 _drained = true;
                 return;
