@@ -184,13 +184,24 @@ And the absolute axes the harness does not cover:
 | Axis | Mean | Reading |
 |---|---|---|
 | `Take` of 1 000 scattered rows | 86.8 µs | was 110 µs before the take pushdown of `927bf0c` |
-| Selective filter, pruning **on** | 74.2 µs | was 58 µs when first measured — see below |
-| Selective filter, pruning **off** | 546.3 µs | 7.4× — what zone-map pruning is worth here |
+| Selective filter, pruning **on** | 74.2 µs | over a band that matches ~100 rows |
+| Selective filter, pruning **off** | 546.3 µs | **7.4×** — what zone-map pruning is worth here |
 
-The pruning-off arm has not moved since the benchmark project was written (546 → 546.3 µs), which
-rules out thermal drift as the explanation for the pruning-on arm moving 58 → 74.2 µs over the same
-interval. So the 9.4× that row used to read is now 7.4×, and the cause is a real change on the
-pruned path rather than noise on both. Nothing has bisected it yet.
+**This row used to read 58 µs and 9.4×, and that pair was measuring an empty band.** `monotone`
+starts at 1 000 000 and steps by 3, so the original filter — `[1 000, 1 100)` — matched **nothing**.
+The benchmark was reporting the cost of pruning away an entire file, which is the easy half of the
+claim; `820b1b6` found the same defect in `ZonePruningTests`, fixed the band to one that matches
+~100 rows, and left this table describing the old one.
+
+The correction is not an inference. Today's code run against the original band returns **59.44 µs**,
+against the 58 µs first recorded — so nothing regressed, and the whole of the difference is the
+band. The pruning-off arm is 546.9 µs either way, because it scans and filters all 65 536 rows
+whichever band is asked for.
+
+That last sentence is also the trap. "The unpruned arm did not move and the pruned one did" looks
+like proof that code changed — it was written into this file as exactly that — but an arm that
+cannot respond to the band is no evidence at all about the band. **7.4× is pruning against rows that
+exist**, and it is the smaller and more honest number.
 
 **Read the first-batch row carefully.** It is like-for-like in unit of work — both sides emit 64
 batches — but Rust's array stream evidently materializes the whole local scan on its first poll:
