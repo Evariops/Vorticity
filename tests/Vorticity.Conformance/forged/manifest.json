@@ -6,7 +6,7 @@
     "source": "tools/conformance-gen",
     "vortex_version": "0.86.1"
   },
-  "about": "Fixtures that no conformant writer can produce, made by byte-patching a corpus file. These are NOT reference-implementation output: they are deliberately malformed or out-of-scope files, and the Rust reader is expected to reject them exactly as a .NET reader should. Each record states the source file, its hash, and the exact byte patch, so the fixture can be re-derived rather than trusted.",
+  "about": "Fixtures that no conformant writer can produce, made by byte-patching a corpus file. These are NOT reference-implementation output. Most are deliberately malformed or out-of-scope files the Rust reader is expected to reject exactly as a .NET reader should; `legacy/stats_layout` is the exception, a perfectly valid file in an encoding 0.86.1 can read but not write. Each record states the source file, its hash, and the exact byte patch, so the fixture can be re-derived rather than trusted.",
   "files": [
     {
       "id": "negative/unknown_encoding_id",
@@ -24,14 +24,33 @@
       "sha256": "3480ef80d21db8618d5105b177ef37c2e359f71f8db58aa2c02c265059602c9f",
       "size_bytes": 100256,
       "row_count": 4096,
-      "columns": {
-        "ints": "the patched column",
-        "strs": "unaffected, vortex.varbinview"
-      },
       "expectations": [
         "opening the file and reading its dtype and layout tree succeeds: an unknown id in array_specs is not itself an error",
         "scanning with a projection of only `strs` succeeds and returns the same values as containers/uncompressed_canonical — this is the lazy-component-resolution test of docs/04-conformance.md §6",
         "scanning with `ints` projected fails with VortexUnsupportedException, and the message names both the id `vortex.unknown01` and the component kind `array`"
+      ]
+    },
+    {
+      "id": "legacy/stats_layout",
+      "path": "legacy/stats_layout.vortex",
+      "description": "the canonical zone-map file with its layout id renamed to `vortex.stats`, the legacy zone map of editions core2025.05.0 through core2025.10.0 that Vortex 0.86.1 has no writer path for. Both vtables take (data, zones) with data at child 0 — vortex-layout-0.86.1/src/layouts/zoned/mod.rs asserts exactly that for each — so a structural reader must return the source's values through a code path nothing else exercises. PARTIAL BY CONSTRUCTION: child 1 still carries the zoned zone map, not a legacy stats table, because only the twelve-byte id was patched. That is enough to exercise a reader that treats vortex.stats as structural only and never parses the child, and it is NOT a conformant legacy file — a reader that parsed the legacy stats table would find the wrong schema there",
+      "source": "containers/zoned_many_zones_nulls.vortex",
+      "source_sha256": "cfb64e85b9d7415b75b13330ba19198ff04187b7e8c35d45ab30a74e3fc945a1",
+      "patch": {
+        "offset": 682092,
+        "length": 12,
+        "from": "vortex.zoned",
+        "to": "vortex.stats",
+        "why_same_length": "the id is a length-prefixed flatbuffer string; an equal-length overwrite keeps every offset in the file valid, and Vortex checksums nothing"
+      },
+      "sha256": "ca3c9db19713c06029e7b5e85cf4d80f6224bad6462222375ec64cf6fb165ceb",
+      "size_bytes": 688636,
+      "row_count": 65536,
+      "expectations": [
+        "opening the file succeeds and the layout tree reports `vortex.stats` where the source reports `vortex.zoned`, with the same layout count and the same dtype",
+        "a full scan returns EXACTLY the values containers/zoned_many_zones_nulls returns: the two files differ in one twelve-byte id and in nothing else",
+        "a filtered scan returns the same ROWS as the source: vortex.stats reports pruning unavailable, so the filter is evaluated everywhere rather than skipped by zone, and a reader that pruned on a zone map it had not parsed would drop rows here",
+        "NOT asserted, because the fixture cannot support it: that legacy stats-table metadata parses. Child 1 holds a zoned zone map"
       ]
     }
   ]

@@ -237,14 +237,23 @@ public sealed class ForgedFixtureTests
     [Fact]
     public void TheForgedDirectoryShipsOneUnsupportedEncodingFixtureAndNoMalformedOnes()
     {
-        Assert.Single(ForgedCatalog.Fixtures);
-        ForgedFixture fixture = ForgedCatalog.Fixtures[0];
-        Assert.Equal("negative/unknown_encoding_id", fixture.Id);
+        // The assertion is on the IDs, not on a count: what matters is that nothing malformed ships
+        // on disk, and a bare number would pass while saying nothing about what arrived.
+        List<string> ids = [];
+        foreach (ForgedFixture f in ForgedCatalog.Fixtures)
+        {
+            ids.Add(f.Id);
+        }
+
+        ids.Sort(StringComparer.Ordinal);
+        Assert.Equal(["legacy/stats_layout", "negative/unknown_encoding_id"], ids);
 
         Console.Out.Write(
-            "forged/: 1 fixture (" + fixture.Id + "), structurally valid and carrying an " +
-            "unregistered encoding id. No malformed fixture ships on disk; the malformed-input " +
-            "invariant is exercised by " + MutationSources.Length.ToString(CultureInfo.InvariantCulture) +
+            "forged/: " + ids.Count.ToString(CultureInfo.InvariantCulture) + " fixtures, neither " +
+            "malformed. negative/unknown_encoding_id is structurally valid and carries an " +
+            "unregistered encoding id; legacy/stats_layout is a perfectly valid file in a layout " +
+            "encoding 0.86.1 can read but not write. The malformed-input invariant ships no file " +
+            "at all: it is exercised by " + MutationSources.Length.ToString(CultureInfo.InvariantCulture) +
             " corpus files mutated in memory.\n");
     }
 }
