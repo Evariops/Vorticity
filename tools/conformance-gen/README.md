@@ -40,6 +40,13 @@ cargo run --release -j 6 --example verify_corpus -- ../../tests/Vorticity.Confor
 
 # Assert the forged fixture set behaves the way its manifest claims.
 cargo run --release -j 6 --example verify_forged -- ../../tests/Vorticity.Conformance/forged
+
+# CRITERION 2: does Vortex Rust read what Vorticity writes? Produce the files from .NET first,
+# then hand them to the reference and compare scalar by scalar against its own corpus file.
+VORTICITY_WRITE_CORPUS=/tmp/vxwritten dotnet test ../../Vorticity.slnx -c Release \
+    --filter-method '*WritesTheCorpusOutForTheRustCrossCheck*'
+cargo run --release -j 6 --example verify_written -- \
+    ../../tests/Vorticity.Conformance/corpus /tmp/vxwritten
 ```
 
 Output defaults to `tests/Vorticity.Conformance/corpus`; `--out <dir>` redirects it. `--seed

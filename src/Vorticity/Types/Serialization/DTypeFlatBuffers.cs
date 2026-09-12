@@ -755,16 +755,21 @@ public static class DTypeFlatBuffers
         int id = builder.CreateStringUtf8(dtype.ExtensionIdUtf8);
         int storage = WriteCore(builder, dtype.StorageType, depth + 1);
 
-        // Absent rather than present-but-empty: the model collapses the two, and writing the
-        // shorter of the two encodings keeps a wide schema's metadata smaller.
+        // PRESENT-BUT-EMPTY, NOT ABSENT, and this is not a matter of taste. The reference REQUIRES
+        // the field: vortex-array-0.86.1/src/dtype/serde/flatbuffers.rs does
+        //
+        //     fb_ext.metadata().ok_or_else(|| vortex_err!("failed to parse extension metadata ..."))
+        //
+        // so an extension whose metadata is empty -- `vortex.uuid`, whose metadata is 0 or 1 byte --
+        // is unreadable by Vortex Rust if the vector is omitted. Our own reader collapses absent and
+        // empty, which is why writing the shorter encoding looked free and why the round-trip test
+        // could never see it: the Rust cross-check found it on 16 files, all of them uuid.
         ReadOnlySpan<byte> metadata = dtype.ExtensionMetadata;
-        int metadataVector = metadata.IsEmpty ? 0 : builder.CreateByteVector(metadata);
+        int metadataVector = builder.CreateByteVector(metadata);
 
         builder.StartTable();
         builder.AddOffset(ExtensionId, id);
         builder.AddOffset(ExtensionStorage, storage);
-
-        // AddOffset(_, 0) writes nothing, which is how an absent optional child is expressed.
         builder.AddOffset(ExtensionMetadata, metadataVector);
         return builder.EndTable();
     }

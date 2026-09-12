@@ -916,12 +916,42 @@ public sealed class DTypeFlatBuffersTests
         Assert.Equal(withBytes, backBytes);
         Assert.Equal(new byte[] { 1, 2, 3 }, backBytes.ExtensionMetadata.ToArray());
 
-        // The writer omits an empty [ubyte] vector entirely, so a reader that treated "absent" as
-        // an error would reject the shorter encoding.
+        // Our READER accepts both encodings: absent and present-but-empty read the same.
         using FlatBufferBuilder builder = new FlatBufferBuilder();
         int offset = DTypeFlatBuffers.Write(builder, withNone);
         byte[] buffer = builder.FinishToArray(offset);
         Assert.Equal(withNone, DTypeFlatBuffers.Read(buffer, new DTypeArena()));
+    }
+
+    [Fact]
+    public void ExtensionMetadata_IsWrittenPresentEvenWhenEmpty()
+    {
+        // OUR WRITER MUST NOT USE THE SHORTER ENCODING. The reference requires the field:
+        // vortex-array-0.86.1/src/dtype/serde/flatbuffers.rs does
+        // `fb_ext.metadata().ok_or_else(|| vortex_err!("failed to parse extension metadata ..."))`,
+        // so an omitted vector makes the dtype unreadable by Vortex Rust.
+        //
+        // This was a real bug, and only the Rust cross-check could see it: our reader collapses
+        // absent and empty, so the round-trip test passed on all 16 uuid files in the corpus while
+        // the reference rejected every one of them.
+        DTypeArena arena = new DTypeArena();
+        DType storage = arena.FixedSizeList(
+            arena.Primitive(PType.U8, Nullability.NonNullable), 16, Nullability.NonNullable);
+        DType uuid = arena.Extension("vortex.uuid", storage, ReadOnlySpan<byte>.Empty);
+
+        using FlatBufferBuilder builder = new FlatBufferBuilder();
+        int offset = DTypeFlatBuffers.Write(builder, uuid);
+        byte[] buffer = builder.FinishToArray(offset);
+
+        // Read the extension table's own vtable rather than the model, which cannot tell the two
+        // encodings apart: slot 2 must resolve to a vector, not to nothing. The root DType table is
+        // a union, so its value sits in slot 1 and the tag in slot 0.
+        FlatBufferTable root = FlatBufferTable.Root(buffer);
+        FlatBufferTable extension = root.GetTable(1);
+        Assert.True(
+            extension.HasField(2),
+            "the extension's metadata vector must be present, even at zero length");
+        Assert.True(extension.GetByteVector(2).IsEmpty);
     }
 
     [Fact]

@@ -62,6 +62,45 @@ public sealed class RoundTripSweepTests
         Assert.True(checkedFiles > 700, $"only {checkedFiles} files round-tripped");
     }
 
+    [Fact]
+    public async Task WritesTheCorpusOutForTheRustCrossCheck()
+    {
+        // The .NET half of criterion 2 (docs/01-scope.md §4): produce the files, and let
+        // `cargo run --example verify_written` decide whether the reference agrees with them. It is
+        // env-gated because it costs a full corpus write and only the cross-check consumes the
+        // output -- and it SKIPS rather than passes when the variable is absent, so a CI job that
+        // forgets to set it does not look like a green cross-check.
+        string? root = Environment.GetEnvironmentVariable("VORTICITY_WRITE_CORPUS");
+        Assert.SkipWhen(
+            string.IsNullOrEmpty(root),
+            "Set VORTICITY_WRITE_CORPUS to a directory to produce files for the Rust cross-check.");
+
+        Decoders.EnsureRegistered();
+        Directory.CreateDirectory(root!);
+
+        int written = 0;
+        foreach (CorpusEntry entry in CorpusManifest.InScope())
+        {
+            string destination = Path.Combine(root!, entry.Id.Replace('/', Path.DirectorySeparatorChar) + ".vortex");
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+
+            await using VortexFile source = await VortexFile.OpenAsync(entry.Path, CancellationToken.None);
+            await using VortexFileWriter writer = VortexFileWriter.Create(destination, source.Schema);
+            await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+                .WithCancellation(CancellationToken.None))
+            {
+                await writer.WriteAsync(batch, CancellationToken.None);
+            }
+
+            await writer.CompleteAsync(CancellationToken.None);
+            written++;
+        }
+
+        Console.Out.Write(
+            "WROTE " + written.ToString(CultureInfo.InvariantCulture) + " files to " + root + "\n");
+        Assert.True(written > 700);
+    }
+
     /// <summary>Writes one corpus file out and reads it back, comparing every value.</summary>
     /// <returns>How many rows were compared.</returns>
     private static async Task<int> RoundTrip(CorpusEntry entry)
