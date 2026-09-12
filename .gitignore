@@ -1,0 +1,72 @@
+# ---- .NET build output ----
+bin/
+obj/
+artifacts/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+*.userprefs
+*.binlog
+project.lock.json
+project.fragment.lock.json
+
+# ---- NuGet ----
+*.nupkg
+*.snupkg
+packages/
+!packages/build/
+.nuget/
+
+# ---- Test and coverage output ----
+[Tt]est[Rr]esult*/
+TestResults/
+*.trx
+*.coverage
+*.coverxml
+coverage*.json
+coverage*.xml
+coverage*.info
+.coverlet/
+
+# ---- BenchmarkDotNet ----
+BenchmarkDotNet.Artifacts/
+
+# ---- Native artifacts (vortex-ffi is loaded by the conformance and benchmark projects) ----
+*.dll
+*.so
+*.so.*
+*.dylib
+*.pdb
+*.exp
+*.ilk
+!**/native/**/.gitkeep
+
+# ---- Rust conformance generator ----
+tools/conformance-gen/target/
+**/Cargo.lock.orig
+
+# ---- Conformance corpus (generated artifact, published by CI — never committed) ----
+tests/**/corpus/
+tests/**/golden/
+*.vortex
+!tests/**/fixtures/**/*.vortex
+
+# ---- Fuzzing ----
+fuzz/artifacts/
+fuzz/corpus/
+crash-*
+timeout-*
+leak-*
+
+# ---- IDE ----
+.vs/
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.sln.iml
+*.DotSettings.user
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
