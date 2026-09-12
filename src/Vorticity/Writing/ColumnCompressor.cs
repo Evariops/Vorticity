@@ -13,13 +13,14 @@
 //     is the ORIGINAL column gathered down to its first occurrences, which is exactly
 //     CanonicalFilter.Apply -- so a dictionary of strings shares the data buffers it came from and
 //     copies only 16-byte views.
-//   * RANGE. A dense integer column -- an id, a measurement, a timestamp -- gets frame-of-reference
-//     plus bit-packing: subtract the minimum, then store only the bits the span needs. This is the
-//     scheme the reference's own ratios on numeric data come from.
+//   * RANGE. A dense integer column -- an id, a measurement, a timestamp -- gets bit-packed, under
+//     whichever of frame-of-reference and zigzag costs less, with the values that do not fit
+//     carried as patches. That decision is BitPackPlan's, because it is a minimization rather than
+//     a rule; this is the pass that asks for it.
 //
-// WHAT IS DELIBERATELY NOT HERE, so its absence is a decision rather than an oversight: ALP, FSST
-// and OnPair, each of which is a whole algorithm rather than a kernel, and CASCADING -- dictionary
-// codes that are themselves bit-packed, which is where the last of the reference's ratio lives.
+// WHAT IS DELIBERATELY NOT HERE, so its absence is a decision rather than an oversight: OnPair,
+// which is a whole algorithm rather than a kernel, and CASCADING -- dictionary codes that are
+// themselves bit-packed, which is where the last of the reference's ratio lives.
 //
 // The thresholds are ratios, not sizes, and they are conservative on purpose. Compressing a column
 // that barely benefits costs a second array, its metadata and a decode step on every read; the
@@ -62,17 +63,15 @@ internal enum ColumnScheme : byte
 /// <summary>The chosen scheme and the indices it needs.</summary>
 internal readonly struct ColumnPlan
 {
-    private ColumnPlan(ColumnScheme scheme, int[] gather, int[] codes, ulong reference, int bitWidth)
+    private ColumnPlan(ColumnScheme scheme, int[] gather, int[] codes)
     {
         Scheme = scheme;
         Gather = gather;
         Codes = codes;
-        Reference = reference;
-        BitWidth = bitWidth;
     }
 
     /// <summary>Leave the column alone.</summary>
-    internal static ColumnPlan Canonical => new ColumnPlan(ColumnScheme.None, [], [], 0, 0);
+    internal static ColumnPlan Canonical => new ColumnPlan(ColumnScheme.None, [], []);
 
     /// <summary>
     /// The compressed column, for <see cref="ColumnScheme.Fsst"/>. Carried on the plan rather than
@@ -83,11 +82,10 @@ internal readonly struct ColumnPlan
     /// <summary>The encoded column, for <see cref="ColumnScheme.Alp"/>.</summary>
     internal AlpPlan? Alp { get; private init; }
 
-    /// <summary>The frame of reference, as the column's own raw bits.</summary>
-    internal ulong Reference { get; }
-
-    /// <summary>Bits per packed value.</summary>
-    internal int BitWidth { get; }
+    /// <summary>
+    /// The transform, the width and the exceptions, for <see cref="ColumnScheme.BitPacked"/>.
+    /// </summary>
+    internal BitPackPlan? BitPack { get; private init; }
 
     /// <summary>What to do.</summary>
     internal ColumnScheme Scheme { get; }
@@ -105,19 +103,19 @@ internal readonly struct ColumnPlan
     internal int[] Codes { get; }
 
     internal static ColumnPlan Runs(int[] starts, int[] ends) =>
-        new ColumnPlan(ColumnScheme.RunEnd, starts, ends, 0, 0);
+        new ColumnPlan(ColumnScheme.RunEnd, starts, ends);
 
     internal static ColumnPlan Dictionary(int[] firstOccurrences, int[] codes) =>
-        new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes, 0, 0);
+        new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes);
 
     internal static ColumnPlan ForFsst(FsstPlan plan) =>
-        new ColumnPlan(ColumnScheme.Fsst, [], [], 0, 0) { Fsst = plan };
+        new ColumnPlan(ColumnScheme.Fsst, [], []) { Fsst = plan };
 
     internal static ColumnPlan ForAlp(AlpPlan plan) =>
-        new ColumnPlan(ColumnScheme.Alp, [], [], 0, 0) { Alp = plan };
+        new ColumnPlan(ColumnScheme.Alp, [], []) { Alp = plan };
 
-    internal static ColumnPlan FrameOfReference(ulong reference, int bitWidth) =>
-        new ColumnPlan(ColumnScheme.BitPacked, [], [], reference, bitWidth);
+    internal static ColumnPlan ForBitPacking(BitPackPlan plan) =>
+        new ColumnPlan(ColumnScheme.BitPacked, [], []) { BitPack = plan };
 }
 
 /// <summary>Decides how to encode one column chunk.</summary>
@@ -131,16 +129,10 @@ internal static class ColumnCompressor
 
     /// <summary>
     /// What a dictionary costs beyond its codes and entries: two more array nodes and their
-    /// metadata. Same role as <see cref="FrameOfReferenceOverhead"/>, and deliberately generous.
+    /// metadata. Deliberately generous - the point is to refuse encodings that barely pay, not to
+    /// squeeze the last byte. <see cref="BitPackPlan"/> carries its own for the same reason.
     /// </summary>
     private const int DictionaryOverhead = 512;
-
-    /// <summary>
-    /// What a frame-of-reference node costs beyond its packed bytes: one more array node, its
-    /// metadata and its buffer spec. Deliberately generous - the point is to refuse encodings that
-    /// barely pay, not to squeeze the last byte.
-    /// </summary>
-    private const int FrameOfReferenceOverhead = 256;
 
     /// <summary>Below this many rows, a column is a candidate only if it is big in BYTES.</summary>
     private const int MinimumRows = 64;
@@ -197,23 +189,34 @@ internal static class ColumnCompressor
             return ColumnPlan.Runs([.. runStarts], [.. runEnds]);
         }
 
-        // Dense integers before dictionaries: a column of a million distinct measurements has no
-        // dictionary worth building and a very good bit width.
-        if (TryFrameOfReference(arena, node, out ColumnPlan packed))
-        {
-            return packed;
-        }
+        // Dense integers: a column of a million distinct measurements has no dictionary worth
+        // building and a very good bit width.
+        BitPackPlan? packed = BitPackPlan.TryBuild(arena, node);
 
-        // A second pass for distinct values, over a column the runs did not capture. The run count
-        // bounds the distinct count from above, so this only runs when the data is genuinely
-        // interleaved rather than merely repetitive.
+        // ...but "has a good bit width" is not "is the best scheme", and the two are COMPARED
+        // rather than ordered. This used to return the bit-packed plan the moment it beat
+        // canonical, which was harmless while bit-packing declined often, and became a 37 kB
+        // regression on `containers/zoned_many_zones_nulls` the moment patches let it apply to a
+        // nullable integer column a dictionary was already handling better. Both are priced in
+        // bytes; whichever is cheaper wins.
         long plain = node.Kind == CanonicalKind.VarBinView
             ? PlainBinarySize(arena, node)
             : DataBytes(node);
-        ColumnPlan dictionary = Dictionary(arena, node, comparer, length, plain);
+
+        // A second pass for distinct values, over a column the runs did not capture. The run count
+        // bounds the distinct count from above, so this only runs when the data is genuinely
+        // interleaved rather than merely repetitive -- and the budget is what the BEST plan so far
+        // costs, so a dictionary that cannot beat the bit-packing abandons that much sooner.
+        long budget = packed is null ? plain : Math.Min(plain, packed.Cost);
+        ColumnPlan dictionary = Dictionary(arena, node, comparer, length, budget);
         if (dictionary.Scheme != ColumnScheme.None)
         {
             return dictionary;
+        }
+
+        if (packed is not null)
+        {
+            return ColumnPlan.ForBitPacking(packed);
         }
 
         // LAST, and only for text: a high-cardinality string column defeats runs, defeats
@@ -250,124 +253,6 @@ internal static class ColumnCompressor
     }
 
     /// <summary>
-    /// Measures the column's range and decides whether bit-packing it pays.
-    /// </summary>
-    /// <remarks>
-    /// The reference is the MINIMUM, so every encoded value is non-negative and the bit width is
-    /// the span rather than the magnitude: a column of timestamps around 1.7e18 needs 64 bits as
-    /// raw values and perhaps 20 as offsets from its own minimum. Null rows are encoded as the
-    /// reference itself -- their value is never read back, and zero packs better than whatever
-    /// happened to be in the buffer.
-    /// </remarks>
-    private static bool TryFrameOfReference(
-        CanonicalArena arena, CanonicalNode node, out ColumnPlan plan)
-    {
-        plan = ColumnPlan.Canonical;
-        if (node.Kind != CanonicalKind.Primitive || !node.PType.IsInteger())
-        {
-            return false;
-        }
-
-        PType ptype = node.PType;
-        int elementBits = ptype.ByteWidth() * 8;
-        ValidityMask mask = ValidityMask.From(arena, node.Validity);
-        ReadOnlySpan<byte> values = node.Values.Span;
-        bool signed = ptype.IsSignedInteger();
-
-        ulong span;
-        ulong reference;
-        if (signed)
-        {
-            long min = long.MaxValue;
-            long max = long.MinValue;
-            if (!RangeSigned(node.Length, mask, values, ptype, ref min, ref max))
-            {
-                return false;
-            }
-
-            // Unsigned subtraction of two's-complement bit patterns: max - min never overflows
-            // here even when the two straddle zero, which a signed subtraction would.
-            reference = unchecked((ulong)min);
-            span = unchecked((ulong)max) - reference;
-        }
-        else
-        {
-            ulong min = ulong.MaxValue;
-            ulong max = ulong.MinValue;
-            if (!RangeUnsigned(node.Length, mask, values, ptype, ref min, ref max))
-            {
-                return false;
-            }
-
-            reference = min;
-            span = max - min;
-        }
-
-        int bitWidth = span == 0 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount(span);
-
-        // Compared in BYTES, not as a fraction of the element width. The rule used to be "half the
-        // width or better", which refused a 40-bit column of i64 timestamps - a 37% saving on
-        // 8192 rows, tens of kilobytes, declined by a heuristic that had never been measured
-        // against the thing it stands for. What it stands for is the fixed cost of a second node
-        // and a decode step, so that is what it is compared against.
-        //
-        // The padding matters at small row counts: FastLanes packs in blocks of 1024 and the last
-        // block is full-width whatever it holds, so 100 rows at 40 bits cost 1024 of them.
-        long canonical = (long)node.Length * ptype.ByteWidth();
-        long blocks = (node.Length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
-        long packed = blocks * FastLanes.BlockByteLength(bitWidth);
-        if (packed + FrameOfReferenceOverhead >= canonical)
-        {
-            return false;
-        }
-
-        plan = ColumnPlan.FrameOfReference(reference, bitWidth);
-        return true;
-    }
-
-    private static bool RangeSigned(
-        int length, ValidityMask mask, ReadOnlySpan<byte> values, PType ptype,
-        ref long min, ref long max)
-    {
-        bool any = false;
-        for (int i = 0; i < length; i++)
-        {
-            if (!mask.IsValid(i))
-            {
-                continue;
-            }
-
-            any = true;
-            long value = CanonicalSupport.ReadInteger(values, ptype, i);
-            min = Math.Min(min, value);
-            max = Math.Max(max, value);
-        }
-
-        return any;
-    }
-
-    private static bool RangeUnsigned(
-        int length, ValidityMask mask, ReadOnlySpan<byte> values, PType ptype,
-        ref ulong min, ref ulong max)
-    {
-        bool any = false;
-        for (int i = 0; i < length; i++)
-        {
-            if (!mask.IsValid(i))
-            {
-                continue;
-            }
-
-            any = true;
-            ulong value = Arrays.Decoders.Compressed.CompressedValues.ReadUnsigned(values, ptype, i);
-            min = Math.Min(min, value);
-            max = Math.Max(max, value);
-        }
-
-        return any;
-    }
-
-    /// <summary>
     /// Builds a dictionary and keeps it only when it is SMALLER, in bytes, than the column.
     /// </summary>
     /// <remarks>
@@ -377,12 +262,15 @@ internal static class ColumnCompressor
     /// dictionary-encodes it into a quarter of our size; per chunk that is about one in 3.5, so the
     /// ratio refused it by a hair while the byte arithmetic says it wins by 100 kB.
     ///
+    /// The BUDGET is the cheapest plan found so far rather than the plain column, so this both
+    /// decides and abandons against the real competition.
+    ///
     /// The abandonment guard stays, in a form that still bounds the work: a dictionary whose
     /// ENTRIES alone already cost more than the whole column can never win, whatever the rest of
     /// the rows hold.
     /// </remarks>
     private static ColumnPlan Dictionary(
-        CanonicalArena arena, CanonicalNode node, in RowComparer comparer, int length, long plain)
+        CanonicalArena arena, CanonicalNode node, in RowComparer comparer, int length, long budget)
     {
         Dictionary<int, List<int>> byHash = new Dictionary<int, List<int>>();
         List<int> firstOccurrences = [];
@@ -423,7 +311,7 @@ internal static class ColumnCompressor
                 // Give up as soon as the dictionary provably cannot win, rather than building one
                 // and then discarding it: every row needs at least a one-byte code, and every
                 // entry costs at least `minimumEntry` bytes however it is written.
-                if (length + ((long)firstOccurrences.Count * minimumEntry) >= plain)
+                if (length + ((long)firstOccurrences.Count * minimumEntry) >= budget)
                 {
                     return ColumnPlan.Canonical;
                 }
@@ -436,7 +324,7 @@ internal static class ColumnCompressor
         // entries themselves in whatever form they will actually be written.
         long encoded = ((long)length * FsstPlan.IndexPType(firstOccurrences.Count).ByteWidth())
             + EntriesSize(arena, node, firstOccurrences);
-        return encoded + DictionaryOverhead < plain
+        return encoded + DictionaryOverhead < budget
             ? ColumnPlan.Dictionary([.. firstOccurrences], codes)
             : ColumnPlan.Canonical;
     }

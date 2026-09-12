@@ -34,10 +34,11 @@ public sealed class WrittenSizeTests
     /// The whole-corpus ceiling. Lower it when a compression improvement lands; never raise it
     /// without saying in the commit message what got bigger and why that is acceptable.
     ///
-    /// Now just above the 1.05 TARGET rather than far above it, so this has stopped being a
-    /// ratchet on a failing number and started being a guard on a passing one.
+    /// Now BELOW the 1.05 target rather than above it, so this has stopped being a ratchet on a
+    /// failing number and become a guard on a passing one: the target itself would no longer
+    /// notice a regression.
     /// </summary>
-    private const double CorpusCeiling = 1.06;
+    private const double CorpusCeiling = 1.02;
 
     /// <summary>How many of the worst offenders to name, so the number is actionable.</summary>
     private const int Worst = 12;

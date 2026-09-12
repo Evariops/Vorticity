@@ -98,6 +98,11 @@ internal sealed class ColumnFixture : IDisposable
         Arena.AddPrimitive(
             Types.Primitive(PType.I32, nullability), values.Length, validity, PType.I32, Int32s(values));
 
+    /// <summary>An i64 primitive node.</summary>
+    internal int Int64Node(ReadOnlySpan<long> values, Validity validity, Nullability nullability = Nullability.NonNullable) =>
+        Arena.AddPrimitive(
+            Types.Primitive(PType.I64, nullability), values.Length, validity, PType.I64, Int64s(values));
+
     /// <summary>A Utf8 varbinview node whose values are all inlined or spilled as needed.</summary>
     internal int Utf8Node(ReadOnlySpan<byte[]?> values, Nullability nullability, DTypeKind kind = DTypeKind.Utf8)
     {

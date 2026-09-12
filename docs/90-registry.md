@@ -183,17 +183,16 @@ kernels requires the mapping, not the marketing names:
 ## Writing: what the compressor does today
 
 F10 describes a BtrBlocks-style sampling compressor. What exists is the rule-based chooser
-underneath it, measuring two properties in one pass each and applying the result to the TOP of a
-column and nowhere else:
+underneath it, measuring two properties in one pass each:
 
 | Property | Scheme | Notes |
 |---|---|---|
 | Few runs | `vortex.runend` | the constant case falls out as the single-run degenerate, so `vortex.constant` is not separately emitted |
-| Narrow range | `fastlanes.for` + `fastlanes.bitpacked` | the reference is the minimum, so the bit width is the *span* rather than the magnitude |
+| Narrow range | `fastlanes.for` or `vortex.zigzag`, over `fastlanes.bitpacked` | the width minimizes packed bytes plus the cost of the values that do not fit, which ride along as patches |
 | Few distinct values | `vortex.dict` | codes are non-nullable; a null row is a code pointing at a null dictionary entry |
 | otherwise | canonical | |
 
-Only the third needed a new kernel — `FastLanes.PackBlock`, the inverse of the unpacker — and it is
+Only bit-packing needed a new kernel — `FastLanes.PackBlock`, the inverse of the unpacker — and it is
 verified the only way a packer honestly can be: the Rust cross-check reads every bit-packed file we
 write, which makes our transposition byte-compatible with the reference's unpacker rather than
 merely self-consistent. The values child of run-end and dict is the original column gathered to its
@@ -205,10 +204,11 @@ representative rows, so a dictionary of strings shares the data buffers it came 
 
 | | ratio to the reference |
 |---|---|
-| Whole corpus | **1.044×** — inside the ≤105% target of [05-benchmarks.md](05-benchmarks.md) §3. Was 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes, 1.11× before ALP |
+| Whole corpus | **1.008×** — inside the ≤105% target of [05-benchmarks.md](05-benchmarks.md) §3. Was 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes, 1.11× before ALP, 1.044× before patched bit-packing |
 | `distributions/high_cardinality_i64_r8193` (dense integers) | **0.97×** |
 | `distributions/short_runs_i32_r8193` | **0.87×** |
-| `containers/zoned_many_zones_nulls` (five columns, one of them high-cardinality text) | 1.72× (was 3.61×) |
+| `types/i64_nonnull_r8192` | **0.99×** (was 3.31×) |
+| `containers/zoned_many_zones_nulls` (five columns, one of them high-cardinality text) | 1.16× (was 3.61×) |
 
 Measured by `WrittenSizeTests` on every run rather than by hand, with the worst offenders ranked
 by BYTES LOST — a 40× ratio on a 300-byte file moves nothing.
@@ -268,19 +268,46 @@ silently change values, and no equality-based test could see it.
   crushes with `vortex.onpair`. That encoding is **absent from the default write target**
   `core2025.05.0` and first appears in `core2026.08.1`, so we cannot emit it by default at all.
   Same for `repeated_prefix_utf8_r8193` at 1.63×.
-* `types/i64_nonnull_*` at 3.31× — three extreme values (`0`, `i64::MIN`, `i64::MAX`) among
-  thousands of tiny ones, so the frame-of-reference span is the whole 64 bits. The reference uses
-  **patched bit-packing**: pack at the width the bulk needs and carry the outliers as patches.
-  That is the next real algorithm.
 * `containers/zoned_many_zones*` — the `monotone i64` column, where the reference uses
   `vortex.sequence` (start and step). Also **not in the default target**.
 
 So an edition caveat belongs on the whole measurement: the corpus was written at
 `core2026.08.3` and we write at `core2025.05.0`, and §3's target says "the same data, edition and
-configuration". Part of the remaining 4.4% is an edition difference rather than an implementation
+configuration". Most of the remaining 0.8% is an edition difference rather than an implementation
 gap.
 
 Cascading — dictionary codes that are themselves bit-packed — is where the rest lives.
+
+**Bit-packing is patched, and chooses its own transform.** `types/i64_nonnull_r8192` is `0`,
+`i64::MIN`, `i64::MAX` and then eight thousand values alternating either side of zero: three rows
+in 8192 made the frame-of-reference span the whole 64 bits, and a scheme built for dense integers
+declined to touch the densest column in the corpus. Two separate things were missing, and neither
+works without the other:
+
+* **Patches.** The width stops being a property of the data and becomes a MINIMUM over a cost
+  function — packed bytes plus what the exceptions cost — which is what `best_bit_width` computes
+  upstream. `fastlanes.bitpacked` has always been able to express them and our decoder has always
+  read them.
+* **The transform.** Patches over a frame of reference anchored at `i64::MIN` make *half* that
+  column an exception. What the reference does is `vortex.zigzag` instead — magnitude rather than
+  position decides the width — and then 17 bits with two patches. That is read off the corpus
+  sidecar's own array tree, not guessed.
+
+Both are priced and the cheaper wins; frame still wins outright on the columns it was already
+winning, because a column of timestamps has a tiny span and an enormous magnitude.
+
+Two things this cost, which are the interesting half:
+
+* **A null row's packed value is zero, and that is not the same statement as "its value is zero".**
+  Put a raw zero through a frame of reference and it encodes as `-reference`, 64 bits wide, so
+  every null in the column prices as an exception and the scheme is refused outright. It cost
+  37 kB on `containers/zoned_many_zones_nulls`, and no value test in the suite could see it: the
+  file round-tripped perfectly at every stage. It was just bigger. `BitPackPlanTests` pins it now.
+* **Scheme selection was an ORDERING and had to become a comparison.** Bit-packing was tried before
+  dictionaries and returned the moment it beat canonical — harmless while it declined often, and a
+  regression the moment patches let it apply to columns a dictionary was handling better. Both are
+  priced in bytes, so the dictionary's abandonment budget is now what the bit-packing costs rather
+  than what the plain column costs: it decides and gives up against the real competition.
 
 ## Writing: edition targeting
 

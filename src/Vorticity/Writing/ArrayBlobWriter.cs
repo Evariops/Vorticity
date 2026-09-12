@@ -137,7 +137,7 @@ internal static class ArrayBlobWriter
 
         if (plan.Scheme == ColumnScheme.BitPacked)
         {
-            return WriteFrameOfReference(builder, arena, nodeIndex, plan, buffers, encodings);
+            return WriteBitPacked(builder, arena, nodeIndex, plan.BitPack!, buffers, encodings);
         }
 
         if (plan.Scheme == ColumnScheme.Fsst)
@@ -162,57 +162,110 @@ internal static class ArrayBlobWriter
     }
 
     /// <summary>
-    /// Writes <c>fastlanes.for</c> over <c>fastlanes.bitpacked</c>: the encoded values are
-    /// <c>value - reference</c> and the reader adds the reference back, wrapping.
+    /// Writes <c>fastlanes.bitpacked</c> under whichever transform the plan chose:
+    /// <c>fastlanes.for</c>, which adds a reference back, or <c>vortex.zigzag</c>, which
+    /// un-interleaves the sign bit.
     /// </summary>
     /// <remarks>
-    /// The nesting is not arbitrary. FoR carries the reference in its metadata and has NO validity
-    /// of its own -- its validity is its child's -- so the validity child belongs to the bitpacked
-    /// node underneath, which is where this puts it.
+    /// The nesting is not arbitrary. Neither wrapper has a validity of its own -- both take their
+    /// child's -- so the validity child belongs to the bitpacked node underneath, which is where
+    /// this puts it, AFTER the patch children, because the decoder derives the validity child's
+    /// position from the metadata (2 with patches, 0 without) and never from the child count.
     ///
-    /// The subtraction is on RAW BITS, unsigned, and that is what makes a signed column work: a
-    /// column spanning -1000 to 1000 has a span of 2000 and needs 11 bits, which a signed
-    /// subtraction of the extremes would have got right and a signed per-value subtraction would
-    /// have overflowed on. The reader's own kernel is `wrapping_add` for exactly this reason.
+    /// The frame subtraction is on RAW BITS, unsigned, and that is what makes a signed column work:
+    /// a column spanning -1000 to 1000 has a span of 2000 and needs 11 bits, which a signed
+    /// per-value subtraction would have overflowed on. The reader's own kernel is `wrapping_add`
+    /// for exactly this reason.
+    ///
+    /// The PATCH VALUES are in the encoded domain -- after the transform, before the packing --
+    /// because that is the buffer the decoder overwrites: it applies patches to the unpacked
+    /// values and only then hands them to the wrapper.
     /// </remarks>
-    private static int WriteFrameOfReference(
+    private static int WriteBitPacked(
         FlatBufferBuilder builder,
         CanonicalArena arena,
         int nodeIndex,
-        in ColumnPlan plan,
+        BitPackPlan plan,
         List<PendingBuffer> buffers,
         EncodingDictionary encodings)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         PType ptype = node.PType;
         int width = ptype.ByteWidth();
-        int bitWidth = plan.BitWidth;
         int length = node.Length;
 
-        byte[] packed = Pack(arena, node, plan.Reference, bitWidth, ptype, length);
+        byte[] packed = Pack(arena, node, plan, ptype, length);
         buffers.Add(new PendingBuffer(packed, Exponent(width)));
         Span<ushort> packedBuffer = stackalloc ushort[1];
         packedBuffer[0] = (ushort)(buffers.Count - 1);
 
-        Span<int> validity = stackalloc int[1];
-        int validityCount = Validity(builder, arena, node, buffers, encodings, validity);
+        Span<int> children = stackalloc int[3];
+        int childCount = 0;
+        PatchesMetadata patches = default;
+        bool patched = plan.PatchIndices.Length > 0;
+        if (patched)
+        {
+            PType indicesPType = FsstPlan.IndexPType(length);
+            patches = PatchesMetadata.Create((ulong)plan.PatchIndices.Length, 0, indicesPType);
+            children[0] = WriteIndexArray(builder, buffers, encodings, plan.PatchIndices, indicesPType);
+            children[1] = WriteRawPrimitive(
+                builder, buffers, encodings, LittleEndian(plan.PatchValues, width), ToUnsigned(ptype));
+            childCount = 2;
+        }
+
+        childCount += Validity(builder, arena, node, buffers, encodings, children[childCount..]);
 
         int bitpacked = Node(
-            builder, encodings, "fastlanes.bitpacked"u8, BitPackedBytes((uint)bitWidth),
-            validity[..validityCount], packedBuffer);
+            builder, encodings, "fastlanes.bitpacked"u8,
+            BitPackedBytes((uint)plan.BitWidth, patched, in patches),
+            children[..childCount], packedBuffer);
 
-        Span<int> children = stackalloc int[1];
-        children[0] = bitpacked;
-        return Node(
-            builder, encodings, "fastlanes.for"u8, ReferenceBytes(plan.Reference, ptype),
-            children, []);
+        Span<int> wrapper = stackalloc int[1];
+        wrapper[0] = bitpacked;
+        return plan.Transform == BitPackTransform.ZigZag
+            ? Node(builder, encodings, "vortex.zigzag"u8, default, wrapper, [])
+            : Node(
+                builder, encodings, "fastlanes.for"u8, ReferenceBytes(plan.Reference, ptype),
+                wrapper, []);
     }
 
-    /// <summary>Subtracts the reference and bit-packs, one 1024-element block at a time.</summary>
-    private static byte[] Pack(
-        CanonicalArena arena, CanonicalNode node, ulong reference, int bitWidth, PType ptype,
-        int length)
+    /// <summary>The patch values, truncated to the element width and written little-endian.</summary>
+    private static byte[] LittleEndian(ulong[] values, int width)
     {
+        byte[] bytes = new byte[values.Length * width];
+        for (int i = 0; i < values.Length; i++)
+        {
+            Span<byte> destination = bytes.AsSpan(i * width, width);
+            switch (width)
+            {
+                case 1:
+                    destination[0] = unchecked((byte)values[i]);
+                    break;
+                case 2:
+                    BinaryPrimitives.WriteUInt16LittleEndian(destination, unchecked((ushort)values[i]));
+                    break;
+                case 4:
+                    BinaryPrimitives.WriteUInt32LittleEndian(destination, unchecked((uint)values[i]));
+                    break;
+                default:
+                    BinaryPrimitives.WriteUInt64LittleEndian(destination, values[i]);
+                    break;
+            }
+        }
+
+        return bytes;
+    }
+
+    /// <summary>Applies the transform and bit-packs, one 1024-element block at a time.</summary>
+    /// <remarks>
+    /// A patched row is packed like any other and its low bits are simply lost to the mask; the
+    /// patch child puts the value back. Writing a zero there instead would cost a branch per row
+    /// to produce bytes nothing reads.
+    /// </remarks>
+    private static byte[] Pack(
+        CanonicalArena arena, CanonicalNode node, BitPackPlan plan, PType ptype, int length)
+    {
+        int bitWidth = plan.BitWidth;
         int blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
         byte[] destination = new byte[(long)blocks * FastLanes.BlockByteLength(bitWidth)];
         if (bitWidth == 0 || length == 0)
@@ -223,6 +276,7 @@ internal static class ArrayBlobWriter
         ReadOnlySpan<byte> values = node.Values.Span;
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
         int blockBytes = FastLanes.BlockByteLength(bitWidth);
+        int elementBits = ptype.ByteWidth() * 8;
 
         ulong[] block = new ulong[FastLanes.BlockSize];
         for (int b = 0; b < blocks; b++)
@@ -235,10 +289,12 @@ internal static class ArrayBlobWriter
             {
                 int row = start + i;
 
-                // A null row encodes as the reference, so it packs to zero: its value is never
-                // read back and a stable zero compresses better than whatever the buffer held.
+                // A null row encodes as zero under either transform: its value is never read back
+                // and a stable zero compresses better than whatever the buffer held.
                 block[i] = mask.IsValid(row)
-                    ? unchecked(CompressedValues.ReadUnsigned(values, ToUnsigned(ptype), row) - reference)
+                    ? BitPackPlan.Encode(
+                        CompressedValues.ReadUnsigned(values, ToUnsigned(ptype), row),
+                        plan.Transform, plan.Reference, elementBits)
                     : 0;
             }
 
@@ -303,12 +359,14 @@ internal static class ArrayBlobWriter
         _ => ptype,
     };
 
-    private static byte[] BitPackedBytes(uint bitWidth)
+    private static byte[] BitPackedBytes(uint bitWidth, bool hasPatches, in PatchesMetadata patches)
     {
         ProtoWriter writer = new ProtoWriter();
         try
         {
-            BitPackedMetadata value = new BitPackedMetadata(bitWidth, 0);
+            BitPackedMetadata value = hasPatches
+                ? new BitPackedMetadata(bitWidth, 0, in patches)
+                : new BitPackedMetadata(bitWidth, 0);
             BitPackedMetadata.Write(ref writer, in value);
             return writer.WrittenSpan.ToArray();
         }
