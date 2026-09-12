@@ -51,6 +51,29 @@ internal sealed class FsstSymbols
     /// <summary>The five generations of the FSST paper, as fractions of 128.</summary>
     private static readonly int[] Generations = [8, 38, 68, 98, 128];
 
+    /// <summary>
+    /// The trainer's counting tables, kept per thread instead of allocated per call.
+    /// </summary>
+    /// <remarks>
+    /// <c>count2</c> is 65 536 ints - 256 kB - and <see cref="Train"/> is called ONCE PER
+    /// COLUMN-CHUNK, so writing a 65 536-row file allocated and dropped about 16 MB of counting
+    /// table. They are cleared at the top of every generation regardless, so reusing them cannot
+    /// change a single symbol: the first <c>Array.Clear</c> of a freshly allocated array was always
+    /// redundant work on memory the runtime had just zeroed.
+    ///
+    /// THREAD-STATIC RATHER THAN POOLED, deliberately. <c>ArrayPool&lt;T&gt;.Shared</c> is
+    /// process-global, and this repository has already measured what that costs a path that rents
+    /// many blocks at once - a scattered take allocated a fresh owner per split once its rents moved
+    /// into an exhausted size class. The price here is 260 kB retained per thread that has ever
+    /// written a file, which is bounded, predictable, and does not interact with anything else.
+    /// </remarks>
+    [System.ThreadStatic]
+    private static int[]? ScratchOne;
+
+    /// <inheritdoc cref="ScratchOne"/>
+    [System.ThreadStatic]
+    private static int[]? ScratchTwo;
+
     /// <summary>Bytes of sample the trainer aims for before it stops drawing lines.</summary>
     private const int SampleTarget = 1 << 14;
 
@@ -99,8 +122,8 @@ internal sealed class FsstSymbols
             return null;
         }
 
-        int[] count1 = new int[CodeMask + 1];
-        int[] count2 = new int[(CodeMask + 1) * (CodeMask + 1)];
+        int[] count1 = ScratchOne ??= new int[CodeMask + 1];
+        int[] count2 = ScratchTwo ??= new int[(CodeMask + 1) * (CodeMask + 1)];
 
         foreach (int generation in Generations)
         {
