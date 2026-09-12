@@ -55,20 +55,47 @@ are ours ÷ Rust, so above 1.00 is slower:
 | `vortex.datetimeparts` | 47.3 µs | 42.5 µs | 1.11× |
 | `vortex.varbinview` | 60.2 µs | 67.0 µs | **0.90× — we are faster** |
 
-**Read those ratios knowing what is inside them, because it changes the conclusion.** These corpus
-files hold 4096 rows, and roughly 35 µs of every row above is the open-and-walk-the-layout cost both
-implementations pay before a single value is decoded — Rust's own floor across the easy encodings is
-34–38 µs. Subtracting it turns `vortex.fsst` from 3.1× into something nearer 12×, and
-`fastlanes.bitpacked` from 1.26× into 9 µs against well under one. So the table is a reliable
-RANKING and an understated set of ratios; §3's "ns/value on 1M values, isolated" is the measurement
-that would give honest absolutes, and it wants a bigger dataset than the corpus carries.
+**This table is a RANKING, and must not be read as a measurement.** Two things are inside every
+number. First, these corpus files hold 4096 rows, and roughly 35 µs of each row above is the
+open-and-walk-the-layout cost both implementations pay before a single value is decoded — Rust's own
+floor across the easy encodings is 34–38 µs, so the ratios are all pulled toward 1. Second, and
+worse: **between-process variance here is larger than the effects being measured.** Three runs of
+effectively identical code on `encodings/fsst` returned 135 µs, 146 µs and 202 µs, each with a
+BenchmarkDotNet error bar under ±3 µs — the statistics describe the iterations inside one process
+and say nothing about the next one. The in-process toolchain (§1b, last paragraph) is part of why.
 
-What the ranking says is unambiguous: the three byte-oriented decoders — FSST, OnPair and Zstd —
-are the slow ones, and the bit-packing kernels are already close. FSST and OnPair both decode one
-symbol at a time where the reference writes a fixed-width store per symbol and advances by the real
-length; `FsstSymbolTable`'s own comment predicted that "reproducing its shape rather than its
-semantics would buy nothing until the rest of the library is vectorized", and the measurement
-disagrees.
+So: use this table to decide WHAT to work on, and a microbenchmark to decide whether the work
+helped. §3's "ns/value on 1M values, isolated" is the measurement that would give honest absolutes,
+and it wants a bigger dataset than the corpus carries.
+
+The ranking is unambiguous: the three byte-oriented decoders — FSST, OnPair and Zstd — are the slow
+ones, and the bit-packing kernels are already close.
+
+### The FSST kernel, measured properly
+
+`FsstSymbolTable` argued for years of comments that reproducing the reference's shape "would buy
+nothing until the rest of the library is vectorized". The ranking above said FSST was our slowest
+kernel, so the shape was tried: one unaligned 8-byte store per symbol, advancing by the symbol's
+real length, with an exact-copy tail where the slack runs out.
+
+The end-to-end benchmark said it was **8% slower**, and that was nearly written down as a finding.
+It was drift. `FsstKernelBenchmarks` runs both shapes in one process over one code stream, which is
+what §5 prescribes and what should have been done first:
+
+| shape | 64 KiB of codes | ratio |
+|---|---|---|
+| exact copy (what the library did) | 306.8 µs | 1.00 |
+| **wide store** (what it does now) | **38.8 µs** | **0.13** |
+
+**7.9× faster.** Two lessons, both already in §5: a microbenchmark of the thing being changed beats
+an end-to-end one diluted by a fixed cost, and two candidates must be measured against ONE clock or
+thermal drift picks the winner.
+
+The same trick applies to `vortex.onpair`, whose tokens are at most 16 bytes and now take one
+`Vector128` store each; its decoder also stopped re-reading the token offsets through a
+physical-type switch twice per code. That one was measured end to end across four separate process
+launches — 117 µs, then 81, 82, 81 — which is consistent enough to trust, though a kernel
+microbenchmark would still be better evidence.
 
 A defect this also found: `DecodeBenchmarks`'s parameter list named `encodings/bitpacked`,
 `encodings/for` and `encodings/rle`, none of which exist — the corpus ids are

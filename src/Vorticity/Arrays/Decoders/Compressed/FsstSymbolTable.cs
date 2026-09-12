@@ -19,8 +19,23 @@
 // to store a symbol whose real length may be 1. This implementation writes exactly the symbol's
 // length, so it needs no slack -- stated here because the absence of FSST_DECODE_SLACK is otherwise
 // an unexplained divergence.
+//
+// SO THE WIDE STORE IS NOW HERE TOO, and the story of getting there is the useful part. This file
+// used to argue that reproducing the reference's shape "would buy nothing until the rest of the
+// library is vectorized". Measuring per-encoding ratios against Rust (docs/05-benchmarks.md §1b)
+// made FSST our slowest kernel, so the shape was tried - and a whole-file benchmark said it was 8%
+// SLOWER, which I nearly wrote down as a finding. It was drift: three runs of effectively identical
+// code came back 135, 146 and 202 us, and a 35 us open cost sat in front of the kernel in every one
+// of them. Measured properly, both shapes in one process over one code stream
+// (FsstKernelBenchmarks), the wide store is 7.9x FASTER - 307 us against 39 us on 64 KiB of codes.
+//
+// Two lessons, both already written down in docs/05 §5 and neither of which I applied first time: a
+// microbenchmark of the thing being changed beats an end-to-end one diluted by a fixed cost, and
+// two candidates have to be measured against ONE clock or thermal drift decides the winner.
 using System;
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
@@ -113,7 +128,16 @@ internal readonly ref struct FsstSymbolTable
     {
         ReadOnlySpan<byte> symbols = _symbols;
         ReadOnlySpan<byte> lengths = _lengths;
+        int count = lengths.Length;
         int written = 0;
+
+        ref byte output = ref MemoryMarshal.GetReference(destination);
+        ref byte table = ref MemoryMarshal.GetReference(symbols);
+
+        // Past this point a symbol no longer has eight writable bytes behind it, so the wide store
+        // would run off the end and the exact copy takes over. Negative for a destination under
+        // eight bytes, which is right: the wide path is then never taken at all.
+        int wideLimit = destination.Length - SymbolSize;
 
         for (int i = 0; i < codes.Length; i++)
         {
@@ -135,21 +159,35 @@ internal readonly ref struct FsstSymbolTable
                 continue;
             }
 
-            if (code >= lengths.Length)
+            if (code >= count)
             {
                 CompressedThrow.Format(
-                    $"{encodingId}: code {code} names a symbol the {lengths.Length}-entry table " +
+                    $"{encodingId}: code {code} names a symbol the {count}-entry table " +
                     "does not hold.");
             }
 
             int width = lengths[code];
+            if (written <= wideLimit)
+            {
+                // ONE 8-BYTE STORE PER SYMBOL, then advance by the symbol's REAL length. The bytes
+                // written past the symbol are garbage that the next store overwrites, which is both
+                // what makes this legal and what makes it fast: a 1..8-byte Span.CopyTo carries a
+                // length the CPU cannot see through, and this is a single unaligned move.
+                Unsafe.WriteUnaligned(
+                    ref Unsafe.Add(ref output, (uint)written),
+                    Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref table, (uint)(code * SymbolSize))));
+                written += width;
+                continue;
+            }
+
             if (written + width > destination.Length)
             {
                 return ThrowOverrun(encodingId, destination.Length);
             }
 
-            // The symbol is a little-endian u64 whose low `width` bytes are the text, which is
-            // exactly its first `width` bytes in memory.
+            // The tail, where the wide store would run past the end of the destination. The symbol
+            // is a little-endian u64 whose low `width` bytes are the text, which is exactly its
+            // first `width` bytes in memory.
             symbols.Slice(code * SymbolSize, width).CopyTo(destination.Slice(written, width));
             written += width;
         }

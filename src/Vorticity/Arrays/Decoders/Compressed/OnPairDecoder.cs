@@ -23,7 +23,10 @@
 // bound -- the last offset within the blob -- and not the padding. A padded file satisfies both; an
 // unpadded one is readable here and not there, which is the safe direction to differ in.
 using System;
+using System.Buffers;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Text.Unicode;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
@@ -139,7 +142,48 @@ public sealed class OnPairDecoder : ArrayDecoder
         ReadOnlySpan<byte> dictionary,
         Span<byte> destination)
     {
+        // The token offsets are read ONCE into an int table rather than twice per code through
+        // CanonicalSupport.ReadInteger's physical-type switch. There are at most 65536 tokens and
+        // usually far more codes than that, so this trades a bounded pass for two switches and two
+        // bounds checks on every code. ValidateDictionary has already proved every offset lies
+        // inside the blob and never decreases, so the table needs no checking of its own.
+        int[] rented = ArrayPool<int>.Shared.Rent(tokenCount + 1);
+        try
+        {
+            Span<int> offsets = rented.AsSpan(0, tokenCount + 1);
+            for (int t = 0; t <= tokenCount; t++)
+            {
+                offsets[t] = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, t);
+            }
+
+            return Concatenate(
+                codes, codesPType, codeStart, codeEnd, offsets, tokenCount, dictionary, destination);
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>The concatenation itself, with the code width resolved once.</summary>
+    private static int Concatenate(
+        ReadOnlySpan<byte> codes,
+        PType codesPType,
+        int codeStart,
+        int codeEnd,
+        ReadOnlySpan<int> offsets,
+        int tokenCount,
+        ReadOnlySpan<byte> dictionary,
+        Span<byte> destination)
+    {
         int written = 0;
+
+        // Past this point a token no longer has sixteen writable bytes behind it, so the wide
+        // store is unsafe and the exact copy takes over.
+        int wideLimit = destination.Length - MaxTokenSize;
+        ref byte output = ref MemoryMarshal.GetReference(destination);
+        ref byte source = ref MemoryMarshal.GetReference(dictionary);
+
         for (int i = codeStart; i < codeEnd; i++)
         {
             ulong code = CompressedValues.ReadUnsigned(codes, codesPType, i);
@@ -149,14 +193,26 @@ public sealed class OnPairDecoder : ArrayDecoder
                     $"{Id} code {code} names a token the {tokenCount}-entry dictionary does not hold.");
             }
 
-            int start = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, (int)code);
-            int end = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, (int)code + 1);
-            int size = end - start;
+            int start = offsets[(int)code];
+            int size = offsets[(int)code + 1] - start;
             if (written + size > destination.Length)
             {
                 CompressedThrow.Format(
                     $"{Id}: the code stream decodes to more than the {destination.Length} bytes " +
                     "its uncompressed lengths account for.");
+            }
+
+            if (written <= wideLimit && start <= dictionary.Length - MaxTokenSize)
+            {
+                // ONE 16-BYTE STORE PER TOKEN, then advance by the token's REAL length - the same
+                // trick FSST's decoder uses, and legal for the same reason: the bytes past the
+                // token are garbage the next store overwrites. A token is at most 16 bytes, so one
+                // Vector128 move replaces a variable-length Span.CopyTo call.
+                Vector128.StoreUnsafe(
+                    Vector128.LoadUnsafe(ref Unsafe.Add(ref source, (uint)start)),
+                    ref Unsafe.Add(ref output, (uint)written));
+                written += size;
+                continue;
             }
 
             dictionary.Slice(start, size).CopyTo(destination.Slice(written, size));
