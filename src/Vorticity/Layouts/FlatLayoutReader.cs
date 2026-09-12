@@ -32,6 +32,16 @@ public sealed class FlatLayoutReader : LayoutReader
     /// <inheritdoc/>
     public override ReadOnlySpan<byte> IdUtf8 => "vortex.flat"u8;
 
+    /// <summary>
+    /// Values this reader has materialized, across every scan in the process.
+    /// </summary>
+    /// <remarks>
+    /// Internal and diagnostic. The cost of maintaining it is one interlocked add per decoded node,
+    /// beside a decode of that whole node, so it is not measurable; the cost of NOT having it was
+    /// a quadratic that survived forty-two iterations of benchmarking.
+    /// </remarks>
+    internal static long ValuesDecoded;
+
     /// <inheritdoc/>
     public override void RegisterSegments(
         in LayoutNode node, RowRange rows, in FieldMask fields, SegmentRequestSet segments)
@@ -78,6 +88,12 @@ public sealed class FlatLayoutReader : LayoutReader
             return MaskProjection.Apply(context.Decode, taken, in fields);
         }
 
+        // DIAGNOSTIC, not a feature: `total`, not `length`. A flat layout decodes its WHOLE node
+        // for every batch carved out of it and then slices, so this counter reads `rows` on a file
+        // whose chunk is one batch and `rows x batches` on one whose chunk is larger. That second
+        // number is quadratic in the row count, and nothing in the repository could see it because
+        // every fixture has chunk <= batch. FlatLayoutDecodeCountTests owns it.
+        System.Threading.Interlocked.Add(ref ValuesDecoded, total);
         int decoded = context.Decode.DecodeRoot(in root, node.DType, total);
 
         int sliced = CanonicalSlice.Slice(context.Decode, decoded, (int)rows.Start, length);
