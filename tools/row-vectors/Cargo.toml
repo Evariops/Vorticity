@@ -1,0 +1,25 @@
+[package]
+name = "row-vectors"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Emits golden row-encoding vectors from the reference vortex-row implementation, for Vorticity to compare against byte for byte."
+
+# A GIT DEPENDENCY, and the only one in this repository.
+#
+# `vortex-row` is marked `publish = false` upstream: it exists only inside the vortex monorepo and
+# has never been pushed to crates.io, so the crates.io pin that tools/conformance-gen uses cannot
+# reach it. docs/04-conformance.md §7 nevertheless asks for byte-exactness against Rust, on the
+# grounds that two implementations can each be internally consistent and still disagree - which
+# would silently break every cross-language comparison, the one thing this format is for.
+#
+# The tag is pinned exactly, for the same reason the corpus pin is: a version bump is a
+# regeneration of the vectors, not a dependency update. Every vortex crate below comes from the
+# same tag so that one resolved copy of vortex-array serves them all.
+#
+# This crate is NOT built by CI. It is run by hand when the pin moves; its output is committed.
+[dependencies]
+vortex-row = { git = "https://github.com/vortex-data/vortex", tag = "0.86.1" }
+vortex-array = { git = "https://github.com/vortex-data/vortex", tag = "0.86.1" }
+vortex-buffer = { git = "https://github.com/vortex-data/vortex", tag = "0.86.1" }
+vortex-error = { git = "https://github.com/vortex-data/vortex", tag = "0.86.1" }

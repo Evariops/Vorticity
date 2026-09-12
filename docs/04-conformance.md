@@ -152,10 +152,17 @@ correctness condition is a single crisp property rather than a format match.
   (`"ab"` vs `"abc"`), and nulls under nested structs with garbage in the child arrays — the case
   that only the canonicalized-null-body rule gets right.
 * **Byte-exactness against Rust.** `vortex-ffi` exposes no row-encoding API, so this goes through
-  a small binary in `tools/conformance-gen` that encodes a generated table with `vortex-row` and
-  dumps the bytes; we compare byte for byte. Being merely order-*compatible* is not enough — two
-  implementations could each be internally consistent and still disagree, which would silently
-  break any cross-language comparison.
+  a binary that encodes a generated table with `vortex-row` and dumps the bytes; we compare byte
+  for byte. Being merely order-*compatible* is not enough — two implementations could each be
+  internally consistent and still disagree, which would silently break any cross-language
+  comparison.
+
+  It lives in [`tools/row-vectors`](../tools/row-vectors) rather than in `conformance-gen`, because
+  `vortex-row` is marked `publish = false` upstream — it exists only inside the vortex monorepo and
+  is not on crates.io, so the exact crates.io pin `conformance-gen` uses cannot reach it. It is
+  taken as a **git dependency pinned to the tag `0.86.1`**, the only git dependency in the
+  repository, and every other vortex crate comes from the same tag so one resolved `vortex-array`
+  serves them all. The crate is not built by CI; its output is committed.
 * **Version pinning.** The format is experimental upstream. The golden row-encoding vectors record
   the Vortex version that produced them, and a mismatch is a loud failure rather than a silent
   re-baseline.

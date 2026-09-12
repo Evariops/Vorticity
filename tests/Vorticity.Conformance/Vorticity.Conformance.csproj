@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
+    <ProjectReference Include="../../src/Vorticity.RowEncoding/Vorticity.RowEncoding.csproj" />
   </ItemGroup>
 
   <!-- The corpus and the forged fixtures live inside this project directory and are found by

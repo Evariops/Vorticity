@@ -41,6 +41,9 @@ vortex-file/src/strategy.rs                          Default write pipeline (819
 vortex-btrblocks/src/builder.rs                      Default scheme list and their ordering
 vortex/editions/core/*.toml                          Frozen edition records (the authoritative scope list)
 vortex-row/src/                                      Byte-sortable row encoder (codec, encode, size, options)
+                                                     — NOT on crates.io (`publish = false`): read it
+                                                       from the repo at the pinned tag, and note that
+                                                       tools/row-vectors takes it as a git dependency
 vortex/editions/zstd/zstd2026.02.0.toml              Draft zstd edition (vortex.zstd_buffers)
 vortex-ffi/cinclude/vortex.h                         C API used for cross-testing and benchmarking
                                                      — note: it exposes no row-encoding entry points
