@@ -60,6 +60,7 @@ public static class ArrayDecoderTable
 
         // Phase 2, as each lands.
         Register(DecimalBytePartsDecoder.Instance);
+        Register(DateTimePartsDecoder.Instance);
     }
 
     /// <summary>

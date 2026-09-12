@@ -181,6 +181,25 @@ internal static class TestMetadata
         }
     }
 
+    /// <summary><c>vortex.datetimeparts</c> metadata: the three parts' physical types.</summary>
+    /// <param name="days">Physical type of the days child.</param>
+    /// <param name="seconds">Physical type of the seconds child.</param>
+    /// <param name="subseconds">Physical type of the subseconds child.</param>
+    internal static byte[] DateTimeParts(PType days, PType seconds, PType subseconds)
+    {
+        DateTimePartsMetadata value = new(days, seconds, subseconds);
+        ProtoWriter writer = new();
+        try
+        {
+            DateTimePartsMetadata.Write(ref writer, in value);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
     /// <summary>A bare <c>ScalarValue</c> message body, as fastlanes.for's metadata and
     /// vortex.constant's / vortex.sparse's buffer 0 carry it.</summary>
     internal static byte[] Scalar(ScalarValue value) => ScalarProtobuf.SerializeValue(value);
