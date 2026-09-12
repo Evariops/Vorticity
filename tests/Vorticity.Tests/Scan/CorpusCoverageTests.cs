@@ -9,6 +9,20 @@
 // A ratchet on the gap fixes that asymmetry. It goes down when a decoder lands and it goes red if a
 // file the build used to read stops being in scope, which is the failure an in-scope-only sweep
 // cannot see: dropping a registration moves a file out of scope and the sweep still says 100%.
+//
+// WHAT THE NUMBER IS NOT is a backlog. docs/01-scope.md §3 defers most of it BY DECISION, and
+// reading the counts without reading that table gets the priorities exactly backwards - which is
+// what happened when this test was first written:
+//
+//   vortex.map, vortex.variant, vortex.parquet.variant   35 files   "target 1.1"
+//   vortex.pco                                            4 files   "target 1.1"
+//   vortex.zstd_buffers                                   4 files   draft edition, decode once stable
+//   fastlanes.delta                                       5 files   belongs to NO core edition
+//   vortex.list layout, vortex.patched                    2 files   experimental upstream
+//
+// So 43 of the 45 are scope, not debt, and the largest single component - vortex.map at 23 files -
+// is the one the scope document defers most explicitly. The ratchet is worth keeping for the
+// regression direction; it is not a work queue.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
