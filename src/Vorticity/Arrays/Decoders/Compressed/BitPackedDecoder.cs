@@ -278,41 +278,74 @@ public sealed class BitPackedDecoder : ArrayDecoder
         // rejecting an under-aligned buffer would refuse a file whose values are perfectly readable.
         ReadOnlySpan<T> packed = MemoryMarshal.Cast<byte, T>(packedBytes);
         int elementsPerBlock = FastLanes.BlockByteLength(bitWidth) / Unsafe.SizeOf<T>();
-        int blocks = packed.Length / elementsPerBlock;
 
-        T[] scratchArray = ArrayPool<T>.Shared.Rent(FastLanes.BlockSize);
-        try
+        // THE WINDOW DECIDES WHICH BLOCKS ARE TOUCHED, and there are at most three kinds: a
+        // partial first, a contiguous run of whole ones, and a partial last. Blocks before the
+        // window were being visited only to be `continue`d, and the whole run was being unpacked a
+        // block at a time -- which made `UnpackBlock` rebuild its per-row shape table once per
+        // block, for a bit width that is the same across every block of the node.
+        int end = offset + length;
+        int firstBlock = offset / FastLanes.BlockSize;
+        int lastBlock = (end - 1) / FastLanes.BlockSize;
+
+        bool headPartial = offset % FastLanes.BlockSize != 0;
+        bool tailPartial = end % FastLanes.BlockSize != 0;
+
+        int firstWhole = headPartial ? firstBlock + 1 : firstBlock;
+        int lastWhole = tailPartial ? lastBlock - 1 : lastBlock;
+
+        if (headPartial || tailPartial)
         {
-            Span<T> scratch = scratchArray.AsSpan(0, FastLanes.BlockSize);
-            for (int block = 0; block < blocks; block++)
+            T[] scratchArray = ArrayPool<T>.Shared.Rent(FastLanes.BlockSize);
+            try
             {
-                ReadOnlySpan<T> source = packed.Slice(block * elementsPerBlock, elementsPerBlock);
-                int encodedStart = block * FastLanes.BlockSize;
-                int encodedEnd = encodedStart + FastLanes.BlockSize;
-
-                if (encodedStart >= offset && encodedEnd <= offset + length)
+                Span<T> scratch = scratchArray.AsSpan(0, FastLanes.BlockSize);
+                if (headPartial)
                 {
-                    // The whole block lands inside the output: unpack straight into it.
-                    FastLanes.UnpackBlock(
-                        source, bitWidth, destination.Slice(encodedStart - offset, FastLanes.BlockSize));
-                    continue;
+                    CopyPartial(packed, bitWidth, elementsPerBlock, firstBlock, offset, end, scratch, destination);
                 }
 
-                int from = Math.Max(encodedStart, offset);
-                int to = Math.Min(encodedEnd, offset + length);
-                if (to <= from)
+                // A window that is partial at both ends of the SAME block was already copied
+                // whole by the head: its clamp is [offset, end), which is all of it.
+                if (tailPartial && !(headPartial && lastBlock == firstBlock))
                 {
-                    continue;
+                    CopyPartial(packed, bitWidth, elementsPerBlock, lastBlock, offset, end, scratch, destination);
                 }
-
-                FastLanes.UnpackBlock(source, bitWidth, scratch);
-                scratch.Slice(from - encodedStart, to - from).CopyTo(destination[(from - offset)..]);
+            }
+            finally
+            {
+                ArrayPool<T>.Shared.Return(scratchArray);
             }
         }
-        finally
+
+        int wholeBlocks = lastWhole - firstWhole + 1;
+        if (wholeBlocks > 0)
         {
-            ArrayPool<T>.Shared.Return(scratchArray);
+            FastLanes.UnpackBlocks(
+                packed.Slice(firstWhole * elementsPerBlock, wholeBlocks * elementsPerBlock),
+                bitWidth,
+                destination.Slice(
+                    (firstWhole * FastLanes.BlockSize) - offset, wholeBlocks * FastLanes.BlockSize),
+                wholeBlocks);
         }
+    }
+
+    /// <summary>Unpacks one block into scratch and copies out only the part the window wants.</summary>
+    private static void CopyPartial<T>(
+        ReadOnlySpan<T> packed, int bitWidth, int elementsPerBlock, int block, int offset, int end,
+        Span<T> scratch, Span<T> destination)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int encodedStart = block * FastLanes.BlockSize;
+        int from = Math.Max(encodedStart, offset);
+        int to = Math.Min(encodedStart + FastLanes.BlockSize, end);
+        if (to <= from)
+        {
+            return;
+        }
+
+        FastLanes.UnpackBlock(packed.Slice(block * elementsPerBlock, elementsPerBlock), bitWidth, scratch);
+        scratch.Slice(from - encodedStart, to - from).CopyTo(destination[(from - offset)..]);
     }
 
     /// <summary>

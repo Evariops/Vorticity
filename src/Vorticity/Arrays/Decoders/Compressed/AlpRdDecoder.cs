@@ -125,7 +125,13 @@ public sealed class AlpRdDecoder : ArrayDecoder
             context, rightIndex, rightPType, length, Id + " right_parts");
 
         int total = ArrayDecodeContext.CheckedMultiply(length, width, Id + " values");
-        VortexBuffer output = CanonicalSupport.Allocate(context, total, width, out Span<byte> destination);
+
+        // UNINITIALIZED: `Combine` casts the destination to exactly `length` elements of `width`
+        // bytes -- which is `total` -- and assigns every one of them. `ApplyLeftPartPatches` only
+        // ever overwrites rows the combine already wrote. The one path that stops short is
+        // `ThrowCode`, and it throws: the buffer is never reachable from a decode that failed.
+        VortexBuffer output = CanonicalSupport.AllocateUninitialized(
+            context, total, width, out Span<byte> destination);
 
         Combine(
             left.Values.Span, leftPType, right.Values.Span, destination, length,

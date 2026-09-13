@@ -316,26 +316,97 @@ internal static class FastLanes
 
         ReadOnlySpan<int> index = PackedIndexTable(elementBits);
 
-        // W == T copies straight through: packed[LANES * row + lane] is the value.
+        // W == T copies straight through: packed[LANES * row + lane] is the value. AND IT IS A
+        // BLOCK COPY, not a gather -- `BuildPackedIndex` writes
+        // `table[row * lanes + lane] = Order[row / 8] * 16 + (row % 8) * 128 + lane`, so for a
+        // fixed row the destination runs contiguously in `lane`, exactly as the source does. The
+        // by-element form was 1024 bounds-checked loads through an index table to move what is
+        // `elementBits` memcpys of 128 bytes. (PERF-AUDIT, §"FastLanes.UnpackBlock:280".)
         if (bitWidth == elementBits)
         {
-            for (int lane = 0; lane < lanes; lane++)
+            ReadOnlySpan<byte> order = OrderBytes;
+            for (int row = 0; row < elementBits; row++)
             {
-                for (int row = 0; row < elementBits; row++)
-                {
-                    output[index[(row * lanes) + lane]] = packed[(lanes * row) + lane];
-                }
+                int destination = (order[row / 8] * 16) + ((row % 8) * 128);
+                packed.Slice(lanes * row, lanes).CopyTo(output.Slice(destination, lanes));
             }
 
             return;
         }
 
-        if (Vectorized(packed, bitWidth, output, elementBits, lanes))
+        if (Vectorizable<T>() && Vector128.IsHardwareAccelerated)
         {
+            Span<Row<T>> shapes = stackalloc Row<T>[elementBits];
+            BuildRows(bitWidth, elementBits, shapes);
+            Vectorized(packed, shapes, output, lanes, lanes * bitWidth, 1);
             return;
         }
 
         UnpackBlockScalar(packed, bitWidth, output, index, elementBits, lanes);
+    }
+
+    /// <summary>
+    /// Unpacks a RUN of consecutive blocks into consecutive output, with the per-row shape
+    /// computed ONCE for the whole run.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every block of a node shares one bit width, so all <c>elementBits</c> row shapes are the
+    /// same for all of them -- and the per-block form rebuilt every one of them per block: four
+    /// multiply-shift pairs and two mask constructions per row, 32 rows for a u32, against an
+    /// inner loop of eight vector iterations per row. It was a quarter of the kernel spent
+    /// recomputing a table that never changed.
+    /// </para>
+    /// <para>
+    /// The block stays the OUTER loop even though hoisting the rows outside it would also hoist
+    /// the two <c>Vector128.Create</c> broadcasts. A row writes only <c>lanes</c> contiguous
+    /// elements per block, so row-outer would sweep the whole output once per row -- 32 passes
+    /// over a megabyte column instead of one. The broadcasts are a register move; the sweep is
+    /// memory bandwidth.
+    /// </para>
+    /// </remarks>
+    /// <typeparam name="T">The unsigned element type.</typeparam>
+    /// <param name="packed">Exactly <c>blocks * lanes * bitWidth</c> words.</param>
+    /// <param name="bitWidth">Bits per packed value, in <c>[0, 8 * sizeof(T)]</c>.</param>
+    /// <param name="output">Exactly <c>blocks * 1024</c> elements; every one is written.</param>
+    /// <param name="blocks">How many consecutive blocks to unpack.</param>
+    internal static void UnpackBlocks<T>(
+        ReadOnlySpan<T> packed, int bitWidth, Span<T> output, int blocks)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int elementBits = Unsafe.SizeOf<T>() * 8;
+        int lanes = BlockSize / elementBits;
+        int wordsPerBlock = lanes * bitWidth;
+
+        // The two degenerate widths and the platforms without vectors keep the per-block form:
+        // neither has a row shape to hoist.
+        if (bitWidth == 0 || bitWidth == elementBits
+            || !Vectorizable<T>() || !Vector128.IsHardwareAccelerated)
+        {
+            for (int block = 0; block < blocks; block++)
+            {
+                UnpackBlock(
+                    packed.Slice(block * wordsPerBlock, wordsPerBlock),
+                    bitWidth,
+                    output.Slice(block * BlockSize, BlockSize));
+            }
+
+            return;
+        }
+
+        Span<Row<T>> shapes = stackalloc Row<T>[elementBits];
+        BuildRows(bitWidth, elementBits, shapes);
+        Vectorized(packed, shapes, output, lanes, wordsPerBlock, blocks);
+    }
+
+    /// <summary>Fills the per-row shapes for one bit width.</summary>
+    private static void BuildRows<T>(int bitWidth, int elementBits, Span<Row<T>> shapes)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        for (int row = 0; row < elementBits; row++)
+        {
+            shapes[row] = new Row<T>(row, bitWidth, elementBits);
+        }
     }
 
     /// <summary>
@@ -508,134 +579,160 @@ internal static class FastLanes
         typeof(T) == typeof(byte) || typeof(T) == typeof(ushort)
         || typeof(T) == typeof(uint) || typeof(T) == typeof(ulong);
 
-    /// <summary>Runs whichever vector width is available, or reports that none is.</summary>
-    private static bool Vectorized<T>(
-        ReadOnlySpan<T> packed, int bitWidth, Span<T> output, int elementBits, int lanes)
+    /// <summary>Runs whichever vector width is available over a run of prepared blocks.</summary>
+    private static void Vectorized<T>(
+        ReadOnlySpan<T> packed, ReadOnlySpan<Row<T>> shapes, Span<T> output, int lanes,
+        int wordsPerBlock, int blocks)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
-        if (!Vectorizable<T>())
-        {
-            return false;
-        }
-
         // `lanes` is 16, 32, 64 or 128 and every vector width divides all four, so the loops below
         // never need a remainder tail.
         if (Vector512.IsHardwareAccelerated)
         {
-            Unpack512(packed, bitWidth, output, elementBits, lanes);
-            return true;
+            Unpack512(packed, shapes, output, lanes, wordsPerBlock, blocks);
+            return;
         }
 
         if (Vector256.IsHardwareAccelerated)
         {
-            Unpack256(packed, bitWidth, output, elementBits, lanes);
-            return true;
+            Unpack256(packed, shapes, output, lanes, wordsPerBlock, blocks);
+            return;
         }
 
-        if (Vector128.IsHardwareAccelerated)
-        {
-            Unpack128(packed, bitWidth, output, elementBits, lanes);
-            return true;
-        }
-
-        return false;
+        Unpack128(packed, shapes, output, lanes, wordsPerBlock, blocks);
     }
 
     private static void Unpack512<T>(
-        ReadOnlySpan<T> packed, int bitWidth, Span<T> output, int elementBits, int lanes)
+        ReadOnlySpan<T> packed, ReadOnlySpan<Row<T>> shapes, Span<T> output, int lanes,
+        int wordsPerBlock, int blocks)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
         ref T source = ref MemoryMarshal.GetReference(packed);
         ref T destination = ref MemoryMarshal.GetReference(output);
+        ref Row<T> shapeTable = ref MemoryMarshal.GetReference(shapes);
+        int rows = shapes.Length;
         int step = Vector512<T>.Count;
 
-        for (int row = 0; row < elementBits; row++)
+        for (int block = 0; block < blocks; block++)
         {
-            Row<T> shape = new Row<T>(row, bitWidth, elementBits);
-            Vector512<T> low = Vector512.Create(shape.LowMask);
-            Vector512<T> high = Vector512.Create(shape.HighMask);
-            nuint current = (nuint)(lanes * shape.CurrentWord);
-            nuint next = (nuint)(lanes * shape.NextWord);
-            nuint into = (nuint)shape.Destination;
+            nuint blockSource = (nuint)((nint)block * wordsPerBlock);
+            nuint blockDestination = (nuint)((nint)block * BlockSize);
 
-            for (int lane = 0; lane < lanes; lane += step)
+            for (int row = 0; row < rows; row++)
             {
-                Vector512<T> value = ShiftRight(
-                    Vector512.LoadUnsafe(ref source, current + (nuint)lane), shape.Shift) & low;
+                ref Row<T> shape = ref Unsafe.Add(ref shapeTable, row);
+                Vector512<T> low = Vector512.Create(shape.LowMask);
+                Vector512<T> high = Vector512.Create(shape.HighMask);
+                nuint current = blockSource + (nuint)(lanes * shape.CurrentWord);
+                nuint next = blockSource + (nuint)(lanes * shape.NextWord);
+                nuint into = blockDestination + (nuint)shape.Destination;
+                int shift = shape.Shift;
+                int currentBits = shape.CurrentBits;
+                bool spills = shape.Spills;
 
-                if (shape.Spills)
+                for (int lane = 0; lane < lanes; lane += step)
                 {
-                    value |= ShiftLeft(
-                        Vector512.LoadUnsafe(ref source, next + (nuint)lane) & high, shape.CurrentBits);
-                }
+                    Vector512<T> value = ShiftRight(
+                        Vector512.LoadUnsafe(ref source, current + (nuint)lane), shift) & low;
 
-                value.StoreUnsafe(ref destination, into + (nuint)lane);
+                    if (spills)
+                    {
+                        value |= ShiftLeft(
+                            Vector512.LoadUnsafe(ref source, next + (nuint)lane) & high, currentBits);
+                    }
+
+                    value.StoreUnsafe(ref destination, into + (nuint)lane);
+                }
             }
         }
     }
 
     private static void Unpack256<T>(
-        ReadOnlySpan<T> packed, int bitWidth, Span<T> output, int elementBits, int lanes)
+        ReadOnlySpan<T> packed, ReadOnlySpan<Row<T>> shapes, Span<T> output, int lanes,
+        int wordsPerBlock, int blocks)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
         ref T source = ref MemoryMarshal.GetReference(packed);
         ref T destination = ref MemoryMarshal.GetReference(output);
+        ref Row<T> shapeTable = ref MemoryMarshal.GetReference(shapes);
+        int rows = shapes.Length;
         int step = Vector256<T>.Count;
 
-        for (int row = 0; row < elementBits; row++)
+        for (int block = 0; block < blocks; block++)
         {
-            Row<T> shape = new Row<T>(row, bitWidth, elementBits);
-            Vector256<T> low = Vector256.Create(shape.LowMask);
-            Vector256<T> high = Vector256.Create(shape.HighMask);
-            nuint current = (nuint)(lanes * shape.CurrentWord);
-            nuint next = (nuint)(lanes * shape.NextWord);
-            nuint into = (nuint)shape.Destination;
+            nuint blockSource = (nuint)((nint)block * wordsPerBlock);
+            nuint blockDestination = (nuint)((nint)block * BlockSize);
 
-            for (int lane = 0; lane < lanes; lane += step)
+            for (int row = 0; row < rows; row++)
             {
-                Vector256<T> value = ShiftRight(
-                    Vector256.LoadUnsafe(ref source, current + (nuint)lane), shape.Shift) & low;
+                ref Row<T> shape = ref Unsafe.Add(ref shapeTable, row);
+                Vector256<T> low = Vector256.Create(shape.LowMask);
+                Vector256<T> high = Vector256.Create(shape.HighMask);
+                nuint current = blockSource + (nuint)(lanes * shape.CurrentWord);
+                nuint next = blockSource + (nuint)(lanes * shape.NextWord);
+                nuint into = blockDestination + (nuint)shape.Destination;
+                int shift = shape.Shift;
+                int currentBits = shape.CurrentBits;
+                bool spills = shape.Spills;
 
-                if (shape.Spills)
+                for (int lane = 0; lane < lanes; lane += step)
                 {
-                    value |= ShiftLeft(
-                        Vector256.LoadUnsafe(ref source, next + (nuint)lane) & high, shape.CurrentBits);
-                }
+                    Vector256<T> value = ShiftRight(
+                        Vector256.LoadUnsafe(ref source, current + (nuint)lane), shift) & low;
 
-                value.StoreUnsafe(ref destination, into + (nuint)lane);
+                    if (spills)
+                    {
+                        value |= ShiftLeft(
+                            Vector256.LoadUnsafe(ref source, next + (nuint)lane) & high, currentBits);
+                    }
+
+                    value.StoreUnsafe(ref destination, into + (nuint)lane);
+                }
             }
         }
     }
 
     private static void Unpack128<T>(
-        ReadOnlySpan<T> packed, int bitWidth, Span<T> output, int elementBits, int lanes)
+        ReadOnlySpan<T> packed, ReadOnlySpan<Row<T>> shapes, Span<T> output, int lanes,
+        int wordsPerBlock, int blocks)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
         ref T source = ref MemoryMarshal.GetReference(packed);
         ref T destination = ref MemoryMarshal.GetReference(output);
+        ref Row<T> shapeTable = ref MemoryMarshal.GetReference(shapes);
+        int rows = shapes.Length;
         int step = Vector128<T>.Count;
 
-        for (int row = 0; row < elementBits; row++)
+        for (int block = 0; block < blocks; block++)
         {
-            Row<T> shape = new Row<T>(row, bitWidth, elementBits);
-            Vector128<T> low = Vector128.Create(shape.LowMask);
-            Vector128<T> high = Vector128.Create(shape.HighMask);
-            nuint current = (nuint)(lanes * shape.CurrentWord);
-            nuint next = (nuint)(lanes * shape.NextWord);
-            nuint into = (nuint)shape.Destination;
+            nuint blockSource = (nuint)((nint)block * wordsPerBlock);
+            nuint blockDestination = (nuint)((nint)block * BlockSize);
 
-            for (int lane = 0; lane < lanes; lane += step)
+            for (int row = 0; row < rows; row++)
             {
-                Vector128<T> value = ShiftRight(
-                    Vector128.LoadUnsafe(ref source, current + (nuint)lane), shape.Shift) & low;
+                ref Row<T> shape = ref Unsafe.Add(ref shapeTable, row);
+                Vector128<T> low = Vector128.Create(shape.LowMask);
+                Vector128<T> high = Vector128.Create(shape.HighMask);
+                nuint current = blockSource + (nuint)(lanes * shape.CurrentWord);
+                nuint next = blockSource + (nuint)(lanes * shape.NextWord);
+                nuint into = blockDestination + (nuint)shape.Destination;
+                int shift = shape.Shift;
+                int currentBits = shape.CurrentBits;
+                bool spills = shape.Spills;
 
-                if (shape.Spills)
+                for (int lane = 0; lane < lanes; lane += step)
                 {
-                    value |= ShiftLeft(
-                        Vector128.LoadUnsafe(ref source, next + (nuint)lane) & high, shape.CurrentBits);
-                }
+                    Vector128<T> value = ShiftRight(
+                        Vector128.LoadUnsafe(ref source, current + (nuint)lane), shift) & low;
 
-                value.StoreUnsafe(ref destination, into + (nuint)lane);
+                    if (spills)
+                    {
+                        value |= ShiftLeft(
+                            Vector128.LoadUnsafe(ref source, next + (nuint)lane) & high, currentBits);
+                    }
+
+                    value.StoreUnsafe(ref destination, into + (nuint)lane);
+                }
             }
         }
     }
