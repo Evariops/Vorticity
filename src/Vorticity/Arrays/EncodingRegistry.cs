@@ -78,6 +78,9 @@ public enum ArrayEncodingId : ushort
     /// <summary><c>vortex.map</c>.</summary>
     Map,
 
+    /// <summary><c>vortex.patched</c>.</summary>
+    Patched,
+
     /// <summary><c>fastlanes.rle</c>.</summary>
     FastLanesRle,
 
@@ -232,6 +235,7 @@ public static class EncodingRegistry
                 {
                     case (byte)'d': return idUtf8.SequenceEqual("vortex.decimal"u8) ? ArrayEncodingId.Decimal : ArrayEncodingId.Unknown;
                     case (byte)'c': return idUtf8.SequenceEqual("vortex.chunked"u8) ? ArrayEncodingId.Chunked : ArrayEncodingId.Unknown;
+                    case (byte)'p': return idUtf8.SequenceEqual("vortex.patched"u8) ? ArrayEncodingId.Patched : ArrayEncodingId.Unknown;
                     default: return ArrayEncodingId.Unknown;
                 }
 
@@ -323,24 +327,20 @@ public static class EncodingRegistry
     /// </summary>
     /// <param name="idUtf8">The id exactly as the file carries it.</param>
     /// <remarks>
-    /// The notes contract §2.8 pins verbatim are <c>vortex.patched</c> and the
-    /// <c>vortex.list</c> <em>layout</em>; <c>fastlanes.delta</c> was a third until it gained a
-    /// decoder. The array <c>vortex.list</c> is implemented, so it never reaches a throw site and
-    /// the layout note is unambiguous here.
+    /// The one note contract §2.8 still pins verbatim is the <c>vortex.list</c> <em>layout</em>;
+    /// <c>fastlanes.delta</c> and <c>vortex.patched</c> were two more until they gained decoders.
+    /// The array <c>vortex.list</c> is implemented, so it never reaches a throw site and the layout
+    /// note is unambiguous here.
     /// </remarks>
     public static string? DescribeUnsupported(ReadOnlySpan<byte> idUtf8)
     {
         // Cold path: readability beats a second hand-rolled trie.
         //
-        // `fastlanes.delta` used to be described here as "in no core edition; a default writer
-        // cannot emit it". Both halves are still true of UPSTREAM, and neither was ever a reason not
-        // to read one, so the entry went when the decoder arrived rather than the sentence being
-        // reworded. Contract §2.8 pins the remaining two.
-        if (idUtf8.SequenceEqual("vortex.patched"u8))
-        {
-            return "in-memory only upstream; never produced by a conformant writer";
-        }
-
+        // Two entries have left this list as their decoders arrived: `fastlanes.delta` ("in no core
+        // edition; a default writer cannot emit it") and `vortex.patched` ("in-memory only upstream;
+        // never produced by a conformant writer"). Both sentences are still true of UPSTREAM, and
+        // neither was ever a reason not to READ one - which is why the entries went rather than the
+        // wording being softened. Contract §2.8 pins the one that remains.
         if (idUtf8.SequenceEqual("vortex.list"u8))
         {
             return "experimental list layout; in no core edition";

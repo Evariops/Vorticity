@@ -44,7 +44,7 @@ public sealed class CorpusCoverageTests
     /// that used to be readable no longer is, which is a regression the conformance sweep reports as
     /// a clean 100% because the file simply leaves its denominator.
     /// </remarks>
-    private const int OutOfScopeCeiling = 18;
+    private const int OutOfScopeCeiling = 17;
 
     [Fact]
     public void TheUnreadablePartOfTheCorpusStaysWithinItsRatchet()

@@ -30,8 +30,8 @@ public sealed class ScanCorpusTests
         // and the test is updated to the new snapshot rather than the computation being replaced by
         // a list. 616 was Phase 1; +32 vortex.decimal_byte_parts, +6 vortex.datetimeparts,
         // +5 vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst, +46 vortex.onpair,
-        // +2 distributions/sorted_disjoint_utf8, +4 fastlanes.delta, +23 vortex.map.
-        Assert.Equal(803, inScope.Count);
+        // +2 distributions/sorted_disjoint_utf8, +4 fastlanes.delta, +23 vortex.map, +1 vortex.patched.
+        Assert.Equal(804, inScope.Count);
     }
 
     [Fact]
@@ -58,7 +58,7 @@ public sealed class ScanCorpusTests
         }
 
         Assert.Equal(string.Empty, failures.ToString());
-        Assert.Equal(803, checkedFiles);
+        Assert.Equal(804, checkedFiles);
     }
 
     [Fact]
@@ -114,7 +114,7 @@ public sealed class ScanCorpusTests
         }
 
         Assert.Equal(string.Empty, wrong.ToString());
-        Assert.Equal(18, named + read);
+        Assert.Equal(17, named + read);
 
         // A PROPORTION, not a count: the absolute number shrinks with every decoder that lands,
         // while the property being asserted -- that an out-of-scope file almost always reaches the

@@ -52,7 +52,6 @@ public sealed class EncodingRegistryTests
     [InlineData("vortex.pco")]
     [InlineData("vortex.variant")]
     [InlineData("vortex.parquet.variant")]
-    [InlineData("vortex.patched")]
     public void EveryDeferredArrayIdIsUnknownAndDescribed(string id)
     {
         byte[] utf8 = Encoding.UTF8.GetBytes(id);
@@ -112,12 +111,9 @@ public sealed class EncodingRegistryTests
     [Fact]
     public void TheNotesContractTwoPointEightPinsAreVerbatim()
     {
-        // fastlanes.delta was a third pinned note until it gained a decoder. Its wording said "in
-        // no core edition; a default writer cannot emit it", which is still true of upstream and was
-        // never a reason not to read one.
-        Assert.Equal(
-            "in-memory only upstream; never produced by a conformant writer",
-            EncodingRegistry.DescribeUnsupported("vortex.patched"u8));
+        // fastlanes.delta and vortex.patched were two more pinned notes until they gained decoders.
+        // Both sentences were true of upstream and neither was a reason not to read one, so the
+        // entries went rather than the wording being softened.
         Assert.Equal(
             "experimental list layout; in no core edition",
             EncodingRegistry.DescribeUnsupported("vortex.list"u8));
@@ -133,20 +129,20 @@ public sealed class EncodingRegistryTests
     [Fact]
     public void GettingADecoderForAnUnknownIdNamesTheIdAndTheKind()
     {
-        // vortex.patched rather than one of the Phase 2 ids: its note is structural ("in-memory
-        // only upstream"), so unlike "deferred to Phase 2" it does not expire as decoders land.
-        // This was fastlanes.delta until that gained a decoder, which is the expiry this comment
-        // was guarding against and did not prevent - the note was structural, the CHOICE of example
-        // was not.
+        // The vortex.list LAYOUT: the last id whose note contract §2.8 pins. This example has now
+        // been changed twice - fastlanes.delta, then vortex.patched - each time because the id
+        // gained a decoder. The comment each time claimed the note was structural and so would not
+        // expire; the note never did, but the CHOICE of example is not structural and keeps
+        // expiring. A layout id is safer only because this build implements no new layouts.
         VortexUnsupportedException error =
             Assert.Throws<VortexUnsupportedException>(
-                () => ArrayDecoderTable.Get(ArrayEncodingId.Unknown, "vortex.patched"));
+                () => ArrayDecoderTable.Get(ArrayEncodingId.Unknown, "vortex.list"));
 
-        Assert.Equal("vortex.patched", error.ComponentId);
+        Assert.Equal("vortex.list", error.ComponentId);
         Assert.Equal(VortexComponentKind.Array, error.Kind);
-        Assert.Contains("vortex.patched", error.Message, StringComparison.Ordinal);
+        Assert.Contains("vortex.list", error.Message, StringComparison.Ordinal);
         Assert.Contains("array", error.Message, StringComparison.Ordinal);
-        Assert.Contains("in-memory only upstream", error.Message, StringComparison.Ordinal);
+        Assert.Contains("experimental list layout", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

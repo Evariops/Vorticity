@@ -67,15 +67,15 @@ wrong.
 |---|---|---|---|
 | ~~**`vortex.map`**~~ | 23 | **the estimate was wrong twice over.** The `Map` DTYPE was already implemented — parsing, arena, switch sites — and a map ARRAY is a `ListView<Struct{key,value}>` wearing the map dtype, so no new canonical kind and no new column type were needed | **DONE.** One decoder, one writer wrapper, and the harness work below |
 | **`vortex.zstd_buffers`** | 4 | **NOT a value codec.** A META-ENCODING: it compresses each top-level buffer of *another* array independently and stores that array's encoding id and metadata so it can be rebuilt. Decoding means reconstructing an inner array with substituted buffers | **this table said "trivial once `vortex.zstd` is in place"; that is wrong.** Architectural, not trivial |
-| **`vortex.variant`, `vortex.parquet.variant`** | 8 | a self-describing binary value format | moderate |
-| **`vortex.pco`** | 4 | full pcodec | large |
+| **`vortex.variant`, `vortex.parquet.variant`** | 8 | **the largest of the six, and the only one needing a new canonical kind.** The sidecar renders a variant row as `{dtype, value}` — genuinely typed PER ROW — and nothing in `CanonicalKind` expresses that, unlike `vortex.map` which reused `ListView`. `vortex.variant` wraps a core-storage child carrying the same Variant dtype plus an optional shredded child; the real payload is `vortex.parquet.variant`, whose crate is 4 623 lines of the Parquet Variant binary format | **large**: new canonical kind, new column type, a binary format, and `ValueComparer` support |
+| **`vortex.pco`** | 4 | full pcodec — a real compression algorithm. Canonical form is `Primitive`, which exists, so no new kind: the whole cost is the codec | **large**, but bounded and verifiable value-for-value against the sidecar |
 | ~~**`fastlanes.delta`**~~ | 4 | ~~per-lane prefix sum over 1024-element FastLanes blocks~~ | **DONE.** The estimate held: one decoder, one metadata reader |
 
 **Three of these are pinned by contract §2.8, not merely absent**, with reasons that stay true after
 implementation. `EncodingRegistry.DescribeUnsupported` returns them verbatim:
 
-* `fastlanes.delta` — "in no core edition; a default writer cannot emit it";
-* `vortex.patched` — "in-memory only upstream; never produced by a conformant writer";
+* ~~`fastlanes.delta`~~ and ~~`vortex.patched`~~ — both now read; their notes were true of upstream
+  and were never reasons not to read one;
 * the `vortex.list` **layout** — "experimental list layout; in no core edition".
 
 Those statements describe *upstream*, and implementing a reader does not falsify any of them. What

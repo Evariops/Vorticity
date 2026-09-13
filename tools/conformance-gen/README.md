@@ -45,7 +45,10 @@ cargo run --release -j 6 --example verify_forged -- ../../tests/Vorticity.Confor
 # then hand them to the reference and compare scalar by scalar against its own corpus file.
 VORTICITY_WRITE_CORPUS=/tmp/vxwritten dotnet test ../../Vorticity.slnx -c Release \
     --filter-method '*WritesTheCorpusOutForTheRustCrossCheck*'
-cargo run --release -j 6 --example verify_written -- \
+# VORTEX_EXPERIMENTAL_PATCHED_ARRAY=1 because the verifier opens the REFERENCE file to compare
+# against, and containers/experimental_patched_array_editions_off carries `vortex.patched`, which
+# Vortex refuses without that switch. It says nothing about our output, which uses no such encoding.
+VORTEX_EXPERIMENTAL_PATCHED_ARRAY=1 cargo run --release -j 6 --example verify_written -- \
     ../../tests/Vorticity.Conformance/corpus /tmp/vxwritten
 ```
 
