@@ -29,7 +29,14 @@ use futures::pin_mut;
 use vortex::VortexSessionDefault;
 use vortex::array::Canonical;
 use vortex::array::VortexSessionExecute;
+use vortex::buffer::Buffer;
+use vortex::scan::strict_sorted_buffer::StrictSortedBuffer;
 use vortex::error::VortexResult;
+use vortex::expr::and;
+use vortex::expr::get_item;
+use vortex::expr::lit;
+use vortex::expr::lt;
+use vortex::expr::gt_eq;
 use vortex::expr::root;
 use vortex::expr::select;
 use vortex::file::OpenOptionsSessionExt;
@@ -203,6 +210,102 @@ pub unsafe extern "C" fn vxbench_write(path: *const c_char) -> i64 {
                     .write_options()
                     .write(Vec::<u8>::new(), stream)
                     .await?;
+                Ok(rows)
+            }
+        })
+    })
+}
+
+/// Takes `count` rows of `path`, one every `stride`, canonicalizing, and counts them.
+///
+/// THE TAKE AXIS HAD NO REFERENCE. docs/05's take figure was "0.32x of a full scan", which is a
+/// ratio against ourselves and says nothing about whether the path is fast. The indices are a
+/// stride rather than a list so the same call describes a scattered take of any density without
+/// marshalling an array across the ABI -- the .NET side's `TakeBenchmarks` uses exactly this shape,
+/// `i * 1024 + 511`.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vxbench_take(path: *const c_char, count: i64, stride: i64) -> i64 {
+    if count < 0 || stride <= 0 {
+        return ERR_BAD_PATH;
+    }
+
+    run(path, move |session, path| {
+        block_on(|handle| {
+            let session = session.with_handle(handle);
+            async move {
+                let mut ctx = session.create_execution_ctx();
+                let file = session.open_options().open_path(&path).await?;
+                let rows_in_file = file.row_count();
+                let indices: Buffer<u64> = (0..count as u64)
+                    .map(|i| (i * stride as u64) + (stride as u64 / 2))
+                    .filter(|&row| row < rows_in_file)
+                    .collect();
+                let selection = StrictSortedBuffer::try_new(indices)?;
+                let stream = file.scan()?.with_row_indices(selection).into_array_stream()?;
+                pin_mut!(stream);
+                let mut rows: i64 = 0;
+                while let Some(array) = stream.next().await {
+                    let array = array?;
+                    rows += array.len() as i64;
+                    let _canonical: Canonical = array.execute(&mut ctx)?;
+                }
+
+                Ok(rows)
+            }
+        })
+    })
+}
+
+/// Scans `path` under `field >= lo AND field < lo + width`, canonicalizing, and counts the rows.
+///
+/// THE FILTER AXIS HAD NO REFERENCE EITHER. `bench/BRANCHING.md` priced the comparison kernel's
+/// remedy at 6.0x and `FilterSelectivityBenchmarks` measured the whole path at four selectivities,
+/// but nothing said whether 230 microseconds for a 1% band was good, bad or indifferent -- the
+/// reference had no filter entry point to ask.
+///
+/// The predicate is a BAND rather than a single comparison, because that is what the .NET side's
+/// selectivity benchmark uses and what a zone map can actually prune: a half-open interval on one
+/// i64 field. `lo` and `width` are the caller's, so the same call serves every selectivity.
+///
+/// # Safety
+/// `path` and `field` must be valid NUL-terminated C strings for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vxbench_scan_filtered(
+    path: *const c_char,
+    field: *const c_char,
+    lo: i64,
+    width: i64,
+) -> i64 {
+    let Some(field) = (unsafe { text(field) }) else {
+        return ERR_BAD_PATH;
+    };
+
+    run(path, move |session, path| {
+        let field = field.clone();
+        block_on(|handle| {
+            let session = session.with_handle(handle);
+            async move {
+                let mut ctx = session.create_execution_ctx();
+                let file = session.open_options().open_path(&path).await?;
+                let predicate = and(
+                    gt_eq(get_item(field.as_str(), root()), lit(lo)),
+                    lt(get_item(field.as_str(), root()), lit(lo + width)),
+                );
+                let filter = predicate
+                    .optimize_recursive(file.dtype())
+                    .and_then(|expr| expr.bind(file.dtype()))?;
+                let stream = file.scan()?.with_filter(filter).into_array_stream()?;
+                pin_mut!(stream);
+                let mut rows: i64 = 0;
+                while let Some(array) = stream.next().await {
+                    let array = array?;
+                    rows += array.len() as i64;
+                    let _canonical: Canonical = array.execute(&mut ctx)?;
+                }
+
                 Ok(rows)
             }
         })

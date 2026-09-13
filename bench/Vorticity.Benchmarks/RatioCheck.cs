@@ -30,6 +30,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Vorticity.Columns;
+using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Scan;
 
@@ -156,10 +157,55 @@ internal static class RatioCheck
             1.82,
             ReadAndWrite,
             p => RustReader.Require(RustReader.Write(p), "write")),
+        new Axis(
+            "filtered scan, 1% band",
+            0.237,
+            p => FilteredScan(p, BandLow, NarrowBand),
+            p => RustReader.Require(
+                RustReader.ScanFiltered(p, Field, BandLow, NarrowBand), "filtered scan")),
+        new Axis(
+            "filtered scan, half the rows",
+            0.340,
+            p => FilteredScan(p, BandLow, WideBand),
+            p => RustReader.Require(
+                RustReader.ScanFiltered(p, Field, BandLow, WideBand), "filtered scan")),
+        new Axis(
+            "scattered take, 64 of 64 splits",
+            0.262,
+            p => ScatteredTake(p, TakeCount, TakeStride),
+            p => RustReader.Require(RustReader.Take(p, TakeCount, TakeStride), "take")),
     ];
 
-    /// <summary>The field the projection axis reads; it exists in the default dataset.</summary>
+    /// <summary>The field the projection, filter and band axes read; it exists in the dataset.</summary>
     private const string Field = "monotone";
+
+    /// <summary>
+    /// The filter band's lower bound, and two widths.
+    /// </summary>
+    /// <remarks>
+    /// The dataset's `monotone` column runs from 1 000 000 upward over 65 536 rows, which is what
+    /// `ZoneMapWritingTests` and `FilterSelectivityBenchmarks` both already use. Two widths because
+    /// the two ends of the selectivity range answer different questions: a narrow band is about
+    /// PRUNING, a wide one is about the comparison kernel, and the plan asked for a ratio on both.
+    /// </remarks>
+    private const long BandLow = 1_000_000;
+
+    /// <summary>About 1% of the rows: the pruning end.</summary>
+    private const long NarrowBand = 656;
+
+    /// <summary>About half the rows: the kernel end.</summary>
+    private const long WideBand = 32_768;
+
+    /// <summary>Rows a scattered take asks for, and the gap between them.</summary>
+    /// <remarks>
+    /// 64 rows one per 1024 is the shape `TakeBenchmarks` uses and the shape docs/05 quotes its
+    /// "0.32x of a full scan" from: one row from each of the dataset's 64 splits, which is the
+    /// worst case for a reader that fetches by split.
+    /// </remarks>
+    private const long TakeCount = 64;
+
+    /// <summary>The gap between taken rows.</summary>
+    private const long TakeStride = 1024;
 
     /// <summary>How many warm-up iterations each axis got, for the report.</summary>
     private static readonly Dictionary<string, int> Warmed = [];
@@ -201,6 +247,20 @@ internal static class RatioCheck
         int over = 0;
         foreach (Axis axis in Axes)
         {
+            // PER AXIS, not once for the file. The precondition above covers the full scan; the
+            // filter and take axes select rows, and two readers that disagree about WHICH rows
+            // survive would produce a ratio between two different amounts of work. That is the
+            // failure `--ffi-check` was written for, and it only ever checked the full scan.
+            long mineRows = await axis.Ours(path).ConfigureAwait(false);
+            long rustRows = axis.Theirs(path);
+            if (mineRows != rustRows)
+            {
+                Console.Error.WriteLine(
+                    $"The two readers disagree on the `{axis.Name}` axis: {mineRows} rows " +
+                    $"versus {rustRows}. No ratio over it means anything.");
+                return 2;
+            }
+
             (double mine, double rust) = await MeasureAsync(path, axis).ConfigureAwait(false);
             double ratio = mine / rust;
             double ceiling = axis.Reference * Margin;
@@ -292,6 +352,55 @@ internal static class RatioCheck
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
         await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
+    /// <summary>Scans under the same half-open band the Rust side is given.</summary>
+    /// <param name="path">The file.</param>
+    /// <param name="low">The band's inclusive lower bound.</param>
+    /// <param name="width">The band's width.</param>
+    /// <remarks>
+    /// PRUNING ON, because that is the path a caller gets by default and the one the zone map
+    /// exists for. The reference prunes too, from the same zone map, so the two sides are answering
+    /// the same question.
+    /// </remarks>
+    private static async Task<long> FilteredScan(string path, long low, long width)
+    {
+        VortexExpr band = Expr.And(
+            Expr.Ge(Expr.Field(Field), Expr.Literal(FilterLiteral.From(low))),
+            Expr.Lt(Expr.Field(Field), Expr.Literal(FilterLiteral.From(low + width))));
+
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().Where(band).ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
+    /// <summary>Takes the same strided rows the Rust side is given.</summary>
+    /// <param name="path">The file.</param>
+    /// <param name="count">How many rows.</param>
+    /// <param name="stride">The gap between them.</param>
+    private static async Task<long> ScatteredTake(string path, long count, long stride)
+    {
+        long[] indices = new long[count];
+        for (int i = 0; i < indices.Length; i++)
+        {
+            indices[i] = (i * stride) + (stride / 2);
+        }
+
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().Take(indices).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;

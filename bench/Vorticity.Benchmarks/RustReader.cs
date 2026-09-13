@@ -75,6 +75,35 @@ internal static partial class RustReader
     [LibraryImport(Library, EntryPoint = "vxbench_write", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long Write(string path);
 
+    /// <summary>Scans under <c>field &gt;= lo AND field &lt; lo + width</c>, canonicalizing.</summary>
+    /// <param name="path">The file to scan, as a UTF-8 C string.</param>
+    /// <param name="field">The root field the band applies to; must be an i64.</param>
+    /// <param name="lo">The band's inclusive lower bound.</param>
+    /// <param name="width">The band's width; the upper bound is exclusive.</param>
+    /// <returns>The surviving row count, or negative on failure.</returns>
+    /// <remarks>
+    /// A BAND rather than one comparison, because that is what `FilterSelectivityBenchmarks` uses
+    /// and what a zone map can actually prune. The filter path had no reference at all: the 6.0x
+    /// the comparison kernel was worth was measured against our own past, and 230 microseconds for
+    /// a 1% band was a number with nothing to compare it to.
+    /// </remarks>
+    [LibraryImport(Library, EntryPoint = "vxbench_scan_filtered", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial long ScanFiltered(string path, string field, long lo, long width);
+
+    /// <summary>Takes <paramref name="count"/> rows, one every <paramref name="stride"/>.</summary>
+    /// <param name="path">The file to take from, as a UTF-8 C string.</param>
+    /// <param name="count">How many rows to ask for.</param>
+    /// <param name="stride">The gap between them; row i is <c>i * stride + stride / 2</c>.</param>
+    /// <returns>The row count actually produced, or negative on failure.</returns>
+    /// <remarks>
+    /// A STRIDE rather than a list, so the same call describes a scattered take of any density
+    /// without marshalling an array across the ABI -- and `TakeBenchmarks` on the .NET side uses
+    /// exactly this shape. docs/05's take figure was "0.32x of a full scan", a ratio against
+    /// ourselves that says nothing about whether the path is fast.
+    /// </remarks>
+    [LibraryImport(Library, EntryPoint = "vxbench_take", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial long Take(string path, long count, long stride);
+
     /// <summary>Opens a file and scans one field of every batch.</summary>
     /// <param name="path">The file to scan, as a UTF-8 C string.</param>
     /// <param name="field">The root field to project.</param>
