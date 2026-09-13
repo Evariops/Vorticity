@@ -55,7 +55,12 @@ pub async fn write_throughput_corpus(
 
         let path = out.join(format!("{}.vortex", case.id));
         let sink = FileWrite::create(&path, session.handle()).await?;
-        let spec = WriteSpec::forced();
+        // `fastlanes.delta` and `vortex.zstd_buffers` belong to no core edition, so the write is
+        // rejected at serialization time unless the case's own flag is honoured. Ignoring it was
+        // silently dropping the two encodings this axis most needed a number for: the corpus has
+        // them at 4096 rows, where ~35 us of fixed cost hides the decoder entirely.
+        let mut spec = WriteSpec::forced();
+        spec.disable_editions = case.disable_editions;
         match build_options(session, &spec)
             .write(sink, array.to_array_stream())
             .await

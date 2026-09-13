@@ -13,6 +13,11 @@
 // `-- --ratio-check` is the gate rather than the report: the same axes, interleaved against one
 // clock, each held to a ceiling. It exits non-zero when one is over, so CI can run it. See
 // RatioCheck.cs for why it does its own timing instead of asserting on a BenchmarkDotNet result.
+//
+// `-- --throughput` is the per-encoding axis at a million rows, where the fixed open-and-walk cost
+// is under a percent instead of most of the measurement; `-- --throughput --check` turns it into
+// the same kind of gate, per encoding. That is where the largest measured gaps in this repository
+// live, and until the gate existed nothing defended them.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -41,7 +46,8 @@ internal static class Program
 
         if (args.Length > 0 && args[0] == "--throughput")
         {
-            return await ThroughputCheck.RunAsync().ConfigureAwait(false);
+            bool check = Array.IndexOf(args, "--check") >= 0;
+            return await ThroughputCheck.RunAsync(check).ConfigureAwait(false);
         }
 
         if (args.Length > 1 && args[0] == "--profile")

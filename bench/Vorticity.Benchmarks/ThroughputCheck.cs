@@ -48,9 +48,101 @@ internal static class ThroughputCheck
     /// <summary>Timed rounds per file. Odd, so the median is an observation.</summary>
     private const int Rounds = 7;
 
+    /// <summary>
+    /// The margin over the reference ratio, the same +15% RatioCheck uses and for the same reason:
+    /// the ratio is largely but not entirely deterministic, and a tighter margin gates noise.
+    /// </summary>
+    private const double Margin = 1.15;
+
+    /// <summary>
+    /// The ratio each encoding was measured at when the ceiling was last set, on the machine named
+    /// in bench/BASELINE.md. LOWER ONE BY HAND when an improvement lands, in the same commit.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the gate the biggest measured gap in the repository never had. bench/BASELINE.md's
+    /// per-encoding table is a RANKING at 4096 rows -- ~35 us of fixed open-and-walk cost on both
+    /// sides pulls every ratio in it toward 1.0 -- so a decoder could get three times slower and
+    /// that table would move by a few percent. These files are a million rows each, which pushes
+    /// the fixed cost under a percent and leaves the decoder.
+    /// </para>
+    /// <para>
+    /// A ratio ABOVE the ceiling fails. A ratio far BELOW its reference is reported as STALE rather
+    /// than silently accepted: a ratchet that is never lowered stops being a ratchet, and the whole
+    /// point of these numbers is that they move down.
+    /// </para>
+    /// <para>
+    /// The three encodings whose ratio is well under 1 (`struct`, `varbin`, `varbinview`) are not
+    /// a mistake: upstream's scan of those files materializes far more than ours does. They are
+    /// gated all the same, because a regression there is still a regression.
+    /// </para>
+    /// </remarks>
+    private static readonly (string Encoding, double Reference)[] References =
+    [
+        ("alp", 3.09),   // 3 runs, spread 2.68-3.09
+        ("alp_no_patches", 1.97),   // 3 runs, spread 1.75-1.97
+        ("alp_patched_no_chunk_offsets", 1.97),   // 3 runs, spread 1.81-1.97
+        ("alprd", 6.13),   // 3 runs, spread 5.17-6.13
+        ("bool", 1.16),   // 3 runs, spread 1.05-1.16
+        ("bool_bit_offset3", 1.05),   // 3 runs, spread 1.00-1.05
+        ("bool_bit_offset7", 1.20),   // 3 runs, spread 1.04-1.20
+        ("bool_bit_offset_straddle", 1.10),   // 3 runs, spread 1.00-1.10
+        ("bytebool", 4.58),   // 3 runs, spread 3.85-4.58
+        ("chunked", 1.68),   // 3 runs, spread 1.40-1.68
+        ("chunked_empty_chunks", 1.72),   // 3 runs, spread 1.35-1.72
+        ("chunked_one_chunk", 1.41),   // 3 runs, spread 1.21-1.41
+        ("constant", 13.11),   // 3 runs, spread 10.53-13.11
+        ("datetimeparts", 2.09),   // 3 runs, spread 1.95-2.09
+        ("decimal", 1.40),   // 3 runs, spread 1.21-1.40
+        ("decimal_byte_parts", 1.37),   // 3 runs, spread 1.31-1.37
+        ("dict", 11.83),   // 3 runs, spread 9.52-11.83
+        ("dict_nullable_codes", 17.28),   // 3 runs, spread 14.09-17.28
+        ("dict_nullable_values_nonnull_codes", 20.82),   // 3 runs, spread 16.84-20.82
+        ("dict_u64_codes", 8.43),   // 3 runs, spread 7.71-8.43
+        ("dict_u8_codes", 16.38),   // 3 runs, spread 15.44-16.38
+        ("ext", 1.27),   // 3 runs, spread 1.13-1.27
+        ("fastlanes_bitpacked", 2.57),   // 3 runs, spread 2.32-2.57
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 2.62),   // 3 runs, spread 2.37-2.62
+        ("fastlanes_delta", 8.72),   // 2 runs, spread 7.60-8.72
+        ("fastlanes_for", 1.98),   // 3 runs, spread 1.68-1.98
+        ("fastlanes_rle", 19.44),   // 3 runs, spread 15.83-19.44
+        ("fixed_size_list", 1.42),   // 3 runs, spread 1.37-1.42
+        ("fsst", 10.94),   // 3 runs, spread 10.42-10.94
+        ("list", 16.90),   // 3 runs, spread 16.54-16.90
+        ("listview", 2.58),   // 3 runs, spread 2.52-2.58
+        ("map", 1.16),   // 3 runs, spread 1.12-1.16
+        ("masked", 1.40),   // 3 runs, spread 1.26-1.40
+        ("masked_all_invalid", 1.87),   // 3 runs, spread 1.74-1.87
+        ("masked_all_valid", 1.88),   // 3 runs, spread 1.78-1.88
+        ("null", 1.18),   // 3 runs, spread 1.13-1.18
+        ("onpair", 13.81),   // 3 runs, spread 13.59-13.81
+        ("pco", 12.78),   // 3 runs, spread 11.74-12.78
+        ("primitive", 1.37),   // 3 runs, spread 1.34-1.37
+        ("runend", 13.59),   // 3 runs, spread 11.82-13.59
+        ("sequence", 4.50),   // 3 runs, spread 4.47-4.50
+        ("sparse", 10.70),   // 3 runs, spread 9.69-10.70
+        ("struct", 0.09),   // 3 runs, spread 0.09-0.09
+        ("varbin", 0.16),   // 3 runs, spread 0.15-0.16
+        ("varbinview", 0.08),   // 3 runs, spread 0.08-0.08
+        ("zigzag", 2.90),   // 3 runs, spread 2.41-2.90
+        ("zstd", 14.34),   // 3 runs, spread 13.70-14.34
+        ("zstd_buffers", 4.03),   // 2 runs, spread 3.81-4.03
+    ];
+
+    /// <summary>
+    /// How far under its reference a ratio may sit before it is called stale.
+    /// </summary>
+    /// <remarks>
+    /// Loose, because the references above are a MAX over three runs and the run-to-run spread on
+    /// the sub-millisecond encodings is itself 20-25% (`constant` read 10.53, 11.00 and 13.11 with
+    /// no code change between them). A tighter threshold would report staleness that is noise.
+    /// </remarks>
+    private const double StaleBelow = 0.70;
+
     /// <summary>Measures every generated file and reports ns/value for both readers.</summary>
-    /// <returns>0 on success, 2 when the inputs or the harness are absent.</returns>
-    internal static async Task<int> RunAsync()
+    /// <param name="check">Whether to hold each ratio to its ceiling and exit non-zero when over.</param>
+    /// <returns>0 on success, 1 when an encoding is over its ceiling, 2 when the inputs are absent.</returns>
+    internal static async Task<int> RunAsync(bool check)
     {
         string? root = Environment.GetEnvironmentVariable(Variable);
         if (string.IsNullOrEmpty(root) || !Directory.Exists(root))
@@ -65,6 +157,14 @@ internal static class ThroughputCheck
         }
 
         bool rust = RustReader.Available;
+        if (check && !rust)
+        {
+            Console.Error.WriteLine(
+                $"--check needs the reference: vxbench not found ({RustReader.ExpectedPath}).\n" +
+                "Build it with: cd tools/vxbench-rs && cargo build --release");
+            return 2;
+        }
+
         string[] files = Directory.GetFiles(root, "*.vortex", SearchOption.AllDirectories);
         Array.Sort(files, StringComparer.Ordinal);
         if (files.Length == 0)
@@ -77,12 +177,21 @@ internal static class ThroughputCheck
             $"THROUGHPUT: median of {Rounds} interleaved rounds after a " +
             $"{WarmupBudget.TotalSeconds.ToString("F0", CultureInfo.InvariantCulture)}s warm-up per file, " +
             $"from {root}");
+        if (check)
+        {
+            Console.Out.WriteLine(
+                $"  held to reference x {Margin.ToString("F2", CultureInfo.InvariantCulture)}");
+        }
+
         Console.Out.WriteLine(
             rust
-                ? "  encoding                             rows batches       ours       rust   ns/value   rust ns/v   ratio"
+                ? "  encoding                             rows batches       ours       rust   ns/value   rust ns/v   ratio" +
+                  (check ? "  reference  ceiling" : string.Empty)
                 : "  encoding                             rows batches       ours   ns/value   (no vxbench: absolutes only)");
 
         List<string> failures = [];
+        List<string> stale = [];
+        List<string> unreferenced = [];
         foreach (string file in files)
         {
             string name = Path.GetFileNameWithoutExtension(file);
@@ -111,9 +220,44 @@ internal static class ThroughputCheck
             if (rust && theirs > 0)
             {
                 double rustNs = theirs * 1000.0 / rows;
+                double ratio = ours / theirs;
+                string suffix = string.Empty;
+                if (check)
+                {
+                    double? reference = ReferenceFor(name);
+                    if (reference is null)
+                    {
+                        unreferenced.Add(string.Create(
+                            CultureInfo.InvariantCulture,
+                            $"        (\"{name}\", {ratio:F2}),"));
+                        suffix = "         --       --   NO REF";
+                    }
+                    else
+                    {
+                        double ceiling = reference.Value * Margin;
+                        suffix = string.Create(
+                            CultureInfo.InvariantCulture,
+                            $" {reference.Value,10:F2} {ceiling,8:F2}");
+                        if (ratio > ceiling)
+                        {
+                            suffix += "   OVER";
+                            failures.Add(string.Create(
+                                CultureInfo.InvariantCulture,
+                                $"  {name}: {ratio:F2} over the {ceiling:F2} ceiling ({reference.Value:F2} x {Margin:F2})."));
+                        }
+                        else if (ratio < reference.Value * StaleBelow)
+                        {
+                            suffix += "   STALE";
+                            stale.Add(string.Create(
+                                CultureInfo.InvariantCulture,
+                                $"  {name}: {ratio:F2} against a {reference.Value:F2} reference -- lower it."));
+                        }
+                    }
+                }
+
                 Console.Out.WriteLine(string.Create(
                     CultureInfo.InvariantCulture,
-                    $"  {name,-32} {rows,10} {batches,7} {ours,9:F0}us {theirs,9:F0}us {nsPerValue,10:F2} {rustNs,11:F2} {ours / theirs,7:F2}"));
+                    $"  {name,-32} {rows,10} {batches,7} {ours,9:F0}us {theirs,9:F0}us {nsPerValue,10:F2} {rustNs,11:F2} {ratio,7:F2}{suffix}"));
             }
             else
             {
@@ -130,12 +274,53 @@ internal static class ThroughputCheck
                 "and there is no ratio. Build it with: cd tools/vxbench-rs && cargo build --release");
         }
 
+        if (unreferenced.Count > 0)
+        {
+            Console.Out.WriteLine(
+                $"\n{unreferenced.Count} encoding(s) have no reference. Add these lines to " +
+                "ThroughputCheck.References, having checked the machine is quiet:");
+            foreach (string line in unreferenced)
+            {
+                Console.Out.WriteLine(line);
+            }
+        }
+
+        foreach (string line in stale)
+        {
+            Console.Out.WriteLine(line);
+        }
+
         foreach (string failure in failures)
         {
             Console.Error.WriteLine(failure);
         }
 
-        return 0;
+        if (!check)
+        {
+            return 0;
+        }
+
+        Console.Out.WriteLine(
+            failures.Count == 0
+                ? "Every encoding is inside its ceiling."
+                : $"{failures.Count} encoding(s) above ceiling. A ratio only moves when the code " +
+                  "moves: find the change, do not raise the ceiling.");
+        return failures.Count == 0 ? 0 : 1;
+    }
+
+    /// <summary>The reference ratio for one encoding, or null when it has none yet.</summary>
+    /// <param name="encoding">The file's base name.</param>
+    private static double? ReferenceFor(string encoding)
+    {
+        foreach ((string name, double reference) in References)
+        {
+            if (string.Equals(name, encoding, StringComparison.Ordinal))
+            {
+                return reference;
+            }
+        }
+
+        return null;
     }
 
     private static async Task<(double Ours, double Theirs)> MeasureAsync(string path, bool rust)
