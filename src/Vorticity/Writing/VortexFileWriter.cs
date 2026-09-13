@@ -441,6 +441,19 @@ public sealed class VortexFileWriter : IAsyncDisposable
             await CompleteAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
+        // The transit contexts own pooled native blocks. Dropping them on the floor sends every
+        // one through ~NativeSegmentOwner instead of back to AlignedBufferPool.Shared, which is
+        // the leak `ZoneMapWriter` had too: a finalizer-thread free per block, and a pool that
+        // never refills. CompleteAsync resets the arena it emitted from; this returns the storage.
+        if (_transit is not null)
+        {
+            for (int i = 0; i < _transit.Length; i++)
+            {
+                _transit[i]?.Dispose();
+                _transit[i] = null;
+            }
+        }
+
         if (_sink is IAsyncDisposable disposable)
         {
             await disposable.DisposeAsync().ConfigureAwait(false);

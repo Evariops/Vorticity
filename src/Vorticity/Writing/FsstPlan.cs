@@ -48,10 +48,27 @@ internal sealed class FsstPlan
     /// </summary>
     /// <param name="arena">The arena holding the column.</param>
     /// <param name="nodeIndex">A canonical VarBinView node.</param>
-    /// <param name="canonicalSize">What the column costs written as it is.</param>
-    /// <returns>The plan, or null.</returns>
-    internal static FsstPlan? TryBuild(CanonicalArena arena, int nodeIndex, long canonicalSize)
+    /// <param name="sizeCeiling">
+    /// The largest <see cref="EncodedSize"/> worth returning. The caller derives it from every bar
+    /// the plan has to clear, so this method neither knows nor applies a margin of its own.
+    /// </param>
+    /// <returns>The plan, or null when it cannot come in at or below the ceiling.</returns>
+    /// <remarks>
+    /// THE CEILING IS ALSO AN ABORT THRESHOLD, and that is most of what it is for. Pricing FSST
+    /// means training a symbol table and then compressing the ENTIRE column, which was 54% of the
+    /// write profile on a file whose one text column FSST then LOST - the caller prices zstd too,
+    /// and threw the whole result away. <see cref="EncodedSize"/> is never below the code stream's
+    /// own length, so the moment the stream passes the ceiling the plan is already rejected and the
+    /// remaining rows cannot change that. Stopping there is not an approximation: the answer is the
+    /// same null it would have returned after compressing the rest.
+    /// </remarks>
+    internal static FsstPlan? TryBuild(CanonicalArena arena, int nodeIndex, long sizeCeiling)
     {
+        if (sizeCeiling <= 0)
+        {
+            return null;
+        }
+
         CanonicalNode node = arena.GetNode(nodeIndex);
         int rows = node.Length;
 
@@ -113,6 +130,13 @@ internal sealed class FsstPlan
             ReadOnlySpan<byte> value = values[i].Span;
             lengths[i] = value.Length;
             written += table.Compress(value, codes.AsSpan(written));
+
+            // The code stream alone is already a lower bound on EncodedSize, so a stream past the
+            // ceiling is a decided loss whatever the remaining rows do.
+            if (written > sizeCeiling)
+            {
+                return null;
+            }
         }
 
         offsets[rows] = written;
@@ -121,9 +145,7 @@ internal sealed class FsstPlan
             + ((long)rows * Width(MaxOf(lengths)))
             + ((long)(rows + 1) * Width(written));
 
-        // A margin, not a tie-break: FSST costs a symbol table and two index children on every
-        // read, so a 1% saving is not worth making every reader pay for the indirection.
-        return encoded * 10 <= canonicalSize * 9
+        return encoded <= sizeCeiling
             ? new FsstPlan(table, codes, written, offsets, lengths, encoded)
             : null;
     }

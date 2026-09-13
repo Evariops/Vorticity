@@ -306,43 +306,64 @@ internal static class ColumnCompressor
             }
         }
 
-        FsstPlan? fsst = null;
-        if (node.Kind == CanonicalKind.VarBinView && Allows(target, "vortex.fsst"))
-        {
-            // Measured against the BEST plain form, not against the view form. A binary column of
-            // incompressible bytes is smaller as `vortex.varbin` - four-byte offsets rather than
-            // sixteen-byte views - than as anything FSST can do with it, and comparing against the
-            // view form made FSST look like a win on exactly those columns. It is the reference's
-            // own choice there, and it was ours only after this baseline was fixed.
-            fsst = FsstPlan.TryBuild(arena, nodeIndex, plain);
-        }
-
         // ZSTD IS COMPARED WITH FSST, NOT REACHED WHEN FSST FAILS, and the difference is the whole
         // point. The first version of this ran zstd only after every other scheme had declined,
         // which is cheap and useless: on `distributions/huge_string_r16` FSST wins - it turns 1.1 MB
         // into 139 kB - so zstd was never tried, while zstd turns the same bytes into 118. A scheme
         // that wins is not a scheme that wins by enough.
         //
-        // What keeps it affordable is the SIZE GATE rather than the ordering. The profiling session
-        // found FSST symbol training at 56% of the whole write path, spent pricing a candidate that
-        // usually loses; compressing every 1024-row chunk of short strings to discover zstd loses
-        // would be that same mistake. Columns below the gate are exactly the ones where the
-        // absolute saving cannot repay the pass.
-        long zstdBudget = fsst is not null ? Math.Min(plain, fsst.EncodedSize) : plain;
+        // THE CHEAP CANDIDATE IS PRICED FIRST, and that ordering is an optimization with no effect
+        // on the outcome. Pricing zstd is one pass to build the value stream and one call into the
+        // library; pricing FSST is a symbol-table training run plus a compression of the whole
+        // column, and it was 54% of the write profile on a file where zstd then won and the entire
+        // result was discarded. Priced this way round, FSST is handed the size it has to beat and
+        // stops as soon as its code stream passes it.
+        //
+        // What keeps it affordable in the other direction is the SIZE GATE: columns below it are
+        // exactly the ones where the absolute saving cannot repay either pass.
+        ZstdPlan? zstd = null;
         if (node.Kind is CanonicalKind.VarBinView or CanonicalKind.Primitive
             && Allows(target, "vortex.zstd")
             && DataBytes(node) >= ZstdMinimumBytes)
         {
-            ZstdPlan? zstd = ZstdPlan.TryBuild(arena, nodeIndex, zstdBudget);
+            zstd = ZstdPlan.TryBuild(arena, nodeIndex, plain);
+        }
+
+        FsstPlan? fsst = null;
+        if (node.Kind == CanonicalKind.VarBinView && Allows(target, "vortex.fsst"))
+        {
+            // TWO BARS, AND FSST HAS TO CLEAR BOTH, so the ceiling handed down is the tighter one.
+            //
+            //   * its own margin against the plain form:  encoded * 10 <= plain * 9. Measured
+            //     against the BEST plain form, not against the view form. A binary column of
+            //     incompressible bytes is smaller as `vortex.varbin` - four-byte offsets rather
+            //     than sixteen-byte views - than as anything FSST can do with it, and comparing
+            //     against the view form made FSST look like a win on exactly those columns. It is
+            //     the reference's own choice there, and it was ours only after this baseline was
+            //     fixed.
+            //   * beating a zstd frame that priced: zstd takes the column when
+            //     zstdBytes * 10 < encoded * 9, so FSST keeps it only while encoded * 9 <= zstdBytes * 10.
+            //
+            // Both are integer comparisons and both are turned into a ceiling on `encoded` by
+            // flooring, which is exact because `encoded` is an integer. The two together are
+            // EXACTLY the condition under which FSST was returned when it was priced first.
+            long ceiling = plain * 9 / 10;
             if (zstd is not null)
             {
-                return ColumnPlan.ForZstd(zstd);
+                ceiling = Math.Min(ceiling, zstd.Frame.Length * 10L / 9);
             }
+
+            fsst = FsstPlan.TryBuild(arena, nodeIndex, ceiling);
         }
 
         if (fsst is not null)
         {
             return ColumnPlan.ForFsst(fsst);
+        }
+
+        if (zstd is not null)
+        {
+            return ColumnPlan.ForZstd(zstd);
         }
 
         return ColumnPlan.Canonical;

@@ -62,32 +62,46 @@ internal static class ZoneMapWriter
         DTypeArena types = new DTypeArena();
         CanonicalArena arena = new CanonicalArena();
 
-        AggregateSpecList specs = new AggregateSpecList();
-        List<int> columns = [];
-
-        // The fourth namespace the allowlist covers. It cannot fire today - all six aggregates and
-        // the `vortex.zoned` layout that carries them were introduced by the same edition, so a
-        // target that has the layout has the aggregates - but the two are independent ids in the
-        // spec and a future edition is free to add a seventh. Asserted rather than assumed, because
-        // silently dropping a zone map would quietly change the pruning the caller asked for.
-        RequireAggregate(encodings.Target, "vortex.null_count");
-        if (bounds)
+        // RESET IN A FINALLY, because this arena rents from AlignedBufferPool.Shared and is the
+        // only owner of what it rents. Dropping it on the floor does not merely fail to recycle:
+        // every block leaves through ~NativeSegmentOwner, so a write of N columns x M chunks
+        // queues N*M native frees onto the finalizer thread and the pool it rented from stays
+        // empty. That showed up as 38% of a write profile under GC.RunFinalizers.
+        try
         {
-            RequireAggregate(encodings.Target, "vortex.min");
-            RequireAggregate(encodings.Target, "vortex.max");
-            specs.Add("vortex.min"u8, SkipNaNs);
-            specs.Add("vortex.max"u8, SkipNaNs);
-            columns.Add(Bounds(arena, types, column, zones, wantMin: true));
-            columns.Add(Bounds(arena, types, column, zones, wantMin: false));
+            AggregateSpecList specs = new AggregateSpecList();
+            List<int> columns = [];
+
+            // The fourth namespace the allowlist covers. It cannot fire today - all six aggregates
+            // and the `vortex.zoned` layout that carries them were introduced by the same edition,
+            // so a target that has the layout has the aggregates - but the two are independent ids
+            // in the spec and a future edition is free to add a seventh. Asserted rather than
+            // assumed, because silently dropping a zone map would quietly change the pruning the
+            // caller asked for.
+            RequireAggregate(encodings.Target, "vortex.null_count");
+            if (bounds)
+            {
+                RequireAggregate(encodings.Target, "vortex.min");
+                RequireAggregate(encodings.Target, "vortex.max");
+                specs.Add("vortex.min"u8, SkipNaNs);
+                specs.Add("vortex.max"u8, SkipNaNs);
+                columns.Add(Bounds(arena, types, column, zones, wantMin: true));
+                columns.Add(Bounds(arena, types, column, zones, wantMin: false));
+            }
+
+            specs.Add("vortex.null_count"u8, default);
+            columns.Add(NullCounts(arena, types, zones));
+
+            int root = Struct(arena, types, column, bounds, columns);
+            blob = ArrayBlobWriter.Write(arena, root, encodings);
+            metadata = ZonedMetadata.Serialize(ZonedMetadata.Create(zoneLength, specs));
+            return true;
         }
-
-        specs.Add("vortex.null_count"u8, default);
-        columns.Add(NullCounts(arena, types, zones));
-
-        int root = Struct(arena, types, column, bounds, columns);
-        blob = ArrayBlobWriter.Write(arena, root, encodings);
-        metadata = ZonedMetadata.Serialize(ZonedMetadata.Create(zoneLength, specs));
-        return true;
+        finally
+        {
+            // The blob is a byte[] copy by the time Write returns, so nothing outlives the arena.
+            arena.Reset();
+        }
     }
 
     private static void RequireAggregate(VortexEdition target, string id)

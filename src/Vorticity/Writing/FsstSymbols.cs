@@ -24,6 +24,7 @@
 // target as a SIZE ratio precisely because "the compressor is a sampler, so two honest
 // implementations of the same algorithm diverge on borderline data".
 using System;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 
@@ -56,8 +57,8 @@ internal sealed class FsstSymbols
     /// The trainer's counting tables, kept per thread instead of allocated per call.
     /// </summary>
     /// <remarks>
-    /// <c>count2</c> is 65 536 ints - 256 kB - and <see cref="Train"/> is called ONCE PER
-    /// COLUMN-CHUNK, so writing a 65 536-row file allocated and dropped about 16 MB of counting
+    /// <c>count2</c> is 512 x 512 ints - ONE MEGABYTE - and <see cref="Train"/> is called ONCE PER
+    /// COLUMN-CHUNK, so writing a 65 536-row file allocated and dropped about 64 MB of counting
     /// table. They are cleared at the top of every generation regardless, so reusing them cannot
     /// change a single symbol: the first <c>Array.Clear</c> of a freshly allocated array was always
     /// redundant work on memory the runtime had just zeroed.
@@ -65,8 +66,8 @@ internal sealed class FsstSymbols
     /// THREAD-STATIC RATHER THAN POOLED, deliberately. <c>ArrayPool&lt;T&gt;.Shared</c> is
     /// process-global, and this repository has already measured what that costs a path that rents
     /// many blocks at once - a scattered take allocated a fresh owner per split once its rents moved
-    /// into an exhausted size class. The price here is 260 kB retained per thread that has ever
-    /// written a file, which is bounded, predictable, and does not interact with anything else.
+    /// into an exhausted size class. The price here is about 1.1 MB retained per thread that has
+    /// ever written a file, which is bounded, predictable, and does not interact with anything else.
     /// </remarks>
     [System.ThreadStatic]
     private static int[]? ScratchOne;
@@ -74,6 +75,58 @@ internal sealed class FsstSymbols
     /// <inheritdoc cref="ScratchOne"/>
     [System.ThreadStatic]
     private static int[]? ScratchTwo;
+
+    /// <summary>
+    /// One bit per cell of <see cref="ScratchTwo"/>, set when that cell has been incremented.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE PAIR TABLE IS DENSE AND THE COUNTS IN IT ARE NOT. <c>count2</c> has 262 144 cells, and
+    /// one generation can touch at most as many of them as the sample has tokens -
+    /// <see cref="SampleTarget"/> is 16 kB, so a few thousand. The table was nevertheless CLEARED
+    /// in full and SCANNED in full once per generation, five generations per column-chunk: 5 MB of
+    /// <c>memset</c> and 1.3 M cell reads to look at a few thousand live counts. That is what put
+    /// <c>Train</c> at a third of the write profile, with its <c>memset</c> half showing up
+    /// separately under <c>ZeroMemoryNative</c>.
+    /// </para>
+    /// <para>
+    /// A 32 kB bitmap replaces both passes with one 64x smaller walk. Clearing zeroes only the
+    /// cells that were touched; <see cref="Optimize"/> visits only those cells.
+    /// </para>
+    /// <para>
+    /// <b>The visit order is unchanged, and that is load-bearing rather than incidental.</b>
+    /// <see cref="Optimize"/> accumulates candidate gains into a dictionary, flattens it in
+    /// INSERTION order and sorts it with an UNSTABLE sort, so two candidates of equal gain and
+    /// equal length are separated by nothing but the order they were proposed in - and which of
+    /// them wins the last slot of a full table changes the symbol table, hence the compressed
+    /// bytes, hence the file. Walking each row's bitmap with
+    /// <c>BitOperations.TrailingZeroCount</c> yields <c>code2</c> in ascending order, which
+    /// is exactly the order the dense scan produced. <c>FsstSymbolsTests</c> and the byte-exact
+    /// <c>WrittenSizeTests</c> are what hold that claim up.
+    /// </para>
+    /// </remarks>
+    [System.ThreadStatic]
+    private static ulong[]? ScratchPairBits;
+
+    /// <summary><see cref="ulong"/>s per <c>count2</c> row: 512 bits of pair presence.</summary>
+    private const int PairWordsPerRow = (CodeMask + 1) / 64;
+
+    /// <summary>
+    /// The candidate map and its flattened form, reused across generations and column-chunks.
+    /// </summary>
+    /// <remarks>
+    /// Reuse is order-neutral. A <see cref="Dictionary{TKey, TValue}"/> with no removals enumerates
+    /// in insertion order, <see cref="Dictionary{TKey, TValue}.Clear"/> puts it back in the state a
+    /// fresh one is in, and growing it copies the entry array wholesale - so a pre-grown, cleared
+    /// dictionary enumerates identically to the one that was allocated here per generation. See
+    /// <see cref="ScratchPairBits"/> for why that identity is the property to protect.
+    /// </remarks>
+    [System.ThreadStatic]
+    private static Dictionary<Candidate, long>? ScratchCandidates;
+
+    /// <inheritdoc cref="ScratchCandidates"/>
+    [System.ThreadStatic]
+    private static List<KeyValuePair<Candidate, long>>? ScratchRanked;
 
     /// <summary>Bytes of sample the trainer aims for before it stops drawing lines.</summary>
     private const int SampleTarget = 1 << 14;
@@ -155,11 +208,14 @@ internal sealed class FsstSymbols
 
         int[] count1 = ScratchOne ??= new int[CodeMask + 1];
         int[] count2 = ScratchTwo ??= new int[(CodeMask + 1) * (CodeMask + 1)];
+        ulong[] pairBits = ScratchPairBits ??= new ulong[(CodeMask + 1) * PairWordsPerRow];
 
         foreach (int generation in Generations)
         {
+            // count1 is 2 kB and is cleared outright; count2 is 1 MB and is cleared through the
+            // bitmap, which touches only the cells a previous generation actually incremented.
             Array.Clear(count1);
-            Array.Clear(count2);
+            ClearPairCounts(count2, pairBits);
 
             for (int i = 0; i < sample.Count; i++)
             {
@@ -170,10 +226,10 @@ internal sealed class FsstSymbols
                     continue;
                 }
 
-                table.CountLine(sample[i].Span, count1, count2);
+                table.CountLine(sample[i].Span, count1, count2, pairBits);
             }
 
-            table.Optimize(count1, count2, generation, prune: generation >= 128 && !sampled);
+            table.Optimize(count1, count2, pairBits, generation, prune: generation >= 128 && !sampled);
         }
 
         if (table._count == 0)
@@ -315,7 +371,7 @@ internal sealed class FsstSymbols
     /// The single-byte extension count - recorded when a matched symbol is longer than one byte -
     /// is the reference's way of keeping the option of a shorter symbol alive.
     /// </remarks>
-    private void CountLine(ReadOnlySpan<byte> line, int[] count1, int[] count2)
+    private void CountLine(ReadOnlySpan<byte> line, int[] count1, int[] count2, ulong[] pairBits)
     {
         int read = 0;
         int previous = CodeMask;
@@ -323,17 +379,60 @@ internal sealed class FsstSymbols
         {
             int code = FindLongest(Word(line, read), line.Length - read, out int length);
             count1[code]++;
-            count2[(previous * (CodeMask + 1)) + code]++;
+            CountPair(count2, pairBits, previous, code);
 
             if (length > 1)
             {
                 int firstByte = (int)(SymbolBitsOf(code) & 0xFF);
                 count1[firstByte]++;
-                count2[(previous * (CodeMask + 1)) + firstByte]++;
+                CountPair(count2, pairBits, previous, firstByte);
             }
 
             read += length;
             previous = code;
+        }
+    }
+
+    /// <summary>
+    /// Increments one pair count and records that the cell is live.
+    /// </summary>
+    /// <remarks>
+    /// The bit is set unconditionally rather than only on the 0 -&gt; 1 transition: a branch here
+    /// would be mispredicted about as often as it is taken, and a bit that is already set costs a
+    /// redundant OR. What must never happen is the reverse - a non-zero cell with no bit - because
+    /// <see cref="ClearPairCounts"/> would then leave a stale count for the next generation to
+    /// read as if the sample had produced it.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CountPair(int[] count2, ulong[] pairBits, int previous, int code)
+    {
+        count2[(previous * (CodeMask + 1)) + code]++;
+        pairBits[(previous * PairWordsPerRow) + (code >> 6)] |= 1UL << (code & 63);
+    }
+
+    /// <summary>Zeroes every pair count a previous generation touched, and the bitmap with it.</summary>
+    private static void ClearPairCounts(int[] count2, ulong[] pairBits)
+    {
+        for (int row = 0; row <= CodeMask; row++)
+        {
+            int bitBase = row * PairWordsPerRow;
+            int rowBase = row * (CodeMask + 1);
+            for (int w = 0; w < PairWordsPerRow; w++)
+            {
+                ulong word = pairBits[bitBase + w];
+                if (word == 0)
+                {
+                    continue;
+                }
+
+                pairBits[bitBase + w] = 0;
+                int codeBase = w << 6;
+                while (word != 0)
+                {
+                    count2[rowBase + codeBase + BitOperations.TrailingZeroCount(word)] = 0;
+                    word &= word - 1;
+                }
+            }
         }
     }
 
@@ -343,15 +442,17 @@ internal sealed class FsstSymbols
     /// </summary>
     /// <param name="count1">Per-code occurrence counts.</param>
     /// <param name="count2">Per-code-pair occurrence counts.</param>
+    /// <param name="pairBits">Which cells of <paramref name="count2"/> are live.</param>
     /// <param name="sampleFrac">This generation's sample fraction, out of 128.</param>
     /// <param name="prune">
     /// Whether to drop symbols that do not pay for themselves. Only on the last generation, and
     /// only when the counts are exact rather than sampled - pruning on estimates would discard
     /// symbols on the strength of noise.
     /// </param>
-    private void Optimize(int[] count1, int[] count2, int sampleFrac, bool prune)
+    private void Optimize(int[] count1, int[] count2, ulong[] pairBits, int sampleFrac, bool prune)
     {
-        Dictionary<Candidate, long> candidates = new Dictionary<Candidate, long>(512);
+        Dictionary<Candidate, long> candidates = ScratchCandidates ??= new Dictionary<Candidate, long>(512);
+        candidates.Clear();
         int minimum = prune ? 1 : 5 * sampleFrac / 128;
 
         for (int code1 = 0; code1 <= CodeMask; code1++)
@@ -381,28 +482,46 @@ internal sealed class FsstSymbols
                 continue;
             }
 
+            // Ascending code2, exactly as the dense 512-cell scan this replaces produced it. The
+            // bitmap holds a set bit for every cell CountPair incremented and for no other, so the
+            // cells visited are the same ones the dense scan would not have skipped.
             int row = code1 * (CodeMask + 1);
-            for (int code2 = 0; code2 <= CodeMask; code2++)
+            int bitBase = code1 * PairWordsPerRow;
+            for (int w = 0; w < PairWordsPerRow; w++)
             {
-                int pair = count2[row + code2];
-                if (pair == 0)
+                ulong word = pairBits[bitBase + w];
+                int codeBase = w << 6;
+                while (word != 0)
                 {
-                    continue;
-                }
+                    int code2 = codeBase + BitOperations.TrailingZeroCount(word);
+                    word &= word - 1;
 
-                int length2 = SymbolLengthOf(code2);
-                int merged = length1 + length2;
-                if (merged > MaxSymbolLength)
-                {
-                    continue;
-                }
+                    int pair = count2[row + code2];
+                    if (pair == 0)
+                    {
+                        continue;
+                    }
 
-                ulong bits = bits1 | (SymbolBitsOf(code2) << (length1 * 8));
-                Add(candidates, new Candidate(bits, (byte)merged), (long)pair * merged);
+                    int length2 = SymbolLengthOf(code2);
+                    int merged = length1 + length2;
+                    if (merged > MaxSymbolLength)
+                    {
+                        continue;
+                    }
+
+                    ulong bits = bits1 | (SymbolBitsOf(code2) << (length1 * 8));
+                    Add(candidates, new Candidate(bits, (byte)merged), (long)pair * merged);
+                }
             }
         }
 
-        List<KeyValuePair<Candidate, long>> ranked = [.. candidates];
+        List<KeyValuePair<Candidate, long>> ranked = ScratchRanked ??= new List<KeyValuePair<Candidate, long>>(512);
+        ranked.Clear();
+        foreach (KeyValuePair<Candidate, long> entry in candidates)
+        {
+            ranked.Add(entry);
+        }
+
         ranked.Sort(static (a, b) =>
         {
             int byGain = b.Value.CompareTo(a.Value);
