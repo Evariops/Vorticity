@@ -26,6 +26,7 @@ using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.Conformance.Sidecar;
 using Vorticity.Types;
+using Vorticity.Types.Variant;
 using Vorticity.Types.Numerics;
 
 namespace Vorticity.Conformance.Comparison;
@@ -121,10 +122,14 @@ internal static class ValueComparer
                 CompareExtension(expected, column, index, path, fileRow, log);
                 return;
 
+            case DTypeKind.Variant:
+                CompareVariant(expected, column, index, path, fileRow, log);
+                return;
+
             default:
-                // Variant and Union carry values this harness cannot spell. They are reachable
-                // only from a file with rows of that dtype, which Phase 1 does not claim; saying so
-                // out loud beats comparing nothing and reporting a pass.
+                // Union carries values this harness cannot spell. It is reachable only from a file
+                // with rows of that dtype, which nothing upstream produces; saying so out loud
+                // beats comparing nothing and reporting a pass.
                 log.Add(
                     path,
                     fileRow,
@@ -133,6 +138,126 @@ internal static class ValueComparer
                     $"a {dtype.Kind} column");
                 return;
         }
+    }
+
+    /// <summary>
+    /// Compares one variant row: the sidecar's <c>{dtype, value}</c> against the Parquet Variant
+    /// bytes the column carries.
+    /// </summary>
+    /// <remarks>
+    /// THE HARNESS DECODES, and that is the load-bearing half of the representation decision. A
+    /// variant column here is a `Struct{metadata, value}` wearing the variant dtype, so the values
+    /// the reader hands back are BYTES -- and a comparison against bytes would only be checking
+    /// that two buffers matched, which is the reference's encoder agreeing with itself. Decoding
+    /// the binary and comparing the RESULT against the sidecar's typed scalar is what makes the
+    /// port a port: it is the same check every other encoding gets.
+    /// </remarks>
+    private static void CompareVariant(
+        JsonValue expected, VortexColumn column, int index, string path, long fileRow, MismatchLog log)
+    {
+        if (expected.Kind != JsonKind.Object)
+        {
+            log.Add(path, fileRow, "a variant column met a non-object sidecar value",
+                expected.Summary(), "a variant");
+            return;
+        }
+
+        StructColumn fields = column.AsStruct();
+        if (fields.FieldCount != 2)
+        {
+            log.Add(path, fileRow, "a variant column with two fields",
+                expected.Summary(), $"{fields.FieldCount} fields");
+            return;
+        }
+
+        BinaryColumn metadata = fields.GetField(0).AsBinary();
+        BinaryColumn value = fields.GetField(1).AsBinary();
+        if (!value.IsValid(index))
+        {
+            // `value` null with no shredded child is not a legal row -- upstream calls it "missing,
+            // only valid for shredded object fields" -- and a decoder that let one through would be
+            // reporting a value nobody wrote.
+            log.Add(path, fileRow, "a variant row with an unshredded value",
+                expected.Summary(), "a null value child");
+            return;
+        }
+
+        VariantValue actual;
+        try
+        {
+            actual = ParquetVariant.Read(metadata.GetSpan(index), value.GetSpan(index));
+        }
+        catch (Exception error) when (error is VortexFormatException or VortexUnsupportedException)
+        {
+            log.Add(path, fileRow, "a decodable variant value", expected.Summary(), error.Message);
+            return;
+        }
+
+        JsonValue dtype = expected.Require("dtype");
+        JsonValue payload = expected.Require("value");
+        string kind = dtype.Kind == JsonKind.Object ? dtype.RequireString("kind") : "?";
+
+        switch (actual.Kind)
+        {
+            case VariantKind.Null:
+                if (kind != "null" || !payload.IsNull)
+                {
+                    log.Add(path, fileRow, "variant value", expected.Summary(), "the variant null");
+                }
+
+                return;
+
+            case VariantKind.Bool:
+                CompareVariantText(
+                    expected, payload, actual.Integer != 0 ? "true" : "false", path, fileRow, log);
+                return;
+
+            case VariantKind.Int8:
+            case VariantKind.Int16:
+            case VariantKind.Int32:
+            case VariantKind.Int64:
+                CompareVariantText(
+                    expected, payload, actual.Integer.ToString(CultureInfo.InvariantCulture),
+                    path, fileRow, log);
+                return;
+
+            case VariantKind.String:
+                CompareVariantText(
+                    expected, payload, System.Text.Encoding.UTF8.GetString(actual.Bytes),
+                    path, fileRow, log);
+                return;
+
+            case VariantKind.Binary:
+                CompareVariantText(
+                    expected, payload, Convert.ToBase64String(actual.Bytes), path, fileRow, log);
+                return;
+
+            default:
+                // Float and double: the sidecar spells a float as the hex of its BITS, the way
+                // every other float in this harness is spelled, and reproducing that here would
+                // duplicate `CompareFloatBits` for a case the corpus does not carry. Reported
+                // rather than silently passed.
+                log.Add(path, fileRow, "a variant value this harness spells",
+                    expected.Summary(), $"a variant {actual.Kind}");
+                return;
+        }
+    }
+
+    private static void CompareVariantText(
+        JsonValue expected, JsonValue payload, string actual, string path, long fileRow, MismatchLog log)
+    {
+        if (payload.Kind == JsonKind.String && string.Equals(payload.Text, actual, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (payload.Kind == JsonKind.Boolean &&
+            string.Equals(payload.Boolean ? "true" : "false", actual, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        log.Add(path, fileRow, "variant value", expected.Summary(), actual);
     }
 
     private static void CompareBool(

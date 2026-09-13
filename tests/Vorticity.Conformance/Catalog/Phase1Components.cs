@@ -20,7 +20,7 @@ namespace Vorticity.Conformance.Corpus;
 internal static class Phase1Components
 {
     /// <summary>
-    /// The nine compressed decoders. Named here so the wiring assertion can check each one by its
+    /// The compressed decoders. Named here so the wiring assertion can check each one by its
     /// wire id rather than by a count.
     /// </summary>
     internal static readonly string[] CompressedDecodersRegisteredByTheHarness =
@@ -41,6 +41,8 @@ internal static class Phase1Components
         "vortex.alprd",
         "vortex.fsst",
         "vortex.onpair",
+        "vortex.variant",
+        "vortex.parquet.variant",
     ];
 
     private static readonly object Gate = new object();
@@ -104,6 +106,8 @@ internal static class Phase1Components
         Register(AlpRdDecoder.Instance);
         Register(FsstDecoder.Instance);
         Register(OnPairDecoder.Instance);
+        Register(VariantDecoder.Instance);
+        Register(ParquetVariantDecoder.Instance);
     }
 
     /// <summary>Whether this build has a decoder for the array encoding <paramref name="id"/>.</summary>

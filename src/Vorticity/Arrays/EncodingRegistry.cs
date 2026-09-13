@@ -131,6 +131,12 @@ public enum ArrayEncodingId : ushort
 
     /// <summary><c>vortex.onpair</c>.</summary>
     OnPair,
+
+    /// <summary><c>vortex.variant</c>.</summary>
+    Variant,
+
+    /// <summary><c>vortex.parquet.variant</c>.</summary>
+    ParquetVariant,
 }
 
 /// <summary>
@@ -169,7 +175,7 @@ public enum LayoutEncodingId : ushort
 public static class EncodingRegistry
 {
     /// <summary>The highest defined <see cref="ArrayEncodingId"/>; the decoder table is sized by it.</summary>
-    internal const int MaxArrayEncodingId = (int)ArrayEncodingId.OnPair;
+    internal const int MaxArrayEncodingId = (int)ArrayEncodingId.ParquetVariant;
 
     /// <summary>The highest defined <see cref="LayoutEncodingId"/>.</summary>
     internal const int MaxLayoutEncodingId = (int)LayoutEncodingId.List;
@@ -247,6 +253,7 @@ public static class EncodingRegistry
                     case (byte)'d': return idUtf8.SequenceEqual("vortex.decimal"u8) ? ArrayEncodingId.Decimal : ArrayEncodingId.Unknown;
                     case (byte)'c': return idUtf8.SequenceEqual("vortex.chunked"u8) ? ArrayEncodingId.Chunked : ArrayEncodingId.Unknown;
                     case (byte)'p': return idUtf8.SequenceEqual("vortex.patched"u8) ? ArrayEncodingId.Patched : ArrayEncodingId.Unknown;
+                    case (byte)'v': return idUtf8.SequenceEqual("vortex.variant"u8) ? ArrayEncodingId.Variant : ArrayEncodingId.Unknown;
                     default: return ArrayEncodingId.Unknown;
                 }
 
@@ -282,9 +289,15 @@ public static class EncodingRegistry
                         : ArrayEncodingId.Unknown);
 
             case 22:
-                return idUtf8.SequenceEqual("vortex.fixed_size_list"u8)
-                    ? ArrayEncodingId.FixedSizeList
-                    : ArrayEncodingId.Unknown;
+                // Two 22-byte ids, split on byte 7: the 'f' of "vortex.fixed_size_list" against
+                // the 'p' of "vortex.parquet.variant".
+                return idUtf8[7] == (byte)'f'
+                    ? (idUtf8.SequenceEqual("vortex.fixed_size_list"u8)
+                        ? ArrayEncodingId.FixedSizeList
+                        : ArrayEncodingId.Unknown)
+                    : (idUtf8.SequenceEqual("vortex.parquet.variant"u8)
+                        ? ArrayEncodingId.ParquetVariant
+                        : ArrayEncodingId.Unknown);
 
             case 20:
                 return idUtf8.SequenceEqual("vortex.datetimeparts"u8)
@@ -363,12 +376,11 @@ public static class EncodingRegistry
         // 2026-09-13 made full parity with Vortex Rust the target for 1.0 (docs/01-scope.md).
         // `vortex.map` and `vortex.zstd_buffers` were on this list and are now read; what is left is
         // in scope and unwritten, which is a different thing from out of scope.
-        if (idUtf8.SequenceEqual("vortex.variant"u8) ||
-            idUtf8.SequenceEqual("vortex.parquet.variant"u8))
-        {
-            return "in scope for 1.0 by the parity decision; not implemented yet";
-        }
-
+        // NOTHING IS LEFT HERE, and that is the point: every array id docs/90-registry.md names now
+        // has a decoder. `vortex.variant` and `vortex.parquet.variant` were the last two, and they
+        // read the unshredded form -- a file carrying a SHREDDED child is refused by the decoder
+        // itself, with a message naming the child, which is a better place for that sentence than
+        // a table of ids.
         return null;
     }
 

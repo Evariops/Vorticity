@@ -16,30 +16,23 @@ public sealed class UnsupportedCorpusTests
 {
     static UnsupportedCorpusTests() => CanonicalDecoders.RegisterAll();
 
-    public static TheoryData<string> Entries()
+    /// <summary>
+    /// THE LIST IS EMPTY, and that is what this test now asserts.
+    /// </summary>
+    /// <remarks>
+    /// It ran over 110 files at its widest, then 8, and now none: `vortex.variant` and
+    /// `vortex.parquet.variant` were the last encodings of the corpus without a decoder. An empty
+    /// theory is a test that passes by finding nothing, which is the failure mode the header of
+    /// `CorpusEntries.cs` was written against -- so the theory is replaced by an assertion that the
+    /// partition is exactly what it claims, and the PROPERTY it protected (an unsupported encoding
+    /// raises `VortexUnsupportedException` naming the id, never a wrong value) is still tested
+    /// against a forged id in `ScanContextTests` and against a shredded variant by the decoders
+    /// themselves.
+    /// </remarks>
+    [Fact]
+    public void NoCorpusEntryReachesAnUnimplementedEncoding()
     {
-        TheoryData<string> data = new TheoryData<string>();
-        foreach (string entry in UnsupportedCorpusEntries.All)
-        {
-            data.Add(entry);
-        }
-
-        return data;
-    }
-
-    [Theory]
-    [MemberData(nameof(Entries))]
-    public async Task AnUnimplementedEncodingFailsCleanly(string entry)
-    {
-        Sidecar? sidecar = Sidecar.TryLoad(entry);
-        Assert.NotNull(sidecar);
-
-        VortexUnsupportedException error = await Assert.ThrowsAsync<VortexUnsupportedException>(
-            async () =>
-            {
-                await using DecodedCorpusFile file = await DecodedCorpusFile.OpenAsync(entry, sidecar);
-            });
-
-        Assert.False(string.IsNullOrEmpty(error.Message));
+        Assert.Empty(UnsupportedCorpusEntries.All);
+        Assert.NotEmpty(CorpusEntries.All);
     }
 }

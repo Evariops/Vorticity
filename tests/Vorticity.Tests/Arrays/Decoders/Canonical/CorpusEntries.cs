@@ -126,6 +126,10 @@ internal static class CorpusEntries
         "encodings/null_r1",
         "encodings/null_r1023",
         "encodings/null_r1025",
+        "encodings/parquet_variant",
+        "encodings/parquet_variant_r1",
+        "encodings/parquet_variant_r1023",
+        "encodings/parquet_variant_r1025",
         "encodings/primitive",
         "encodings/primitive_r1",
         "encodings/primitive_r1023",
@@ -153,6 +157,10 @@ internal static class CorpusEntries
         "encodings/varbinview_r1",
         "encodings/varbinview_r1023",
         "encodings/varbinview_r1025",
+        "encodings/variant",
+        "encodings/variant_r1",
+        "encodings/variant_r1023",
+        "encodings/variant_r1025",
         "encodings/zigzag",
         "encodings/zigzag_r1",
         "encodings/zigzag_r1023",
@@ -171,13 +179,8 @@ internal static class UnsupportedCorpusEntries
     /// </summary>
     internal static readonly string[] All =
     [
-        "encodings/parquet_variant",
-        "encodings/parquet_variant_r1",
-        "encodings/parquet_variant_r1023",
-        "encodings/parquet_variant_r1025",
-        "encodings/variant",
-        "encodings/variant_r1",
-        "encodings/variant_r1023",
-        "encodings/variant_r1025",
+        // EMPTY, and that is the finding: every single-flat-leaf corpus entry now decodes.
+        // `vortex.variant` and `vortex.parquet.variant` were the last eight entries here, and the
+        // list's whole value was that an entry had to be MOVED by hand when a decoder landed.
     ];
 }

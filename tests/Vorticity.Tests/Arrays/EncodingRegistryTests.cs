@@ -42,19 +42,33 @@ public sealed class EncodingRegistryTests
     [InlineData("vortex.alprd", ArrayEncodingId.AlpRd)]
     [InlineData("vortex.fsst", ArrayEncodingId.Fsst)]
     [InlineData("vortex.onpair", ArrayEncodingId.OnPair)]
+    [InlineData("vortex.variant", ArrayEncodingId.Variant)]
+    [InlineData("vortex.parquet.variant", ArrayEncodingId.ParquetVariant)]
     public void EveryImplementedArrayIdResolves(string id, ArrayEncodingId expected)
     {
         Assert.Equal(expected, EncodingRegistry.ResolveArray(Encoding.UTF8.GetBytes(id)));
     }
 
-    [Theory]
-    [InlineData("vortex.variant")]
-    [InlineData("vortex.parquet.variant")]
-    public void EveryDeferredArrayIdIsUnknownAndDescribed(string id)
+    /// <summary>
+    /// THERE ARE NO DEFERRED ARRAY IDS LEFT, which is what this test now asserts.
+    /// </summary>
+    /// <remarks>
+    /// It used to be a theory over `vortex.variant` and `vortex.parquet.variant`, and before that
+    /// over `fastlanes.delta`, `vortex.patched`, `vortex.map`, `vortex.zstd_buffers` and
+    /// `vortex.pco` -- each one leaving the list when it gained a decoder. The variants were the
+    /// last, so `DescribeUnsupported` has nothing to describe: every id docs/90-registry.md names
+    /// resolves. A file carrying a shredded variant is still refused, but by the DECODER, with a
+    /// message naming the child rather than a table entry naming the id.
+    /// </remarks>
+    [Fact]
+    public void NoArrayIdIsDeferredAnyMore()
     {
-        byte[] utf8 = Encoding.UTF8.GetBytes(id);
-        Assert.Equal(ArrayEncodingId.Unknown, EncodingRegistry.ResolveArray(utf8));
-        Assert.NotNull(EncodingRegistry.DescribeUnsupported(utf8));
+        foreach (string id in new[] { "vortex.variant", "vortex.parquet.variant" })
+        {
+            byte[] utf8 = Encoding.UTF8.GetBytes(id);
+            Assert.NotEqual(ArrayEncodingId.Unknown, EncodingRegistry.ResolveArray(utf8));
+            Assert.Null(EncodingRegistry.DescribeUnsupported(utf8));
+        }
     }
 
     [Theory]
@@ -116,20 +130,20 @@ public sealed class EncodingRegistryTests
     [Fact]
     public void GettingADecoderForAnUnknownIdNamesTheIdAndTheKind()
     {
-        // vortex.variant: the last id still refused. This example has now been changed FOUR times -
-        // fastlanes.delta, vortex.patched, the vortex.list layout, vortex.pco - each time because
-        // the id gained a reader, and the third time the comment predicted exactly this. When
-        // variant lands there will be no unimplemented array id left and this test will need a
-        // forged one, the way LazyResolutionTests already does.
+        // A FORGED ID, and the comment above this test predicted the day it would need one: the
+        // example has been changed five times -- fastlanes.delta, vortex.patched, the vortex.list
+        // layout, vortex.pco, then the two variants -- each time because the id gained a reader.
+        // There is no unimplemented array id left to borrow, so the id is one no edition will ever
+        // define, which is also the case a reader most needs to handle well: a file from the
+        // future.
         VortexUnsupportedException error =
             Assert.Throws<VortexUnsupportedException>(
-                () => ArrayDecoderTable.Get(ArrayEncodingId.Unknown, "vortex.variant"));
+                () => ArrayDecoderTable.Get(ArrayEncodingId.Unknown, "vortex.acme.future_codec"));
 
-        Assert.Equal("vortex.variant", error.ComponentId);
+        Assert.Equal("vortex.acme.future_codec", error.ComponentId);
         Assert.Equal(VortexComponentKind.Array, error.Kind);
-        Assert.Contains("vortex.variant", error.Message, StringComparison.Ordinal);
+        Assert.Contains("vortex.acme.future_codec", error.Message, StringComparison.Ordinal);
         Assert.Contains("array", error.Message, StringComparison.Ordinal);
-        Assert.Contains("in scope for 1.0", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -60,6 +60,19 @@ public readonly ref struct TypedScalar
     /// <summary>The wire <c>oneof</c> case that was present.</summary>
     public ScalarValueKind WireKind => _value.Kind;
 
+    /// <summary>
+    /// The nested typed scalar of a variant value: RFC 0015's <c>(dtype, value)</c> pair.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The value is not a variant.</exception>
+    public Scalar AsVariantScalar
+    {
+        get
+        {
+            RequireKind(ScalarValueKind.Variant);
+            return _value.AsVariant;
+        }
+    }
+
     /// <summary>The untyped handle, for a caller that wants to keep the value in a store.</summary>
     public ScalarValue Value => _value;
 
@@ -584,8 +597,21 @@ public static class TypedScalarReader
                 return;
 
             case ScalarValueKind.Variant:
-                ThrowUnsupportedScalar("vortex.variant");
+            {
+                // RFC 0015: a variant scalar is a nested (dtype, value) pair, and the dtype it
+                // pairs with on the outside is `variant`. Validating the nested half against its
+                // OWN dtype is what makes `variant(i32 = 1)` a checked value rather than an opaque
+                // blob -- and the nesting is charged against the depth budget like any other.
+                RequireDTypeKind(dtype, DTypeKind.Variant, "variant_value");
+                Scalar nested = value.AsVariant;
+                if (nested.DType.IsDefault)
+                {
+                    ArraysThrow.Format("A variant scalar carries no dtype for its value.");
+                }
+
+                Validate(nested.Value, Unwrap(nested.DType), depth + 1);
                 return;
+            }
 
             default:
                 // ScalarValueKind.Union, and any tag a future proto adds.

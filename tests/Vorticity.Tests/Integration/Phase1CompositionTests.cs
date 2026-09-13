@@ -296,18 +296,16 @@ public sealed class Phase1CompositionTests
         string path = CorpusBlobs.Path("types/i64_nonnull_r1024", ".vortex");
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
 
-        int unknown = 0;
+        // EVERY DECLARED ID RESOLVES. This asserted the opposite -- that some declared id was
+        // Unknown and the open tolerated it -- until `vortex.variant` and `vortex.parquet.variant`
+        // gained decoders and the corpus's whole edition-permitted set became readable. The
+        // tolerance is still real and still tested, over a forged id in `ScanContextTests`; what
+        // this file can check is that the classification happens at open, for every entry.
         for (int i = 0; i < file.ArrayEncodingCount; i++)
         {
-            string idText = file.GetArrayEncodingId(i);
-            Assert.NotEmpty(idText);
-            if (file.GetArrayEncoding(i) == ArrayEncodingId.Unknown)
-            {
-                unknown++;
-            }
+            Assert.NotEmpty(file.GetArrayEncodingId(i));
+            Assert.NotEqual(ArrayEncodingId.Unknown, file.GetArrayEncoding(i));
         }
-
-        Assert.True(unknown > 0, "the corpus declares ids Phase 1 defers, and open must tolerate them");
 
         for (int i = 0; i < file.LayoutEncodingCount; i++)
         {

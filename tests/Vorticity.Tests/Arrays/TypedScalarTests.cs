@@ -330,15 +330,38 @@ public sealed class TypedScalarTests
         Assert.Equal(19000L, Read(message, outer).AsInt64);
     }
 
+    /// <summary>A variant scalar reads as its nested typed scalar, RFC 0015's <c>(dtype, value)</c>.</summary>
+    /// <remarks>
+    /// This asserted the OPPOSITE until `vortex.variant` gained a decoder: a variant scalar was
+    /// refused, because nothing could do anything with one. The `vortex.variant` corpus files are
+    /// exactly this shape -- a constant carrier holding `variant(i32 = 1)` -- so refusing it made
+    /// them unreadable. What is validated is the NESTED half against its own dtype, which is what
+    /// keeps `variant(i32 = 1)` a checked value rather than an opaque blob.
+    /// </remarks>
     [Fact]
-    public void AVariantScalarIsUnsupportedRatherThanMisread()
+    public void AVariantScalarReadsAsItsNestedTypedScalar()
     {
         Scalar inner = new Scalar(_types.Primitive(PType.I32, Nullability.NonNullable), _store.Int64(1));
         byte[] message = ScalarProtobuf.SerializeValue(_store.Variant(in inner));
 
-        VortexUnsupportedException error = Assert.Throws<VortexUnsupportedException>(
-            () => { _ = Read(message, _types.Variant(Nullability.NonNullable)).WireKind; });
-        Assert.Equal(VortexComponentKind.DType, error.Kind);
+        TypedScalar scalar = Read(message, _types.Variant(Nullability.NonNullable));
+        Assert.Equal(ScalarValueKind.Variant, scalar.WireKind);
+
+        Scalar nested = scalar.AsVariantScalar;
+        Assert.Equal(DTypeKind.Primitive, nested.DType.Kind);
+        Assert.Equal(PType.I32, nested.DType.PType);
+        Assert.Equal(1L, TypedScalarReader.Interpret(nested.Value, nested.DType).AsInt64);
+    }
+
+    /// <summary>A variant scalar against a non-variant dtype is still refused.</summary>
+    [Fact]
+    public void AVariantScalarNeedsAVariantDType()
+    {
+        Scalar inner = new Scalar(_types.Primitive(PType.I32, Nullability.NonNullable), _store.Int64(1));
+        byte[] message = ScalarProtobuf.SerializeValue(_store.Variant(in inner));
+
+        Assert.Throws<VortexFormatException>(
+            () => { _ = Read(message, _types.Primitive(PType.I32, Nullability.NonNullable)).WireKind; });
     }
 
     [Fact]

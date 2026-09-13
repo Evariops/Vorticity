@@ -31,7 +31,7 @@ public sealed class ScanCorpusTests
         // a list. 616 was Phase 1; +32 vortex.decimal_byte_parts, +6 vortex.datetimeparts,
         // +5 vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst, +46 vortex.onpair,
         // +2 distributions/sorted_disjoint_utf8, +4 fastlanes.delta, +23 vortex.map, +1 vortex.patched, +4 vortex.zstd_buffers, +1 the vortex.list layout, +4 vortex.pco.
-        Assert.Equal(813, inScope.Count);
+        Assert.Equal(821, inScope.Count);
     }
 
     [Fact]
@@ -58,7 +58,7 @@ public sealed class ScanCorpusTests
         }
 
         Assert.Equal(string.Empty, failures.ToString());
-        Assert.Equal(813, checkedFiles);
+        Assert.Equal(821, checkedFiles);
     }
 
     [Fact]
@@ -114,15 +114,14 @@ public sealed class ScanCorpusTests
         }
 
         Assert.Equal(string.Empty, wrong.ToString());
-        Assert.Equal(8, named + read);
 
-        // A PROPORTION, not a count: the absolute number shrinks with every decoder that lands,
-        // while the property being asserted -- that an out-of-scope file almost always reaches the
-        // component it is missing, rather than being quietly readable -- does not.
-        Assert.True(
-            named * 4 >= (named + read) * 3,
-            $"{named} of {named + read} out-of-scope files reached their missing component; " +
-            "the rest were readable, which should stay the rare case");
+        // ZERO OUT-OF-SCOPE FILES, which is what the loop above now finds and what makes the
+        // proportion assertion that used to live here meaningless. The property it protected --
+        // that a file this build cannot read says WHICH component it is missing, and never blames
+        // the file with a VortexFormatException -- is still asserted by the `catch` arms: they run
+        // for no file today, and the moment a corpus regeneration adds a component we do not have,
+        // they run again and still hold. The count is the finding.
+        Assert.Equal(0, named + read);
     }
 
     private static async Task ScanOne(CorpusEntry entry)

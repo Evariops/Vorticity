@@ -29,7 +29,15 @@ public sealed class OutOfScopeTests
 {
     private static readonly string[] Kinds = ["array", "layout", "dtype"];
 
-    /// <summary>Every file that uses at least one component this build does not implement.</summary>
+    /// <summary>
+    /// Every file that uses at least one component this build does not implement. EMPTY today.
+    /// </summary>
+    /// <remarks>
+    /// A `vortex.acme.future_codec` placeholder keeps the theory non-empty, because xunit fails a
+    /// `[MemberData]` theory with no cases rather than skipping it, and a test class that cannot
+    /// run is worse than one that runs over one synthetic case. The placeholder is recognised and
+    /// skipped by the theory body; every real entry, when the corpus grows one, is exercised.
+    /// </remarks>
     public static TheoryData<string> OutOfScopeFiles()
     {
         TheoryData<string> data = new TheoryData<string>();
@@ -38,13 +46,51 @@ public sealed class OutOfScopeTests
             data.Add(verdict.Entry.Id);
         }
 
+        if (data.Count == 0)
+        {
+            data.Add(NoSuchEntry);
+        }
+
         return data;
+    }
+
+    /// <summary>The placeholder id <see cref="OutOfScopeFiles"/> uses when the corpus is all in scope.</summary>
+    private const string NoSuchEntry = "<none: every corpus file is in scope>";
+
+    /// <summary>
+    /// THE CORPUS HAS NO OUT-OF-SCOPE FILE LEFT, so this asserts that and keeps the machinery.
+    /// </summary>
+    /// <remarks>
+    /// `FailsWithTheComponentIdAndTheKind` below is still a theory over
+    /// <see cref="OutOfScopeFiles"/> -- it simply has nothing to run on, and an empty theory is a
+    /// test that passes by finding nothing. This Fact is the guard against that: it states the
+    /// count, so a corpus regeneration that introduces a component this build lacks makes the
+    /// count move rather than quietly re-enabling a theory nobody was watching.
+    /// </remarks>
+    [Fact]
+    public void EveryCorpusFileIsInScope()
+    {
+        int outOfScope = 0;
+        foreach (ScopeVerdict verdict in CorpusCatalog.OutOfScope())
+        {
+            outOfScope++;
+        }
+
+        Assert.Equal(0, outOfScope);
+        Assert.Equal(821, CorpusCatalog.Entries.Length);
     }
 
     [Theory]
     [MemberData(nameof(OutOfScopeFiles))]
     public async Task FailsWithTheComponentIdAndTheKind(string id)
     {
+        if (string.Equals(id, NoSuchEntry, StringComparison.Ordinal))
+        {
+            // The placeholder: the corpus has no out-of-scope file, which `EveryCorpusFileIsInScope`
+            // asserts directly rather than by this theory finding nothing.
+            return;
+        }
+
         ScopeVerdict verdict = CorpusCatalog.Verdict(id);
         CorpusEntry entry = verdict.Entry;
 

@@ -11,6 +11,7 @@ using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
+using Vorticity.Types.Variant;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
@@ -118,10 +119,111 @@ internal static class ConstantCanonicalizer
             case DTypeKind.FixedSizeList:
                 return BuildFixedSizeList(context, dtype, length, in scalar, validity, depth);
 
+            case DTypeKind.Variant:
+                return BuildVariant(context, dtype, length, in scalar, validity);
+
             default:
                 throw new VortexFormatException(
                     $"Phase 1 has no canonical form for a {dtype.Kind} dtype.");
         }
+    }
+
+    /// <summary>
+    /// Builds a constant variant column: <c>Struct{metadata, value}</c> wearing the variant dtype.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A `vortex.variant` over a constant carrier holds a TYPED SCALAR -- `variant(i32 = 1)` in the
+    /// corpus -- and the canonical form this library gives every variant column is the Parquet
+    /// Variant binary pair (see `VariantDecoder`'s header for why). So this is the one place that
+    /// has to ENCODE rather than decode, and `ParquetVariant.WriteValue` does exactly the
+    /// primitives, no more: an object or an array raises rather than being approximated.
+    /// </para>
+    /// <para>
+    /// The two columns are themselves constants -- every row is the same bytes -- so they are built
+    /// by tiling one view, which is what `BuildBinary` already does.
+    /// </para>
+    /// </remarks>
+    private static int BuildVariant(
+        ArrayDecodeContext context, DType dtype, int length, scoped in TypedScalar scalar,
+        Validity validity)
+    {
+        if (scalar.WireKind != ScalarValueKind.Variant)
+        {
+            throw new VortexFormatException(
+                $"A constant variant column needs a variant scalar; the file carries " +
+                $"{scalar.WireKind}.");
+        }
+
+        Scalar nested = scalar.AsVariantScalar;
+        DType nestedType = nested.DType;
+        TypedScalar inner = TypedScalarReader.Interpret(nested.Value, nestedType);
+
+        int valueBytes = ParquetVariant.MeasureValue(in inner, nestedType);
+        if (valueBytes < 0)
+        {
+            throw new VortexUnsupportedException(
+                "vortex.variant",
+                VortexComponentKind.Array,
+                $"a constant variant of dtype {nestedType} has no primitive encoding here; null, " +
+                "booleans, integers, floats, strings and binary do.");
+        }
+
+        Span<byte> stack = stackalloc byte[64];
+        Scratch<byte> scratch = new Scratch<byte>(valueBytes, stack);
+        try
+        {
+            ParquetVariant.WriteValue(in inner, nestedType, scratch.Span);
+
+            DTypeArena types = dtype.Arena;
+            DType binary = types.Binary(Nullability.NonNullable);
+            int metadataField = BuildConstantBinary(
+                context, binary, length, ParquetVariant.EmptyMetadata);
+            int valueField = BuildConstantBinary(context, binary, length, scratch.Span);
+
+            Span<int> fields = stackalloc int[2];
+            fields[0] = metadataField;
+            fields[1] = valueField;
+            return context.Canonical.AddStruct(dtype, length, validity, fields);
+        }
+        finally
+        {
+            scratch.Dispose();
+        }
+    }
+
+    /// <summary>A binary column of <paramref name="length"/> rows all holding the same bytes.</summary>
+    private static int BuildConstantBinary(
+        ArrayDecodeContext context, DType dtype, int length, ReadOnlySpan<byte> value)
+    {
+        CanonicalArena arena = context.Canonical;
+        int viewBytes = ArrayDecodeContext.CheckedMultiply(
+            length, CanonicalSupport.ViewSize, "constant variant views");
+        VortexBuffer views = CanonicalSupport.AllocateUninitialized(
+            context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
+        if (length == 0)
+        {
+            return arena.AddVarBinView(dtype, 0, Validity.NonNullable, views, default);
+        }
+
+        Span<byte> first = writable[..CanonicalSupport.ViewSize];
+        if (value.Length <= CanonicalSupport.MaxInlineViewLength)
+        {
+            first.Clear();
+            CanonicalSupport.WriteInlineView(first, value);
+            RowKernels.Tile(writable, first);
+            return arena.AddVarBinView(dtype, length, Validity.NonNullable, views, default);
+        }
+
+        VortexBuffer data = CanonicalSupport.AllocateUninitialized(
+            context, value.Length, Align, out Span<byte> heap);
+        value.CopyTo(heap);
+        CanonicalSupport.WriteReferenceView(first, value.Length, value, bufferIndex: 0, offset: 0);
+        RowKernels.Tile(writable, first);
+
+        Span<VortexBuffer> single = stackalloc VortexBuffer[1];
+        single[0] = data;
+        return arena.AddVarBinView(dtype, length, Validity.NonNullable, views, single);
     }
 
     private static int BuildDecimal(

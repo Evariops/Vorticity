@@ -355,17 +355,21 @@ public sealed class VortexFileCorpusTests
         // §2.3: an id we do not implement maps to Unknown and that is NOT an error at open. The
         // writer pre-populates array_specs with every id its editions permit, so an unused and
         // unresolvable entry is the normal case, not the exceptional one.
-        // The file is one that DECLARES an id this build does not implement. It used to be
-        // encodings/fastlanes_delta, then encodings/map, then encodings/pco -- all now decode.
-        // vortex.variant is declared by the writer's edition-permitted set the same way, and is the
-        // last array id this build refuses.
+        //
+        // EVERY DECLARED ID NOW RESOLVES, so this test has no unresolvable one to point at. It
+        // used to name encodings/fastlanes_delta, then encodings/map, then encodings/pco, then
+        // encodings/variant -- each replaced when the id gained a decoder, and the variants were
+        // the last. What it asserts now is the half that is still checkable HERE: the open reads
+        // the whole table and resolves each entry, and the resolution is addressable by the wire
+        // index. The tolerance for an id from a future edition is tested in `ScanContextTests`,
+        // over a forged id, which is the only way left to have one.
         CorpusEntry entry = CorpusManifest.Find("encodings/variant");
         await using VortexFile file = await VortexFile.OpenAsync(
             new TestSegmentSource(CorpusManifest.Bytes(entry.Id)),
             VortexOpenOptions.Default,
             CancellationToken.None);
 
-        bool sawDelta = false;
+        bool sawVariant = false;
         bool sawKnown = false;
         for (int i = 0; i < file.ArrayEncodingCount; i++)
         {
@@ -373,8 +377,8 @@ public sealed class VortexFileCorpusTests
             global::Vorticity.Arrays.ArrayEncodingId resolved = file.GetArrayEncoding(i);
             if (string.Equals(id, "vortex.variant", StringComparison.Ordinal))
             {
-                sawDelta = true;
-                Assert.Equal(global::Vorticity.Arrays.ArrayEncodingId.Unknown, resolved);
+                sawVariant = true;
+                Assert.Equal(global::Vorticity.Arrays.ArrayEncodingId.Variant, resolved);
             }
 
             if (string.Equals(id, "vortex.primitive", StringComparison.Ordinal))
@@ -384,7 +388,7 @@ public sealed class VortexFileCorpusTests
             }
         }
 
-        Assert.True(sawDelta, "the delta file must declare fastlanes.delta");
+        Assert.True(sawVariant, "the variant file must declare vortex.variant");
         Assert.True(sawKnown, "every corpus file declares vortex.primitive");
 
         Assert.True(file.LayoutEncodingCount > 0);

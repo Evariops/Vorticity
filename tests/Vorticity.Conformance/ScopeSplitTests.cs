@@ -18,10 +18,17 @@ public sealed class ScopeSplitTests
     // Bumped deliberately, one decoder at a time: a moved count is the visible half of a
     // decoder landing, and an unexplained move is the visible half of one being dropped.
     // 616/203 was Phase 1. +32 vortex.decimal_byte_parts, +6 vortex.datetimeparts, +5
-    // vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst, +46 vortex.onpair. The 45
-    // that remain need a component deferred to Vortex 1.1 or in no core edition at all.
-    private const int ExpectedInScope = 813;
-    private const int ExpectedOutOfScope = 8;
+    // vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst, +46 vortex.onpair, and
+    // finally +8 for vortex.variant and vortex.parquet.variant.
+    //
+    // THE SPLIT IS NOW 821/0, and the zero is the point: every file of the conformance corpus is
+    // readable by this build. There is no remaining component "deferred to Vortex 1.1" and none in
+    // no core edition -- `fastlanes.delta` and `vortex.zstd_buffers` are both read, and both
+    // variants are. What is still refused is a SHAPE rather than an id: a shredded variant, the
+    // two-buffer form of fsst, the pco modes the generator cannot produce. Each of those is refused
+    // by its decoder with a message naming the shape, and none of them is in the corpus.
+    private const int ExpectedInScope = 821;
+    private const int ExpectedOutOfScope = 0;
 
     [Fact]
     public void TheCorpusSplitsIntoTheScopeThisBuildClaims()

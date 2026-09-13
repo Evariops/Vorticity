@@ -17,10 +17,14 @@ namespace Vorticity.Tests.Arrays;
 
 public sealed class ScanContextTests
 {
-    // Slot 2 is the stand-in for "an id this build does not decode". It was vortex.variant until
-    // that gained a decoder; vortex.variant is in no
-    // core edition, so it stays that way as Phase 2 decoders land.
-    private static readonly string[] Ids = ["vortex.primitive", "vortex.bool", "vortex.variant"];
+    // Slot 2 is the stand-in for "an id this build does not decode". It has been three different
+    // ids -- fastlanes.delta, vortex.pco, vortex.variant -- each replaced when the id gained a
+    // decoder. There is no unimplemented array id left to borrow, so it is now a FORGED one from a
+    // namespace no edition will define, which is also the case a reader most needs to get right: a
+    // file from the future. The point of the slot is unchanged: the table resolves every id at
+    // open, and an unknown one is fatal only where it is USED.
+
+    private static readonly string[] Ids = ["vortex.primitive", "vortex.bool", "vortex.acme.future_codec"];
 
     [Fact]
     public void ADetachedContextOwnsEveryArenaAndRefusesToInventAFile()
@@ -54,7 +58,7 @@ public sealed class ScanContextTests
         Assert.Equal(ArrayEncodingId.Unknown, scan.ArrayEncodings[2]);
 
         Assert.Equal("vortex.primitive", scan.GetArrayEncodingIdText(0));
-        Assert.Equal("vortex.variant", scan.GetArrayEncodingIdText(2));
+        Assert.Equal("vortex.acme.future_codec", scan.GetArrayEncodingIdText(2));
 
         // An index the footer never declared must not be an index-out-of-range on a throw path.
         Assert.Contains("99", scan.GetArrayEncodingIdText(99), StringComparison.Ordinal);
@@ -120,7 +124,7 @@ public sealed class ScanContextTests
         VortexUnsupportedException error = Assert.Throws<VortexUnsupportedException>(
             () => scan.Decode.Decode(scan.Nodes.Root, dtype, 8));
 
-        Assert.Equal("vortex.variant", error.ComponentId);
+        Assert.Equal("vortex.acme.future_codec", error.ComponentId);
         Assert.Equal(VortexComponentKind.Array, error.Kind);
     }
 

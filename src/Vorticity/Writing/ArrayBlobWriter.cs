@@ -949,7 +949,13 @@ internal static class ArrayBlobWriter
                 return WriteFixedSizeList(builder, arena, node, buffers, encodings, compress);
 
             case CanonicalKind.Struct:
-                return WriteStruct(builder, arena, node, buffers, encodings, compress);
+                // THE DTYPE DECIDES, as it does for a map above: a Struct wearing a VARIANT dtype
+                // is a variant column in this library's canonical form, and writing it as
+                // `vortex.struct` would produce a file whose array says "two fields" and whose
+                // schema says "variant" -- which every reader, this one included, refuses.
+                return node.DType.Kind == DTypeKind.Variant
+                    ? WriteParquetVariant(builder, arena, node, buffers, encodings, compress)
+                    : WriteStruct(builder, arena, node, buffers, encodings, compress);
 
             default:
                 return WriteExtension(builder, arena, node, buffers, encodings, compress);
@@ -1221,6 +1227,68 @@ internal static class ArrayBlobWriter
         int count = 1 + Validity(builder, arena, node, buffers, encodings, children[1..]);
         return Node(
             builder, encodings, "vortex.fixed_size_list"u8, default, children[..count], []);
+    }
+
+    /// <summary>
+    /// Writes a variant column as <c>vortex.parquet.variant</c>: the unshredded metadata and value.
+    /// </summary>
+    /// <remarks>
+    /// ONE SPELLING OUT, TWO IN. Both `vortex.variant` and `vortex.parquet.variant` decode to
+    /// `Struct{metadata, value}`, and the information that distinguished them -- whether the value
+    /// arrived as a typed scalar or as bytes -- is gone by then, because the canonical form is the
+    /// bytes. So everything goes out as the parquet spelling, which is the one that stores exactly
+    /// what this form holds. A file round-trips to a DIFFERENT ENCODING and the same values, which
+    /// is what `vortex.varbin` already does (it reads as a VarBinView and writes as one).
+    /// </remarks>
+    private static int WriteParquetVariant(
+        FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
+        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress)
+    {
+        if (node.FieldCount != 2)
+        {
+            throw new InvalidOperationException(
+                $"A variant column is a two-field struct of {{metadata, value}}; this one has " +
+                $"{node.FieldCount} fields.");
+        }
+
+        CanonicalNode valueNode = arena.GetNode(arena.GetNode(node.Index).GetFieldIndex(1));
+        bool valueNullable = valueNode.DType.Nullability == Nullability.Nullable;
+
+        // Children in the reader's order: validity when the array carries one, then metadata, then
+        // value. The metadata says how many to expect.
+        Span<int> children = stackalloc int[3];
+        Span<int> validity = stackalloc int[1];
+        int validityCount = Validity(builder, arena, node, buffers, encodings, validity);
+        if (validityCount == 1)
+        {
+            children[0] = validity[0];
+        }
+
+        children[validityCount] = WriteChild(
+            builder, arena, arena.GetNode(node.Index).GetFieldIndex(0), buffers, encodings, compress);
+        children[validityCount + 1] = WriteChild(
+            builder, arena, arena.GetNode(node.Index).GetFieldIndex(1), buffers, encodings, compress);
+
+        byte[] metadata = ParquetVariantBytes(valueNullable);
+        return Node(
+            builder, encodings, "vortex.parquet.variant"u8, metadata,
+            children[..(validityCount + 2)], []);
+    }
+
+    private static byte[] ParquetVariantBytes(bool valueNullable)
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            ParquetVariantMetadata value = new ParquetVariantMetadata(
+                hasValue: true, hasTypedValue: false, valueNullable: valueNullable);
+            ParquetVariantMetadata.Write(ref writer, in value);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
     }
 
     private static int WriteStruct(

@@ -118,22 +118,22 @@ public sealed class ArrayBlobCorpusTests
     {
         // The writer pre-populates every id its edition permits, so a declared-but-unresolvable id
         // must never be an error (contract §2.3 and the corpus manifest's last caveat).
+        //
+        // AND THERE ARE NONE LEFT, which is what this now asserts and is a stronger statement than
+        // the one it replaces. The corpus file declares all 34 ids `core2026.08.3` permits, and
+        // this build resolves every one of them: `vortex.variant` and `vortex.parquet.variant` were
+        // the last two. The tolerance itself is still tested -- by
+        // `ScanContextTests`, over a forged id from a namespace no edition will ever define, which
+        // is the case the tolerance actually exists for.
         CorpusBlobs blobs = CorpusBlobs.Load("types/i64_nonnull_r1024");
         Assert.NotEmpty(blobs.ArrayEncodingIds);
 
-        int unknown = 0;
         foreach (string id in blobs.ArrayEncodingIds)
         {
-            if (EncodingRegistry.ResolveArray(Encoding.UTF8.GetBytes(id)) == ArrayEncodingId.Unknown)
-            {
-                unknown++;
-
-                // Every one of them is an id we know about and deferred, not a mystery.
-                Assert.NotNull(EncodingRegistry.DescribeUnsupported(Encoding.UTF8.GetBytes(id)));
-            }
+            Assert.NotEqual(
+                ArrayEncodingId.Unknown,
+                EncodingRegistry.ResolveArray(Encoding.UTF8.GetBytes(id)));
         }
-
-        Assert.True(unknown > 0, "the corpus declares ids Phase 1 defers");
     }
 
     [Fact]

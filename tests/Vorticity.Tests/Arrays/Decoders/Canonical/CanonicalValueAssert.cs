@@ -11,6 +11,7 @@ using System.Text.Json;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Types;
+using Vorticity.Types.Variant;
 using Vorticity.Types.Numerics;
 using Xunit;
 
@@ -70,6 +71,10 @@ internal static class CanonicalValueAssert
                 AssertElements(scan, node.ElementsIndex, dtype.ElementType, row * size, size, expected);
                 return;
             }
+
+            case CanonicalKind.Struct when dtype.Kind == DTypeKind.Variant:
+                AssertVariant(in node, scan, row, expected);
+                return;
 
             default:
             {
@@ -227,6 +232,83 @@ internal static class CanonicalValueAssert
 
         Assert.Equal(expected.GetProperty("len").GetInt32(), value.Length);
         Assert.Equal(expected.GetProperty("b64").GetString(), Convert.ToBase64String(value));
+    }
+
+    /// <summary>
+    /// Asserts one variant row against the sidecar's <c>{dtype, value}</c>.
+    /// </summary>
+    /// <remarks>
+    /// A variant column is a `Struct{metadata, value}` wearing the variant dtype -- see
+    /// `VariantDecoder`'s header -- so the generic struct branch above would compare it against the
+    /// variant dtype's own field count, which is zero. The bytes are decoded instead, because the
+    /// sidecar spells a variant row as the TYPED SCALAR it holds and comparing buffers would only
+    /// check that the reference's encoder agrees with itself.
+    /// </remarks>
+    private static void AssertVariant(
+        ref readonly CanonicalNode node, ScanContext scan, int row, JsonElement expected)
+    {
+        Assert.Equal(JsonValueKind.Object, expected.ValueKind);
+        Assert.Equal(2, node.FieldCount);
+
+        CanonicalNode metadataNode = scan.Canonical.GetNode(node.GetFieldIndex(0));
+        CanonicalNode valueNode = scan.Canonical.GetNode(node.GetFieldIndex(1));
+        VariantValue actual = ParquetVariant.Read(
+            ViewOf(in metadataNode, row), ViewOf(in valueNode, row));
+
+        JsonElement dtype = expected.GetProperty("dtype");
+        JsonElement payload = expected.GetProperty("value");
+        string kind = dtype.GetProperty("kind").GetString() ?? string.Empty;
+
+        switch (actual.Kind)
+        {
+            case VariantKind.Null:
+                Assert.Equal("null", kind);
+                Assert.Equal(JsonValueKind.Null, payload.ValueKind);
+                return;
+            case VariantKind.Bool:
+                Assert.Equal(actual.Integer != 0 ? "true" : "false", Text(payload));
+                return;
+            case VariantKind.Int8:
+            case VariantKind.Int16:
+            case VariantKind.Int32:
+            case VariantKind.Int64:
+                Assert.Equal(
+                    actual.Integer.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    Text(payload));
+                return;
+            case VariantKind.String:
+                Assert.Equal(System.Text.Encoding.UTF8.GetString(actual.Bytes), Text(payload));
+                return;
+            case VariantKind.Binary:
+                Assert.Equal(Convert.ToBase64String(actual.Bytes), Text(payload));
+                return;
+            default:
+                Assert.Fail($"the harness does not spell a variant {actual.Kind}");
+                return;
+        }
+    }
+
+    private static string Text(JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.String => value.GetString() ?? string.Empty,
+        JsonValueKind.True => "true",
+        JsonValueKind.False => "false",
+        _ => value.ToString(),
+    };
+
+    /// <summary>One row of a VarBinView as bytes, inline or through a data buffer.</summary>
+    private static ReadOnlySpan<byte> ViewOf(ref readonly CanonicalNode node, int row)
+    {
+        ReadOnlySpan<byte> view = node.Views.Span.Slice(row * 16, 16);
+        uint size = BinaryPrimitives.ReadUInt32LittleEndian(view);
+        if (size <= 12)
+        {
+            return view.Slice(4, (int)size);
+        }
+
+        uint bufferIndex = BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
+        uint offset = BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
+        return node.GetDataBuffer((int)bufferIndex).Span.Slice((int)offset, (int)size);
     }
 
     private static long ReadIndex(ReadOnlySpan<byte> bytes, PType ptype, int index) => ptype switch

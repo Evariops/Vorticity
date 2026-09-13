@@ -71,6 +71,8 @@ public static class ArrayDecoderTable
         Register(AlpRdDecoder.Instance);
         Register(FsstDecoder.Instance);
         Register(OnPairDecoder.Instance);
+        Register(VariantDecoder.Instance);
+        Register(ParquetVariantDecoder.Instance);
     }
 
     /// <summary>
