@@ -1,7 +1,7 @@
 // Which corpus files this build cannot read, and why, as a number that only goes down.
 //
 // The conformance sweep reports "774 of 774 in-scope files read back value for value", which is a
-// true statement about a set this build defines. 819 files ship. The 45 in the gap are the ones
+// true statement about a set this build defines. 821 files ship. The 41 in the gap are the ones
 // whose components are not implemented, and until now the only way to know what they were was to
 // read the scope rule and work it out - so the cost of NOT implementing a decoder was invisible
 // while the success rate stayed at 100%.
@@ -20,7 +20,8 @@
 //   fastlanes.delta                                       5 files   belongs to NO core edition
 //   vortex.list layout, vortex.patched                    2 files   experimental upstream
 //
-// So 43 of the 45 are scope, not debt, and the largest single component - vortex.map at 23 files -
+// fastlanes.delta's four left the gap when it gained a decoder (49 iterations in), so 39 of the
+// 41 are scope, not debt, and the largest single component - vortex.map at 22 files -
 // is the one the scope document defers most explicitly. The ratchet is worth keeping for the
 // regression direction; it is not a work queue.
 using System;
@@ -43,7 +44,7 @@ public sealed class CorpusCoverageTests
     /// that used to be readable no longer is, which is a regression the conformance sweep reports as
     /// a clean 100% because the file simply leaves its denominator.
     /// </remarks>
-    private const int OutOfScopeCeiling = 45;
+    private const int OutOfScopeCeiling = 41;
 
     [Fact]
     public void TheUnreadablePartOfTheCorpusStaysWithinItsRatchet()

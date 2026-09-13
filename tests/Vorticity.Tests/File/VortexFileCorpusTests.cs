@@ -355,7 +355,10 @@ public sealed class VortexFileCorpusTests
         // §2.3: an id we do not implement maps to Unknown and that is NOT an error at open. The
         // writer pre-populates array_specs with every id its editions permit, so an unused and
         // unresolvable entry is the normal case, not the exceptional one.
-        CorpusEntry entry = CorpusManifest.Find("encodings/fastlanes_delta");
+        // The file is one that DECLARES an id this build does not implement. It used to be
+        // encodings/fastlanes_delta, which now decodes; vortex.map is declared by the writer's
+        // edition-permitted set the same way.
+        CorpusEntry entry = CorpusManifest.Find("encodings/map");
         await using VortexFile file = await VortexFile.OpenAsync(
             new TestSegmentSource(CorpusManifest.Bytes(entry.Id)),
             VortexOpenOptions.Default,
@@ -367,7 +370,7 @@ public sealed class VortexFileCorpusTests
         {
             string id = file.GetArrayEncodingId(i);
             global::Vorticity.Arrays.ArrayEncodingId resolved = file.GetArrayEncoding(i);
-            if (string.Equals(id, "fastlanes.delta", StringComparison.Ordinal))
+            if (string.Equals(id, "vortex.map", StringComparison.Ordinal))
             {
                 sawDelta = true;
                 Assert.Equal(global::Vorticity.Arrays.ArrayEncodingId.Unknown, resolved);

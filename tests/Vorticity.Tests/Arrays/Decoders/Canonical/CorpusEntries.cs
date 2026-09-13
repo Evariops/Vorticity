@@ -164,17 +164,13 @@ internal static class UnsupportedCorpusEntries
 {
     /// <summary>
     /// The single-flat-leaf corpus entries whose array tree still reaches an encoding this build
-    /// does not implement: fastlanes.delta and vortex.patched (in no core edition), and map,
+    /// does not implement: vortex.patched (in-memory only upstream), and map,
     /// parquet_variant, pco, variant and zstd_buffers (deferred upstream to Vortex 1.1).
     /// Decoding one must raise VortexUnsupportedException naming the id - never a wrong value, an
     /// out-of-bounds read or a different exception type (contract §2.3).
     /// </summary>
     internal static readonly string[] All =
     [
-        "encodings/fastlanes_delta",
-        "encodings/fastlanes_delta_r1",
-        "encodings/fastlanes_delta_r1023",
-        "encodings/fastlanes_delta_r1025",
         "encodings/map",
         "encodings/map_r1",
         "encodings/map_r1023",

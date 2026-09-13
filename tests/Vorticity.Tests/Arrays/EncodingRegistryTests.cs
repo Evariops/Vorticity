@@ -53,7 +53,6 @@ public sealed class EncodingRegistryTests
     [InlineData("vortex.map")]
     [InlineData("vortex.variant")]
     [InlineData("vortex.parquet.variant")]
-    [InlineData("fastlanes.delta")]
     [InlineData("vortex.patched")]
     public void EveryDeferredArrayIdIsUnknownAndDescribed(string id)
     {
@@ -112,11 +111,11 @@ public sealed class EncodingRegistryTests
     }
 
     [Fact]
-    public void TheThreeNotesContractTwoPointEightPinsAreVerbatim()
+    public void TheNotesContractTwoPointEightPinsAreVerbatim()
     {
-        Assert.Equal(
-            "in no core edition; a default writer cannot emit it",
-            EncodingRegistry.DescribeUnsupported("fastlanes.delta"u8));
+        // fastlanes.delta was a third pinned note until it gained a decoder. Its wording said "in
+        // no core edition; a default writer cannot emit it", which is still true of upstream and was
+        // never a reason not to read one.
         Assert.Equal(
             "in-memory only upstream; never produced by a conformant writer",
             EncodingRegistry.DescribeUnsupported("vortex.patched"u8));
@@ -135,17 +134,20 @@ public sealed class EncodingRegistryTests
     [Fact]
     public void GettingADecoderForAnUnknownIdNamesTheIdAndTheKind()
     {
-        // fastlanes.delta rather than one of the Phase 2 ids: its note is structural ("in no core
-        // edition"), so unlike "deferred to Phase 2" it does not expire as decoders land.
+        // vortex.patched rather than one of the Phase 2 ids: its note is structural ("in-memory
+        // only upstream"), so unlike "deferred to Phase 2" it does not expire as decoders land.
+        // This was fastlanes.delta until that gained a decoder, which is the expiry this comment
+        // was guarding against and did not prevent - the note was structural, the CHOICE of example
+        // was not.
         VortexUnsupportedException error =
             Assert.Throws<VortexUnsupportedException>(
-                () => ArrayDecoderTable.Get(ArrayEncodingId.Unknown, "fastlanes.delta"));
+                () => ArrayDecoderTable.Get(ArrayEncodingId.Unknown, "vortex.patched"));
 
-        Assert.Equal("fastlanes.delta", error.ComponentId);
+        Assert.Equal("vortex.patched", error.ComponentId);
         Assert.Equal(VortexComponentKind.Array, error.Kind);
-        Assert.Contains("fastlanes.delta", error.Message, StringComparison.Ordinal);
+        Assert.Contains("vortex.patched", error.Message, StringComparison.Ordinal);
         Assert.Contains("array", error.Message, StringComparison.Ordinal);
-        Assert.Contains("core edition", error.Message, StringComparison.Ordinal);
+        Assert.Contains("in-memory only upstream", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

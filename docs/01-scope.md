@@ -69,7 +69,7 @@ wrong.
 | **`vortex.zstd_buffers`** | 4 | **NOT a value codec.** A META-ENCODING: it compresses each top-level buffer of *another* array independently and stores that array's encoding id and metadata so it can be rebuilt. Decoding means reconstructing an inner array with substituted buffers | **this table said "trivial once `vortex.zstd` is in place"; that is wrong.** Architectural, not trivial |
 | **`vortex.variant`, `vortex.parquet.variant`** | 8 | a self-describing binary value format | moderate |
 | **`vortex.pco`** | 4 | full pcodec | large |
-| **`fastlanes.delta`** | 4 | per-lane prefix sum over 1024-element FastLanes blocks, on top of bit-packing we already have. Contract: metadata is two protobuf varints (`deltas_len`, `offset < 1024`), children are `bases` and `deltas`, and `index(row, lane) = FL_ORDER[row / 8] * 16 + (row % 8) * 128 + lane` over `row` in `0..T` and `lane` in `0..1024/T` | **small — the cheapest real win** |
+| ~~**`fastlanes.delta`**~~ | 4 | ~~per-lane prefix sum over 1024-element FastLanes blocks~~ | **DONE.** The estimate held: one decoder, one metadata reader |
 
 **Three of these are pinned by contract §2.8, not merely absent**, with reasons that stay true after
 implementation. `EncodingRegistry.DescribeUnsupported` returns them verbatim:

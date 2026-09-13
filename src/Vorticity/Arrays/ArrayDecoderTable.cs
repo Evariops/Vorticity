@@ -49,6 +49,7 @@ public static class ArrayDecoderTable
 
         // The nine compressed decoders (Decoders/Compressed).
         Register(ForDecoder.Instance);
+        Register(DeltaDecoder.Instance);
         Register(BitPackedDecoder.Instance);
         Register(FastLanesRleDecoder.Instance);
         Register(ZigZagDecoder.Instance);
