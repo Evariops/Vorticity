@@ -596,6 +596,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "futures-lite",
+ "pco",
  "serde",
  "serde_json",
  "sha2",
