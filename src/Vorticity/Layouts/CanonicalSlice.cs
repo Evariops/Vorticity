@@ -34,31 +34,48 @@ internal static class CanonicalSlice
     /// </returns>
     /// <exception cref="VortexFormatException">The range escapes the node, or its dtype cannot be sliced.</exception>
     internal static int Slice(ArrayDecodeContext context, int nodeIndex, int start, int length) =>
-        Slice(context.Canonical, nodeIndex, start, length, depth: 1);
+        Slice(context.Canonical, context.Canonical, nodeIndex, start, length, depth: 1);
 
     /// <summary>
-    /// Slices inside <paramref name="arena"/>, which need not be the batch's.
+    /// Narrows a node held by <paramref name="source"/> into records appended to
+    /// <paramref name="destination"/>.
     /// </summary>
-    /// <param name="arena">The arena holding the node; the slice is appended to it.</param>
-    /// <param name="nodeIndex">The node to narrow.</param>
+    /// <param name="source">The arena holding the node, and the storage the result will view.</param>
+    /// <param name="destination">The arena the window's records are appended to.</param>
+    /// <param name="nodeIndex">The node to narrow, indexed in <paramref name="source"/>.</param>
     /// <param name="start">First row of the window.</param>
     /// <param name="length">Rows in the window.</param>
-    /// <returns>The slice's index in <paramref name="arena"/>.</returns>
+    /// <returns>The window's index in <paramref name="destination"/>.</returns>
     /// <remarks>
-    /// SLICING COPIES NOTHING - it appends a record whose buffers are narrowed VIEWS onto the same
-    /// storage. That is what makes it usable against a retained arena: narrowing a million-row chunk
-    /// to one batch costs a record, and only then does materializing that window cost bytes.
+    /// <para>
+    /// SLICING COPIES NOTHING, AND ACROSS ARENAS IT STILL COPIES NOTHING. A slice is a record whose
+    /// buffers are narrowed <b>views</b> onto the same storage, so a window of a retained chunk costs
+    /// a handful of records however many rows or bytes it spans - including a <c>VarBinView</c>'s
+    /// data buffers, which travel as views and are never rebuilt. That is the whole reason the
+    /// string encodings can reach their ceiling.
+    /// </para>
+    /// <para>
+    /// THE RESULT BORROWS <paramref name="source"/>'s MEMORY and is valid only while that arena is.
+    /// Whoever calls this owes a lifetime argument; <see cref="Vorticity.Arrays.ScanContext"/>'s
+    /// is that an entry touched during the current batch is never evicted.
+    /// </para>
+    /// <para>
+    /// <c>ListView</c> is the one kind that cannot borrow: its offsets are absolute into an elements
+    /// CHILD, named by index, and an index is meaningless in another arena. That child is copied.
+    /// </para>
     /// </remarks>
-    internal static int SliceIn(CanonicalArena arena, int nodeIndex, int start, int length) =>
-        Slice(arena, nodeIndex, start, length, depth: 1);
+    internal static int SliceAcross(
+        CanonicalArena source, CanonicalArena destination, int nodeIndex, int start, int length) =>
+        Slice(source, destination, nodeIndex, start, length, depth: 1);
 
-    private static int Slice(CanonicalArena arena, int nodeIndex, int start, int length, int depth)
+    private static int Slice(
+        CanonicalArena source, CanonicalArena destination, int nodeIndex, int start, int length, int depth)
     {
         // Depth is the canonical tree's, which mirrors the dtype's and is capped at parse time; the
         // explicit charge is what makes that a guarantee rather than an assumption.
         VortexLimits.CheckDepth(depth, VortexLimits.MaxArrayDepth, "Canonical slice");
 
-        CanonicalNode node = arena.GetNode(nodeIndex);
+        CanonicalNode node = source.GetNode(nodeIndex);
 
         if (start < 0 || length < 0 || (long)start + length > node.Length)
         {
@@ -66,7 +83,9 @@ internal static class CanonicalSlice
                 $"A slice of [{start}, {start + (long)length}) escapes a canonical node of {node.Length} rows.");
         }
 
-        if (start == 0 && length == node.Length)
+        // Only when the arenas are the same: an index is meaningless in another arena, so a
+        // cross-arena whole-node window falls through and rebuilds the record with full-width views.
+        if (start == 0 && length == node.Length && ReferenceEquals(source, destination))
         {
             return nodeIndex;
         }
@@ -77,16 +96,16 @@ internal static class CanonicalSlice
         // neither slices the parent's - which would build a second, identical bitmap slice.
         if (node.Kind == CanonicalKind.Null)
         {
-            return arena.AddNull(dtype, length);
+            return destination.AddNull(dtype, length);
         }
 
         if (node.Kind == CanonicalKind.Extension)
         {
-            int storageSlice = Slice(arena, node.StorageIndex, start, length, depth + 1);
-            return arena.AddExtension(dtype, length, storageSlice);
+            int storageSlice = Slice(source, destination, node.StorageIndex, start, length, depth + 1);
+            return destination.AddExtension(dtype, length, storageSlice);
         }
 
-        Validity validity = SliceValidity(arena, node.Validity, start, length, depth);
+        Validity validity = SliceValidity(source, destination, node.Validity, start, length, depth);
 
         switch (node.Kind)
         {
@@ -98,20 +117,20 @@ internal static class CanonicalSlice
                 int byteStart = (int)(firstBit >> 3);
                 int bitOffset = (int)(firstBit & 7);
                 int bytes = (int)(((long)bitOffset + length + 7) / 8);
-                return arena.AddBool(dtype, length, validity, node.Bits.Slice(byteStart, bytes), bitOffset);
+                return destination.AddBool(dtype, length, validity, node.Bits.Slice(byteStart, bytes), bitOffset);
             }
 
             case CanonicalKind.Primitive:
             {
                 int width = node.PType.ByteWidth();
-                return arena.AddPrimitive(
+                return destination.AddPrimitive(
                     dtype, length, validity, node.PType, node.Values.Slice(start * width, length * width));
             }
 
             case CanonicalKind.Decimal:
             {
                 int width = DecimalStorage.ByteWidth(node.Storage);
-                return arena.AddDecimal(
+                return destination.AddDecimal(
                     dtype,
                     length,
                     validity,
@@ -122,7 +141,7 @@ internal static class CanonicalSlice
             }
 
             case CanonicalKind.VarBinView:
-                return SliceVarBinView(arena, in node, dtype, validity, start, length);
+                return SliceVarBinView(destination, in node, dtype, validity, start, length);
 
             case CanonicalKind.ListView:
             {
@@ -130,11 +149,13 @@ internal static class CanonicalSlice
                 // unchanged and only the per-row offset and size vectors are narrowed.
                 int offsetWidth = node.OffsetPType.ByteWidth();
                 int sizeWidth = node.SizePType.ByteWidth();
-                return arena.AddListView(
+                return destination.AddListView(
                     dtype,
                     length,
                     validity,
-                    node.ElementsIndex,
+                    ReferenceEquals(source, destination)
+                        ? node.ElementsIndex
+                        : destination.CopyFrom(source, node.ElementsIndex),
                     node.Offsets.Slice(start * offsetWidth, length * offsetWidth),
                     node.OffsetPType,
                     node.Sizes.Slice(start * sizeWidth, length * sizeWidth),
@@ -146,18 +167,18 @@ internal static class CanonicalSlice
                 uint size = node.FixedSize;
                 int elementStart = ArrayDecodeContext.CheckedMultiply(start, (int)size, "fixed-size-list slice");
                 int elementCount = ArrayDecodeContext.CheckedMultiply(length, (int)size, "fixed-size-list slice");
-                int elements = Slice(arena, node.ElementsIndex, elementStart, elementCount, depth + 1);
-                return arena.AddFixedSizeList(dtype, length, validity, elements, size);
+                int elements = Slice(source, destination, node.ElementsIndex, elementStart, elementCount, depth + 1);
+                return destination.AddFixedSizeList(dtype, length, validity, elements, size);
             }
 
             default:
                 // Struct: every field is narrowed to the same window.
-                return SliceStruct(arena, nodeIndex, dtype, validity, start, length, depth);
+                return SliceStruct(source, destination, nodeIndex, dtype, validity, start, length, depth);
         }
     }
 
     private static int SliceVarBinView(
-        CanonicalArena arena, in CanonicalNode node, DType dtype, Validity validity, int start, int length)
+        CanonicalArena destination, in CanonicalNode node, DType dtype, Validity validity, int start, int length)
     {
         const int ViewWidth = 16;
 
@@ -173,7 +194,7 @@ internal static class CanonicalSlice
                 buffers[i] = node.GetDataBuffer(i);
             }
 
-            return arena.AddVarBinView(
+            return destination.AddVarBinView(
                 dtype, length, validity, node.Views.Slice(start * ViewWidth, length * ViewWidth), buffers);
         }
         finally
@@ -183,7 +204,8 @@ internal static class CanonicalSlice
     }
 
     private static int SliceStruct(
-        CanonicalArena arena,
+        CanonicalArena source,
+        CanonicalArena destination,
         int nodeIndex,
         DType dtype,
         Validity validity,
@@ -191,7 +213,7 @@ internal static class CanonicalSlice
         int length,
         int depth)
     {
-        int fieldCount = arena.GetNode(nodeIndex).FieldCount;
+        int fieldCount = source.GetNode(nodeIndex).FieldCount;
 
         Span<int> stack = stackalloc int[16];
         Scratch<int> scratch = new Scratch<int>(fieldCount, stack);
@@ -202,11 +224,11 @@ internal static class CanonicalSlice
             {
                 // Re-read the node each iteration: the arena's record array can be reallocated by
                 // the child slices this loop creates, which would invalidate a cached view.
-                int child = arena.GetNode(nodeIndex).GetFieldIndex(i);
-                fields[i] = Slice(arena, child, start, length, depth + 1);
+                int child = source.GetNode(nodeIndex).GetFieldIndex(i);
+                fields[i] = Slice(source, destination, child, start, length, depth + 1);
             }
 
-            return arena.AddStruct(dtype, length, validity, fields);
+            return destination.AddStruct(dtype, length, validity, fields);
         }
         finally
         {
@@ -215,13 +237,18 @@ internal static class CanonicalSlice
     }
 
     private static Validity SliceValidity(
-        CanonicalArena arena, Validity validity, int start, int length, int depth)
+        CanonicalArena source,
+        CanonicalArena destination,
+        Validity validity,
+        int start,
+        int length,
+        int depth)
     {
         if (validity.Kind != ValidityKind.Bitmap)
         {
             return validity;
         }
 
-        return Validity.Bitmap(Slice(arena, validity.CanonicalNodeIndex, start, length, depth + 1));
+        return Validity.Bitmap(Slice(source, destination, validity.CanonicalNodeIndex, start, length, depth + 1));
     }
 }

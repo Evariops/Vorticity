@@ -5,6 +5,7 @@
 // ResetBatch() releases segments BEFORE resetting the arenas. The other order would let a decoder
 // that ran during the reset read freed memory.
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -243,64 +244,134 @@ public sealed class ScanContext : IDisposable
         return previous;
     }
 
+    /// <summary>One retained chunk: the arena that owns it, the node, and when it was last used.</summary>
+    private sealed class RetainedChunk
+    {
+        internal required CanonicalArena Arena { get; init; }
+
+        internal uint SegmentId;
+
+        internal int NodeIndex;
+
+        /// <summary>The batch number that last asked for this entry.</summary>
+        internal long LastTouched;
+    }
+
     /// <summary>
-    /// Holds ONE decoded flat node across the batches carved out of it. Never reset by
+    /// Decoded chunks held across the batches carved out of them. Never cleared by
     /// <see cref="ResetBatch"/>; that is the whole point.
     /// </summary>
-    private CanonicalArena? _retained;
+    /// <remarks>
+    /// LAZY, and the ratchets are why. A file whose chunk is its batch never retains anything, which
+    /// is every conformance fixture and everything this library writes at the default edition. Two
+    /// eagerly-constructed collections cost 88 bytes on every one of those scans -
+    /// <c>PathAllocationTests</c> turned red by 56 bytes over its tightest ceiling - so the common
+    /// path allocates nothing for a feature it does not use.
+    /// </remarks>
+    private List<RetainedChunk>? _retained;
 
-    /// <summary>The segment id <see cref="_retained"/> holds, when <see cref="_retainedIndex"/> is set.</summary>
-    private uint _retainedSegment;
+    /// <summary>Arenas whose entry was evicted, kept to be refilled rather than reallocated.</summary>
+    private Stack<CanonicalArena>? _spareArenas;
 
-    /// <summary>The retained node's index in <see cref="_retained"/>, or -1.</summary>
-    private int _retainedIndex = -1;
+    /// <summary>Counts batches, so an entry can say whether the CURRENT batch has used it.</summary>
+    private long _batchNumber;
 
-    /// <summary>The arena holding the retained node.</summary>
-    internal CanonicalArena Retained => _retained ??= new CanonicalArena();
-
-    /// <summary>The retained decode for <paramref name="segmentId"/>, if it is the one held.</summary>
+    /// <summary>The retained decode for <paramref name="segmentId"/>, if one is held.</summary>
     /// <param name="segmentId">The flat layout's segment, which identifies it within the file.</param>
-    /// <param name="nodeIndex">The node's index in <see cref="Retained"/>.</param>
-    /// <returns><see langword="true"/> when this segment is the one retained.</returns>
-    internal bool TryGetRetained(uint segmentId, out int nodeIndex)
+    /// <param name="arena">The arena holding it. The caller may borrow from this until eviction.</param>
+    /// <param name="nodeIndex">The node's index in <paramref name="arena"/>.</param>
+    /// <returns><see langword="true"/> when this segment is retained.</returns>
+    internal bool TryGetRetained(uint segmentId, out CanonicalArena arena, out int nodeIndex)
     {
-        if (_retainedIndex >= 0 && _retainedSegment == segmentId)
+        if (_retained is null)
         {
-            nodeIndex = _retainedIndex;
-            return true;
+            arena = null!;
+            nodeIndex = -1;
+            return false;
         }
 
+        foreach (RetainedChunk entry in _retained)
+        {
+            if (entry.SegmentId == segmentId)
+            {
+                // Touching it is what makes it un-evictable for the rest of this batch, so it has to
+                // happen on the hit path and not only when the entry is created.
+                entry.LastTouched = _batchNumber;
+                arena = entry.Arena;
+                nodeIndex = entry.NodeIndex;
+                return true;
+            }
+        }
+
+        arena = null!;
         nodeIndex = -1;
         return false;
     }
 
-    /// <summary>
-    /// Copies a decoded node into the retained arena, evicting whatever was there.
-    /// </summary>
+    /// <summary>Retains a decoded node, evicting entries no live batch can be borrowing.</summary>
     /// <param name="segmentId">The segment the node decodes.</param>
     /// <param name="source">The arena holding it, normally the batch's.</param>
     /// <param name="nodeIndex">The node.</param>
-    /// <returns>Its index in <see cref="Retained"/>.</returns>
+    /// <param name="arena">The arena the copy now lives in.</param>
+    /// <returns>Its index in <paramref name="arena"/>.</returns>
     /// <remarks>
-    /// ONE ENTRY, AND THAT IS A DESIGN CHOICE RATHER THAN A SIMPLIFICATION. A scan walks its splits
-    /// in order, so every batch carved out of a chunk asks for the same segment in a row and the
-    /// next chunk never comes back. A larger cache would hold chunks nothing will ask for again and
-    /// turn a bounded cost into a growing one, which `LiveMemoryTests` exists to catch.
-    ///
-    /// The peak cost is therefore one chunk's canonical form -- 8 MB for a million `i64` rows --
-    /// held only while its own batches are being emitted.
+    /// <para>
+    /// THE EVICTION RULE IS A PROOF, NOT A HEURISTIC, and the first version of this cache had no
+    /// such rule and was wrong for it. Callers BORROW a retained arena: a batch's records hold views
+    /// onto its memory rather than copies. So an entry may be freed only when no live batch can be
+    /// looking at it, and there is exactly one fact that establishes that - a batch is invalid once
+    /// the next <c>MoveNextAsync</c> begins, so an entry whose <see cref="RetainedChunk.LastTouched"/>
+    /// is below the current batch number is borrowed by nobody.
+    /// </para>
+    /// <para>
+    /// THE FIRST VERSION HELD ONE ENTRY AND SHARED ONE ARENA, and both were wrong for the same
+    /// reason: <b>a batch reads several columns, so several flat nodes, each with its own segment</b>.
+    /// One entry meant column B evicted column A mid-batch; one arena meant evicting anything freed
+    /// everything, since <see cref="CanonicalArena.Reset"/> returns every block it owns. That cost 25
+    /// tests and is why each entry owns its arena.
+    /// </para>
+    /// <para>
+    /// The working set is therefore one chunk per column, which the schema bounds. Evicted arenas are
+    /// kept and refilled rather than reallocated.
+    /// </para>
     /// </remarks>
-    internal int Retain(uint segmentId, CanonicalArena source, int nodeIndex)
+    internal int Retain(uint segmentId, CanonicalArena source, int nodeIndex, out CanonicalArena arena)
     {
-        CanonicalArena retained = Retained;
-        retained.Reset();
-        _retainedIndex = retained.CopyFrom(source, nodeIndex);
-        _retainedSegment = segmentId;
-        return _retainedIndex;
+        _retained ??= [];
+        for (int i = _retained.Count - 1; i >= 0; i--)
+        {
+            RetainedChunk entry = _retained[i];
+            if (entry.LastTouched >= _batchNumber)
+            {
+                continue;
+            }
+
+            entry.Arena.Reset();
+            (_spareArenas ??= new Stack<CanonicalArena>()).Push(entry.Arena);
+            _retained.RemoveAt(i);
+        }
+
+        CanonicalArena fresh = _spareArenas is { Count: > 0 }
+            ? _spareArenas.Pop()
+            : new CanonicalArena();
+        int index = fresh.CopyFrom(source, nodeIndex);
+        _retained.Add(new RetainedChunk
+        {
+            Arena = fresh,
+            SegmentId = segmentId,
+            NodeIndex = index,
+            LastTouched = _batchNumber,
+        });
+
+        arena = fresh;
+        return index;
     }
 
     public void ResetBatch()
     {
+        // Before anything else: the batch that was borrowing retained arenas is now dead, which is
+        // what makes the eviction in `Retain` safe.
+        _batchNumber++;
         _selection = null;
         _selectionCount = 0;
         Segments.Release();
@@ -320,8 +391,21 @@ public sealed class ScanContext : IDisposable
 
         _disposed = true;
         Canonical.Reset();
-        _retained?.Reset();
-        _retainedIndex = -1;
+        if (_retained is not null)
+        {
+            foreach (RetainedChunk entry in _retained)
+            {
+                entry.Arena.Reset();
+            }
+
+            _retained.Clear();
+        }
+
+        while (_spareArenas is { Count: > 0 })
+        {
+            _spareArenas.Pop().Reset();
+        }
+
         Segments.Dispose();
     }
 

@@ -103,20 +103,23 @@ public sealed class FlatLayoutReader : LayoutReader
         // decoded 123 million values to deliver one million. Measured at 3.4 SECONDS for a 1M-row
         // FSST column against 26.5 ms with the subdivision removed.
         //
-        // The retained node lives in an arena `ResetBatch` does not touch, and the window is taken
-        // in two steps that are cheap for different reasons: `SliceIn` appends a record whose
-        // buffers are narrowed VIEWS and copies nothing, then `CopyFrom` materializes just that
-        // window into the batch's arena. Per batch that is O(batch rows), so the scan is linear.
+        // The retained node lives in an arena `ResetBatch` does not touch, and the window costs
+        // NOTHING BUT RECORDS: `SliceAcross` appends to the batch's arena records whose buffers are
+        // narrowed VIEWS onto the retained storage. No bytes move however many rows the window spans,
+        // and a VarBinView's data buffers travel as views rather than being rebuilt per batch, which
+        // is what the string encodings needed.
+        //
+        // The batch therefore BORROWS the retained arena. `ScanContext.Retain` owes the lifetime
+        // argument and makes it: an entry touched during the current batch is never evicted.
         uint segmentId = node.Segments[0];
-        if (!context.TryGetRetained(segmentId, out int retained))
+        if (!context.TryGetRetained(segmentId, out CanonicalArena held, out int retained))
         {
             System.Threading.Interlocked.Add(ref ValuesDecoded, total);
             int decoded = context.Decode.DecodeRoot(in root, node.DType, total);
-            retained = context.Retain(segmentId, context.Canonical, decoded);
+            retained = context.Retain(segmentId, context.Canonical, decoded, out held);
         }
 
-        int window = CanonicalSlice.SliceIn(context.Retained, retained, (int)rows.Start, length);
-        int sliced = context.Canonical.CopyFrom(context.Retained, window);
+        int sliced = CanonicalSlice.SliceAcross(held, context.Canonical, retained, (int)rows.Start, length);
         return MaskProjection.Apply(context.Decode, sliced, in fields);
     }
 }
