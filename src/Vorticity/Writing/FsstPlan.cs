@@ -5,6 +5,7 @@
 // well a trained table covers this particular data - so the work is done once and the bytes are
 // kept, rather than done twice.
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using Vorticity.Arrays;
 using Vorticity.Types;
@@ -92,62 +93,92 @@ internal sealed class FsstPlan
             return null;
         }
 
-        byte[] heap = new byte[Math.Max((int)plain, 1)];
-        List<ReadOnlyMemory<byte>> values = new List<ReadOnlyMemory<byte>>(rows);
-        int at = 0;
-        for (int i = 0; i < rows; i++)
+        // EVERYTHING TRANSIENT IS RENTED, because most of this work is thrown away: FSST is PRICED
+        // against zstd and against the plain form, and on a column it loses the heap, the row
+        // table and the code stream are all garbage the moment `null` is returned. On a megabyte
+        // text column each of those is a large-object allocation, and together they were most of
+        // why the write profile spent 14% of itself inside the pool trimmer that a Gen2 collection
+        // runs.
+        //
+        // A row is two ints into the heap rather than a `ReadOnlyMemory<byte>`, which also removes
+        // the per-row memory struct and the `List` that held them.
+        int heapBytes = Math.Max((int)plain, 1);
+        byte[] heap = ArrayPool<byte>.Shared.Rent(heapBytes);
+        int[] starts = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        int[] lengths = new int[rows];
+        byte[]? codes = null;
+        try
         {
-            // A null row contributes nothing to the corpus AND nothing to the stream: its bytes
-            // are unspecified, and encoding them would pay for values no reader will ever ask for.
-            if (!IsValid(arena, node, i))
+            int at = 0;
+            for (int i = 0; i < rows; i++)
             {
-                values.Add(ReadOnlyMemory<byte>.Empty);
-                continue;
+                // A null row contributes nothing to the corpus AND nothing to the stream: its
+                // bytes are unspecified, and encoding them would pay for values no reader will
+                // ever ask for. It still occupies a row slot, of length zero.
+                starts[i] = at;
+                if (!IsValid(arena, node, i))
+                {
+                    lengths[i] = 0;
+                    continue;
+                }
+
+                ReadOnlySpan<byte> value = ValueOf(node, i);
+                value.CopyTo(heap.AsSpan(at));
+                lengths[i] = value.Length;
+                at += value.Length;
             }
 
-            ReadOnlySpan<byte> value = ValueOf(node, i);
-            value.CopyTo(heap.AsSpan(at));
-            values.Add(new ReadOnlyMemory<byte>(heap, at, value.Length));
-            at += value.Length;
-        }
-
-        FsstSymbols? table = FsstSymbols.Train(values);
-        if (table is null)
-        {
-            return null;
-        }
-
-        // An escape costs two bytes, so the worst case is twice the input; sized once for the whole
-        // column rather than per row.
-        byte[] codes = new byte[Math.Max(plain * 2, 1)];
-        int[] offsets = new int[rows + 1];
-        int[] lengths = new int[rows];
-        int written = 0;
-
-        for (int i = 0; i < rows; i++)
-        {
-            offsets[i] = written;
-            ReadOnlySpan<byte> value = values[i].Span;
-            lengths[i] = value.Length;
-            written += table.Compress(value, codes.AsSpan(written));
-
-            // The code stream alone is already a lower bound on EncodedSize, so a stream past the
-            // ceiling is a decided loss whatever the remaining rows do.
-            if (written > sizeCeiling)
+            FsstSymbols? table = FsstSymbols.Train(
+                heap.AsSpan(0, heapBytes), starts.AsSpan(0, rows), lengths);
+            if (table is null)
             {
                 return null;
             }
+
+            // An escape costs two bytes, so the worst case is twice the input; sized once for the
+            // whole column rather than per row.
+            codes = ArrayPool<byte>.Shared.Rent((int)Math.Max(plain * 2, 1));
+            int[] offsets = new int[rows + 1];
+            int written = 0;
+
+            for (int i = 0; i < rows; i++)
+            {
+                offsets[i] = written;
+                written += table.Compress(
+                    heap.AsSpan(starts[i], lengths[i]), codes.AsSpan(written));
+
+                // The code stream alone is already a lower bound on EncodedSize, so a stream past
+                // the ceiling is a decided loss whatever the remaining rows do.
+                if (written > sizeCeiling)
+                {
+                    return null;
+                }
+            }
+
+            offsets[rows] = written;
+
+            long encoded = ((long)table.Count * (FsstSymbols.MaxSymbolLength + 1)) + written
+                + ((long)rows * Width(MaxOf(lengths)))
+                + ((long)(rows + 1) * Width(written));
+
+            // THE KEPT ARRAY IS EXACT. The rental is sized for the worst case -- twice the column
+            // -- and a stream that compressed at all uses a fraction of it, so the plan copies out
+            // what is live instead of carrying the rest into the writer. `ArrayBlobWriter` used to
+            // make that copy itself, one line later.
+            return encoded <= sizeCeiling
+                ? new FsstPlan(table, codes.AsSpan(0, written).ToArray(), written, offsets, lengths, encoded)
+                : null;
         }
+        finally
+        {
+            if (codes is not null)
+            {
+                ArrayPool<byte>.Shared.Return(codes);
+            }
 
-        offsets[rows] = written;
-
-        long encoded = ((long)table.Count * (FsstSymbols.MaxSymbolLength + 1)) + written
-            + ((long)rows * Width(MaxOf(lengths)))
-            + ((long)(rows + 1) * Width(written));
-
-        return encoded <= sizeCeiling
-            ? new FsstPlan(table, codes, written, offsets, lengths, encoded)
-            : null;
+            ArrayPool<int>.Shared.Return(starts);
+            ArrayPool<byte>.Shared.Return(heap);
+        }
     }
 
     /// <summary>The narrowest unsigned physical type that holds <paramref name="maximum"/>.</summary>

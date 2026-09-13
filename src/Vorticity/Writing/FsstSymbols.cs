@@ -26,6 +26,7 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 
@@ -62,7 +63,7 @@ internal sealed class FsstSymbols
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <c>Count2</c> is 512 x 512 ints - ONE MEGABYTE - and <see cref="Train"/> runs ONCE PER
+    /// <c>Count2</c> is 512 x 512 ints - ONE MEGABYTE - and <see cref="Train(System.ReadOnlySpan{byte},System.ReadOnlySpan{int},System.ReadOnlySpan{int})"/> runs ONCE PER
     /// COLUMN-CHUNK, so writing a 65 536-row file allocated and dropped about 64 MB of counting
     /// table. They are cleared at the top of every generation regardless, so reusing them cannot
     /// change a single symbol: the first <c>Array.Clear</c> of a freshly allocated array was always
@@ -232,26 +233,96 @@ internal sealed class FsstSymbols
     /// <returns>The trained table, holding at least one symbol, or null when nothing was learnable.</returns>
     internal static FsstSymbols? Train(IReadOnlyList<ReadOnlyMemory<byte>> rows)
     {
-        FsstSymbols table = new FsstSymbols();
-        List<ReadOnlyMemory<byte>> sample = MakeSample(rows, out bool sampled);
-        if (sample.Count == 0)
+        ArgumentNullException.ThrowIfNull(rows);
+
+        // THE ADAPTER, not the entry point. `FsstPlan` already holds its column as one contiguous
+        // heap and calls the span form directly; this shape exists for callers that hold a list of
+        // separate buffers, which in this repository is the tests.
+        long total = 0;
+        for (int i = 0; i < rows.Count; i++)
         {
-            return null;
+            total += rows[i].Length;
         }
 
-        TrainingTables tables = TrainingTables.Take();
+        byte[] heap = new byte[Math.Max(total, 1)];
+        int[] starts = new int[Math.Max(rows.Count, 1)];
+        int[] lengths = new int[Math.Max(rows.Count, 1)];
+        int at = 0;
+        for (int i = 0; i < rows.Count; i++)
+        {
+            ReadOnlySpan<byte> value = rows[i].Span;
+            value.CopyTo(heap.AsSpan(at));
+            starts[i] = at;
+            lengths[i] = value.Length;
+            at += value.Length;
+        }
+
+        return Train(heap, starts.AsSpan(0, rows.Count), lengths.AsSpan(0, rows.Count));
+    }
+
+    /// <summary>
+    /// Trains a table on rows held as slices of ONE contiguous heap.
+    /// </summary>
+    /// <param name="heap">The concatenated row bytes.</param>
+    /// <param name="starts">Each row's offset into <paramref name="heap"/>.</param>
+    /// <param name="lengths">Each row's length; zero for a row that contributes nothing.</param>
+    /// <returns>The trained table, or null when there is nothing to train on.</returns>
+    /// <remarks>
+    /// A ROW IS TWO INTS, NOT A `ReadOnlyMemory&lt;byte&gt;`. The list form allocated one 16-byte
+    /// memory per row and a `List` to hold them -- on a 65 536-row column that is a megabyte on the
+    /// large object heap, built to be read once and dropped, and it is a large part of why the
+    /// write path spent 14% of its profile in the pool trimmer the Gen2 collector runs.
+    /// </remarks>
+    internal static FsstSymbols? Train(
+        ReadOnlySpan<byte> heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths)
+    {
+        FsstSymbols table = new FsstSymbols();
+
+        // At most `SampleTarget` entries: the unsampled branch takes rows whose lengths sum below
+        // it, and the sampled branch draws at least one byte per entry until it reaches it.
+        Line[] rented = ArrayPool<Line>.Shared.Rent(SampleTarget);
         try
         {
-            return TrainCore(table, sample, sampled, tables);
+            Span<Line> sample = rented.AsSpan(0, SampleTarget);
+            MakeSample(starts, lengths, sample, out int drawn, out bool sampled);
+            if (drawn == 0)
+            {
+                return null;
+            }
+
+            TrainingTables tables = TrainingTables.Take();
+            try
+            {
+                return TrainCore(table, heap, sample[..drawn], sampled, tables);
+            }
+            finally
+            {
+                TrainingTables.Give(tables);
+            }
         }
         finally
         {
-            TrainingTables.Give(tables);
+            ArrayPool<Line>.Shared.Return(rented);
         }
     }
 
+    /// <summary>One row, or one drawn run of one row, as a slice of the shared heap.</summary>
+    private readonly struct Line
+    {
+        internal Line(int start, int length)
+        {
+            Start = start;
+            Length = length;
+        }
+
+        internal int Start { get; }
+
+        internal int Length { get; }
+    }
+
     private static FsstSymbols? TrainCore(
-        FsstSymbols table, List<ReadOnlyMemory<byte>> sample, bool sampled, TrainingTables tables)
+        FsstSymbols table, ReadOnlySpan<byte> heap, ReadOnlySpan<Line> sample, bool sampled,
+        TrainingTables tables)
     {
         int[] count1 = tables.Count1;
         int[] count2 = tables.Count2;
@@ -264,7 +335,7 @@ internal sealed class FsstSymbols
             Array.Clear(count1);
             ClearPairCounts(count2, pairBits);
 
-            for (int i = 0; i < sample.Count; i++)
+            for (int i = 0; i < sample.Length; i++)
             {
                 // The sample fraction is a HASH of the line index, not a prefix: taking the first
                 // k lines would train generation after generation on the same head of the data.
@@ -273,7 +344,8 @@ internal sealed class FsstSymbols
                     continue;
                 }
 
-                table.CountLine(sample[i].Span, count1, count2, pairBits);
+                Line line = sample[i];
+                table.CountLine(heap.Slice(line.Start, line.Length), count1, count2, pairBits);
             }
 
             table.Optimize(tables, count1, count2, pairBits, generation, prune: generation >= 128 && !sampled);
@@ -328,61 +400,63 @@ internal sealed class FsstSymbols
     /// sample is what the whole algorithm sees: a sampler that took prefixes would train on
     /// headers, and one that took whole rows would let a single long row dominate.
     /// </remarks>
-    private static List<ReadOnlyMemory<byte>> MakeSample(
-        IReadOnlyList<ReadOnlyMemory<byte>> rows, out bool sampled)
+    private static void MakeSample(
+        ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, Span<Line> into, out int drawn,
+        out bool sampled)
     {
         long total = 0;
         int nonEmpty = 0;
-        for (int i = 0; i < rows.Count; i++)
+        int rows = lengths.Length;
+        for (int i = 0; i < rows; i++)
         {
-            total += rows[i].Length;
-            if (rows[i].Length > 0)
+            total += lengths[i];
+            if (lengths[i] > 0)
             {
                 nonEmpty++;
             }
         }
 
-        List<ReadOnlyMemory<byte>> sample = [];
+        drawn = 0;
         if (nonEmpty == 0)
         {
             sampled = false;
-            return sample;
+            return;
         }
 
         if (total < SampleTarget)
         {
             sampled = false;
-            for (int i = 0; i < rows.Count; i++)
+            for (int i = 0; i < rows; i++)
             {
-                if (rows[i].Length > 0)
+                if (lengths[i] > 0)
                 {
-                    sample.Add(rows[i]);
+                    into[drawn++] = new Line(starts[i], lengths[i]);
                 }
             }
 
-            return sample;
+            return;
         }
 
         sampled = true;
         ulong random = Hash(4637947);
-        long drawn = 0;
-        while (drawn < SampleTarget)
+        long bytes = 0;
+        while (bytes < SampleTarget)
         {
             random = Hash(random);
-            int start = (int)(random % (ulong)rows.Count);
+            int start = (int)(random % (ulong)rows);
 
             // The first non-empty row from `start`, wrapping. Without the wrap a corpus whose
             // tail is empty would draw nothing and loop forever.
             int found = -1;
-            for (int offset = 0; offset < rows.Count; offset++)
+            for (int offset = 0; offset < rows; offset++)
             {
                 int candidate = start + offset;
-                if (candidate >= rows.Count)
+                if (candidate >= rows)
                 {
-                    candidate -= rows.Count;
+                    candidate -= rows;
                 }
 
-                if (rows[candidate].Length > 0)
+                if (lengths[candidate] > 0)
                 {
                     found = candidate;
                     break;
@@ -394,16 +468,14 @@ internal sealed class FsstSymbols
                 break;
             }
 
-            ReadOnlyMemory<byte> line = rows[found];
-            int chunks = 1 + ((line.Length - 1) / SampleLine);
+            int lineLength = lengths[found];
+            int chunks = 1 + ((lineLength - 1) / SampleLine);
             random = Hash(random);
             int chunk = SampleLine * (int)(random % (ulong)chunks);
-            int length = Math.Min(SampleLine, line.Length - chunk);
-            sample.Add(line.Slice(chunk, length));
-            drawn += length;
+            int length = Math.Min(SampleLine, lineLength - chunk);
+            into[drawn++] = new Line(starts[found] + chunk, length);
+            bytes += length;
         }
-
-        return sample;
     }
 
     /// <summary>The FSST hash, as the C++ implementation's <c>FSST_HASH</c> macro defines it.</summary>

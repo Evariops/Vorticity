@@ -69,12 +69,27 @@ public sealed class WriteAllocationTests
     /// </remarks>
     private static readonly (string Id, long Ceiling)[] Files =
     [
-        ("containers/zoned_many_zones_nulls", 12_100_000),
+        ("containers/zoned_many_zones_nulls", 7_900_000),
         ("distributions/high_cardinality_i64_r8193", 470_000),
-        ("encodings/fsst", 1_155_000),
-        ("encodings/onpair", 500_000),
-        ("types/utf8_nullable_r1025", 495_000),
+        ("encodings/fsst", 310_000),
+        ("encodings/onpair", 370_000),
+        ("types/utf8_nullable_r1025", 305_000),
     ];
+
+    // FOUR OF THESE FIVE CAME DOWN AGAIN WHEN FSST STOPPED ALLOCATING WHAT IT THROWS AWAY.
+    // Pricing FSST means training a table and compressing the whole column, and on a column it
+    // loses -- which is the common case, because it is priced against zstd and against the plain
+    // form -- the heap, the row table and the code stream are all garbage the moment it returns
+    // null. Rented instead of allocated, with a row as two ints rather than a
+    // `ReadOnlyMemory<byte>` in a `List`:
+    //
+    //     containers/zoned_many_zones_nulls   12 061 328 B -> 7 866 272 B   -35%
+    //     encodings/fsst                       1 148 096 B ->   303 624 B   -74%
+    //     types/utf8_nullable_r1025              490 944 B ->   298 624 B   -39%
+    //     encodings/onpair                       495 408 B ->   365 392 B   -26%
+    //
+    // The corpus still rewrites to 9 942 348 bytes, unchanged to the byte: the sampler draws the
+    // same lines and the trainer reaches the same tables.
 
     // FOUR OF THESE FIVE WENT UP WHEN REPARTITIONING LANDED, and that is a trade rather than a
     // regression, so it is written down rather than rounded over. A writer that buffers rows needs

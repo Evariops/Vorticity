@@ -466,7 +466,10 @@ internal static class ArrayBlobWriter
         int symbolBuffer = buffers.Count - 1;
         buffers.Add(new PendingBuffer(symbolLengths, 0));
         int lengthBuffer = buffers.Count - 1;
-        buffers.Add(new PendingBuffer(plan.Codes.AsSpan(0, plan.CodeLength).ToArray(), 0));
+        // No copy: `FsstPlan` now keeps a code array of exactly `CodeLength` bytes, because the
+        // oversized one it used to carry was a rental it had to let go of anyway. This line was
+        // PERF-AUDIT §4.3's `WriteFsst (:469)`.
+        buffers.Add(new PendingBuffer(plan.Codes, 0));
         int codeBuffer = buffers.Count - 1;
 
         PType lengthsPType = FsstPlan.IndexPType(FsstPlan.MaxOf(plan.Lengths));
