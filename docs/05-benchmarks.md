@@ -120,8 +120,8 @@ So: use this table to decide WHAT to work on, and a microbenchmark to decide whe
 helped. §3's "ns/value on 1M values, isolated" is the measurement that would give honest absolutes,
 and it wants a bigger dataset than the corpus carries.
 
-**The clearest demonstration of why is `fastlanes.bitpacked`.** Its unpack kernel became 3.6× faster
-on i64 and 7.0× on i32 (measured below), and its row in this table moved from 1.26× to 1.18×. Both
+**The clearest demonstration of why is `fastlanes.bitpacked`.** Its unpack kernel became 3.9× faster
+on i64 and 8.7× on i32 (measured below), and its row in this table moved from 1.26× to 1.18×. Both
 numbers are correct. Only about 7 µs of that 42 is the kernel; the other 35 is the fixed cost, which
 no kernel work can touch. The full-scan row, which decodes 64 batches rather than one 4096-row file,
 moved 1.403 → 1.294 ms from the same change.
@@ -190,13 +190,16 @@ positions written are contiguous — `index(row, lane) = base(row) + lane` at ev
 and there is no gather or scatter anywhere in it.
 
 `FastLanesKernelBenchmarks`, both shapes in one process, 64 blocks per operation, Apple M4 Pro
-(NEON, so the `Vector128` path; the 256 and 512 paths exist and are exercised by CI's x64 legs):
+(NEON, so the `Vector128` path; the 256 and 512 paths exist and are exercised by CI's x64 legs).
+The vector arms call `UnpackBlocks`, the entry point the library uses for a run of blocks; they
+called the per-block one until 2026-09-14, which cost 25% and read as a regression that was not one
+(BENCH-AUDIT.md §4.4):
 
 | bits/value | i64 scalar | i64 vector | i32 scalar | i32 vector |
 |---|---|---|---|---|
-| 10 | 70.4 µs | **18.8 µs (3.7×)** | 76.3 µs | **10.7 µs (7.1×)** |
-| 17 | 75.4 µs | **21.4 µs (3.5×)** | 86.0 µs | **12.3 µs (7.0×)** |
-| 33 | 86.5 µs | **23.8 µs (3.6×)** | 104.6 µs | **15.6 µs (6.7×)** |
+| 10 | 71.3 µs | **17.7 µs (4.0×)** | 77.5 µs | **9.4 µs (8.2×)** |
+| 17 | 76.0 µs | **19.6 µs (3.9×)** | 87.2 µs | **10.0 µs (8.7×)** |
+| 33 | 87.0 µs | **21.7 µs (4.0×)** | 105.1 µs | **11.7 µs (9.0×)** |
 
 Two lanes per `Vector128` at i64 and four at i32, so the ceiling from width alone would be 2× and
 4×. Both beat it, because interchanging the loops also hoists the per-row arithmetic out of the lane

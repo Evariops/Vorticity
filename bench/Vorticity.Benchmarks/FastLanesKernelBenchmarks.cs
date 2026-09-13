@@ -6,6 +6,16 @@
 // it - so are the output positions, because `index(row, lane) = base(row) + lane` at every element
 // width. No gather, no scatter, just loads, shifts, masks and stores.
 //
+// THE VECTOR ARMS CALL `UnpackBlocks`, WHICH IS WHAT SHIPS, and that is the whole difference
+// between a number and a number about nothing. They called `UnpackBlock` -- the single-block
+// entry point -- until 2026-09-14, and `71b18f0` moved the library off it: a node's blocks all
+// share one bit width, so the per-row shape table is built once for the run instead of once per
+// block. The singular form still exists for the partial first and last block of a window, and it
+// pays that table per call: measured here on the same 64 blocks into the same output, 26.53 us
+// per block against 19.92 us for the run, -25%. So the arm read +20% against BASELINE's 21.6 us
+// while the shipped path had got FASTER, and the bisect that cost (BENCH-AUDIT.md §4.4) found a
+// benchmark, not a regression. An arm that does not call what ships measures nothing anyone runs.
+//
 // MEASURED AT THE KERNEL AND NOT END TO END, for the reason docs/05-benchmarks.md §1b now
 // states outright: an end-to-end run puts tens of microseconds of open-and-walk in front of the
 // kernel and leaves the answer inside the run-to-run spread. That mistake has already been made
@@ -53,7 +63,7 @@ public class FastLanesKernelBenchmarks
 
         _packed64 = new ulong[Blocks * 16 * BitWidth];
         random.NextBytes(MemoryMarshal.AsBytes(_packed64.AsSpan()));
-        _output64 = new ulong[FastLanes.BlockSize];
+        _output64 = new ulong[Blocks * FastLanes.BlockSize];
 
         // 32-bit elements as well, because `lanes` is 32 rather than 16 there: the inner loop runs
         // twice as many vector steps per row, and a per-row cost that looked free at 64 bits would
@@ -61,7 +71,7 @@ public class FastLanesKernelBenchmarks
         int width32 = Math.Min(BitWidth, 31);
         _packed32 = new uint[Blocks * 32 * width32];
         random.NextBytes(MemoryMarshal.AsBytes(_packed32.AsSpan()));
-        _output32 = new uint[FastLanes.BlockSize];
+        _output32 = new uint[Blocks * FastLanes.BlockSize];
     }
 
     [Benchmark(Baseline = true, Description = "i64 scalar")]
@@ -73,8 +83,13 @@ public class FastLanesKernelBenchmarks
         for (int block = 0; block < Blocks; block++)
         {
             FastLanes.UnpackBlockScalar<ulong>(
-                _packed64.AsSpan(block * words, words), BitWidth, _output64, index, 64, 16);
-            sink += _output64[0];
+                _packed64.AsSpan(block * words, words),
+                BitWidth,
+                _output64.AsSpan(block * FastLanes.BlockSize, FastLanes.BlockSize),
+                index,
+                64,
+                16);
+            sink += _output64[block * FastLanes.BlockSize];
         }
 
         return sink;
@@ -83,16 +98,8 @@ public class FastLanesKernelBenchmarks
     [Benchmark(Description = "i64 vector")]
     public ulong Vector64()
     {
-        int words = 16 * BitWidth;
-        ulong sink = 0;
-        for (int block = 0; block < Blocks; block++)
-        {
-            FastLanes.UnpackBlock<ulong>(
-                _packed64.AsSpan(block * words, words), BitWidth, _output64);
-            sink += _output64[0];
-        }
-
-        return sink;
+        FastLanes.UnpackBlocks<ulong>(_packed64, BitWidth, _output64, Blocks);
+        return _output64[0];
     }
 
     [Benchmark(Description = "i32 scalar")]
@@ -105,8 +112,13 @@ public class FastLanesKernelBenchmarks
         for (int block = 0; block < Blocks; block++)
         {
             FastLanes.UnpackBlockScalar<uint>(
-                _packed32.AsSpan(block * words, words), width, _output32, index, 32, 32);
-            sink += _output32[0];
+                _packed32.AsSpan(block * words, words),
+                width,
+                _output32.AsSpan(block * FastLanes.BlockSize, FastLanes.BlockSize),
+                index,
+                32,
+                32);
+            sink += _output32[block * FastLanes.BlockSize];
         }
 
         return sink;
@@ -116,14 +128,7 @@ public class FastLanesKernelBenchmarks
     public uint Vector32()
     {
         int width = Math.Min(BitWidth, 31);
-        int words = 32 * width;
-        uint sink = 0;
-        for (int block = 0; block < Blocks; block++)
-        {
-            FastLanes.UnpackBlock<uint>(_packed32.AsSpan(block * words, words), width, _output32);
-            sink += _output32[0];
-        }
-
-        return sink;
+        FastLanes.UnpackBlocks<uint>(_packed32, width, _output32, Blocks);
+        return _output32[0];
     }
 }
