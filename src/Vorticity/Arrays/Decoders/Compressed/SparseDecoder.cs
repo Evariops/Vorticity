@@ -85,8 +85,20 @@ public sealed class SparseDecoder : ArrayDecoder
             context.Canonical, in values, hasFillBuffer, fillBuffer);
         try
         {
-            ValueWriter writer = ValueWriter.Create(
-                context, in values, length, hasFillBuffer ? 1 : 0, Id);
+            // UNINITIALIZED WHEN THERE IS A FILL, because a fill covers every row before a single
+            // patch is applied: `WriteFill` writes the whole buffer for a Primitive, and row by row
+            // for a Decimal or a VarBinView, and now for a Bool too. A NULL fill writes nothing at
+            // all -- the null rows ARE the zeros -- so that case keeps them.
+            //
+            // Bool needs no special case here: `CreateUninitialized` declines for a bitmap on its
+            // own, because a bitmap's last byte holds bits past the row count that nothing writes.
+            //
+            // It was 14% of a scattered-take profile: a zero fill of the whole node, immediately
+            // tiled over.
+            ValueWriter writer = fillIsNull
+                ? ValueWriter.Create(context, in values, length, hasFillBuffer ? 1 : 0, Id)
+                : ValueWriter.CreateUninitialized(
+                    context, in values, length, hasFillBuffer ? 1 : 0, Id);
             ValidityWriter validity = ValidityWriter.Create(context, length, tracked, Id);
 
             if (!fillIsNull)
@@ -158,14 +170,14 @@ public sealed class SparseDecoder : ArrayDecoder
 
 
             case CanonicalKind.Bool:
-                if (fill.AsBool)
-                {
-                    for (int row = 0; row < length; row++)
-                    {
-                        writer.SetBit(row);
-                    }
-                }
 
+                // BOTH VALUES ARE WRITTEN, not just `true`. Relying on the allocator's zeros for a
+                // `false` fill was correct and invisible: it made the buffer's coverage depend on
+                // the fill's VALUE, which is exactly the property `CreateUninitialized` above has
+                // to be able to reason about. Writing the run either way says what it means, and
+                // costs a vectorized fill instead of `length` read-modify-writes of the same byte
+                // (PERF-AUDIT §4.2).
+                writer.FillBits(0, length, fill.AsBool);
                 return;
 
             case CanonicalKind.Decimal:

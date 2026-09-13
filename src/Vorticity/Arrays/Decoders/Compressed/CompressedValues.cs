@@ -379,6 +379,18 @@ internal ref struct ValueWriter
     /// <param name="row">The destination row.</param>
     public readonly void ClearBit(int row) => _bytes[row >> 3] &= (byte)~(1 << (row & 7));
 
+    /// <summary>Sets or clears a whole RUN of Bool output rows.</summary>
+    /// <param name="row">First destination row.</param>
+    /// <param name="count">How many rows.</param>
+    /// <param name="value">The bit to write across them.</param>
+    /// <remarks>
+    /// The kernel writes the interior bytes whole and masks only the two ends, so a run costs a
+    /// vectorized fill rather than <paramref name="count"/> read-modify-writes of the same byte.
+    /// PERF-AUDIT §4.2 asks for every bit-at-a-time site to arrive here.
+    /// </remarks>
+    public readonly void FillBits(int row, int count, bool value) =>
+        BitmapKernels.FillRange(_bytes, row, count, value);
+
     /// <summary>Publishes the node into the canonical arena.</summary>
     /// <param name="ctx">The decode context.</param>
     /// <param name="dtype">The dtype the node must produce.</param>
