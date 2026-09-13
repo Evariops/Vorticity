@@ -58,6 +58,32 @@ this build cannot read. 43 of them are exactly these components — `vortex.map`
 decision converts almost the whole of that number from *scope* into *work*. That test's header says
 "it is not a work queue"; as of this decision, it is one.
 
+**The effort estimates this table carried were unreliable, and here they are re-derived from the
+reference implementation rather than from memory.** The parity decision does not depend on them — the
+owner's instruction was unconditional — but the ORDER of the work does, and one estimate was simply
+wrong.
+
+| component | files | what it actually is | corrected estimate |
+|---|---|---|---|
+| **`vortex.map`** | 22 | a logical dtype: Map needs a dtype, a canonical kind, a column API and a decoder | large, and the biggest single win |
+| **`vortex.zstd_buffers`** | 4 | **NOT a value codec.** A META-ENCODING: it compresses each top-level buffer of *another* array independently and stores that array's encoding id and metadata so it can be rebuilt. Decoding means reconstructing an inner array with substituted buffers | **this table said "trivial once `vortex.zstd` is in place"; that is wrong.** Architectural, not trivial |
+| **`vortex.variant`, `vortex.parquet.variant`** | 8 | a self-describing binary value format | moderate |
+| **`vortex.pco`** | 4 | full pcodec | large |
+| **`fastlanes.delta`** | 4 | per-lane prefix sum over 1024-element FastLanes blocks, on top of bit-packing we already have. Contract: metadata is two protobuf varints (`deltas_len`, `offset < 1024`), children are `bases` and `deltas`, and `index(row, lane) = FL_ORDER[row / 8] * 16 + (row % 8) * 128 + lane` over `row` in `0..T` and `lane` in `0..1024/T` | **small — the cheapest real win** |
+
+**Three of these are pinned by contract §2.8, not merely absent**, with reasons that stay true after
+implementation. `EncodingRegistry.DescribeUnsupported` returns them verbatim:
+
+* `fastlanes.delta` — "in no core edition; a default writer cannot emit it";
+* `vortex.patched` — "in-memory only upstream; never produced by a conformant writer";
+* the `vortex.list` **layout** — "experimental list layout; in no core edition".
+
+Those statements describe *upstream*, and implementing a reader does not falsify any of them. What
+changes is whether this library refuses the file. Both remaining single-file refusals sit here:
+`containers/experimental_patched_array_editions_off` and `containers/experimental_list_layout`, each
+produced only with an upstream environment switch. **The array `vortex.list` is already implemented
+and read** — about fifty corpus files carry one; only the same-named layout is missing.
+
 **What is NOT moved by this decision**, because "parity with Rust" is not the axis that excluded
 them. Each is listed in the table below with its own reason, and each is a separate call:
 
