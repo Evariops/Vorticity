@@ -31,11 +31,10 @@ file format (LF AI & Data, formerly SpiralDB).
 
 | | |
 |---|---|
-| Conformance corpus | 774 of 819 files in scope, **all read back value for value** against the Rust sidecars |
-| The other 45 | need a component deferred upstream to Vortex 1.1, or in no core edition at all |
-| Round trip | all 774 written by Vorticity and read back, 2.38 M rows compared |
-| **Cross-check** | all 774 **read by Vortex Rust**, 2.38 M rows compared scalar by scalar against its own file |
-| Tests | 5026, on a corpus of 819 files |
+| Conformance corpus | **821 of 821** files in scope, all read back value for value against the Rust sidecars — 2.51 M rows, 5.60 M values and validity bits compared |
+| Round trip | all 821 written by Vorticity and read back, 2.51 M rows compared |
+| **Cross-check** | 819 of 820 **read by Vortex Rust**, 2.50 M rows compared scalar by scalar against its own file. The one that disagrees is `experimental_patched_array_editions_off`: we now read `vortex.patched` and write it back, and the 0.86.1 reference does not know that encoding |
+| Tests | 5237, on a corpus of 821 files |
 | Native AOT | `vxdump` publishes with no trim or AOT warnings and opens 818 of 819 corpus files |
 
 Implemented: the file open path, the layout tree, all 30 array encodings of the 1.0 scope, typed

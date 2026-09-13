@@ -1,29 +1,22 @@
 // Which corpus files this build cannot read, and why, as a number that only goes down.
 //
-// The conformance sweep reports "774 of 774 in-scope files read back value for value", which is a
-// true statement about a set this build defines. 821 files ship. The 41 in the gap are the ones
-// whose components are not implemented, and until now the only way to know what they were was to
-// read the scope rule and work it out - so the cost of NOT implementing a decoder was invisible
-// while the success rate stayed at 100%.
+// THE GAP IS CLOSED: 821 of the 821 shipped files are readable, and the ceiling is 0. What is left
+// is the direction this was always worth more for. The conformance sweep reports "821 of 821
+// IN-SCOPE files read back value for value", which is a true statement about a set THIS BUILD
+// DEFINES: dropping a registration moves a file out of scope, the file leaves the denominator, and
+// the sweep still says 100%. This test counts the files that left, so that failure has somewhere to
+// show up.
 //
-// A ratchet on the gap fixes that asymmetry. It goes down when a decoder lands and it goes red if a
-// file the build used to read stops being in scope, which is the failure an in-scope-only sweep
-// cannot see: dropping a registration moves a file out of scope and the sweep still says 100%.
+// It was written when 41 files were in the gap, as a ratchet on a backlog, and the header then
+// carried a table of what blocked them - vortex.map at 22 files, pco at 4, zstd_buffers at 4,
+// fastlanes.delta at 5. All of it is gone. Keeping a ceiling of 8 after the last one landed would
+// mean eight decoders could be dropped without a test going red, which is the opposite of what this
+// file is for: a ratchet that is never lowered defends nothing.
 //
-// WHAT THE NUMBER IS NOT is a backlog. docs/01-scope.md §3 defers most of it BY DECISION, and
-// reading the counts without reading that table gets the priorities exactly backwards - which is
-// what happened when this test was first written:
-//
-//   vortex.map, vortex.variant, vortex.parquet.variant   35 files   "target 1.1"
-//   vortex.pco                                            4 files   "target 1.1"
-//   vortex.zstd_buffers                                   4 files   draft edition, decode once stable
-//   fastlanes.delta                                       5 files   belongs to NO core edition
-//   vortex.list layout, vortex.patched                    2 files   experimental upstream
-//
-// fastlanes.delta's four left the gap when it gained a decoder (49 iterations in), so 39 of the
-// 41 are scope, not debt, and the largest single component - vortex.map at 22 files -
-// is the one the scope document defers most explicitly. The ratchet is worth keeping for the
-// regression direction; it is not a work queue.
+// AT ZERO THE CEILING IS AN EQUALITY, and that is deliberate. Every file the repository ships is
+// readable; a new corpus file carrying a component this build does not decode turns this red, which
+// is a decision to make rather than a number to relax. docs/01-scope.md §3 is where such a decision
+// is written down; raising the ceiling instead would hide it.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -42,9 +35,11 @@ public sealed class CorpusCoverageTests
     /// <remarks>
     /// LOWER THIS when a decoder or layout reader lands, in the same commit. Raising it means a file
     /// that used to be readable no longer is, which is a regression the conformance sweep reports as
-    /// a clean 100% because the file simply leaves its denominator.
+    /// a clean 100% because the file simply leaves its denominator. It is at the floor: every shipped
+    /// file is readable, so the only move left is up, and up is a scope decision (docs/01-scope.md
+    /// §3) rather than a test adjustment.
     /// </remarks>
-    private const int OutOfScopeCeiling = 8;
+    private const int OutOfScopeCeiling = 0;
 
     [Fact]
     public void TheUnreadablePartOfTheCorpusStaysWithinItsRatchet()
@@ -77,14 +72,22 @@ public sealed class CorpusCoverageTests
             .Append(unreadable.Count.ToString(CultureInfo.InvariantCulture))
             .Append(" not (ceiling ")
             .Append(OutOfScopeCeiling.ToString(CultureInfo.InvariantCulture))
-            .Append(")\n  blocked by:\n");
+            .Append(")\n");
 
-        foreach ((string component, int count) in byComponent.OrderByDescending(p => p.Value))
+        if (unreadable.Count == 0)
         {
-            report.Append("    ")
-                .Append(component.PadRight(34))
-                .Append(count.ToString(CultureInfo.InvariantCulture).PadLeft(4))
-                .Append(" files\n");
+            report.Append("  every shipped file is in scope; nothing is blocked.\n");
+        }
+        else
+        {
+            report.Append("  blocked by:\n");
+            foreach ((string component, int count) in byComponent.OrderByDescending(p => p.Value))
+            {
+                report.Append("    ")
+                    .Append(component.PadRight(34))
+                    .Append(count.ToString(CultureInfo.InvariantCulture).PadLeft(4))
+                    .Append(" files\n");
+            }
         }
 
         Console.Out.Write(report.ToString());
