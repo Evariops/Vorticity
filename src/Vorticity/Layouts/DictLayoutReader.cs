@@ -71,16 +71,61 @@ public sealed class DictLayoutReader : LayoutReader
         LayoutNode codesLayout = node.GetChild(1);
 
         int valuesLength = NodeLength(in valuesLayout);
-        (int[]? Buffer, int Count) saved = context.ExchangeSelection(null, 0);
+
+        // THE VALUES CHILD IS DECODED ONCE PER SCAN, NOT ONCE PER BATCH. It is asked for WHOLE
+        // every time -- that is what a dict layout is, one shared set of values behind every row --
+        // so a column split into N batches used to decode all of its values N times to serve them
+        // once each. PERF-AUDIT names it P8.
+        //
+        // The mechanism is the one `FlatLayoutReader` already uses for a chunk larger than a batch,
+        // under a key in the layout-node namespace rather than the segment one. Its eviction rule
+        // carries over unchanged, and it is the load-bearing part: a batch BORROWS the retained
+        // arena, so an entry may be freed only once no live batch can be looking at it.
+        // NOTHING IS RETAINED WHEN THERE IS NO SECOND BATCH TO SERVE, for the reason the retention
+        // cache is lazy in the first place: it costs an arena, and on a file whose rows are one
+        // batch that arena is pure loss. `WriteAllocationTests` priced it at 6.9 kB on
+        // types/utf8_nullable_r1025 -- one batch, one use -- the moment this retained
+        // unconditionally. The test is on the layout's own range, not on the selection: a take
+        // reads every value whatever it selects.
+        bool wholeLayout = rows.Start == 0 && BatchLength(rows) == NodeLength(in node);
+        long valuesKey = ScanContext.LayoutKey(valuesLayout.Index);
         int valuesIndex;
-        try
+
+        if (wholeLayout)
         {
-            valuesIndex = ExecuteChild(
-                in valuesLayout, RowRange.FromLength(0, valuesLength), in fields, context);
+            (int[]? Buffer, int Count) once = context.ExchangeSelection(null, 0);
+            try
+            {
+                valuesIndex = ExecuteChild(
+                    in valuesLayout, RowRange.FromLength(0, valuesLength), in fields, context);
+            }
+            finally
+            {
+                context.ExchangeSelection(once.Buffer, once.Count);
+            }
         }
-        finally
+        else
         {
-            context.ExchangeSelection(saved.Buffer, saved.Count);
+            if (!context.TryGetRetained(valuesKey, out CanonicalArena held, out int retainedValues))
+            {
+                (int[]? Buffer, int Count) saved = context.ExchangeSelection(null, 0);
+                held = context.BeginRetainedDecode();
+                retainedValues = -1;
+                try
+                {
+                    retainedValues = ExecuteChild(
+                        in valuesLayout, RowRange.FromLength(0, valuesLength), in fields, context);
+                }
+                finally
+                {
+                    context.EndRetainedDecode(valuesKey, retainedValues);
+                    context.ExchangeSelection(saved.Buffer, saved.Count);
+                }
+            }
+
+            // Records only: the batch's node points at the retained arena's buffers rather than
+            // owning a copy of them, which is the same borrow `CanonicalSlice.SliceAcross` makes.
+            valuesIndex = context.Canonical.ReferenceFrom(held, retainedValues);
         }
 
         FieldMask all = FieldMask.All;

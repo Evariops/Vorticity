@@ -263,7 +263,7 @@ public sealed class ScanContext : IDisposable
     {
         internal required CanonicalArena Arena { get; init; }
 
-        internal uint SegmentId;
+        internal long Key;
 
         internal int NodeIndex;
 
@@ -290,12 +290,32 @@ public sealed class ScanContext : IDisposable
     /// <summary>Counts batches, so an entry can say whether the CURRENT batch has used it.</summary>
     private long _batchNumber;
 
-    /// <summary>The retained decode for <paramref name="segmentId"/>, if one is held.</summary>
-    /// <param name="segmentId">The flat layout's segment, which identifies it within the file.</param>
+    /// <summary>
+    /// The retention key for a flat layout, which its segment identifies within the file.
+    /// </summary>
+    /// <param name="segmentId">The segment.</param>
+    internal static long SegmentKey(uint segmentId) => segmentId;
+
+    /// <summary>
+    /// The retention key for a whole LAYOUT NODE, which its index identifies within the tree.
+    /// </summary>
+    /// <remarks>
+    /// A second namespace above the segment ids rather than a second cache: the eviction rule is
+    /// the load-bearing part of this mechanism and there should be exactly one of it. A dict
+    /// layout's values child and a list layout's elements child are re-requested WHOLE on every
+    /// batch, so they need the same "decoded once, borrowed by many batches" treatment a chunk
+    /// larger than a batch needs -- but they are named by a position in the layout tree, not by a
+    /// segment.
+    /// </remarks>
+    /// <param name="layoutNodeIndex">The node's index in the layout tree.</param>
+    internal static long LayoutKey(int layoutNodeIndex) => (1L << 32) | (uint)layoutNodeIndex;
+
+    /// <summary>The retained decode for <paramref name="key"/>, if one is held.</summary>
+    /// <param name="key">From <see cref="SegmentKey"/> or <see cref="LayoutKey"/>.</param>
     /// <param name="arena">The arena holding it. The caller may borrow from this until eviction.</param>
     /// <param name="nodeIndex">The node's index in <paramref name="arena"/>.</param>
-    /// <returns><see langword="true"/> when this segment is retained.</returns>
-    internal bool TryGetRetained(uint segmentId, out CanonicalArena arena, out int nodeIndex)
+    /// <returns><see langword="true"/> when this key is retained.</returns>
+    internal bool TryGetRetained(long key, out CanonicalArena arena, out int nodeIndex)
     {
         if (_retained is null)
         {
@@ -306,7 +326,7 @@ public sealed class ScanContext : IDisposable
 
         foreach (RetainedChunk entry in _retained)
         {
-            if (entry.SegmentId == segmentId)
+            if (entry.Key == key)
             {
                 // Touching it is what makes it un-evictable for the rest of this batch, so it has to
                 // happen on the hit path and not only when the entry is created.
@@ -393,14 +413,14 @@ public sealed class ScanContext : IDisposable
     /// Ends the redirect and records the decoded node, or discards the arena when the decode
     /// failed.
     /// </summary>
-    /// <param name="segmentId">The segment the node decodes, or 0 when discarding.</param>
+    /// <param name="key">What the node is retained under, or 0 when discarding.</param>
     /// <param name="nodeIndex">The decoded node's index in the redirected arena, or -1.</param>
     /// <remarks>
     /// Called from a <c>finally</c>, so it has to be correct for the throwing path too: a decode
     /// that raised leaves an arena full of half-built records, which is reset and returned to the
     /// spares rather than published.
     /// </remarks>
-    internal void EndRetainedDecode(uint segmentId, int nodeIndex)
+    internal void EndRetainedDecode(long key, int nodeIndex)
     {
         CanonicalArena? fresh = _redirect;
         _redirect = null;
@@ -420,7 +440,7 @@ public sealed class ScanContext : IDisposable
         _retained.Add(new RetainedChunk
         {
             Arena = fresh,
-            SegmentId = segmentId,
+            Key = key,
             NodeIndex = nodeIndex,
             LastTouched = _batchNumber,
         });

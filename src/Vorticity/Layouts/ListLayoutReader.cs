@@ -90,13 +90,45 @@ public sealed class ListLayoutReader : LayoutReader
         // that. The children are therefore read over the whole window with the selection suppressed,
         // exactly as `vortex.dict` suppresses it for its values child, and the wanted rows are
         // gathered afterwards.
+        // THE ELEMENTS CHILD IS READ WHOLE AND THE OFFSETS CHILD IS WINDOWED, which is why only the
+        // first is worth retaining across batches: a column split into N batches decoded ALL of its
+        // elements N times to serve each of them once. Same mechanism, same key namespace and same
+        // one-batch exemption as `vortex.dict`'s values child. PERF-AUDIT names both as P8.
+        int elementsLength = NodeLength(in elementsLayout);
+        bool wholeLayout = rows.Start == 0 && span == NodeLength(in node);
+        long elementsKey = ScanContext.LayoutKey(elementsLayout.Index);
+
         (int[]? Buffer, int Count) saved = context.ExchangeSelection(null, 0);
         int elementsIndex;
         int offsetsIndex;
         try
         {
-            elementsIndex = ExecuteChild(
-                in elementsLayout, RowRange.FromLength(0, NodeLength(in elementsLayout)), in all, context);
+            if (wholeLayout)
+            {
+                elementsIndex = ExecuteChild(
+                    in elementsLayout, RowRange.FromLength(0, elementsLength), in all, context);
+            }
+            else
+            {
+                if (!context.TryGetRetained(elementsKey, out CanonicalArena held, out int retained))
+                {
+                    held = context.BeginRetainedDecode();
+                    retained = -1;
+                    try
+                    {
+                        retained = ExecuteChild(
+                            in elementsLayout, RowRange.FromLength(0, elementsLength), in all, context);
+                    }
+                    finally
+                    {
+                        context.EndRetainedDecode(elementsKey, retained);
+                    }
+                }
+
+                // Records only; the bytes stay in the retained arena.
+                elementsIndex = context.Canonical.ReferenceFrom(held, retained);
+            }
+
             offsetsIndex = ExecuteChild(in offsetsLayout, OffsetsRange(rows), in all, context);
         }
         finally

@@ -107,8 +107,8 @@ public sealed class FlatLayoutReader : LayoutReader
         //
         // The batch therefore BORROWS the retained arena. `ScanContext.Retain` owes the lifetime
         // argument and makes it: an entry touched during the current batch is never evicted.
-        uint segmentId = node.Segments[0];
-        if (!context.TryGetRetained(segmentId, out CanonicalArena held, out int retained))
+        long key = ScanContext.SegmentKey(node.Segments[0]);
+        if (!context.TryGetRetained(key, out CanonicalArena held, out int retained))
         {
             System.Threading.Interlocked.Add(ref ValuesDecoded, total);
 
@@ -126,7 +126,7 @@ public sealed class FlatLayoutReader : LayoutReader
             }
             finally
             {
-                context.EndRetainedDecode(segmentId, retained);
+                context.EndRetainedDecode(key, retained);
             }
         }
 
