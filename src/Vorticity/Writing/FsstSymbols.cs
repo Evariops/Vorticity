@@ -111,8 +111,26 @@ internal sealed class FsstSymbols
         private int[]? _count1;
         private int[]? _count2;
         private ulong[]? _pairBits;
+        private Line[]? _sample;
         private Dictionary<Candidate, long>? _candidates;
         private List<KeyValuePair<Candidate, long>>? _ranked;
+
+        /// <summary>
+        /// Room for the drawn sample: at most <see cref="SampleTarget"/> lines.
+        /// </summary>
+        /// <remarks>
+        /// It lives HERE rather than in an <see cref="ArrayPool{T}"/> because a pool is per element
+        /// type, and asking for one of <see cref="Line"/> creates a whole new
+        /// <c>SharedArrayPool</c> - with its own Gen2 trimming callback, which showed up at 6.9% of
+        /// a write profile doing nothing but reading memory pressure. This object is already the
+        /// place the trainer keeps what it reuses across columns, and 128 kB next to
+        /// <see cref="Count2"/>'s megabyte is not the line to economize on.
+        ///
+        /// The bound holds either way the sample is built: the unsampled branch takes rows whose
+        /// lengths sum below <see cref="SampleTarget"/>, so there are fewer than that many
+        /// non-empty ones; the sampled branch draws at least one byte per line until it reaches it.
+        /// </remarks>
+        internal Line[] Sample => _sample ??= new Line[SampleTarget];
 
         /// <summary>Per-code occurrence counts; 2 kB, cleared outright each generation.</summary>
         internal int[] Count1 => _count1 ??= new int[CodeMask + 1];
@@ -278,36 +296,23 @@ internal sealed class FsstSymbols
     {
         FsstSymbols table = new FsstSymbols();
 
-        // At most `SampleTarget` entries: the unsampled branch takes rows whose lengths sum below
-        // it, and the sampled branch draws at least one byte per entry until it reaches it.
-        Line[] rented = ArrayPool<Line>.Shared.Rent(SampleTarget);
+        // The sample buffer comes from the reused training set, not from a pool: see
+        // TrainingTables.Sample for why a pool of `Line` is the wrong tool.
+        TrainingTables tables = TrainingTables.Take();
         try
         {
-            Span<Line> sample = rented.AsSpan(0, SampleTarget);
+            Span<Line> sample = tables.Sample;
             MakeSample(starts, lengths, sample, out int drawn, out bool sampled);
-            if (drawn == 0)
-            {
-                return null;
-            }
-
-            TrainingTables tables = TrainingTables.Take();
-            try
-            {
-                return TrainCore(table, heap, sample[..drawn], sampled, tables);
-            }
-            finally
-            {
-                TrainingTables.Give(tables);
-            }
+            return drawn == 0 ? null : TrainCore(table, heap, sample[..drawn], sampled, tables);
         }
         finally
         {
-            ArrayPool<Line>.Shared.Return(rented);
+            TrainingTables.Give(tables);
         }
     }
 
     /// <summary>One row, or one drawn run of one row, as a slice of the shared heap.</summary>
-    private readonly struct Line
+    internal readonly struct Line
     {
         internal Line(int start, int length)
         {
