@@ -1,0 +1,35 @@
+# Analyzer severities. The bans that are expressible as APIs live in BannedSymbols.txt; these are
+# the rules that need to look at the SHAPE of the code instead.
+#
+# TreatWarningsAsErrors is on repository-wide, so `severity = warning` here already fails the
+# build. The rules are written as `error` anyway, because a reader of this file should not have to
+# know that to understand what happens.
+root = true
+
+[src/**.cs]
+
+# ---------------------------------------------------------------- async correctness
+# CA1849: a synchronous call where an async overload exists, inside an async method. This is the
+# half of "sync over async" that BannedSymbols.txt cannot express, because it is about the
+# relationship between a call and its enclosing method rather than about the API being called.
+dotnet_diagnostic.CA1849.severity = error
+
+# CA2012: a ValueTask consumed twice, or not consumed at all. A ValueTask is not a Task and does
+# not survive being awaited twice; this library returns them from the hottest paths it has.
+dotnet_diagnostic.CA2012.severity = error
+
+# CA2016: a CancellationToken in scope that was not forwarded. A scan that cannot be cancelled
+# because one call in the chain dropped the token is a bug nobody sees until a request hangs.
+dotnet_diagnostic.CA2016.severity = error
+
+# CA1068: the CancellationToken goes last. A convention, but one that makes CA2016 readable.
+dotnet_diagnostic.CA1068.severity = error
+
+# CA2007 (ConfigureAwait) is deliberately NOT enabled: this library already writes
+# ConfigureAwait(false) on every await it owns, and the rule's value is in catching the omission,
+# which review has done so far.
+#
+# SCOPED TO src/ ON PURPOSE. CA1849 is about not blocking a caller that could have awaited, and
+# the callers that matter are the library's -- a benchmark writing its results with
+# Console.WriteLine inside an async Main is not the anti-pattern the rule is named for, and
+# fifty of those would train everyone to ignore the rule where it does matter.

@@ -20,8 +20,8 @@ namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 /// <summary>Decodes one pco page into latents and then into numbers.</summary>
 internal static class PcoPageDecoder
 {
-    /// <summary>Values per batch.</summary>
-    private const int BatchSize = 256;
+    /// <summary>Values per batch. Also the size of the buffers in <see cref="PcoBatchScratch"/>.</summary>
+    internal const int BatchSize = 256;
 
     /// <summary>Interleaved ANS states.</summary>
     private const int Interleaving = 4;
@@ -35,13 +35,16 @@ internal static class PcoPageDecoder
     /// At least <paramref name="valueCount"/> slots, caller-owned; unread when the chunk has no
     /// secondary latent variable.
     /// </param>
+    /// <param name="scratch">
+    /// A batch's working buffers, caller-owned so that a thousand pages rent them once.
+    /// </param>
     /// <returns>
     /// The decoded latents, joined by the chunk's mode. A view over one of the two buffers, valid
     /// until the next call.
     /// </returns>
     internal static ReadOnlySpan<ulong> DecodeJoined(
         PcoChunkMeta chunk, ReadOnlySpan<byte> page, int valueCount, Span<ulong> primaryOut,
-        Span<ulong> secondaryOut)
+        Span<ulong> secondaryOut, in PcoBatchScratch scratch)
     {
         PcoBitReader reader = new PcoBitReader(page);
 
@@ -69,9 +72,11 @@ internal static class PcoPageDecoder
             int remaining = valueCount - done;
             int batch = Math.Min(BatchSize, remaining);
 
-            delta?.ReadBatch(ref reader, remaining, batch, null);
-            primary.ReadBatch(ref reader, remaining, batch, primaryOut.Slice(done, batch));
-            secondary?.ReadBatch(ref reader, remaining, batch, secondaryOut.Slice(done, batch));
+            delta?.ReadBatch(ref reader, remaining, batch, default, in scratch);
+            primary.ReadBatch(
+                ref reader, remaining, batch, primaryOut.Slice(done, batch), in scratch);
+            secondary?.ReadBatch(
+                ref reader, remaining, batch, secondaryOut.Slice(done, batch), in scratch);
 
             done += batch;
         }
@@ -125,6 +130,46 @@ internal static class PcoPageDecoder
     }
 }
 
+/// <summary>The three per-batch working buffers of a page decode, owned by the caller.</summary>
+/// <remarks>
+/// <para>
+/// These are written at the top of a batch and consumed before it ends -- nothing in them
+/// survives the call -- but they were instance fields of <see cref="PcoLatentState"/>, so a page
+/// carrying one latent variable allocated 5 kB of them and a chunk of a thousand pages dropped
+/// that a thousand times, against contract 1.3's "no managed allocation on a decode path".
+/// </para>
+/// <para>
+/// THEY WERE THREAD-STATIC FOR ONE COMMIT AND THAT WAS THE WRONG ANSWER. A <c>[ThreadStatic]</c>
+/// is only correct while no <c>await</c> separates taking the buffer from finishing with it, and
+/// this decode is reached from <c>BatchAsyncEnumerable</c>: the property holds today because the
+/// decode happens to be synchronous throughout, which is not a property any test states and not
+/// one an edit three layers up would notice breaking. The buffers belong to whoever owns the
+/// decode, and <c>PcoDecoder</c> already rents the two page buffers exactly that way.
+/// </para>
+/// </remarks>
+internal readonly ref struct PcoBatchScratch
+{
+    /// <summary>Creates a view over three caller-owned buffers, each at least a batch long.</summary>
+    /// <param name="values">The batch's latents.</param>
+    /// <param name="offsetBits">Per-value offset widths.</param>
+    /// <param name="offsetCumulative">Per-value offset positions.</param>
+    internal PcoBatchScratch(Span<ulong> values, Span<int> offsetBits, Span<long> offsetCumulative)
+    {
+        Values = values;
+        OffsetBits = offsetBits;
+        OffsetCumulative = offsetCumulative;
+    }
+
+    /// <summary>The batch's latents, before they are copied out.</summary>
+    internal Span<ulong> Values { get; }
+
+    /// <summary>Each value's offset width, when the variable has more than one bin.</summary>
+    internal Span<int> OffsetBits { get; }
+
+    /// <summary>Each value's bit position within the offset stream.</summary>
+    internal Span<long> OffsetCumulative { get; }
+}
+
 /// <summary>One latent variable's decoding state within a page.</summary>
 internal sealed class PcoLatentState
 {
@@ -136,42 +181,6 @@ internal sealed class PcoLatentState
     // and read again by the next batch.
     private readonly int[] _stateIndices = new int[4];
     private readonly ulong[] _deltaMoments;
-
-    /// <summary>
-    /// The per-batch working buffers, shared per thread instead of allocated per page.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// These three are written at the top of <c>Decode</c> and consumed before it returns - nothing
-    /// in them survives the call - but they were instance fields, so a page carrying one latent
-    /// variable allocated 5 kB of them and a chunk of many pages dropped that per page. The two
-    /// fields above are the ones that genuinely carry state, and they stay where they are.
-    /// </para>
-    /// <para>
-    /// Thread-static rather than pooled, for the reason <c>FsstSymbols</c> gives for its counting
-    /// tables: <c>ArrayPool&lt;T&gt;.Shared</c> is process-global and this is a fixed, bounded 5 kB
-    /// per thread that has ever decoded pco.
-    /// </para>
-    /// </remarks>
-    [ThreadStatic]
-    private static ulong[]? ScratchValues;
-
-    /// <inheritdoc cref="ScratchValues"/>
-    [ThreadStatic]
-    private static int[]? ScratchOffsetBits;
-
-    /// <inheritdoc cref="ScratchValues"/>
-    [ThreadStatic]
-    private static long[]? ScratchOffsetCumulative;
-
-    /// <summary>Values per batch; must match <c>PcoPageDecoder.BatchSize</c>.</summary>
-    private const int BatchSize = 256;
-
-    private static ulong[] Scratch => ScratchValues ??= new ulong[BatchSize];
-
-    private static int[] OffsetBits => ScratchOffsetBits ??= new int[BatchSize];
-
-    private static long[] OffsetCumulative => ScratchOffsetCumulative ??= new long[BatchSize];
 
     private PcoLatentState(PcoAnsTable table, int ansSizeLog, int binCount, ulong[] deltaMoments)
     {
@@ -217,36 +226,38 @@ internal sealed class PcoLatentState
     /// <param name="remaining">Values left in the page before this batch.</param>
     /// <param name="batch">Values this batch produces.</param>
     /// <param name="destination">Where to put them; empty for a delta variable.</param>
+    /// <param name="scratchBuffers">The decode's working buffers; see <see cref="PcoBatchScratch"/>.</param>
     internal void ReadBatch(
-        ref PcoBitReader reader, int remaining, int batch, Span<ulong> destination)
+        ref PcoBitReader reader, int remaining, int batch, Span<ulong> destination,
+        in PcoBatchScratch scratchBuffers)
     {
         // The values that come from the delta moments are not on the wire, so the symbol pass is
         // shorter than the batch by the delta order - but only at the end of the page.
-        ulong[] scratch = Scratch;
+        Span<ulong> scratch = scratchBuffers.Values;
         int preDelta = Math.Min(batch, Math.Max(0, remaining - _deltaMoments.Length));
-        ReadPreDelta(ref reader, preDelta);
+        ReadPreDelta(ref reader, preDelta, in scratchBuffers);
 
         if (_deltaMoments.Length > 0)
         {
-            UndoConsecutiveDelta(batch);
+            UndoConsecutiveDelta(batch, in scratchBuffers);
         }
 
         if (!destination.IsEmpty)
         {
-            scratch.AsSpan(0, batch).CopyTo(destination);
+            scratch[..batch].CopyTo(destination);
         }
     }
 
-    private void ReadPreDelta(ref PcoBitReader reader, int count)
+    private void ReadPreDelta(ref PcoBitReader reader, int count, in PcoBatchScratch scratchBuffers)
     {
         if (count == 0)
         {
             return;
         }
 
-        ulong[] scratch = Scratch;
-        int[] offsetBits = OffsetBits;
-        long[] offsetCumulative = OffsetCumulative;
+        Span<ulong> scratch = scratchBuffers.Values;
+        Span<int> offsetBits = scratchBuffers.OffsetBits;
+        Span<long> offsetCumulative = scratchBuffers.OffsetCumulative;
         long offsetBitTotal = 0;
         if (_binCount > 1)
         {
@@ -272,7 +283,7 @@ internal sealed class PcoLatentState
             // value i is `base + i * offsetBits`, and the fill is one vectorized store.
             int uniformBits = _table.Nodes[0].OffsetBits;
             ulong lower = _table.StateLowers[0];
-            scratch.AsSpan(0, count).Fill(lower);
+            scratch[..count].Fill(lower);
 
             if (uniformBits == 0)
             {
@@ -317,11 +328,10 @@ internal sealed class PcoLatentState
     /// was there, so the first values of a page come from the moments themselves. The moments are
     /// carried across batches, which is why they live on this object rather than on the batch.
     /// </remarks>
-    private void UndoConsecutiveDelta(int batch)
+    private void UndoConsecutiveDelta(int batch, in PcoBatchScratch scratchBuffers)
     {
         // The 2^63 bias is pointwise and contiguous, so it is one vector add per lane group.
-        ulong[] scratch = Scratch;
-        Span<ulong> values = scratch.AsSpan(0, batch);
+        Span<ulong> values = scratchBuffers.Values[..batch];
         int biased = 0;
         if (Vector<ulong>.IsSupported && batch >= Vector<ulong>.Count)
         {
@@ -343,8 +353,8 @@ internal sealed class PcoLatentState
             ulong moment = _deltaMoments[order];
             for (int i = 0; i < batch; i++)
             {
-                ulong previous = scratch[i];
-                scratch[i] = moment;
+                ulong previous = values[i];
+                values[i] = moment;
                 moment = unchecked(moment + previous);
             }
 

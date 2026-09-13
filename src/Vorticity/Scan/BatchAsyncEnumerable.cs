@@ -8,12 +8,21 @@
 // coalescing SILENTLY: the scan still works and the I/O count doubles. That is what
 // Scan_OneReadManyPerBatch exists to catch.
 //
-// HAND-WRITTEN, NOT `yield return`. A compiler-generated async iterator allocates its state machine
+// HAND-WRITTEN, NOT `yield return`. A compiler-generated async ITERATOR allocates its state machine
 // and can allocate per MoveNextAsync. One allocation per SCAN is acceptable and documented; per
-// BATCH is not. The enumerator is therefore built over ManualResetValueTaskSourceCore<bool>, the
-// pattern System.Threading.Channels uses, with the synchronous-completion fast path - which is
-// every batch of a memory-mapped file - returning `new ValueTask<bool>(true)` and allocating
-// nothing at all.
+// BATCH is not. So MoveNextAsync is written out: it plans the split and issues the read itself, and
+// hands the await to one `async ValueTask<bool>` helper.
+//
+// THAT HELPER IS AN ASYNC METHOD AND STILL ALLOCATES NOTHING on the path that matters, because an
+// `async ValueTask<T>` boxes its state machine only at the first await that ACTUALLY SUSPENDS. A
+// memory-mapped read has already completed by the time the helper is entered, so the struct stays
+// on the stack and the builder returns a completed ValueTask by value.
+//
+// This used to be a hand-written state machine as well - IValueTaskSource<bool> over
+// ManualResetValueTaskSourceCore, a stored ValueTaskAwaiter, an UnsafeOnCompleted callback, and
+// GetAwaiter().GetResult() at both ends of the await. It was a faithful transcription of what the
+// compiler emits, it allocated 120 BYTES PER SCAN MORE than the compiler's version (the core and
+// its callback delegate), and it hid every suspension point from anyone reading the class.
 //
 // The one unavoidable per-batch allocation is the RecordBatch itself: §12.1 makes it a sealed class
 // with readonly fields, so it cannot be recycled. Nothing else allocates in steady state, and
@@ -155,7 +164,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 /// batches alive at once must copy.
 /// </para>
 /// </remarks>
-public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValueTaskSource<bool>
+public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 {
     private readonly LayoutTree _tree;
     private readonly ISegmentSource _source;
@@ -168,11 +177,8 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
     private readonly int _maxBatchRows;
     private readonly CancellationToken _token;
     private readonly Lane[] _lanes;
-    private readonly Action _onReadCompleted;
 
     private SplitCursor _cursor;
-    private ManualResetValueTaskSourceCore<bool> _core;
-    private ValueTaskAwaiter _readAwaiter;
 
     private RecordBatch? _current;
     private Lane? _currentLane;
@@ -214,8 +220,6 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
         }
 
         // Allocated once per scan, so the awaiter's continuation costs nothing per batch.
-        _onReadCompleted = OnReadCompleted;
-        _core.RunContinuationsAsynchronously = true;
     }
 
     /// <summary>
@@ -272,7 +276,9 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
             Register(lane.Context, split);
 
             // Phase 2: exactly one coalesced read per batch.
+#pragma warning disable CA2012 // awaited by ReadAndCompleteAsync, on the next line, exactly once
             read = _source.ReadManyAsync(lane.Context.Segments, _token);
+#pragma warning restore CA2012
         }
         catch
         {
@@ -280,17 +286,59 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
             throw;
         }
 
-        if (read.IsCompletedSuccessfully)
+        return ReadAndCompleteAsync(read, lane);
+    }
+
+    /// <summary>Awaits the batch's one read, then builds the batch from what it brought.</summary>
+    /// <param name="read">The read issued by <see cref="MoveNextAsync"/>, not yet awaited.</param>
+    /// <param name="lane">The lane the batch is being built in.</param>
+    /// <returns><see langword="true"/> when a batch was produced.</returns>
+    /// <remarks>
+    /// <para>
+    /// AN <c>async ValueTask&lt;bool&gt;</c> THAT NEVER SUSPENDS ALLOCATES NOTHING. The state
+    /// machine is a struct on the stack and <c>AsyncValueTaskMethodBuilder</c> boxes it only at the
+    /// first await that actually yields, so the memory-mapped path -- where
+    /// <c>ReadManyAsync</c> has already completed by the time this is entered -- runs to
+    /// <c>CompleteBatch</c> without a single allocation, which is what the per-batch ratchet holds.
+    /// </para>
+    /// <para>
+    /// This class used to be its own <see cref="IValueTaskSource{TResult}"/> to get that property:
+    /// a <c>ManualResetValueTaskSourceCore</c>, a stored <c>ValueTaskAwaiter</c>, an
+    /// <c>UnsafeOnCompleted</c> callback, and <c>GetAwaiter().GetResult()</c> at both ends of the
+    /// hand-written await. It bought nothing the compiler does not already do on the path that
+    /// matters -- and it cost the one thing a reader of an async method can otherwise rely on,
+    /// which is that every suspension and every resumption is visible as an <c>await</c>.
+    /// </para>
+    /// </remarks>
+    private async ValueTask<bool> ReadAndCompleteAsync(ValueTask read, Lane lane)
+    {
+        try
         {
-            // The whole memory-mapped path lands here, and it allocates nothing.
-            read.GetAwaiter().GetResult();
-            return new ValueTask<bool>(CompleteBatch());
+            await read.ConfigureAwait(false);
+        }
+        catch
+        {
+            // MoveNextAsync's catch covers a read that throws INLINE and CompleteBatch resets in
+            // its own; this is the third way a batch can fail -- a read whose ValueTask completes
+            // faulted, which is what every async ISegmentSource does -- and it must leave the lane
+            // in the same state as the other two. Without it the failed split's registrations stay
+            // in the SegmentRequestSet (the source's AbandonPending releases the owners but leaves
+            // the set registered and ready to retry, per ISegmentSource), so the NEXT batch
+            // registers on top of them and issues one coalesced read covering a superset of the
+            // split it is actually reading.
+            try
+            {
+                lane.Context.ResetBatch();
+            }
+            catch
+            {
+                // The I/O failure is what the caller needs to see, not a release failure behind it.
+            }
+
+            throw;
         }
 
-        _core.Reset();
-        _readAwaiter = read.GetAwaiter();
-        _readAwaiter.UnsafeOnCompleted(_onReadCompleted);
-        return new ValueTask<bool>(this, _core.Version);
+        return CompleteBatch();
     }
 
     /// <summary>Releases everything, whether the enumeration finished, threw, or was abandoned.</summary>
@@ -314,16 +362,6 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
         DisposeLanes();
         return default;
     }
-
-    // ------------------------------------------------------------------------- IValueTaskSource
-
-    bool IValueTaskSource<bool>.GetResult(short token) => _core.GetResult(token);
-
-    ValueTaskSourceStatus IValueTaskSource<bool>.GetStatus(short token) => _core.GetStatus(token);
-
-    void IValueTaskSource<bool>.OnCompleted(
-        Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
-        _core.OnCompleted(continuation, state, token, flags);
 
     // ------------------------------------------------------------------------------ the two phases
 
@@ -490,42 +528,6 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>, IValue
         }
 
         return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
-    }
-
-    private void OnReadCompleted()
-    {
-        bool result;
-        try
-        {
-            ValueTaskAwaiter awaiter = _readAwaiter;
-            _readAwaiter = default;
-            awaiter.GetResult();
-            result = CompleteBatch();
-        }
-        catch (Exception exception)
-        {
-            // The synchronous path resets the lane in MoveNextAsync's catch and CompleteBatch
-            // resets it in its own; this is the third way a batch can fail - a read whose ValueTask
-            // completes faulted rather than throwing inline, which is what every async
-            // ISegmentSource does - and it must leave the lane in the same state as the other two.
-            // Without it the failed split's registrations stay in the SegmentRequestSet (the
-            // source's AbandonPending releases the owners but leaves the set registered and ready
-            // to retry, per ISegmentSource), so the NEXT batch registers on top of them and issues
-            // one coalesced read covering a superset of the split it is actually reading.
-            try
-            {
-                _currentLane?.Context.ResetBatch();
-            }
-            catch
-            {
-                // The I/O failure is what the caller needs to see, not a release failure behind it.
-            }
-
-            _core.SetException(exception);
-            return;
-        }
-
-        _core.SetResult(result);
     }
 
     // -------------------------------------------------------------------------------- pipelined

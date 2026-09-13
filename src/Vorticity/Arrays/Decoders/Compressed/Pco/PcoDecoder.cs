@@ -82,8 +82,18 @@ public sealed class PcoDecoder : ArrayDecoder
         bool signed = ptype.IsSignedInteger();
         Scratch<ulong> primaryScratch = new Scratch<ulong>(widestPage, default);
         Scratch<ulong> secondaryScratch = new Scratch<ulong>(widestPage, default);
+
+        // A batch's three working buffers, rented here for the same reason the two page buffers
+        // are: they are fixed at 256 values and a thousand pages must not allocate them a thousand
+        // times. They belong to this decode and to nothing wider -- see PcoBatchScratch for why
+        // the thread-static they briefly were is not an option.
+        Scratch<ulong> batchValues = new Scratch<ulong>(PcoPageDecoder.BatchSize, default);
+        Scratch<int> batchOffsetBits = new Scratch<int>(PcoPageDecoder.BatchSize, default);
+        Scratch<long> batchOffsetCumulative = new Scratch<long>(PcoPageDecoder.BatchSize, default);
         try
         {
+            PcoBatchScratch batchScratch = new PcoBatchScratch(
+                batchValues.Span, batchOffsetBits.Span, batchOffsetCumulative.Span);
             int pageBuffer = wrapper.Chunks.Count;
             int written = 0;
             for (int chunk = 0; chunk < wrapper.Chunks.Count; chunk++)
@@ -95,7 +105,7 @@ public sealed class PcoDecoder : ArrayDecoder
                 {
                     ReadOnlySpan<ulong> latents = PcoPageDecoder.DecodeJoined(
                         meta, node.GetBuffer(pageBuffer).Span, pageValues,
-                        primaryScratch.Span, secondaryScratch.Span);
+                        primaryScratch.Span, secondaryScratch.Span, in batchScratch);
                     pageBuffer++;
 
                     // The ordered latent form: shifted so the type's minimum is zero. For an
@@ -120,6 +130,9 @@ public sealed class PcoDecoder : ArrayDecoder
         }
         finally
         {
+            batchOffsetCumulative.Dispose();
+            batchOffsetBits.Dispose();
+            batchValues.Dispose();
             secondaryScratch.Dispose();
             primaryScratch.Dispose();
         }

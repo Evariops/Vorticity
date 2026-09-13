@@ -1,0 +1,26 @@
+# APIs this repository refuses, enforced at COMPILE TIME by
+# Microsoft.CodeAnalysis.BannedApiAnalyzers (RS0030). TreatWarningsAsErrors makes each one a
+# build failure rather than a warning somebody scrolls past.
+# Format: one `T:`, `M:` or `P:` docid per line, then `;`, then the message the compiler prints.
+# The message has to say what to do INSTEAD, because it is the only thing the person who hit it
+# will read. Blank lines are NOT allowed -- the analyzer reads them as an empty symbol (RS0031).
+# A genuinely unavoidable use is suppressed at the site with `#pragma warning disable RS0030` and
+# a comment saying why. That is the point: the exception becomes visible in review instead of
+# being indistinguishable from the ninety uses that were never thought about.
+# ---------------------------------------------------------------- scratch ownership
+T:System.ThreadStaticAttribute; a thread-static is correct only while no await separates taking the state from finishing with it, and both entry points into this library (ScanBuilder, VortexFileWriter) are async -- so the property is never local to the code that relies on it. Put scratch on the context that owns the work (ScanContext on the read path), rent it for the decode that uses it (Scratch<T>), or transfer ownership of one cached instance explicitly (FsstSymbols.TrainingTables.Take/Give).
+# ---------------------------------------------------------------- sync over async
+# Blocking on a task is a deadlock on any caller with a synchronization context and a thread-pool
+# starvation on every other. The whole read and write surface of this library is async; there is
+# no correct place to bridge back. Await it, or make the caller async too.
+M:System.Threading.Tasks.Task.Wait; await the task instead of blocking on it.
+M:System.Threading.Tasks.Task.WaitAll; await the tasks instead of blocking on them (Task.WhenAll).
+M:System.Threading.Tasks.Task.WaitAny; await the tasks instead of blocking on them (Task.WhenAny).
+P:System.Threading.Tasks.Task`1.Result; await the task instead of blocking on it.
+P:System.Threading.Tasks.ValueTask`1.Result; await the value task; reading Result before it completes is undefined, and blocking on it is worse.
+M:System.Runtime.CompilerServices.TaskAwaiter.GetResult; await the task. Legitimate only to observe an ALREADY-completed task, which needs a suppression saying so.
+M:System.Runtime.CompilerServices.TaskAwaiter`1.GetResult; await the task. Legitimate only to observe an ALREADY-completed task, which needs a suppression saying so.
+M:System.Runtime.CompilerServices.ValueTaskAwaiter.GetResult; await the value task. Legitimate only to observe one whose IsCompletedSuccessfully has just been checked, which needs a suppression saying so.
+M:System.Runtime.CompilerServices.ValueTaskAwaiter`1.GetResult; await the value task. Legitimate only to observe one whose IsCompletedSuccessfully has just been checked, which needs a suppression saying so.
+M:System.Threading.Tasks.Task.RunSynchronously; there is no synchronous path through this library.
+M:System.Threading.Thread.Sleep(System.Int32); blocking a pool thread. Use Task.Delay in async code; in a test, wait on the thing that actually changes.

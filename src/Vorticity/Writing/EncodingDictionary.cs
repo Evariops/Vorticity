@@ -40,6 +40,7 @@ internal sealed class EncodingDictionary
     /// <summary>The edition every id in this dictionary must belong to.</summary>
     internal VortexEdition Target => _target;
 
+
     /// <summary>The ids, in index order, for the footer's spec vector.</summary>
     internal IReadOnlyList<string> Ids => _ids;
 

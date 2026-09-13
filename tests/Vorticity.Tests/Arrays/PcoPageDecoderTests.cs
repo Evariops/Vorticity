@@ -33,12 +33,16 @@ public sealed class PcoPageDecoderTests
         PcoChunkMeta chunk = PcoChunkMeta.Read(vector.Header, vector.Meta, latentBits: 64);
 
         List<long> decoded = [];
+        PcoBatchScratch scratch = new PcoBatchScratch(
+            new ulong[PcoPageDecoder.BatchSize],
+            new int[PcoPageDecoder.BatchSize],
+            new long[PcoPageDecoder.BatchSize]);
         for (int page = 0; page < vector.Pages.Length; page++)
         {
             ulong[] primary = new ulong[vector.PerPage[page]];
             ulong[] secondary = new ulong[vector.PerPage[page]];
             ReadOnlySpan<ulong> latents = PcoPageDecoder.DecodeJoined(
-                chunk, vector.Pages[page], vector.PerPage[page], primary, secondary);
+                chunk, vector.Pages[page], vector.PerPage[page], primary, secondary, in scratch);
             foreach (ulong latent in latents)
             {
                 // i64's ordered latent form: the unsigned value shifted so that long.MinValue is 0.

@@ -27,6 +27,7 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace Vorticity.Writing;
 
@@ -53,80 +54,112 @@ internal sealed class FsstSymbols
     /// <summary>The five generations of the FSST paper, as fractions of 128.</summary>
     private static readonly int[] Generations = [8, 38, 68, 98, 128];
 
-    /// <summary>
-    /// The trainer's counting tables, kept per thread instead of allocated per call.
-    /// </summary>
-    /// <remarks>
-    /// <c>count2</c> is 512 x 512 ints - ONE MEGABYTE - and <see cref="Train"/> is called ONCE PER
-    /// COLUMN-CHUNK, so writing a 65 536-row file allocated and dropped about 64 MB of counting
-    /// table. They are cleared at the top of every generation regardless, so reusing them cannot
-    /// change a single symbol: the first <c>Array.Clear</c> of a freshly allocated array was always
-    /// redundant work on memory the runtime had just zeroed.
-    ///
-    /// THREAD-STATIC RATHER THAN POOLED, deliberately. <c>ArrayPool&lt;T&gt;.Shared</c> is
-    /// process-global, and this repository has already measured what that costs a path that rents
-    /// many blocks at once - a scattered take allocated a fresh owner per split once its rents moved
-    /// into an exhausted size class. The price here is about 1.1 MB retained per thread that has
-    /// ever written a file, which is bounded, predictable, and does not interact with anything else.
-    /// </remarks>
-    [System.ThreadStatic]
-    private static int[]? ScratchOne;
-
-    /// <inheritdoc cref="ScratchOne"/>
-    [System.ThreadStatic]
-    private static int[]? ScratchTwo;
-
-    /// <summary>
-    /// One bit per cell of <see cref="ScratchTwo"/>, set when that cell has been incremented.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// THE PAIR TABLE IS DENSE AND THE COUNTS IN IT ARE NOT. <c>count2</c> has 262 144 cells, and
-    /// one generation can touch at most as many of them as the sample has tokens -
-    /// <see cref="SampleTarget"/> is 16 kB, so a few thousand. The table was nevertheless CLEARED
-    /// in full and SCANNED in full once per generation, five generations per column-chunk: 5 MB of
-    /// <c>memset</c> and 1.3 M cell reads to look at a few thousand live counts. That is what put
-    /// <c>Train</c> at a third of the write profile, with its <c>memset</c> half showing up
-    /// separately under <c>ZeroMemoryNative</c>.
-    /// </para>
-    /// <para>
-    /// A 32 kB bitmap replaces both passes with one 64x smaller walk. Clearing zeroes only the
-    /// cells that were touched; <see cref="Optimize"/> visits only those cells.
-    /// </para>
-    /// <para>
-    /// <b>The visit order is unchanged, and that is load-bearing rather than incidental.</b>
-    /// <see cref="Optimize"/> accumulates candidate gains into a dictionary, flattens it in
-    /// INSERTION order and sorts it with an UNSTABLE sort, so two candidates of equal gain and
-    /// equal length are separated by nothing but the order they were proposed in - and which of
-    /// them wins the last slot of a full table changes the symbol table, hence the compressed
-    /// bytes, hence the file. Walking each row's bitmap with
-    /// <c>BitOperations.TrailingZeroCount</c> yields <c>code2</c> in ascending order, which
-    /// is exactly the order the dense scan produced. <c>FsstSymbolsTests</c> and the byte-exact
-    /// <c>WrittenSizeTests</c> are what hold that claim up.
-    /// </para>
-    /// </remarks>
-    [System.ThreadStatic]
-    private static ulong[]? ScratchPairBits;
-
     /// <summary><see cref="ulong"/>s per <c>count2</c> row: 512 bits of pair presence.</summary>
     private const int PairWordsPerRow = (CodeMask + 1) / 64;
 
     /// <summary>
-    /// The candidate map and its flattened form, reused across generations and column-chunks.
+    /// The trainer's working tables, owned by whoever owns the write.
     /// </summary>
     /// <remarks>
-    /// Reuse is order-neutral. A <see cref="Dictionary{TKey, TValue}"/> with no removals enumerates
-    /// in insertion order, <see cref="Dictionary{TKey, TValue}.Clear"/> puts it back in the state a
-    /// fresh one is in, and growing it copies the entry array wholesale - so a pre-grown, cleared
-    /// dictionary enumerates identically to the one that was allocated here per generation. See
-    /// <see cref="ScratchPairBits"/> for why that identity is the property to protect.
+    /// <para>
+    /// <c>Count2</c> is 512 x 512 ints - ONE MEGABYTE - and <see cref="Train"/> runs ONCE PER
+    /// COLUMN-CHUNK, so writing a 65 536-row file allocated and dropped about 64 MB of counting
+    /// table. They are cleared at the top of every generation regardless, so reusing them cannot
+    /// change a single symbol: the first <c>Array.Clear</c> of a freshly allocated array was always
+    /// redundant work on memory the runtime had just zeroed.
+    /// </para>
+    /// <para>
+    /// THEY WERE <c>[ThreadStatic]</c> AND THAT WAS THE WRONG ANSWER. A thread-static is correct
+    /// only while no <c>await</c> separates taking the buffer from finishing with it, and
+    /// <c>VortexFileWriter</c> is async throughout: the property held because training happens to
+    /// be synchronous, which no test states and which an edit three layers up would break in
+    /// silence.
+    /// </para>
+    /// <para>
+    /// WHAT REPLACES IT IS AN EXPLICIT TRANSFER OF OWNERSHIP: one cached set, taken with an
+    /// <see cref="System.Threading.Interlocked.Exchange(ref object, object)"/> that leaves null
+    /// behind, put back in a <c>finally</c>. Whoever holds the reference is its only holder, which
+    /// is the property a thread-static only PRETENDS to have -- a second trainer, on any thread,
+    /// in any continuation, finds null and allocates its own rather than sharing. The process
+    /// retains one set, not one per thread that has ever written a file.
+    /// </para>
+    /// <para>
+    /// Per-write ownership was tried first and is the honest alternative; it costs 1.1 MB per file
+    /// written, which `WriteAllocationTests` reported as 522 B/row on a 4096-row FSST file. The
+    /// thread-static had been hiding that cost rather than removing it.
+    /// </para>
+    /// <para>
+    /// The arrays inside are allocated ON FIRST USE, so the first write that reaches no FSST
+    /// candidate pays nothing.
+    /// </para>
     /// </remarks>
-    [System.ThreadStatic]
-    private static Dictionary<Candidate, long>? ScratchCandidates;
+    internal sealed class TrainingTables
+    {
+        /// <summary>The one cached set; null while somebody holds it.</summary>
+        private static TrainingTables? Cached;
 
-    /// <inheritdoc cref="ScratchCandidates"/>
-    [System.ThreadStatic]
-    private static List<KeyValuePair<Candidate, long>>? ScratchRanked;
+        /// <summary>Takes the cached set, or a fresh one when another trainer holds it.</summary>
+        /// <returns>A set the caller owns outright until it calls <see cref="Give"/>.</returns>
+        internal static TrainingTables Take() =>
+            Interlocked.Exchange(ref Cached, null) ?? new TrainingTables();
+
+        /// <summary>Gives a set back. Losing the race simply drops one set to the GC.</summary>
+        /// <param name="tables">The set the caller is done with.</param>
+        internal static void Give(TrainingTables tables) => Volatile.Write(ref Cached, tables);
+
+        private int[]? _count1;
+        private int[]? _count2;
+        private ulong[]? _pairBits;
+        private Dictionary<Candidate, long>? _candidates;
+        private List<KeyValuePair<Candidate, long>>? _ranked;
+
+        /// <summary>Per-code occurrence counts; 2 kB, cleared outright each generation.</summary>
+        internal int[] Count1 => _count1 ??= new int[CodeMask + 1];
+
+        /// <summary>Per-code-pair occurrence counts; 1 MB, cleared through <see cref="PairBits"/>.</summary>
+        internal int[] Count2 => _count2 ??= new int[(CodeMask + 1) * (CodeMask + 1)];
+
+        /// <summary>
+        /// One bit per cell of <see cref="Count2"/>, set when that cell has been incremented.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// THE PAIR TABLE IS DENSE AND THE COUNTS IN IT ARE NOT. <c>count2</c> has 262 144 cells,
+        /// and one generation can touch at most as many of them as the sample has tokens -
+        /// <see cref="SampleTarget"/> is 16 kB, so a few thousand. The table was nevertheless
+        /// CLEARED in full and SCANNED in full once per generation, five generations per
+        /// column-chunk: 5 MB of <c>memset</c> and 1.3 M cell reads to look at a few thousand live
+        /// counts. That is what put <c>Train</c> at a third of the write profile.
+        /// </para>
+        /// <para>
+        /// <b>The visit order is unchanged, and that is load-bearing rather than incidental.</b>
+        /// <c>Optimize</c> accumulates candidate gains into a dictionary, flattens it in INSERTION
+        /// order and sorts it with an UNSTABLE sort, so two candidates of equal gain and equal
+        /// length are separated by nothing but the order they were proposed in - and which of them
+        /// wins the last slot of a full table changes the symbol table, hence the compressed bytes,
+        /// hence the file. Walking each row's bitmap with <c>BitOperations.TrailingZeroCount</c>
+        /// yields <c>code2</c> in ascending order, which is exactly the order the dense scan
+        /// produced. <c>FsstSymbolsTests</c> and the byte-exact <c>WrittenSizeTests</c> are what
+        /// hold that claim up.
+        /// </para>
+        /// </remarks>
+        internal ulong[] PairBits => _pairBits ??= new ulong[(CodeMask + 1) * PairWordsPerRow];
+
+        /// <summary>The candidate gain map, reused across generations and column-chunks.</summary>
+        /// <remarks>
+        /// Reuse is order-neutral. A <see cref="Dictionary{TKey, TValue}"/> with no removals
+        /// enumerates in insertion order, <see cref="Dictionary{TKey, TValue}.Clear"/> puts it back
+        /// in the state a fresh one is in, and growing it copies the entry array wholesale - so a
+        /// pre-grown, cleared dictionary enumerates identically to one allocated per generation.
+        /// See <see cref="PairBits"/> for why that identity is the property to protect.
+        /// </remarks>
+        internal Dictionary<Candidate, long> Candidates =>
+            _candidates ??= new Dictionary<Candidate, long>(512);
+
+        /// <inheritdoc cref="Candidates"/>
+        internal List<KeyValuePair<Candidate, long>> Ranked =>
+            _ranked ??= new List<KeyValuePair<Candidate, long>>(512);
+    }
 
     /// <summary>Bytes of sample the trainer aims for before it stops drawing lines.</summary>
     private const int SampleTarget = 1 << 14;
@@ -206,9 +239,23 @@ internal sealed class FsstSymbols
             return null;
         }
 
-        int[] count1 = ScratchOne ??= new int[CodeMask + 1];
-        int[] count2 = ScratchTwo ??= new int[(CodeMask + 1) * (CodeMask + 1)];
-        ulong[] pairBits = ScratchPairBits ??= new ulong[(CodeMask + 1) * PairWordsPerRow];
+        TrainingTables tables = TrainingTables.Take();
+        try
+        {
+            return TrainCore(table, sample, sampled, tables);
+        }
+        finally
+        {
+            TrainingTables.Give(tables);
+        }
+    }
+
+    private static FsstSymbols? TrainCore(
+        FsstSymbols table, List<ReadOnlyMemory<byte>> sample, bool sampled, TrainingTables tables)
+    {
+        int[] count1 = tables.Count1;
+        int[] count2 = tables.Count2;
+        ulong[] pairBits = tables.PairBits;
 
         foreach (int generation in Generations)
         {
@@ -229,7 +276,7 @@ internal sealed class FsstSymbols
                 table.CountLine(sample[i].Span, count1, count2, pairBits);
             }
 
-            table.Optimize(count1, count2, pairBits, generation, prune: generation >= 128 && !sampled);
+            table.Optimize(tables, count1, count2, pairBits, generation, prune: generation >= 128 && !sampled);
         }
 
         if (table._count == 0)
@@ -440,6 +487,7 @@ internal sealed class FsstSymbols
     /// Rebuilds the table from the counts: every observed code is a candidate, every observed
     /// adjacent pair is a candidate for its concatenation, and the best 255 by gain win.
     /// </summary>
+    /// <param name="tables">The write's working tables.</param>
     /// <param name="count1">Per-code occurrence counts.</param>
     /// <param name="count2">Per-code-pair occurrence counts.</param>
     /// <param name="pairBits">Which cells of <paramref name="count2"/> are live.</param>
@@ -449,9 +497,11 @@ internal sealed class FsstSymbols
     /// only when the counts are exact rather than sampled - pruning on estimates would discard
     /// symbols on the strength of noise.
     /// </param>
-    private void Optimize(int[] count1, int[] count2, ulong[] pairBits, int sampleFrac, bool prune)
+    private void Optimize(
+        TrainingTables tables, int[] count1, int[] count2, ulong[] pairBits, int sampleFrac,
+        bool prune)
     {
-        Dictionary<Candidate, long> candidates = ScratchCandidates ??= new Dictionary<Candidate, long>(512);
+        Dictionary<Candidate, long> candidates = tables.Candidates;
         candidates.Clear();
         int minimum = prune ? 1 : 5 * sampleFrac / 128;
 
@@ -515,7 +565,7 @@ internal sealed class FsstSymbols
             }
         }
 
-        List<KeyValuePair<Candidate, long>> ranked = ScratchRanked ??= new List<KeyValuePair<Candidate, long>>(512);
+        List<KeyValuePair<Candidate, long>> ranked = tables.Ranked;
         ranked.Clear();
         foreach (KeyValuePair<Candidate, long> entry in candidates)
         {
@@ -738,7 +788,7 @@ internal sealed class FsstSymbols
     }
 
     /// <summary>A symbol proposed for the table: its bytes and its length.</summary>
-    private readonly struct Candidate(ulong bits, byte length) : IEquatable<Candidate>
+    internal readonly struct Candidate(ulong bits, byte length) : IEquatable<Candidate>
     {
         internal ulong Bits { get; } = bits;
 

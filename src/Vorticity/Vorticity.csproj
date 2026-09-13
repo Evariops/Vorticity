@@ -13,4 +13,12 @@
     <InternalsVisibleTo Include="Vorticity.Benchmarks" />
   </ItemGroup>
 
+  <!-- Compile-time enforcement of the bans in BannedSymbols.txt. Build-time only: PrivateAssets
+       keeps it out of the package graph, so the library stays dependency-free at runtime, which
+       is the claim in Description above. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" PrivateAssets="all" />
+    <AdditionalFiles Include="../../BannedSymbols.txt" />
+  </ItemGroup>
+
 </Project>
