@@ -7,6 +7,7 @@
 // O(k) work rather than O(n * k). A fixed-size list has no offsets and is positional, so there the
 // k elements really are tiled n times, through the same concat machinery `vortex.chunked` uses.
 using System;
+using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
@@ -81,7 +82,7 @@ internal static class ConstantCanonicalizer
                     context, CanonicalSupport.BitmapByteCount(length), Align, out Span<byte> writable);
                 if (scalar.AsBool)
                 {
-                    CanonicalSupport.SetBits(writable, 0, length);
+                    BitmapKernels.SetRange(writable, 0, length);
                 }
 
                 return arena.AddBool(dtype, length, validity, bits, 0);
@@ -92,7 +93,11 @@ internal static class ConstantCanonicalizer
                 PType ptype = dtype.PType;
                 int bytes = ArrayDecodeContext.CheckedMultiply(
                     length, ptype.ByteWidth(), "constant values");
-                VortexBuffer values = CanonicalSupport.Allocate(context, bytes, Align, out Span<byte> writable);
+
+                // Uninitialized: `WriteTo` tiles the whole span, so every byte is written and the
+                // zero-fill was a second full pass over the buffer for nothing.
+                VortexBuffer values = CanonicalSupport.AllocateUninitialized(
+                    context, bytes, Align, out Span<byte> writable);
                 scalar.WriteTo(writable, ptype);
                 return arena.AddPrimitive(dtype, length, validity, ptype, values);
             }
@@ -166,12 +171,9 @@ internal static class ConstantCanonicalizer
         }
 
         int bytes = ArrayDecodeContext.CheckedMultiply(length, width, "constant decimals");
-        VortexBuffer values = CanonicalSupport.Allocate(context, bytes, Align, out Span<byte> writable);
-        ReadOnlySpan<byte> element = full[..width];
-        for (int offset = 0; offset < bytes; offset += width)
-        {
-            element.CopyTo(writable.Slice(offset, width));
-        }
+        VortexBuffer values = CanonicalSupport.AllocateUninitialized(
+            context, bytes, Align, out Span<byte> writable);
+        RowKernels.Tile(writable, full[..width]);
 
         return context.Canonical.AddDecimal(
             dtype, length, validity, storage, dtype.Precision, dtype.Scale, values);
@@ -185,15 +187,20 @@ internal static class ConstantCanonicalizer
 
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             length, CanonicalSupport.ViewSize, "constant views");
-        VortexBuffer views = CanonicalSupport.Allocate(
+        VortexBuffer views = CanonicalSupport.AllocateUninitialized(
             context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
 
         if (value.Length <= CanonicalSupport.MaxInlineViewLength)
         {
-            for (int i = 0; i < length; i++)
+            if (length > 0)
             {
-                CanonicalSupport.WriteInlineView(
-                    writable.Slice(i * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize), value);
+                // WriteInlineView leaves the bytes past the value untouched, so the first view is
+                // cleared before it is written and then tiled -- the zero-fill of one 16-byte view
+                // rather than of the whole buffer.
+                Span<byte> first = writable[..CanonicalSupport.ViewSize];
+                first.Clear();
+                CanonicalSupport.WriteInlineView(first, value);
+                RowKernels.Tile(writable, first);
             }
 
             return arena.AddVarBinView(dtype, length, validity, views, default);
@@ -202,13 +209,14 @@ internal static class ConstantCanonicalizer
         // The scalar's bytes live in the batch's ScalarStore, which is a managed array and may
         // move; a VortexBuffer is a raw pointer, so the value is copied into arena memory once and
         // every row references that.
-        VortexBuffer data = CanonicalSupport.Allocate(context, value.Length, Align, out Span<byte> heap);
+        VortexBuffer data = CanonicalSupport.AllocateUninitialized(
+            context, value.Length, Align, out Span<byte> heap);
         value.CopyTo(heap);
-        for (int i = 0; i < length; i++)
+        if (length > 0)
         {
-            CanonicalSupport.WriteReferenceView(
-                writable.Slice(i * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize),
-                value.Length, value, bufferIndex: 0, offset: 0);
+            Span<byte> first = writable[..CanonicalSupport.ViewSize];
+            CanonicalSupport.WriteReferenceView(first, value.Length, value, bufferIndex: 0, offset: 0);
+            RowKernels.Tile(writable, first);
         }
 
         Span<VortexBuffer> single = stackalloc VortexBuffer[1];
@@ -269,9 +277,10 @@ internal static class ConstantCanonicalizer
         VortexBuffer sizes = CanonicalSupport.Allocate(context, bytes, Align, out Span<byte> sizeSpan);
 
         // Offsets stay zero - every row is the same list, so every row points at the same run.
-        for (int i = 0; i < length; i++)
+        if (length > 0)
         {
-            CanonicalSupport.WriteInteger(sizeSpan, PType.U64, i, k);
+            CanonicalSupport.WriteInteger(sizeSpan, PType.U64, 0, k);
+            RowKernels.Tile(sizeSpan, sizeSpan[..8]);
         }
 
         return arena.AddListView(

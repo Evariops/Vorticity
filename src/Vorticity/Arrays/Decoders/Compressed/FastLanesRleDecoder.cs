@@ -134,60 +134,112 @@ public sealed class FastLanesRleDecoder : ArrayDecoder
         ValidityReader indicesValidity = ValidityReader.Of(context.Canonical, indicesNode.Validity);
 
         int width = ptype.ByteWidth();
+        int indexWidth = metadata.IndicesPType.ByteWidth();
         int total = ArrayDecodeContext.CheckedMultiply(length, width, "RLE values");
         if (total == 0)
         {
             return context.Canonical.AddPrimitive(dtype, length, validity, ptype, VortexBuffer.Empty);
         }
 
-        VortexBuffer output = CompressedValues.Allocate(
+        // Uninitialized: every row of the output is written below, either by the chunk gather or
+        // by the single-value fill.
+        VortexBuffer output = CompressedValues.AllocateUninitialized(
             context, total, width, Id, out Span<byte> destination);
         ReadOnlySpan<byte> indices = indicesNode.Values.Span;
 
         ulong firstOffset = CompressedValues.ReadUnsigned(offsets, metadata.ValuesIdxOffsetsPType, 0);
-        int currentChunk = -1;
-        int chunkBase = 0;
-        int chunkValueCount = 0;
 
-        for (int row = 0; row < length; row++)
+        // BY CHUNK, NOT BY ROW. The chunk boundary is fixed by the FastLanes block size, so which
+        // chunk a row belongs to is a property of the loop, not a question to ask per row: the
+        // division, the offsets lookup through `switch (ptype)` and the compare against the
+        // previous chunk were all paid a million times to answer it 977 times. Inside a chunk the
+        // gather is `RowKernels`', with both physical types resolved before it starts.
+        int row = 0;
+        while (row < length)
         {
             int encoded = offset + row;
             int chunk = encoded / FastLanes.BlockSize;
-            if (chunk != currentChunk)
+            int chunkBase = (int)(CompressedValues.ReadUnsigned(
+                offsets, metadata.ValuesIdxOffsetsPType, chunk) - firstOffset);
+            int chunkEnd = chunk + 1 < offsetsLength
+                ? (int)(CompressedValues.ReadUnsigned(
+                    offsets, metadata.ValuesIdxOffsetsPType, chunk + 1) - firstOffset)
+                : valuesLength;
+            int chunkValueCount = chunkEnd - chunkBase;
+            if (chunkValueCount <= 0)
             {
-                currentChunk = chunk;
-                chunkBase = (int)(CompressedValues.ReadUnsigned(
-                    offsets, metadata.ValuesIdxOffsetsPType, chunk) - firstOffset);
-                int chunkEnd = chunk + 1 < offsetsLength
-                    ? (int)(CompressedValues.ReadUnsigned(
-                        offsets, metadata.ValuesIdxOffsetsPType, chunk + 1) - firstOffset)
-                    : valuesLength;
-                chunkValueCount = chunkEnd - chunkBase;
-                if (chunkValueCount <= 0)
+                CompressedThrow.Format($"{Id} chunk {chunk} references no values.");
+            }
+
+            // Rows of this chunk that are also rows of the window.
+            int chunkRows = Math.Min(
+                ((chunk + 1) * FastLanes.BlockSize) - encoded, length - row);
+
+            if (chunkValueCount == 1)
+            {
+                // "fills a single-value chunk without looking at the indices at all" -- upstream's
+                // behaviour, and now one tiled write instead of `chunkRows` copies.
+                RowKernels.TileRow(width, values, chunkBase, destination, row, chunkRows);
+            }
+            else
+            {
+                int bad = indicesValidity.IsAllValid
+                    ? RowKernels.Gather(
+                        indices[(encoded * indexWidth)..], metadata.IndicesPType,
+                        values[(chunkBase * width)..], width, chunkValueCount,
+                        destination[(row * width)..], chunkRows)
+                    : RowKernels.GatherMasked(
+                        indices[(encoded * indexWidth)..], metadata.IndicesPType,
+                        values[(chunkBase * width)..], width, chunkValueCount,
+                        destination[(row * width)..], chunkRows,
+                        indicesValidity.Bits, indicesValidity.BitOffset + encoded,
+                        default, 0, true, default);
+                if (bad >= 0)
                 {
-                    CompressedThrow.Format($"{Id} chunk {chunk} references no values.");
+                    ThrowIndex(indices, metadata.IndicesPType, encoded + bad, row + bad, chunk,
+                        chunkValueCount);
+                }
+
+                // A null index selects nothing, and upstream fills such a row with the chunk's
+                // FIRST value rather than leaving it undefined. The masked gather zeroes it, so
+                // the zeroed rows are re-filled here; scanning the mask a second time costs a word
+                // per 64 rows, where testing validity inside the gather costs a branch per row.
+                if (!indicesValidity.IsAllValid)
+                {
+                    FillNulls(
+                        in indicesValidity, encoded, row, chunkRows, width, values, chunkBase,
+                        destination);
                 }
             }
 
-            int source = chunkBase;
-            if (chunkValueCount > 1 && indicesValidity.IsValid(encoded))
-            {
-                ulong index = CompressedValues.ReadUnsigned(indices, metadata.IndicesPType, encoded);
-                if (index >= (ulong)(uint)chunkValueCount)
-                {
-                    CompressedThrow.Format(
-                        $"{Id} index {index} at row {row} is out of bounds for chunk {chunk}, " +
-                        $"which holds {chunkValueCount} values.");
-                }
-
-                source = chunkBase + (int)index;
-            }
-
-            values.Slice(source * width, width).CopyTo(destination.Slice(row * width, width));
+            row += chunkRows;
         }
 
         return context.Canonical.AddPrimitive(dtype, length, validity, ptype, output);
     }
+
+    /// <summary>Re-fills the rows a null index left zeroed with the chunk's first value.</summary>
+    private static void FillNulls(
+        in ValidityReader indicesValidity, int encoded, int row, int chunkRows, int width,
+        ReadOnlySpan<byte> values, int chunkBase, Span<byte> destination)
+    {
+        for (int i = 0; i < chunkRows; i++)
+        {
+            if (!indicesValidity.IsValid(encoded + i))
+            {
+                values.Slice(chunkBase * width, width)
+                    .CopyTo(destination.Slice((row + i) * width, width));
+            }
+        }
+    }
+
+    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
+    private static void ThrowIndex(
+        ReadOnlySpan<byte> indices, PType indicesPType, int encoded, int row, int chunk,
+        int chunkValueCount) =>
+        CompressedThrow.Format(
+            $"{Id} index {RowKernels.CodeAt(indices, indicesPType, encoded)} at row {row} is out " +
+            $"of bounds for chunk {chunk}, which holds {chunkValueCount} values.");
 
     private static PType RequirePrimitive(DType dtype)
     {

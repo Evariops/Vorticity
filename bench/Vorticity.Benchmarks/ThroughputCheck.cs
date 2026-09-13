@@ -91,7 +91,7 @@ internal static class ThroughputCheck
         ("chunked", 1.68),   // 3 runs, spread 1.40-1.68
         ("chunked_empty_chunks", 1.72),   // 3 runs, spread 1.35-1.72
         ("chunked_one_chunk", 1.41),   // 3 runs, spread 1.21-1.41
-        ("constant", 13.11),   // 3 runs, spread 10.53-13.11
+        ("constant", 2.82),
         ("datetimeparts", 2.09),   // 3 runs, spread 1.95-2.09
         ("decimal", 1.40),   // 3 runs, spread 1.21-1.40
         ("decimal_byte_parts", 1.37),   // 3 runs, spread 1.31-1.37
@@ -105,7 +105,7 @@ internal static class ThroughputCheck
         ("fastlanes_bitpacked_patched_no_chunk_offsets", 2.62),   // 3 runs, spread 2.37-2.62
         ("fastlanes_delta", 8.72),   // 2 runs, spread 7.60-8.72
         ("fastlanes_for", 1.98),   // 3 runs, spread 1.68-1.98
-        ("fastlanes_rle", 19.44),   // 3 runs, spread 15.83-19.44
+        ("fastlanes_rle", 2.70),
         ("fixed_size_list", 1.42),   // 3 runs, spread 1.37-1.42
         ("fsst", 10.94),   // 3 runs, spread 10.42-10.94
         ("list", 16.90),   // 3 runs, spread 16.54-16.90
@@ -118,9 +118,9 @@ internal static class ThroughputCheck
         ("onpair", 13.81),   // 3 runs, spread 13.59-13.81
         ("pco", 12.78),   // 3 runs, spread 11.74-12.78
         ("primitive", 1.37),   // 3 runs, spread 1.34-1.37
-        ("runend", 13.59),   // 3 runs, spread 11.82-13.59
-        ("sequence", 4.50),   // 3 runs, spread 4.47-4.50
-        ("sparse", 10.70),   // 3 runs, spread 9.69-10.70
+        ("runend", 3.08),
+        ("sequence", 4.22),
+        ("sparse", 2.55),
         ("struct", 0.09),   // 3 runs, spread 0.09-0.09
         ("varbin", 0.16),   // 3 runs, spread 0.15-0.16
         ("varbinview", 0.08),   // 3 runs, spread 0.08-0.08

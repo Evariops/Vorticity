@@ -14,6 +14,7 @@ using System;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 using Vorticity.Types.Serialization;
@@ -341,10 +342,10 @@ public readonly ref struct TypedScalar
             one.Clear();
         }
 
-        for (int offset = 0; offset < destination.Length; offset += width)
-        {
-            one.CopyTo(destination.Slice(offset, width));
-        }
+        // One element written, then doubled: log2(n) calls to `memmove` rather than n copies of
+        // one element. `vortex.constant` is nothing but this loop, and it read 11x the reference
+        // on the 1M-row axis while doing no work at all beyond filling a buffer.
+        RowKernels.Tile(destination, one);
     }
 
     internal static void RequireDecimalWidth(int length)
