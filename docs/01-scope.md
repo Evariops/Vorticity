@@ -65,7 +65,7 @@ wrong.
 
 | component | files | what it actually is | corrected estimate |
 |---|---|---|---|
-| **`vortex.map`** | 22 | a logical dtype: Map needs a dtype, a canonical kind, a column API and a decoder | large, and the biggest single win |
+| ~~**`vortex.map`**~~ | 23 | **the estimate was wrong twice over.** The `Map` DTYPE was already implemented — parsing, arena, switch sites — and a map ARRAY is a `ListView<Struct{key,value}>` wearing the map dtype, so no new canonical kind and no new column type were needed | **DONE.** One decoder, one writer wrapper, and the harness work below |
 | **`vortex.zstd_buffers`** | 4 | **NOT a value codec.** A META-ENCODING: it compresses each top-level buffer of *another* array independently and stores that array's encoding id and metadata so it can be rebuilt. Decoding means reconstructing an inner array with substituted buffers | **this table said "trivial once `vortex.zstd` is in place"; that is wrong.** Architectural, not trivial |
 | **`vortex.variant`, `vortex.parquet.variant`** | 8 | a self-describing binary value format | moderate |
 | **`vortex.pco`** | 4 | full pcodec | large |

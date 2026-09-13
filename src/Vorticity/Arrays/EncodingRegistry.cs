@@ -75,6 +75,9 @@ public enum ArrayEncodingId : ushort
     /// <summary><c>fastlanes.delta</c>.</summary>
     FastLanesDelta,
 
+    /// <summary><c>vortex.map</c>.</summary>
+    Map,
+
     /// <summary><c>fastlanes.rle</c>.</summary>
     FastLanesRle,
 
@@ -174,6 +177,7 @@ public static class EncodingRegistry
                 switch (idUtf8[7])
                 {
                     case (byte)'e': return idUtf8.SequenceEqual("vortex.ext"u8) ? ArrayEncodingId.Extension : ArrayEncodingId.Unknown;
+                    case (byte)'m': return idUtf8.SequenceEqual("vortex.map"u8) ? ArrayEncodingId.Map : ArrayEncodingId.Unknown;
                     case (byte)'a': return idUtf8.SequenceEqual("vortex.alp"u8) ? ArrayEncodingId.Alp : ArrayEncodingId.Unknown;
                     default: return ArrayEncodingId.Unknown;
                 }

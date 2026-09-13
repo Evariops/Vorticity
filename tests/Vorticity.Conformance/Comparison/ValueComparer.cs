@@ -106,6 +106,15 @@ internal static class ValueComparer
                 CompareFixedSizeList(expected, column, index, path, fileRow, log);
                 return;
 
+            case DTypeKind.Map:
+                // Compared AS A LIST, and that is not a shortcut. A vortex.map node is a ListView of
+                // Struct{key, value} wearing the map dtype, and the sidecar renders a map row as an
+                // array of {"key": .., "value": ..} objects - the same shape from both directions,
+                // so CompareList reaches CompareStruct and matches by field name. If the two ever
+                // disagreed this would report a mismatch rather than hide one.
+                CompareList(expected, column, index, path, fileRow, log);
+                return;
+
             case DTypeKind.Extension:
                 // SIDECAR.md: "extension: the storage value; the extension id and metadata are in
                 // the dtype line." The dtype line is checked by SchemaComparer.
@@ -113,7 +122,7 @@ internal static class ValueComparer
                 return;
 
             default:
-                // Map, Variant and Union carry values this harness cannot spell. They are reachable
+                // Variant and Union carry values this harness cannot spell. They are reachable
                 // only from a file with rows of that dtype, which Phase 1 does not claim; saying so
                 // out loud beats comparing nothing and reporting a pass.
                 log.Add(
@@ -610,6 +619,8 @@ internal static class ValueComparer
                 return $"a fixed-size list of {column.AsFixedSizeList().Size.ToString(CultureInfo.InvariantCulture)}";
             case DTypeKind.Struct:
                 return $"a struct of {column.AsStruct().FieldCount.ToString(CultureInfo.InvariantCulture)} fields";
+            case DTypeKind.Map:
+                return $"a map of {column.AsList().GetLength(index).ToString(CultureInfo.InvariantCulture)} entries";
             case DTypeKind.Extension:
                 return "an extension value";
             default:

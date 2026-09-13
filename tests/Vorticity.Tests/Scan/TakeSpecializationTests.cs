@@ -25,6 +25,7 @@ using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.Scan;
+using Vorticity.Types;
 using Vorticity.Tests.Writing;
 using Xunit;
 
@@ -180,7 +181,7 @@ public sealed class TakeSpecializationTests
     private static async Task<List<string>> ReadAll(string path)
     {
         List<string> values = [];
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(path, OpenOptionsFor(path), CancellationToken.None);
         await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
@@ -193,7 +194,7 @@ public sealed class TakeSpecializationTests
     private static async Task<List<string>> ReadTake(string path, long[] wanted)
     {
         List<string> values = [];
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(path, OpenOptionsFor(path), CancellationToken.None);
         await foreach (RecordBatch batch in file.Scan().Take(wanted).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
@@ -202,4 +203,29 @@ public sealed class TakeSpecializationTests
 
         return values;
     }
+
+    /// <summary>Open options for a corpus path: the schema out of band when the file has none.</summary>
+    /// <param name="path">The corpus file about to be opened.</param>
+    /// <remarks>
+    /// <c>types/no_dtype_segment</c> reached this sweep only when <c>vortex.map</c> gained a decoder
+    /// and the file became in-scope. Opening it without a DType is a <c>VortexFormatException</c> by
+    /// contract §7.4, so the donor is a real corpus file with the identical schema.
+    /// </remarks>
+    private static VortexOpenOptions OpenOptionsFor(string path) =>
+        path.Contains("no_dtype_segment", StringComparison.Ordinal)
+            ? new VortexOpenOptions { DType = OutOfBandSchema.Value }
+            : VortexOpenOptions.Default;
+
+    private static readonly Lazy<DType> OutOfBandSchema = new Lazy<DType>(static () =>
+    {
+        VortexFile donor = VortexFile
+            .OpenAsync(
+                CorpusManifest.Get("types/user_metadata_segments").Path,
+                VortexOpenOptions.Default,
+                CancellationToken.None)
+            .AsTask()
+            .GetAwaiter()
+            .GetResult();
+        return donor.Schema;
+    });
 }

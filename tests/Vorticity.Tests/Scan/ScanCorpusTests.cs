@@ -30,8 +30,8 @@ public sealed class ScanCorpusTests
         // and the test is updated to the new snapshot rather than the computation being replaced by
         // a list. 616 was Phase 1; +32 vortex.decimal_byte_parts, +6 vortex.datetimeparts,
         // +5 vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst, +46 vortex.onpair,
-        // +2 distributions/sorted_disjoint_utf8, +4 fastlanes.delta.
-        Assert.Equal(780, inScope.Count);
+        // +2 distributions/sorted_disjoint_utf8, +4 fastlanes.delta, +23 vortex.map.
+        Assert.Equal(803, inScope.Count);
     }
 
     [Fact]
@@ -58,7 +58,7 @@ public sealed class ScanCorpusTests
         }
 
         Assert.Equal(string.Empty, failures.ToString());
-        Assert.Equal(780, checkedFiles);
+        Assert.Equal(803, checkedFiles);
     }
 
     [Fact]
@@ -86,7 +86,8 @@ public sealed class ScanCorpusTests
 
             try
             {
-                await using VortexFile file = await VortexFile.OpenAsync(entry.Path, CancellationToken.None);
+                await using VortexFile file = await VortexFile.OpenAsync(
+                    entry.Path, OpenOptionsFor(entry), CancellationToken.None);
                 await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
                 {
                     Assert.True(batch.RowCount > 0);
@@ -113,7 +114,7 @@ public sealed class ScanCorpusTests
         }
 
         Assert.Equal(string.Empty, wrong.ToString());
-        Assert.Equal(40, named + read);
+        Assert.Equal(18, named + read);
 
         // A PROPORTION, not a count: the absolute number shrinks with every decoder that lands,
         // while the property being asserted -- that an out-of-scope file almost always reaches the
@@ -126,7 +127,8 @@ public sealed class ScanCorpusTests
 
     private static async Task ScanOne(CorpusEntry entry)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(entry.Path, CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(
+            entry.Path, OpenOptionsFor(entry), CancellationToken.None);
         Assert.Equal(entry.RowCount, file.RowCount);
 
         long rows = 0;
@@ -285,4 +287,30 @@ public sealed class ScanCorpusTests
         Assert.Equal(8193, rows);
         Assert.True(batches >= 9, "8193 rows capped at 1000 needs at least nine batches");
     }
+
+    /// <summary>Open options for one entry: the schema out of band when the file has none.</summary>
+    /// <param name="entry">The corpus entry about to be opened.</param>
+    /// <remarks>
+    /// <c>types/no_dtype_segment</c> reached this sweep only when <c>vortex.map</c> gained a decoder
+    /// and the file became in-scope. Opening it without a DType is a <c>VortexFormatException</c> by
+    /// contract §7.4, so the donor is a real corpus file with the identical schema.
+    /// </remarks>
+    private static VortexOpenOptions OpenOptionsFor(CorpusEntry entry) =>
+        entry.HasDTypeSegment
+            ? VortexOpenOptions.Default
+            : new VortexOpenOptions { DType = OutOfBandSchema.Value };
+
+    private static readonly Lazy<Vorticity.Types.DType> OutOfBandSchema =
+        new Lazy<Vorticity.Types.DType>(static () =>
+        {
+            VortexFile donor = VortexFile
+                .OpenAsync(
+                    CorpusManifest.Get("types/user_metadata_segments").Path,
+                    VortexOpenOptions.Default,
+                    CancellationToken.None)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult();
+            return donor.Schema;
+        });
 }

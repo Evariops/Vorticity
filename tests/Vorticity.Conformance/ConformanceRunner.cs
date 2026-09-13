@@ -18,6 +18,7 @@ using Vorticity.Columns;
 using Vorticity.Conformance.Comparison;
 using Vorticity.Conformance.Corpus;
 using Vorticity.Conformance.Sidecar;
+using Vorticity.Types;
 using Vorticity.File;
 using Vorticity.Scan;
 
@@ -126,8 +127,12 @@ internal static class ConformanceRunner
             SidecarRowStream stream = new SidecarRowStream(sidecar);
             NullCountAccumulator nulls = new NullCountAccumulator();
 
+            // types/no_dtype_segment has no dtype segment, so opening it without one is a
+            // VortexFormatException by contract §7.4 and the caller is expected to supply the
+            // schema. It reached this runner only when vortex.map gained a decoder and the file
+            // became in-scope; the donor is a real corpus file with the identical schema.
             await using VortexFile file = await VortexFile
-                .OpenAsync(entry.FullPath, cancellationToken)
+                .OpenAsync(entry.FullPath, OpenOptionsFor(entry), cancellationToken)
                 .ConfigureAwait(false);
 
             CheckNumber(log, "row count", sidecar.RowCount, file.RowCount);
@@ -285,6 +290,26 @@ internal static class ConformanceRunner
             log.Add(string.Empty, -1, what, expected, actual);
         }
     }
+
+    private static VortexOpenOptions OpenOptionsFor(CorpusEntry entry) =>
+        entry.HasDTypeSegment
+            ? VortexOpenOptions.Default
+            : new VortexOpenOptions { DType = OutOfBandSchema.Value };
+
+    private static readonly Lazy<DType> OutOfBandSchema = new Lazy<DType>(static () =>
+    {
+        VortexFile donor = VortexFile
+            .OpenAsync(
+                System.Array.Find(
+                    CorpusCatalog.Entries,
+                    static e => string.Equals(e.Id, "types/user_metadata_segments", StringComparison.Ordinal))!.FullPath,
+                VortexOpenOptions.Default,
+                System.Threading.CancellationToken.None)
+            .AsTask()
+            .GetAwaiter()
+            .GetResult();
+        return donor.Schema;
+    });
 
     private static void CheckNumber(MismatchLog log, string what, long expected, long actual)
     {

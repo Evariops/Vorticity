@@ -116,7 +116,8 @@ public sealed class WrittenSizeTests
         string written = Path.Combine(Path.GetTempPath(), $"vorticity-size-{Guid.NewGuid():N}.vortex");
         try
         {
-            await using (VortexFile source = await VortexFile.OpenAsync(entry.Path, CancellationToken.None))
+            await using (VortexFile source = await VortexFile.OpenAsync(
+                entry.Path, OpenOptionsFor(entry), CancellationToken.None))
             await using (VortexFileWriter writer = VortexFileWriter.Create(written, source.Schema))
             {
                 await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
@@ -138,4 +139,30 @@ public sealed class WrittenSizeTests
             }
         }
     }
+
+    /// <summary>Open options for one entry: the schema out of band when the file has none.</summary>
+    /// <param name="entry">The corpus entry about to be opened.</param>
+    /// <remarks>
+    /// <c>types/no_dtype_segment</c> reached this sweep only when <c>vortex.map</c> gained a decoder
+    /// and the file became in-scope. Opening it without a DType is a <c>VortexFormatException</c> by
+    /// contract §7.4, so the donor is a real corpus file with the identical schema.
+    /// </remarks>
+    private static VortexOpenOptions OpenOptionsFor(CorpusEntry entry) =>
+        entry.HasDTypeSegment
+            ? VortexOpenOptions.Default
+            : new VortexOpenOptions { DType = OutOfBandSchema.Value };
+
+    private static readonly Lazy<Vorticity.Types.DType> OutOfBandSchema =
+        new Lazy<Vorticity.Types.DType>(static () =>
+        {
+            VortexFile donor = VortexFile
+                .OpenAsync(
+                    CorpusManifest.Get("types/user_metadata_segments").Path,
+                    VortexOpenOptions.Default,
+                    CancellationToken.None)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult();
+            return donor.Schema;
+        });
 }

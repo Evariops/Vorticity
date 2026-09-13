@@ -81,10 +81,22 @@ public sealed class RoundTripSweepTests
         int written = 0;
         foreach (CorpusEntry entry in CorpusManifest.InScope())
         {
+            // NOT WRITTEN FOR THE CROSS-CHECK, and the reason is the verifier's, not ours. Our
+            // output for types/no_dtype_segment is fine - RoundTrip reads it back with default
+            // options - but `verify_written` opens the REFERENCE file to compare against, and that
+            // one has no dtype segment by construction, so the Rust side fails at open. Supplying a
+            // schema is a capability the example does not have; teaching it one is the better fix
+            // and is recorded rather than done here.
+            if (!entry.HasDTypeSegment)
+            {
+                continue;
+            }
+
             string destination = Path.Combine(root!, entry.Id.Replace('/', Path.DirectorySeparatorChar) + ".vortex");
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
 
-            await using VortexFile source = await VortexFile.OpenAsync(entry.Path, CancellationToken.None);
+            await using VortexFile source = await VortexFile.OpenAsync(
+                entry.Path, OpenOptionsFor(entry), CancellationToken.None);
             await using VortexFileWriter writer = VortexFileWriter.Create(destination, source.Schema);
             await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
@@ -111,7 +123,8 @@ public sealed class RoundTripSweepTests
             List<string> original = [];
             DType schema;
 
-            await using (VortexFile source = await VortexFile.OpenAsync(entry.Path, CancellationToken.None))
+            await using (VortexFile source = await VortexFile.OpenAsync(
+                entry.Path, OpenOptionsFor(entry), CancellationToken.None))
             {
                 schema = source.Schema;
                 await using VortexFileWriter writer = VortexFileWriter.Create(written, schema);
@@ -166,4 +179,35 @@ public sealed class RoundTripSweepTests
             }
         }
     }
+
+    /// <summary>
+    /// Open options for one entry: the schema supplied out of band when the file has no dtype
+    /// segment.
+    /// </summary>
+    /// <param name="entry">The corpus entry about to be opened.</param>
+    /// <remarks>
+    /// <c>types/no_dtype_segment</c> is the corpus's only such file, and it reached this sweep only
+    /// when <c>vortex.map</c> gained a decoder and the file became in-scope. Opening it without a
+    /// DType is a <c>VortexFormatException</c> BY CONTRACT §7.4, so the failure was the sweep
+    /// calling the wrong overload rather than anything about the round trip. The donor is a real
+    /// file with the identical schema, which is the same approach <c>Phase1CompositionTests</c>
+    /// already takes.
+    /// </remarks>
+    private static VortexOpenOptions OpenOptionsFor(CorpusEntry entry) =>
+        entry.HasDTypeSegment
+            ? VortexOpenOptions.Default
+            : new VortexOpenOptions { DType = OutOfBandSchema.Value };
+
+    private static readonly Lazy<DType> OutOfBandSchema = new Lazy<DType>(static () =>
+    {
+        VortexFile donor = VortexFile
+            .OpenAsync(
+                CorpusManifest.Get("types/user_metadata_segments").Path,
+                VortexOpenOptions.Default,
+                CancellationToken.None)
+            .AsTask()
+            .GetAwaiter()
+            .GetResult();
+        return donor.Schema;
+    });
 }

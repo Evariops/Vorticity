@@ -918,7 +918,13 @@ internal static class ArrayBlobWriter
                 return WriteVarBinView(builder, arena, node, buffers, encodings);
 
             case CanonicalKind.ListView:
-                return WriteListView(builder, arena, node, buffers, encodings, compress);
+                // A map node IS a ListView wearing the map dtype - see MapDecoder - so the kind
+                // alone does not say which id to write. Emitting `vortex.listview` under a map
+                // schema produces a file THIS READER REFUSES, correctly: "vortex.listview produces
+                // a List dtype; it was asked for Map".
+                return node.DType.Kind == DTypeKind.Map
+                    ? WriteMap(builder, arena, node, buffers, encodings, compress)
+                    : WriteListView(builder, arena, node, buffers, encodings, compress);
 
             case CanonicalKind.FixedSizeList:
                 return WriteFixedSizeList(builder, arena, node, buffers, encodings, compress);
@@ -1142,6 +1148,23 @@ internal static class ArrayBlobWriter
         uint buffer = BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
         uint offset = BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
         return node.GetDataBuffer((int)buffer).Span.Slice((int)offset, (int)size);
+    }
+
+    /// <summary>Writes <c>vortex.map</c>: empty metadata, no buffers, one <c>vortex.listview</c> child.</summary>
+    /// <remarks>
+    /// The inner listview carries the validity, which is where <c>MapDecoder</c>
+    /// reads it from, so the pair is symmetric rather than merely compatible. Upstream requires the
+    /// entries child to use the listview encoding specifically, so this wrapper is the only shape a
+    /// conformant map can take.
+    /// </remarks>
+    private static int WriteMap(
+        FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
+        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress)
+    {
+        int entries = WriteListView(builder, arena, node, buffers, encodings, compress);
+        Span<int> children = stackalloc int[1];
+        children[0] = entries;
+        return Node(builder, encodings, "vortex.map"u8, default, children, []);
     }
 
     private static int WriteListView(
