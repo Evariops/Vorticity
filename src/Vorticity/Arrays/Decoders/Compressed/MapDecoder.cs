@@ -17,6 +17,7 @@
 // dtype is how a mismatch becomes an error instead of a reinterpretation.
 using System;
 
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
@@ -53,14 +54,45 @@ public sealed class MapDecoder : ArrayDecoder
             CompressedThrow.Format($"{Id} requires a map dtype; the node declares {dtype.Kind}.");
         }
 
-        // BUILT IN THE DTYPE'S OWN ARENA, not the context's. A DType is an index into an arena and
-        // children must share their parent's; composing the file's key and value types inside
-        // `context.Types` throws "Child DTypes must come from the same DTypeArena as their parent",
-        // which is the arena invariant doing its job rather than an obstacle to route around.
-        DTypeArena types = dtype.Arena;
-        DType entries = types.Struct(
-            ["key", "value"], [dtype.KeyType, dtype.ValueType], Nullability.NonNullable);
-        DType entriesList = types.List(entries, dtype.Nullability);
+        // IMPORTED INTO THE CONTEXT'S ARENA, then derived there - the order DTypeImport's header
+        // states as the rule, and the reason it exists.
+        //
+        // THIS USED TO DERIVE INTO `dtype.Arena`, WHICH IS THE FILE'S. A DType is an index into an
+        // arena and children must share their parent's, so composing the file's key and value types
+        // straight into `context.Types` is refused - correctly - and deriving into the file's arena
+        // instead looked like the way round it. It is not: `DTypeArena.Struct` grows arrays and
+        // rehashes the dedup table with no synchronization at all, and docs/09-contracts.md §1
+        // permits CONCURRENT SCANS over one open file. Two scans reaching a Map column at the same
+        // moment are two unsynchronized writers on one table. That is why ScanContext owns an arena
+        // (contract §8.3) and why `MaskedDecoder` and `ZoneMapSchema` already import first.
+        //
+        // Importing costs nothing after the first batch: the target arena deduplicates, so every
+        // later import finds the nodes already there.
+        DTypeArena types = context.Types;
+        DType key = DTypeImport.Into(types, dtype.KeyType);
+        DType value = DTypeImport.Into(types, dtype.ValueType);
+        DType entriesList;
+
+        // Interned handles and a pooled pair rather than two `new[]`s per decode. DType is a
+        // managed type, so the fields cannot be `stackalloc`; Scratch is the house answer and is
+        // what DTypeImport uses for the same two spans.
+        Span<int> nameStack = stackalloc int[2];
+        Scratch<DType> fields = new Scratch<DType>(2, default);
+        try
+        {
+            nameStack[0] = types.InternName("key"u8);
+            nameStack[1] = types.InternName("value"u8);
+            Span<DType> fieldSpan = fields.Span;
+            fieldSpan[0] = key;
+            fieldSpan[1] = value;
+
+            entriesList = types.List(
+                types.Struct(nameStack, fieldSpan, Nullability.NonNullable), dtype.Nullability);
+        }
+        finally
+        {
+            fields.Dispose();
+        }
 
         int child = context.DecodeChild(in node, 0, entriesList, length);
         CanonicalNode list = context.Canonical.GetNode(child);
