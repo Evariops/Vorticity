@@ -44,55 +44,36 @@ internal static class LayoutValidity
             return Validity.AllValid;
         }
 
-        return Classify(bits.Bits.Span, bits.BitOffset, length) switch
+        return Classify(bits.Bits.Span, bits.BitOffset, length, canonicalIndex);
+    }
+
+    /// <summary>
+    /// The same classification <c>ArrayDecodeContext.ClassifyValidityBits</c> does, through the
+    /// same kernel.
+    /// </summary>
+    /// <remarks>
+    /// This was its own byte-at-a-time loop with an <c>b == firstByte</c> and a <c>b == lastByte</c>
+    /// test inside it -- a second copy of the code that, vectorized, turned out to be the largest
+    /// single measured gain of the whole audit (`masked_*` 1.32 to 0.49; PERF-AUDIT §1.9). Two
+    /// implementations of one question is how one of them stays slow.
+    ///
+    /// <paramref name="length"/> is at least 1: the caller returns <c>AllValid</c> for a zero-row
+    /// layout before reaching here, which is what the kernel's masked ends assume.
+    /// </remarks>
+    /// <param name="bits">The validity bitmap.</param>
+    /// <param name="bitOffset">The bit the layout's row 0 sits at.</param>
+    /// <param name="length">Row count, strictly positive.</param>
+    /// <param name="canonicalIndex">The bitmap's node, carried by a mixed result.</param>
+    private static Validity Classify(ReadOnlySpan<byte> bits, int bitOffset, int length, int canonicalIndex)
+    {
+        Arrays.Decoders.Canonical.BitmapKernels.Classify(
+            bits, bitOffset, length, out bool anySet, out bool anyClear);
+
+        return (anySet, anyClear) switch
         {
-            BitmapShape.AllClear => Validity.AllInvalid,
-            BitmapShape.AllSet => Validity.AllValid,
-            _ => Validity.Bitmap(canonicalIndex),
+            (true, true) => Validity.Bitmap(canonicalIndex),
+            (true, false) => Validity.AllValid,
+            _ => Validity.AllInvalid,
         };
-    }
-
-    private enum BitmapShape : byte
-    {
-        Mixed = 0,
-        AllSet = 1,
-        AllClear = 2,
-    }
-
-    /// <summary>Byte-at-a-time classification with masked ends; stops as soon as both are ruled out.</summary>
-    private static BitmapShape Classify(ReadOnlySpan<byte> bits, int bitOffset, int length)
-    {
-        int firstBit = bitOffset;
-        int lastBit = bitOffset + length - 1;
-        int firstByte = firstBit >> 3;
-        int lastByte = lastBit >> 3;
-
-        bool allSet = true;
-        bool allClear = true;
-
-        for (int b = firstByte; b <= lastByte; b++)
-        {
-            int lo = b == firstByte ? (firstBit & 7) : 0;
-            int hi = b == lastByte ? (lastBit & 7) : 7;
-            int mask = ((1 << (hi - lo + 1)) - 1) << lo;
-            int value = bits[b] & mask;
-
-            if (value != mask)
-            {
-                allSet = false;
-            }
-
-            if (value != 0)
-            {
-                allClear = false;
-            }
-
-            if (!allSet && !allClear)
-            {
-                return BitmapShape.Mixed;
-            }
-        }
-
-        return allSet ? BitmapShape.AllSet : BitmapShape.AllClear;
     }
 }

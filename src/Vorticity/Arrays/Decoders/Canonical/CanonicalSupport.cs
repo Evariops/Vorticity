@@ -226,29 +226,20 @@ internal static class CanonicalSupport
     /// <summary>
     /// Copies <paramref name="count"/> bits from <paramref name="source"/> at bit
     /// <paramref name="sourceBit"/> to <paramref name="destination"/> at bit
-    /// <paramref name="destinationBit"/>. Scalar and simple on purpose: SIMD is Phase 2 and
-    /// invariant 4 requires the scalar path to exist and be tested regardless.
+    /// <paramref name="destinationBit"/>.
     /// </summary>
+    /// <remarks>
+    /// Both of these were bit-at-a-time loops, the two PERF-AUDIT §4.2 names under
+    /// <c>CanonicalSupport</c>. They now forward to <see cref="BitmapKernels"/>, which §4.2 asks to
+    /// become the single entry point for bitmap work.
+    /// </remarks>
     internal static void CopyBits(
-        ReadOnlySpan<byte> source, int sourceBit, Span<byte> destination, int destinationBit, int count)
-    {
-        for (int i = 0; i < count; i++)
-        {
-            if (BitAt(source, sourceBit + i))
-            {
-                SetBit(destination, destinationBit + i);
-            }
-        }
-    }
+        ReadOnlySpan<byte> source, int sourceBit, Span<byte> destination, int destinationBit, int count) =>
+        BitmapKernels.CopyRange(source, sourceBit, destination, destinationBit, count);
 
     /// <summary>Sets <paramref name="count"/> bits starting at <paramref name="destinationBit"/>.</summary>
-    internal static void SetBits(Span<byte> destination, int destinationBit, int count)
-    {
-        for (int i = 0; i < count; i++)
-        {
-            SetBit(destination, destinationBit + i);
-        }
-    }
+    internal static void SetBits(Span<byte> destination, int destinationBit, int count) =>
+        BitmapKernels.SetRange(destination, destinationBit, count);
 
     /// <summary>Bytes needed to hold <paramref name="bitCount"/> bits.</summary>
     internal static int BitmapByteCount(int bitCount) => (int)(((long)bitCount + 7) / 8);

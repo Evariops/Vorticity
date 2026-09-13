@@ -378,10 +378,18 @@ internal static class FastLanes
         int lanes = BlockSize / elementBits;
         int wordsPerBlock = lanes * bitWidth;
 
-        // The two degenerate widths and the platforms without vectors keep the per-block form:
-        // neither has a row shape to hoist.
-        if (bitWidth == 0 || bitWidth == elementBits
-            || !Vectorizable<T>() || !Vector128.IsHardwareAccelerated)
+        // A zero bit width packs nothing at all: the whole run is zeros, and it is ONE clear
+        // rather than `blocks` of them. The per-block form was calling into `memset` once per
+        // 1024 elements for a buffer that is contiguous.
+        if (bitWidth == 0)
+        {
+            output[..(blocks * BlockSize)].Clear();
+            return;
+        }
+
+        // The remaining degenerate width and the platforms without vectors keep the per-block
+        // form: neither has a row shape to hoist.
+        if (bitWidth == elementBits || !Vectorizable<T>() || !Vector128.IsHardwareAccelerated)
         {
             for (int block = 0; block < blocks; block++)
             {

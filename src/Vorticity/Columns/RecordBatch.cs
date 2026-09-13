@@ -393,29 +393,11 @@ public sealed class RecordBatch : IDisposable
                 $"offset {bitOffset}.");
         }
 
-        int set = 0;
-        int firstByte = bitOffset >> 3;
-        int lastByte = (int)((endBit - 1) >> 3);
-        int lowSkip = bitOffset & 7;
-
-        for (int i = firstByte; i <= lastByte; i++)
-        {
-            uint b = bits[i];
-            if (i == firstByte)
-            {
-                b &= 0xFFu << lowSkip;
-            }
-
-            if (i == lastByte)
-            {
-                int highKeep = (int)(((endBit - 1) & 7) + 1);
-                b &= 0xFFu >> (8 - highKeep);
-            }
-
-            set += BitOperations.PopCount(b);
-        }
-
-        return length - set;
+        // Counted eight bytes at a time, with the two partial ends masked once rather than tested
+        // per byte -- PERF-AUDIT §4.2 asks for every bit-at-a-time site to arrive at this one
+        // kernel, and this loop carried an `i == firstByte` and an `i == lastByte` compare through
+        // all 125 000 iterations of a million-row bitmap.
+        return length - Arrays.Decoders.Canonical.BitmapKernels.CountSet(bits, bitOffset, length);
     }
 
     /// <summary>

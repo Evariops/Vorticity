@@ -417,16 +417,10 @@ public sealed class ZstdDecoder : ArrayDecoder
             return 0;
         }
 
-        int count = 0;
-        for (int i = 0; i < length; i++)
-        {
-            if (mask.IsValid(i))
-            {
-                count++;
-            }
-        }
-
-        return count;
+        // A CALL PER ROW became a popcount per eight bytes. `mask` is a Bitmap here -- the two
+        // uniform kinds returned above -- so the bits are exactly what the kernel counts
+        // (PERF-AUDIT §4.2).
+        return BitmapKernels.CountSet(mask.Bits, mask.BitOffset, length);
     }
 
     private static long CheckedSize(ulong value, int index, string what)

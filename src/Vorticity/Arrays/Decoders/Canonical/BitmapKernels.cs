@@ -115,6 +115,148 @@ internal static class BitmapKernels
         }
     }
 
+    /// <summary>
+    /// Counts the SET bits of <paramref name="count"/> bits from <paramref name="start"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Eight bytes at a time, with the two partial ends masked ONCE instead of tested per byte.
+    /// The loops this replaces did one of two things per bit or per byte: a
+    /// <c>mask.IsValid(row)</c> call over every row of the array, or a byte-wise popcount carrying
+    /// an <c>i == firstByte</c> and an <c>i == lastByte</c> compare into all 125 000 iterations of
+    /// a million-row bitmap. Both ends are known before the loop starts.
+    /// </para>
+    /// <para>
+    /// The single-byte case is separate because a range inside one byte has BOTH masks on the same
+    /// byte, and the two-sided form would count it twice.
+    /// </para>
+    /// </remarks>
+    /// <param name="bits">The bitmap; the caller has established it covers the range.</param>
+    /// <param name="start">First bit.</param>
+    /// <param name="count">How many bits; zero and negative count as none.</param>
+    /// <returns>How many of those bits are set.</returns>
+    internal static int CountSet(ReadOnlySpan<byte> bits, int start, int count)
+    {
+        if (count <= 0)
+        {
+            return 0;
+        }
+
+        int firstByte = start >> 3;
+        long endExclusive = (long)start + count;
+        int lastByte = (int)((endExclusive - 1) >> 3);
+        int lo = start & 7;
+        int hi = (int)((endExclusive - 1) & 7) + 1;
+
+        if (firstByte == lastByte)
+        {
+            uint only = (uint)(bits[firstByte] & (0xFF << lo) & (0xFF >> (8 - hi)));
+            return BitOperations.PopCount(only);
+        }
+
+        int total = BitOperations.PopCount((uint)(bits[firstByte] & (0xFF << lo)) & 0xFF)
+            + BitOperations.PopCount((uint)(bits[lastByte] & (0xFF >> (8 - hi))));
+
+        ReadOnlySpan<byte> middle = bits[(firstByte + 1)..lastByte];
+        ReadOnlySpan<ulong> words = MemoryMarshal.Cast<byte, ulong>(middle);
+        for (int i = 0; i < words.Length; i++)
+        {
+            total += BitOperations.PopCount(words[i]);
+        }
+
+        for (int i = words.Length * sizeof(ulong); i < middle.Length; i++)
+        {
+            total += BitOperations.PopCount((uint)middle[i]);
+        }
+
+        return total;
+    }
+
+    /// <summary>
+    /// Copies <paramref name="count"/> bits from <paramref name="source"/> at
+    /// <paramref name="sourceStart"/> to <paramref name="destination"/> at
+    /// <paramref name="destinationStart"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE DESTINATION IS WRITTEN A BYTE AT A TIME, not a bit. Once the destination is byte
+    /// aligned -- which costs at most seven bits of head -- each output byte is eight source bits
+    /// read as one unaligned pair and shifted into place, whatever the source's own alignment.
+    /// Eight times fewer read-modify-writes, and the destination byte is written rather than
+    /// OR-ed, so the caller no longer has to hand over a cleared buffer.
+    /// </para>
+    /// <para>
+    /// The second source byte of a pair is read only when the shift needs it, and when it does,
+    /// the caller's promise that <paramref name="count"/> bits are readable is exactly what puts
+    /// it in range: the last whole output byte ends at source bit
+    /// <c>sourceStart + 8 * wholeBytes - 1</c>, whose byte index is the one the pair's high half
+    /// reads.
+    /// </para>
+    /// </remarks>
+    /// <param name="source">The source bitmap.</param>
+    /// <param name="sourceStart">First source bit.</param>
+    /// <param name="destination">The destination bitmap.</param>
+    /// <param name="destinationStart">First destination bit.</param>
+    /// <param name="count">How many bits; zero and negative are no-ops.</param>
+    internal static void CopyRange(
+        ReadOnlySpan<byte> source, int sourceStart, Span<byte> destination, int destinationStart,
+        int count)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        // The head, bit by bit, until the destination lands on a byte boundary.
+        int copied = 0;
+        while (copied < count && ((destinationStart + copied) & 7) != 0)
+        {
+            CopyOne(source, sourceStart + copied, destination, destinationStart + copied);
+            copied++;
+        }
+
+        int wholeBytes = (count - copied) >> 3;
+        if (wholeBytes > 0)
+        {
+            int destinationByte = (destinationStart + copied) >> 3;
+            int sourceBit = sourceStart + copied;
+            int sourceByte = sourceBit >> 3;
+            int shift = sourceBit & 7;
+
+            if (shift == 0)
+            {
+                source.Slice(sourceByte, wholeBytes).CopyTo(destination.Slice(destinationByte, wholeBytes));
+            }
+            else
+            {
+                for (int b = 0; b < wholeBytes; b++)
+                {
+                    int pair = source[sourceByte + b] | (source[sourceByte + b + 1] << 8);
+                    destination[destinationByte + b] = (byte)(pair >> shift);
+                }
+            }
+
+            copied += wholeBytes << 3;
+        }
+
+        // The tail, bit by bit again: fewer than eight of them by construction.
+        for (; copied < count; copied++)
+        {
+            CopyOne(source, sourceStart + copied, destination, destinationStart + copied);
+        }
+    }
+
+    /// <summary>Copies one bit, setting or clearing the destination to match.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CopyOne(
+        ReadOnlySpan<byte> source, int sourceBit, Span<byte> destination, int destinationBit)
+    {
+        int bit = (source[sourceBit >> 3] >> (sourceBit & 7)) & 1;
+        int at = destinationBit >> 3;
+        int mask = 1 << (destinationBit & 7);
+        destination[at] = (byte)((destination[at] & ~mask) | (bit == 0 ? 0 : mask));
+    }
+
     /// <summary>Sets <paramref name="count"/> bits from <paramref name="start"/>.</summary>
     /// <param name="bits">The bitmap; the caller has sized it.</param>
     /// <param name="start">First bit.</param>

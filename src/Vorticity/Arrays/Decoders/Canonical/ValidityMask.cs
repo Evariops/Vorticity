@@ -54,6 +54,15 @@ internal readonly ref struct ValidityMask
     /// <summary><see langword="true"/> when every row is null.</summary>
     internal bool AllInvalid => _kind == ValidityKind.AllInvalid;
 
+    /// <summary>
+    /// The backing bits, for a caller that has ruled out the two uniform kinds and wants to read a
+    /// RANGE of them through <see cref="BitmapKernels"/> rather than a row at a time.
+    /// </summary>
+    internal ReadOnlySpan<byte> Bits => _bits;
+
+    /// <summary>The bit this mask's row 0 sits at.</summary>
+    internal int BitOffset => _bitOffset;
+
     /// <summary>Whether row <paramref name="index"/> holds a value.</summary>
     /// <param name="index">Row index; the caller has already bounds-checked it against the length.</param>
     internal bool IsValid(int index) => _kind switch
