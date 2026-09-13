@@ -25,8 +25,12 @@
 // iteration time and count are shortened. A fast-profile figure is a DIRECTION; anything under about
 // 5 % on a kernel, or any number that goes into bench/BASELINE.md, is confirmed with `--full` on the
 // one class concerned.
+using System;
+using System.Linq;
+
 using BenchmarkDotNet.Columns;
 using BenchmarkDotNet.Configs;
+using BenchmarkDotNet.Filters;
 using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Toolchains.InProcess.Emit;
 
@@ -44,6 +48,17 @@ public sealed class BenchmarkConfig : ManualConfig
     /// </summary>
     internal static bool Full { get; set; }
 
+    /// <summary>
+    /// Set the same way by <see cref="Program"/>: <c>--explore</c> on the command line. The
+    /// <see cref="Explore"/> category holds the CURVES - a selectivity sweep, a take sweep - which
+    /// answered their question once and are not regression guards (BENCH-AUDIT.md §3.1). They stay
+    /// runnable and stay out of the run with no argument.
+    /// </summary>
+    internal static bool Exploring { get; set; }
+
+    /// <summary>The category name for a curve: excluded unless <c>--explore</c> asks for it.</summary>
+    public const string Explore = "explore";
+
     public BenchmarkConfig()
     {
         Job job = Job.Default.WithToolchain(InProcessEmitToolchain.Instance);
@@ -59,6 +74,12 @@ public sealed class BenchmarkConfig : ManualConfig
         AddLogger(BenchmarkDotNet.Loggers.ConsoleLogger.Default);
         AddColumnProvider(DefaultColumnProviders.Instance);
         AddDiagnoser(BenchmarkDotNet.Diagnosers.MemoryDiagnoser.Default);
+        if (!Exploring)
+        {
+            AddFilter(new SimpleFilter(benchmark => !benchmark.Descriptor.Categories.Contains(
+                Explore, StringComparer.OrdinalIgnoreCase)));
+        }
+
         WithOptions(ConfigOptions.DisableOptimizationsValidator);
     }
 }

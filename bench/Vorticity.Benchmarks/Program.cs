@@ -3,7 +3,8 @@
 // `dotnet run -c Release --project bench/Vorticity.Benchmarks` runs everything in the FAST profile
 // (BenchmarkConfig.cs says what that is and what it costs in fidelity); `-- --filter '*Fsst*'`
 // narrows it to one class, which is what a kernel change wants; `-- --full` selects the reference
-// profile, for the one class whose number is about to be written down.
+// profile, for the one class whose number is about to be written down; `-- --explore` adds back the
+// CURVES, which are exploration rather than guards and are out of the default run.
 //
 // `-- --ffi-check` is not a benchmark: it verifies that the native comparison harness is present
 // and that both implementations AGREE on what they read. A ratio between two readers that return
@@ -66,7 +67,8 @@ internal static class Program
         // `--full` is ours, not BenchmarkDotNet's: consumed here, and read by every BenchmarkConfig
         // the [Config] attributes instantiate afterwards.
         BenchmarkConfig.Full = Array.IndexOf(args, "--full") >= 0;
-        string[] forwarded = [.. args.Where(a => a != "--full")];
+        BenchmarkConfig.Exploring = Array.IndexOf(args, "--explore") >= 0;
+        string[] forwarded = [.. args.Where(a => a is not ("--full" or "--explore"))];
         BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(forwarded);
         return 0;
     }

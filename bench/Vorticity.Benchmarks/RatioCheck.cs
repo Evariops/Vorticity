@@ -198,7 +198,7 @@ internal static class RatioCheck
 
     /// <summary>Rows a scattered take asks for, and the gap between them.</summary>
     /// <remarks>
-    /// 64 rows one per 1024 is the shape `TakeBenchmarks` uses and the shape docs/05 quotes its
+    /// 64 rows one per 1024 is the shape `PathAllocationTests` uses and the shape docs/05 quotes its
     /// "0.32x of a full scan" from: one row from each of the dataset's 64 splits, which is the
     /// worst case for a reader that fetches by split.
     /// </remarks>

@@ -6,15 +6,14 @@
 // it - so are the output positions, because `index(row, lane) = base(row) + lane` at every element
 // width. No gather, no scatter, just loads, shifts, masks and stores.
 //
-// MEASURED HERE AND NOT THROUGH DecodeComparison, for the reason docs/05-benchmarks.md §1b now
+// MEASURED AT THE KERNEL AND NOT END TO END, for the reason docs/05-benchmarks.md §1b now
 // states outright: an end-to-end run puts tens of microseconds of open-and-walk in front of the
 // kernel and leaves the answer inside the run-to-run spread. That mistake has already been made
 // once in this repository, on the FSST kernel, and it produced a confident negative result about a
 // change that was in fact 7.9x faster.
 //
-// Both bit widths below are real: 17 is what the reference chose for `types/i64_nonnull_r8192`, and
-// 10 is what our own writer chooses for the nullable column of `containers/zoned_many_zones_nulls`.
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 using BenchmarkDotNet.Attributes;
@@ -34,9 +33,17 @@ public class FastLanesKernelBenchmarks
     private uint[] _packed32 = [];
     private uint[] _output32 = [];
 
-    /// <summary>Bits per packed value.</summary>
-    [Params(10, 17, 33)]
+    /// <summary>
+    /// Bits per packed value. 17 by default -- the width the reference chose for
+    /// `types/i64_nonnull_r8192` -- because a kernel regression shows at one width; 10 and 33 come
+    /// back under `--full` (10 is what our own writer chooses for the nullable column of
+    /// `containers/zoned_many_zones_nulls`, 33 crosses the 32-bit boundary).
+    /// </summary>
+    [ParamsSource(nameof(BitWidths))]
     public int BitWidth { get; set; } = 17;
+
+    /// <summary>The widths the current profile measures.</summary>
+    public static IEnumerable<int> BitWidths => BenchmarkConfig.Full ? [10, 17, 33] : [17];
 
     [GlobalSetup]
     public void Setup()

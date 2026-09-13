@@ -1,7 +1,7 @@
 // What one row costs, and how that cost amortizes.
 //
-// docs/05-benchmarks.md §3 asks for "random access: the latency of row N alone" and notes that
-// `TakeBenchmarks` measures 64 and 1000 scattered rows, never one. The single row is the honest
+// docs/05-benchmarks.md §3 asks for "random access: the latency of row N alone", and the take axis
+// of `--ratio-check` measures 64 scattered rows, never one. The single row is the honest
 // statement of the F5 claim - a format that supports random access is one you can ask for a row
 // without paying for a scan - and it is also the number that exposes the FIXED cost of a take, which
 // an amortized figure hides by construction.
@@ -29,8 +29,9 @@ using Vorticity.Scan;
 
 namespace Vorticity.Benchmarks;
 
-/// <summary>Taking 1 to 4096 scattered rows out of 65 536.</summary>
+/// <summary>Taking 1 to 4096 scattered rows out of 65 536. A curve: <c>--explore</c>.</summary>
 [Config(typeof(BenchmarkConfig))]
+[BenchmarkCategory(BenchmarkConfig.Explore)]
 public class RandomAccessBenchmarks
 {
     /// <summary>Rows in the file, which turns a count into a stride.</summary>
@@ -39,8 +40,13 @@ public class RandomAccessBenchmarks
     private string _path = string.Empty;
     private long[] _rows = [];
 
-    /// <summary>How many rows the caller asks for.</summary>
-    [Params(1, 8, 64, 512, 4096)]
+    /// <summary>
+    /// How many rows the caller asks for. Three points rather than five: the curve has ANSWERED -
+    /// the cost is per split, and one row costs the open - so what is left is its two ends and its
+    /// middle, kept so the shape can be re-read, not so it can guard (BENCH-AUDIT.md §3.1). The
+    /// guard is the take axis of `--ratio-check`.
+    /// </summary>
+    [Params(1, 64, 4096)]
     public int Count { get; set; } = 1;
 
     [GlobalSetup]

@@ -97,8 +97,8 @@ internal static partial class RustReader
     /// <returns>The row count actually produced, or negative on failure.</returns>
     /// <remarks>
     /// A STRIDE rather than a list, so the same call describes a scattered take of any density
-    /// without marshalling an array across the ABI -- and `TakeBenchmarks` on the .NET side uses
-    /// exactly this shape. docs/05's take figure was "0.32x of a full scan", a ratio against
+    /// without marshalling an array across the ABI -- and the take axis of `--ratio-check` on the
+    /// .NET side uses exactly this shape. docs/05's take figure was "0.32x of a full scan", a ratio against
     /// ourselves that says nothing about whether the path is fast.
     /// </remarks>
     [LibraryImport(Library, EntryPoint = "vxbench_take", StringMarshalling = StringMarshalling.Utf8)]

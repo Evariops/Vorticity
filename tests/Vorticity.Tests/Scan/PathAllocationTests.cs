@@ -294,7 +294,7 @@ public sealed class PathAllocationTests
 
     private static async ValueTask<long> ScatteredTake()
     {
-        // One row from each of the file's 64 splits of 1024, exactly as TakeBenchmarks does.
+        // One row from each of the file's 64 splits of 1024, the take axis of `--ratio-check`'s shape.
         long[] indices = new long[64];
         for (int i = 0; i < indices.Length; i++)
         {
@@ -314,7 +314,7 @@ public sealed class PathAllocationTests
 
     private static async ValueTask<long> PrunedFilter()
     {
-        // The same narrow band of the sorted column ScanBenchmarks filters on: ~100 rows of 65 536,
+        // A narrow band of the sorted column: ~100 rows of 65 536,
         // which is the case pruning exists for.
         VortexExpr filter = Expr.And(
             Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_000L))),

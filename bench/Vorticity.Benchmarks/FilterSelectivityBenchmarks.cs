@@ -1,8 +1,8 @@
 // What zone-map pruning is worth as the filter gets less selective.
 //
 // docs/05-benchmarks.md §3 asks for filter pushdown at 1%, 10% and 50% selectivity and has never had
-// it. `ScanBenchmarks` measures exactly one band - about 100 rows of 65 536, roughly 0.15% - with
-// pruning on and off, and reports a single ratio. That number is the BEST CASE by construction: a
+// it. `PathAllocationTests` exercises exactly one band - about 100 rows of 65 536, roughly 0.15% -
+// and that band is the BEST CASE by construction: a
 // band narrow enough to live in one or two zones is the case pruning exists for, and quoting its
 // speedup as "what pruning is worth" says nothing about the predicate a user actually writes.
 //
@@ -24,8 +24,9 @@ using Vorticity.Scan;
 
 namespace Vorticity.Benchmarks;
 
-/// <summary>A selective filter at four selectivities, with and without pruning.</summary>
+/// <summary>A selective filter at two selectivities, pruned and not. A curve: <c>--explore</c>.</summary>
 [Config(typeof(BenchmarkConfig))]
+[BenchmarkCategory(BenchmarkConfig.Explore)]
 public class FilterSelectivityBenchmarks
 {
     /// <summary>`monotone` starts here and steps by 3, so a band of 3n rows is n wide in value.</summary>
@@ -39,8 +40,12 @@ public class FilterSelectivityBenchmarks
 
     private string _path = string.Empty;
 
-    /// <summary>Percent of rows the predicate matches.</summary>
-    [Params(1, 10, 50, 90)]
+    /// <summary>
+    /// Percent of rows the predicate matches. The two ends rather than four points: `--ratio-check`
+    /// holds 1 % and 50 % against Rust, and the arm without pruning is flat by construction, so the
+    /// intermediate points are shape rather than guard (BENCH-AUDIT.md §3.1).
+    /// </summary>
+    [Params(1, 50)]
     public int Percent { get; set; } = 1;
 
     /// <summary>Whether zone-map pruning is allowed.</summary>

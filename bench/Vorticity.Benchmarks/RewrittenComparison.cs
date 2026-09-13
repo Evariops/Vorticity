@@ -15,6 +15,12 @@
 //
 // The written file is produced once in GlobalSetup, not per iteration - writing is not what this
 // measures.
+//
+// IN `explore` UNTIL ITS AXES LAND. BENCH-AUDIT.md §3.1 rules this class "move, not delete": the
+// QUESTION is unique in the repository, the ESTIMATOR is not - sequential arms cannot share a drift
+// the way `--ratio-check`'s interleaved ones do, and its Rust arms still call the lazy `ScanAll`
+// (A1). It leaves the default run now and disappears when the `rewritten` axes exist in
+// `--ratio-check`; until then `--explore` is how the 2x2 is still read.
 using System;
 using System.IO;
 using System.Threading;
@@ -31,6 +37,7 @@ namespace Vorticity.Benchmarks;
 
 /// <summary>Scanning the reference's bytes against scanning our own, with both readers.</summary>
 [Config(typeof(BenchmarkConfig))]
+[BenchmarkCategory(BenchmarkConfig.Explore)]
 public class RewrittenComparison
 {
     private string _reference = string.Empty;
