@@ -766,6 +766,47 @@ public sealed class CanonicalArena
     }
 
     /// <summary>
+    /// The bytes a node and everything under it occupy, counted once per buffer.
+    /// </summary>
+    /// <param name="nodeIndex">The node.</param>
+    /// <returns>The total, in bytes.</returns>
+    /// <exception cref="VortexFormatException"><paramref name="nodeIndex"/> is out of range.</exception>
+    /// <remarks>
+    /// The reference's <c>nbytes()</c>, and it exists for the same caller: the writer's
+    /// repartitioner decides when a block is large enough, and "large enough" is a size in
+    /// UNCOMPRESSED bytes because that is the only size available before the block is compressed.
+    /// A shared buffer is counted once per reference, as upstream's is -- the figure is a budget,
+    /// not an allocation report.
+    /// </remarks>
+    internal long ByteSize(int nodeIndex)
+    {
+        if ((uint)nodeIndex >= (uint)_recordCount)
+        {
+            ArraysThrow.CanonicalIndex(nodeIndex, _recordCount);
+        }
+
+        CanonicalRecord record = _records[nodeIndex];
+        long total = record.BufferA.Length + record.BufferB.Length;
+
+        for (int i = 0; i < record.DataBufferCount; i++)
+        {
+            total += _dataBuffers[record.DataBufferStart + i].Length;
+        }
+
+        if (record.Validity.Kind == ValidityKind.Bitmap)
+        {
+            total += ByteSize(record.Validity.CanonicalNodeIndex);
+        }
+
+        for (int i = 0; i < record.ChildCount; i++)
+        {
+            total += ByteSize(_children[record.ChildStart + i]);
+        }
+
+        return total;
+    }
+
+    /// <summary>
     /// Re-creates a node and everything under it in this arena as records whose buffers are still
     /// <b>views</b> onto <paramref name="source"/>'s storage. Nothing is copied but the records.
     /// </summary>

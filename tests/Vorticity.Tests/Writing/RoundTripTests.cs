@@ -173,14 +173,21 @@ public sealed class RoundTripTests
     /// Renders every value of every column, so the comparison is over VALUES rather than over the
     /// bytes we happened to write.
     /// </summary>
+    /// <summary>Flattens a batch to one string per value, ROW-major.</summary>
+    /// <remarks>
+    /// ROW-MAJOR, AND THAT IS THE WHOLE POINT. Field-major within a batch makes the flattened
+    /// sequence depend on where the batch boundaries fall, so the same rows split differently
+    /// compare unequal -- and the writer is allowed to choose its own chunking, which is what
+    /// `VortexWriteOptions.RowBlockSize` does. Row-major is invariant under re-batching, which is
+    /// what this test is actually asserting.
+    /// </remarks>
     private static void Describe(RecordBatch batch, List<string> into)
     {
-        for (int field = 0; field < batch.FieldCount; field++)
+        for (int row = 0; row < batch.RowCount; row++)
         {
-            VortexColumn column = batch.Column(field);
-            for (int row = 0; row < batch.RowCount; row++)
+            for (int field = 0; field < batch.FieldCount; field++)
             {
-                into.Add(Render(column, row));
+                into.Add(Render(batch.Column(field), row));
             }
         }
     }

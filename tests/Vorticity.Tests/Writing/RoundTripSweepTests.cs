@@ -58,6 +58,14 @@ public sealed class RoundTripSweepTests
             "written and read back, " + rows.ToString(CultureInfo.InvariantCulture) +
             " rows compared value for value.\n");
 
+        // On the console as well as in the assertion: xunit truncates a long string comparison at
+        // fifty characters, which on a sweep over 813 files is one file's name and the first word
+        // of its exception.
+        if (failures.Length > 0)
+        {
+            Console.Out.Write(failures.ToString());
+        }
+
         Assert.Equal(string.Empty, failures.ToString());
         Assert.True(checkedFiles > 700, $"only {checkedFiles} files round-tripped");
     }
@@ -131,7 +139,7 @@ public sealed class RoundTripSweepTests
                 await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
-                    Values.Describe(batch, original);
+                    Values.DescribeRows(batch, original);
                     await writer.WriteAsync(batch, CancellationToken.None);
                 }
 
@@ -150,7 +158,7 @@ public sealed class RoundTripSweepTests
                 await foreach (RecordBatch batch in target.Scan().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
-                    Values.Describe(batch, readBack);
+                    Values.DescribeRows(batch, readBack);
                 }
             }
 

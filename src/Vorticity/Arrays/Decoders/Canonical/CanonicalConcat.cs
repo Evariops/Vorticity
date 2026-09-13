@@ -396,7 +396,15 @@ internal static class CanonicalConcat
         int depth)
     {
         CanonicalArena arena = context.Canonical;
-        DType elementType = dtype.ElementType;
+
+        // THE ELEMENT DTYPE COMES FROM THE CHILD, NOT FROM THE PARENT, and the difference is a
+        // `vortex.map`: its canonical form is a ListView, but its DTYPE is Map, which has no
+        // `ElementType` -- `MapDecoder` derives `Struct{key, value}` and puts it on the elements
+        // child. Reading the parent worked for as long as nothing chunked or repartitioned a map
+        // column, which nothing did until the writer started choosing its own chunk boundaries.
+        DType elementType = chunks.Length == 0
+            ? dtype.ElementType
+            : arena.GetNode(arena.GetNode(chunks[0]).ElementsIndex).DType;
 
         Span<int> stack = stackalloc int[StackSmall];
         Scratch<int> scratch = new Scratch<int>(chunks.Length, stack);

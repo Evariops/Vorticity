@@ -69,12 +69,29 @@ public sealed class WriteAllocationTests
     /// </remarks>
     private static readonly (string Id, long Ceiling)[] Files =
     [
-        ("containers/zoned_many_zones_nulls", 32_400_000),
-        ("distributions/high_cardinality_i64_r8193", 385_000),
-        ("encodings/fsst", 1_140_000),
-        ("encodings/onpair", 482_000),
-        ("types/utf8_nullable_r1025", 477_000),
+        ("containers/zoned_many_zones_nulls", 12_100_000),
+        ("distributions/high_cardinality_i64_r8193", 470_000),
+        ("encodings/fsst", 1_155_000),
+        ("encodings/onpair", 500_000),
+        ("types/utf8_nullable_r1025", 495_000),
     ];
+
+    // FOUR OF THESE FIVE WENT UP WHEN REPARTITIONING LANDED, and that is a trade rather than a
+    // regression, so it is written down rather than rounded over. A writer that buffers rows needs
+    // an arena to buffer them in, and the rows it buffers are materialized into it -- a fixed cost
+    // per FILE, plus a second materialization when several batches are concatenated into one chunk.
+    // On a file whose rows fit in one block that cost is all there is, and it is worth 3% to 20%:
+    //
+    //     containers/zoned_many_zones_nulls   32 172 440 B -> 12 059 208 B   -62%
+    //     distributions/high_cardinality         381 512 B ->    463 704 B   +22%
+    //     encodings/fsst                       1 129 768 B ->  1 148 096 B    +2%
+    //     encodings/onpair                       477 008 B ->    495 408 B    +4%
+    //     types/utf8_nullable_r1025              472 544 B ->    490 944 B    +4%
+    //
+    // What it buys, on the file large enough to have chunks to save: 64 chunks become 3, which is
+    // 20 MB of write allocation and -76% of the allocation a SCAN of that file costs
+    // (RewrittenComparison: 147 510 B -> 35 437 B). Setting `RowBlockSize = null` restores the old
+    // figures exactly, for a caller whose batches are already its chunking.
 
     /// <summary>
     /// A shape guard, in bytes per row, over and above each file's own ceiling.

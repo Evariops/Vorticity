@@ -32,6 +32,21 @@ public sealed class ZoneMapWritingTests
     /// <summary>65536 rows in 64 uniform batches of 1024: exactly the shape a zone map needs.</summary>
     private const string Uniform = "containers/zoned_many_zones_nulls";
 
+    /// <summary>Writing one chunk per call, which is what `RowBlockSize = null` restores.</summary>
+    private static readonly VortexWriteOptions OneChunkPerCall =
+        new VortexWriteOptions { RowBlockSize = null };
+
+    /// <summary>
+    /// The zone map of a file written with the DEFAULT repartitioning: 8192-row blocks.
+    /// </summary>
+    /// <remarks>
+    /// THE ZONE LENGTH IS THE WRITER'S NOW, not the caller's, and that is the change
+    /// `VortexWriteOptions.RowBlockSize` makes. This file arrives as 64 batches of 1024 and used to
+    /// leave as 64 zones of 1024; it now leaves as three zones of 24 576, because a chunk carries
+    /// about 26 kB of fixed cost and paying it 64 times for a 65 536-row file is the caller's
+    /// batching leaking into the file. The pruning is correspondingly coarser, which is the trade
+    /// upstream makes by default too.
+    /// </remarks>
     [Fact]
     public async Task AWrittenFileCarriesAUsableZoneMapPerColumn()
     {
@@ -55,18 +70,53 @@ public sealed class ZoneMapWritingTests
 
             // Usable, not merely present: an unresolvable aggregate would parse and prune nothing.
             Assert.True(map.IsPruningAvailable);
-            Assert.Equal(1024, map.ZoneLength);
-            Assert.Equal(64, map.ZoneCount);
+
+            // 24 576 = three row blocks, which is where this file's five columns first reach the
+            // 1 MiB byte target. Both conditions are load-bearing and the number is the proof: the
+            // row block alone would have given 8192.
+            Assert.Equal(24576, map.ZoneLength);
+            Assert.Equal(3, map.ZoneCount);
             zoned++;
         }
 
         Assert.Equal(root.ChildCount, zoned);
     }
 
+    /// <summary>
+    /// `RowBlockSize = null` gives the caller the chunking back, exactly.
+    /// </summary>
+    /// <remarks>
+    /// The opt-out is the reason the default is safe to change: a caller who WANTS one chunk per
+    /// batch -- because its batches are its own pruning unit, which is what a 1024-row batch over
+    /// this file is -- says so and gets it, to the zone.
+    /// </remarks>
+    [Fact]
+    public async Task TurningOffRepartitioningGivesTheCallerTheChunkingBack()
+    {
+        await using Written written = await Written.Copy(Uniform, OneChunkPerCall);
+        await using VortexFile file = await VortexFile.OpenAsync(written.Path, CancellationToken.None);
+
+        LayoutTree tree = LayoutTree.Parse(file);
+        LayoutNode root = tree.Root;
+        for (int i = 0; i < root.ChildCount; i++)
+        {
+            LayoutNode child = root.GetChild(i);
+            Assert.Equal(LayoutEncodingId.Zoned, child.Encoding);
+            Assert.True(child.TryGetZoneMap(out ZoneMap map));
+            Assert.Equal(1024, map.ZoneLength);
+            Assert.Equal(64, map.ZoneCount);
+        }
+    }
+
     [Fact]
     public async Task PruningAWrittenFileSkipsSegmentsAndKeepsEveryRow()
     {
-        await using Written written = await Written.Copy(Uniform);
+        // ONE CHUNK PER CALL, deliberately: this asserts that pruning SKIPS READS, and the
+        // narrower the zones the more it can skip. With the default 8192-row blocks the same file
+        // has eight zones and a band inside one of them saves less than four-fold -- which is a
+        // statement about zone granularity, not about pruning, and is measured by
+        // `FilterSelectivityBenchmarks` rather than asserted here.
+        await using Written written = await Written.Copy(Uniform, OneChunkPerCall);
 
         // The same narrow band the corpus-file pruning test uses, so the two are comparable.
         VortexExpr narrow = Expr.And(
@@ -113,7 +163,10 @@ public sealed class ZoneMapWritingTests
             await using (VortexFile source = await VortexFile.OpenAsync(
                 Corpus.Path(Uniform), CancellationToken.None))
             {
-                await using VortexFileWriter writer = VortexFileWriter.Create(path, source.Schema);
+                // ONE CHUNK PER CALL: with repartitioning on, the writer would smooth the ragged
+                // batches into uniform blocks and there would be no raggedness left to test.
+                await using VortexFileWriter writer = VortexFileWriter.Create(
+                    path, source.Schema, OneChunkPerCall);
 
                 // 700 then 1024: the first batch is not the file's natural split, so the chunk
                 // sizes differ in the middle rather than only at the end.
@@ -207,7 +260,9 @@ public sealed class ZoneMapWritingTests
 
         internal string Path { get; }
 
-        internal static async Task<Written> Copy(string id)
+        internal static Task<Written> Copy(string id) => Copy(id, VortexWriteOptions.Default);
+
+        internal static async Task<Written> Copy(string id, VortexWriteOptions options)
         {
             Decoders.EnsureRegistered();
             string path = System.IO.Path.Combine(
@@ -215,7 +270,7 @@ public sealed class ZoneMapWritingTests
 
             await using VortexFile source = await VortexFile.OpenAsync(
                 Corpus.Path(id), CancellationToken.None);
-            await using VortexFileWriter writer = VortexFileWriter.Create(path, source.Schema);
+            await using VortexFileWriter writer = VortexFileWriter.Create(path, source.Schema, options);
             await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {

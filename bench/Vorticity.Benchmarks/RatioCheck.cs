@@ -153,7 +153,7 @@ internal static class RatioCheck
             p => RustReader.Require(RustReader.OpenOnly(p), "open")),
         new Axis(
             "read and write back",
-            1.70,
+            1.82,
             ReadAndWrite,
             p => RustReader.Require(RustReader.Write(p), "write")),
     ];

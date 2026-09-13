@@ -39,9 +39,11 @@ internal static class Values
     /// <param name="batch">The batch.</param>
     /// <param name="into">The sink.</param>
     /// <remarks>
-    /// <see cref="Describe"/> is column-major, which is right for a round trip - it compares the
-    /// same values in the same order whatever the batching - and wrong for anything that has to
-    /// index by row, because across several batches an entry's position is not its row.
+    /// <see cref="Describe"/> is column-major WITHIN A BATCH, which was described here as "the same
+    /// values in the same order whatever the batching" and is not: it is the same order only while
+    /// both sides batch identically. The moment a writer chooses its own chunk boundaries -- which
+    /// `VortexWriteOptions.RowBlockSize` makes it do -- the flattened sequences interleave
+    /// differently and compare unequal over identical data. A round trip should use THIS one.
     /// </remarks>
     internal static void DescribeRows(RecordBatch batch, List<string> into)
     {

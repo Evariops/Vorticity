@@ -51,4 +51,70 @@ public sealed class VortexWriteOptions
     /// the one unacceptable answer.
     /// </remarks>
     public VortexEdition TargetEdition { get; init; } = EditionRegistry.Newest;
+
+    /// <summary>
+    /// Rows per written chunk, as a multiple. Default 8192; <c>null</c> writes one chunk per
+    /// <c>WriteAsync</c> call.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE FILE'S SHAPE USED TO BE THE CALLER'S BATCHING, and that is not a policy, it is the
+    /// absence of one. The same rows handed over in batches of 1024 instead of 8192 produced a file
+    /// <b>2.57x larger</b>, because every chunk carries its own array blob, its own segment entry
+    /// and its own zone-map row -- about 26 kB of fixed cost that a caller with a small batch size
+    /// paid over and over for nothing.
+    /// </para>
+    /// <para>
+    /// Upstream's own name for this is <c>row_block_size</c> and its default is the same 8192
+    /// (`vortex-file-0.86.1/src/strategy.rs`). Every emitted chunk but the last is a multiple of
+    /// it.
+    /// </para>
+    /// </remarks>
+    public int? RowBlockSize { get; init; } = 8192;
+
+    /// <summary>
+    /// Uncompressed bytes to accumulate before a chunk is emitted. Default 1 MiB; <c>null</c>
+    /// disables byte-size coalescing and leaves the row granularity to
+    /// <see cref="RowBlockSize"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The row count alone is the wrong unit for a chunk, in both directions: 8192 rows of a
+    /// boolean column is a kilobyte, and 8192 rows of a wide struct is megabytes. The reference
+    /// buffers until a block is <b>both</b> at least this many bytes and at least
+    /// <see cref="RowBlockSize"/> rows, then emits whole multiples of the row block; the remainder
+    /// goes out at close. One megabyte is upstream's default and its comment gives the reason: it
+    /// is the size at which a single object-store request is efficient without losing read
+    /// concurrency (Durner et al., VLDB Vol 16, Iss 11).
+    /// </para>
+    /// <para>
+    /// MEASURED IN CANONICAL BYTES, before compression, because that is the only size available
+    /// when the decision is made -- and it is what the reference measures too (`nbytes()` of the
+    /// buffered arrays).
+    /// </para>
+    /// <para>
+    /// ONE DIFFERENCE FROM THE REFERENCE, and it is a consequence of the layout rather than a
+    /// choice: upstream repartitions PER COLUMN, so two columns of one file may have different
+    /// chunk boundaries. A `vortex.zoned` layout here has one zone per chunk across every column,
+    /// so the boundaries are shared and the accumulation is measured over the whole batch. The
+    /// format permits both; the files differ in chunking, not in content.
+    /// </para>
+    /// </remarks>
+    public long? DataBlockTargetBytes { get; init; } = 1L << 20;
+
+    /// <summary>
+    /// WRITE ATOMICITY, which <see cref="RowBlockSize"/> changes and which the contract has to say
+    /// out loud: a batch handed to <c>WriteAsync</c> is no longer guaranteed to have reached the
+    /// sink when the call returns.
+    /// </summary>
+    /// <remarks>
+    /// Before repartitioning, one <c>WriteAsync</c> was one chunk and its segments were with the
+    /// sink before the returned task completed. With accumulation, rows are held in the writer
+    /// until a block fills or <c>CompleteAsync</c> runs. Nothing about durability changes -- the
+    /// sink was never flushed per batch either -- but a caller that was reading the sink's position
+    /// to infer progress will see it move in blocks. Setting <see cref="RowBlockSize"/> to
+    /// <c>null</c> restores one chunk per call exactly.
+    /// </remarks>
+    internal const string AtomicityNote =
+        "WriteAsync buffers rows until a block fills; CompleteAsync flushes the remainder.";
 }

@@ -33,6 +33,8 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Layouts;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.Serialization.FlatBuffers;
@@ -64,6 +66,27 @@ public sealed class VortexFileWriter : IAsyncDisposable
     private readonly bool _isTabular;
     private readonly bool _compress;
     private readonly VortexEdition _target;
+
+    /// <summary>Rows a chunk is a multiple of, or 0 when one call is one chunk.</summary>
+    private readonly int _rowBlock;
+
+    /// <summary>Canonical bytes to accumulate before emitting, or 0 for no byte threshold.</summary>
+    private readonly long _blockBytes;
+
+    /// <summary>
+    /// The two arenas the accumulation ping-pongs between.
+    /// </summary>
+    /// <remarks>
+    /// TWO, BECAUSE A BLOCK'S REMAINDER HAS TO SURVIVE THE BLOCK. The pending batches are
+    /// materialized into <c>_transit[_current]</c>; emitting a block concatenates them, slices off
+    /// the rows that go out, writes those, then copies what is LEFT into the other arena and resets
+    /// the first. One arena would mean resetting storage the remainder still views.
+    /// </remarks>
+    private ScanContext?[]? _transit;
+    private int _current;
+    private readonly List<int> _pending = [];
+    private long _pendingRows;
+    private long _pendingBytes;
     private int[]? _zoneSegments;
     private byte[][]? _zoneMetadata;
     private long _rowCount;
@@ -71,12 +94,16 @@ public sealed class VortexFileWriter : IAsyncDisposable
     private bool _completed;
     private byte[] _padding = new byte[VortexLimits.MaxAlignment];
 
-    private VortexFileWriter(ISegmentSink sink, DType schema, bool compress, VortexEdition target)
+    private VortexFileWriter(
+        ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
+        long blockBytes)
     {
         _sink = sink;
         _schema = schema;
         _compress = compress;
         _target = target;
+        _rowBlock = rowBlock;
+        _blockBytes = blockBytes;
         _arrayEncodings = new EncodingDictionary(ComponentKind.Array, target);
         _layoutEncodings = new EncodingDictionary(ComponentKind.Layout, target);
         _isTabular = schema.Kind == DTypeKind.Struct;
@@ -127,7 +154,25 @@ public sealed class VortexFileWriter : IAsyncDisposable
         // the answer cannot change once the writer exists, and "this schema cannot be written to
         // this edition" is worth hearing before the first batch rather than at Complete.
         RequireSchemaInTarget(schema, options.TargetEdition);
-        return new VortexFileWriter(sink, schema, options.Compress, options.TargetEdition);
+
+        int rowBlock = options.RowBlockSize ?? 0;
+        if (rowBlock < 0)
+        {
+            throw new ArgumentException(
+                "RowBlockSize must be positive, or null for one chunk per WriteAsync.",
+                nameof(options));
+        }
+
+        long blockBytes = options.DataBlockTargetBytes ?? 0;
+        if (blockBytes < 0)
+        {
+            throw new ArgumentException(
+                "DataBlockTargetBytes must be positive, or null to disable byte coalescing.",
+                nameof(options));
+        }
+
+        return new VortexFileWriter(
+            sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes);
     }
 
     /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
@@ -208,21 +253,117 @@ public sealed class VortexFileWriter : IAsyncDisposable
         RequireMatchingSchema(batch);
         await StartAsync(cancellationToken).ConfigureAwait(false);
 
+        if (_rowBlock == 0)
+        {
+            // One call, one chunk: the shape before repartitioning existed, kept as an explicit
+            // choice rather than as the absence of one.
+            await EmitChunkAsync(batch.Arena, batch.RootIndex, batch.RowCount, cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        // NOTHING PENDING AND ALREADY BIG ENOUGH: write it where it lies. A caller handing over
+        // batches that already satisfy both thresholds -- which is the shape a bulk load has --
+        // then pays no transit copy at all, and the repartitioner costs it nothing.
+        if (_pending.Count == 0 &&
+            batch.RowCount >= _rowBlock &&
+            batch.Arena.ByteSize(batch.RootIndex) >= _blockBytes &&
+            batch.RowCount % _rowBlock == 0)
+        {
+            await EmitChunkAsync(batch.Arena, batch.RootIndex, batch.RowCount, cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        // MATERIALIZED, not borrowed. The batch's arena is the scan's and is reset the moment the
+        // caller asks for the next batch, so rows that are going to be held have to own their
+        // bytes -- which is exactly what CopyFrom is for.
+        CanonicalArena transit = Transit();
+        _pending.Add(transit.CopyFrom(batch.Arena, batch.RootIndex));
+        _pendingRows += batch.RowCount;
+        _pendingBytes += transit.ByteSize(_pending[^1]);
+
+        while (_pendingRows >= _rowBlock && _pendingBytes >= _blockBytes)
+        {
+            await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The arena the pending rows live in, created on first use.</summary>
+    private CanonicalArena Transit()
+    {
+        // A detached scan context: the writer needs an arena and the decode plumbing that
+        // CanonicalConcat and CanonicalSlice take, and it has no file to scan. The SECOND one is
+        // created only when a block actually splits, which for a file small enough to leave as one
+        // chunk never happens.
+        _transit ??= new ScanContext?[2];
+        return (_transit[_current] ??= new ScanContext([])).Canonical;
+    }
+
+    /// <summary>
+    /// Emits whole multiples of <see cref="_rowBlock"/> rows and carries the remainder forward.
+    /// </summary>
+    private async ValueTask EmitBlockAsync(CancellationToken cancellationToken)
+    {
+        ScanContext from = _transit![_current]!;
+        long blocks = _pendingRows / _rowBlock;
+        int emit = checked((int)(blocks * _rowBlock));
+        int total = checked((int)_pendingRows);
+
+        int whole = _pending.Count == 1
+            ? _pending[0]
+            : CanonicalConcat.Concat(from.Decode, _schema, total, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending));
+
+        if (emit == total)
+        {
+            await EmitChunkAsync(from.Canonical, whole, emit, cancellationToken).ConfigureAwait(false);
+            ResetTransit();
+            return;
+        }
+
+        int head = CanonicalSlice.Slice(from.Decode, whole, 0, emit);
+        int tail = CanonicalSlice.Slice(from.Decode, whole, emit, total - emit);
+        await EmitChunkAsync(from.Canonical, head, emit, cancellationToken).ConfigureAwait(false);
+
+        // The remainder moves to the other arena BEFORE this one is reset, because a slice is a
+        // view onto the storage the reset would hand back.
+        ScanContext to = _transit[_current ^ 1] ??= new ScanContext([]);
+        int carried = to.Canonical.CopyFrom(from.Canonical, tail);
+        long carriedBytes = to.Canonical.ByteSize(carried);
+        from.Canonical.Reset();
+        _pending.Clear();
+        _pending.Add(carried);
+        _pendingRows = total - emit;
+        _pendingBytes = carriedBytes;
+        _current ^= 1;
+    }
+
+    /// <summary>Drops every pending row and frees the transit arena's storage.</summary>
+    private void ResetTransit()
+    {
+        _transit![_current]!.Canonical.Reset();
+        _pending.Clear();
+        _pendingRows = 0;
+        _pendingBytes = 0;
+    }
+
+    /// <summary>Writes one chunk of every column from <paramref name="arena"/>.</summary>
+    private async ValueTask EmitChunkAsync(
+        CanonicalArena arena, int rootIndex, long rows, CancellationToken cancellationToken)
+    {
         for (int field = 0; field < _fieldCount; field++)
         {
-            int node = _isTabular
-                ? batch.Arena.GetNode(batch.RootIndex).GetFieldIndex(field)
-                : batch.RootIndex;
-            byte[] blob = ArrayBlobWriter.Write(batch.Arena, node, _arrayEncodings, _compress);
+            int node = _isTabular ? arena.GetNode(rootIndex).GetFieldIndex(field) : rootIndex;
+            byte[] blob = ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress);
             _columnSegments[field].Add(await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false));
 
             // Summarized from the canonical column before the arena is reused, which is the only
             // moment the values are in hand.
-            _columnZones[field].Add(ZoneStatistics.Compute(batch.Arena, node));
+            _columnZones[field].Add(ZoneStatistics.Compute(arena, node));
         }
 
-        _chunkRows.Add(batch.RowCount);
-        _rowCount += batch.RowCount;
+        _chunkRows.Add(rows);
+        _rowCount += rows;
     }
 
     /// <summary>
@@ -238,6 +379,21 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
         // A file with no batches still has to start with the magic.
         await StartAsync(cancellationToken).ConfigureAwait(false);
+
+        // The last block goes out whatever its size: the row-block multiple and the byte target are
+        // conditions on the blocks BEFORE the last one, exactly as upstream has it.
+        if (_pendingRows > 0)
+        {
+            ScanContext from = _transit![_current]!;
+            int total = checked((int)_pendingRows);
+            int whole = _pending.Count == 1
+                ? _pending[0]
+                : CanonicalConcat.Concat(
+                    from.Decode, _schema, total,
+                    System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending));
+            await EmitChunkAsync(from.Canonical, whole, total, cancellationToken).ConfigureAwait(false);
+            ResetTransit();
+        }
 
         // The zones arrays are segments like any other and must be written BEFORE the footer that
         // records them.
