@@ -14,6 +14,7 @@
 //
 // Validity is the caller's: every kernel writes Unknown for a null row and never looks at its value.
 using System;
+using System.Numerics;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
@@ -82,6 +83,41 @@ internal static class ComparisonKernels
                     $"A filter cannot compare a {node.Kind} column. The 1.0 filter evaluates " +
                     "booleans, primitives, utf8 and binary, plus extensions over those " +
                     "(docs/01-scope.md F7).");
+        }
+    }
+
+    /// <summary>
+    /// The integer comparison loop, reachable without an arena, for
+    /// <c>FilterKernelBenchmarks</c>.
+    /// </summary>
+    /// <param name="bytes">The column's values, little-endian.</param>
+    /// <param name="ptype">Their physical type; must be a signed integer.</param>
+    /// <param name="op">The operator, with the column on the left.</param>
+    /// <param name="wanted">The literal.</param>
+    /// <param name="destination">One <see cref="Trilean"/> state per row.</param>
+    /// <remarks>
+    /// Internal and for the benchmark only. It exists so that benchmark's control arm can be the
+    /// LIBRARY rather than a hand-written copy of what the library used to look like -- the failure
+    /// mode FsstKernelBenchmarks documents, where a benchmark kept demonstrating a speedup that had
+    /// already been collected because both of its arms had drifted into the same shape.
+    /// </remarks>
+    internal static void CompareForBenchmark(
+        ReadOnlySpan<byte> bytes, PType ptype, ComparisonOp op, long wanted, Span<byte> destination)
+    {
+        switch (ptype)
+        {
+            case PType.I8:
+                CompareOp<sbyte, long>(bytes, default, op, wanted, destination);
+                break;
+            case PType.I16:
+                CompareOp<short, long>(bytes, default, op, wanted, destination);
+                break;
+            case PType.I32:
+                CompareOp<int, long>(bytes, default, op, wanted, destination);
+                break;
+            default:
+                CompareOp<long, long>(bytes, default, op, wanted, destination);
+                break;
         }
     }
 
@@ -268,16 +304,20 @@ internal static class ComparisonKernels
         }
 
         ReadOnlySpan<byte> bytes = values.Span;
-        for (int i = 0; i < destination.Length; i++)
+        switch (ptype)
         {
-            if (!mask.IsValid(i))
-            {
-                destination[i] = Trilean.Unknown;
-                continue;
-            }
-
-            long value = CanonicalSupport.ReadInteger(bytes, ptype, i);
-            destination[i] = Apply(op, value.CompareTo(wanted)) ? Trilean.True : Trilean.False;
+            case PType.I8:
+                CompareOp<sbyte, long>(bytes, mask, op, wanted, destination);
+                break;
+            case PType.I16:
+                CompareOp<short, long>(bytes, mask, op, wanted, destination);
+                break;
+            case PType.I32:
+                CompareOp<int, long>(bytes, mask, op, wanted, destination);
+                break;
+            default:
+                CompareOp<long, long>(bytes, mask, op, wanted, destination);
+                break;
         }
     }
 
@@ -312,17 +352,164 @@ internal static class ComparisonKernels
         }
 
         ReadOnlySpan<byte> bytes = values.Span;
-        for (int i = 0; i < destination.Length; i++)
+        switch (ptype)
         {
-            if (!mask.IsValid(i))
+            case PType.U8:
+                CompareOp<byte, ulong>(bytes, mask, op, wanted, destination);
+                break;
+            case PType.U16:
+                CompareOp<ushort, ulong>(bytes, mask, op, wanted, destination);
+                break;
+            case PType.U32:
+                CompareOp<uint, ulong>(bytes, mask, op, wanted, destination);
+                break;
+            default:
+                CompareOp<ulong, ulong>(bytes, mask, op, wanted, destination);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Resolves the OPERATOR out of the loop and calls the typed comparison.
+    /// </summary>
+    /// <typeparam name="TValue">The column's own element type.</typeparam>
+    /// <typeparam name="TWide">
+    /// The type the comparison happens in: <see cref="long"/> for a signed column,
+    /// <see cref="ulong"/> for an unsigned one. Widening one element is free; what it buys is that
+    /// the literal is compared in a type that can hold it, which is the signedness rule this file
+    /// opens with.
+    /// </typeparam>
+    private static void CompareOp<TValue, TWide>(
+        ReadOnlySpan<byte> bytes, ValidityMask mask, ComparisonOp op, TWide wanted,
+        Span<byte> destination)
+        where TValue : unmanaged, INumberBase<TValue>
+        where TWide : unmanaged, INumberBase<TWide>, IComparisonOperators<TWide, TWide, bool>
+    {
+        switch (op)
+        {
+            case ComparisonOp.Equal:
+                CompareCore<TValue, TWide, EqualOp>(bytes, mask, wanted, destination);
+                break;
+            case ComparisonOp.NotEqual:
+                CompareCore<TValue, TWide, NotEqualOp>(bytes, mask, wanted, destination);
+                break;
+            case ComparisonOp.Less:
+                CompareCore<TValue, TWide, LessOp>(bytes, mask, wanted, destination);
+                break;
+            case ComparisonOp.LessOrEqual:
+                CompareCore<TValue, TWide, LessOrEqualOp>(bytes, mask, wanted, destination);
+                break;
+            case ComparisonOp.Greater:
+                CompareCore<TValue, TWide, GreaterOp>(bytes, mask, wanted, destination);
+                break;
+            default:
+                CompareCore<TValue, TWide, GreaterOrEqualOp>(bytes, mask, wanted, destination);
+                break;
+        }
+    }
+
+    /// <summary>The comparison loop, with the type, the operator and the validity all resolved.</summary>
+    /// <remarks>
+    /// <para>
+    /// WHAT THIS REPLACES. The loop asked three questions per row that are properties of the CALL:
+    /// which physical type is this column (through <c>ReadInteger</c>'s switch), is this row valid
+    /// (through <c>ValidityMask.IsValid</c>'s switch on the validity kind), and which operator is
+    /// this (through <c>Apply</c>'s switch on an <c>int</c> ordering it had to compute first).
+    /// Hoisting all three was measured twice at 6.0x -- 97.2 us to 16.1 us on 65 536 rows of
+    /// <c>i64 &lt; literal</c> -- and never applied.
+    /// </para>
+    /// <para>
+    /// The operator arrives as a struct with a static abstract member, which the JIT devirtualizes
+    /// and inlines for a value-type instantiation, so the body is one compare and one store. The
+    /// ORDERING is gone too: <c>Apply</c> needed a three-way <c>CompareTo</c> before it could ask a
+    /// two-way question.
+    /// </para>
+    /// <para>
+    /// Still a byte per row, deliberately. bench/SIMD.md measured a <c>Vector128</c> version of this
+    /// loop 1.8x SLOWER and named the cause: the <see cref="Trilean"/> output is one byte per row,
+    /// so a vectorized compare has to narrow its mask back down to bytes and the narrowing costs
+    /// more than the compare saves. That is a statement about the OUTPUT representation, not about
+    /// vectorizing comparisons, and it stands until Trilean becomes two bitmaps.
+    /// </para>
+    /// </remarks>
+    private static void CompareCore<TValue, TWide, TOp>(
+        ReadOnlySpan<byte> bytes, ValidityMask mask, TWide wanted, Span<byte> destination)
+        where TValue : unmanaged, INumberBase<TValue>
+        where TWide : unmanaged, INumberBase<TWide>, IComparisonOperators<TWide, TWide, bool>
+        where TOp : struct, IOrderOp
+    {
+        if (mask.AllInvalid)
+        {
+            Trilean.Fill(destination, Trilean.Unknown);
+            return;
+        }
+
+        ReadOnlySpan<TValue> values = MemoryMarshal.Cast<byte, TValue>(bytes)[..destination.Length];
+        if (mask.AllValid)
+        {
+            for (int i = 0; i < destination.Length; i++)
             {
-                destination[i] = Trilean.Unknown;
-                continue;
+                destination[i] = TOp.Holds(TWide.CreateTruncating(values[i]), wanted)
+                    ? Trilean.True
+                    : Trilean.False;
             }
 
-            ulong value = CompressedValues.ReadUnsigned(bytes, ptype, i);
-            destination[i] = Apply(op, value.CompareTo(wanted)) ? Trilean.True : Trilean.False;
+            return;
         }
+
+        for (int i = 0; i < destination.Length; i++)
+        {
+            destination[i] = !mask.IsValid(i)
+                ? Trilean.Unknown
+                : TOp.Holds(TWide.CreateTruncating(values[i]), wanted) ? Trilean.True : Trilean.False;
+        }
+    }
+
+    /// <summary>One comparison operator, as a type the JIT can inline through.</summary>
+    private interface IOrderOp
+    {
+        /// <summary>Whether the operator holds for this pair.</summary>
+        /// <typeparam name="T">The comparison type.</typeparam>
+        /// <param name="left">The column's value.</param>
+        /// <param name="right">The literal.</param>
+        static abstract bool Holds<T>(T left, T right)
+            where T : IComparisonOperators<T, T, bool>;
+    }
+
+    private readonly struct EqualOp : IOrderOp
+    {
+        public static bool Holds<T>(T left, T right)
+            where T : IComparisonOperators<T, T, bool> => left == right;
+    }
+
+    private readonly struct NotEqualOp : IOrderOp
+    {
+        public static bool Holds<T>(T left, T right)
+            where T : IComparisonOperators<T, T, bool> => left != right;
+    }
+
+    private readonly struct LessOp : IOrderOp
+    {
+        public static bool Holds<T>(T left, T right)
+            where T : IComparisonOperators<T, T, bool> => left < right;
+    }
+
+    private readonly struct LessOrEqualOp : IOrderOp
+    {
+        public static bool Holds<T>(T left, T right)
+            where T : IComparisonOperators<T, T, bool> => left <= right;
+    }
+
+    private readonly struct GreaterOp : IOrderOp
+    {
+        public static bool Holds<T>(T left, T right)
+            where T : IComparisonOperators<T, T, bool> => left > right;
+    }
+
+    private readonly struct GreaterOrEqualOp : IOrderOp
+    {
+        public static bool Holds<T>(T left, T right)
+            where T : IComparisonOperators<T, T, bool> => left >= right;
     }
 
     /// <summary>

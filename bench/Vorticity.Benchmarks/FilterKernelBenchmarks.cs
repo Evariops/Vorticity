@@ -42,6 +42,9 @@ using System.Runtime.Intrinsics;
 
 using BenchmarkDotNet.Attributes;
 
+using Vorticity.Compute;
+using Vorticity.Expressions;
+
 namespace Vorticity.Benchmarks;
 
 /// <summary>A `<` predicate over an i64 column: library, branch-hoisted, and vectorized.</summary>
@@ -103,6 +106,23 @@ public class FilterKernelBenchmarks
         }
 
         return destination.Length;
+    }
+
+    /// <summary>What the library actually runs, through its own entry point.</summary>
+    /// <remarks>
+    /// THE ARM THIS FILE WAS MISSING, and FsstKernelBenchmarks records exactly why it matters: a
+    /// benchmark whose control is a hand-written copy of "the library shape" cannot say whether the
+    /// library still has that shape. It said 6.0x for two audits running and nothing ever checked
+    /// whether the 6.0x had been collected. This arm closes that: its distance from
+    /// <see cref="Hoisted"/> is what the library still pays over the best scalar loop, including
+    /// the validity resolution and the bounds checks that the bare arm does not have.
+    /// </remarks>
+    [Benchmark(Description = "library")]
+    public int Library()
+    {
+        ComparisonKernels.CompareForBenchmark(
+            _values, Vorticity.Types.PType.I64, ComparisonOp.Less, _wanted, _destination);
+        return _destination.Length;
     }
 
     /// <summary>The same work, all three branches hoisted out of the loop. Still one at a time.</summary>
