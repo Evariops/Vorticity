@@ -106,11 +106,11 @@ internal static class ThroughputCheck
         ("fastlanes_delta", 8.72),   // 2 runs, spread 7.60-8.72
         ("fastlanes_for", 1.98),   // 3 runs, spread 1.68-1.98
         ("fastlanes_rle", 2.70),
-        ("fixed_size_list", 1.42),   // 3 runs, spread 1.37-1.42
+        ("fixed_size_list", 1.37),
         ("fsst", 10.94),   // 3 runs, spread 10.42-10.94
-        ("list", 16.90),   // 3 runs, spread 16.54-16.90
-        ("listview", 2.58),   // 3 runs, spread 2.52-2.58
-        ("map", 1.16),   // 3 runs, spread 1.12-1.16
+        ("list", 7.15),
+        ("listview", 0.80),
+        ("map", 0.17),
         ("masked", 1.40),   // 3 runs, spread 1.26-1.40
         ("masked_all_invalid", 1.87),   // 3 runs, spread 1.74-1.87
         ("masked_all_valid", 1.88),   // 3 runs, spread 1.78-1.88
@@ -121,9 +121,9 @@ internal static class ThroughputCheck
         ("runend", 3.08),
         ("sequence", 4.22),
         ("sparse", 2.55),
-        ("struct", 0.09),   // 3 runs, spread 0.09-0.09
-        ("varbin", 0.16),   // 3 runs, spread 0.15-0.16
-        ("varbinview", 0.08),   // 3 runs, spread 0.08-0.08
+        ("struct", 0.08),
+        ("varbin", 0.14),
+        ("varbinview", 0.07),
         ("zigzag", 2.90),   // 3 runs, spread 2.41-2.90
         ("zstd", 14.34),   // 3 runs, spread 13.70-14.34
         ("zstd_buffers", 4.03),   // 2 runs, spread 3.81-4.03

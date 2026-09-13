@@ -766,6 +766,92 @@ public sealed class CanonicalArena
     }
 
     /// <summary>
+    /// Re-creates a node and everything under it in this arena as records whose buffers are still
+    /// <b>views</b> onto <paramref name="source"/>'s storage. Nothing is copied but the records.
+    /// </summary>
+    /// <param name="source">The arena holding the node, whose memory the result borrows.</param>
+    /// <param name="sourceIndex">The node to reference.</param>
+    /// <returns>The reference's index in this arena.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="source"/> is <see langword="null"/>.</exception>
+    /// <exception cref="VortexFormatException"><paramref name="sourceIndex"/> is out of range.</exception>
+    /// <remarks>
+    /// <para>
+    /// THE RESULT BORROWS, SO THE CALLER OWES A LIFETIME ARGUMENT -- the same one every other
+    /// cross-arena slice already owes. <see cref="CopyFrom"/> materializes bytes because its three
+    /// callers keep the result past the arena it came from; this one exists for the caller that
+    /// does not, and for which materializing is the whole cost.
+    /// </para>
+    /// <para>
+    /// WHY IT EXISTS AT ALL, WHEN A SLICE IS ALREADY A VIEW. Every canonical kind but one narrows
+    /// across arenas for free, because everything a narrowed record needs is a
+    /// <see cref="VortexBuffer"/> and a buffer is a window, not an owner. <c>ListView</c> is the
+    /// exception: its offsets are absolute into an elements CHILD named by an arena index, and an
+    /// index means nothing in another arena. The child therefore has to EXIST here -- but existing
+    /// is a record, not a copy of its bytes. Copying them made a batch of a large list chunk cost
+    /// the whole child, which is the scan quadratic again, restricted to one dtype.
+    /// </para>
+    /// </remarks>
+    internal int ReferenceFrom(CanonicalArena source, int sourceIndex)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if ((uint)sourceIndex >= (uint)source._recordCount)
+        {
+            ArraysThrow.CanonicalIndex(sourceIndex, source._recordCount);
+        }
+
+        // By value up front, for CopyFrom's reason: the recursive calls append to this arena and
+        // may resize `_records`.
+        CanonicalRecord src = source._records[sourceIndex];
+
+        Validity validity = src.Validity;
+        if (validity.Kind == ValidityKind.Bitmap)
+        {
+            validity = Validity.Bitmap(ReferenceFrom(source, validity.CanonicalNodeIndex));
+        }
+
+        int[]? childIndices = null;
+        if (src.ChildCount > 0)
+        {
+            childIndices = new int[src.ChildCount];
+            for (int i = 0; i < src.ChildCount; i++)
+            {
+                childIndices[i] = ReferenceFrom(source, source._children[src.ChildStart + i]);
+            }
+        }
+
+        CanonicalRecord copy = src;
+        copy.Validity = validity;
+        copy.ChildStart = -1;
+        copy.ChildCount = 0;
+        copy.DataBufferStart = -1;
+        copy.DataBufferCount = 0;
+
+        int index = Commit(ref copy);
+
+        if (childIndices is not null)
+        {
+            _records[index].ChildStart = _childCount;
+            _records[index].ChildCount = childIndices.Length;
+            foreach (int child in childIndices)
+            {
+                AddChild(child);
+            }
+        }
+
+        if (src.DataBufferCount > 0)
+        {
+            _records[index].DataBufferStart = _dataBufferCount;
+            _records[index].DataBufferCount = src.DataBufferCount;
+            for (int i = 0; i < src.DataBufferCount; i++)
+            {
+                AddDataBuffer(source._dataBuffers[src.DataBufferStart + i]);
+            }
+        }
+
+        return index;
+    }
+
+    /// <summary>
     /// Copies a node and everything under it out of <paramref name="source"/> and into this arena,
     /// materializing every byte so the result outlives the arena it came from.
     /// </summary>
@@ -870,6 +956,17 @@ public sealed class CanonicalArena
         return index;
     }
 
+    /// <summary>
+    /// Bytes <see cref="CopyFrom"/> has materialized, across every scan in the process.
+    /// </summary>
+    /// <remarks>
+    /// Internal and diagnostic, for FlatLayoutReader.ValuesDecoded's reason: the quantity that
+    /// catches a per-batch copy is exact and machine-independent, where the timing that catches it
+    /// needs a million rows and a quiet machine. A cross-arena window is supposed to cost records
+    /// and nothing else; this is what lets a test assert that rather than hope it.
+    /// </remarks>
+    internal static long BytesMaterialized;
+
     /// <summary>Materializes one buffer's bytes into storage this arena owns.</summary>
     /// <remarks>
     /// An empty buffer copies to an empty buffer rather than to a zero-length allocation: renting a
@@ -885,6 +982,7 @@ public sealed class CanonicalArena
 
         // Uninitialized: the copy below writes every byte of it. See AllocateUninitialized for why
         // that bar is where it is.
+        System.Threading.Interlocked.Add(ref BytesMaterialized, source.Length);
         VortexBuffer copy = AllocateUninitialized(source.Length, 1, out Span<byte> destination);
         source.Span.CopyTo(destination);
         return copy;

@@ -60,8 +60,12 @@ internal static class CanonicalSlice
     /// is that an entry touched during the current batch is never evicted.
     /// </para>
     /// <para>
-    /// <c>ListView</c> is the one kind that cannot borrow: its offsets are absolute into an elements
-    /// CHILD, named by index, and an index is meaningless in another arena. That child is copied.
+    /// <c>ListView</c> needs one extra step and no extra bytes: its offsets are absolute into an
+    /// elements CHILD named by an arena index, and an index means nothing in another arena, so the
+    /// child's RECORDS are re-created here (<see cref="CanonicalArena.ReferenceFrom"/>) while its
+    /// buffers stay views onto <paramref name="source"/>. Copying those bytes instead made a batch
+    /// of a large list chunk cost the whole child -- the scan quadratic, restricted to one dtype,
+    /// and measured at 16.9x the reference on the 1M-row axis.
     /// </para>
     /// </remarks>
     internal static int SliceAcross(
@@ -155,7 +159,7 @@ internal static class CanonicalSlice
                     validity,
                     ReferenceEquals(source, destination)
                         ? node.ElementsIndex
-                        : destination.CopyFrom(source, node.ElementsIndex),
+                        : destination.ReferenceFrom(source, node.ElementsIndex),
                     node.Offsets.Slice(start * offsetWidth, length * offsetWidth),
                     node.OffsetPType,
                     node.Sizes.Slice(start * sizeWidth, length * sizeWidth),

@@ -91,6 +91,113 @@ public sealed class FlatLayoutDecodeCountTests
         }
     }
 
+    /// <summary>
+    /// A window onto a retained LIST chunk costs records, not the elements child's bytes.
+    /// </summary>
+    /// <remarks>
+    /// THE SECOND HALF OF THE SAME DEFECT, and it survived the first fix for a year. Every canonical
+    /// kind narrows across arenas for free -- a slice is a record whose buffers are views -- except
+    /// ListView, whose offsets are absolute into an elements CHILD named by an arena index, and an
+    /// index means nothing in another arena. The child was therefore COPIED, wholesale, for every
+    /// batch of the chunk: `CanonicalSlice`'s own comment said "ListView is the one kind that cannot
+    /// borrow", and the 1M-row axis read `vortex.list` at 16.9x the reference with the quadratic
+    /// supposedly fixed.
+    ///
+    /// Re-creating the child's RECORDS while its buffers stay views costs neither correctness nor
+    /// bytes, and the quantity that proves it is exact. NOT zero: retaining the chunk in the first
+    /// place is one honest copy out of the batch arena into an arena that outlives it, which is
+    /// `ScanContext.Retain` and is the fix, not the defect. What must be zero is everything AFTER
+    /// that -- and the assertion is equality with the one copy rather than a bound, so the seven
+    /// per-batch copies the defect added (800 000 bytes each) cannot hide inside slack.
+    /// </remarks>
+    [Fact]
+    public async Task AWindowOntoARetainedListChunkCopiesNoBytes()
+    {
+        string path = WriteOneListChunk(Rows);
+        try
+        {
+            long before = CanonicalArena.BytesMaterialized;
+            long batches = 0;
+            long rows = 0;
+            await using (VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None))
+            {
+                await foreach (RecordBatch batch in opened.Scan().ExecuteAsync()
+                    .WithCancellation(CancellationToken.None))
+                {
+                    batches++;
+                    rows += batch.RowCount;
+                }
+            }
+
+            long copied = CanonicalArena.BytesMaterialized - before;
+
+            // One retain: the elements child (2 per row), the offsets and the sizes, all i64.
+            const long OneRetain = ((long)Rows * 2 * sizeof(long)) + ((long)Rows * 2 * sizeof(long));
+            Console.Out.Write(
+                "LIST WINDOW: " + rows.ToString(CultureInfo.InvariantCulture) + " list rows in one chunk, read as " +
+                batches.ToString(CultureInfo.InvariantCulture) + " batches, materialized " +
+                copied.ToString(CultureInfo.InvariantCulture) + " bytes -- " +
+                ((double)copied / OneRetain).ToString("F2", CultureInfo.InvariantCulture) +
+                "x the one retain a correct reader pays.\n" +
+                "Anything above 1.00x is the elements child re-copied per batch, and grows with the row count.\n");
+
+            Assert.Equal(Rows, rows);
+            Assert.True(batches > 1, "the chunk must exceed one batch for this test to mean anything");
+            Assert.Equal(OneRetain, copied);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(path))
+            {
+                System.IO.File.Delete(path);
+            }
+        }
+    }
+
+    /// <summary>Writes one chunk of <paramref name="rows"/> two-element lists.</summary>
+    /// <param name="rows">List rows in the single chunk.</param>
+    private static string WriteOneListChunk(int rows)
+    {
+        const int PerRow = 2;
+        DTypeArena types = new DTypeArena();
+        CanonicalArena arena = new CanonicalArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType list = types.List(i64, Nullability.NonNullable);
+        DType schema = types.Struct(["v"], [list], Nullability.NonNullable);
+
+        int elements = rows * PerRow;
+        VortexBuffer values = arena.Allocate(elements * sizeof(long), sizeof(long), out Span<byte> destination);
+        Span<long> longs = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(destination);
+        for (int i = 0; i < elements; i++)
+        {
+            longs[i] = i;
+        }
+
+        VortexBuffer offsets = arena.Allocate(rows * sizeof(long), sizeof(long), out Span<byte> offsetBytes);
+        VortexBuffer sizes = arena.Allocate(rows * sizeof(long), sizeof(long), out Span<byte> sizeBytes);
+        Span<long> offsetValues = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(offsetBytes);
+        Span<long> sizeValues = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(sizeBytes);
+        for (int i = 0; i < rows; i++)
+        {
+            offsetValues[i] = (long)i * PerRow;
+            sizeValues[i] = PerRow;
+        }
+
+        int child = arena.AddPrimitive(i64, elements, Validity.NonNullable, PType.I64, values);
+        int column = arena.AddListView(
+            list, rows, Validity.NonNullable, child, offsets, PType.I64, sizes, PType.I64);
+        int root = arena.AddStruct(schema, rows, Validity.NonNullable, [column]);
+
+        string path = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"vorticity-listwindow-{Guid.NewGuid():N}.vortex");
+        using (RecordBatch batch = new RecordBatch(arena, root, 0))
+        {
+            WriteAsync(path, schema, batch).GetAwaiter().GetResult();
+        }
+
+        return path;
+    }
+
     /// <summary>Writes one chunk of <paramref name="rows"/> rows and returns the file path.</summary>
     /// <param name="rows">Rows in the single chunk.</param>
     /// <remarks>
