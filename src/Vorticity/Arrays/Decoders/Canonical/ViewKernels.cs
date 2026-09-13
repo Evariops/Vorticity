@@ -47,6 +47,151 @@ internal static class ViewKernels
     private const int Inline = CanonicalSupport.MaxInlineViewLength;
 
     /// <summary>
+    /// Sums the per-row lengths that cut a heap, and reports the longest single row.
+    /// </summary>
+    /// <param name="lengths">One length per row, as <paramref name="ptype"/>.</param>
+    /// <param name="ptype">Their physical type.</param>
+    /// <param name="wanted">Row indices, or empty for rows 0..count-1.</param>
+    /// <param name="count">Rows to sum.</param>
+    /// <returns>
+    /// The total, the longest single row (only tracked when <paramref name="wanted"/> is given,
+    /// because only a selective decode asks), and the index of the first NEGATIVE length or -1.
+    /// </returns>
+    /// <remarks>
+    /// Shared by `vortex.fsst` and `vortex.onpair`, which both cut their decoded heap with the same
+    /// child and both had their own copy of this loop going through <c>ReadInteger</c>'s switch on
+    /// every row. It was 15% of a 1M-row scan of either.
+    /// </remarks>
+    internal static (long Total, long Longest, int Negative) SumLengths(
+        ReadOnlySpan<byte> lengths, PType ptype, ReadOnlySpan<int> wanted, int count)
+    {
+        bool selective = !wanted.IsEmpty;
+        return ptype switch
+        {
+            PType.U8 => SumLengths<byte>(lengths, wanted, selective, count),
+            PType.U16 => SumLengths<ushort>(lengths, wanted, selective, count),
+            PType.U32 => SumLengths<uint>(lengths, wanted, selective, count),
+            PType.U64 => SumLengths<ulong>(lengths, wanted, selective, count),
+            PType.I8 => SumLengths<sbyte>(lengths, wanted, selective, count),
+            PType.I16 => SumLengths<short>(lengths, wanted, selective, count),
+            PType.I32 => SumLengths<int>(lengths, wanted, selective, count),
+            _ => SumLengths<long>(lengths, wanted, selective, count),
+        };
+    }
+
+    /// <summary>Sums and maxes the lengths with the physical type resolved before the loop.</summary>
+    /// <returns>The total, the longest row, and the index of the first negative length or -1.</returns>
+    /// <remarks>
+    /// Two loops, not one with a flag in it. The dense path is the one that runs a million times
+    /// per chunk, and it needs neither the <c>wanted</c> indirection nor the longest row --
+    /// <c>longestRow</c> decides whether a SELECTIVE decode may use the stack, and a dense one
+    /// never asks. For an unsigned length type the sign test is dropped too, because there is
+    /// nothing to test.
+    /// </remarks>
+    private static (long Total, long Longest, int Negative) SumLengths<TLen>(
+        ReadOnlySpan<byte> raw, ReadOnlySpan<int> wanted, bool selective, int count)
+        where TLen : unmanaged
+    {
+        ReadOnlySpan<TLen> typed = MemoryMarshal.Cast<byte, TLen>(raw);
+        long total = 0;
+        long longest = 0;
+
+        if (!selective)
+        {
+            typed = typed[..count];
+            if (Signed<TLen>())
+            {
+                for (int i = 0; i < typed.Length; i++)
+                {
+                    long value = WidenLength(typed[i]);
+                    if (value < 0)
+                    {
+                        return (total, longest, i);
+                    }
+
+                    total += value;
+                }
+
+                return (total, longest, -1);
+            }
+
+            for (int i = 0; i < typed.Length; i++)
+            {
+                total += WidenLength(typed[i]);
+            }
+
+            return (total, longest, -1);
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            long value = WidenLength(typed[wanted[i]]);
+            if (value < 0)
+            {
+                return (total, longest, i);
+            }
+
+            total += value;
+            longest = Math.Max(longest, value);
+        }
+
+        return (total, longest, -1);
+    }
+
+    /// <summary>Whether <typeparamref name="TLen"/> can hold a negative value.</summary>
+    private static bool Signed<TLen>()
+        where TLen : unmanaged =>
+        typeof(TLen) == typeof(sbyte) || typeof(TLen) == typeof(short) ||
+        typeof(TLen) == typeof(int) || typeof(TLen) == typeof(long);
+
+    /// <summary>
+    /// Widens one length, saturating a <see cref="ulong"/> above <see cref="long.MaxValue"/> so the
+    /// sum's cap refuses it rather than wrapping.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static long WidenLength<TLen>(TLen value)
+        where TLen : unmanaged
+    {
+        if (typeof(TLen) == typeof(byte))
+        {
+            return Unsafe.As<TLen, byte>(ref value);
+        }
+
+        if (typeof(TLen) == typeof(ushort))
+        {
+            return Unsafe.As<TLen, ushort>(ref value);
+        }
+
+        if (typeof(TLen) == typeof(uint))
+        {
+            return Unsafe.As<TLen, uint>(ref value);
+        }
+
+        if (typeof(TLen) == typeof(ulong))
+        {
+            ulong wide = Unsafe.As<TLen, ulong>(ref value);
+            return wide > long.MaxValue ? long.MaxValue : (long)wide;
+        }
+
+        if (typeof(TLen) == typeof(sbyte))
+        {
+            return Unsafe.As<TLen, sbyte>(ref value);
+        }
+
+        if (typeof(TLen) == typeof(short))
+        {
+            return Unsafe.As<TLen, short>(ref value);
+        }
+
+        if (typeof(TLen) == typeof(int))
+        {
+            return Unsafe.As<TLen, int>(ref value);
+        }
+
+        return Unsafe.As<TLen, long>(ref value);
+    }
+
+    /// <summary>
     /// Cuts <paramref name="heap"/> into <paramref name="count"/> views by consecutive lengths.
     /// </summary>
     /// <param name="lengths">One length per row, as <paramref name="ptype"/>.</param>

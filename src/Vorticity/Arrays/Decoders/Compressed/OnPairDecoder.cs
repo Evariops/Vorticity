@@ -659,17 +659,8 @@ public sealed class OnPairDecoder : ArrayDecoder
         // until it is tested.
         ReadOnlySpan<byte> raw = lengths.Values.Span;
         int count = selective ? wanted.Length : length;
-        (long total, long longest, int negative) = ptype switch
-        {
-            PType.U8 => SumLengths<byte>(raw, wanted, selective, count),
-            PType.U16 => SumLengths<ushort>(raw, wanted, selective, count),
-            PType.U32 => SumLengths<uint>(raw, wanted, selective, count),
-            PType.U64 => SumLengths<ulong>(raw, wanted, selective, count),
-            PType.I8 => SumLengths<sbyte>(raw, wanted, selective, count),
-            PType.I16 => SumLengths<short>(raw, wanted, selective, count),
-            PType.I32 => SumLengths<int>(raw, wanted, selective, count),
-            _ => SumLengths<long>(raw, wanted, selective, count),
-        };
+        (long total, long longest, int negative) = ViewKernels.SumLengths(
+            raw, ptype, selective ? wanted : default, count);
 
         if (negative >= 0)
         {
@@ -687,70 +678,6 @@ public sealed class OnPairDecoder : ArrayDecoder
         return (int)total;
     }
 
-    /// <summary>Sums and maxes the lengths with the physical type resolved before the loop.</summary>
-    /// <returns>The total, the longest row, and the index of the first negative length or -1.</returns>
-    /// <remarks>
-    /// Two loops, not one with a flag in it. The dense path is the one that runs a million times
-    /// per chunk, and it needs neither the <c>wanted</c> indirection nor the longest row --
-    /// <c>longestRow</c> decides whether a SELECTIVE decode may use the stack, and a dense one
-    /// never asks. For an unsigned length type the sign test is dropped too, because there is
-    /// nothing to test.
-    /// </remarks>
-    private static (long Total, long Longest, int Negative) SumLengths<TLen>(
-        ReadOnlySpan<byte> raw, ReadOnlySpan<int> wanted, bool selective, int count)
-        where TLen : unmanaged
-    {
-        ReadOnlySpan<TLen> typed = MemoryMarshal.Cast<byte, TLen>(raw);
-        long total = 0;
-        long longest = 0;
-
-        if (!selective)
-        {
-            typed = typed[..count];
-            if (Signed<TLen>())
-            {
-                for (int i = 0; i < typed.Length; i++)
-                {
-                    long value = WidenLength(typed[i]);
-                    if (value < 0)
-                    {
-                        return (total, longest, i);
-                    }
-
-                    total += value;
-                }
-
-                return (total, longest, -1);
-            }
-
-            for (int i = 0; i < typed.Length; i++)
-            {
-                total += WidenLength(typed[i]);
-            }
-
-            return (total, longest, -1);
-        }
-
-        for (int i = 0; i < count; i++)
-        {
-            long value = WidenLength(typed[wanted[i]]);
-            if (value < 0)
-            {
-                return (total, longest, i);
-            }
-
-            total += value;
-            longest = Math.Max(longest, value);
-        }
-
-        return (total, longest, -1);
-    }
-
-    /// <summary>Whether <typeparamref name="TLen"/> can hold a negative value.</summary>
-    private static bool Signed<TLen>()
-        where TLen : unmanaged =>
-        typeof(TLen) == typeof(sbyte) || typeof(TLen) == typeof(short) ||
-        typeof(TLen) == typeof(int) || typeof(TLen) == typeof(long);
 
     /// <summary>
     /// Widens one length, saturating a <c>u64</c> above <see cref="long.MaxValue"/> so the sum's

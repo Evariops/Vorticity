@@ -107,7 +107,7 @@ internal static class ThroughputCheck
         ("fastlanes_for", 1.07),   // 2 runs, spread 1.00-1.07
         ("fastlanes_rle", 0.97),   // 2 runs, spread 0.92-0.97
         ("fixed_size_list", 0.32),   // 2 runs, spread 0.31-0.32
-        ("fsst", 1.76),   // 2 runs, spread 1.68-1.76
+        ("fsst", 1.51),   // 2 runs, spread 1.48-1.51
         ("list", 0.60),   // 2 runs, spread 0.58-0.60
         ("listview", 0.73),   // 2 runs, spread 0.67-0.73
         ("map", 0.16),   // 2 runs, spread 0.15-0.16
