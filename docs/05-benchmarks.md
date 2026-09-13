@@ -20,24 +20,42 @@ rather than just reporting a ratio.
 The FFI harness of §2 now exists ([`tools/vxbench-rs`](../tools/vxbench-rs)), so the numbers below
 **are** ratios against Rust, measured in one process on the same bytes with the same clock.
 
+**They come from `--ratio-check`, not from a BenchmarkDotNet table, and that is a correction rather
+than a preference.** The classes that produced the figures this section used to carry drove the Rust
+side through the *lazy* scan, which hands back arrays in the file's own encodings without
+decompressing them, against a .NET reader whose `RecordBatch` is canonical by construction. That is
+a decode compared with an absence of decode. The gate drives it through `execute::<Canonical>`
+instead, interleaves the two sides against one clock so thermal drift is common to both, and takes
+a median of 51 rounds. BENCH-AUDIT.md A1 has the whole account; the practical consequence is that
+every ratio below moved, and the full-scan one moved by half.
+
 `containers/zoned_many_zones_nulls` — 65 536 rows over five mixed columns, Apple M4 Pro (arm64),
-in-process toolchain, single-threaded on both sides. Both readers return 65 536 rows in **64
-batches**, checked before every run:
+in-process toolchain, single-threaded on both sides. Both readers are checked to return the same
+rows on every axis before it is timed:
 
 | Axis | Vorticity | Vortex Rust | Ratio |
 |---|---|---|---|
-| **Full scan** | 1.294 ms | 1.343 ms | **0.96×** — criterion 4 wants ≤ 2× |
-| Projected scan, 1 of 5 columns | 108.5 µs | 274.4 µs | 2.53× faster |
-| Open → first batch | 74.5 µs | 1.221 ms | 16.4× faster (see below) |
-| Open → footer only | 40.1 µs | 51.5 µs | 1.28× faster |
+| **Full scan** | 614.8 µs | 1.347 ms | **0.46×** — criterion 4 wants ≤ 2× |
+| Projected scan, 1 of 5 columns | 108.6 µs | 250.7 µs | 0.43× |
+| Open → first batch | 99.5 µs | 1.202 ms | 0.08× (see below) |
+| Open → footer only | 42.2 µs | 52.1 µs | 0.81× |
+| Filtered scan, 1% band | 112.6 µs | 470.3 µs | 0.24× |
+| Filtered scan, half the rows | 218.3 µs | 672.2 µs | 0.33× |
+| Scattered take, 64 of 64 splits | 348.9 µs | 1.409 ms | 0.25× |
+| Read and write back | 16.41 ms | 14.72 ms | 1.12× |
 | Empty FFI call | — | 2.5 ns | the floor: noise on every axis above |
+
+Each of those has a ceiling in `RatioCheck.cs` and `--ratio-check` exits non-zero over it, so these
+are gated numbers rather than reported ones. Absolutes are one machine's; read the ratio column.
 
 The full-scan row read **1.43× slower** when this section was first written, and the figure stayed
 there through two commits that moved it. That is the failure this whole section exists to prevent,
-so the chain is recorded rather than the endpoint. All three numbers are ours; Rust is the control
-and did not move (1.312 → 1.343 ms, which is the run-to-run spread):
+so the chain is recorded rather than the endpoint. All three numbers are ours; Rust was the control
+and did not move (1.312 → 1.343 ms, which is the run-to-run spread). **The chain below is against
+the lazy reference**, which is why its last row says 0.96× where the table above says 0.46×: the
+same bytes, the same reader, a reference asked to do twice the work:
 
-| after | ours | ratio |
+| after | ours | ratio vs the lazy reference |
 |---|---|---|
 | the FFI harness first measured it | 1.878 ms | 1.43× |
 | wide stores in the FSST and OnPair kernels | 1.403 ms | 1.05× |
@@ -49,7 +67,7 @@ same session, because the first attempt at that comparison silently measured the
 numbers came back identical to four significant figures. Identical is not a small difference; it is
 a broken experiment.
 
-**"0.96×" is one file on one machine, and it is not a claim that this library is faster than Vortex
+**"0.46×" is one file on one machine, and it is not a claim that this library is faster than Vortex
 Rust.** It is `containers/zoned_many_zones_nulls` on an Apple M4 Pro — arm64, so NEON, so
 `Vector128` only on our side — single-threaded on both. A machine with AVX-512 gives our kernels a
 wider path *and* gives Rust's the same; a file dominated by FSST would put us back above 1. What it
@@ -57,8 +75,18 @@ does support is the narrower and more useful statement: on a mixed five-column f
 scan is no longer the bottleneck anyone expected it to be.
 
 **Per-encoding decode**, the axis §3 calls the one that matters most during development, and the
-one §1 holds to a tighter target (**≤ 1.5×**). Each file was written with one scheme forced. Ratios
-are ours ÷ Rust, so above 1.00 is slower:
+one §1 holds to a tighter target (**≤ 1.5×**).
+
+**The table below is superseded and kept as history.** It was produced by `DecodeComparison`, a
+BenchmarkDotNet class that no longer exists, on 4096-row files, against the lazy Rust scan — so it
+carries both defects at once: a fixed cost larger than the signal, and a reference that did not
+decode what it was being compared on. The instrument now is **`--throughput`**: the same question on
+files of a million rows, against `execute::<Canonical>`, with a ceiling per encoding and a non-zero
+exit over it. Its fifty rows live in [bench/BASELINE.md](../../bench/BASELINE.md) under "The 1M axis";
+`bench/README.md` says how to run it. The correction is not cosmetic — published as `fsst`
+"1.74× rather than 10.6×" — and it is why nothing should be quoted from here.
+
+Ratios are ours ÷ Rust, so above 1.00 is slower:
 
 | Encoding | Vorticity | Vortex Rust | ratio |
 |---|---|---|---|
@@ -300,19 +328,31 @@ implementations. Reading identical bytes is what makes the comparison honest.
 
 ## 5. Reporting
 
-* BenchmarkDotNet with `MemoryDiagnoser`, `ThreadingDiagnoser`, and hardware counters
-  (`BranchMispredictions`, `CacheMisses`) where the platform allows.
-* Ratio against Rust as the primary reported column; absolute values secondary.
-* **Thread count pinned on both sides**, with ratios reported at 1 thread and at N threads. The
-  Rust harness's threading is configured explicitly in the FFI setup rather than left to its
-  default — otherwise the ratio measures a threading-model difference, not implementation quality
-  ([09-contracts.md](09-contracts.md) §2).
-* **Measurement order randomized.** Interleaving two implementations by hand through FFI defeats
-  BenchmarkDotNet's usual protections: thermal drift over a long run systematically favors whoever
-  goes first.
-* Results are committed per release tag so regressions are visible in history.
-* CI runs a reduced subset on every PR touching `Compute/` or `Arrays/`, with a failure threshold
-  on regression rather than on absolute value (CI hardware is too noisy for absolutes).
+**What is true today**, and it is less than this section used to promise:
+
+* BenchmarkDotNet with `MemoryDiagnoser`, in the fast profile by default and `Job.Default` under
+  `--full`. **No `ThreadingDiagnoser` and no hardware counters**: `[HardwareCounters]` is a Windows
+  ETW feature, and the reference machine is arm64 macOS, where the equivalent is Instruments and
+  interactive (BENCH-AUDIT.md D5).
+* Ratio against Rust as the primary reported column; absolute values secondary. `--ratio-check` and
+  `--throughput --check` carry a ceiling per axis and exit non-zero over it.
+* **Measurement order alternated**, which is the part of "randomized" that matters here: the gates
+  interleave the two sides round by round and swap which goes first, so thermal drift is common to
+  both instead of a result. Interleaving by hand through FFI is exactly what defeats
+  BenchmarkDotNet's usual protections, and it is why the gates do their own timing.
+* Reference ratios are committed, in `RatioCheck.References` and `ThroughputCheck.References`, and
+  move down in the same commit as the change that moved them.
+
+**What is NOT true, and was written here as though it were.** Saying a document promises what
+nothing does is worse than saying nothing:
+
+* **Thread count is not pinned on either side, and no ratio is reported at N threads.** Both sides
+  are single-threaded by default and nothing configures the Rust harness's threading explicitly.
+  The multi-lane axis is BENCH-AUDIT.md D2, unbuilt.
+* **CI runs no benchmark at all.** There is no perf job, reduced subset or otherwise, on any PR.
+  The gates are commands a developer runs; `bench/README.md` lists them and what each costs. A CI
+  job is BENCH-AUDIT.md §5 and needs an x64 runner to be worth having.
+* **Nothing is committed per release tag.** There are no release tags.
 
 ## 6. Secondary context (not the target)
 

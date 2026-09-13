@@ -41,6 +41,8 @@ Implemented: the file open path, the layout tree, all 30 array encodings of the 
 column access, scans with projection and row ranges, filter pushdown, zone-map pruning, random
 access by row index, and a canonical uncompressed writer.
 
-Not yet: the sampling compressor and statistics on write, SIMD kernels and the benchmark suite
-against Rust, the byte-sortable row encoding, and parser fuzzing. See
+Not yet: the sampling compressor and statistics on write, and parser fuzzing. See
 [docs/90-registry.md](docs/90-registry.md) for the component-by-component state.
+
+The SIMD kernels, the byte-sortable row encoding and the benchmark suite against Rust all landed;
+[bench/README.md](bench/README.md) is the one page on what to run and what it costs.
