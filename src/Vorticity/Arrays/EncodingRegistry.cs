@@ -154,6 +154,9 @@ public enum LayoutEncodingId : ushort
 
     /// <summary><c>vortex.stats</c>, the legacy ancestor of <c>vortex.zoned</c> (contract §2.7).</summary>
     Stats,
+
+    /// <summary><c>vortex.list</c>, the experimental shredded list layout.</summary>
+    List,
 }
 
 /// <summary>
@@ -165,7 +168,7 @@ public static class EncodingRegistry
     internal const int MaxArrayEncodingId = (int)ArrayEncodingId.OnPair;
 
     /// <summary>The highest defined <see cref="LayoutEncodingId"/>.</summary>
-    internal const int MaxLayoutEncodingId = (int)LayoutEncodingId.Stats;
+    internal const int MaxLayoutEncodingId = (int)LayoutEncodingId.List;
 
     /// <summary>
     /// Resolves an array encoding id. An id this build does not decode - a future edition's, or
@@ -307,6 +310,7 @@ public static class EncodingRegistry
                 {
                     case (byte)'f': return idUtf8.SequenceEqual("vortex.flat"u8) ? LayoutEncodingId.Flat : LayoutEncodingId.Unknown;
                     case (byte)'d': return idUtf8.SequenceEqual("vortex.dict"u8) ? LayoutEncodingId.Dict : LayoutEncodingId.Unknown;
+                    case (byte)'l': return idUtf8.SequenceEqual("vortex.list"u8) ? LayoutEncodingId.List : LayoutEncodingId.Unknown;
                     default: return LayoutEncodingId.Unknown;
                 }
 
@@ -345,23 +349,20 @@ public static class EncodingRegistry
     {
         // Cold path: readability beats a second hand-rolled trie.
         //
-        // Two entries have left this list as their decoders arrived: `fastlanes.delta` ("in no core
-        // edition; a default writer cannot emit it") and `vortex.patched` ("in-memory only upstream;
-        // never produced by a conformant writer"). Both sentences are still true of UPSTREAM, and
-        // neither was ever a reason not to READ one - which is why the entries went rather than the
-        // wording being softened. Contract §2.8 pins the one that remains.
-        if (idUtf8.SequenceEqual("vortex.list"u8))
-        {
-            return "experimental list layout; in no core edition";
-        }
-
-        if (idUtf8.SequenceEqual("vortex.zstd_buffers"u8) ||
-            idUtf8.SequenceEqual("vortex.pco"u8) ||
-            idUtf8.SequenceEqual("vortex.map"u8) ||
+        // ALL THREE of contract §2.8's pinned notes have left this method, each when its component
+        // gained a reader: `fastlanes.delta`, `vortex.patched`, and the `vortex.list` LAYOUT. Every
+        // one of those sentences was true of UPSTREAM and none was ever a reason not to READ the
+        // component, which is why the entries went rather than the wording being softened.
+        //
+        // THE REMAINING NOTE NO LONGER SAYS "deferred to 1.1", because the scope decision of
+        // 2026-09-13 made full parity with Vortex Rust the target for 1.0 (docs/01-scope.md).
+        // `vortex.map` and `vortex.zstd_buffers` were on this list and are now read; what is left is
+        // in scope and unwritten, which is a different thing from out of scope.
+        if (idUtf8.SequenceEqual("vortex.pco"u8) ||
             idUtf8.SequenceEqual("vortex.variant"u8) ||
             idUtf8.SequenceEqual("vortex.parquet.variant"u8))
         {
-            return "deferred upstream to Vortex 1.1; not implemented";
+            return "in scope for 1.0 by the parity decision; not implemented yet";
         }
 
         return null;

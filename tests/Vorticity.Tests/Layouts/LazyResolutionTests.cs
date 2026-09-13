@@ -25,9 +25,11 @@ public sealed class LazyResolutionTests
     [Fact]
     public async Task AnUnknownLayoutOnAnUnprojectedFieldDoesNotThrow()
     {
-        // {items=list(i32)} stored under a vortex.list LAYOUT, which is in no core edition
-        // (contract §2.8). Selecting no field reads the struct's rows and nothing under them.
-        await using VortexFile file = await LayoutExecutor.OpenAsync("containers/experimental_list_layout");
+        // A FORGED layout id, not a real one. This test used containers/experimental_list_layout
+        // until `vortex.list` gained a reader, which is the fourth time an "unknown component"
+        // example has expired by being implemented. `vortex.zzzzz` is registered nowhere and cannot
+        // gain a reader, so the fixture outlives the coverage work.
+        await using VortexFile file = await LayoutExecutor.OpenForgedAsync("negative/unknown_layout_id.vortex");
         LayoutTree tree = LayoutTree.Parse(file);
         using ScanContext context = new ScanContext(file);
 
@@ -65,7 +67,7 @@ public sealed class LazyResolutionTests
     [Fact]
     public async Task ProjectingTheUnknownLayoutThrowsNamingItAndItsKind()
     {
-        await using VortexFile file = await LayoutExecutor.OpenAsync("containers/experimental_list_layout");
+        await using VortexFile file = await LayoutExecutor.OpenForgedAsync("negative/unknown_layout_id.vortex");
         LayoutTree tree = LayoutTree.Parse(file);
         using ScanContext context = new ScanContext(file);
 
@@ -73,9 +75,9 @@ public sealed class LazyResolutionTests
             async () => await LayoutExecutor.ReadAsync(
                 file, tree, context, new RowRange(0, file.RowCount), FieldMask.All));
 
-        Assert.Equal("vortex.list", error.ComponentId);
+        Assert.Equal("vortex.zzzzz", error.ComponentId);
         Assert.Equal(VortexComponentKind.Layout, error.Kind);
-        Assert.Contains("vortex.list", error.Message, StringComparison.Ordinal);
+        Assert.Contains("vortex.zzzzz", error.Message, StringComparison.Ordinal);
         Assert.Contains("layout", error.Message, StringComparison.Ordinal);
     }
 
@@ -205,7 +207,7 @@ public sealed class LazyResolutionTests
     {
         // Contract §2.3: opening a file never throws for an unknown component, and parsing the
         // layout tree never throws for an unknown layout id.
-        await using VortexFile file = await LayoutExecutor.OpenAsync("containers/experimental_list_layout");
+        await using VortexFile file = await LayoutExecutor.OpenForgedAsync("negative/unknown_layout_id.vortex");
         LayoutTree tree = LayoutTree.Parse(file);
         Assert.True(tree.NodeCount > 0);
     }

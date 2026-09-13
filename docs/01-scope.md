@@ -76,7 +76,9 @@ implementation. `EncodingRegistry.DescribeUnsupported` returns them verbatim:
 
 * ~~`fastlanes.delta`~~ and ~~`vortex.patched`~~ — both now read; their notes were true of upstream
   and were never reasons not to read one;
-* the `vortex.list` **layout** — "experimental list layout; in no core edition".
+* ~~the `vortex.list` **layout**~~ — now read; its note was true of upstream and was never a reason
+  not to read one. **All three of §2.8's pinned notes are now retired**, each by its component
+  gaining a reader.
 
 Those statements describe *upstream*, and implementing a reader does not falsify any of them. What
 changes is whether this library refuses the file. Both remaining single-file refusals sit here:

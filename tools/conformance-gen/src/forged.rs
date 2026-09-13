@@ -84,6 +84,30 @@ const FORGES: &[Forge] = &[
         ],
     },
     Forge {
+        id: "negative/unknown_layout_id",
+        rel: "negative/unknown_layout_id.vortex",
+        source: "containers/dict_layout.vortex",
+        from: b"vortex.zoned",
+        to: b"vortex.zzzzz",
+        description:
+            "a structurally valid file whose LAYOUT id `vortex.zzzzz` is registered nowhere. The \
+             array-level twin of this fixture renames an array id; this one renames a layout, which \
+             is a different resolution path and a different error. It exists because every test that \
+             needed an unknown LAYOUT had been using a real corpus file whose layout this build did \
+             not yet read - and each time that layout gained a reader, the test expired. A forged id \
+             cannot gain a reader",
+        row_count: 4096,
+        expectations: &[
+            "opening the file and parsing its layout tree succeeds: an unresolvable layout id is \
+             not itself an error",
+            "the unknown layout's node reports LayoutEncodingId.Unknown and parses no children, \
+             because a child's dtype is derived from its parent's layout kind and an unknown kind \
+             derives nothing",
+            "scanning without projecting the affected field succeeds; projecting it fails with \
+             VortexUnsupportedException naming `vortex.zzzzz` and the component kind `layout`",
+        ],
+    },
+    Forge {
         id: "legacy/stats_layout",
         rel: "legacy/stats_layout.vortex",
         source: "containers/zoned_many_zones_nulls.vortex",

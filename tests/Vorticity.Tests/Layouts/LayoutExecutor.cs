@@ -84,6 +84,14 @@ internal static class LayoutExecutor
     private static byte[] Utf8(string id) => System.Text.Encoding.UTF8.GetBytes(id);
 
     /// <summary>Opens a corpus file with its decoders registered.</summary>
+    /// <summary>Opens a FORGED fixture by its path under <c>forged/</c>.</summary>
+    /// <param name="relative">e.g. <c>negative/unknown_layout_id.vortex</c>.</param>
+    /// <returns>The open file.</returns>
+    internal static async ValueTask<VortexFile> OpenForgedAsync(string relative) =>
+        await VortexFile.OpenAsync(
+            System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(LayoutCorpus.Root)!, "forged", relative));
+
     internal static async ValueTask<VortexFile> OpenAsync(string id)
     {
         EnsureDecoders();

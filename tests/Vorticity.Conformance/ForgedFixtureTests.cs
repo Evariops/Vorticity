@@ -246,14 +246,18 @@ public sealed class ForgedFixtureTests
         }
 
         ids.Sort(StringComparer.Ordinal);
-        Assert.Equal(["legacy/stats_layout", "negative/unknown_encoding_id"], ids);
+        Assert.Equal(
+            ["legacy/stats_layout", "negative/unknown_encoding_id", "negative/unknown_layout_id"],
+            ids);
 
         Console.Out.Write(
             "forged/: " + ids.Count.ToString(CultureInfo.InvariantCulture) + " fixtures, neither " +
             "malformed. negative/unknown_encoding_id is structurally valid and carries an " +
             "unregistered encoding id; legacy/stats_layout is a perfectly valid file in a layout " +
             "encoding 0.86.1 can read but not write. The malformed-input invariant ships no file " +
-            "at all: it is exercised by " + MutationSources.Length.ToString(CultureInfo.InvariantCulture) +
+            "negative/unknown_layout_id renames a LAYOUT id rather than an array id, a different " +
+            "resolution path. The malformed-input invariant ships no file at all: it is exercised by " +
+            MutationSources.Length.ToString(CultureInfo.InvariantCulture) +
             " corpus files mutated in memory.\n");
     }
 }

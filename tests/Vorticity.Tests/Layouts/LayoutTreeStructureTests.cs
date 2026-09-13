@@ -625,19 +625,24 @@ public sealed class LayoutTreeStructureTests
     [Fact]
     public void AnUnknownLayoutIdParsesAndStopsThere()
     {
-        SyntheticLayout root = new SyntheticLayout("vortex.list", 8)
+        // "vortex.zzzzz", not a real id. This was "vortex.list" until that layout gained a reader
+        // -- the fourth example of its kind to expire by being implemented. An id registered nowhere
+        // cannot.
+        SyntheticLayout root = new SyntheticLayout("vortex.zzzzz", 8)
             .With(SyntheticLayout.Flat(8, 0), SyntheticLayout.Flat(8, 1));
 
         LayoutTree tree = Parse(root, I64, segmentCount: 4);
         Assert.Equal(LayoutEncodingId.Unknown, tree.Root.Encoding);
-        Assert.Equal("vortex.list", tree.Root.EncodingIdText);
+        Assert.Equal("vortex.zzzzz", tree.Root.EncodingIdText);
         Assert.Equal(0, tree.Root.ChildCount);
 
         VortexUnsupportedException error = Assert.Throws<VortexUnsupportedException>(
             () => LayoutReaderTable.Get(tree.Root.Encoding, tree.Root.EncodingIdText));
-        Assert.Equal("vortex.list", error.ComponentId);
+        Assert.Equal("vortex.zzzzz", error.ComponentId);
         Assert.Equal(VortexComponentKind.Layout, error.Kind);
-        Assert.Contains("in no core edition", error.Message, StringComparison.Ordinal);
+        // No note: a forged id is not one this build has anything to say about, and
+        // DescribeUnsupported returning null for it is the honest answer.
+        Assert.Contains("layout", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

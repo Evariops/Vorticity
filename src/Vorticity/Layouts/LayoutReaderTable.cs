@@ -25,6 +25,7 @@ public static class LayoutReaderTable
         Register(DictLayoutReader.Instance);
         Register(ZonedLayoutReader.Instance);
         Register(StatsLayoutReader.Instance);
+        Register(ListLayoutReader.Instance);
     }
 
     /// <summary>

@@ -82,6 +82,10 @@ internal static class LayoutParser
                 ParseStats(b, in view, dtype, depth, metadata, segments.Length, wireChildren, ref record);
                 break;
 
+            case LayoutEncodingId.List:
+                ParseList(b, in view, dtype, depth, metadata, segments.Length, wireChildren, ref record);
+                break;
+
             default:
                 // An unknown layout's children have no derivable dtypes, so they are not
                 // materialized. That is not an error here (contract §2.3): it becomes one only
@@ -320,6 +324,86 @@ internal static class LayoutParser
         if (codesRows != record.RowCount)
         {
             LayoutsThrow.RowCountMismatch("vortex.dict", "codes", codesRows, record.RowCount);
+        }
+    }
+
+    // ------------------------------------------------------------------------------ vortex.list
+
+    /// <summary>
+    /// <c>vortex.list</c>: elements, offsets, and a validity child when the dtype is nullable.
+    /// </summary>
+    /// <remarks>
+    /// The children's dtypes are DERIVED rather than read, which is why an unknown layout cannot
+    /// have children at all: the elements child takes the list's element dtype, the offsets child is
+    /// a non-nullable primitive of the width the metadata names, and the validity child is a
+    /// non-nullable Bool. vortex-layout-0.86.1/src/layouts/list/mod.rs does exactly this.
+    /// </remarks>
+    private static void ParseList(
+        LayoutTree.Builder b,
+        in LayoutView view,
+        DType dtype,
+        int depth,
+        ReadOnlySpan<byte> metadata,
+        int segmentCount,
+        int wireChildren,
+        ref LayoutNodeRecord record)
+    {
+        if (segmentCount != 0)
+        {
+            LayoutsThrow.Arity("vortex.list", "segment", segmentCount, 0);
+        }
+
+        if (dtype.Kind != DTypeKind.List)
+        {
+            LayoutsThrow.Format($"A vortex.list layout requires a List dtype, not {dtype.Kind}.");
+        }
+
+        int expected = dtype.Nullability == Nullability.Nullable ? 3 : 2;
+        if (wireChildren != expected)
+        {
+            LayoutsThrow.Arity("vortex.list", "children", wireChildren, expected);
+        }
+
+        ListLayoutMetadata list = ListLayoutMetadata.Read(metadata);
+        if (!list.OffsetsPType.IsInteger())
+        {
+            LayoutsThrow.Format(
+                $"A vortex.list layout's offsets must be an integer physical type, not " +
+                $"{list.OffsetsPType.Name()}.");
+        }
+
+        DType offsetsType = b.Types.Primitive(list.OffsetsPType, Nullability.NonNullable);
+
+        record.ChildStart = b.ReserveChildren(expected);
+        record.ChildCount = expected;
+
+        LayoutView elements = view.GetChild(0);
+        b.ChildIndices[record.ChildStart] = ParseNode(b, in elements, dtype.ElementType, depth + 1);
+
+        LayoutView offsets = view.GetChild(1);
+        int offsetsIndex = ParseNode(b, in offsets, offsetsType, depth + 1);
+        b.ChildIndices[record.ChildStart + 1] = offsetsIndex;
+
+        // One boundary per row plus one to close the last list, which is the invariant upstream
+        // checks as `offsets.row_count() - 1 == row_count`.
+        long offsetRows = b.Records[offsetsIndex].RowCount;
+        if (offsetRows != record.RowCount + 1)
+        {
+            LayoutsThrow.RowCountMismatch("vortex.list", "offsets", offsetRows, record.RowCount + 1);
+        }
+
+        if (expected == 3)
+        {
+            DType validityType = b.Types.Bool(Nullability.NonNullable);
+            LayoutView validity = view.GetChild(2);
+            int validityIndex = ParseNode(b, in validity, validityType, depth + 1);
+            b.ChildIndices[record.ChildStart + 2] = validityIndex;
+
+            long validityRows = b.Records[validityIndex].RowCount;
+            if (validityRows != record.RowCount)
+            {
+                LayoutsThrow.RowCountMismatch("vortex.list", "validity", validityRows, record.RowCount);
+            }
         }
     }
 
