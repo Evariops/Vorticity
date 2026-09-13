@@ -62,6 +62,9 @@ public sealed class VortexFile : IAsyncDisposable
     private readonly int _segmentSpecCount;
     private readonly byte[] _rootLayoutBytes;
     private readonly FileStatistics? _statistics;
+
+    /// <summary>Lazily parsed by <see cref="LayoutTree"/>; see its remarks on the benign race.</summary>
+    private Layouts.LayoutTree? _layoutTree;
     private readonly string[] _metadataKeys;
     private readonly byte[][] _metadataKeysUtf8;
     private readonly SegmentSpec[] _metadataSegments;
@@ -874,6 +877,39 @@ public sealed class VortexFile : IAsyncDisposable
     /// (docs/02-format.md §4, docs/07-dotnet-mapping.md §5).
     /// </summary>
     public DType Schema => _schema;
+
+    /// <summary>
+    /// The parsed root layout tree, parsed at most once per open file and shared by every scan.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE TREE IS A FUNCTION OF THE FILE AND NOTHING ELSE, so re-parsing it per
+    /// <c>ScanBuilder.ExecuteAsync</c> re-derived the same immutable object from the same
+    /// immutable bytes. A caller that scans one open file repeatedly - which
+    /// docs/09-contracts.md §1 exists to permit - paid for that every time.
+    /// </para>
+    /// <para>
+    /// The race is benign and deliberately left unlocked: two scans starting at once may both
+    /// parse, and because the result is immutable and derived only from <c>_rootLayoutBytes</c>,
+    /// either instance is equally correct and the loser is ordinary garbage. A lock here would
+    /// serialize the one thing this property exists to make concurrent.
+    /// </para>
+    /// </remarks>
+    internal Layouts.LayoutTree LayoutTree
+    {
+        get
+        {
+            Layouts.LayoutTree? tree = Volatile.Read(ref _layoutTree);
+            if (tree is not null)
+            {
+                return tree;
+            }
+
+            tree = Layouts.LayoutTree.Parse(this);
+            Volatile.Write(ref _layoutTree, tree);
+            return tree;
+        }
+    }
 
     /// <summary>True when <see cref="Schema"/> is a struct and the file therefore reads as a table.</summary>
     public bool IsTabular => _schema.Kind == DTypeKind.Struct;

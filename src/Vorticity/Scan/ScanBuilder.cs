@@ -278,7 +278,9 @@ public sealed class ScanBuilder
     /// <exception cref="VortexFormatException">The file's layout tree is malformed.</exception>
     public IAsyncEnumerable<RecordBatch> ExecuteAsync()
     {
-        LayoutTree tree = LayoutTree.Parse(_file);
+        // Parsed at most once per OPEN FILE rather than once per scan: the tree is a function of
+        // the file's bytes and nothing else. See VortexFile.LayoutTree.
+        LayoutTree tree = _file.LayoutTree;
 
         long rootRows = tree.Root.RowCount;
         RowRange whole = new RowRange(0, rootRows);

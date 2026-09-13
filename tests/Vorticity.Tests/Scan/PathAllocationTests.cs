@@ -112,7 +112,13 @@ public sealed class PathAllocationTests
     private static readonly (string Axis, long Ceiling, Func<ValueTask<long>> Path)[] Axes =
     [
         ("open, footer only", 15_360, FooterOnly),
-        ("open, first batch", 133_632, FirstBatch),
+        // 133_632 -> 133_640: `VortexFile` gained one reference field, the lazily parsed
+        // `LayoutTree` that every scan of an open file now shares instead of re-deriving. Eight
+        // bytes once per OPEN, against a layout-tree parse once per `ExecuteAsync` - and this axis
+        // opens the file and reads one batch, so it pays the eight and collects none of the
+        // saving. The ratchet is here to make a change like that be noticed and argued, which is
+        // what this comment is.
+        ("open, first batch", 133_640, FirstBatch),
         ("full scan", 190_976, FullScan),
         ("projected scan, 1 of 5 columns", 134_144, ProjectedScan),
         ("take 64 rows from 64 splits", 192_000, ScatteredTake),
