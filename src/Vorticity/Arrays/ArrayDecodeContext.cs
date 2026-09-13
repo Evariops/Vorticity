@@ -391,24 +391,14 @@ public sealed class ArrayDecodeContext
                 $"bytes; the buffer holds {bits.Length}.");
         }
 
-        bool anySet = false;
-        bool anyClear = false;
-        for (int b = firstByte; b <= lastByte; b++)
+        Decoders.Canonical.BitmapKernels.Classify(
+            bits, start, length, out bool anySet, out bool anyClear);
+        return (anySet, anyClear) switch
         {
-            int lo = b == firstByte ? start & 7 : 0;
-            int hi = b == lastByte ? (int)((endExclusive - 1) & 7) + 1 : 8;
-            byte mask = (byte)(((1 << hi) - 1) & ~((1 << lo) - 1));
-            byte masked = (byte)(bits[b] & mask);
-
-            anySet |= masked != 0;
-            anyClear |= masked != mask;
-            if (anySet && anyClear)
-            {
-                return ValidityBitmapShape.Mixed;
-            }
-        }
-
-        return anySet ? ValidityBitmapShape.AllSet : ValidityBitmapShape.AllClear;
+            (true, true) => ValidityBitmapShape.Mixed,
+            (true, false) => ValidityBitmapShape.AllSet,
+            _ => ValidityBitmapShape.AllClear,
+        };
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

@@ -84,7 +84,7 @@ internal static class ThroughputCheck
         ("alp_patched_no_chunk_offsets", 1.08),   // 2 runs, spread 0.91-1.08
         ("alprd", 1.25),   // 2 runs, spread 1.24-1.25
         ("bool", 1.00),   // 2 runs, spread 0.97-1.00
-        ("bool_bit_offset3", 1.09),   // 2 runs, spread 1.06-1.09
+        ("bool_bit_offset3", 1.00),   // vectorized validity classify; spread 0.95-1.00
         ("bool_bit_offset7", 1.01),   // 2 runs, spread 0.97-1.01
         ("bool_bit_offset_straddle", 1.01),   // 2 runs, spread 1.00-1.01
         ("bytebool", 1.14),   // 2 runs, spread 1.12-1.14
@@ -112,8 +112,8 @@ internal static class ThroughputCheck
         ("listview", 0.73),   // 2 runs, spread 0.67-0.73
         ("map", 0.16),   // 2 runs, spread 0.15-0.16
         ("masked", 0.53),   // 2 runs, spread 0.49-0.53
-        ("masked_all_invalid", 1.37),   // 2 runs, spread 1.03-1.37
-        ("masked_all_valid", 1.26),   // 2 runs, spread 1.26-1.26
+        ("masked_all_invalid", 0.52),   // vectorized validity classify; spread 0.49-0.52
+        ("masked_all_valid", 0.58),   // vectorized validity classify; spread 0.56-0.58
         ("null", 1.31),   // 2 runs, spread 1.12-1.31
         ("onpair", 1.61),   // 2 runs, spread 1.61-1.61
         ("parquet_variant", 8.11),   // 2 runs, spread 7.69-8.11
