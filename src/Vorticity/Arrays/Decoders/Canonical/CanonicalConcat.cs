@@ -7,6 +7,8 @@
 // this file is a switch over the nine kinds rather than a general kernel. Buffers come from
 // CanonicalArena.Allocate, which is the only writable memory a decoder may have (contract §8.4).
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
@@ -231,6 +233,15 @@ internal static class CanonicalConcat
         int width = ptype.ByteWidth();
         int totalBytes = ArrayDecodeContext.CheckedMultiply(length, width, "concatenated values");
 
+        // NOT COPIED AT ALL when the chunks already lie end to end, which is the common shape and
+        // not a lucky one: chunk buffers come either from consecutive segments of the same mapped
+        // file or from consecutive bump allocations in the same arena. Concatenating them then
+        // means memcpying several megabytes onto a byte-identical image of themselves.
+        if (TryBorrowContiguous(arena, chunks, ptype, totalBytes, out VortexBuffer borrowed))
+        {
+            return arena.AddPrimitive(dtype, length, validity, ptype, borrowed);
+        }
+
         // UNINITIALIZED, because the chunks tile the output: each contributes its whole values
         // buffer, and the widths agree, so the copies below cover every byte. Zero-filling first
         // doubled the memory traffic of a concatenation that is already bandwidth-bound - 8 MB of
@@ -263,6 +274,92 @@ internal static class CanonicalConcat
         }
 
         return arena.AddPrimitive(dtype, length, validity, ptype, values);
+    }
+
+    /// <summary>
+    /// The chunks' values as ONE buffer, without copying, when they are already adjacent and in
+    /// order.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The test is reference adjacency, not an assumption: each chunk's values must start exactly
+    /// where the previous one ended, and the run must add up to <paramref name="totalBytes"/>.
+    /// Anything else - a repeated chunk, a reordered one, alignment padding between two segments,
+    /// a chunk whose buffer is shorter than its declared length - fails the walk and takes the
+    /// copy. A physical-type disagreement is still a FORMAT ERROR and is raised by the copying
+    /// path, so this one declines rather than deciding.
+    /// </para>
+    /// <para>
+    /// The borrowed bytes outlive the result for the same reason every other decoder's do: they
+    /// belong to the mapping or the arena that produced the chunks, and the concatenation is a
+    /// node in that same arena.
+    /// </para>
+    /// </remarks>
+    private static bool TryBorrowContiguous(
+        CanonicalArena arena, ReadOnlySpan<int> chunks, PType ptype, int totalBytes,
+        out VortexBuffer values)
+    {
+        values = VortexBuffer.Empty;
+        int width = ptype.ByteWidth();
+
+        ReadOnlySpan<byte> first = default;
+        ReadOnlySpan<byte> previous = default;
+        int alignmentExponent = 0;
+        int covered = 0;
+        bool started = false;
+
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            CanonicalNode chunk = arena.GetNode(chunks[i]);
+            if (chunk.PType != ptype)
+            {
+                return false;
+            }
+
+            VortexBuffer buffer = chunk.Values;
+            ReadOnlySpan<byte> span = buffer.Span;
+
+            // A zero-row chunk is legal (encodings/chunked_empty_chunks) and contributes nothing;
+            // its buffer may be the null-based empty one, which has no address to be adjacent to.
+            if (span.IsEmpty)
+            {
+                continue;
+            }
+
+            // The chunk must contribute EXACTLY its declared rows. A buffer longer than that would
+            // still sum to `totalBytes` if a later one came up short, and the borrowed run would
+            // then hold the wrong bytes at the right size.
+            if (span.Length != chunk.Length * width)
+            {
+                return false;
+            }
+
+            if (!started)
+            {
+                first = span;
+                alignmentExponent = buffer.AlignmentExponent;
+                started = true;
+            }
+            else if (!Unsafe.AreSame(
+                ref MemoryMarshal.GetReference(span),
+                ref Unsafe.Add(ref MemoryMarshal.GetReference(previous), previous.Length)))
+            {
+                return false;
+            }
+
+            previous = span;
+            covered += span.Length;
+        }
+
+        if (!started || covered != totalBytes)
+        {
+            return false;
+        }
+
+        values = VortexBuffer.FromPinned(
+            MemoryMarshal.CreateReadOnlySpan(ref MemoryMarshal.GetReference(first), totalBytes),
+            alignmentExponent);
+        return true;
     }
 
     private static int ConcatDecimal(

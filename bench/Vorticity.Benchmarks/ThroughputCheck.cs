@@ -82,15 +82,15 @@ internal static class ThroughputCheck
         ("alp", 0.95),   // 2 runs, spread 0.94-0.95
         ("alp_no_patches", 0.93),   // 2 runs, spread 0.92-0.93
         ("alp_patched_no_chunk_offsets", 1.08),   // 2 runs, spread 0.91-1.08
-        ("alprd", 1.25),   // 2 runs, spread 1.24-1.25
+        ("alprd", 1.18),   // row shapes hoisted, output uninitialized; 3 runs, spread 1.13-1.18
         ("bool", 1.00),   // 2 runs, spread 0.97-1.00
         ("bool_bit_offset3", 1.00),   // vectorized validity classify; spread 0.95-1.00
         ("bool_bit_offset7", 1.01),   // 2 runs, spread 0.97-1.01
         ("bool_bit_offset_straddle", 1.01),   // 2 runs, spread 1.00-1.01
         ("bytebool", 1.14),   // 2 runs, spread 1.12-1.14
-        ("chunked", 1.34),   // 2 runs, spread 1.33-1.34
-        ("chunked_empty_chunks", 1.44),   // 2 runs, spread 1.43-1.44
-        ("chunked_one_chunk", 0.42),   // 2 runs, spread 0.40-0.42
+        ("chunked", 0.46),   // adjacent chunks borrowed, not concatenated; 3 runs, spread 0.43-0.46
+        ("chunked_empty_chunks", 0.47),   // same; 3 runs, spread 0.41-0.47
+        ("chunked_one_chunk", 0.47),   // 3 runs, spread 0.41-0.47
         ("constant", 1.10),   // 2 runs, spread 1.06-1.10
         ("datetimeparts", 1.22),   // 2 runs, spread 1.22-1.22
         ("decimal", 0.40),   // 2 runs, spread 0.39-0.40
@@ -101,8 +101,8 @@ internal static class ThroughputCheck
         ("dict_u64_codes", 1.18),   // 2 runs, spread 1.11-1.18
         ("dict_u8_codes", 0.99),   // 2 runs, spread 0.95-0.99
         ("ext", 0.45),   // 2 runs, spread 0.34-0.45
-        ("fastlanes_bitpacked", 1.38),   // 2 runs, spread 1.35-1.38
-        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.51),   // 2 runs, spread 1.32-1.51
+        ("fastlanes_bitpacked", 1.29),   // row shapes hoisted out of the block loop; 3 runs, spread 1.23-1.29
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.21),   // same; 3 runs, spread 1.18-1.21
         ("fastlanes_delta", 1.18),   // Undelta by reference; 3 runs, spread 1.12-1.18
         ("fastlanes_for", 1.07),   // 2 runs, spread 1.00-1.07
         ("fastlanes_rle", 0.97),   // 2 runs, spread 0.92-0.97
