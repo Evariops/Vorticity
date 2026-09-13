@@ -190,7 +190,11 @@ public class FsstKernelBenchmarks
     [Benchmark(Description = "library, validation included")]
     public int Library()
     {
-        FsstSymbolTable table = FsstSymbolTable.Create(_symbols, _lengths, "vortex.fsst");
+        Span<byte> symbolScratch = stackalloc byte[FsstSymbolTable.SymbolScratchBytes];
+        Span<byte> widthScratch = stackalloc byte[FsstSymbolTable.WidthScratchBytes];
+        FsstDecodeTable table = FsstSymbolTable
+            .Create(_symbols, _lengths, "vortex.fsst")
+            .Prepare(symbolScratch, widthScratch);
         return table.Decode(_codes, _output, "vortex.fsst");
     }
 

@@ -27,6 +27,8 @@ use std::sync::OnceLock;
 use futures::StreamExt;
 use futures::pin_mut;
 use vortex::VortexSessionDefault;
+use vortex::array::Canonical;
+use vortex::array::VortexSessionExecute;
 use vortex::error::VortexResult;
 use vortex::expr::root;
 use vortex::expr::select;
@@ -69,6 +71,46 @@ pub unsafe extern "C" fn vxbench_scan_all(path: *const c_char) -> i64 {
                 let mut rows: i64 = 0;
                 while let Some(array) = stream.next().await {
                     rows += array?.len() as i64;
+                }
+
+                Ok(rows)
+            }
+        })
+    })
+}
+
+/// Opens `path`, scans every batch AND CANONICALIZES IT, returning the row count.
+///
+/// THIS IS THE LIKE-FOR-LIKE AXIS, and `vxbench_scan_all` is not.
+///
+/// `file.scan()` hands back arrays in whatever encoding the file holds: a `vortex.fsst` column
+/// comes out as an FsstArray, and `array.len()` answers from its metadata without touching a code.
+/// The .NET reader has no such state -- its `RecordBatch` is canonical by construction, because
+/// `CanonicalArena` is the only representation it has -- so `vxbench_scan_all` compares a scan that
+/// decompresses against one that does not, on every compressed encoding. That is not a small
+/// correction: on the 1M-row axis it is most of what the per-encoding ratios were measuring.
+///
+/// `execute::<Canonical>` is upstream's own canonicalization, the same call its arrow conversion
+/// and its own `to_canonical` make. The result is dropped rather than accumulated: the decode has
+/// already happened by then, and holding a million rows of it would measure the allocator.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vxbench_scan_canonical(path: *const c_char) -> i64 {
+    run(path, |session, path| {
+        block_on(|handle| {
+            let session = session.with_handle(handle);
+            async move {
+                let mut ctx = session.create_execution_ctx();
+                let file = session.open_options().open_path(&path).await?;
+                let stream = file.scan()?.into_array_stream()?;
+                pin_mut!(stream);
+                let mut rows: i64 = 0;
+                while let Some(array) = stream.next().await {
+                    let array = array?;
+                    rows += array.len() as i64;
+                    let _canonical: Canonical = array.execute(&mut ctx)?;
                 }
 
                 Ok(rows)

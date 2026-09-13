@@ -237,7 +237,11 @@ public sealed class FsstSymbolsTests
             lengths[i] = table.SymbolLength(i);
         }
 
-        FsstSymbolTable decoder = FsstSymbolTable.Create(symbols, lengths, "vortex.fsst");
+        Span<byte> symbolScratch = stackalloc byte[FsstSymbolTable.SymbolScratchBytes];
+        Span<byte> widthScratch = stackalloc byte[FsstSymbolTable.WidthScratchBytes];
+        FsstDecodeTable decoder = FsstSymbolTable
+            .Create(symbols, lengths, "vortex.fsst")
+            .Prepare(symbolScratch, widthScratch);
         byte[] decoded = new byte[value.Length];
         int produced = decoder.Decode(codes.AsSpan(0, written), decoded, "vortex.fsst");
         Assert.Equal(value.Length, produced);

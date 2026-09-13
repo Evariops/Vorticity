@@ -111,10 +111,28 @@ internal static class RatioCheck
     /// are honest about different things. BenchmarkDotNet reports the best case, a tight loop of
     /// one path with the caches to itself; this reports a path sharing a process with other work,
     /// which is the case a gate should defend. Neither figure should be quoted as the other.
+    ///
+    /// THERE ARE TWO FULL-SCAN AXES, AND THEY MEASURE DIFFERENT QUESTIONS. Upstream's scan hands
+    /// back arrays in the file's own encodings and `len()` answers from their metadata, so nothing
+    /// is decompressed; the .NET reader has no lazy state, because `CanonicalArena` is the only
+    /// representation it has. "full scan" therefore drives the Rust side through
+    /// `execute::&lt;Canonical&gt;`, which is the comparison a decoder ratio has to be built on.
+    /// "full scan, upstream lazy" keeps the old call beside it, because "how long to get a stream
+    /// of arrays you may never fully read" is a real question about a real API -- it just is not
+    /// the same question, and quoting one as the other is what this pair exists to prevent.
     /// </remarks>
     private static readonly Axis[] Axes =
     [
-        new Axis("full scan", 0.953, ScanAll, p => RustReader.Require(RustReader.ScanAll(p), "scan")),
+        new Axis(
+            "full scan",
+            0.953,
+            ScanAll,
+            p => RustReader.Require(RustReader.ScanCanonical(p), "scan")),
+        new Axis(
+            "full scan, upstream lazy",
+            0.953,
+            ScanAll,
+            p => RustReader.Require(RustReader.ScanAll(p), "scan")),
         new Axis(
             "projected scan, 1 of 5 columns",
             0.514,

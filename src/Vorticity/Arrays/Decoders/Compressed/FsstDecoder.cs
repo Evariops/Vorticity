@@ -25,7 +25,6 @@
 // (all 55 are `vortex.fsst/c2/b3` or `/c3/b3`), so it is refused by name rather than implemented
 // untested -- recorded in docs/90-registry.md as the gap it is.
 using System;
-using System.Text.Unicode;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -103,8 +102,15 @@ public sealed class FsstDecoder : ArrayDecoder
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, 3, Id);
 
         FsstMetadata metadata = FsstMetadata.Read(node.Metadata);
-        FsstSymbolTable table = FsstSymbolTable.Create(
-            node.GetBuffer(0).Span, node.GetBuffer(1).Span, Id);
+
+        // The padded decode tables are built ONCE, here, and handed to whichever path runs: the
+        // selective path calls the kernel per wanted row, and rebuilding 2.3 KiB per row would cost
+        // more than the branches the padding removes.
+        Span<byte> symbolScratch = stackalloc byte[FsstSymbolTable.SymbolScratchBytes];
+        Span<byte> widthScratch = stackalloc byte[FsstSymbolTable.WidthScratchBytes];
+        FsstDecodeTable table = FsstSymbolTable
+            .Create(node.GetBuffer(0).Span, node.GetBuffer(1).Span, Id)
+            .Prepare(symbolScratch, widthScratch);
 
         int produced = selective ? wanted.Length : length;
 
@@ -157,10 +163,16 @@ public sealed class FsstDecoder : ArrayDecoder
 
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             produced, CanonicalSupport.ViewSize, Id + " views");
-        VortexBuffer views = CanonicalSupport.Allocate(
+
+        // Uninitialized: ViewKernels writes all sixteen bytes of every view, null rows included.
+        // A null row stores a zero length upstream, so it consumes nothing of the heap and gets an
+        // empty view -- which is now WRITTEN rather than inherited from the allocator.
+        VortexBuffer views = CanonicalSupport.AllocateUninitialized(
             context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
-        BuildViews(
-            uncompressedLengths.Values.Span, lengthsPType, destination, writable, produced,
+        // No `wanted` indirection: the lengths child was decoded SELECTIVELY, so it already holds
+        // exactly the produced rows in selection order.
+        ViewKernels.BuildFromLengths(
+            uncompressedLengths.Values.Span, lengthsPType, default, destination, writable, produced,
             dtype.Kind == DTypeKind.Utf8);
 
         if (total == 0)
@@ -185,7 +197,7 @@ public sealed class FsstDecoder : ArrayDecoder
     /// span adds nothing a check does not already give.
     /// </remarks>
     private static void DecodeRows(
-        in FsstSymbolTable table,
+        in FsstDecodeTable table,
         CanonicalNode offsets,
         PType offsetsPType,
         int length,
@@ -273,45 +285,5 @@ public sealed class FsstDecoder : ArrayDecoder
         }
 
         return (int)total;
-    }
-
-    /// <summary>
-    /// Cuts the decoded heap into per-row views, advancing by each row's uncompressed length.
-    /// </summary>
-    /// <remarks>
-    /// Null rows are not special-cased: upstream stores a zero length for them, so they consume
-    /// nothing and get an empty view, which is also what the zeroed allocation already holds.
-    /// </remarks>
-    private static void BuildViews(
-        ReadOnlySpan<byte> lengths,
-        PType ptype,
-        ReadOnlySpan<byte> heap,
-        Span<byte> views,
-        int length,
-        bool requireUtf8)
-    {
-        int offset = 0;
-        for (int i = 0; i < length; i++)
-        {
-            int size = (int)CanonicalSupport.ReadInteger(lengths, ptype, i);
-            ReadOnlySpan<byte> value = heap.Slice(offset, size);
-
-            if (requireUtf8 && !Utf8.IsValid(value))
-            {
-                throw new VortexFormatException($"Row {i} of a Utf8 array is not valid UTF-8.");
-            }
-
-            Span<byte> view = views.Slice(i * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
-            if (size <= CanonicalSupport.MaxInlineViewLength)
-            {
-                CanonicalSupport.WriteInlineView(view, value);
-            }
-            else
-            {
-                CanonicalSupport.WriteReferenceView(view, size, value, bufferIndex: 0, offset: offset);
-            }
-
-            offset += size;
-        }
     }
 }

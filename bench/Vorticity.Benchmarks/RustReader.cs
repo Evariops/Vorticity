@@ -32,11 +32,35 @@ internal static partial class RustReader
     [LibraryImport(Library, EntryPoint = "vxbench_noop")]
     internal static partial long NoOp();
 
-    /// <summary>Opens a file and scans every column of every batch.</summary>
+    /// <summary>
+    /// Opens a file and walks every batch of every column, WITHOUT decompressing.
+    /// </summary>
     /// <param name="path">The file to scan, as a UTF-8 C string.</param>
     /// <returns>The row count, or negative on failure.</returns>
+    /// <remarks>
+    /// Upstream's scan hands back arrays in the file's own encodings -- an FsstArray, a DictArray,
+    /// a RunEndArray -- and <c>len()</c> answers from their metadata. So this measures layout
+    /// reading and array deserialization, and NOT the decoders. Use <see cref="ScanCanonical"/> for
+    /// any ratio against a .NET scan, whose <c>RecordBatch</c> is canonical by construction.
+    /// </remarks>
     [LibraryImport(Library, EntryPoint = "vxbench_scan_all", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long ScanAll(string path);
+
+    /// <summary>
+    /// Opens a file, walks every batch AND canonicalizes it: the like-for-like counterpart of
+    /// <see cref="ScanAll"/>.
+    /// </summary>
+    /// <param name="path">The file to scan, as a UTF-8 C string.</param>
+    /// <returns>The row count, or negative on failure.</returns>
+    /// <remarks>
+    /// The .NET reader has no lazy state: <c>CanonicalArena</c> is the only representation it has,
+    /// so a batch is decompressed by the time its row count exists. A ratio built on
+    /// <see cref="ScanAll"/> therefore compares a scan that decompresses against one that does not,
+    /// on every compressed encoding -- which on the 1M-row axis was most of what the per-encoding
+    /// ratios were measuring.
+    /// </remarks>
+    [LibraryImport(Library, EntryPoint = "vxbench_scan_canonical", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial long ScanCanonical(string path);
 
     /// <summary>Opens a file and scans one field of every batch.</summary>
     /// <param name="path">The file to scan, as a UTF-8 C string.</param>

@@ -79,54 +79,54 @@ internal static class ThroughputCheck
     /// </remarks>
     private static readonly (string Encoding, double Reference)[] References =
     [
-        ("alp", 3.09),   // 3 runs, spread 2.68-3.09
-        ("alp_no_patches", 1.97),   // 3 runs, spread 1.75-1.97
-        ("alp_patched_no_chunk_offsets", 1.97),   // 3 runs, spread 1.81-1.97
-        ("alprd", 6.13),   // 3 runs, spread 5.17-6.13
-        ("bool", 1.16),   // 3 runs, spread 1.05-1.16
-        ("bool_bit_offset3", 1.05),   // 3 runs, spread 1.00-1.05
-        ("bool_bit_offset7", 1.20),   // 3 runs, spread 1.04-1.20
-        ("bool_bit_offset_straddle", 1.10),   // 3 runs, spread 1.00-1.10
-        ("bytebool", 4.58),   // 3 runs, spread 3.85-4.58
-        ("chunked", 1.68),   // 3 runs, spread 1.40-1.68
-        ("chunked_empty_chunks", 1.72),   // 3 runs, spread 1.35-1.72
-        ("chunked_one_chunk", 1.41),   // 3 runs, spread 1.21-1.41
-        ("constant", 2.82),
-        ("datetimeparts", 2.09),   // 3 runs, spread 1.95-2.09
-        ("decimal", 1.40),   // 3 runs, spread 1.21-1.40
-        ("decimal_byte_parts", 1.37),   // 3 runs, spread 1.31-1.37
-        ("dict", 2.59),
-        ("dict_nullable_codes", 7.02),
-        ("dict_nullable_values_nonnull_codes", 6.60),
-        ("dict_u64_codes", 1.99),
-        ("dict_u8_codes", 3.67),
-        ("ext", 1.27),   // 3 runs, spread 1.13-1.27
-        ("fastlanes_bitpacked", 2.57),   // 3 runs, spread 2.32-2.57
-        ("fastlanes_bitpacked_patched_no_chunk_offsets", 2.62),   // 3 runs, spread 2.37-2.62
-        ("fastlanes_delta", 8.72),   // 2 runs, spread 7.60-8.72
-        ("fastlanes_for", 1.98),   // 3 runs, spread 1.68-1.98
-        ("fastlanes_rle", 2.70),
-        ("fixed_size_list", 1.37),
-        ("fsst", 10.94),   // 3 runs, spread 10.42-10.94
-        ("list", 7.15),
-        ("listview", 0.80),
-        ("map", 0.17),
-        ("masked", 1.40),   // 3 runs, spread 1.26-1.40
-        ("masked_all_invalid", 1.87),   // 3 runs, spread 1.74-1.87
-        ("masked_all_valid", 1.88),   // 3 runs, spread 1.78-1.88
-        ("null", 1.18),   // 3 runs, spread 1.13-1.18
-        ("onpair", 13.81),   // 3 runs, spread 13.59-13.81
-        ("pco", 12.78),   // 3 runs, spread 11.74-12.78
-        ("primitive", 1.37),   // 3 runs, spread 1.34-1.37
-        ("runend", 3.08),
-        ("sequence", 4.22),
-        ("sparse", 2.55),
-        ("struct", 0.08),
-        ("varbin", 0.14),
-        ("varbinview", 0.07),
-        ("zigzag", 2.90),   // 3 runs, spread 2.41-2.90
-        ("zstd", 14.34),   // 3 runs, spread 13.70-14.34
-        ("zstd_buffers", 4.03),   // 2 runs, spread 3.81-4.03
+        ("alp", 2.15),   // 2 runs, spread 2.10-2.15
+        ("alp_no_patches", 1.41),   // 2 runs, spread 1.37-1.41
+        ("alp_patched_no_chunk_offsets", 1.28),   // 2 runs, spread 1.27-1.28
+        ("alprd", 3.29),   // 2 runs, spread 2.65-3.29
+        ("bool", 1.06),   // 2 runs, spread 1.05-1.06
+        ("bool_bit_offset3", 1.26),   // 2 runs, spread 1.14-1.26
+        ("bool_bit_offset7", 1.05),   // 2 runs, spread 1.02-1.05
+        ("bool_bit_offset_straddle", 1.13),   // 2 runs, spread 1.04-1.13
+        ("bytebool", 3.62),   // 2 runs, spread 3.59-3.62
+        ("chunked", 1.59),   // 2 runs, spread 1.52-1.59
+        ("chunked_empty_chunks", 1.70),   // 2 runs, spread 1.55-1.70
+        ("chunked_one_chunk", 1.40),   // 2 runs, spread 1.37-1.40
+        ("constant", 1.82),   // 2 runs, spread 1.82-1.82
+        ("datetimeparts", 1.40),   // 2 runs, spread 1.34-1.40
+        ("decimal", 1.38),   // 2 runs, spread 1.36-1.38
+        ("decimal_byte_parts", 1.37),   // 2 runs, spread 1.31-1.37
+        ("dict", 1.52),   // 2 runs, spread 1.41-1.52
+        ("dict_nullable_codes", 1.03),   // 2 runs, spread 1.02-1.03
+        ("dict_nullable_values_nonnull_codes", 3.69),   // 2 runs, spread 3.17-3.69
+        ("dict_u64_codes", 1.40),   // 2 runs, spread 1.40-1.40
+        ("dict_u8_codes", 1.58),   // 2 runs, spread 1.56-1.58
+        ("ext", 1.39),   // 2 runs, spread 1.26-1.39
+        ("fastlanes_bitpacked", 1.68),   // 2 runs, spread 1.68-1.68
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.60),   // 2 runs, spread 1.59-1.60
+        ("fastlanes_delta", 4.24),   // 2 runs, spread 3.70-4.24
+        ("fastlanes_for", 1.48),   // 2 runs, spread 1.29-1.48
+        ("fastlanes_rle", 1.06),   // 2 runs, spread 1.02-1.06
+        ("fixed_size_list", 1.26),   // 2 runs, spread 1.25-1.26
+        ("fsst", 1.74),   // 2 runs, spread 1.72-1.74
+        ("list", 5.29),   // 2 runs, spread 4.82-5.29
+        ("listview", 0.80),   // 2 runs, spread 0.78-0.80
+        ("map", 0.19),   // 2 runs, spread 0.18-0.19
+        ("masked", 1.32),   // 2 runs, spread 1.31-1.32
+        ("masked_all_invalid", 1.95),   // 2 runs, spread 1.92-1.95
+        ("masked_all_valid", 1.96),   // 2 runs, spread 1.86-1.96
+        ("null", 1.14),   // 2 runs, spread 1.13-1.14
+        ("onpair", 4.98),   // 2 runs, spread 4.87-4.98
+        ("pco", 3.59),   // 2 runs, spread 3.41-3.59
+        ("primitive", 1.37),   // 2 runs, spread 1.33-1.37
+        ("runend", 1.83),   // 2 runs, spread 1.64-1.83
+        ("sequence", 2.70),   // 2 runs, spread 2.57-2.70
+        ("sparse", 1.45),   // 2 runs, spread 1.42-1.45
+        ("struct", 0.09),   // 2 runs, spread 0.08-0.09
+        ("varbin", 0.17),   // 2 runs, spread 0.15-0.17
+        ("varbinview", 0.08),   // 2 runs, spread 0.08-0.08
+        ("zigzag", 1.72),   // 2 runs, spread 1.69-1.72
+        ("zstd", 1.40),   // 2 runs, spread 1.39-1.40
+        ("zstd_buffers", 0.22),   // 2 runs, spread 0.22-0.22
     ];
 
     /// <summary>
@@ -354,7 +354,7 @@ internal static class ThroughputCheck
             await ScanAll(path).ConfigureAwait(false);
             if (rust)
             {
-                RustReader.ScanAll(path);
+                RustReader.ScanCanonical(path);
             }
         }
         while (Stopwatch.GetTimestamp() < deadline);
@@ -390,7 +390,7 @@ internal static class ThroughputCheck
     private static double Time(string path)
     {
         long start = Stopwatch.GetTimestamp();
-        RustReader.ScanAll(path);
+        RustReader.ScanCanonical(path);
         return Stopwatch.GetElapsedTime(start).TotalMicroseconds;
     }
 

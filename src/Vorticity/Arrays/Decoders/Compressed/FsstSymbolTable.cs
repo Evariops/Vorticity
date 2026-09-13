@@ -32,6 +32,31 @@
 // Two lessons, both already written down in docs/05 §5 and neither of which I applied first time: a
 // microbenchmark of the thing being changed beats an end-to-end one diluted by a fixed cost, and
 // two candidates have to be measured against ONE clock or thermal drift decides the winner.
+//
+// AND THEN THE OTHER HALF OF THE REFERENCE'S SHAPE, which the first pass took the store from and
+// left the loop behind. `dotnet-trace` over a 1M-row `vortex.fsst` scan puts 76.7% of the whole
+// scan inside this one method -- it is not a hot path, it IS the path -- and per code it was doing
+// a bounds-checked load of the code, a compare against the escape, a compare against the table
+// size, a bounds-checked load of the width and a compare against the destination's slack, to
+// perform one store.
+//
+// `fsst-rs` loads EIGHT codes as one u64 and tests all eight for the escape with a SWAR has-zero-
+// byte mask. When none of them is an escape -- a trained table produces one escape in dozens of
+// codes -- it runs eight unconditional stores with no branch between them. That needs two things
+// this file did not have:
+//
+//   * THE TABLES PADDED TO THE FULL CODE SPACE. Dropping the `code >= count` branch means an
+//     out-of-table code would index past the symbol buffer, which is the out-of-bounds read this
+//     library promises never to perform. So the 256 widths and the 2 KiB of symbols are built once
+//     per node into caller scratch, zero-filled, and an absent code reads a zero width. The check
+//     does not disappear, it becomes BRANCHLESS: `bad |= width - 1` is 0..7 for a real symbol and
+//     0xFFFFFFFF for an absent one, tested once at the end of the stream.
+//   * THE SLACK CHECKED PER BLOCK RATHER THAN PER CODE. Eight symbols advance the cursor by at
+//     most 64 bytes, so one compare before the block covers all eight stores.
+//
+// Preparing the tables costs a 2.3 KiB clear and copy per NODE, against 65 536 branches saved per
+// 64 KiB of codes; and it is why `Prepare` takes the scratch from its caller -- the selective path
+// decodes row by row and must not rebuild the table per row.
 using System;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
@@ -112,6 +137,76 @@ internal readonly ref struct FsstSymbolTable
         return new FsstSymbolTable(symbols, lengths);
     }
 
+    /// <summary>Bytes of scratch <see cref="Prepare"/> needs for the padded symbol table.</summary>
+    internal const int SymbolScratchBytes = 256 * SymbolSize;
+
+    /// <summary>Bytes of scratch <see cref="Prepare"/> needs for the padded width table.</summary>
+    internal const int WidthScratchBytes = 256;
+
+    /// <summary>
+    /// Builds the padded decode tables into caller-owned scratch, ONCE per node.
+    /// </summary>
+    /// <param name="symbolScratch">At least <see cref="SymbolScratchBytes"/> writable bytes.</param>
+    /// <param name="widthScratch">At least <see cref="WidthScratchBytes"/> writable bytes.</param>
+    /// <remarks>
+    /// The scratch is the caller's because the selective path calls <see cref="FsstDecodeTable.Decode"/>
+    /// once per wanted row, and rebuilding a 2.3 KiB table per row would cost more than the branches
+    /// it removes.
+    /// </remarks>
+    internal FsstDecodeTable Prepare(Span<byte> symbolScratch, Span<byte> widthScratch)
+    {
+        symbolScratch = symbolScratch[..SymbolScratchBytes];
+        widthScratch = widthScratch[..WidthScratchBytes];
+
+        // Zero-filled past the real table: an absent code then reads a zero width, which is what
+        // makes the range check branchless rather than absent.
+        symbolScratch.Clear();
+        widthScratch.Clear();
+        _symbols.CopyTo(symbolScratch);
+        _lengths.CopyTo(widthScratch);
+        return new FsstDecodeTable(symbolScratch, widthScratch, _lengths.Length);
+    }
+
+    /// <summary>The <c>u64</c> of symbol <paramref name="code"/>, for diagnostics and tests.</summary>
+    /// <param name="code">A code below <see cref="Count"/>.</param>
+    internal ulong SymbolBits(int code) =>
+        BinaryPrimitives.ReadUInt64LittleEndian(_symbols.Slice(code * SymbolSize, SymbolSize));
+
+}
+
+/// <summary>
+/// The padded decode tables of one <c>vortex.fsst</c> node, and the kernel over them.
+/// </summary>
+/// <remarks>
+/// Separate from <see cref="FsstSymbolTable"/> because the padding is built once per node while
+/// <see cref="Decode"/> runs once per node OR once per wanted row, and the two lifetimes have to be
+/// expressible apart.
+/// </remarks>
+internal readonly ref struct FsstDecodeTable
+{
+    /// <summary>Every byte of a <c>u64</c> that equals 0xFF is an escape.</summary>
+    private const ulong Ones = 0x0101010101010101UL;
+
+    /// <summary>The high bit of every byte.</summary>
+    private const ulong Highs = 0x8080808080808080UL;
+
+    /// <summary>Codes consumed per block of the wide loop.</summary>
+    private const int Block = 8;
+
+    /// <summary>Bytes a block of eight symbols can advance the cursor by.</summary>
+    private const int BlockSlack = Block * FsstSymbolTable.SymbolSize;
+
+    private readonly ReadOnlySpan<byte> _symbols;
+    private readonly ReadOnlySpan<byte> _widths;
+    private readonly int _count;
+
+    internal FsstDecodeTable(ReadOnlySpan<byte> symbols, ReadOnlySpan<byte> widths, int count)
+    {
+        _symbols = symbols;
+        _widths = widths;
+        _count = count;
+    }
+
     /// <summary>
     /// Decodes the whole code stream into <paramref name="destination"/> and returns the bytes
     /// written.
@@ -126,23 +221,53 @@ internal readonly ref struct FsstSymbolTable
     /// </exception>
     internal int Decode(ReadOnlySpan<byte> codes, Span<byte> destination, string encodingId)
     {
-        ReadOnlySpan<byte> symbols = _symbols;
-        ReadOnlySpan<byte> lengths = _lengths;
-        int count = lengths.Length;
-        int written = 0;
-
         ref byte output = ref MemoryMarshal.GetReference(destination);
-        ref byte table = ref MemoryMarshal.GetReference(symbols);
+        ref byte table = ref MemoryMarshal.GetReference(_symbols);
+        ref byte widths = ref MemoryMarshal.GetReference(_widths);
+        ref byte input = ref MemoryMarshal.GetReference(codes);
+
+        int written = 0;
+        int i = 0;
+        uint bad = 0;
 
         // Past this point a symbol no longer has eight writable bytes behind it, so the wide store
         // would run off the end and the exact copy takes over. Negative for a destination under
         // eight bytes, which is right: the wide path is then never taken at all.
-        int wideLimit = destination.Length - SymbolSize;
+        int wideLimit = destination.Length - FsstSymbolTable.SymbolSize;
+        int blockLimit = destination.Length - BlockSlack;
+        int blockEnd = codes.Length - Block;
 
-        for (int i = 0; i < codes.Length; i++)
+        while (true)
         {
+            // EIGHT AT A TIME while the block is escape-free and the slack covers eight stores.
+            // One compare for the slack and one SWAR test for the escapes, against eight of each.
+            while (i <= blockEnd && written <= blockLimit)
+            {
+                ulong word = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref input, (uint)i));
+                ulong inverted = ~word;
+                if (((inverted - Ones) & ~inverted & Highs) != 0)
+                {
+                    break;
+                }
+
+                written = Step(ref output, ref table, ref widths, (byte)word, written, ref bad);
+                written = Step(ref output, ref table, ref widths, (byte)(word >> 8), written, ref bad);
+                written = Step(ref output, ref table, ref widths, (byte)(word >> 16), written, ref bad);
+                written = Step(ref output, ref table, ref widths, (byte)(word >> 24), written, ref bad);
+                written = Step(ref output, ref table, ref widths, (byte)(word >> 32), written, ref bad);
+                written = Step(ref output, ref table, ref widths, (byte)(word >> 40), written, ref bad);
+                written = Step(ref output, ref table, ref widths, (byte)(word >> 48), written, ref bad);
+                written = Step(ref output, ref table, ref widths, (byte)(word >> 56), written, ref bad);
+                i += Block;
+            }
+
+            if (i >= codes.Length)
+            {
+                break;
+            }
+
             byte code = codes[i];
-            if (code == EscapeCode)
+            if (code == FsstSymbolTable.EscapeCode)
             {
                 if (i + 1 >= codes.Length)
                 {
@@ -156,27 +281,20 @@ internal readonly ref struct FsstSymbolTable
                 }
 
                 destination[written++] = codes[++i];
+                i++;
                 continue;
             }
 
-            if (code >= count)
-            {
-                CompressedThrow.Format(
-                    $"{encodingId}: code {code} names a symbol the {count}-entry table " +
-                    "does not hold.");
-            }
-
-            int width = lengths[code];
+            int width = widthsAt(ref widths, code);
+            bad |= (uint)(width - 1);
             if (written <= wideLimit)
             {
-                // ONE 8-BYTE STORE PER SYMBOL, then advance by the symbol's REAL length. The bytes
-                // written past the symbol are garbage that the next store overwrites, which is both
-                // what makes this legal and what makes it fast: a 1..8-byte Span.CopyTo carries a
-                // length the CPU cannot see through, and this is a single unaligned move.
                 Unsafe.WriteUnaligned(
                     ref Unsafe.Add(ref output, (uint)written),
-                    Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref table, (uint)(code * SymbolSize))));
+                    Unsafe.ReadUnaligned<ulong>(
+                        ref Unsafe.Add(ref table, (uint)(code * FsstSymbolTable.SymbolSize))));
                 written += width;
+                i++;
                 continue;
             }
 
@@ -188,17 +306,64 @@ internal readonly ref struct FsstSymbolTable
             // The tail, where the wide store would run past the end of the destination. The symbol
             // is a little-endian u64 whose low `width` bytes are the text, which is exactly its
             // first `width` bytes in memory.
-            symbols.Slice(code * SymbolSize, width).CopyTo(destination.Slice(written, width));
+            _symbols.Slice(code * FsstSymbolTable.SymbolSize, width)
+                .CopyTo(destination.Slice(written, width));
             written += width;
+            i++;
+        }
+
+        // ONE TEST FOR THE WHOLE STREAM. A width of zero means the code names no symbol; every real
+        // width is 1..8, so `width - 1` stays in 0..7 for every legal code and wraps to 0xFFFFFFFF
+        // for an absent one. The stores such a code made wrote into slack the next store overwrites
+        // and advanced nothing, so nothing has escaped the destination by the time this fires.
+        if (bad > FsstSymbolTable.SymbolSize - 1)
+        {
+            ThrowUnknownCode(codes, encodingId);
         }
 
         return written;
+
+        static int widthsAt(ref byte widths, byte code) => Unsafe.Add(ref widths, (uint)code);
     }
 
-    /// <summary>The <c>u64</c> of symbol <paramref name="code"/>, for diagnostics and tests.</summary>
-    /// <param name="code">A code below <see cref="Count"/>.</param>
-    internal ulong SymbolBits(int code) =>
-        BinaryPrimitives.ReadUInt64LittleEndian(_symbols.Slice(code * SymbolSize, SymbolSize));
+    /// <summary>One symbol: the wide store, the branchless range accumulation, the advance.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int Step(
+        ref byte output, ref byte table, ref byte widths, byte code, int written, ref uint bad)
+    {
+        Unsafe.WriteUnaligned(
+            ref Unsafe.Add(ref output, (uint)written),
+            Unsafe.ReadUnaligned<ulong>(
+                ref Unsafe.Add(ref table, (uint)(code * FsstSymbolTable.SymbolSize))));
+        uint width = Unsafe.Add(ref widths, (uint)code);
+        bad |= width - 1;
+        return written + (int)width;
+    }
+
+    /// <summary>Finds the offending code, on the error path, where cost does not matter.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ThrowUnknownCode(ReadOnlySpan<byte> codes, string encodingId)
+    {
+        for (int i = 0; i < codes.Length; i++)
+        {
+            byte code = codes[i];
+            if (code == FsstSymbolTable.EscapeCode)
+            {
+                i++;
+                continue;
+            }
+
+            if (code >= _count)
+            {
+                CompressedThrow.Format(
+                    $"{encodingId}: code {code} names a symbol the {_count}-entry table " +
+                    "does not hold.");
+            }
+        }
+
+        CompressedThrow.Format(
+            $"{encodingId}: the code stream names a symbol the {_count}-entry table does not hold.");
+    }
 
     private static int ThrowOverrun(string encodingId, int capacity) =>
         CompressedThrow.Format<int>(
