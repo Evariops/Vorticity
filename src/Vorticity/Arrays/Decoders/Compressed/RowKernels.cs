@@ -253,6 +253,36 @@ internal static class RowKernels
         bool codesAllValid = codeBits.IsEmpty;
         bool tracked = !outputBits.IsEmpty;
 
+        // EVERY CODE VALID, EVERY VALUE MAYBE NOT: a dictionary whose VALUES are nullable, which is
+        // its own corpus shape and reads 3.2x the reference. There is no code mask to test, and the
+        // output validity is a bit per row written in order -- so it is accumulated a BYTE at a
+        // time and stored once, instead of eight read-modify-writes of the same byte.
+        if (codesAllValid && tracked && !valuesAllValid)
+        {
+            for (int block = 0; block < target.Length; block += 8)
+            {
+                int rows = Math.Min(8, target.Length - block);
+                int mask = 0;
+                for (int k = 0; k < rows; k++)
+                {
+                    int row = block + k;
+                    uint code = WidenCode(codes[row]);
+                    if (code >= limit)
+                    {
+                        return row;
+                    }
+
+                    target[row] = source[(int)code];
+                    int bit = valueBitOffset + (int)code;
+                    mask |= ((valueBits[bit >> 3] >> (bit & 7)) & 1) << k;
+                }
+
+                outputBits[block >> 3] = (byte)mask;
+            }
+
+            return -1;
+        }
+
         for (int row = 0; row < target.Length; row++)
         {
             if (!codesAllValid &&

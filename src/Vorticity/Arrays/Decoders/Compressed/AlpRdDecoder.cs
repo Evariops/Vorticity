@@ -28,6 +28,8 @@
 // a conformant writer, and both are worse than an error for a reader of untrusted input, so an
 // out-of-range code is a format error here on both paths.
 using System;
+using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using System.Buffers.Binary;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
@@ -153,20 +155,100 @@ public sealed class AlpRdDecoder : ArrayDecoder
         int rightBitWidth,
         bool isSingle)
     {
-        for (int i = 0; i < length; i++)
+        // The physical type of the left parts and the output width are properties of the NODE, and
+        // this loop was asking about both on every row: `ReadUnsigned`'s switch to fetch the code,
+        // then `Write`'s branch on `isSingle` wrapping two bounds-checked little-endian accesses.
+        // Resolved once, the body is a gather from an eight-entry dictionary, a shift and an or.
+        switch (leftPType)
         {
-            ulong code = CompressedValues.ReadUnsigned(left, leftPType, i);
-            if (code >= (ulong)dictionary.Length)
-            {
-                CompressedThrow.Format(
-                    $"{Id} row {i} names left-parts dictionary entry {code}, but the dictionary " +
-                    $"holds {dictionary.Length}.");
-            }
-
-            ulong high = dictionary[(int)code];
-            Write(destination, i, high, right, rightBitWidth, isSingle);
+            case PType.U8:
+                CombineCodes<byte>(left, right, destination, length, dictionary, rightBitWidth, isSingle);
+                break;
+            case PType.U16:
+                CombineCodes<ushort>(left, right, destination, length, dictionary, rightBitWidth, isSingle);
+                break;
+            case PType.U32:
+                CombineCodes<uint>(left, right, destination, length, dictionary, rightBitWidth, isSingle);
+                break;
+            default:
+                CombineCodes<ulong>(left, right, destination, length, dictionary, rightBitWidth, isSingle);
+                break;
         }
     }
+
+    private static void CombineCodes<TCode>(
+        ReadOnlySpan<byte> left,
+        ReadOnlySpan<byte> right,
+        Span<byte> destination,
+        int length,
+        ReadOnlySpan<uint> dictionary,
+        int rightBitWidth,
+        bool isSingle)
+        where TCode : unmanaged
+    {
+        ReadOnlySpan<TCode> codes = MemoryMarshal.Cast<byte, TCode>(left)[..length];
+        if (isSingle)
+        {
+            ReadOnlySpan<uint> low = MemoryMarshal.Cast<byte, uint>(right)[..length];
+            Span<uint> target = MemoryMarshal.Cast<byte, uint>(destination)[..length];
+            for (int i = 0; i < length; i++)
+            {
+                uint code = Widen(codes[i]);
+                if (code >= (uint)dictionary.Length)
+                {
+                    ThrowCode(i, code, dictionary.Length);
+                }
+
+                target[i] = unchecked((dictionary[(int)code] << rightBitWidth) | low[i]);
+            }
+
+            return;
+        }
+
+        ReadOnlySpan<ulong> wide = MemoryMarshal.Cast<byte, ulong>(right)[..length];
+        Span<ulong> output = MemoryMarshal.Cast<byte, ulong>(destination)[..length];
+        for (int i = 0; i < length; i++)
+        {
+            uint code = Widen(codes[i]);
+            if (code >= (uint)dictionary.Length)
+            {
+                ThrowCode(i, code, dictionary.Length);
+            }
+
+            output[i] = unchecked(((ulong)dictionary[(int)code] << rightBitWidth) | wide[i]);
+        }
+    }
+
+    /// <summary>Widens one left-parts code, saturating so an over-large one is refused.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint Widen<TCode>(TCode code)
+        where TCode : unmanaged
+    {
+        if (typeof(TCode) == typeof(byte))
+        {
+            return Unsafe.As<TCode, byte>(ref code);
+        }
+
+        if (typeof(TCode) == typeof(ushort))
+        {
+            return Unsafe.As<TCode, ushort>(ref code);
+        }
+
+        if (typeof(TCode) == typeof(uint))
+        {
+            return Unsafe.As<TCode, uint>(ref code);
+        }
+
+        ulong value = Unsafe.As<TCode, ulong>(ref code);
+        return value > uint.MaxValue ? uint.MaxValue : (uint)value;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
+    private static void ThrowCode(int row, uint code, int dictionaryLength) =>
+        CompressedThrow.Format(
+            $"{Id} row {row} names left-parts dictionary entry {code}, but the dictionary " +
+            $"holds {dictionaryLength}.");
 
     /// <summary>
     /// Replaces the left part of the rows whose high bits were not in the dictionary, then

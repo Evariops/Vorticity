@@ -82,7 +82,7 @@ internal static class ThroughputCheck
         ("alp", 1.69),   // 2 runs, spread 1.46-1.69
         ("alp_no_patches", 0.89),   // 2 runs, spread 0.87-0.89
         ("alp_patched_no_chunk_offsets", 0.99),   // 2 runs, spread 0.91-0.99
-        ("alprd", 3.07),   // 2 runs, spread 3.00-3.07
+        ("alprd", 1.23),   // 2 runs, spread 1.21-1.23
         ("bool", 1.06),   // 2 runs, spread 0.96-1.06
         ("bool_bit_offset3", 1.00),   // 2 runs, spread 0.94-1.00
         ("bool_bit_offset7", 1.83),   // 2 runs, spread 0.97-1.83
@@ -97,7 +97,7 @@ internal static class ThroughputCheck
         ("decimal_byte_parts", 0.38),   // 2 runs, spread 0.38-0.38
         ("dict", 1.09),   // 2 runs, spread 1.00-1.09
         ("dict_nullable_codes", 0.86),   // 2 runs, spread 0.85-0.86
-        ("dict_nullable_values_nonnull_codes", 3.23),   // 2 runs, spread 2.95-3.23
+        ("dict_nullable_values_nonnull_codes", 1.78),   // 2 runs, spread 1.77-1.78
         ("dict_u64_codes", 1.14),   // 2 runs, spread 1.08-1.14
         ("dict_u8_codes", 0.95),   // 2 runs, spread 0.94-0.95
         ("ext", 0.38),   // 2 runs, spread 0.38-0.38
