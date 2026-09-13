@@ -12,6 +12,9 @@
 // Upstream computes `max - offset` as a usize subtraction, so a first index below the offset
 // underflows there; here it is rejected.
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Numerics;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
 
@@ -89,6 +92,106 @@ public readonly ref struct Patches
         }
 
         return (int)(CompressedValues.ReadUnsigned(_indices, _indicesPType, i) - (ulong)_offset);
+    }
+
+    /// <summary>
+    /// Scatters every patch value into <paramref name="destination"/> at its own position.
+    /// </summary>
+    /// <param name="values">The patch values, one per patch, at <paramref name="width"/> bytes.</param>
+    /// <param name="width">Bytes per value.</param>
+    /// <param name="destination">The array being patched, <see cref="ArrayLength"/> rows.</param>
+    /// <remarks>
+    /// The index type and the value width are properties of the node, and the loop this replaces
+    /// asked about both per PATCH: `GetPosition` through `ReadUnsigned`'s switch, then a
+    /// variable-width `Slice(..).CopyTo(..)`. On `vortex.alp` the patch set is large enough that
+    /// applying it was 37% of the scan.
+    /// </remarks>
+    public readonly void ApplyAll(ReadOnlySpan<byte> values, int width, Span<byte> destination)
+    {
+        switch (_indicesPType)
+        {
+            case PType.U8:
+                ApplyAll<byte>(values, width, destination);
+                break;
+            case PType.U16:
+                ApplyAll<ushort>(values, width, destination);
+                break;
+            case PType.U32:
+                ApplyAll<uint>(values, width, destination);
+                break;
+            default:
+                ApplyAll<ulong>(values, width, destination);
+                break;
+        }
+    }
+
+    private readonly void ApplyAll<TIndex>(
+        ReadOnlySpan<byte> values, int width, Span<byte> destination)
+        where TIndex : unmanaged
+    {
+        ReadOnlySpan<TIndex> indices = MemoryMarshal.Cast<byte, TIndex>(_indices)[.._count];
+        switch (width)
+        {
+            case 1:
+                Scatter<TIndex, byte>(indices, values, destination);
+                break;
+            case 2:
+                Scatter<TIndex, ushort>(indices, values, destination);
+                break;
+            case 4:
+                Scatter<TIndex, uint>(indices, values, destination);
+                break;
+            case 8:
+                Scatter<TIndex, ulong>(indices, values, destination);
+                break;
+            default:
+                for (int i = 0; i < _count; i++)
+                {
+                    int position = (int)(Widen(indices[i]) - (ulong)_offset);
+                    values.Slice(i * width, width)
+                        .CopyTo(destination.Slice(position * width, width));
+                }
+
+                break;
+        }
+    }
+
+    private readonly void Scatter<TIndex, TValue>(
+        ReadOnlySpan<TIndex> indices, ReadOnlySpan<byte> values, Span<byte> destination)
+        where TIndex : unmanaged
+        where TValue : unmanaged
+    {
+        ReadOnlySpan<TValue> source = MemoryMarshal.Cast<byte, TValue>(values)[..indices.Length];
+        Span<TValue> target = MemoryMarshal.Cast<byte, TValue>(destination)[.._arrayLength];
+        ulong offset = (ulong)_offset;
+        for (int i = 0; i < indices.Length; i++)
+        {
+            // Validated at construction: every index ascends, is at or above the offset, and the
+            // last one is inside the array -- so every position is in [0, ArrayLength).
+            target[(int)(Widen(indices[i]) - offset)] = source[i];
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Widen<TIndex>(TIndex index)
+        where TIndex : unmanaged
+    {
+        if (typeof(TIndex) == typeof(byte))
+        {
+            return Unsafe.As<TIndex, byte>(ref index);
+        }
+
+        if (typeof(TIndex) == typeof(ushort))
+        {
+            return Unsafe.As<TIndex, ushort>(ref index);
+        }
+
+        if (typeof(TIndex) == typeof(uint))
+        {
+            return Unsafe.As<TIndex, uint>(ref index);
+        }
+
+        return Unsafe.As<TIndex, ulong>(ref index);
     }
 
     /// <summary>
@@ -181,39 +284,85 @@ public readonly ref struct Patches
             CompressedThrow.ChildLength(encodingId, "patch_values", values.Length, count);
         }
 
+        // SORTED FIRST, THEN THE TWO ENDS. The original loop asked three questions of every index
+        // through `ReadUnsigned`'s switch; two of the three are implied by the first once the
+        // sequence is known to ascend. If indices[0] >= offset then every index is, and if the LAST
+        // index is inside the array then every index is -- so the per-index work is a monotonicity
+        // check, which is a shifted compare and belongs to the vector unit.
         ulong unsignedOffset = (ulong)offset;
-        ulong previous = 0;
-        for (int i = 0; i < count; i++)
+        RequireAscending(indices, indicesPType, count, encodingId);
+
+        ulong first = CompressedValues.ReadUnsigned(indices, indicesPType, 0);
+        if (first < unsignedOffset)
         {
-            ulong index = CompressedValues.ReadUnsigned(indices, indicesPType, i);
+            CompressedThrow.Format(
+                $"{encodingId} patch index {first} is below the patch offset {offset}.");
+        }
 
-            // Sorted ascending: upstream only debug_asserts it, but every lookup path assumes it
-            // and the max check below reads only the last entry.
-            if (i != 0 && index < previous)
-            {
-                CompressedThrow.Format(
-                    $"{encodingId} patch indices are not sorted: {index} follows {previous}.");
-            }
-
-            if (index < unsignedOffset)
-            {
-                CompressedThrow.Format(
-                    $"{encodingId} patch index {index} is below the patch offset {offset}.");
-            }
-
-            if (index - unsignedOffset >= (ulong)(uint)arrayLength)
-            {
-                CompressedThrow.Format(
-                    $"{encodingId} patch index {index} at offset {offset} falls outside an array " +
-                    $"of {arrayLength} rows.");
-            }
-
-            previous = index;
+        ulong last = CompressedValues.ReadUnsigned(indices, indicesPType, count - 1);
+        if (last - unsignedOffset >= (ulong)(uint)arrayLength)
+        {
+            CompressedThrow.Format(
+                $"{encodingId} patch index {last} at offset {offset} falls outside an array " +
+                $"of {arrayLength} rows.");
         }
 
         return Patches.CreateUnchecked(
             indices, indicesPType, count, arrayLength, offset, valuesNodeIndex,
             metadata.HasChunkOffsets);
+    }
+
+    /// <summary>
+    /// Class I: the patch indices must ascend. Upstream only <c>debug_assert</c>s it, but every
+    /// lookup path assumes it and the endpoint checks above rely on it.
+    /// </summary>
+    private static void RequireAscending(
+        ReadOnlySpan<byte> indices, PType ptype, int count, string encodingId)
+    {
+        switch (ptype)
+        {
+            case PType.U8:
+                RequireAscending<byte>(indices, count, encodingId);
+                break;
+            case PType.U16:
+                RequireAscending<ushort>(indices, count, encodingId);
+                break;
+            case PType.U32:
+                RequireAscending<uint>(indices, count, encodingId);
+                break;
+            default:
+                RequireAscending<ulong>(indices, count, encodingId);
+                break;
+        }
+    }
+
+    private static void RequireAscending<T>(ReadOnlySpan<byte> indices, int count, string encodingId)
+        where T : unmanaged, INumber<T>
+    {
+        ReadOnlySpan<T> typed = MemoryMarshal.Cast<byte, T>(indices)[..count];
+
+        int i = 1;
+        if (Vector<T>.IsSupported && count > Vector<T>.Count)
+        {
+            int lanes = Vector<T>.Count;
+            for (; i <= count - lanes; i += lanes)
+            {
+                if (Vector.LessThanAny(Vector.LoadUnsafe(in typed[i]), Vector.LoadUnsafe(in typed[i - 1])))
+                {
+                    // One pair in this block descends; the scalar loop below names which.
+                    break;
+                }
+            }
+        }
+
+        for (; i < count; i++)
+        {
+            if (typed[i] < typed[i - 1])
+            {
+                CompressedThrow.Format(
+                    $"{encodingId} patch indices are not sorted: {typed[i]} follows {typed[i - 1]}.");
+            }
+        }
     }
 
     private static Patches CreateUnchecked(

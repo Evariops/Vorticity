@@ -219,11 +219,7 @@ public sealed class AlpDecoder : ArrayDecoder
             return;
         }
 
-        for (int i = 0; i < patches.Count; i++)
-        {
-            int position = patches.GetPosition(i);
-            source.Slice(i * width, width).CopyTo(destination.Slice(position * width, width));
-        }
+        patches.ApplyAll(source, width, destination);
     }
 
     private static int CheckExponent(uint value, int tableLength, string name)
