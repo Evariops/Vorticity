@@ -15,7 +15,7 @@ dotnet run -c Release PROJ -- <arguments>
 | a kernel | `-- fastlanes` (its class) | 1–8 s | did the kernel move, against the ported arm on the same clock |
 | anything, want a direction | no argument at all | **14 s** | the four default classes, 10 cases, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
-| a read path | `-- --ratio-check` | 21 s | the nine axes against Rust, interleaved, each held to a ceiling |
+| a read path | `-- --ratio-check` | 29 s | the thirteen axes against Rust, interleaved, each held to a ceiling |
 | a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust |
 | the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 50 files |
 | the FFI harness, or before trusting any ratio | `-- --ffi-check` | < 1 s | both readers return the same rows on the same files |
@@ -49,7 +49,7 @@ Three mechanisms, finest first:
 class to run, which makes the default run do nothing under a script or in CI. `Program.cs` supplies
 `--filter *` when nothing else has said what to run.
 
-## The classes, and why there are only seven
+## The classes, and why there are only six
 
 | class | category | in the default run |
 |---|---|---|
@@ -59,21 +59,24 @@ class to run, which makes the default run do nothing under a script or in CI. `P
 | `RowEncodingBenchmarks` | `path` | yes |
 | `RandomAccessBenchmarks` | `explore` | no — `--explore` |
 | `FilterSelectivityBenchmarks` | `explore` | no — `--explore` |
-| `RewrittenComparison` | `explore` | no — `--explore` |
 
 `explore` holds the **curves** — a selectivity sweep, a take sweep — which answered their question
 once and do not guard against anything. They stay runnable and stay out of the default run.
 
-Eight other classes were deleted rather than demoted: each measured something another instrument
+Nine other classes were deleted rather than demoted: each measured something another instrument
 measures with a better estimator, and BENCH-AUDIT.md §3.1 names the replacement for every one. The
-numbers they produced are not lost — they are in [BASELINE.md](BASELINE.md) and in the commits.
+last to go was `RewrittenComparison`, whose unique question — our own bytes, read by both readers —
+is now the four `rewritten` axes of `--ratio-check`. The numbers they produced are not lost: they are
+in [BASELINE.md](BASELINE.md) and in the commits.
 
 ## The gates, and their ceilings
 
-* **`--ratio-check`** — nine axes (full scan, full scan upstream-lazy, projected, first batch, footer
-  only, read-and-write-back, filtered 1 %, filtered half, scattered take), ours against Rust,
-  **interleaved against one clock** so that drift is common to both arms. Each has a ceiling in
-  `RatioCheck.cs`; over it, non-zero exit.
+* **`--ratio-check`** — thirteen axes, ours against Rust, **interleaved against one clock** so that
+  drift is common to both arms. Nine on the dataset (full scan, full scan upstream-lazy, projected,
+  first batch, footer only, read-and-write-back, filtered 1 %, filtered half, scattered take), and
+  four `rewritten` ones that read a file **our writer produced** beside the reference's — the only
+  place our own encoding choices are measured at all. Each has a ceiling in `RatioCheck.cs`; over it,
+  non-zero exit. 29 s.
 * **`--throughput [family…] [--check]`** — 50 encodings at a million rows, where the fixed
   open-and-walk cost is under a percent instead of most of the measurement. A bare family name
   narrows the report; `--check` makes it a gate.

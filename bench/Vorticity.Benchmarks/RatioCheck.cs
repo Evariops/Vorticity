@@ -87,8 +87,17 @@ internal static class RatioCheck
     /// <param name="Reference">The ratio measured by this harness when the ceiling was last set.</param>
     /// <param name="Ours">Our side.</param>
     /// <param name="Theirs">Rust's side.</param>
+    /// <param name="Path">
+    /// The file this axis runs on, when it is not the dataset. Only the <c>rewritten</c> group sets
+    /// it: every other axis is a different QUESTION about one file, and that group is the same
+    /// question about two files.
+    /// </param>
     private sealed record Axis(
-        string Name, double Reference, Func<string, Task<long>> Ours, Func<string, long> Theirs);
+        string Name,
+        double Reference,
+        Func<string, Task<long>> Ours,
+        Func<string, long> Theirs,
+        string? Path = null);
 
     /// <summary>
     /// The axes, with the ratio each was measured at. LOWER A REFERENCE BY HAND when an
@@ -176,6 +185,66 @@ internal static class RatioCheck
             p => RustReader.Require(RustReader.Take(p, TakeCount, TakeStride), "take")),
     ];
 
+    /// <summary>
+    /// The corpus entries whose rewrite is worth watching, and the group that reads them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// EVERY OTHER AXIS READS BYTES THE REFERENCE WROTE, because the conformance corpus is the
+    /// reference's output. So the cost of OUR OWN encoding choices appeared in no number at all, and
+    /// that gap hid a real one: with zstd disabled, `high_cardinality_i64_r8193` scanned 1.27x
+    /// slower from our writer's output than from the reference's -- invisible to every benchmark and
+    /// to the written-size ratchet alike.
+    /// </para>
+    /// <para>
+    /// FOUR AXES, BECAUSE TWO RATIOS SEPARATE THE QUESTION. "Our file is slower" can mean the
+    /// encoding is genuinely more expensive to decode, or that OUR DECODER is weak on a scheme our
+    /// writer happens to like. Read the report as a 2x2: the two `ours` columns are the two readers'
+    /// cost on our bytes and on the reference's, the two `rust` columns the same for the reference
+    /// implementation. If Rust reads our file as fast as the reference's, the encoding is fine and
+    /// the decoder is ours to fix; if Rust slows down too, the writer is choosing a scheme that
+    /// costs everyone.
+    /// </para>
+    /// <para>
+    /// This group replaces the `RewrittenComparison` BenchmarkDotNet class, which asked the same
+    /// unique question with a worse estimator -- sequential arms cannot share a drift the way these
+    /// interleaved ones do -- and asked it against the lazy `ScanAll`, which is A1: a Rust side that
+    /// does not decompress is not the counterpart of a .NET scan that has no choice but to.
+    /// `ScanCanonical` is what the group is born on.
+    /// </para>
+    /// <para>
+    /// The five-column file because every other axis uses it; the high-cardinality integer file
+    /// because it is where the gap was first seen. They are NOT redirected by
+    /// `VORTICITY_BENCH_DATA`: the variable points the other axes at a bigger dataset, and this
+    /// group is about two specific files whose rewrite has a known history.
+    /// </para>
+    /// </remarks>
+    private static readonly (string Entry, string Label)[] Rewritten =
+    [
+        ("containers/zoned_many_zones_nulls", "zoned"),
+        ("distributions/high_cardinality_i64_r8193", "high card"),
+    ];
+
+    /// <summary>
+    /// The ratios the rewritten group was measured at, keyed by axis name, in the same order as
+    /// <see cref="Rewritten"/>. Kept beside <see cref="Axes"/>'s references and lowered the same way.
+    /// </summary>
+    /// <remarks>
+    /// `rewritten zoned, ours` is a ceiling of FIVE, and it is not a typo. The pair says what it was
+    /// built to say: our reader takes 990 us on bytes our writer produced against 610 us on the
+    /// reference's, while the Rust reader goes the other way, 1 315 us down to 195 us. The encoding
+    /// is not the problem -- the reference implementation reads our file nearly seven times faster
+    /// than it reads its own -- so this is our decoder on a scheme our writer likes. Written up as a
+    /// finding in BENCH-AUDIT.md §5.A; the reference holds the current number until it moves.
+    /// </remarks>
+    private static readonly Dictionary<string, double> RewrittenReferences = new()
+    {
+        ["rewritten zoned, reference's"] = 0.457,
+        ["rewritten zoned, ours"] = 5.023,
+        ["rewritten high card, reference's"] = 0.828,
+        ["rewritten high card, ours"] = 0.890,
+    };
+
     /// <summary>The field the projection, filter and band axes read; it exists in the dataset.</summary>
     private const string Field = "monotone";
 
@@ -237,51 +306,131 @@ internal static class RatioCheck
             return 2;
         }
 
-        Console.Out.WriteLine(
-            $"RATIO CHECK: median of {Rounds} interleaved rounds after a " +
-            $"{WarmupBudget.TotalSeconds.ToString("F0", CultureInfo.InvariantCulture)}s warm-up per axis, " +
-            $"ceiling = reference x {Margin.ToString("F2", CultureInfo.InvariantCulture)}");
-        Console.Out.WriteLine(
-            "  axis                             ours      rust     ratio  reference  ceiling   warmed");
-
-        int over = 0;
-        foreach (Axis axis in Axes)
+        List<string> temporary = [];
+        try
         {
-            // PER AXIS, not once for the file. The precondition above covers the full scan; the
-            // filter and take axes select rows, and two readers that disagree about WHICH rows
-            // survive would produce a ratio between two different amounts of work. That is the
-            // failure `--ffi-check` was written for, and it only ever checked the full scan.
-            long mineRows = await axis.Ours(path).ConfigureAwait(false);
-            long rustRows = axis.Theirs(path);
-            if (mineRows != rustRows)
+            Axis[] axes = [.. Axes, .. await RewrittenAxesAsync(temporary).ConfigureAwait(false)];
+
+            Console.Out.WriteLine(
+                $"RATIO CHECK: median of {Rounds} interleaved rounds after a " +
+                $"{WarmupBudget.TotalSeconds.ToString("F0", CultureInfo.InvariantCulture)}s warm-up per axis, " +
+                $"ceiling = reference x {Margin.ToString("F2", CultureInfo.InvariantCulture)}");
+            Console.Out.WriteLine(
+                "  axis                             ours      rust     ratio  reference  ceiling   warmed");
+
+            int over = 0;
+            foreach (Axis axis in axes)
             {
-                Console.Error.WriteLine(
-                    $"The two readers disagree on the `{axis.Name}` axis: {mineRows} rows " +
-                    $"versus {rustRows}. No ratio over it means anything.");
-                return 2;
+                string file = axis.Path ?? path;
+
+                // PER AXIS, not once for the file. The precondition above covers the full scan; the
+                // filter and take axes select rows, and two readers that disagree about WHICH rows
+                // survive would produce a ratio between two different amounts of work. That is the
+                // failure `--ffi-check` was written for, and it only ever checked the full scan.
+                long mineRows = await axis.Ours(file).ConfigureAwait(false);
+                long rustRows = axis.Theirs(file);
+                if (mineRows != rustRows)
+                {
+                    Console.Error.WriteLine(
+                        $"The two readers disagree on the `{axis.Name}` axis: {mineRows} rows " +
+                        $"versus {rustRows}. No ratio over it means anything.");
+                    return 2;
+                }
+
+                (double mine, double rust) = await MeasureAsync(file, axis).ConfigureAwait(false);
+                double ratio = mine / rust;
+                double ceiling = axis.Reference * Margin;
+                bool bad = ratio > ceiling;
+                over += bad ? 1 : 0;
+
+                // The warm-up count is reported, not asserted: it is the number that explains an
+                // implausible ratio, and a plausible one is not evidence that it was high enough.
+                string verdict = bad ? "   OVER" : string.Empty;
+                int warmed = Warmed[axis.Name];
+                Console.Out.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"  {axis.Name,-30} {mine,8:F1}us {rust,8:F1}us {ratio,8:F3} {axis.Reference,10:F3} {ceiling,8:F3} {warmed,8}{verdict}"));
             }
 
-            (double mine, double rust) = await MeasureAsync(path, axis).ConfigureAwait(false);
-            double ratio = mine / rust;
-            double ceiling = axis.Reference * Margin;
-            bool bad = ratio > ceiling;
-            over += bad ? 1 : 0;
+            Console.Out.WriteLine(
+                "  The `rewritten` pairs read as a 2x2 per file: compare the two RATIOS for our " +
+                "decoder, the two `rust` columns for the writer's encoding choice.");
+            Console.Out.WriteLine(
+                over == 0
+                    ? "Every axis is inside its ceiling."
+                    : $"{over} axis/axes above ceiling. A ratio only moves when the code moves: " +
+                      "find the change, do not raise the ceiling.");
+            return over == 0 ? 0 : 1;
+        }
+        finally
+        {
+            foreach (string file in temporary)
+            {
+                System.IO.File.Delete(file);
+            }
+        }
+    }
 
-            // The warm-up count is reported, not asserted: it is the number that explains an
-            // implausible ratio, and a plausible one is not evidence that it was high enough.
-            string verdict = bad ? "   OVER" : string.Empty;
-            int warmed = Warmed[axis.Name];
-            Console.Out.WriteLine(string.Create(
-                CultureInfo.InvariantCulture,
-                $"  {axis.Name,-30} {mine,8:F1}us {rust,8:F1}us {ratio,8:F3} {axis.Reference,10:F3} {ceiling,8:F3} {warmed,8}{verdict}"));
+    /// <summary>
+    /// Rewrites each entry of <see cref="Rewritten"/> with OUR writer, once, and returns the two
+    /// axes that read the pair.
+    /// </summary>
+    /// <param name="temporary">Collects the files written, for the caller to delete.</param>
+    /// <remarks>
+    /// The rewrite happens here rather than per round because writing is not what this measures.
+    /// Both files are asserted to hold the same rows before either is timed: a rewrite that dropped
+    /// a row would turn the pair of ratios into a comparison of two different computations, and it
+    /// is the one failure this group can produce that the per-axis row check would not catch --
+    /// that check compares the two READERS on one file, not the two FILES.
+    /// </remarks>
+    private static async Task<List<Axis>> RewrittenAxesAsync(List<string> temporary)
+    {
+        List<Axis> axes = [];
+        foreach ((string entry, string label) in Rewritten)
+        {
+            string reference = Corpus.Path(entry);
+            string ours = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(), $"vorticity-rewritten-{Guid.NewGuid():N}.vortex");
+            temporary.Add(ours);
+            await Rewrite(reference, ours).ConfigureAwait(false);
+
+            long referenceRows = RustReader.Require(RustReader.ScanCanonical(reference), "reference scan");
+            long ourRows = RustReader.Require(RustReader.ScanCanonical(ours), "rewritten scan");
+            if (referenceRows != ourRows)
+            {
+                throw new InvalidOperationException(
+                    $"The rewrite of {entry} holds {ourRows} rows against the original's {referenceRows}.");
+            }
+
+            foreach ((string suffix, string file) in
+                new[] { ("reference's", reference), ("ours", ours) })
+            {
+                string name = $"rewritten {label}, {suffix}";
+                axes.Add(new Axis(
+                    name,
+                    RewrittenReferences[name],
+                    ScanAll,
+                    p => RustReader.Require(RustReader.ScanCanonical(p), "scan"),
+                    file));
+            }
         }
 
-        Console.Out.WriteLine(
-            over == 0
-                ? "Every axis is inside its ceiling."
-                : $"{over} axis/axes above ceiling. A ratio only moves when the code moves: " +
-                  "find the change, do not raise the ceiling.");
-        return over == 0 ? 0 : 1;
+        return axes;
+    }
+
+    /// <summary>Reads a file with our reader and writes it back with our writer.</summary>
+    private static async Task Rewrite(string source, string destination)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(source, CancellationToken.None);
+        await using Vorticity.Writing.VortexFileWriter writer =
+            Vorticity.Writing.VortexFileWriter.Create(destination, file.Schema);
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            await writer.WriteAsync(batch, CancellationToken.None);
+        }
+
+        await writer.CompleteAsync(CancellationToken.None);
     }
 
     /// <summary>
