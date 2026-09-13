@@ -79,56 +79,56 @@ internal static class ThroughputCheck
     /// </remarks>
     private static readonly (string Encoding, double Reference)[] References =
     [
-        ("alp", 0.95),   // 2 runs, spread 0.94-0.95
-        ("alp_no_patches", 0.93),   // 2 runs, spread 0.92-0.93
-        ("alp_patched_no_chunk_offsets", 1.08),   // 2 runs, spread 0.91-1.08
-        ("alprd", 1.18),   // row shapes hoisted, output uninitialized; 3 runs, spread 1.13-1.18
-        ("bool", 1.00),   // 2 runs, spread 0.97-1.00
-        ("bool_bit_offset3", 1.00),   // vectorized validity classify; spread 0.95-1.00
-        ("bool_bit_offset7", 1.01),   // 2 runs, spread 0.97-1.01
-        ("bool_bit_offset_straddle", 1.01),   // 2 runs, spread 1.00-1.01
-        ("bytebool", 1.14),   // 2 runs, spread 1.12-1.14
-        ("chunked", 0.46),   // adjacent chunks borrowed, not concatenated; 3 runs, spread 0.43-0.46
-        ("chunked_empty_chunks", 0.47),   // same; 3 runs, spread 0.41-0.47
-        ("chunked_one_chunk", 0.47),   // 3 runs, spread 0.41-0.47
-        ("constant", 1.10),   // 2 runs, spread 1.06-1.10
+        ("alp", 0.91),   // 3 runs, spread 0.87-0.91
+        ("alp_no_patches", 0.93),   // held: 3 runs peaked at 0.94, inside the x1.15 ceiling -- a ratchet does not loosen on noise
+        ("alp_patched_no_chunk_offsets", 0.91),   // 3 runs, spread 0.85-0.91
+        ("alprd", 1.15),   // 3 runs, spread 1.10-1.15
+        ("bool", 0.88),   // 3 runs, spread 0.83-0.88
+        ("bool_bit_offset3", 0.95),   // 3 runs, spread 0.88-0.95
+        ("bool_bit_offset7", 0.91),   // 3 runs, spread 0.90-0.91
+        ("bool_bit_offset_straddle", 0.89),   // 3 runs, spread 0.86-0.89
+        ("bytebool", 1.09),   // 3 runs, spread 1.01-1.09
+        ("chunked", 0.35),   // 3 runs, spread 0.30-0.35
+        ("chunked_empty_chunks", 0.33),   // 3 runs, spread 0.31-0.33
+        ("chunked_one_chunk", 0.35),   // 3 runs, spread 0.34-0.35
+        ("constant", 1.02),   // 3 runs, spread 0.91-1.02
         ("datetimeparts", 1.22),   // 2 runs, spread 1.22-1.22
-        ("decimal", 0.40),   // 2 runs, spread 0.39-0.40
-        ("decimal_byte_parts", 0.39),   // 2 runs, spread 0.31-0.39
+        ("decimal", 0.35),   // 3 runs, spread 0.33-0.35
+        ("decimal_byte_parts", 0.34),   // 3 runs, spread 0.31-0.34
         ("dict", 1.04),   // 2 runs, spread 0.95-1.04
-        ("dict_nullable_codes", 0.85),   // 2 runs, spread 0.81-0.85
-        ("dict_nullable_values_nonnull_codes", 1.40),   // dictionary validity expanded to a byte; spread 1.32-1.40
-        ("dict_u64_codes", 1.18),   // 2 runs, spread 1.11-1.18
-        ("dict_u8_codes", 0.99),   // 2 runs, spread 0.95-0.99
-        ("ext", 0.45),   // 2 runs, spread 0.34-0.45
-        ("fastlanes_bitpacked", 1.29),   // row shapes hoisted out of the block loop; 3 runs, spread 1.23-1.29
-        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.21),   // same; 3 runs, spread 1.18-1.21
-        ("fastlanes_delta", 1.18),   // Undelta by reference; 3 runs, spread 1.12-1.18
-        ("fastlanes_for", 1.07),   // 2 runs, spread 1.00-1.07
-        ("fastlanes_rle", 0.97),   // 2 runs, spread 0.92-0.97
-        ("fixed_size_list", 0.32),   // 2 runs, spread 0.31-0.32
-        ("fsst", 1.51),   // 2 runs, spread 1.48-1.51
-        ("list", 0.60),   // 2 runs, spread 0.58-0.60
-        ("listview", 0.73),   // 2 runs, spread 0.67-0.73
+        ("dict_nullable_codes", 0.85),   // held: 3 runs peaked at 0.89, inside the x1.15 ceiling -- a ratchet does not loosen on noise
+        ("dict_nullable_values_nonnull_codes", 1.26),   // 3 runs, spread 1.23-1.26
+        ("dict_u64_codes", 1.11),   // 3 runs, spread 1.05-1.11
+        ("dict_u8_codes", 0.96),   // 3 runs, spread 0.94-0.96
+        ("ext", 0.35),   // 3 runs, spread 0.34-0.35
+        ("fastlanes_bitpacked", 1.25),   // 3 runs, spread 1.20-1.25
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.21),   // held: 3 runs peaked at 1.22, inside the x1.15 ceiling -- a ratchet does not loosen on noise
+        ("fastlanes_delta", 1.06),   // 3 runs, spread 1.02-1.06
+        ("fastlanes_for", 0.99),   // 3 runs, spread 0.89-0.99
+        ("fastlanes_rle", 0.90),   // 3 runs, spread 0.86-0.90
+        ("fixed_size_list", 0.25),   // 3 runs, spread 0.24-0.25
+        ("fsst", 1.31),   // 3 runs, spread 1.27-1.31
+        ("list", 0.58),   // 3 runs, spread 0.51-0.58
+        ("listview", 0.67),   // 3 runs, spread 0.58-0.67
         ("map", 0.16),   // 2 runs, spread 0.15-0.16
-        ("masked", 0.53),   // 2 runs, spread 0.49-0.53
-        ("masked_all_invalid", 0.52),   // vectorized validity classify; spread 0.49-0.52
-        ("masked_all_valid", 0.58),   // vectorized validity classify; spread 0.56-0.58
-        ("null", 1.31),   // 2 runs, spread 1.12-1.31
-        ("onpair", 1.61),   // 2 runs, spread 1.61-1.61
-        ("parquet_variant", 8.11),   // 2 runs, spread 7.69-8.11
-        ("pco", 1.35),   // 2 runs, spread 1.32-1.35
-        ("primitive", 0.38),   // 2 runs, spread 0.29-0.38
-        ("runend", 1.30),   // tile from source, uninitialized output; 3 runs, spread 1.14-1.30
-        ("sequence", 1.97),   // 2 runs, spread 1.91-1.97
-        ("sparse", 1.04),   // 2 runs, spread 0.95-1.04
-        ("struct", 0.08),   // 2 runs, spread 0.07-0.08
-        ("varbin", 0.07),   // 2 runs, spread 0.07-0.07
+        ("masked", 0.37),   // 3 runs, spread 0.35-0.37
+        ("masked_all_invalid", 0.38),   // 3 runs, spread 0.34-0.38
+        ("masked_all_valid", 0.40),   // 3 runs, spread 0.37-0.40
+        ("null", 0.94),   // 3 runs, spread 0.81-0.94
+        ("onpair", 1.20),   // 3 runs, spread 1.15-1.20
+        ("parquet_variant", 5.95),   // 3 runs, spread 5.18-5.95
+        ("pco", 0.86),   // 3 runs, spread 0.83-0.86
+        ("primitive", 0.33),   // 3 runs, spread 0.32-0.33
+        ("runend", 1.16),   // 3 runs, spread 1.12-1.16
+        ("sequence", 0.95),   // 3 runs, spread 0.87-0.95
+        ("sparse", 1.02),   // 3 runs, spread 0.91-1.02
+        ("struct", 0.07),   // 3 runs, spread 0.07-0.07
+        ("varbin", 0.05),   // 3 runs, spread 0.04-0.05
         ("varbinview", 0.08),   // 2 runs, spread 0.07-0.08
-        ("variant", 4.89),   // 2 runs, spread 4.57-4.89
-        ("zigzag", 1.09),   // 2 runs, spread 0.94-1.09
-        ("zstd", 1.27),   // 2 runs, spread 1.25-1.27
-        ("zstd_buffers", 0.16),   // 2 runs, spread 0.16-0.16
+        ("variant", 4.89),   // held: 3 runs peaked at 5.55, inside the x1.15 ceiling -- a ratchet does not loosen on noise
+        ("zigzag", 0.86),   // 3 runs, spread 0.82-0.86
+        ("zstd", 1.10),   // 3 runs, spread 1.04-1.10
+        ("zstd_buffers", 0.16),   // held: 3 runs peaked at 0.17, inside the x1.15 ceiling -- a ratchet does not loosen on noise
     ];
 
     /// <summary>
