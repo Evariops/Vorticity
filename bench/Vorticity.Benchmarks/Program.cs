@@ -87,7 +87,8 @@ internal static class Program
                     i > 0 && i != counted && !a.StartsWith("--", StringComparison.Ordinal))
             ];
             bool rebase = Array.IndexOf(args, "--rebase") >= 0;
-            return await RatioCheck.RunAsync(axes, recalibrate, rebase).ConfigureAwait(false);
+            bool onePass = Array.IndexOf(args, RatioCheck.PassFlag) >= 0;
+            return await RatioCheck.RunAsync(axes, recalibrate, rebase, onePass).ConfigureAwait(false);
         }
 
         if (args.Length > 0 && args[0] == "--throughput")

@@ -76,6 +76,87 @@ internal static class ThroughputCheck
     /// <summary>The manifest shapes this build knows how to read.</summary>
     private const string ManifestFormat = "vorticity-throughput-corpus/1";
 
+    /// <summary>The prefix a recalibration pass prints its measurements under.</summary>
+    private const string PassPrefix = "PASS\t";
+
+    /// <summary>Runs each recalibration pass in its own process, then prints the table.</summary>
+    private static async Task<int> RecalibrateAcrossProcessesAsync(
+        string[] only, int passes, bool rebase)
+    {
+        Console.Out.WriteLine(
+            $"RECALIBRATE: {passes} PROCESSES. Nothing is gated; paste the table below into " +
+            "ThroughputCheck.References.");
+
+        string self = Environment.ProcessPath
+            ?? throw new InvalidOperationException("No process path; cannot re-run for a pass.");
+        Dictionary<string, List<double>> measured = [];
+        Dictionary<string, bool> grouped = [];
+        for (int pass = 1; pass <= passes; pass++)
+        {
+            ProcessStartInfo start = new ProcessStartInfo(self)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            start.ArgumentList.Add("--throughput");
+            foreach (string family in only)
+            {
+                start.ArgumentList.Add(family);
+            }
+
+            start.ArgumentList.Add("--check");
+            start.ArgumentList.Add("--recalibrate");
+            start.ArgumentList.Add("1");
+
+            using Process child = Process.Start(start)
+                ?? throw new InvalidOperationException("Could not start a pass.");
+            string output = await child.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
+            string errors = await child.StandardError.ReadToEndAsync().ConfigureAwait(false);
+            await child.WaitForExitAsync().ConfigureAwait(false);
+            if (child.ExitCode != 0)
+            {
+                Console.Error.WriteLine($"Pass {pass} failed ({child.ExitCode}):\n{errors}");
+                return child.ExitCode;
+            }
+
+            int seen = 0;
+            foreach (string line in output.Split('\n'))
+            {
+                if (!line.StartsWith(PassPrefix, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                string[] parts = line[PassPrefix.Length..].Split('\t');
+                if (parts.Length != 3 ||
+                    !double.TryParse(parts[1], CultureInfo.InvariantCulture, out double median))
+                {
+                    continue;
+                }
+
+                if (!measured.TryGetValue(parts[0], out List<double>? values))
+                {
+                    values = [];
+                    measured[parts[0]] = values;
+                }
+
+                values.Add(median);
+                grouped[parts[0]] = parts[2].Trim() == "1";
+                seen++;
+            }
+
+            if (seen == 0)
+            {
+                Console.Error.WriteLine($"Pass {pass} measured nothing.\n{errors}");
+                return 2;
+            }
+
+            Console.Out.WriteLine($"  pass {pass} of {passes}: {seen} encoding(s).");
+        }
+
+        return PrintRecalibration(measured, grouped, passes, rebase);
+    }
+
     /// <summary>
     /// Prints a replacement <see cref="References"/> table from several measured passes.
     /// </summary>
@@ -325,56 +406,56 @@ internal static class ThroughputCheck
     /// </remarks>
     private static readonly (string Encoding, double Reference)[] References =
     [
-        ("alp", 0.90),   // 3 passes, spread 0.89-0.90; was 0.91, -0.8%
-        ("alp_no_patches", 0.85),   // 3 passes, spread 0.82-0.85; was 0.93, -9.0%
-        ("alp_patched_no_chunk_offsets", 0.87),   // 3 passes, spread 0.83-0.87; was 0.91, -4.0%
-        ("alprd", 1.26),   // 3 passes, spread 1.22-1.26; REBASED UP from 1.15 (k>1): +9.2%
-        ("bool", 0.82),   // 3 passes, spread 0.81-0.82; was 0.88, -6.6%
-        ("bool_bit_offset3", 0.84),   // 3 passes, spread 0.79-0.84; was 0.95, -12.1%
-        ("bool_bit_offset7", 0.84),   // 3 passes, spread 0.80-0.84; was 0.91, -8.2%
-        ("bool_bit_offset_straddle", 0.83),   // 3 passes, spread 0.82-0.83; was 0.89, -6.4%
-        ("bytebool", 1.04),   // 3 passes, spread 1.00-1.04; was 1.09, -4.9%
-        ("chunked", 0.29),   // 3 passes, spread 0.24-0.29; was 0.35, -17.4%
-        ("chunked_empty_chunks", 0.27),   // 3 passes, spread 0.24-0.27; was 0.33, -17.3%
-        ("chunked_one_chunk", 0.30),   // 3 passes, spread 0.23-0.30; was 0.35, -14.2%
-        ("constant", 1.00),   // 3 passes, spread 0.95-1.00; was 1.02, -1.5%
-        ("datetimeparts", 1.21),   // 3 passes, spread 1.18-1.21; was 1.22, -0.6%
-        ("decimal", 0.27),   // 3 passes, spread 0.21-0.27; was 0.35, -21.8%
-        ("decimal_byte_parts", 0.28),   // 3 passes, spread 0.23-0.28; was 0.34, -17.4%
-        ("dict", 0.97),   // 3 passes, spread 0.95-0.97; was 1.04, -7.0%
-        ("dict_nullable_codes", 0.86),   // 3 passes, spread 0.84-0.86; REBASED UP from 0.85 (k>1): +1.1%
-        ("dict_nullable_values_nonnull_codes", 1.31),   // 3 passes, spread 1.26-1.31; REBASED UP from 1.26 (k>1): +4.2%
-        ("dict_u64_codes", 1.11),   // 3 passes, spread 1.08-1.11; was 1.11, -0.4%
-        ("dict_u8_codes", 0.94),   // 3 passes, spread 0.93-0.94; was 0.96, -2.2%
-        ("ext", 0.29),   // 3 passes, spread 0.25-0.29; was 0.35, -18.6%
-        ("fastlanes_bitpacked", 1.55),   // 3 passes, spread 1.54-1.55; REBASED UP from 1.25 (k>1): +23.8%
-        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.48),   // 3 passes, spread 1.44-1.48; REBASED UP from 1.21 (k>1): +22.0%
-        ("fastlanes_delta", 1.02),   // 3 passes, spread 0.99-1.02; was 1.06, -4.0%
-        ("fastlanes_for", 0.99),   // 3 passes, spread 0.97-0.99; REBASED UP from 0.99 (k>1): +0.1%
-        ("fastlanes_rle", 0.88),   // 3 passes, spread 0.84-0.88; was 0.90, -2.4%
-        ("fixed_size_list", 0.21),   // 3 passes, spread 0.18-0.21; was 0.25, -16.6%
-        ("fsst", 1.31),   // 3 passes, spread 1.33-1.40; HELD at 1.31: 3 passes peaked at 1.40, no loosening
-        ("list", 0.51),   // 3 passes, spread 0.47-0.51; was 0.58, -11.5%
-        ("listview", 0.67),   // 3 passes, spread 0.68-0.69; HELD at 0.67: 3 passes peaked at 0.69, no loosening
-        ("map", 0.15),   // 3 passes, spread 0.15-0.15; was 0.16, -6.5%
-        ("masked", 0.33),   // 3 passes, spread 0.31-0.33; was 0.37, -10.3%
-        ("masked_all_invalid", 0.34),   // 3 passes, spread 0.33-0.34; was 0.38, -11.4%
-        ("masked_all_valid", 0.34),   // 3 passes, spread 0.33-0.34; was 0.40, -16.2%
-        ("null", 0.92),   // 3 passes, spread 0.90-0.92; was 0.94, -1.9%
-        ("onpair", 1.20),   // 3 passes, spread 1.16-1.28; HELD at 1.20: 3 passes peaked at 1.28, no loosening
-        ("parquet_variant", 5.95),   // 3 passes, spread 6.22-6.37; HELD at 5.95: 3 passes peaked at 6.37, no loosening
-        ("pco", 0.85),   // 3 passes, spread 0.84-0.85; was 0.86, -0.7%
-        ("primitive", 0.28),   // 3 passes, spread 0.24-0.28; was 0.33, -16.0%
-        ("runend", 1.22),   // 3 passes, spread 1.19-1.22; REBASED UP from 1.16 (k>1): +5.4%
-        ("sequence", 0.97),   // 3 passes, spread 0.93-0.97; REBASED UP from 0.95 (k>1): +2.2%
-        ("sparse", 0.84),   // 3 passes, spread 0.83-0.84; was 1.02, -17.7%
-        ("struct", 0.07),   // 3 passes, spread 0.07-0.07; HELD at 0.07: 3 passes peaked at 0.07, no loosening
-        ("varbin", 0.04),   // 3 passes, spread 0.04-0.04; was 0.05, -10.4%
-        ("varbinview", 0.08),   // 3 passes, spread 0.07-0.08; was 0.08, -4.8%
-        ("variant", 6.50),   // 3 passes, spread 6.25-6.50; REBASED UP from 4.89 (k>1): +32.8%
-        ("zigzag", 0.82),   // 3 passes, spread 0.78-0.82; was 0.86, -4.8%
-        ("zstd", 1.06),   // 3 passes, spread 1.04-1.06; was 1.10, -3.7%
-        ("zstd_buffers", 0.15),   // 3 passes, spread 0.14-0.15; was 0.16, -8.6%
+        ("alp", 0.91),   // 3 processes, spread 0.89-0.91; REBASED UP from 0.90 (k>1): +0.8%
+        ("alp_no_patches", 0.89),   // 3 processes, spread 0.82-0.89; REBASED UP from 0.85 (k>1): +4.4%
+        ("alp_patched_no_chunk_offsets", 0.86),   // 3 processes, spread 0.82-0.86; was 0.87, -0.6%
+        ("alprd", 1.28),   // 3 processes, spread 1.14-1.28; REBASED UP from 1.26 (k>1): +1.2%
+        ("bool", 0.85),   // 3 processes, spread 0.81-0.85; REBASED UP from 0.82 (k>1): +3.2%
+        ("bool_bit_offset3", 0.86),   // 3 processes, spread 0.82-0.86; REBASED UP from 0.84 (k>1): +2.2%
+        ("bool_bit_offset7", 0.84),   // 3 processes, spread 0.81-0.84; REBASED UP from 0.84 (k>1): +0.0%
+        ("bool_bit_offset_straddle", 0.84),   // 3 processes, spread 0.83-0.84; REBASED UP from 0.83 (k>1): +0.8%
+        ("bytebool", 1.05),   // 3 processes, spread 1.02-1.05; REBASED UP from 1.04 (k>1): +1.4%
+        ("chunked", 0.26),   // 3 processes, spread 0.24-0.26; was 0.29, -11.4%
+        ("chunked_empty_chunks", 0.26),   // 3 processes, spread 0.23-0.26; was 0.27, -5.4%
+        ("chunked_one_chunk", 0.26),   // 3 processes, spread 0.24-0.26; was 0.30, -14.6%
+        ("constant", 0.97),   // 3 processes, spread 0.96-0.97; was 1.00, -3.3%
+        ("datetimeparts", 1.21),   // 3 processes, spread 1.11-1.22; HELD at 1.21: 3 processes peaked at 1.22, no loosening
+        ("decimal", 0.27),   // 3 processes, spread 0.26-0.27; REBASED UP from 0.27 (k>1): +0.3%
+        ("decimal_byte_parts", 0.25),   // 3 processes, spread 0.24-0.25; was 0.28, -12.2%
+        ("dict", 1.01),   // 3 processes, spread 0.98-1.01; REBASED UP from 0.97 (k>1): +4.2%
+        ("dict_nullable_codes", 0.85),   // 3 processes, spread 0.83-0.85; was 0.86, -0.8%
+        ("dict_nullable_values_nonnull_codes", 1.33),   // 3 processes, spread 1.28-1.33; REBASED UP from 1.31 (k>1): +1.1%
+        ("dict_u64_codes", 1.11),   // 3 processes, spread 1.07-1.11; REBASED UP from 1.11 (k>1): +0.0%
+        ("dict_u8_codes", 0.94),   // 3 processes, spread 0.92-0.94; was 0.94, -0.2%
+        ("ext", 0.27),   // 3 processes, spread 0.24-0.27; was 0.29, -7.1%
+        ("fastlanes_bitpacked", 1.30),   // 3 processes, spread 1.29-1.30; was 1.55, -16.1%
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.21),   // 3 processes, spread 1.20-1.21; was 1.48, -18.4%
+        ("fastlanes_delta", 1.07),   // 3 processes, spread 1.01-1.07; REBASED UP from 1.02 (k>1): +5.1%
+        ("fastlanes_for", 1.01),   // 3 processes, spread 0.98-1.01; REBASED UP from 0.99 (k>1): +2.1%
+        ("fastlanes_rle", 0.88),   // 3 processes, spread 0.84-0.88; was 0.88, -0.3%
+        ("fixed_size_list", 0.18),   // 3 processes, spread 0.16-0.18; was 0.21, -12.9%
+        ("fsst", 1.31),   // 3 processes, spread 1.35-1.38; HELD at 1.31: 3 processes peaked at 1.38, no loosening
+        ("list", 0.50),   // 3 processes, spread 0.47-0.50; was 0.51, -1.7%
+        ("listview", 0.67),   // 3 processes, spread 0.67-0.68; HELD at 0.67: 3 processes peaked at 0.68, no loosening
+        ("map", 0.15),   // 3 processes, spread 0.15-0.15; HELD at 0.15: 3 processes peaked at 0.15, no loosening
+        ("masked", 0.33),   // 3 processes, spread 0.31-0.33; REBASED UP from 0.33 (k>1): +1.3%
+        ("masked_all_invalid", 0.35),   // 3 processes, spread 0.34-0.35; REBASED UP from 0.34 (k>1): +3.6%
+        ("masked_all_valid", 0.36),   // 3 processes, spread 0.33-0.36; REBASED UP from 0.34 (k>1): +5.8%
+        ("null", 0.92),   // 3 processes, spread 0.92-0.92; was 0.92, -0.2%
+        ("onpair", 1.20),   // 3 processes, spread 1.17-1.21; HELD at 1.20: 3 processes peaked at 1.21, no loosening
+        ("parquet_variant", 5.95),   // 3 processes, spread 5.94-6.14; HELD at 5.95: 3 processes peaked at 6.14, no loosening
+        ("pco", 0.85),   // 3 processes, spread 0.84-0.85; was 0.85, -0.3%
+        ("primitive", 0.26),   // 3 processes, spread 0.21-0.26; was 0.28, -7.7%
+        ("runend", 1.23),   // 3 processes, spread 1.19-1.23; REBASED UP from 1.22 (k>1): +0.6%
+        ("sequence", 0.95),   // 3 processes, spread 0.93-0.95; was 0.97, -2.2%
+        ("sparse", 0.88),   // 3 processes, spread 0.82-0.88; REBASED UP from 0.84 (k>1): +4.4%
+        ("struct", 0.07),   // 3 processes, spread 0.07-0.07; HELD at 0.07: 3 processes peaked at 0.07, no loosening
+        ("varbin", 0.04),   // 3 processes, spread 0.04-0.05; HELD at 0.04: 3 processes peaked at 0.05, no loosening
+        ("varbinview", 0.08),   // 3 processes, spread 0.07-0.08; was 0.08, -4.7%
+        ("variant", 6.51),   // 3 processes, spread 6.41-6.51; REBASED UP from 6.50 (k>1): +0.1%
+        ("zigzag", 0.82),   // 3 processes, spread 0.80-0.82; was 0.82, -0.4%
+        ("zstd", 1.06),   // 3 processes, spread 1.02-1.07; HELD at 1.06: 3 processes peaked at 1.07, no loosening
+        ("zstd_buffers", 0.14),   // 3 processes, spread 0.14-0.14; was 0.15, -5.4%
     ];
 
     /// <summary>
@@ -502,11 +583,15 @@ internal static class ThroughputCheck
         Dictionary<string, List<double>> measured = [];
         Dictionary<string, bool> grouped = [];
         List<string> unreferenced = [];
-        for (int pass = 0; pass < Math.Max(1, recalibrate); pass++)
+        // A PASS IS A PROCESS when recalibrating, and B2.5 is why: measured over twenty runs of one
+        // axis each, between-run variance is two to three times the within-run variance, and a 95%
+        // within-run interval contains the grand median 11 or 12 times out of 20 rather than 19.
+        // Passes inside one process share a JIT, a heap, a page cache and a thermal state, so a
+        // reference built from them is narrower than what the gate has to survive.
+        if (recalibrate > 1)
         {
-        if (recalibrate > 0)
-        {
-            Console.Out.WriteLine($"  pass {pass + 1} of {recalibrate}...");
+            return await RecalibrateAcrossProcessesAsync(only, recalibrate, rebase)
+                .ConfigureAwait(false);
         }
 
         foreach (string file in files)
@@ -610,11 +695,18 @@ internal static class ThroughputCheck
                     $"  {name,-32} {rows,10} {batches,7} {ours,9:F0}us {nsPerValue,10:F2}"));
             }
         }
-        }
 
         if (recalibrate > 0)
         {
-            return PrintRecalibration(measured, grouped, recalibrate, rebase);
+            // One pass: print the machine-readable lines the parent process collects.
+            foreach ((string name, List<double> seen) in measured)
+            {
+                Console.Out.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{PassPrefix}{name}\t{seen[0]:R}\t{(grouped.GetValueOrDefault(name) ? 1 : 0)}"));
+            }
+
+            return 0;
         }
 
         if (!rust)

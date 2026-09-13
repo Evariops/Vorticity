@@ -109,9 +109,11 @@ Rounds keep coming until half the interval is within 5% of the median, and a cal
 timer's noise floor is repeated inside one timed round (the `k` column). The `mde` column is the
 smallest change that axis can currently see.
 
-**An interval is within one run, and the residual is between them** — see BENCH-AUDIT.md B2.5. A
-ratio can read 1.30 [1.28; 1.31] in eight runs and 1.71 [1.65; 1.77] in the ninth. Narrow does not
-mean reproducible, so the replay rule below still stands.
+**An interval is within one run, and between-run variance is 2–3× larger.** Measured over twenty
+processes per axis (BENCH-AUDIT.md B2.5): a 95 % interval contains the grand median 11–12 times out
+of 20 rather than 19. So a ratio can read 1.30 [1.28; 1.31] in eight runs and 1.71 [1.65; 1.77] in
+the ninth — narrow and wrong. **Narrow does not mean reproducible**, which is why `--recalibrate`
+runs each pass in its own process, and why the replay rule below still stands for a single red.
 
 **When the code outran a ceiling, `--ratio-check` says `STALE`** — more than 15 % under its reference
 — because a ratchet that is never lowered defends nothing. `read and write back` sat 43 % under its
@@ -121,8 +123,10 @@ own for five commits, which left room for a 75 % regression to pass. Lower them 
 dotnet run -c Release PROJ -- --ratio-check --recalibrate 3     # ~90 s, prints a table to paste
 ```
 
-It measures N passes, takes the max of the per-pass medians, and prints the `RatioCheck.References`
-table ready to paste. An axis that measures *above* its reference is printed back **unchanged** and
+It runs N passes **in N separate processes** — between-run variance is the larger part and passes
+inside one process cannot sample it — takes the max of the per-pass medians, and prints the
+`RatioCheck.References` table ready to paste. `--throughput --recalibrate N` does the same for the
+per-encoding table. An axis that measures *above* its reference is printed back **unchanged** and
 flagged `HELD`: the command lowers ratchets and never raises one. If such an axis is a real
 regression, plain `--ratio-check` says `OVER`, and the answer is the code, not the number.
 

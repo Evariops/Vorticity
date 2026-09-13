@@ -270,19 +270,19 @@ internal static class RatioCheck
     /// </remarks>
     private static readonly Dictionary<string, double> References = new()
     {
-        ["full scan"] = 0.462,   // 3 passes, spread 0.459-0.466; held
-        ["full scan, upstream lazy"] = 0.463,   // 3 passes, spread 0.460-0.466; held
-        ["projected scan, 1 of 5 columns"] = 0.477,   // rebased for k>1 (warm), was 0.471
-        ["open to first batch"] = 0.086,   // 3 passes, spread 0.083-0.087; held
-        ["open, footer only"] = 0.767,   // rebased for k=19 (warm open), was 0.732
-        ["read and write back"] = 1.027,   // 3 passes, spread 1.021-1.029; held
-        ["filtered scan, 1% band"] = 0.237,   // rebased for k>1 (warm), was 0.235
-        ["filtered scan, half the rows"] = 0.321,   // rebased for k>1 (warm), unchanged in practice
-        ["scattered take, 64 of 64 splits"] = 0.245,   // 3 passes, spread 0.239-0.248; held
-        ["rewritten zoned, reference's"] = 0.457,   // 3 passes, spread 0.456-0.466; held
-        ["rewritten zoned, ours"] = 5.023,   // 3 passes, spread 4.976-5.186; held
-        ["rewritten high card, reference's"] = 0.857,   // rebased for k=22 (warm open), was 0.828
-        ["rewritten high card, ours"] = 0.927,   // rebased for k=18 (warm), was 0.890
+        ["full scan"] = 0.462,   // 5 processes, spread 0.453-0.463; held
+        ["full scan, upstream lazy"] = 0.463,   // 5 processes, spread 0.456-0.467; held
+        ["projected scan, 1 of 5 columns"] = 0.467,   // 5 processes, spread 0.433-0.467; was 0.477
+        ["open to first batch"] = 0.086,   // 5 processes, spread 0.083-0.086; held
+        ["open, footer only"] = 0.774,   // 5 processes, spread 0.759-0.774; k>1
+        ["read and write back"] = 1.027,   // 5 processes, spread 1.003-1.032; held
+        ["filtered scan, 1% band"] = 0.238,   // 5 processes, spread 0.206-0.238; k>1
+        ["filtered scan, half the rows"] = 0.327,   // 5 processes, spread 0.320-0.327; k>1
+        ["scattered take, 64 of 64 splits"] = 0.245,   // 5 processes, spread 0.240-0.247; held
+        ["rewritten zoned, reference's"] = 0.457,   // 5 processes, spread 0.454-0.462; held
+        ["rewritten zoned, ours"] = 5.189,   // 5 processes, spread 4.789-5.189; k>1
+        ["rewritten high card, reference's"] = 0.868,   // 5 processes, spread 0.849-0.868; k>1
+        ["rewritten high card, ours"] = 0.927,   // 5 processes, spread 0.893-0.927; held
     };
 
     /// <summary>
@@ -355,7 +355,11 @@ internal static class RatioCheck
     /// it is a comparison between two different measurements. It is a flag rather than a default so
     /// that a raise is always a deliberate act with a commit message behind it.
     /// </param>
-    internal static async Task<int> RunAsync(string[] only, int recalibrate, bool rebase)
+    /// <param name="onePass">
+    /// Set by <see cref="PassFlag"/>: measure once and print machine-readable lines for the parent
+    /// process that spawned this one. Not a user-facing mode.
+    /// </param>
+    internal static async Task<int> RunAsync(string[] only, int recalibrate, bool rebase, bool onePass)
     {
         if (!RustReader.Available)
         {
@@ -404,9 +408,11 @@ internal static class RatioCheck
                 return 2;
             }
 
-            return recalibrate > 0
-                ? await RecalibrateAsync(path, axes, recalibrate, rebase).ConfigureAwait(false)
-                : await CheckAsync(path, axes).ConfigureAwait(false);
+            return onePass
+                ? await PassOnceAsync(path, axes).ConfigureAwait(false)
+                : recalibrate > 0
+                    ? await RecalibrateAsync(path, axes, recalibrate, rebase).ConfigureAwait(false)
+                    : await CheckAsync(path, axes).ConfigureAwait(false);
         }
         finally
         {
@@ -550,7 +556,7 @@ internal static class RatioCheck
     private static async Task<int> RecalibrateAsync(string path, Axis[] axes, int passes, bool rebase)
     {
         Console.Out.WriteLine(
-            $"RECALIBRATE: {passes} passes over {axes.Length} axis/axes, upper bound per axis. " +
+            $"RECALIBRATE: {passes} PROCESSES over {axes.Length} axis/axes. " +
             "Nothing is gated; paste the table below into RatioCheck.References.");
         if (rebase)
         {
@@ -563,32 +569,17 @@ internal static class RatioCheck
         Dictionary<string, bool> grouped = [];
         for (int pass = 1; pass <= passes; pass++)
         {
-            foreach (Axis axis in axes)
+            // A PASS IS A PROCESS, and B2.5 is why. Measured over twenty runs of one axis each:
+            // between-run variance is two to three times the within-run variance, and a 95%
+            // within-run interval contains the grand median 11 or 12 times out of 20 instead of 19.
+            // Passes inside one process sample the wrong distribution -- they share a JIT, a heap, a
+            // page cache and a thermal state -- so a reference built from them is narrower than the
+            // thing it has to survive. Re-running ourselves costs a second of startup per pass and
+            // buys the only distribution the gate actually meets.
+            if (await PassAsync(axes, pass, passes, ratios, grouped).ConfigureAwait(false) is int bad)
             {
-                (Measurement m, int rows) = await MeasureOnceAsync(path, axis).ConfigureAwait(false);
-                if (rows != 0)
-                {
-                    return rows;
-                }
-
-                if (!ratios.TryGetValue(axis.Name, out List<double>? seen))
-                {
-                    seen = [];
-                    ratios[axis.Name] = seen;
-                }
-
-                // THE MEDIAN, and the interval deliberately NOT folded in. Taking each pass's
-                // upper bound instead was tried and rejected in the same sitting: it stacked the
-                // within-pass uncertainty on top of the between-pass spread and then on top of the
-                // x1.15 margin, and twelve of thirteen references rose by 2 to 20 %. Uncertainty is
-                // applied ONCE, at the decision -- a red needs the whole interval over the ceiling --
-                // so applying it again here would buy the same protection twice and pay for it in a
-                // gate that no longer catches anything.
-                seen.Add(m.Ratio.Median);
-                grouped[axis.Name] = m.Repeats > 1;
+                return bad;
             }
-
-            Console.Out.WriteLine($"  pass {pass} of {passes} done.");
         }
 
         int held = 0;
@@ -670,6 +661,107 @@ internal static class RatioCheck
 
         return (await MeasureAsync(file, axis).ConfigureAwait(false), 0);
     }
+
+    /// <summary>Runs one recalibration pass in a CHILD PROCESS and folds its result in.</summary>
+    /// <returns>Null on success, or an exit code.</returns>
+    private static async Task<int?> PassAsync(
+        Axis[] axes,
+        int pass,
+        int passes,
+        Dictionary<string, List<double>> ratios,
+        Dictionary<string, bool> grouped)
+    {
+        string self = Environment.ProcessPath
+            ?? throw new InvalidOperationException("No process path; cannot re-run for a pass.");
+        ProcessStartInfo start = new ProcessStartInfo(self)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        start.ArgumentList.Add("--ratio-check");
+        foreach (Axis axis in axes)
+        {
+            start.ArgumentList.Add(axis.Name);
+        }
+
+        start.ArgumentList.Add(PassFlag);
+
+        using Process child = Process.Start(start)
+            ?? throw new InvalidOperationException("Could not start a pass.");
+        string output = await child.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
+        string errors = await child.StandardError.ReadToEndAsync().ConfigureAwait(false);
+        await child.WaitForExitAsync().ConfigureAwait(false);
+        if (child.ExitCode != 0)
+        {
+            Console.Error.WriteLine($"Pass {pass} failed ({child.ExitCode}):\n{errors}");
+            return child.ExitCode;
+        }
+
+        int seen = 0;
+        foreach (string line in output.Split('\n'))
+        {
+            if (!line.StartsWith(PassPrefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string[] parts = line[PassPrefix.Length..].Split('\t');
+            if (parts.Length != 3 ||
+                !double.TryParse(parts[1], CultureInfo.InvariantCulture, out double median) ||
+                !int.TryParse(parts[2], CultureInfo.InvariantCulture, out int repeats))
+            {
+                continue;
+            }
+
+            if (!ratios.TryGetValue(parts[0], out List<double>? values))
+            {
+                values = [];
+                ratios[parts[0]] = values;
+            }
+
+            // THE MEDIAN, and the interval deliberately NOT folded in. Taking each pass's upper
+            // bound instead was tried and rejected: it stacked the within-pass uncertainty on the
+            // between-pass spread and then on the x1.15 margin, and twelve of thirteen references
+            // rose by 2 to 20 %. Uncertainty is applied ONCE, at the decision.
+            values.Add(median);
+            grouped[parts[0]] = repeats > 1;
+            seen++;
+        }
+
+        if (seen == 0)
+        {
+            Console.Error.WriteLine($"Pass {pass} measured nothing.\n{errors}");
+            return 2;
+        }
+
+        Console.Out.WriteLine($"  pass {pass} of {passes}: {seen} axis/axes.");
+        return null;
+    }
+
+    /// <summary>Measures each axis once and prints the machine-readable lines a pass collects.</summary>
+    private static async Task<int> PassOnceAsync(string path, Axis[] axes)
+    {
+        foreach (Axis axis in axes)
+        {
+            (Measurement m, int rows) = await MeasureOnceAsync(path, axis).ConfigureAwait(false);
+            if (rows != 0)
+            {
+                return rows;
+            }
+
+            Console.Out.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"{PassPrefix}{axis.Name}\t{m.Ratio.Median:R}\t{m.Repeats}"));
+        }
+
+        return 0;
+    }
+
+    /// <summary>The flag that makes a run one recalibration pass. Internal, not documented for users.</summary>
+    internal const string PassFlag = "--recalibrate-pass";
+
+    /// <summary>The prefix a pass prints its measurements under.</summary>
+    private const string PassPrefix = "PASS\t";
 
     /// <summary>
     /// Rewrites each entry of <see cref="Rewritten"/> with OUR writer, once, and returns the two
