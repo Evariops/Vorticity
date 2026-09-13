@@ -143,7 +143,10 @@ public sealed class FsstDecoder : ArrayDecoder
         VortexBuffer codes = node.GetBuffer(2);
 
         int total = TotalDecodedLength(uncompressedLengths, lengthsPType, produced);
-        VortexBuffer heap = CanonicalSupport.Allocate(context, total, 1, out Span<byte> destination);
+        // Uninitialized: the decode writes exactly `total` bytes and the check below refuses the
+        // stream if it does not, so no byte of the heap survives the allocator.
+        VortexBuffer heap = CanonicalSupport.AllocateUninitialized(
+            context, total, 1, out Span<byte> destination);
 
         if (selective)
         {

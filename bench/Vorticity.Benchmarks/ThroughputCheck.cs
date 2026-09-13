@@ -115,7 +115,7 @@ internal static class ThroughputCheck
         ("masked_all_invalid", 1.95),   // 2 runs, spread 1.92-1.95
         ("masked_all_valid", 1.96),   // 2 runs, spread 1.86-1.96
         ("null", 1.14),   // 2 runs, spread 1.13-1.14
-        ("onpair", 4.98),   // 2 runs, spread 4.87-4.98
+        ("onpair", 1.99),   // 3 runs, spread 1.94-1.99
         ("pco", 3.59),   // 2 runs, spread 3.41-3.59
         ("primitive", 1.37),   // 2 runs, spread 1.33-1.37
         ("runend", 1.83),   // 2 runs, spread 1.64-1.83

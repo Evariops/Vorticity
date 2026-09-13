@@ -27,7 +27,6 @@ using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
-using System.Text.Unicode;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -175,7 +174,9 @@ public sealed class OnPairDecoder : ArrayDecoder
         Span<byte> destination = scratch;
         if (!inlineOnly)
         {
-            heap = CanonicalSupport.Allocate(context, total, 1, out destination);
+            // Uninitialized: both paths below write exactly `total` bytes and refuse the stream
+            // if they do not, so no byte of the heap survives the allocator.
+            heap = CanonicalSupport.AllocateUninitialized(context, total, 1, out destination);
         }
 
         if (selective)
@@ -206,11 +207,16 @@ public sealed class OnPairDecoder : ArrayDecoder
 
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             produced, CanonicalSupport.ViewSize, Id + " views");
-        VortexBuffer views = CanonicalSupport.Allocate(
+
+        // Uninitialized: ViewKernels writes all sixteen bytes of every view. A null row stores a
+        // zero length upstream, so it consumes nothing of the heap and gets an empty view -- now
+        // WRITTEN rather than inherited from the allocator.
+        VortexBuffer views = CanonicalSupport.AllocateUninitialized(
             context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
-        bool referenced = BuildViews(
-            uncompressedLengths.Values.Span, metadata.UncompressedLengthsPType, destination, writable,
-            produced, dtype.Kind == DTypeKind.Utf8, wanted, selective);
+        bool referenced = ViewKernels.BuildFromLengths(
+            uncompressedLengths.Values.Span, metadata.UncompressedLengthsPType,
+            selective ? wanted : default, destination, writable, produced,
+            dtype.Kind == DTypeKind.Utf8);
 
         // The heap is attached only if a view actually points into it. A value of 12 bytes or fewer
         // lives inside its own view, so a selection of short rows references nothing - and handing
@@ -257,14 +263,11 @@ public sealed class OnPairDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted,
         Span<byte> destination)
     {
-        int[] rented = ArrayPool<int>.Shared.Rent(tokenCount + 1);
+        long[] rented = ArrayPool<long>.Shared.Rent(tokenCount);
         try
         {
-            Span<int> offsets = rented.AsSpan(0, tokenCount + 1);
-            for (int t = 0; t <= tokenCount; t++)
-            {
-                offsets[t] = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, t);
-            }
+            Span<long> tokens = rented.AsSpan(0, tokenCount);
+            BuildTokenTable(dictOffsets, offsetsPType, tokenCount, tokens);
 
             int written = 0;
             for (int k = 0; k < wanted.Length; k++)
@@ -280,7 +283,7 @@ public sealed class OnPairDecoder : ArrayDecoder
 
                 int expected = (int)CanonicalSupport.ReadInteger(lengths, lengthsPType, row);
                 int got = Concatenate(
-                    codes, codesPType, (int)start, (int)end, offsets, tokenCount, dictionary,
+                    codes, codesPType, (int)start, (int)end, tokens, dictionary,
                     destination.Slice(written));
                 if (got != expected)
                 {
@@ -293,7 +296,7 @@ public sealed class OnPairDecoder : ArrayDecoder
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(rented);
+            ArrayPool<long>.Shared.Return(rented);
         }
     }
 
@@ -314,21 +317,40 @@ public sealed class OnPairDecoder : ArrayDecoder
         // usually far more codes than that, so this trades a bounded pass for two switches and two
         // bounds checks on every code. ValidateDictionary has already proved every offset lies
         // inside the blob and never decreases, so the table needs no checking of its own.
-        int[] rented = ArrayPool<int>.Shared.Rent(tokenCount + 1);
+        long[] rented = ArrayPool<long>.Shared.Rent(tokenCount);
         try
         {
-            Span<int> offsets = rented.AsSpan(0, tokenCount + 1);
-            for (int t = 0; t <= tokenCount; t++)
-            {
-                offsets[t] = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, t);
-            }
-
+            Span<long> tokens = rented.AsSpan(0, tokenCount);
+            BuildTokenTable(dictOffsets, offsetsPType, tokenCount, tokens);
             return Concatenate(
-                codes, codesPType, codeStart, codeEnd, offsets, tokenCount, dictionary, destination);
+                codes, codesPType, codeStart, codeEnd, tokens, dictionary, destination);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(rented);
+            ArrayPool<long>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Packs each token's start and size into ONE <see cref="long"/>: <c>start | size &lt;&lt; 32</c>.
+    /// </summary>
+    /// <remarks>
+    /// The loop this feeds read <c>offsets[code]</c> and <c>offsets[code + 1]</c> -- two bounds-
+    /// checked loads to describe one token, on every code of the stream. Packing makes it one load
+    /// and one shift, and there are at most 65 536 tokens against usually far more codes.
+    /// <see cref="ValidateDictionary"/> has already proved every offset lies inside the blob, never
+    /// decreases and spans at most <see cref="MaxTokenSize"/>, so the table needs no checking of
+    /// its own and every size fits comfortably in the high half.
+    /// </remarks>
+    private static void BuildTokenTable(
+        ReadOnlySpan<byte> dictOffsets, PType offsetsPType, int tokenCount, Span<long> tokens)
+    {
+        int previous = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, 0);
+        for (int t = 0; t < tokenCount; t++)
+        {
+            int next = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, t + 1);
+            tokens[t] = (uint)previous | ((long)(next - previous) << 32);
+            previous = next;
         }
     }
 
@@ -338,55 +360,216 @@ public sealed class OnPairDecoder : ArrayDecoder
         PType codesPType,
         int codeStart,
         int codeEnd,
-        ReadOnlySpan<int> offsets,
-        int tokenCount,
+        ReadOnlySpan<long> tokens,
+        ReadOnlySpan<byte> dictionary,
+        Span<byte> destination) => codesPType switch
+        {
+            PType.U8 => ConcatenateCore<byte>(codes, codeStart, codeEnd, tokens, dictionary, destination),
+            PType.U16 => ConcatenateCore<ushort>(codes, codeStart, codeEnd, tokens, dictionary, destination),
+            PType.U32 => ConcatenateCore<uint>(codes, codeStart, codeEnd, tokens, dictionary, destination),
+            _ => ConcatenateCore<ulong>(codes, codeStart, codeEnd, tokens, dictionary, destination),
+        };
+
+    /// <summary>
+    /// The concatenation with the code's physical type resolved by the JIT rather than by a switch
+    /// per code.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// FOUR TESTS PER CODE BECAME ONE. What the loop used to do to move one token: a switch on the
+    /// code's physical type, a compare against the token count, two bounds-checked loads from the
+    /// offsets table, a compare of <c>written + size</c> against the destination length, and a
+    /// compare of <c>start</c> against the blob's wide-store limit. bench/BRANCHING.md measured a
+    /// switch here at +0.9% and concluded it was refuted -- which held while the rest of the body
+    /// was this expensive.
+    /// </para>
+    /// <para>
+    /// The destination bound is the one that DISAPPEARS rather than moving, and only because the
+    /// wide path already implies it: <c>written &lt;= wideLimit</c> is
+    /// <c>written + MaxTokenSize &lt;= destination.Length</c>, and a token is at most
+    /// <see cref="MaxTokenSize"/> bytes, so <c>written + size</c> is inside by construction. The
+    /// exact-copy path keeps the check, because there it is load-bearing.
+    /// </para>
+    /// </remarks>
+    private static int ConcatenateCore<TCode>(
+        ReadOnlySpan<byte> codes,
+        int codeStart,
+        int codeEnd,
+        ReadOnlySpan<long> tokens,
         ReadOnlySpan<byte> dictionary,
         Span<byte> destination)
+        where TCode : unmanaged
     {
+        ReadOnlySpan<TCode> typed = MemoryMarshal.Cast<byte, TCode>(codes);
         int written = 0;
 
-        // Past this point a token no longer has sixteen writable bytes behind it, so the wide
-        // store is unsafe and the exact copy takes over.
+        // Past these points the wide store is unsafe and the exact copy takes over: the output no
+        // longer has sixteen writable bytes behind it, or the token no longer has sixteen readable
+        // ones ahead of it.
         int wideLimit = destination.Length - MaxTokenSize;
+        int wideStart = dictionary.Length - MaxTokenSize;
         ref byte output = ref MemoryMarshal.GetReference(destination);
         ref byte source = ref MemoryMarshal.GetReference(dictionary);
 
-        for (int i = codeStart; i < codeEnd; i++)
+        // FOUR AT A TIME, and the reason is the dependency chain rather than the instruction count.
+        // One token per iteration serializes: the store's address needs `written`, `written` needs
+        // this token's size, and the size needs a load from the table indexed by a code that was
+        // itself just loaded. That is a load-to-add-to-store chain of five or six cycles that
+        // nothing can overlap. Four independent table loads, then a three-add prefix sum over
+        // their sizes, then four stores to addresses all known at once, costs about the same chain
+        // for four tokens as the serial form costs for one.
+        //
+        // The block runs only when it needs no test of its own: `written <= blockLimit` is
+        // `written + 4 * MaxTokenSize <= destination.Length`, so all four wide stores are inside
+        // by construction, and the four starts are checked against the blob's limit with a max
+        // rather than four branches.
+        int blockLimit = destination.Length - (4 * MaxTokenSize);
+        int tokenLimit = tokens.Length;
+        int i = codeStart;
+        while (true)
         {
-            ulong code = CompressedValues.ReadUnsigned(codes, codesPType, i);
-            if (code >= (ulong)tokenCount)
+            if (i + 4 > codeEnd || written > blockLimit)
             {
-                CompressedThrow.Format(
-                    $"{Id} code {code} names a token the {tokenCount}-entry dictionary does not hold.");
-            }
+                if (i >= codeEnd)
+                {
+                    break;
+                }
 
-            int start = offsets[(int)code];
-            int size = offsets[(int)code + 1] - start;
-            if (written + size > destination.Length)
-            {
-                CompressedThrow.Format(
-                    $"{Id}: the code stream decodes to more than the {destination.Length} bytes " +
-                    "its uncompressed lengths account for.");
-            }
-
-            if (written <= wideLimit && start <= dictionary.Length - MaxTokenSize)
-            {
-                // ONE 16-BYTE STORE PER TOKEN, then advance by the token's REAL length - the same
-                // trick FSST's decoder uses, and legal for the same reason: the bytes past the
-                // token are garbage the next store overwrites. A token is at most 16 bytes, so one
-                // Vector128 move replaces a variable-length Span.CopyTo call.
-                Vector128.StoreUnsafe(
-                    Vector128.LoadUnsafe(ref Unsafe.Add(ref source, (uint)start)),
-                    ref Unsafe.Add(ref output, (uint)written));
-                written += size;
+                i = One(typed, i, tokens, dictionary, destination, ref output, ref source,
+                    wideLimit, wideStart, ref written);
                 continue;
             }
 
-            dictionary.Slice(start, size).CopyTo(destination.Slice(written, size));
-            written += size;
+            uint a = WidenToken(typed[i]);
+            uint b = WidenToken(typed[i + 1]);
+            uint c = WidenToken(typed[i + 2]);
+            uint d = WidenToken(typed[i + 3]);
+            if (a >= (uint)tokenLimit || b >= (uint)tokenLimit ||
+                c >= (uint)tokenLimit || d >= (uint)tokenLimit)
+            {
+                // One of the four is out of range: the single-token step re-reads them in order
+                // and raises on the offending one, with its index.
+                i = One(typed, i, tokens, dictionary, destination, ref output, ref source,
+                    wideLimit, wideStart, ref written);
+                continue;
+            }
+
+            long pa = tokens[(int)a];
+            long pb = tokens[(int)b];
+            long pc = tokens[(int)c];
+            long pd = tokens[(int)d];
+
+            int sa = (int)pa;
+            int sb = (int)pb;
+            int sc = (int)pc;
+            int sd = (int)pd;
+            if (Math.Max(Math.Max(sa, sb), Math.Max(sc, sd)) > wideStart)
+            {
+                // A token too near the end of the blob for a 16-byte read. Step one and retry the
+                // block: a `break` here would give up on the wide path for the whole rest of the
+                // stream because of one token at the end of the dictionary.
+                i = One(typed, i, tokens, dictionary, destination, ref output, ref source,
+                    wideLimit, wideStart, ref written);
+                continue;
+            }
+
+            int oa = written;
+            int ob = oa + (int)(pa >> 32);
+            int oc = ob + (int)(pb >> 32);
+            int od = oc + (int)(pc >> 32);
+            written = od + (int)(pd >> 32);
+
+            Vector128.StoreUnsafe(
+                Vector128.LoadUnsafe(ref Unsafe.Add(ref source, (uint)sa)),
+                ref Unsafe.Add(ref output, (uint)oa));
+            Vector128.StoreUnsafe(
+                Vector128.LoadUnsafe(ref Unsafe.Add(ref source, (uint)sb)),
+                ref Unsafe.Add(ref output, (uint)ob));
+            Vector128.StoreUnsafe(
+                Vector128.LoadUnsafe(ref Unsafe.Add(ref source, (uint)sc)),
+                ref Unsafe.Add(ref output, (uint)oc));
+            Vector128.StoreUnsafe(
+                Vector128.LoadUnsafe(ref Unsafe.Add(ref source, (uint)sd)),
+                ref Unsafe.Add(ref output, (uint)od));
+            i += 4;
         }
 
         return written;
+    }
+
+    /// <summary>One token: the path the block falls back to, and the only one that can raise.</summary>
+    /// <returns>The next code index.</returns>
+    private static int One<TCode>(
+        ReadOnlySpan<TCode> typed,
+        int i,
+        ReadOnlySpan<long> tokens,
+        ReadOnlySpan<byte> dictionary,
+        Span<byte> destination,
+        ref byte output,
+        ref byte source,
+        int wideLimit,
+        int wideStart,
+        ref int written)
+        where TCode : unmanaged
+    {
+        uint code = WidenToken(typed[i]);
+        if (code >= (uint)tokens.Length)
+        {
+            CompressedThrow.Format(
+                $"{Id} code {code} names a token the {tokens.Length}-entry dictionary does " +
+                "not hold.");
+        }
+
+        long packed = tokens[(int)code];
+        int start = (int)packed;
+        int size = (int)(packed >> 32);
+
+        if (written <= wideLimit && start <= wideStart)
+        {
+            // ONE 16-BYTE STORE PER TOKEN, then advance by the token's REAL length - the same
+            // trick FSST's decoder uses, and legal for the same reason: the bytes past the token
+            // are garbage the next store overwrites.
+            Vector128.StoreUnsafe(
+                Vector128.LoadUnsafe(ref Unsafe.Add(ref source, (uint)start)),
+                ref Unsafe.Add(ref output, (uint)written));
+            written += size;
+            return i + 1;
+        }
+
+        if (written + size > destination.Length)
+        {
+            CompressedThrow.Format(
+                $"{Id}: the code stream decodes to more than the {destination.Length} bytes " +
+                "its uncompressed lengths account for.");
+        }
+
+        dictionary.Slice(start, size).CopyTo(destination.Slice(written, size));
+        written += size;
+        return i + 1;
+    }
+
+    /// <summary>Widens one code, saturating anything past a token index so the check refuses it.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint WidenToken<TCode>(TCode code)
+        where TCode : unmanaged
+    {
+        if (typeof(TCode) == typeof(byte))
+        {
+            return Unsafe.As<TCode, byte>(ref code);
+        }
+
+        if (typeof(TCode) == typeof(ushort))
+        {
+            return Unsafe.As<TCode, ushort>(ref code);
+        }
+
+        if (typeof(TCode) == typeof(uint))
+        {
+            return Unsafe.As<TCode, uint>(ref code);
+        }
+
+        ulong wide = Unsafe.As<TCode, ulong>(ref code);
+        return wide > uint.MaxValue ? uint.MaxValue : (uint)wide;
     }
 
     /// <summary>
@@ -469,80 +652,151 @@ public sealed class OnPairDecoder : ArrayDecoder
         CanonicalNode lengths, PType ptype, int length, ReadOnlySpan<int> wanted, bool selective,
         out int longestRow)
     {
+        // Typed once rather than per row: this loop was 13.7% of a 1M-row onpair scan, and every
+        // iteration of it went through `ReadInteger`'s switch on the physical type to add one
+        // number. The overflow cap is checked ONCE at the end instead of per row -- a sum of at
+        // most 2^31 values each below 2^63 cannot wrap a `long`, so the running total is exact
+        // until it is tested.
         ReadOnlySpan<byte> raw = lengths.Values.Span;
         int count = selective ? wanted.Length : length;
-        long total = 0;
-        long longest = 0;
-        for (int i = 0; i < count; i++)
+        (long total, long longest, int negative) = ptype switch
         {
-            int row = selective ? wanted[i] : i;
-            long value = CanonicalSupport.ReadInteger(raw, ptype, row);
-            if (value < 0)
-            {
-                CompressedThrow.Format($"{Id} row {row} declares a negative uncompressed length.");
-            }
+            PType.U8 => SumLengths<byte>(raw, wanted, selective, count),
+            PType.U16 => SumLengths<ushort>(raw, wanted, selective, count),
+            PType.U32 => SumLengths<uint>(raw, wanted, selective, count),
+            PType.U64 => SumLengths<ulong>(raw, wanted, selective, count),
+            PType.I8 => SumLengths<sbyte>(raw, wanted, selective, count),
+            PType.I16 => SumLengths<short>(raw, wanted, selective, count),
+            PType.I32 => SumLengths<int>(raw, wanted, selective, count),
+            _ => SumLengths<long>(raw, wanted, selective, count),
+        };
 
-            total += value;
-            if (total > int.MaxValue)
-            {
-                CompressedThrow.Format($"{Id} uncompressed lengths sum past {int.MaxValue} bytes.");
-            }
+        if (negative >= 0)
+        {
+            CompressedThrow.Format(
+                $"{Id} row {(selective ? wanted[negative] : negative)} declares a negative " +
+                "uncompressed length.");
+        }
 
-            longest = Math.Max(longest, value);
+        if (total > int.MaxValue)
+        {
+            CompressedThrow.Format($"{Id} uncompressed lengths sum past {int.MaxValue} bytes.");
         }
 
         longestRow = (int)Math.Min(longest, int.MaxValue);
         return (int)total;
     }
 
-    /// <summary>
-    /// Cuts the decoded heap into per-row views, advancing by each row's uncompressed length.
-    /// </summary>
+    /// <summary>Sums and maxes the lengths with the physical type resolved before the loop.</summary>
+    /// <returns>The total, the longest row, and the index of the first negative length or -1.</returns>
     /// <remarks>
-    /// The heap holds the produced rows back to back in selection order, so the OFFSET walks the
-    /// output while the LENGTH is read at the row's own index. Null rows are not special-cased:
-    /// upstream stores a zero length for them, so they consume nothing and get an empty view, which
-    /// is what the zeroed allocation already holds.
+    /// Two loops, not one with a flag in it. The dense path is the one that runs a million times
+    /// per chunk, and it needs neither the <c>wanted</c> indirection nor the longest row --
+    /// <c>longestRow</c> decides whether a SELECTIVE decode may use the stack, and a dense one
+    /// never asks. For an unsigned length type the sign test is dropped too, because there is
+    /// nothing to test.
     /// </remarks>
-    /// <returns><c>true</c> if any view references the heap rather than inlining its value.</returns>
-    private static bool BuildViews(
-        ReadOnlySpan<byte> lengths,
-        PType ptype,
-        ReadOnlySpan<byte> heap,
-        Span<byte> views,
-        int length,
-        bool requireUtf8,
-        ReadOnlySpan<int> wanted,
-        bool selective)
+    private static (long Total, long Longest, int Negative) SumLengths<TLen>(
+        ReadOnlySpan<byte> raw, ReadOnlySpan<int> wanted, bool selective, int count)
+        where TLen : unmanaged
     {
-        bool referenced = false;
-        int offset = 0;
-        for (int i = 0; i < length; i++)
+        ReadOnlySpan<TLen> typed = MemoryMarshal.Cast<byte, TLen>(raw);
+        long total = 0;
+        long longest = 0;
+
+        if (!selective)
         {
-            int size = (int)CanonicalSupport.ReadInteger(
-                lengths, ptype, selective ? wanted[i] : i);
-            ReadOnlySpan<byte> value = heap.Slice(offset, size);
-
-            if (requireUtf8 && !Utf8.IsValid(value))
+            typed = typed[..count];
+            if (Signed<TLen>())
             {
-                throw new VortexFormatException($"Row {i} of a Utf8 array is not valid UTF-8.");
+                for (int i = 0; i < typed.Length; i++)
+                {
+                    long value = WidenLength(typed[i]);
+                    if (value < 0)
+                    {
+                        return (total, longest, i);
+                    }
+
+                    total += value;
+                }
+
+                return (total, longest, -1);
             }
 
-            Span<byte> view = views.Slice(i * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
-            if (size <= CanonicalSupport.MaxInlineViewLength)
+            for (int i = 0; i < typed.Length; i++)
             {
-                CanonicalSupport.WriteInlineView(view, value);
-            }
-            else
-            {
-                CanonicalSupport.WriteReferenceView(view, size, value, bufferIndex: 0, offset: offset);
-                referenced = true;
+                total += WidenLength(typed[i]);
             }
 
-            offset += size;
+            return (total, longest, -1);
         }
 
-        return referenced;
+        for (int i = 0; i < count; i++)
+        {
+            long value = WidenLength(typed[wanted[i]]);
+            if (value < 0)
+            {
+                return (total, longest, i);
+            }
+
+            total += value;
+            longest = Math.Max(longest, value);
+        }
+
+        return (total, longest, -1);
+    }
+
+    /// <summary>Whether <typeparamref name="TLen"/> can hold a negative value.</summary>
+    private static bool Signed<TLen>()
+        where TLen : unmanaged =>
+        typeof(TLen) == typeof(sbyte) || typeof(TLen) == typeof(short) ||
+        typeof(TLen) == typeof(int) || typeof(TLen) == typeof(long);
+
+    /// <summary>
+    /// Widens one length, saturating a <c>u64</c> above <see cref="long.MaxValue"/> so the sum's
+    /// cap refuses it rather than wrapping.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static long WidenLength<TLen>(TLen value)
+        where TLen : unmanaged
+    {
+        if (typeof(TLen) == typeof(byte))
+        {
+            return Unsafe.As<TLen, byte>(ref value);
+        }
+
+        if (typeof(TLen) == typeof(ushort))
+        {
+            return Unsafe.As<TLen, ushort>(ref value);
+        }
+
+        if (typeof(TLen) == typeof(uint))
+        {
+            return Unsafe.As<TLen, uint>(ref value);
+        }
+
+        if (typeof(TLen) == typeof(ulong))
+        {
+            ulong wide = Unsafe.As<TLen, ulong>(ref value);
+            return wide > long.MaxValue ? long.MaxValue : (long)wide;
+        }
+
+        if (typeof(TLen) == typeof(sbyte))
+        {
+            return Unsafe.As<TLen, sbyte>(ref value);
+        }
+
+        if (typeof(TLen) == typeof(short))
+        {
+            return Unsafe.As<TLen, short>(ref value);
+        }
+
+        if (typeof(TLen) == typeof(int))
+        {
+            return Unsafe.As<TLen, int>(ref value);
+        }
+
+        return Unsafe.As<TLen, long>(ref value);
     }
 
     /// <summary>Decodes one non-nullable integer child and checks its shape.</summary>
