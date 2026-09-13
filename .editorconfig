@@ -1,35 +1,109 @@
-# Analyzer severities. The bans that are expressible as APIs live in BannedSymbols.txt; these are
-# the rules that need to look at the SHAPE of the code instead.
+# Analyzer severities. The bans expressible as an API live in BannedSymbols.txt; these are the
+# rules that have to look at the SHAPE of the code instead.
 #
-# TreatWarningsAsErrors is on repository-wide, so `severity = warning` here already fails the
-# build. The rules are written as `error` anyway, because a reader of this file should not have to
-# know that to understand what happens.
+# TreatWarningsAsErrors is on repository-wide, so `severity = warning` here would already fail the
+# build. They are written as `error` anyway, because a reader of this file should not have to know
+# that to understand what happens.
+#
+# EVERY RULE BELOW WAS CLEAN WHEN IT WAS TURNED ON. That is the point of enabling them now rather
+# than later: they cost nothing today and they are the only thing standing between this code and
+# the next plausible-looking `.Result`.
 root = true
 
+# ---------------------------------------------------------------------------------------------
+# SCOPED TO src/ ON PURPOSE. These rules are about not blocking a caller that could have awaited,
+# and the callers that matter are the library's. A benchmark writing its results with
+# Console.WriteLine inside an async Main is not the anti-pattern CA1849 is named for, and fifty of
+# those would train everyone to ignore the rule where it does matter.
+# ---------------------------------------------------------------------------------------------
 [src/**.cs]
 
-# ---------------------------------------------------------------- async correctness
+# ---------------------------------------------------------------- sync over async, by shape
 # CA1849: a synchronous call where an async overload exists, inside an async method. This is the
-# half of "sync over async" that BannedSymbols.txt cannot express, because it is about the
-# relationship between a call and its enclosing method rather than about the API being called.
+# half of "sync over async" BannedSymbols.txt cannot express, because it is about the relationship
+# between a call and its enclosing method rather than about the API being called.
 dotnet_diagnostic.CA1849.severity = error
 
-# CA2012: a ValueTask consumed twice, or not consumed at all. A ValueTask is not a Task and does
-# not survive being awaited twice; this library returns them from the hottest paths it has.
+# VSTHRD002: the same blocking, ANYWHERE -- including the synchronous methods where blocking is
+# most likely to deadlock, which is exactly where CA1849 does not look.
+dotnet_diagnostic.VSTHRD002.severity = error
+
+# VSTHRD103: prefer the async member when one is in scope.
+dotnet_diagnostic.VSTHRD103.severity = error
+
+# ---------------------------------------------------------------- tasks that nobody observes
+# VSTHRD100: `async void`. Its exceptions do not propagate to any caller; they reach the process.
+dotnet_diagnostic.VSTHRD100.severity = error
+
+# VSTHRD101: an async delegate passed where only `void` fits, which is `async void` in disguise.
+dotnet_diagnostic.VSTHRD101.severity = error
+
+# VSTHRD110: a Task-returning call whose result is dropped. Fire-and-forget swallows the failure.
+dotnet_diagnostic.VSTHRD110.severity = error
+
+# VSTHRD114: `return null` from a Task-returning method -- a NullReferenceException at the await.
+dotnet_diagnostic.VSTHRD114.severity = error
+
+# CA2012: a ValueTask consumed twice, or not at all. A ValueTask is not a Task and does not survive
+# a second await; this library returns them from the hottest paths it has.
 dotnet_diagnostic.CA2012.severity = error
 
+# VSTHRD107: `using` over a Task instead of over what it produces.
+dotnet_diagnostic.VSTHRD107.severity = error
+
+# ---------------------------------------------------------------- context and scheduling
+# VSTHRD111: ConfigureAwait stated rather than defaulted. This library writes ConfigureAwait(false)
+# on every await it owns; the rule is what keeps the next one from being the exception.
+dotnet_diagnostic.VSTHRD111.severity = error
+
+# VSTHRD105 / CA2008: an overload that silently captures TaskScheduler.Current.
+dotnet_diagnostic.VSTHRD105.severity = error
+dotnet_diagnostic.CA2008.severity = error
+
+# CA2007: the same ConfigureAwait rule from the built-in set, which sees call sites VSTHRD111 does
+# not. Enabled here and NOT repository-wide: tests and benchmarks want the opposite convention.
+dotnet_diagnostic.CA2007.severity = error
+
+# CA2247: TaskCompletionSource constructed with TaskContinuationOptions, which is a different enum
+# that happens to compile -- the continuation then runs synchronously on the completer's thread.
+dotnet_diagnostic.CA2247.severity = error
+
+# ---------------------------------------------------------------- cancellation
 # CA2016: a CancellationToken in scope that was not forwarded. A scan that cannot be cancelled
 # because one call in the chain dropped the token is a bug nobody sees until a request hangs.
 dotnet_diagnostic.CA2016.severity = error
 
-# CA1068: the CancellationToken goes last. A convention, but one that makes CA2016 readable.
+# CA1068: the token goes last. A convention, but the one that makes CA2016 readable.
 dotnet_diagnostic.CA1068.severity = error
 
-# CA2007 (ConfigureAwait) is deliberately NOT enabled: this library already writes
-# ConfigureAwait(false) on every await it owns, and the rule's value is in catching the omission,
-# which review has done so far.
+# CA2250: ThrowIfCancellationRequested over a hand-written check-and-throw.
+dotnet_diagnostic.CA2250.severity = error
+
+# ---------------------------------------------------------------- disposal and naming
+# VSTHRD112: a type with DisposeAsync should say so with IAsyncDisposable.
+dotnet_diagnostic.VSTHRD112.severity = error
+
+# CA2213: a disposable field the owner never disposes. Two of the leaks this audit fixed --
+# ZoneMapWriter's arena and VortexFileWriter._transit -- were exactly this shape, found by reading
+# a profile rather than by a compiler that could have said so.
+dotnet_diagnostic.CA2213.severity = error
+
+# VSTHRD200: Task-returning members end in Async, so a missing await is visible at the call site.
+dotnet_diagnostic.VSTHRD200.severity = error
+
+# CA1835: the Memory-based ReadAsync/WriteAsync overloads rather than the byte[] ones.
+dotnet_diagnostic.CA1835.severity = error
+
+# ---------------------------------------------------------------- deliberately NOT enabled
+# CA2000 (dispose before losing scope) fires 30 times on OWNERSHIP TRANSFERS it cannot see:
+# VortexFile.OpenAsync hands its source to the file, and ISegmentSource hands out SegmentOwners
+# whose contract is that the BATCH releases them. Thirty suppressions would say nothing that
+# ISegmentSource's own documentation does not already say.
 #
-# SCOPED TO src/ ON PURPOSE. CA1849 is about not blocking a caller that could have awaited, and
-# the callers that matter are the library's -- a benchmark writing its results with
-# Console.WriteLine inside an async Main is not the anti-pattern the rule is named for, and
-# fifty of those would train everyone to ignore the rule where it does matter.
+# CA1063 (implement IDisposable correctly) wants the protected virtual Dispose(bool) pattern on
+# SegmentOwner, which is a reference-counted Retain/Release model on purpose. The rule is right
+# about the pattern it knows and wrong about the one this type implements.
+#
+# VSTHRD003 (avoid awaiting foreign Tasks) is a deadlock rule for code with a main thread; this
+# library has no synchronization context of its own and the rule fires on every legitimate await
+# of a caller's task.
