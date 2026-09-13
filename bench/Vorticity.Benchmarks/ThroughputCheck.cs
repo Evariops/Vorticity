@@ -95,11 +95,11 @@ internal static class ThroughputCheck
         ("datetimeparts", 2.09),   // 3 runs, spread 1.95-2.09
         ("decimal", 1.40),   // 3 runs, spread 1.21-1.40
         ("decimal_byte_parts", 1.37),   // 3 runs, spread 1.31-1.37
-        ("dict", 11.83),   // 3 runs, spread 9.52-11.83
-        ("dict_nullable_codes", 17.28),   // 3 runs, spread 14.09-17.28
-        ("dict_nullable_values_nonnull_codes", 20.82),   // 3 runs, spread 16.84-20.82
-        ("dict_u64_codes", 8.43),   // 3 runs, spread 7.71-8.43
-        ("dict_u8_codes", 16.38),   // 3 runs, spread 15.44-16.38
+        ("dict", 2.59),
+        ("dict_nullable_codes", 7.02),
+        ("dict_nullable_values_nonnull_codes", 6.60),
+        ("dict_u64_codes", 1.99),
+        ("dict_u8_codes", 3.67),
         ("ext", 1.27),   // 3 runs, spread 1.13-1.27
         ("fastlanes_bitpacked", 2.57),   // 3 runs, spread 2.32-2.57
         ("fastlanes_bitpacked_patched_no_chunk_offsets", 2.62),   // 3 runs, spread 2.37-2.62
@@ -142,7 +142,7 @@ internal static class ThroughputCheck
     /// <summary>Measures every generated file and reports ns/value for both readers.</summary>
     /// <param name="check">Whether to hold each ratio to its ceiling and exit non-zero when over.</param>
     /// <returns>0 on success, 1 when an encoding is over its ceiling, 2 when the inputs are absent.</returns>
-    internal static async Task<int> RunAsync(bool check)
+    internal static async Task<int> RunAsync(bool check, string[] only)
     {
         string? root = Environment.GetEnvironmentVariable(Variable);
         if (string.IsNullOrEmpty(root) || !Directory.Exists(root))
@@ -167,6 +167,28 @@ internal static class ThroughputCheck
 
         string[] files = Directory.GetFiles(root, "*.vortex", SearchOption.AllDirectories);
         Array.Sort(files, StringComparer.Ordinal);
+        if (only.Length > 0)
+        {
+            // Measuring one family takes half a minute where the whole axis takes five, which is
+            // the difference between checking a kernel change and not bothering. The gate still
+            // runs everything; this narrows the report.
+            List<string> kept = [];
+            foreach (string file in files)
+            {
+                string name = Path.GetFileNameWithoutExtension(file);
+                foreach (string pattern in only)
+                {
+                    if (name.Contains(pattern, StringComparison.OrdinalIgnoreCase))
+                    {
+                        kept.Add(file);
+                        break;
+                    }
+                }
+            }
+
+            files = [.. kept];
+        }
+
         if (files.Length == 0)
         {
             Console.Error.WriteLine($"no .vortex files under {root}");

@@ -19,6 +19,7 @@
 // the same kind of gate, per encoding. That is where the largest measured gaps in this repository
 // live, and until the gate existed nothing defended them.
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -47,7 +48,8 @@ internal static class Program
         if (args.Length > 0 && args[0] == "--throughput")
         {
             bool check = Array.IndexOf(args, "--check") >= 0;
-            return await ThroughputCheck.RunAsync(check).ConfigureAwait(false);
+            string[] only = [.. args[1..].Where(a => !a.StartsWith("--", StringComparison.Ordinal))];
+            return await ThroughputCheck.RunAsync(check, only).ConfigureAwait(false);
         }
 
         if (args.Length > 1 && args[0] == "--profile")

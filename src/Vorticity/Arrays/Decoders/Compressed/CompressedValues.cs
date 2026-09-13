@@ -11,6 +11,7 @@
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.File;
 using Vorticity.Types;
@@ -241,6 +242,46 @@ internal ref struct ValueWriter
             template.Precision, template.Scale, bufferIndexShift, buffer, span);
     }
 
+    /// <summary>
+    /// <see cref="Create"/> without the zero-fill, for a caller that writes every byte of every
+    /// row -- including the null ones, which must be written explicitly rather than inherited from
+    /// the allocator.
+    /// </summary>
+    /// <param name="ctx">The decode context; its canonical arena owns the memory.</param>
+    /// <param name="template">The node whose kind and element shape the output copies.</param>
+    /// <param name="length">Row count, already validated against the node's declared length.</param>
+    /// <param name="bufferIndexShift">As <see cref="Create"/>.</param>
+    /// <param name="encodingId">The encoding asking, for the error messages.</param>
+    /// <remarks>
+    /// Not offered for <see cref="CanonicalKind.Bool"/>: a bitmap's last byte holds bits past the
+    /// row count that nothing writes, and leaving those as the pool found them makes two decodes of
+    /// the same file produce different bytes.
+    /// </remarks>
+    public static ValueWriter CreateUninitialized(
+        ArrayDecodeContext ctx, in ValueReader template, int length, int bufferIndexShift,
+        string encodingId)
+    {
+        ArgumentNullException.ThrowIfNull(ctx);
+        if (template.Kind == CanonicalKind.Bool)
+        {
+            return Create(ctx, in template, length, bufferIndexShift, encodingId);
+        }
+
+        int total = ArrayDecodeContext.CheckedMultiply(length, template.Width, "Decoded values");
+        if (total == 0)
+        {
+            return new ValueWriter(
+                template.Kind, template.Width, length, template.PType, template.Storage,
+                template.Precision, template.Scale, bufferIndexShift, VortexBuffer.Empty, default);
+        }
+
+        VortexBuffer buffer = CompressedValues.AllocateUninitialized(
+            ctx, total, AlignmentFor(template.Width), encodingId, out Span<byte> span);
+        return new ValueWriter(
+            template.Kind, template.Width, length, template.PType, template.Storage,
+            template.Precision, template.Scale, bufferIndexShift, buffer, span);
+    }
+
     /// <summary>Copies row <paramref name="sourceRow"/> of <paramref name="source"/> to row
     /// <paramref name="destinationRow"/>.</summary>
     /// <param name="source">Where the row comes from; must be the same kind as this writer.</param>
@@ -283,28 +324,17 @@ internal ref struct ValueWriter
 
         if (_kind == CanonicalKind.Bool)
         {
-            bool value = ReadBit(source.Bytes, source.BitOffset + sourceRow);
-            for (int i = 0; i < count; i++)
-            {
-                if (value)
-                {
-                    SetBit(destinationRow + i);
-                }
-                else
-                {
-                    ClearBit(destinationRow + i);
-                }
-            }
-
+            BitmapKernels.FillRange(
+                _bytes, destinationRow, count, ReadBit(source.Bytes, source.BitOffset + sourceRow));
             return;
         }
 
+        // One element written, then doubled: log2(count) calls to `memmove` rather than `count`
+        // copies of one element. `vortex.runend` is nothing but this loop.
         Copy(in source, sourceRow, destinationRow);
-        ReadOnlySpan<byte> first = _bytes.Slice(destinationRow * _width, _width);
-        for (int i = 1; i < count; i++)
-        {
-            first.CopyTo(_bytes.Slice((destinationRow + i) * _width, _width));
-        }
+        RowKernels.Tile(
+            _bytes.Slice(destinationRow * _width, count * _width),
+            _bytes.Slice(destinationRow * _width, _width));
     }
 
     /// <summary>Writes one row of raw bytes, already in the output's representation.</summary>
@@ -452,13 +482,14 @@ internal ref struct ValidityWriter
     /// <summary>Marks a run of rows valid.</summary>
     /// <param name="row">First row.</param>
     /// <param name="count">How many.</param>
-    public readonly void SetValidRange(int row, int count)
-    {
-        for (int i = 0; i < count; i++)
-        {
-            SetValid(row + i);
-        }
-    }
+    public readonly void SetValidRange(int row, int count) =>
+        BitmapKernels.SetRange(_bits, row, count);
+
+    /// <summary>Marks every row valid, when the caller has established that in one test.</summary>
+    public readonly void SetAllValid() => BitmapKernels.SetRange(_bits, 0, _length);
+
+    /// <summary>The bitmap itself, for a kernel that writes it directly; empty when untracked.</summary>
+    internal readonly Span<byte> Bits => _bits;
 
     /// <summary>Collapses the bitmap per contract §2.6 rule 3 and publishes it if it survives.</summary>
     /// <param name="ctx">The decode context.</param>
@@ -541,6 +572,17 @@ internal readonly ref struct ValidityReader
 
     /// <summary>Every row is valid.</summary>
     public bool IsAllValid => _mode == 0;
+
+    /// <summary>The bitmap, or empty when validity is uniform.</summary>
+    /// <remarks>
+    /// For a kernel that reads validity in its own loop rather than through
+    /// <see cref="IsValid(int)"/>: an empty span is the loop-invariant "no bitmap" test, which is
+    /// what removes the per-row mode switch. Pair it with <see cref="BitOffset"/>.
+    /// </remarks>
+    public ReadOnlySpan<byte> Bits => _bits;
+
+    /// <summary>Bit position of row 0 in <see cref="Bits"/>.</summary>
+    public int BitOffset => _bitOffset;
 
     /// <summary>Every row is null.</summary>
     public bool IsAllInvalid => _mode == 1;

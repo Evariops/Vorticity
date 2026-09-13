@@ -126,32 +126,54 @@ public sealed class DictDecoder : ArrayDecoder
         DataBufferSet dataBuffers = DataBufferSet.Collect(context.Canonical, in values, false, default);
         try
         {
-            ValueWriter writer = ValueWriter.Create(context, in values, produced, 0, Id);
+            // A Bool value array is bit-packed, so there is no fixed-width row to move and the
+            // typed kernel has nothing to specialize on; it keeps the row-at-a-time loop. Every
+            // other kind is a gather, which is what the kernel is.
+            bool bitPacked = values.Kind == CanonicalKind.Bool;
+            ValueWriter writer = bitPacked
+                ? ValueWriter.Create(context, in values, produced, 0, Id)
+                : ValueWriter.CreateUninitialized(context, in values, produced, 0, Id);
             ValidityWriter validity = ValidityWriter.Create(context, produced, tracked, Id);
 
-            for (int row = 0; row < produced; row++)
+            if (bitPacked)
             {
-                if (!codesValidity.IsValid(row))
+                GatherBits(
+                    in values, codes, codesPType, valuesLength, produced, in codesValidity,
+                    in valuesValidity, tracked, ref writer, in validity);
+            }
+            else if (!tracked)
+            {
+                // The dense path: no validity to read, no validity to write, one load and one
+                // store per row with the physical types resolved before the loop starts.
+                int bad = RowKernels.Gather(
+                    codes, codesPType, values.Bytes, values.Width, valuesLength,
+                    writer.Bytes, produced);
+                if (bad >= 0)
                 {
-                    // A null code selects nothing; the row stays zeroed and invalid.
-                    continue;
+                    ThrowCode(codes, codesPType, bad, valuesLength);
+                }
+            }
+            else
+            {
+                int bad = RowKernels.GatherMasked(
+                    codes, codesPType, values.Bytes, values.Width, valuesLength,
+                    writer.Bytes, produced,
+                    codesValidity.Bits, codesValidity.BitOffset,
+                    valuesValidity.Bits, valuesValidity.BitOffset, valuesValidity.IsAllValid,
+                    validity.Bits);
+                if (bad >= 0)
+                {
+                    ThrowCode(codes, codesPType, bad, valuesLength);
                 }
 
-                long code = CompressedValues.ReadInteger(codes, codesPType, row);
-
-                // Class I. Upstream leans on the compressor's invariant plus its `take` kernel;
-                // this is untrusted input, so the check is unconditional.
-                if ((ulong)code >= (ulong)(uint)valuesLength)
+                // An all-invalid codes child has no bitmap to mask with, so the kernel would treat
+                // every row as valid. It cannot happen through the reader -- an all-invalid child
+                // collapses to ValidityKind.AllInvalid -- so it is handled here rather than costing
+                // a test per row inside the kernel.
+                if (codesValidity.IsAllInvalid)
                 {
-                    CompressedThrow.Format(
-                        $"{Id} code {code} at row {row} is outside [0, {valuesLength}).");
-                }
-
-                int index = (int)code;
-                writer.Copy(in values, index, row);
-                if (tracked && valuesValidity.IsValid(index))
-                {
-                    validity.SetValid(row);
+                    writer.Bytes.Clear();
+                    validity.Bits.Clear();
                 }
             }
 
@@ -163,4 +185,43 @@ public sealed class DictDecoder : ArrayDecoder
             dataBuffers.Dispose();
         }
     }
+
+    /// <summary>The row-at-a-time path a bit-packed value array still needs.</summary>
+    private static void GatherBits(
+        in ValueReader values, ReadOnlySpan<byte> codes, PType codesPType, int valuesLength,
+        int produced, in ValidityReader codesValidity, in ValidityReader valuesValidity,
+        bool tracked, ref ValueWriter writer, in ValidityWriter validity)
+    {
+        for (int row = 0; row < produced; row++)
+        {
+            if (!codesValidity.IsValid(row))
+            {
+                writer.ClearRow(row);
+                continue;
+            }
+
+            uint code = RowKernels.CodeAt(codes, codesPType, row);
+            if (code >= (uint)valuesLength)
+            {
+                ThrowCode(codes, codesPType, row, valuesLength);
+            }
+
+            int index = (int)code;
+            writer.Copy(in values, index, row);
+            if (tracked && valuesValidity.IsValid(index))
+            {
+                validity.SetValid(row);
+            }
+        }
+    }
+
+    // Class I. Upstream leans on the compressor's invariant plus its `take` kernel; this is
+    // untrusted input, so the check is unconditional -- what moved is where it is spelled, not
+    // whether it runs.
+    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
+    private static void ThrowCode(
+        ReadOnlySpan<byte> codes, PType codesPType, int row, int valuesLength) =>
+        CompressedThrow.Format(
+            $"{Id} code {CompressedValues.ReadInteger(codes, codesPType, row)} at row {row} is " +
+            $"outside [0, {valuesLength}).");
 }
