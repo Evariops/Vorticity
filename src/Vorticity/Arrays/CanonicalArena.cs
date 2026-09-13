@@ -765,6 +765,131 @@ public sealed class CanonicalArena
         return Math.Max(capacity * 2, 4);
     }
 
+    /// <summary>
+    /// Copies a node and everything under it out of <paramref name="source"/> and into this arena,
+    /// materializing every byte so the result outlives the arena it came from.
+    /// </summary>
+    /// <param name="source">The arena holding the node. May be this one.</param>
+    /// <param name="sourceIndex">The node to copy.</param>
+    /// <returns>The copy's index in this arena.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="source"/> is <see langword="null"/>.</exception>
+    /// <exception cref="VortexFormatException"><paramref name="sourceIndex"/> is out of range.</exception>
+    /// <remarks>
+    /// <para>
+    /// THE POINT IS THE BYTES, NOT THE RECORD. A <see cref="CanonicalRecord"/> is mostly indices and
+    /// <see cref="VortexBuffer"/> views, and a view is a window onto memory this arena's
+    /// <see cref="Reset"/> hands back to the pool. Copying the record alone would produce something
+    /// that reads correctly until the next batch refills the storage underneath it and then reads
+    /// live, plausible, wrong data - which is not a hypothetical: it is what
+    /// <c>ArenaLifetimeTests</c> demonstrates, and it is what made the shared-dictionary layout come
+    /// back permuted twice with three unrelated causes eliminated in between.
+    /// </para>
+    /// <para>
+    /// THREE SEPARATE ITEMS WANT THIS ONE FUNCTION. A dictionary shared across chunks must keep its
+    /// entries past the batch that first saw them (§3a); <c>CanonicalConcat</c> cannot coalesce
+    /// chunks across arenas without it (§3c); and a chunk larger than a batch is decoded once per
+    /// batch because the decoded node cannot be kept (the scan quadratic, 79x-129x). None of them is
+    /// about dictionaries, concatenation or scanning: all three are about lifetime.
+    /// </para>
+    /// <para>
+    /// Recursive, over the schema rather than over the rows - depth is the nesting of the dtype, so
+    /// a struct of lists of structs recurses three times whatever its row count.
+    /// </para>
+    /// <para>
+    /// INTERNAL UNTIL A CONSUMER JUSTIFIES THE SHAPE. <see cref="CanonicalArena"/> is public and a
+    /// caller building batches could plausibly want this, but the three items that asked for it have
+    /// not landed yet, and each could want a different signature - a subtree, a row range, a
+    /// retained handle. Publishing before one of them exists is how an API becomes permanent by
+    /// accident; promoting later costs nothing and un-shipping costs everything.
+    /// </para>
+    /// </remarks>
+    internal int CopyFrom(CanonicalArena source, int sourceIndex)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if ((uint)sourceIndex >= (uint)source._recordCount)
+        {
+            ArraysThrow.CanonicalIndex(sourceIndex, source._recordCount);
+        }
+
+        // Read by value up front. The recursive calls below append to THIS arena, which may resize
+        // `_records`, and holding a `ref` into the array across that would be a use-after-move when
+        // source and destination are the same arena.
+        CanonicalRecord src = source._records[sourceIndex];
+
+        // Validity first: its bitmap is a node like any other, and the copy must name the new index.
+        Validity validity = src.Validity;
+        if (validity.Kind == ValidityKind.Bitmap)
+        {
+            validity = Validity.Bitmap(CopyFrom(source, validity.CanonicalNodeIndex));
+        }
+
+        // Children next, gathered before anything is committed so the block stays contiguous: a
+        // child's own copy appends records, and interleaving those with this node's child slots
+        // would scatter them.
+        int[]? childIndices = null;
+        if (src.ChildCount > 0)
+        {
+            childIndices = new int[src.ChildCount];
+            for (int i = 0; i < src.ChildCount; i++)
+            {
+                childIndices[i] = CopyFrom(source, source._children[src.ChildStart + i]);
+            }
+        }
+
+        CanonicalRecord copy = src;
+        copy.Validity = validity;
+        copy.BufferA = CopyBuffer(src.BufferA);
+        copy.BufferB = CopyBuffer(src.BufferB);
+        copy.ChildStart = -1;
+        copy.ChildCount = 0;
+        copy.DataBufferStart = -1;
+        copy.DataBufferCount = 0;
+
+        int index = Commit(ref copy);
+
+        if (childIndices is not null)
+        {
+            _records[index].ChildStart = _childCount;
+            _records[index].ChildCount = childIndices.Length;
+            foreach (int child in childIndices)
+            {
+                AddChild(child);
+            }
+        }
+
+        if (src.DataBufferCount > 0)
+        {
+            _records[index].DataBufferStart = _dataBufferCount;
+            _records[index].DataBufferCount = src.DataBufferCount;
+            for (int i = 0; i < src.DataBufferCount; i++)
+            {
+                AddDataBuffer(CopyBuffer(source._dataBuffers[src.DataBufferStart + i]));
+            }
+        }
+
+        return index;
+    }
+
+    /// <summary>Materializes one buffer's bytes into storage this arena owns.</summary>
+    /// <remarks>
+    /// An empty buffer copies to an empty buffer rather than to a zero-length allocation: renting a
+    /// block to hold nothing would charge every copy of a non-nullable column for a validity buffer
+    /// that does not exist.
+    /// </remarks>
+    private VortexBuffer CopyBuffer(VortexBuffer source)
+    {
+        if (source.Length == 0)
+        {
+            return VortexBuffer.Empty;
+        }
+
+        // Uninitialized: the copy below writes every byte of it. See AllocateUninitialized for why
+        // that bar is where it is.
+        VortexBuffer copy = AllocateUninitialized(source.Length, 1, out Span<byte> destination);
+        source.Span.CopyTo(destination);
+        return copy;
+    }
+
     private int Commit(ref CanonicalRecord record)
     {
         if (_recordCount == _records.Length)
