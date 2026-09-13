@@ -331,10 +331,21 @@ internal ref struct ValueWriter
 
         // One element written, then doubled: log2(count) calls to `memmove` rather than `count`
         // copies of one element. `vortex.runend` is nothing but this loop.
-        Copy(in source, sourceRow, destinationRow);
-        RowKernels.Tile(
-            _bytes.Slice(destinationRow * _width, count * _width),
-            _bytes.Slice(destinationRow * _width, _width));
+        Span<byte> destination = _bytes.Slice(destinationRow * _width, count * _width);
+
+        // TILED STRAIGHT FROM THE SOURCE, because `Copy` first was a `SpanHelpers.Memmove` CALL
+        // PER RUN to move four bytes -- out of line, because the length is a variable -- and a
+        // run-end column is nothing but runs. `Tile` already takes its element from wherever the
+        // caller keeps it; only a view that needs its buffer index rebased has to be written into
+        // the destination first, and then the tiling repeats the rebased copy.
+        if (_kind == CanonicalKind.VarBinView && _bufferIndexShift != 0)
+        {
+            Copy(in source, sourceRow, destinationRow);
+            RowKernels.Tile(destination, destination[.._width]);
+            return;
+        }
+
+        RowKernels.Tile(destination, source.Bytes.Slice(sourceRow * _width, _width));
     }
 
     /// <summary>Writes one row of raw bytes, already in the output's representation.</summary>

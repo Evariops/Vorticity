@@ -116,7 +116,13 @@ public sealed class RunEndDecoder : ArrayDecoder
             context.Canonical, in values, false, default);
         try
         {
-            ValueWriter writer = ValueWriter.Create(context, in values, length, 0, Id);
+            // UNINITIALIZED, AND THE LOOP BELOW IS THE PROOF: `position` starts at 0, every
+            // iteration writes exactly [position, endRow) and then sets position = endRow, so the
+            // written rows are contiguous from 0 with no gap -- and the `position != length` check
+            // after the loop turns "did not reach the end" into a format error rather than a
+            // buffer holding whatever the pool last put there. Zero-filling 4 MB that `Repeat`
+            // overwrites in full was 10% of a 1M-row run-end scan.
+            ValueWriter writer = ValueWriter.CreateUninitialized(context, in values, length, 0, Id);
             ValidityWriter validity = ValidityWriter.Create(context, length, tracked, Id);
 
             ulong unsignedOffset = (ulong)offset;

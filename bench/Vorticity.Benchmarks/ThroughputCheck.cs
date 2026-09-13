@@ -103,7 +103,7 @@ internal static class ThroughputCheck
         ("ext", 0.45),   // 2 runs, spread 0.34-0.45
         ("fastlanes_bitpacked", 1.38),   // 2 runs, spread 1.35-1.38
         ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.51),   // 2 runs, spread 1.32-1.51
-        ("fastlanes_delta", 1.36),   // 2 runs, spread 1.30-1.36
+        ("fastlanes_delta", 1.18),   // Undelta by reference; 3 runs, spread 1.12-1.18
         ("fastlanes_for", 1.07),   // 2 runs, spread 1.00-1.07
         ("fastlanes_rle", 0.97),   // 2 runs, spread 0.92-0.97
         ("fixed_size_list", 0.32),   // 2 runs, spread 0.31-0.32
@@ -119,7 +119,7 @@ internal static class ThroughputCheck
         ("parquet_variant", 8.11),   // 2 runs, spread 7.69-8.11
         ("pco", 1.35),   // 2 runs, spread 1.32-1.35
         ("primitive", 0.38),   // 2 runs, spread 0.29-0.38
-        ("runend", 1.37),   // 2 runs, spread 1.37-1.37
+        ("runend", 1.30),   // tile from source, uninitialized output; 3 runs, spread 1.14-1.30
         ("sequence", 1.97),   // 2 runs, spread 1.91-1.97
         ("sparse", 1.04),   // 2 runs, spread 0.95-1.04
         ("struct", 0.08),   // 2 runs, spread 0.07-0.08

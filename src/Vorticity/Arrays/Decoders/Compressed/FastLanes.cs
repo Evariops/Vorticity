@@ -115,6 +115,13 @@ internal static class FastLanes
         }
     }
 
+    /// <summary>
+    /// The inverse permutation as a span, for a kernel that walks it and has already established
+    /// its indices. <c>Untranspose(i) == UntransposeTable[i]</c>, without the two argument checks
+    /// and the bounds check that the by-index accessor pays PER ELEMENT.
+    /// </summary>
+    internal static ReadOnlySpan<int> UntransposeTable => TransposeInverse;
+
     /// <summary><c>output[transpose(i)] = input[i]</c> over a whole 1024-element block.</summary>
     /// <typeparam name="T">The element type.</typeparam>
     /// <param name="input">Exactly 1024 elements.</param>

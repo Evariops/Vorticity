@@ -20,6 +20,7 @@
 // cannot emit one; that is a statement about writers and has never been a reason not to read.
 using System;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 using Vorticity.Arrays.Decoders.Canonical;
@@ -221,9 +222,19 @@ public sealed class DeltaDecoder : ArrayDecoder
                 int blockStart = b * BlockSize;
                 int from = Math.Max(offset, blockStart);
                 int to = Math.Min(offset + length, blockStart + BlockSize);
+
+                // ADDRESSED BY REFERENCE, because this loop runs once per DECODED VALUE and the
+                // by-index form paid four checks for each: two `ArgumentOutOfRangeException` tests
+                // inside `FastLanes.Untranspose`, then the table's own bounds check, then two span
+                // indexers. `p - blockStart` is in [0, 1024) by the clamps above and the table has
+                // exactly 1024 entries, so the argument checks can only ever pass.
+                ref int table = ref MemoryMarshal.GetReference(FastLanes.UntransposeTable);
+                ref T blockRef = ref MemoryMarshal.GetReference(block);
+                ref T outputRef = ref MemoryMarshal.GetReference(output);
                 for (int p = from; p < to; p++)
                 {
-                    output[p - offset] = block[FastLanes.Untranspose(p - blockStart)];
+                    int at = Unsafe.Add(ref table, p - blockStart);
+                    Unsafe.Add(ref outputRef, p - offset) = Unsafe.Add(ref blockRef, at);
                 }
             }
         }
@@ -240,23 +251,32 @@ public sealed class DeltaDecoder : ArrayDecoder
     private static void Accumulate<T>(Span<T> running, ReadOnlySpan<T> delta, Span<T> into)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
+        // `in running[i]` is a BOUNDS CHECK PER VECTOR ITERATION, on the innermost loop of the
+        // encoding. The three spans are the same length -- the caller slices all three to `lanes`
+        // -- so one set of hoisted references serves all of them.
+        int count = running.Length;
+        ref T runningRef = ref MemoryMarshal.GetReference(running);
+        ref T deltaRef = ref MemoryMarshal.GetReference(delta);
+        ref T intoRef = ref MemoryMarshal.GetReference(into);
+
         int i = 0;
-        if (Vector<T>.IsSupported && running.Length >= Vector<T>.Count)
+        if (Vector<T>.IsSupported && count >= Vector<T>.Count)
         {
             int width = Vector<T>.Count;
-            for (; i <= running.Length - width; i += width)
+            for (; i <= count - width; i += width)
             {
-                Vector<T> sum = Vector.LoadUnsafe(in running[i]) + Vector.LoadUnsafe(in delta[i]);
-                sum.StoreUnsafe(ref running[i]);
-                sum.StoreUnsafe(ref into[i]);
+                Vector<T> sum = Vector.LoadUnsafe(ref runningRef, (nuint)i)
+                    + Vector.LoadUnsafe(ref deltaRef, (nuint)i);
+                sum.StoreUnsafe(ref runningRef, (nuint)i);
+                sum.StoreUnsafe(ref intoRef, (nuint)i);
             }
         }
 
-        for (; i < running.Length; i++)
+        for (; i < count; i++)
         {
-            T sum = unchecked(running[i] + delta[i]);
-            running[i] = sum;
-            into[i] = sum;
+            T sum = unchecked(Unsafe.Add(ref runningRef, i) + Unsafe.Add(ref deltaRef, i));
+            Unsafe.Add(ref runningRef, i) = sum;
+            Unsafe.Add(ref intoRef, i) = sum;
         }
     }
 }
