@@ -48,7 +48,6 @@ public sealed class EncodingRegistryTests
     }
 
     [Theory]
-    [InlineData("vortex.pco")]
     [InlineData("vortex.variant")]
     [InlineData("vortex.parquet.variant")]
     public void EveryDeferredArrayIdIsUnknownAndDescribed(string id)
@@ -117,18 +116,18 @@ public sealed class EncodingRegistryTests
     [Fact]
     public void GettingADecoderForAnUnknownIdNamesTheIdAndTheKind()
     {
-        // vortex.pco: in scope by the parity decision and not written yet. This example has been
-        // changed three times - fastlanes.delta, vortex.patched, the vortex.list layout - each time
-        // because the id gained a reader, and each time the comment claimed the note was structural
-        // and so would not expire. The NOTE never expired; the CHOICE of example is not structural
-        // and will expire again when pco lands. That is now expected rather than defended against.
+        // vortex.variant: the last id still refused. This example has now been changed FOUR times -
+        // fastlanes.delta, vortex.patched, the vortex.list layout, vortex.pco - each time because
+        // the id gained a reader, and the third time the comment predicted exactly this. When
+        // variant lands there will be no unimplemented array id left and this test will need a
+        // forged one, the way LazyResolutionTests already does.
         VortexUnsupportedException error =
             Assert.Throws<VortexUnsupportedException>(
-                () => ArrayDecoderTable.Get(ArrayEncodingId.Unknown, "vortex.pco"));
+                () => ArrayDecoderTable.Get(ArrayEncodingId.Unknown, "vortex.variant"));
 
-        Assert.Equal("vortex.pco", error.ComponentId);
+        Assert.Equal("vortex.variant", error.ComponentId);
         Assert.Equal(VortexComponentKind.Array, error.Kind);
-        Assert.Contains("vortex.pco", error.Message, StringComparison.Ordinal);
+        Assert.Contains("vortex.variant", error.Message, StringComparison.Ordinal);
         Assert.Contains("array", error.Message, StringComparison.Ordinal);
         Assert.Contains("in scope for 1.0", error.Message, StringComparison.Ordinal);
     }

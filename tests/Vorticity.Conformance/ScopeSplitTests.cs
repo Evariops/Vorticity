@@ -20,8 +20,8 @@ public sealed class ScopeSplitTests
     // 616/203 was Phase 1. +32 vortex.decimal_byte_parts, +6 vortex.datetimeparts, +5
     // vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst, +46 vortex.onpair. The 45
     // that remain need a component deferred to Vortex 1.1 or in no core edition at all.
-    private const int ExpectedInScope = 809;
-    private const int ExpectedOutOfScope = 12;
+    private const int ExpectedInScope = 813;
+    private const int ExpectedOutOfScope = 8;
 
     [Fact]
     public void TheCorpusSplitsIntoTheScopeThisBuildClaims()

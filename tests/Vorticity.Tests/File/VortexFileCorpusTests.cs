@@ -356,9 +356,10 @@ public sealed class VortexFileCorpusTests
         // writer pre-populates array_specs with every id its editions permit, so an unused and
         // unresolvable entry is the normal case, not the exceptional one.
         // The file is one that DECLARES an id this build does not implement. It used to be
-        // encodings/fastlanes_delta, then encodings/map -- both now decode. vortex.pco is declared
-        // by the writer's edition-permitted set the same way.
-        CorpusEntry entry = CorpusManifest.Find("encodings/pco");
+        // encodings/fastlanes_delta, then encodings/map, then encodings/pco -- all now decode.
+        // vortex.variant is declared by the writer's edition-permitted set the same way, and is the
+        // last array id this build refuses.
+        CorpusEntry entry = CorpusManifest.Find("encodings/variant");
         await using VortexFile file = await VortexFile.OpenAsync(
             new TestSegmentSource(CorpusManifest.Bytes(entry.Id)),
             VortexOpenOptions.Default,
@@ -370,7 +371,7 @@ public sealed class VortexFileCorpusTests
         {
             string id = file.GetArrayEncodingId(i);
             global::Vorticity.Arrays.ArrayEncodingId resolved = file.GetArrayEncoding(i);
-            if (string.Equals(id, "vortex.pco", StringComparison.Ordinal))
+            if (string.Equals(id, "vortex.variant", StringComparison.Ordinal))
             {
                 sawDelta = true;
                 Assert.Equal(global::Vorticity.Arrays.ArrayEncodingId.Unknown, resolved);

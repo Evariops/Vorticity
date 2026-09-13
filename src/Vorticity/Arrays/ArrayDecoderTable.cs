@@ -53,6 +53,7 @@ public static class ArrayDecoderTable
         Register(MapDecoder.Instance);
         Register(PatchedArrayDecoder.Instance);
         Register(ZstdBuffersDecoder.Instance);
+        Register(Vorticity.Arrays.Decoders.Compressed.Pco.PcoDecoder.Instance);
         Register(BitPackedDecoder.Instance);
         Register(FastLanesRleDecoder.Instance);
         Register(ZigZagDecoder.Instance);

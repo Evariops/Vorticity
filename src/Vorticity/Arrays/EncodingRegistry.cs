@@ -84,6 +84,9 @@ public enum ArrayEncodingId : ushort
     /// <summary><c>vortex.zstd_buffers</c>.</summary>
     ZstdBuffers,
 
+    /// <summary><c>vortex.pco</c>.</summary>
+    Pco,
+
 
     /// <summary><c>fastlanes.rle</c>.</summary>
     FastLanesRle,
@@ -188,6 +191,7 @@ public static class EncodingRegistry
                 {
                     case (byte)'e': return idUtf8.SequenceEqual("vortex.ext"u8) ? ArrayEncodingId.Extension : ArrayEncodingId.Unknown;
                     case (byte)'m': return idUtf8.SequenceEqual("vortex.map"u8) ? ArrayEncodingId.Map : ArrayEncodingId.Unknown;
+                    case (byte)'p': return idUtf8.SequenceEqual("vortex.pco"u8) ? ArrayEncodingId.Pco : ArrayEncodingId.Unknown;
                     case (byte)'a': return idUtf8.SequenceEqual("vortex.alp"u8) ? ArrayEncodingId.Alp : ArrayEncodingId.Unknown;
                     default: return ArrayEncodingId.Unknown;
                 }
@@ -359,8 +363,7 @@ public static class EncodingRegistry
         // 2026-09-13 made full parity with Vortex Rust the target for 1.0 (docs/01-scope.md).
         // `vortex.map` and `vortex.zstd_buffers` were on this list and are now read; what is left is
         // in scope and unwritten, which is a different thing from out of scope.
-        if (idUtf8.SequenceEqual("vortex.pco"u8) ||
-            idUtf8.SequenceEqual("vortex.variant"u8) ||
+        if (idUtf8.SequenceEqual("vortex.variant"u8) ||
             idUtf8.SequenceEqual("vortex.parquet.variant"u8))
         {
             return "in scope for 1.0 by the parity decision; not implemented yet";

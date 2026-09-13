@@ -82,6 +82,41 @@ internal ref struct PcoBitReader
         return value & Mask(width);
     }
 
+    /// <summary>Reads <paramref name="width"/> bits at an absolute position, without moving.</summary>
+    /// <param name="bitPosition">Absolute bit position to read from.</param>
+    /// <param name="width">Bits to read.</param>
+    /// <returns>The value.</returns>
+    /// <remarks>
+    /// pco's offsets are addressed rather than streamed: the symbol pass records each value's width
+    /// and a running sum, and the offset pass reads value <c>i</c> at <c>base + csum[i]</c>. That is
+    /// a random access into the same buffer, not a second cursor.
+    /// </remarks>
+    internal ulong ReadAt(long bitPosition, int width)
+    {
+        long saved = _bitPosition;
+        _bitPosition = bitPosition;
+        try
+        {
+            return ReadUInt(width);
+        }
+        finally
+        {
+            _bitPosition = saved;
+        }
+    }
+
+    /// <summary>Moves to an absolute bit position.</summary>
+    /// <param name="bitPosition">The position; must be within the buffer.</param>
+    internal void SeekBits(long bitPosition)
+    {
+        if (bitPosition < 0 || bitPosition > (long)_source.Length * 8)
+        {
+            CompressedThrow.Format($"A pco seek to bit {bitPosition} is outside the buffer.");
+        }
+
+        _bitPosition = bitPosition;
+    }
+
     /// <summary>Reads one bit as a boolean.</summary>
     /// <returns>The bit.</returns>
     internal bool ReadBool() => ReadUInt(1) != 0;

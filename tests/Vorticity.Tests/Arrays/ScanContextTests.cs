@@ -17,10 +17,10 @@ namespace Vorticity.Tests.Arrays;
 
 public sealed class ScanContextTests
 {
-    // Slot 2 is the stand-in for "an id this build does not decode". It was vortex.pco until
-    // that gained a decoder; vortex.pco is in no
+    // Slot 2 is the stand-in for "an id this build does not decode". It was vortex.variant until
+    // that gained a decoder; vortex.variant is in no
     // core edition, so it stays that way as Phase 2 decoders land.
-    private static readonly string[] Ids = ["vortex.primitive", "vortex.bool", "vortex.pco"];
+    private static readonly string[] Ids = ["vortex.primitive", "vortex.bool", "vortex.variant"];
 
     [Fact]
     public void ADetachedContextOwnsEveryArenaAndRefusesToInventAFile()
@@ -54,7 +54,7 @@ public sealed class ScanContextTests
         Assert.Equal(ArrayEncodingId.Unknown, scan.ArrayEncodings[2]);
 
         Assert.Equal("vortex.primitive", scan.GetArrayEncodingIdText(0));
-        Assert.Equal("vortex.pco", scan.GetArrayEncodingIdText(2));
+        Assert.Equal("vortex.variant", scan.GetArrayEncodingIdText(2));
 
         // An index the footer never declared must not be an index-out-of-range on a throw path.
         Assert.Contains("99", scan.GetArrayEncodingIdText(99), StringComparison.Ordinal);
@@ -111,7 +111,7 @@ public sealed class ScanContextTests
     [Fact]
     public void DecodingANodeThisBuildCannotDecodeFailsAtUseWithTheIdAndTheKind()
     {
-        // Lazy resolution: the blob parsed fine (spec index 2 -> vortex.pco -> Unknown); the throw
+        // Lazy resolution: the blob parsed fine (spec index 2 -> vortex.variant -> Unknown); the throw
         // happens here, at the dispatch site, and names the component.
         using ScanContext scan = new ScanContext(Ids);
         LoadOneNode(scan, encoding: 2);
@@ -120,7 +120,7 @@ public sealed class ScanContextTests
         VortexUnsupportedException error = Assert.Throws<VortexUnsupportedException>(
             () => scan.Decode.Decode(scan.Nodes.Root, dtype, 8));
 
-        Assert.Equal("vortex.pco", error.ComponentId);
+        Assert.Equal("vortex.variant", error.ComponentId);
         Assert.Equal(VortexComponentKind.Array, error.Kind);
     }
 
