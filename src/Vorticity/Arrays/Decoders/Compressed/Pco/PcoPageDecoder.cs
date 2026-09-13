@@ -131,11 +131,47 @@ internal sealed class PcoLatentState
     private readonly PcoAnsTable _table;
     private readonly int _ansSizeLog;
     private readonly int _binCount;
+    // PER STATE, because both carry across the batches of one page: the four interleaved ANS
+    // positions are read-modify-written per value, and a delta moment is updated by the untransform
+    // and read again by the next batch.
     private readonly int[] _stateIndices = new int[4];
     private readonly ulong[] _deltaMoments;
-    private readonly ulong[] _scratch = new ulong[256];
-    private readonly int[] _offsetBits = new int[256];
-    private readonly long[] _offsetCumulative = new int[256].Length == 0 ? [] : new long[256];
+
+    /// <summary>
+    /// The per-batch working buffers, shared per thread instead of allocated per page.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// These three are written at the top of <c>Decode</c> and consumed before it returns - nothing
+    /// in them survives the call - but they were instance fields, so a page carrying one latent
+    /// variable allocated 5 kB of them and a chunk of many pages dropped that per page. The two
+    /// fields above are the ones that genuinely carry state, and they stay where they are.
+    /// </para>
+    /// <para>
+    /// Thread-static rather than pooled, for the reason <c>FsstSymbols</c> gives for its counting
+    /// tables: <c>ArrayPool&lt;T&gt;.Shared</c> is process-global and this is a fixed, bounded 5 kB
+    /// per thread that has ever decoded pco.
+    /// </para>
+    /// </remarks>
+    [ThreadStatic]
+    private static ulong[]? ScratchValues;
+
+    /// <inheritdoc cref="ScratchValues"/>
+    [ThreadStatic]
+    private static int[]? ScratchOffsetBits;
+
+    /// <inheritdoc cref="ScratchValues"/>
+    [ThreadStatic]
+    private static long[]? ScratchOffsetCumulative;
+
+    /// <summary>Values per batch; must match <c>PcoPageDecoder.BatchSize</c>.</summary>
+    private const int BatchSize = 256;
+
+    private static ulong[] Scratch => ScratchValues ??= new ulong[BatchSize];
+
+    private static int[] OffsetBits => ScratchOffsetBits ??= new int[BatchSize];
+
+    private static long[] OffsetCumulative => ScratchOffsetCumulative ??= new long[BatchSize];
 
     private PcoLatentState(PcoAnsTable table, int ansSizeLog, int binCount, ulong[] deltaMoments)
     {
@@ -186,6 +222,7 @@ internal sealed class PcoLatentState
     {
         // The values that come from the delta moments are not on the wire, so the symbol pass is
         // shorter than the batch by the delta order - but only at the end of the page.
+        ulong[] scratch = Scratch;
         int preDelta = Math.Min(batch, Math.Max(0, remaining - _deltaMoments.Length));
         ReadPreDelta(ref reader, preDelta);
 
@@ -196,7 +233,7 @@ internal sealed class PcoLatentState
 
         if (!destination.IsEmpty)
         {
-            _scratch.AsSpan(0, batch).CopyTo(destination);
+            scratch.AsSpan(0, batch).CopyTo(destination);
         }
     }
 
@@ -207,6 +244,9 @@ internal sealed class PcoLatentState
             return;
         }
 
+        ulong[] scratch = Scratch;
+        int[] offsetBits = OffsetBits;
+        long[] offsetCumulative = OffsetCumulative;
         long offsetBitTotal = 0;
         if (_binCount > 1)
         {
@@ -216,9 +256,9 @@ internal sealed class PcoLatentState
                 PcoAnsNode node = _table.Nodes[slot];
                 ulong ansValue = reader.ReadUInt(node.BitsToRead);
 
-                _scratch[i] = _table.StateLowers[slot];
-                _offsetBits[i] = node.OffsetBits;
-                _offsetCumulative[i] = offsetBitTotal;
+                scratch[i] = _table.StateLowers[slot];
+                offsetBits[i] = node.OffsetBits;
+                offsetCumulative[i] = offsetBitTotal;
                 offsetBitTotal += node.OffsetBits;
 
                 _stateIndices[i % 4] = node.NextStateIndexBase + (int)ansValue;
@@ -230,11 +270,11 @@ internal sealed class PcoLatentState
             // rather than reading zero-width symbols. Every value then has the SAME width, so the
             // per-value width and cumulative-position arrays describe nothing -- the position of
             // value i is `base + i * offsetBits`, and the fill is one vectorized store.
-            int offsetBits = _table.Nodes[0].OffsetBits;
+            int uniformBits = _table.Nodes[0].OffsetBits;
             ulong lower = _table.StateLowers[0];
-            _scratch.AsSpan(0, count).Fill(lower);
+            scratch.AsSpan(0, count).Fill(lower);
 
-            if (offsetBits == 0)
+            if (uniformBits == 0)
             {
                 // ...AND A BIN THAT NEEDS NO OFFSET BITS READS NOTHING AT ALL. The whole batch is
                 // the bin's lower bound, and the reader does not move. That is what a delta-encoded
@@ -247,11 +287,11 @@ internal sealed class PcoLatentState
             long uniformBase = reader.BitPosition;
             for (int i = 0; i < count; i++)
             {
-                _scratch[i] = unchecked(
-                    lower + reader.ReadAt(uniformBase + ((long)i * offsetBits), offsetBits));
+                scratch[i] = unchecked(
+                    lower + reader.ReadAt(uniformBase + ((long)i * uniformBits), uniformBits));
             }
 
-            reader.SeekBits(uniformBase + ((long)count * offsetBits));
+            reader.SeekBits(uniformBase + ((long)count * uniformBits));
             return;
         }
 
@@ -259,13 +299,13 @@ internal sealed class PcoLatentState
         long basePosition = reader.BitPosition;
         for (int i = 0; i < count; i++)
         {
-            if (_offsetBits[i] == 0)
+            if (offsetBits[i] == 0)
             {
                 continue;
             }
 
-            ulong offset = reader.ReadAt(basePosition + _offsetCumulative[i], _offsetBits[i]);
-            _scratch[i] = unchecked(_scratch[i] + offset);
+            ulong offset = reader.ReadAt(basePosition + offsetCumulative[i], offsetBits[i]);
+            scratch[i] = unchecked(scratch[i] + offset);
         }
 
         reader.SeekBits(basePosition + offsetBitTotal);
@@ -280,7 +320,8 @@ internal sealed class PcoLatentState
     private void UndoConsecutiveDelta(int batch)
     {
         // The 2^63 bias is pointwise and contiguous, so it is one vector add per lane group.
-        Span<ulong> values = _scratch.AsSpan(0, batch);
+        ulong[] scratch = Scratch;
+        Span<ulong> values = scratch.AsSpan(0, batch);
         int biased = 0;
         if (Vector<ulong>.IsSupported && batch >= Vector<ulong>.Count)
         {
@@ -302,8 +343,8 @@ internal sealed class PcoLatentState
             ulong moment = _deltaMoments[order];
             for (int i = 0; i < batch; i++)
             {
-                ulong previous = _scratch[i];
-                _scratch[i] = moment;
+                ulong previous = scratch[i];
+                scratch[i] = moment;
                 moment = unchecked(moment + previous);
             }
 

@@ -181,15 +181,44 @@ public sealed class SequenceDecoder : ArrayDecoder
                 value = unchecked(value + step);
             }
 
-            Vector<T> current = new Vector<T>(seed);
-            Vector<T> bump = new Vector<T>(unchecked(value - start));
-            for (; index <= values.Length - lanes; index += lanes)
+            T laneStep = unchecked(value - start);
+            Vector<T> bump = new Vector<T>(laneStep);
+
+            // FOUR ACCUMULATORS, NOT ONE, and no bounds check in the loop. One vector still leaves
+            // a loop-carried add between consecutive stores, so the loop runs at add LATENCY where
+            // the store units are the only thing that should bound it; four independent chains let
+            // the machine retire four stores in the time one dependency step takes. The base
+            // reference is taken once, so `StoreUnsafe` addresses the span without re-checking it
+            // per iteration.
+            ref T destinationRef = ref MemoryMarshal.GetReference(values);
+            Vector<T> v0 = new Vector<T>(seed);
+            Vector<T> v1 = unchecked(v0 + bump);
+            Vector<T> v2 = unchecked(v1 + bump);
+            Vector<T> v3 = unchecked(v2 + bump);
+            Vector<T> quadBump = new Vector<T>(
+                unchecked(laneStep + laneStep + laneStep + laneStep));
+
+            int quad = lanes * 4;
+            for (; index <= values.Length - quad; index += quad)
             {
-                current.StoreUnsafe(ref values[index]);
-                current = unchecked(current + bump);
+                v0.StoreUnsafe(ref destinationRef, (nuint)index);
+                v1.StoreUnsafe(ref destinationRef, (nuint)(index + lanes));
+                v2.StoreUnsafe(ref destinationRef, (nuint)(index + (2 * lanes)));
+                v3.StoreUnsafe(ref destinationRef, (nuint)(index + (3 * lanes)));
+                v0 = unchecked(v0 + quadBump);
+                v1 = unchecked(v1 + quadBump);
+                v2 = unchecked(v2 + quadBump);
+                v3 = unchecked(v3 + quadBump);
             }
 
-            accumulator = current[0];
+            // v0 is still the vector for `index`, because all four advanced together.
+            for (; index <= values.Length - lanes; index += lanes)
+            {
+                v0.StoreUnsafe(ref destinationRef, (nuint)index);
+                v0 = unchecked(v0 + bump);
+            }
+
+            accumulator = v0[0];
         }
 
         for (; index < values.Length; index++)

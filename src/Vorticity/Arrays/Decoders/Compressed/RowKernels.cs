@@ -259,6 +259,78 @@ internal static class RowKernels
         // time and stored once, instead of eight read-modify-writes of the same byte.
         if (codesAllValid && tracked && !valuesAllValid)
         {
+            // FOUR BOUNDS CHECKS PER ROW BECOME ONE FOR THE WHOLE LOOP. Every access inside the
+            // block below is provable from a fact established before it, so the checks are not
+            // removed on trust - they are removed because they are redundant:
+            //
+            //   * codes[row]        - `codes` is sliced to exactly the row count here;
+            //   * source[code]      - `code >= limit` returns first, and source.Length == limit;
+            //   * target[row]       - `target` is already sliced to the row count;
+            //   * valueBits[bit>>3] - `bit < valueBitOffset + valuesLength`, and the guard below
+            //                         checks the bitmap covers exactly that many bits.
+            //
+            // The guard failing is not an error: it falls through to the general loop, which
+            // checks everything per row and reports a malformed file the way it always did. That
+            // matters, because the bitmap's extent comes from the FILE and this is a reader that
+            // hostile input is aimed at - the checks go away when they are provably redundant, not
+            // when they are merely unlikely to fire.
+            if (codes.Length >= target.Length
+                && !valueBits.IsEmpty
+                && (long)valueBits.Length * 8 >= (long)valueBitOffset + valuesLength)
+            {
+                ReadOnlySpan<TCode> rowCodes = codes[..target.Length];
+                ref TCode codeRef = ref MemoryMarshal.GetReference(rowCodes);
+                ref TValue sourceRef = ref MemoryMarshal.GetReference(source);
+                ref TValue targetRef = ref MemoryMarshal.GetReference(target);
+                ref byte bitsRef = ref MemoryMarshal.GetReference(valueBits);
+
+                // THE FULL BLOCK IS ITS OWN LOOP, with a CONSTANT eight iterations. Sharing one
+                // loop with the tail made the trip count a variable, which costs the unroll - and
+                // with it the constant shift amounts, and the chance for eight independent gathers
+                // to be in flight at once. Only the last block of a column is ever short.
+                int whole = target.Length & ~7;
+                for (int block = 0; block < whole; block += 8)
+                {
+                    int mask = 0;
+                    for (int k = 0; k < 8; k++)
+                    {
+                        int row = block + k;
+                        uint code = WidenCode(Unsafe.Add(ref codeRef, row));
+                        if (code >= limit)
+                        {
+                            return row;
+                        }
+
+                        Unsafe.Add(ref targetRef, row) = Unsafe.Add(ref sourceRef, (nint)code);
+                        int bit = valueBitOffset + (int)code;
+                        mask |= ((Unsafe.Add(ref bitsRef, bit >> 3) >> (bit & 7)) & 1) << k;
+                    }
+
+                    outputBits[block >> 3] = (byte)mask;
+                }
+
+                if (whole < target.Length)
+                {
+                    int mask = 0;
+                    for (int row = whole; row < target.Length; row++)
+                    {
+                        uint code = WidenCode(Unsafe.Add(ref codeRef, row));
+                        if (code >= limit)
+                        {
+                            return row;
+                        }
+
+                        Unsafe.Add(ref targetRef, row) = Unsafe.Add(ref sourceRef, (nint)code);
+                        int bit = valueBitOffset + (int)code;
+                        mask |= ((Unsafe.Add(ref bitsRef, bit >> 3) >> (bit & 7)) & 1) << (row - whole);
+                    }
+
+                    outputBits[whole >> 3] = (byte)mask;
+                }
+
+                return -1;
+            }
+
             for (int block = 0; block < target.Length; block += 8)
             {
                 int rows = Math.Min(8, target.Length - block);
