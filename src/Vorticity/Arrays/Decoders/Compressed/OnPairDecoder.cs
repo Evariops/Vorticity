@@ -679,53 +679,6 @@ public sealed class OnPairDecoder : ArrayDecoder
     }
 
 
-    /// <summary>
-    /// Widens one length, saturating a <c>u64</c> above <see cref="long.MaxValue"/> so the sum's
-    /// cap refuses it rather than wrapping.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static long WidenLength<TLen>(TLen value)
-        where TLen : unmanaged
-    {
-        if (typeof(TLen) == typeof(byte))
-        {
-            return Unsafe.As<TLen, byte>(ref value);
-        }
-
-        if (typeof(TLen) == typeof(ushort))
-        {
-            return Unsafe.As<TLen, ushort>(ref value);
-        }
-
-        if (typeof(TLen) == typeof(uint))
-        {
-            return Unsafe.As<TLen, uint>(ref value);
-        }
-
-        if (typeof(TLen) == typeof(ulong))
-        {
-            ulong wide = Unsafe.As<TLen, ulong>(ref value);
-            return wide > long.MaxValue ? long.MaxValue : (long)wide;
-        }
-
-        if (typeof(TLen) == typeof(sbyte))
-        {
-            return Unsafe.As<TLen, sbyte>(ref value);
-        }
-
-        if (typeof(TLen) == typeof(short))
-        {
-            return Unsafe.As<TLen, short>(ref value);
-        }
-
-        if (typeof(TLen) == typeof(int))
-        {
-            return Unsafe.As<TLen, int>(ref value);
-        }
-
-        return Unsafe.As<TLen, long>(ref value);
-    }
-
     /// <summary>Decodes one non-nullable integer child and checks its shape.</summary>
     private static CanonicalNode DecodePart(
         ArrayDecodeContext context,

@@ -292,6 +292,51 @@ public sealed class CanonicalArena
         _pool = pool;
     }
 
+    /// <summary>
+    /// Reserves <paramref name="count"/> contiguous child slots and returns the first one.
+    /// </summary>
+    /// <param name="count">How many child slots this node needs; zero is legal.</param>
+    /// <returns>The first reserved slot in the arena's child array.</returns>
+    /// <remarks>
+    /// <para>
+    /// Both <see cref="CopyFrom"/> and <see cref="ReferenceFrom"/> have to place a node's new
+    /// child indices CONTIGUOUSLY, and cannot know them until each child has been copied -- which
+    /// appends records, and children, of its own. They used to gather into
+    /// <c>new int[src.ChildCount]</c> and replay it afterwards: one managed allocation per node
+    /// with children, on a path a batch walks.
+    /// </para>
+    /// <para>
+    /// The arena already owns a growable child array, and reserving in it needs no second
+    /// buffer: this node takes [start, start + count), and every deeper copy reserves ABOVE that,
+    /// so the block is contiguous by construction rather than by replay. Nothing is shared between
+    /// calls, between arenas or between threads -- which a thread-static scratch would have been,
+    /// and an <c>await</c> introduced anywhere in this recursion would then have made two logical
+    /// flows share one stack silently.
+    /// </para>
+    /// <para>
+    /// The slots hold whatever they held; the caller fills every one of them before the node that
+    /// names them is committed.
+    /// </para>
+    /// </remarks>
+    private int ReserveChildren(int count)
+    {
+        int start = _childCount;
+        int needed = start + count;
+        if (needed > _children.Length)
+        {
+            int capacity = _children.Length;
+            while (capacity < needed)
+            {
+                capacity = Grow(capacity);
+            }
+
+            Array.Resize(ref _children, capacity);
+        }
+
+        _childCount = needed;
+        return start;
+    }
+
     /// <summary>Number of decoded nodes currently held.</summary>
     public int NodeCount => _recordCount;
 
@@ -850,34 +895,25 @@ public sealed class CanonicalArena
             validity = Validity.Bitmap(ReferenceFrom(source, validity.CanonicalNodeIndex));
         }
 
-        int[]? childIndices = null;
-        if (src.ChildCount > 0)
+        int childCount = src.ChildCount;
+        int childStart = ReserveChildren(childCount);
+        for (int i = 0; i < childCount; i++)
         {
-            childIndices = new int[src.ChildCount];
-            for (int i = 0; i < src.ChildCount; i++)
-            {
-                childIndices[i] = ReferenceFrom(source, source._children[src.ChildStart + i]);
-            }
+            int child = ReferenceFrom(source, source._children[src.ChildStart + i]);
+
+            // The field is re-read after the recursion on purpose: a deeper copy may have grown
+            // the child array, and `Array.Resize` leaves the old one behind.
+            _children[childStart + i] = child;
         }
 
         CanonicalRecord copy = src;
         copy.Validity = validity;
-        copy.ChildStart = -1;
-        copy.ChildCount = 0;
+        copy.ChildStart = childCount > 0 ? childStart : -1;
+        copy.ChildCount = childCount;
         copy.DataBufferStart = -1;
         copy.DataBufferCount = 0;
 
         int index = Commit(ref copy);
-
-        if (childIndices is not null)
-        {
-            _records[index].ChildStart = _childCount;
-            _records[index].ChildCount = childIndices.Length;
-            foreach (int child in childIndices)
-            {
-                AddChild(child);
-            }
-        }
 
         if (src.DataBufferCount > 0)
         {
@@ -953,36 +989,24 @@ public sealed class CanonicalArena
         // Children next, gathered before anything is committed so the block stays contiguous: a
         // child's own copy appends records, and interleaving those with this node's child slots
         // would scatter them.
-        int[]? childIndices = null;
-        if (src.ChildCount > 0)
+        int childCount = src.ChildCount;
+        int childStart = ReserveChildren(childCount);
+        for (int i = 0; i < childCount; i++)
         {
-            childIndices = new int[src.ChildCount];
-            for (int i = 0; i < src.ChildCount; i++)
-            {
-                childIndices[i] = CopyFrom(source, source._children[src.ChildStart + i]);
-            }
+            int child = CopyFrom(source, source._children[src.ChildStart + i]);
+            _children[childStart + i] = child;
         }
 
         CanonicalRecord copy = src;
         copy.Validity = validity;
         copy.BufferA = CopyBuffer(src.BufferA);
         copy.BufferB = CopyBuffer(src.BufferB);
-        copy.ChildStart = -1;
-        copy.ChildCount = 0;
+        copy.ChildStart = childCount > 0 ? childStart : -1;
+        copy.ChildCount = childCount;
         copy.DataBufferStart = -1;
         copy.DataBufferCount = 0;
 
         int index = Commit(ref copy);
-
-        if (childIndices is not null)
-        {
-            _records[index].ChildStart = _childCount;
-            _records[index].ChildCount = childIndices.Length;
-            foreach (int child in childIndices)
-            {
-                AddChild(child);
-            }
-        }
 
         if (src.DataBufferCount > 0)
         {
