@@ -103,7 +103,7 @@ internal static class ThroughputCheck
         ("ext", 0.38),   // 2 runs, spread 0.38-0.38
         ("fastlanes_bitpacked", 1.47),   // 2 runs, spread 1.36-1.47
         ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.37),   // 2 runs, spread 1.34-1.37
-        ("fastlanes_delta", 4.08),   // 2 runs, spread 3.68-4.08
+        ("fastlanes_delta", 1.42),   // 2 runs, spread 1.32-1.42
         ("fastlanes_for", 1.05),   // 2 runs, spread 1.04-1.05
         ("fastlanes_rle", 0.98),   // 2 runs, spread 0.91-0.98
         ("fixed_size_list", 0.30),   // 2 runs, spread 0.27-0.30
@@ -116,7 +116,7 @@ internal static class ThroughputCheck
         ("masked_all_valid", 1.23),   // 2 runs, spread 1.16-1.23
         ("null", 1.19),   // 2 runs, spread 1.13-1.19
         ("onpair", 1.63),   // 2 runs, spread 1.55-1.63
-        ("pco", 3.32),   // 2 runs, spread 3.31-3.32
+        ("pco", 2.05),   // 2 runs, spread 2.04-2.05
         ("primitive", 0.37),   // 2 runs, spread 0.32-0.37
         ("runend", 1.49),   // 2 runs, spread 1.38-1.49
         ("sequence", 2.04),   // 2 runs, spread 1.76-2.04

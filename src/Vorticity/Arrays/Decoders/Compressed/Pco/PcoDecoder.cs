@@ -4,6 +4,11 @@
 // counts; buffers holding the per-chunk pco metadata followed by the page bodies; zero or one
 // validity child. Everything else is pco's own format, in the sibling files here.
 using System;
+using System.Collections.Generic;
+using System.Numerics;
+using System.Runtime.InteropServices;
+
+using Vorticity.Arrays.Decoders.Canonical;
 
 using Vorticity.Buffers;
 using Vorticity.Types;
@@ -62,36 +67,84 @@ public sealed class PcoDecoder : ArrayDecoder
         VortexBuffer output = CompressedValues.Allocate(
             context, length * width, width, Id, out Span<byte> destination);
 
-        int pageBuffer = wrapper.Chunks.Count;
-        int written = 0;
-        for (int chunk = 0; chunk < wrapper.Chunks.Count; chunk++)
+        // The two page buffers, rented ONCE for the whole node rather than allocated per page: a
+        // million-row column is a thousand pages, and contract §1.3 does not allow a thousand
+        // allocations on a decode path.
+        int widestPage = 0;
+        foreach (int[] pages in wrapper.Chunks)
         {
-            PcoChunkMeta meta = PcoChunkMeta.Read(
-                wrapper.Header, node.GetBuffer(chunk).Span, latentBits: 64);
-
-            foreach (int pageValues in wrapper.Chunks[chunk])
+            foreach (int pageValues in pages)
             {
-                ulong[] latents = PcoPageDecoder.DecodeJoined(
-                    meta, node.GetBuffer(pageBuffer).Span, pageValues);
-                pageBuffer++;
+                widestPage = Math.Max(widestPage, pageValues);
+            }
+        }
 
-                for (int i = 0; i < pageValues; i++)
+        bool signed = ptype.IsSignedInteger();
+        Scratch<ulong> primaryScratch = new Scratch<ulong>(widestPage, default);
+        Scratch<ulong> secondaryScratch = new Scratch<ulong>(widestPage, default);
+        try
+        {
+            int pageBuffer = wrapper.Chunks.Count;
+            int written = 0;
+            for (int chunk = 0; chunk < wrapper.Chunks.Count; chunk++)
+            {
+                PcoChunkMeta meta = PcoChunkMeta.Read(
+                    wrapper.Header, node.GetBuffer(chunk).Span, latentBits: 64);
+
+                foreach (int pageValues in wrapper.Chunks[chunk])
                 {
+                    ReadOnlySpan<ulong> latents = PcoPageDecoder.DecodeJoined(
+                        meta, node.GetBuffer(pageBuffer).Span, pageValues,
+                        primaryScratch.Span, secondaryScratch.Span);
+                    pageBuffer++;
+
                     // The ordered latent form: shifted so the type's minimum is zero. For an
                     // unsigned type it is the value itself, which is why the shift is by MID
-                    // rather than by a sign test.
-                    ulong value = ptype.IsSignedInteger()
-                        ? unchecked(latents[i] + (1UL << 63))
-                        : latents[i];
-                    System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(
-                        destination.Slice((written + i) * width, width), value);
-                }
+                    // rather than by a sign test -- and the shift is pointwise, so it is one
+                    // vector add per lane group rather than a bounds-checked eight-byte write per
+                    // value.
+                    Span<ulong> target = MemoryMarshal.Cast<byte, ulong>(
+                        destination.Slice(written * width, pageValues * width));
+                    if (signed)
+                    {
+                        Bias(latents, target);
+                    }
+                    else
+                    {
+                        latents.CopyTo(target);
+                    }
 
-                written += pageValues;
+                    written += pageValues;
+                }
             }
+        }
+        finally
+        {
+            secondaryScratch.Dispose();
+            primaryScratch.Dispose();
         }
 
         Validity validity = context.DecodeValidity(in node, 0, dtype.Nullability, length);
         return context.Canonical.AddPrimitive(dtype, length, validity, ptype, output);
+    }
+
+    /// <summary>Adds 2^63 to every latent, turning the ordered form back into two's complement.</summary>
+    private static void Bias(ReadOnlySpan<ulong> latents, Span<ulong> destination)
+    {
+        int i = 0;
+        if (Vector<ulong>.IsSupported && latents.Length >= Vector<ulong>.Count)
+        {
+            Vector<ulong> mid = new Vector<ulong>(1UL << 63);
+            int lanes = Vector<ulong>.Count;
+            for (; i <= latents.Length - lanes; i += lanes)
+            {
+                (Vector.LoadUnsafe(in latents[i]) + mid).StoreUnsafe(ref destination[i]);
+            }
+        }
+
+        for (; i < latents.Length; i++)
+        {
+            destination[i] = unchecked(latents[i] + (1UL << 63));
+        }
     }
 }

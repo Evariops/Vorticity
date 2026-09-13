@@ -16,6 +16,7 @@
 // produces the same masked value without requiring the padding, and refuses a read that would need
 // bits the buffer does not have.
 using System;
+using System.Buffers.Binary;
 
 namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 
@@ -45,6 +46,26 @@ internal ref struct PcoBitReader
     /// <exception cref="VortexFormatException">The stream has fewer bits left.</exception>
     internal ulong ReadUInt(int width)
     {
+        ulong value = ReadCore(_bitPosition, width);
+        _bitPosition += width;
+        return value;
+    }
+
+    /// <summary>Reads <paramref name="width"/> bits at an absolute position, without moving.</summary>
+    /// <param name="bitPosition">Absolute bit position to read from.</param>
+    /// <param name="width">Bits to read.</param>
+    /// <returns>The value.</returns>
+    /// <remarks>
+    /// pco's offsets are addressed rather than streamed: the symbol pass records each value's width
+    /// and a running sum, and the offset pass reads value <c>i</c> at <c>base + csum[i]</c>. That is
+    /// a random access into the same buffer, not a second cursor -- so this reads from an explicit
+    /// position rather than saving, moving and restoring one. The save/restore version needed a
+    /// try/finally, which kept it out of line on the hottest loop in the decoder.
+    /// </remarks>
+    internal readonly ulong ReadAt(long bitPosition, int width) => ReadCore(bitPosition, width);
+
+    private readonly ulong ReadCore(long bitPosition, int width)
+    {
         if ((uint)width > 64u)
         {
             CompressedThrow.Format($"A pco bit read of {width} bits is outside [0, 64].");
@@ -55,14 +76,15 @@ internal ref struct PcoBitReader
             return 0;
         }
 
-        if (BitsRemaining < width)
+        long remaining = ((long)_source.Length * 8) - bitPosition;
+        if (bitPosition < 0 || remaining < width)
         {
             CompressedThrow.Format(
-                $"A pco bit read of {width} bits ran past the end: {BitsRemaining} bits remain.");
+                $"A pco bit read of {width} bits ran past the end: {remaining} bits remain.");
         }
 
-        int byteIndex = (int)(_bitPosition >> 3);
-        int bitsPastByte = (int)(_bitPosition & 7);
+        int byteIndex = (int)(bitPosition >> 3);
+        int bitsPastByte = (int)(bitPosition & 7);
 
         ulong first = WordAt(byteIndex) >> bitsPastByte;
         ulong value;
@@ -78,31 +100,7 @@ internal ref struct PcoBitReader
             value = first | (WordAt(byteIndex + 7) << processed);
         }
 
-        _bitPosition += width;
         return value & Mask(width);
-    }
-
-    /// <summary>Reads <paramref name="width"/> bits at an absolute position, without moving.</summary>
-    /// <param name="bitPosition">Absolute bit position to read from.</param>
-    /// <param name="width">Bits to read.</param>
-    /// <returns>The value.</returns>
-    /// <remarks>
-    /// pco's offsets are addressed rather than streamed: the symbol pass records each value's width
-    /// and a running sum, and the offset pass reads value <c>i</c> at <c>base + csum[i]</c>. That is
-    /// a random access into the same buffer, not a second cursor.
-    /// </remarks>
-    internal ulong ReadAt(long bitPosition, int width)
-    {
-        long saved = _bitPosition;
-        _bitPosition = bitPosition;
-        try
-        {
-            return ReadUInt(width);
-        }
-        finally
-        {
-            _bitPosition = saved;
-        }
     }
 
     /// <summary>Moves to an absolute bit position.</summary>
@@ -166,8 +164,20 @@ internal ref struct PcoBitReader
     }
 
     /// <summary>Eight bytes little-endian at <paramref name="byteIndex"/>, zero past the end.</summary>
+    /// <summary>Eight bytes at <paramref name="byteIndex"/>, zero-filled past the end.</summary>
+    /// <remarks>
+    /// ONE LOAD WHEN THE BYTES ARE THERE. This assembled the word a byte at a time -- eight loads,
+    /// eight shifts and eight ORs for every bit read, and `ReadPreDelta` makes two per VALUE. The
+    /// byte loop survives only for the last seven bytes of the buffer, where a wide load would run
+    /// past the end.
+    /// </remarks>
     private readonly ulong WordAt(int byteIndex)
     {
+        if ((uint)byteIndex + sizeof(ulong) <= (uint)_source.Length)
+        {
+            return BinaryPrimitives.ReadUInt64LittleEndian(_source.Slice(byteIndex, sizeof(ulong)));
+        }
+
         ulong word = 0;
         int available = Math.Min(8, Math.Max(0, _source.Length - byteIndex));
         for (int i = 0; i < available; i++)

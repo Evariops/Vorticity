@@ -50,7 +50,10 @@ internal readonly record struct PcoBin(uint Weight, ulong Lower, int OffsetBits)
 /// <summary>One latent variable's table.</summary>
 /// <param name="AnsSizeLog">Log2 of the ANS table size; zero when there is a single bin.</param>
 /// <param name="Bins">The bins, in wire order.</param>
-internal readonly record struct PcoLatentVar(int AnsSizeLog, PcoBin[] Bins);
+/// <param name="Table">
+/// The tANS decoding table for these bins, built ONCE PER CHUNK.
+/// </param>
+internal readonly record struct PcoLatentVar(int AnsSizeLog, PcoBin[] Bins, PcoAnsTable Table);
 
 /// <summary>A pco chunk's metadata.</summary>
 internal sealed class PcoChunkMeta
@@ -257,7 +260,13 @@ internal sealed class PcoChunkMeta
             bins[i] = new PcoBin(weight, lower, offsetBits);
         }
 
-        return new PcoLatentVar(ansSizeLog, bins);
+        // THE TABLE IS A PROPERTY OF THE CHUNK, NOT OF A PAGE, and it used to be rebuilt for every
+        // page of every latent variable: `dotnet-trace` put `PcoAnsTable.Build` at 83.7% of a
+        // 1M-row `vortex.pco` scan. It spreads up to 16 384 symbols across the table and walks
+        // every slot, which is a fixed cost per build and therefore entirely wasted when the bins
+        // it is built from have not changed. Building it here ties it to the metadata it actually
+        // depends on. The table is immutable, so sharing it across pages needs no copy.
+        return new PcoLatentVar(ansSizeLog, bins, PcoAnsTable.Build(ansSizeLog, bins));
     }
 
     /// <summary>Bits needed to encode a value up to <paramref name="latentBits"/>.</summary>

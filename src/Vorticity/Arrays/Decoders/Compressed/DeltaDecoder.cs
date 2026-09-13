@@ -19,7 +19,10 @@
 // path, and why `EncodingRegistry.DescribeUnsupported` used to name it. A default writer upstream
 // cannot emit one; that is a statement about writers and has never been a reason not to read.
 using System;
-using System.Buffers.Binary;
+using System.Numerics;
+using System.Runtime.InteropServices;
+
+using Vorticity.Arrays.Decoders.Canonical;
 
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -139,74 +142,121 @@ public sealed class DeltaDecoder : ArrayDecoder
         int offset,
         int length)
     {
-        int rowsPerLane = BlockSize / lanes;
-        ReadOnlySpan<byte> order = FastLanes.Order;
-
-        Span<byte> block = stackalloc byte[0];
-        byte[] rented = new byte[BlockSize * width];
-        block = rented;
-
-        int firstBlock = offset / BlockSize;
-        int lastBlock = (offset + length - 1) / BlockSize;
-
-        for (int b = firstBlock; b <= lastBlock; b++)
-        {
-            ReadOnlySpan<byte> deltaBlock = deltas.Slice(b * BlockSize * width, BlockSize * width);
-            ReadOnlySpan<byte> baseVector = bases.Slice(b * lanes * width, lanes * width);
-
-            for (int lane = 0; lane < lanes; lane++)
-            {
-                ulong previous = ReadBits(baseVector.Slice(lane * width, width), width);
-                for (int row = 0; row < rowsPerLane; row++)
-                {
-                    int index = (order[row / 8] * 16) + ((row % 8) * 128) + lane;
-                    ulong next = unchecked(previous + ReadBits(deltaBlock.Slice(index * width, width), width));
-                    WriteBits(block.Slice(index * width, width), next, width);
-                    previous = next;
-                }
-            }
-
-            // UNTRANSPOSE ON THE WAY OUT. The prefix sum runs in FastLanes' transposed space -
-            // that is what the lane iteration means - so `block` is not in row order and upstream
-            // calls `Transpose::untranspose` before returning. Doing it per copied element instead
-            // of into a second 1024-element buffer keeps the window's cost proportional to the
-            // window: a batch that wants 8 rows of a block maps 8 indices, not 1024.
-            int blockStart = b * BlockSize;
-            int from = Math.Max(offset, blockStart);
-            int to = Math.Min(offset + length, blockStart + BlockSize);
-            for (int p = from; p < to; p++)
-            {
-                int transposed = FastLanes.Untranspose(p - blockStart);
-                block.Slice(transposed * width, width)
-                    .CopyTo(destination.Slice((p - offset) * width, width));
-            }
-        }
-    }
-
-    private static ulong ReadBits(ReadOnlySpan<byte> value, int width) => width switch
-    {
-        1 => value[0],
-        2 => BinaryPrimitives.ReadUInt16LittleEndian(value),
-        4 => BinaryPrimitives.ReadUInt32LittleEndian(value),
-        _ => BinaryPrimitives.ReadUInt64LittleEndian(value),
-    };
-
-    private static void WriteBits(Span<byte> destination, ulong value, int width)
-    {
         switch (width)
         {
             case 1:
-                destination[0] = (byte)value;
+                Undelta<byte>(bases, deltas, destination, lanes, offset, length);
                 break;
             case 2:
-                BinaryPrimitives.WriteUInt16LittleEndian(destination, (ushort)value);
+                Undelta<ushort>(bases, deltas, destination, lanes, offset, length);
                 break;
             case 4:
-                BinaryPrimitives.WriteUInt32LittleEndian(destination, (uint)value);
+                Undelta<uint>(bases, deltas, destination, lanes, offset, length);
                 break;
             default:
-                BinaryPrimitives.WriteUInt64LittleEndian(destination, value);
+                Undelta<ulong>(bases, deltas, destination, lanes, offset, length);
                 break;
+        }
+    }
+
+    /// <summary>
+    /// The prefix sum, with the element type resolved once and the LANES walked together.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE LANES ARE THE VECTOR, not the rows. `index(row, lane) = FL_ORDER[row / 8] * 16 +
+    /// (row % 8) * 128 + lane` is contiguous in LANE, so for one row the whole lane vector is one
+    /// contiguous run of the delta block -- and each lane's accumulator is independent of every
+    /// other, which is exactly the shape a prefix sum normally is not. There are 16 lanes for a
+    /// 64-bit element and 128 for an 8-bit one, so the per-row step is a handful of vector adds
+    /// where it used to be one scalar add per element through two physical-type switches.
+    /// </para>
+    /// <para>
+    /// The 1024-element block is rented rather than `new byte[BlockSize * width]` per decode, which
+    /// is PERF-AUDIT §3.2's heap allocation per delta node.
+    /// </para>
+    /// </remarks>
+    private static void Undelta<T>(
+        ReadOnlySpan<byte> bases,
+        ReadOnlySpan<byte> deltas,
+        Span<byte> destination,
+        int lanes,
+        int offset,
+        int length)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        ReadOnlySpan<T> baseValues = MemoryMarshal.Cast<byte, T>(bases);
+        ReadOnlySpan<T> deltaValues = MemoryMarshal.Cast<byte, T>(deltas);
+        Span<T> output = MemoryMarshal.Cast<byte, T>(destination);
+        int rowsPerLane = BlockSize / lanes;
+        ReadOnlySpan<byte> order = FastLanes.Order;
+
+        Scratch<T> blockScratch = new Scratch<T>(BlockSize, default);
+        Scratch<T> laneScratch = new Scratch<T>(lanes, default);
+        try
+        {
+            Span<T> block = blockScratch.Span;
+            Span<T> running = laneScratch.Span;
+
+            int firstBlock = offset / BlockSize;
+            int lastBlock = (offset + length - 1) / BlockSize;
+
+            for (int b = firstBlock; b <= lastBlock; b++)
+            {
+                ReadOnlySpan<T> deltaBlock = deltaValues.Slice(b * BlockSize, BlockSize);
+                baseValues.Slice(b * lanes, lanes).CopyTo(running);
+
+                for (int row = 0; row < rowsPerLane; row++)
+                {
+                    int at = (order[row >> 3] * 16) + ((row & 7) * 128);
+                    Accumulate(running, deltaBlock.Slice(at, lanes), block.Slice(at, lanes));
+                }
+
+                // UNTRANSPOSE ON THE WAY OUT. The prefix sum runs in FastLanes' transposed space -
+                // that is what the lane iteration means - so `block` is not in row order and
+                // upstream calls `Transpose::untranspose` before returning. Doing it per copied
+                // element instead of into a second 1024-element buffer keeps the window's cost
+                // proportional to the window: a batch that wants 8 rows of a block maps 8 indices,
+                // not 1024.
+                int blockStart = b * BlockSize;
+                int from = Math.Max(offset, blockStart);
+                int to = Math.Min(offset + length, blockStart + BlockSize);
+                for (int p = from; p < to; p++)
+                {
+                    output[p - offset] = block[FastLanes.Untranspose(p - blockStart)];
+                }
+            }
+        }
+        finally
+        {
+            laneScratch.Dispose();
+            blockScratch.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// <c>running[l] += delta[l]</c> for every lane, publishing each sum into the block.
+    /// </summary>
+    private static void Accumulate<T>(Span<T> running, ReadOnlySpan<T> delta, Span<T> into)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int i = 0;
+        if (Vector<T>.IsSupported && running.Length >= Vector<T>.Count)
+        {
+            int width = Vector<T>.Count;
+            for (; i <= running.Length - width; i += width)
+            {
+                Vector<T> sum = Vector.LoadUnsafe(in running[i]) + Vector.LoadUnsafe(in delta[i]);
+                sum.StoreUnsafe(ref running[i]);
+                sum.StoreUnsafe(ref into[i]);
+            }
+        }
+
+        for (; i < running.Length; i++)
+        {
+            T sum = unchecked(running[i] + delta[i]);
+            running[i] = sum;
+            into[i] = sum;
         }
     }
 }

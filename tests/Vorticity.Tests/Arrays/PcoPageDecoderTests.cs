@@ -35,7 +35,10 @@ public sealed class PcoPageDecoderTests
         List<long> decoded = [];
         for (int page = 0; page < vector.Pages.Length; page++)
         {
-            ulong[] latents = PcoPageDecoder.DecodeJoined(chunk, vector.Pages[page], vector.PerPage[page]);
+            ulong[] primary = new ulong[vector.PerPage[page]];
+            ulong[] secondary = new ulong[vector.PerPage[page]];
+            ReadOnlySpan<ulong> latents = PcoPageDecoder.DecodeJoined(
+                chunk, vector.Pages[page], vector.PerPage[page], primary, secondary);
             foreach (ulong latent in latents)
             {
                 // i64's ordered latent form: the unsigned value shifted so that long.MinValue is 0.

@@ -13,6 +13,7 @@
 // a running sum of those widths; the offset pass then reads value i at `base + csum[i]` for
 // `width[i]` bits. Reading offsets inline would consume the stream in the wrong order.
 using System;
+using System.Numerics;
 
 namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 
@@ -29,8 +30,18 @@ internal static class PcoPageDecoder
     /// <param name="chunk">The chunk's metadata.</param>
     /// <param name="page">The page's bytes.</param>
     /// <param name="valueCount">Values in this page.</param>
-    /// <returns>The decoded latents, joined by the chunk's mode.</returns>
-    internal static ulong[] DecodeJoined(PcoChunkMeta chunk, ReadOnlySpan<byte> page, int valueCount)
+    /// <param name="primaryOut">At least <paramref name="valueCount"/> slots, caller-owned.</param>
+    /// <param name="secondaryOut">
+    /// At least <paramref name="valueCount"/> slots, caller-owned; unread when the chunk has no
+    /// secondary latent variable.
+    /// </param>
+    /// <returns>
+    /// The decoded latents, joined by the chunk's mode. A view over one of the two buffers, valid
+    /// until the next call.
+    /// </returns>
+    internal static ReadOnlySpan<ulong> DecodeJoined(
+        PcoChunkMeta chunk, ReadOnlySpan<byte> page, int valueCount, Span<ulong> primaryOut,
+        Span<ulong> secondaryOut)
     {
         PcoBitReader reader = new PcoBitReader(page);
 
@@ -46,8 +57,11 @@ internal static class PcoPageDecoder
 
         reader.DrainEmptyByte("page metadata");
 
-        ulong[] primaryOut = new ulong[valueCount];
-        ulong[]? secondaryOut = secondary is null ? null : new ulong[valueCount];
+        // THE THREE PAGE ARRAYS ARE THE CALLER'S. A million-row pco column is a thousand pages,
+        // and this used to allocate two or three `ulong[valueCount]` for each of them -- contract
+        // §1.3's "no managed allocation on a decode path", a thousand times over.
+        primaryOut = primaryOut[..valueCount];
+        secondaryOut = secondary is null ? default : secondaryOut[..valueCount];
 
         int done = 0;
         while (done < valueCount)
@@ -56,8 +70,8 @@ internal static class PcoPageDecoder
             int batch = Math.Min(BatchSize, remaining);
 
             delta?.ReadBatch(ref reader, remaining, batch, null);
-            primary.ReadBatch(ref reader, remaining, batch, primaryOut.AsSpan(done, batch));
-            secondary?.ReadBatch(ref reader, remaining, batch, secondaryOut!.AsSpan(done, batch));
+            primary.ReadBatch(ref reader, remaining, batch, primaryOut.Slice(done, batch));
+            secondary?.ReadBatch(ref reader, remaining, batch, secondaryOut.Slice(done, batch));
 
             done += batch;
         }
@@ -80,7 +94,8 @@ internal static class PcoPageDecoder
         return primary || chunk.SecondaryUsesDelta ? chunk.DeltaOrder : 0;
     }
 
-    private static ulong[] Join(PcoChunkMeta chunk, ulong[] primary, ulong[]? secondary)
+    private static ReadOnlySpan<ulong> Join(
+        PcoChunkMeta chunk, Span<ulong> primary, Span<ulong> secondary)
     {
         if (chunk.Mode == PcoModeKind.Classic)
         {
@@ -92,16 +107,18 @@ internal static class PcoPageDecoder
             CompressedThrow.Format($"pco mode {chunk.Mode} is not decoded yet.");
         }
 
-        if (secondary is null)
+        if (secondary.IsEmpty)
         {
             CompressedThrow.Format("A pco IntMult chunk has no secondary latent variable.");
         }
 
-        ulong[] joined = new ulong[primary.Length];
+        // In place, into the primary: nothing reads it again, and a third array per page was the
+        // same allocation the other two were.
+        Span<ulong> joined = primary;
         for (int i = 0; i < primary.Length; i++)
         {
             // Both operands come off the wire, so both operations wrap, exactly as upstream's do.
-            joined[i] = unchecked((primary[i] * chunk.ModeBase) + secondary![i]);
+            joined[i] = unchecked((primary[i] * chunk.ModeBase) + secondary[i]);
         }
 
         return joined;
@@ -146,7 +163,7 @@ internal sealed class PcoLatentState
         }
 
         PcoLatentState state = new PcoLatentState(
-            PcoAnsTable.Build(variable.AnsSizeLog, variable.Bins),
+            variable.Table,
             variable.AnsSizeLog,
             variable.Bins.Length,
             moments);
@@ -210,15 +227,32 @@ internal sealed class PcoLatentState
         else
         {
             // A single bin means every value is that bin: upstream skips the ANS stream entirely
-            // rather than reading zero-width symbols.
+            // rather than reading zero-width symbols. Every value then has the SAME width, so the
+            // per-value width and cumulative-position arrays describe nothing -- the position of
+            // value i is `base + i * offsetBits`, and the fill is one vectorized store.
             int offsetBits = _table.Nodes[0].OffsetBits;
+            ulong lower = _table.StateLowers[0];
+            _scratch.AsSpan(0, count).Fill(lower);
+
+            if (offsetBits == 0)
+            {
+                // ...AND A BIN THAT NEEDS NO OFFSET BITS READS NOTHING AT ALL. The whole batch is
+                // the bin's lower bound, and the reader does not move. That is what a delta-encoded
+                // arithmetic ramp becomes -- the commonest shape a pco column has -- and it was
+                // running two loops per value to discover it, plus 20 bytes of bookkeeping written
+                // per value and read back to be skipped.
+                return;
+            }
+
+            long uniformBase = reader.BitPosition;
             for (int i = 0; i < count; i++)
             {
-                _scratch[i] = _table.StateLowers[0];
-                _offsetBits[i] = offsetBits;
-                _offsetCumulative[i] = offsetBitTotal;
-                offsetBitTotal += offsetBits;
+                _scratch[i] = unchecked(
+                    lower + reader.ReadAt(uniformBase + ((long)i * offsetBits), offsetBits));
             }
+
+            reader.SeekBits(uniformBase + ((long)count * offsetBits));
+            return;
         }
 
         // The offsets live in their own stream starting where the symbols ended.
@@ -245,9 +279,22 @@ internal sealed class PcoLatentState
     /// </remarks>
     private void UndoConsecutiveDelta(int batch)
     {
-        for (int i = 0; i < batch; i++)
+        // The 2^63 bias is pointwise and contiguous, so it is one vector add per lane group.
+        Span<ulong> values = _scratch.AsSpan(0, batch);
+        int biased = 0;
+        if (Vector<ulong>.IsSupported && batch >= Vector<ulong>.Count)
         {
-            _scratch[i] = unchecked(_scratch[i] + (1UL << 63));
+            Vector<ulong> bias = new Vector<ulong>(1UL << 63);
+            int lanes = Vector<ulong>.Count;
+            for (; biased <= batch - lanes; biased += lanes)
+            {
+                (Vector.LoadUnsafe(in values[biased]) + bias).StoreUnsafe(ref values[biased]);
+            }
+        }
+
+        for (; biased < batch; biased++)
+        {
+            values[biased] = unchecked(values[biased] + (1UL << 63));
         }
 
         for (int order = _deltaMoments.Length - 1; order >= 0; order--)
