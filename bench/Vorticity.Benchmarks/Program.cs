@@ -28,7 +28,9 @@
 // live, and until the gate existed nothing defended them.
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
+using System.Reflection;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -45,6 +47,17 @@ internal static class Program
 {
     private static async Task<int> Main(string[] args)
     {
+        if (UnoptimizedAssemblies() is { Length: > 0 } unoptimized)
+        {
+            Console.Error.WriteLine(
+                $"Built without optimizations: {string.Join(", ", unoptimized)}.\n" +
+                "A Debug build measures the JIT's unoptimized output, which is not the code that " +
+                "ships and not a number worth writing down. Rebuild with -c Release:\n" +
+                "  dotnet run -c Release --project bench/Vorticity.Benchmarks -- " +
+                string.Join(" ", args));
+            return 2;
+        }
+
         if (args.Length > 0 && args[0] == "--ffi-check")
         {
             return await FfiCheck().ConfigureAwait(false);
@@ -176,6 +189,36 @@ internal static class Program
     /// no argument selects by EXCLUDING `explore`, so an unlabelled class runs and only its
     /// `--anyCategories` selection quietly returns nothing.
     /// </summary>
+    /// <summary>
+    /// The assemblies under measurement that were built without optimizations, by simple name.
+    /// </summary>
+    /// <remarks>
+    /// BenchmarkDotNet HAS this check and it works here -- `ConfigOptions.DisableOptimizationsValidator`
+    /// had turned it off, and turning it back on makes a Debug `--filter` run refuse. It is not
+    /// enough on its own for two reasons. It prints its complaint and still exits 0, so a CI step
+    /// would pass; and it only ever sees the BenchmarkDotNet path, while `--ratio-check`,
+    /// `--throughput` and `--profile` -- the GATES, the numbers that get committed -- run outside
+    /// it entirely. A Debug `--ratio-check` does not refuse: it measures an unoptimized reader
+    /// against an optimized Rust one and exits 1, which reads exactly like a regression.
+    ///
+    /// `DebuggableAttribute.IsJITOptimizerDisabled` is the same signal BenchmarkDotNet reads. The
+    /// attribute is absent altogether on an optimized assembly built without a debug type, so its
+    /// absence means optimized.
+    /// </remarks>
+    private static string[] UnoptimizedAssemblies() =>
+    [
+        .. new[]
+            {
+                typeof(Program).Assembly,
+                typeof(VortexFile).Assembly,
+                typeof(Vorticity.RowEncoding.RowSortField).Assembly,
+            }
+            .DistinctBy(a => a.GetName().Name, StringComparer.Ordinal)
+            .Where(a => a.GetCustomAttribute<DebuggableAttribute>() is { IsJITOptimizerDisabled: true })
+            .Select(a => a.GetName().Name ?? "?")
+            .Order(StringComparer.Ordinal),
+    ];
+
 #pragma warning disable IL2026, IL2070 // The benchmark host is never trimmed: BenchmarkSwitcher
                                        // reflects over this same assembly to find the classes at all.
     private static string[] UncategorizedClasses() =>

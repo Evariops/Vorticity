@@ -95,12 +95,18 @@ public sealed class BenchmarkConfig : ManualConfig
         AddLogger(BenchmarkDotNet.Loggers.ConsoleLogger.Default);
         AddColumnProvider(DefaultColumnProviders.Instance);
         AddDiagnoser(BenchmarkDotNet.Diagnosers.MemoryDiagnoser.Default);
+
+        // THE OPTIMIZATIONS VALIDATOR IS ON. `ConfigOptions.DisableOptimizationsValidator` used to
+        // sit at the end of this constructor, which turned off the one check that refuses to
+        // measure a Debug assembly. Nothing needed it: with it removed, a Release run is unaffected
+        // and a Debug run refuses, which is the whole point. It is not sufficient on its own --
+        // BenchmarkDotNet prints its complaint and still exits 0, and it never sees `--ratio-check`
+        // or `--throughput` -- so `Program.Main` carries the guard that covers every mode.
         if (!Exploring)
         {
             AddFilter(new SimpleFilter(benchmark => !benchmark.Descriptor.Categories.Contains(
                 Explore, StringComparer.OrdinalIgnoreCase)));
         }
 
-        WithOptions(ConfigOptions.DisableOptimizationsValidator);
     }
 }

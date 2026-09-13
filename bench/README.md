@@ -2,7 +2,8 @@
 
 Every command below is run from the repository root. `PROJ` stands for
 `--project bench/Vorticity.Benchmarks`; add `-c Release` always — a Debug benchmark measures the
-JIT's unoptimized output and is worth nothing.
+JIT's unoptimized output and is worth nothing. Forget it and every mode refuses with exit 2 rather
+than printing a table.
 
 ```
 dotnet run -c Release PROJ -- <arguments>
