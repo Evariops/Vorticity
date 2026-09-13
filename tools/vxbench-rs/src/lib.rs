@@ -33,6 +33,7 @@ use vortex::error::VortexResult;
 use vortex::expr::root;
 use vortex::expr::select;
 use vortex::file::OpenOptionsSessionExt;
+use vortex::file::WriteOptionsSessionExt;
 use vortex::io::runtime::single::block_on;
 use vortex::io::session::RuntimeSessionExt;
 use vortex::session::VortexSession;
@@ -170,6 +171,39 @@ pub unsafe extern "C" fn vxbench_open_first_batch(path: *const c_char) -> i64 {
                     Some(array) => Ok(array?.len() as i64),
                     None => Ok(0),
                 }
+            }
+        })
+    })
+}
+
+/// Reads `path` and WRITES it back out with the default strategy, returning the rows written.
+///
+/// THE WRITE AXIS HAD NO REFERENCE AT ALL. `docs/05-benchmarks.md` compares reading against Vortex
+/// Rust on five axes and writing against nothing, so every write-side change in this repository has
+/// been measured against its own past and never against the implementation it is a port of. The
+/// read is included in the measurement on BOTH sides -- it is the same file and the same reader, so
+/// it is common-mode -- and `vxbench_scan_canonical` gives the caller the number to subtract when
+/// the read is a large share.
+///
+/// The output goes to an in-memory sink rather than to disk, matching the .NET side's `DiscardSink`:
+/// a write benchmark that measures the filesystem measures the filesystem.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vxbench_write(path: *const c_char) -> i64 {
+    run(path, |session, path| {
+        block_on(|handle| {
+            let session = session.with_handle(handle);
+            async move {
+                let file = session.open_options().open_path(&path).await?;
+                let rows = file.row_count() as i64;
+                let stream = file.scan()?.into_array_stream()?;
+                session
+                    .write_options()
+                    .write(Vec::<u8>::new(), stream)
+                    .await?;
+                Ok(rows)
             }
         })
     })

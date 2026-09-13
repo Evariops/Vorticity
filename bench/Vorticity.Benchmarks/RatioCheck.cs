@@ -106,6 +106,9 @@ internal static class RatioCheck
     ///     projected scan          0.514   0.392
     ///     open to first batch     0.093   0.060
     ///
+    /// (The full-scan row is from before the axis was made like-for-like; it now reads 0.536,
+    /// because the reference side canonicalizes and the reader side got faster.)
+    ///
     /// The two that agree are the long axis and the trivial one; the two that do not are short
     /// managed paths measured beside a native call an order of magnitude longer. Both estimators
     /// are honest about different things. BenchmarkDotNet reports the best case, a tight loop of
@@ -125,17 +128,17 @@ internal static class RatioCheck
     [
         new Axis(
             "full scan",
-            0.953,
+            0.536,
             ScanAll,
             p => RustReader.Require(RustReader.ScanCanonical(p), "scan")),
         new Axis(
             "full scan, upstream lazy",
-            0.953,
+            0.537,
             ScanAll,
             p => RustReader.Require(RustReader.ScanAll(p), "scan")),
         new Axis(
             "projected scan, 1 of 5 columns",
-            0.514,
+            0.510,
             ScanProjected,
             p => RustReader.Require(RustReader.ScanProjected(p, Field), "projected scan")),
         new Axis(
@@ -148,6 +151,11 @@ internal static class RatioCheck
             0.732,
             FooterOnly,
             p => RustReader.Require(RustReader.OpenOnly(p), "open")),
+        new Axis(
+            "read and write back",
+            1.96,
+            ReadAndWrite,
+            p => RustReader.Require(RustReader.Write(p), "write")),
     ];
 
     /// <summary>The field the projection axis reads; it exists in the default dataset.</summary>
@@ -315,6 +323,48 @@ internal static class RatioCheck
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// Reads a file and writes it back out, which is the write axis -- the one docs/05 never had a
+    /// reference for.
+    /// </summary>
+    /// <remarks>
+    /// The read is on both sides of the ratio and is therefore common-mode, but it is not small:
+    /// subtract the `full scan` axis from both before reading the quotient as a statement about
+    /// writers. The sink discards, on both sides, because a write benchmark that measures the
+    /// filesystem measures the filesystem.
+    /// </remarks>
+    private static async Task<long> ReadAndWrite(string path)
+    {
+        await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using Vorticity.Writing.VortexFileWriter writer =
+            Vorticity.Writing.VortexFileWriter.Create(new DiscardSink(), source.Schema);
+
+        long rows = 0;
+        await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+            await writer.WriteAsync(batch, CancellationToken.None);
+        }
+
+        await writer.CompleteAsync(CancellationToken.None);
+        return rows;
+    }
+
+    /// <summary>A sink that counts bytes and keeps none of them.</summary>
+    private sealed class DiscardSink : Vorticity.Writing.ISegmentSink
+    {
+        public long Position { get; private set; }
+
+        public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+        {
+            Position += data.Length;
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask FlushAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
     }
 
     private static async Task<long> FooterOnly(string path)

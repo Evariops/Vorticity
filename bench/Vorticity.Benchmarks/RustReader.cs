@@ -62,6 +62,19 @@ internal static partial class RustReader
     [LibraryImport(Library, EntryPoint = "vxbench_scan_canonical", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long ScanCanonical(string path);
 
+    /// <summary>Reads a file and writes it back out with the reference's default strategy.</summary>
+    /// <param name="path">The file to round-trip, as a UTF-8 C string.</param>
+    /// <returns>The row count, or negative on failure.</returns>
+    /// <remarks>
+    /// The write axis had no reference at all: docs/05 compares reading on five axes and writing on
+    /// none, so every write-side change in this repository was measured against its own past rather
+    /// than against the implementation it is a port of. The READ is inside the measurement on both
+    /// sides -- same file, same reader -- so it is common-mode, and
+    /// <see cref="ScanCanonical"/> is the number to subtract when it is a large share.
+    /// </remarks>
+    [LibraryImport(Library, EntryPoint = "vxbench_write", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial long Write(string path);
+
     /// <summary>Opens a file and scans one field of every batch.</summary>
     /// <param name="path">The file to scan, as a UTF-8 C string.</param>
     /// <param name="field">The root field to project.</param>
