@@ -24,6 +24,7 @@
 using System;
 using System.Buffers.Binary;
 using System.IO.Compression;
+using System.Text;
 using System.Text.Unicode;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
@@ -296,12 +297,32 @@ public sealed class ZstdDecoder : ArrayDecoder
     {
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             length, CanonicalSupport.ViewSize, Id + " views");
-        VortexBuffer views = CanonicalSupport.Allocate(
-            context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
 
         ValidityMask mask = ValidityMask.From(context, validity);
-        bool requireUtf8 = dtype.Kind == DTypeKind.Utf8;
+
+        // THE ZERO FILL STAYS, and it was measured rather than assumed. An all-valid array writes
+        // every one of the sixteen bytes of every view, so `AllocateUninitialized` is provable
+        // here -- and it is 1% SLOWER (535 against 541 scans per 4 s). The memset is not pure
+        // overhead: it pulls the sixteen-megabyte view buffer into cache just ahead of the loop
+        // that rewrites it, so dropping it trades a sequential fill for a cold miss per row.
+        // A null row needs the zeros anyway: it keeps `empty_view()` and the loop skips it.
+        VortexBuffer views = CanonicalSupport.Allocate(
+            context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
         ReadOnlySpan<byte> heap = values.Span;
+
+        // ONE PASS OVER THE HEAP INSTEAD OF A CALL PER ROW. Every byte below 0x80 is a complete,
+        // valid UTF-8 sequence on its own, so if the whole decompressed stream is ASCII then so is
+        // every value inside it, whatever the boundaries -- and no per-row validation can fail.
+        // `Ascii.IsValid` is one intrinsified sweep at memory speed; the per-row
+        // `Utf8.IsValid` was 19% of a zstd scan, because a validator called on twenty bytes at a
+        // time never reaches its stride.
+        //
+        // The four-byte length prefixes sit inside the heap and are NOT text, but they are ASCII
+        // whenever a value is shorter than 128 bytes (the low byte) with three zero bytes above
+        // it, which is the shape of essentially every string column. When the sweep does find a
+        // high byte -- a real non-ASCII value, or a value at least 128 bytes long -- the per-row
+        // path below is exactly what it was.
+        bool requireUtf8 = dtype.Kind == DTypeKind.Utf8 && !Ascii.IsValid(heap);
 
         int offset = 0;
         int written = 0;
