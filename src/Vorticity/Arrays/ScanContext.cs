@@ -243,6 +243,62 @@ public sealed class ScanContext : IDisposable
         return previous;
     }
 
+    /// <summary>
+    /// Holds ONE decoded flat node across the batches carved out of it. Never reset by
+    /// <see cref="ResetBatch"/>; that is the whole point.
+    /// </summary>
+    private CanonicalArena? _retained;
+
+    /// <summary>The segment id <see cref="_retained"/> holds, when <see cref="_retainedIndex"/> is set.</summary>
+    private uint _retainedSegment;
+
+    /// <summary>The retained node's index in <see cref="_retained"/>, or -1.</summary>
+    private int _retainedIndex = -1;
+
+    /// <summary>The arena holding the retained node.</summary>
+    internal CanonicalArena Retained => _retained ??= new CanonicalArena();
+
+    /// <summary>The retained decode for <paramref name="segmentId"/>, if it is the one held.</summary>
+    /// <param name="segmentId">The flat layout's segment, which identifies it within the file.</param>
+    /// <param name="nodeIndex">The node's index in <see cref="Retained"/>.</param>
+    /// <returns><see langword="true"/> when this segment is the one retained.</returns>
+    internal bool TryGetRetained(uint segmentId, out int nodeIndex)
+    {
+        if (_retainedIndex >= 0 && _retainedSegment == segmentId)
+        {
+            nodeIndex = _retainedIndex;
+            return true;
+        }
+
+        nodeIndex = -1;
+        return false;
+    }
+
+    /// <summary>
+    /// Copies a decoded node into the retained arena, evicting whatever was there.
+    /// </summary>
+    /// <param name="segmentId">The segment the node decodes.</param>
+    /// <param name="source">The arena holding it, normally the batch's.</param>
+    /// <param name="nodeIndex">The node.</param>
+    /// <returns>Its index in <see cref="Retained"/>.</returns>
+    /// <remarks>
+    /// ONE ENTRY, AND THAT IS A DESIGN CHOICE RATHER THAN A SIMPLIFICATION. A scan walks its splits
+    /// in order, so every batch carved out of a chunk asks for the same segment in a row and the
+    /// next chunk never comes back. A larger cache would hold chunks nothing will ask for again and
+    /// turn a bounded cost into a growing one, which `LiveMemoryTests` exists to catch.
+    ///
+    /// The peak cost is therefore one chunk's canonical form -- 8 MB for a million `i64` rows --
+    /// held only while its own batches are being emitted.
+    /// </remarks>
+    internal int Retain(uint segmentId, CanonicalArena source, int nodeIndex)
+    {
+        CanonicalArena retained = Retained;
+        retained.Reset();
+        _retainedIndex = retained.CopyFrom(source, nodeIndex);
+        _retainedSegment = segmentId;
+        return _retainedIndex;
+    }
+
     public void ResetBatch()
     {
         _selection = null;
@@ -264,6 +320,8 @@ public sealed class ScanContext : IDisposable
 
         _disposed = true;
         Canonical.Reset();
+        _retained?.Reset();
+        _retainedIndex = -1;
         Segments.Dispose();
     }
 

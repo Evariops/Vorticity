@@ -29,6 +29,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.File;
+using Vorticity;
 using Vorticity.Scan;
 using Vorticity.Tests.Scan;
 using Xunit;
@@ -38,22 +39,30 @@ namespace Vorticity.Tests.Writing;
 /// <summary>A batch's arena is recycled, so an index into it is meaningless once the batch is gone.</summary>
 public sealed class ArenaLifetimeTests
 {
-    /// <summary>8 193 i32 rows, which the default batch size splits into more than one chunk.</summary>
+    /// <summary>8 193 i32 rows in one chunk, read as two batches: chunk larger than batch.</summary>
     private const string Entry = "types/i32_nonnull_r8193";
 
     /// <summary>
-    /// Reading through a previous batch's canonical index yields the CURRENT batch's values.
+    /// An index from an earlier batch no longer addresses the later batch's arena at all.
     /// </summary>
     /// <remarks>
-    /// Deliberately asserts what the stale index DOES return rather than merely that it differs.
-    /// "The values changed" would also pass if the arena had been freed and the read were returning
-    /// garbage; the point being fixed is narrower and worth stating exactly - the storage is intact,
-    /// addressable and refilled, so a stale index reads live, plausible, WRONG data rather than
-    /// failing. That is why the shared dictionary produced a valid file full of permuted values
-    /// instead of throwing.
+    /// THIS TEST USED TO ASSERT THE OPPOSITE, and the change is the point. It was written to show
+    /// that a stale canonical index reads live, plausible, WRONG data rather than failing -- the
+    /// mechanism behind the shared-dictionary layout coming back permuted twice, with three
+    /// unrelated causes eliminated in between.
+    ///
+    /// `FlatLayoutReader` now decodes a chunk larger than a batch ONCE, into an arena
+    /// `ResetBatch` does not touch, and copies only the batch's window into the batch's own arena.
+    /// So the batch arena no longer holds the decoded tree, and an index captured from it in batch 1
+    /// is out of range in batch 2: the failure went from silent to loud, which is strictly better.
+    ///
+    /// WHAT IS UNCHANGED, and is what the hazard actually was: there is still ONE arena, reset and
+    /// refilled per batch. `Assert.Same` below is the part that still matters. Anything wanting
+    /// canonical data to outlive its batch must copy the bytes -- `CanonicalArena.CopyFrom` -- and
+    /// that is as true now as when this file was written.
     /// </remarks>
     [Fact]
-    public async Task AnIndexFromAnEarlierBatchReadsTheLaterBatchsRows()
+    public async Task AnIndexFromAnEarlierBatchNoLongerAddressesTheLaterBatch()
     {
         string path = Corpus.Path(Entry);
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
@@ -62,8 +71,7 @@ public sealed class ArenaLifetimeTests
         int capturedRoot = -1;
         List<int> first = [];
         List<int> second = [];
-        List<int> throughStaleIndex = [];
-        int laterRoot = -1;
+        bool checkedStale = false;
 
         await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -76,27 +84,21 @@ public sealed class ArenaLifetimeTests
                 continue;
             }
 
-            // The second batch is resident NOW, and the read below holds no reference to the first
-            // batch at all - only the arena and the index it handed out. Inside the loop on purpose:
-            // disposing the enumerator resets the arena to zero records, so a stale index read after
-            // the scan throws instead of lying, and it is the lying that matters here.
+            // The second batch is resident now, and the arena is the same object it always was.
             Assert.Same(captured, batch.Arena);
-            laterRoot = batch.RootIndex;
             Read(batch, second);
 
-            using RecordBatch stale = new RecordBatch(captured, capturedRoot, 0);
-            Read(stale, throughStaleIndex);
+            Assert.Throws<VortexFormatException>(
+                () => new RecordBatch(captured, capturedRoot, 0).Dispose());
+            checkedStale = true;
             break;
         }
 
         Assert.NotNull(captured);
+        Assert.NotEmpty(first);
         Assert.NotEmpty(second);
-
-        // The index itself is stable - it is the STORAGE BEHIND IT that moved, which is what makes
-        // this silent rather than loud.
-        Assert.Equal(laterRoot, capturedRoot);
-        Assert.Equal(second, throughStaleIndex);
-        Assert.NotEqual(first, throughStaleIndex);
+        Assert.NotEqual(first, second);
+        Assert.True(checkedStale, "the file must produce more than one batch for this to mean anything");
     }
 
     private static void Read(RecordBatch batch, List<int> into)

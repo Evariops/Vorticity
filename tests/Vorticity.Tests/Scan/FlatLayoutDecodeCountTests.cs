@@ -41,16 +41,10 @@ public sealed class FlatLayoutDecodeCountTests
     /// <summary>Rows in the single chunk. Comfortably more than the 8192-row batch.</summary>
     private const int Rows = 50_000;
 
-    /// <summary>
-    /// What a correct reader would materialize: each value once.
-    /// </summary>
-    /// <remarks>
-    /// Not the assertion. Recorded so the gap is a number rather than a description, and so that
-    /// whoever fixes this knows what to assert instead.
-    /// </remarks>
+    /// <summary>What a correct reader materializes: each value once. Now the assertion.</summary>
     private const long Ideal = Rows;
 
-    /// <summary>A scan of one oversized chunk decodes it once per batch.</summary>
+    /// <summary>A scan of one oversized chunk decodes it ONCE, not once per batch.</summary>
     [Fact]
     public async Task AScanMaterializesEveryValueOncePerBatch()
     {
@@ -78,14 +72,15 @@ public sealed class FlatLayoutDecodeCountTests
             decoded.ToString(CultureInfo.InvariantCulture) + " values -- " +
             ((double)decoded / Ideal).ToString("F1", CultureInfo.InvariantCulture) + "x the " +
             Ideal.ToString(CultureInfo.InvariantCulture) + " a correct reader would.\n" +
-            "The factor is the batch count, so it grows with the row count: this is the quadratic.\n");
+            "A factor above 1.0 is the batch count, and would grow with the row count.\n");
 
         Assert.Equal(Rows, rows);
         Assert.True(batches > 1, "the chunk must exceed one batch for this test to mean anything");
 
-        // The ratchet. Equality, not a bound: this quantity is exact, and a bound would let the
-        // number drift up inside it.
-        Assert.Equal(batches * Rows, decoded);
+        // THE RATCHET, DROPPED FROM `batches * Rows` TO `Rows` when the retained decode landed.
+        // Equality, not a bound: the quantity is exact, and a bound would let it drift back up
+        // inside the slack. At 50 000 rows over 7 batches the defect read 350 000.
+        Assert.Equal(Ideal, decoded);
         }
         finally
         {
