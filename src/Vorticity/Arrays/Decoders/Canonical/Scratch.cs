@@ -4,6 +4,7 @@
 // finally.
 using System;
 using System.Buffers;
+using System.Runtime.CompilerServices;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
@@ -14,6 +15,32 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// <typeparam name="T">Element type; only value types are used here.</typeparam>
 internal ref struct Scratch<T>
 {
+    /// <summary>
+    /// Whether a returned rental must be wiped before the pool hands it on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// IT IS THE POINTER THAT HAS TO GO, not the bytes. A <c>VortexBuffer</c> left in a pooled
+    /// array is a raw pointer into a segment this batch no longer owns, and a <c>DType</c> holds an
+    /// arena reference the next batch has no business keeping alive - so those are cleared. A span
+    /// of <c>int</c> holds neither: the pool's own contract already says a renter reads only what
+    /// it wrote, so wiping it buys nothing and costs a pass over the whole rental on the way out.
+    /// </para>
+    /// <para>
+    /// Twenty of the thirty instantiations in this assembly are <c>Scratch&lt;int&gt;</c>, and the
+    /// clear was showing up under <c>ArrayPool.Return</c> in the profile of a pco scan. The test is
+    /// a static readonly <see cref="bool"/> over a type the JIT knows, so it folds to a constant in
+    /// each instantiation and the branch disappears.
+    /// </para>
+    /// <para>
+    /// <c>IsReferenceOrContainsReferences</c> alone would NOT be enough: it reports false for
+    /// <c>VortexBuffer</c>, whose pointer is unmanaged. Requiring a primitive is the conservative
+    /// side of that line - every non-primitive clears, whether or not it turns out to need to.
+    /// </para>
+    /// </remarks>
+    private static readonly bool ClearOnReturn =
+        RuntimeHelpers.IsReferenceOrContainsReferences<T>() || !typeof(T).IsPrimitive;
+
     private T[]? _rented;
     private readonly Span<T> _span;
 
@@ -47,9 +74,7 @@ internal ref struct Scratch<T>
         {
             _rented = null;
 
-            // clearArray: the pool hands these to the next decode, and a VortexBuffer left behind
-            // is a raw pointer into a segment this batch no longer owns.
-            ArrayPool<T>.Shared.Return(rented, clearArray: true);
+            ArrayPool<T>.Shared.Return(rented, ClearOnReturn);
         }
     }
 }

@@ -63,28 +63,23 @@ public sealed class FlatLayoutReader : LayoutReader
         int total = NodeLength(in node);
         int length = BatchLength(rows);
 
-        VortexBuffer segment = SegmentBuffer(in node, 0, context);
-        FlatLayoutMetadata metadata = FlatLayoutMetadata.Read(node.Metadata);
-        if (metadata.HasArrayEncodingTree)
-        {
-            context.Decode.LoadBlob(metadata.ArrayEncodingTree, segment);
-        }
-        else
-        {
-            context.Decode.LoadBlob(segment);
-        }
-
-        // The contained array's dtype is exactly the node's and its length exactly the node's row
-        // count; neither is carried by the array blob (docs/02-format.md §5.2).
-        ArrayNode root = context.Nodes.Root;
+        // THE BLOB IS PARSED WHERE IT IS READ, not on the way past. Loading it means resetting the
+        // node arena, copying the Array FlatBuffer into it, walking the node tree and resolving
+        // every buffer spec in the segment -- and none of that survives the call. A batch that
+        // finds its chunk already decoded and retained never touches the root, so on a column
+        // whose chunk spans 123 batches the parse ran 123 times to be used once. It was 15% of a
+        // 1M-row pco scan, a file of 24 KB.
+        //
+        // The three readers below each load it themselves, immediately before the only use.
 
         // The selection is in the same space as `rows`, and a flat layout's space IS the segment's,
         // so the wanted rows need no translation at all - which is the whole reason the selection
         // is carried in the row argument's coordinate space rather than in absolute file rows.
         if (context.HasSelection)
         {
+            ArrayNode selectedRoot = LoadRoot(in node, context);
             int taken = context.Decode.DecodeRootSelected(
-                in root, node.DType, total, context.Selection);
+                in selectedRoot, node.DType, total, context.Selection);
             return MaskProjection.Apply(context.Decode, taken, in fields);
         }
 
@@ -93,8 +88,9 @@ public sealed class FlatLayoutReader : LayoutReader
         // this library writes at the default edition, so the common path is unchanged.
         if (rows.Start == 0 && length == total)
         {
+            ArrayNode wholeRoot = LoadRoot(in node, context);
             System.Threading.Interlocked.Add(ref ValuesDecoded, total);
-            int whole = context.Decode.DecodeRoot(in root, node.DType, total);
+            int whole = context.Decode.DecodeRoot(in wholeRoot, node.DType, total);
             return MaskProjection.Apply(context.Decode, whole, in fields);
         }
 
@@ -121,11 +117,12 @@ public sealed class FlatLayoutReader : LayoutReader
             // pass over every byte, 26% of a 1M-row sequence scan. `Canonical` is redirected for
             // the duration of this one decode and nothing else changes: the lifetime argument was
             // always about which arena the result lives in, and it lives in the same one.
+            ArrayNode chunkRoot = LoadRoot(in node, context);
             held = context.BeginRetainedDecode();
             retained = -1;
             try
             {
-                retained = context.Decode.DecodeRoot(in root, node.DType, total);
+                retained = context.Decode.DecodeRoot(in chunkRoot, node.DType, total);
             }
             finally
             {
@@ -135,5 +132,31 @@ public sealed class FlatLayoutReader : LayoutReader
 
         int sliced = CanonicalSlice.SliceAcross(held, context.Canonical, retained, (int)rows.Start, length);
         return MaskProjection.Apply(context.Decode, sliced, in fields);
+    }
+
+    /// <summary>
+    /// Parses this layout's array blob into the scan's node arena and returns its root.
+    /// </summary>
+    /// <remarks>
+    /// The contained array's dtype is exactly the node's and its length exactly the node's row
+    /// count; neither is carried by the array blob (docs/02-format.md §5.2).
+    /// </remarks>
+    /// <param name="node">The flat layout node.</param>
+    /// <param name="context">The scan context owning the node arena.</param>
+    /// <returns>The root of the parsed blob.</returns>
+    private ArrayNode LoadRoot(in LayoutNode node, ScanContext context)
+    {
+        VortexBuffer segment = SegmentBuffer(in node, 0, context);
+        FlatLayoutMetadata metadata = FlatLayoutMetadata.Read(node.Metadata);
+        if (metadata.HasArrayEncodingTree)
+        {
+            context.Decode.LoadBlob(metadata.ArrayEncodingTree, segment);
+        }
+        else
+        {
+            context.Decode.LoadBlob(segment);
+        }
+
+        return context.Nodes.Root;
     }
 }
