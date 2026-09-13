@@ -115,8 +115,22 @@ public sealed class FlatLayoutReader : LayoutReader
         if (!context.TryGetRetained(segmentId, out CanonicalArena held, out int retained))
         {
             System.Threading.Interlocked.Add(ref ValuesDecoded, total);
-            int decoded = context.Decode.DecodeRoot(in root, node.DType, total);
-            retained = context.Retain(segmentId, context.Canonical, decoded, out held);
+
+            // DECODED STRAIGHT INTO THE ARENA THAT RETAINS IT. The chunk used to be decoded into
+            // the batch's arena and then deep-copied into one that outlives it -- a second full
+            // pass over every byte, 26% of a 1M-row sequence scan. `Canonical` is redirected for
+            // the duration of this one decode and nothing else changes: the lifetime argument was
+            // always about which arena the result lives in, and it lives in the same one.
+            held = context.BeginRetainedDecode();
+            retained = -1;
+            try
+            {
+                retained = context.Decode.DecodeRoot(in root, node.DType, total);
+            }
+            finally
+            {
+                context.EndRetainedDecode(segmentId, retained);
+            }
         }
 
         int sliced = CanonicalSlice.SliceAcross(held, context.Canonical, retained, (int)rows.Start, length);

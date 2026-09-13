@@ -163,10 +163,38 @@ public sealed class SequenceDecoder : ArrayDecoder
             return;
         }
 
+        // THE ACCUMULATOR IS A LOOP-CARRIED DEPENDENCY, one add deep, so the serial loop runs at
+        // the latency of an add per value however wide the machine is. `base + i * step` is the
+        // same sequence with no dependency at all: seed one vector with the first `lanes` values
+        // and advance it by `lanes * step`, which wraps exactly as the running sum does because
+        // two's-complement addition is associative.
+        int index = 0;
         T accumulator = start;
-        for (int i = 0; i < values.Length; i++)
+        if (Vector<T>.IsSupported && values.Length >= Vector<T>.Count)
         {
-            values[i] = accumulator;
+            int lanes = Vector<T>.Count;
+            Span<T> seed = stackalloc T[lanes];
+            T value = start;
+            for (int k = 0; k < lanes; k++)
+            {
+                seed[k] = value;
+                value = unchecked(value + step);
+            }
+
+            Vector<T> current = new Vector<T>(seed);
+            Vector<T> bump = new Vector<T>(unchecked(value - start));
+            for (; index <= values.Length - lanes; index += lanes)
+            {
+                current.StoreUnsafe(ref values[index]);
+                current = unchecked(current + bump);
+            }
+
+            accumulator = current[0];
+        }
+
+        for (; index < values.Length; index++)
+        {
+            values[index] = accumulator;
             accumulator = unchecked(accumulator + step);
         }
     }

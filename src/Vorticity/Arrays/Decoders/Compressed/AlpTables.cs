@@ -14,6 +14,7 @@
 // whatever the file declares. So the bound a READER must enforce is the table length: it is what
 // keeps the lookup in memory.
 using System;
+using System.Numerics;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
@@ -66,7 +67,24 @@ internal static class AlpTables
     {
         float scale = F10Single[exponentF];
         float inverse = If10Single[exponentE];
-        for (int i = 0; i < destination.Length; i++)
+
+        int i = 0;
+        if (Vector<int>.IsSupported && destination.Length >= Vector<int>.Count)
+        {
+            Vector<float> scaleVector = new Vector<float>(scale);
+            Vector<float> inverseVector = new Vector<float>(inverse);
+            int lanes = Vector<int>.Count;
+            for (; i <= destination.Length - lanes; i += lanes)
+            {
+                // Same order as the scalar line -- convert, multiply by scale, multiply by inverse
+                // -- because float multiplication is not associative and the two orders differ in
+                // the last bit on values this encoding produces by design.
+                Vector<float> values = Vector.ConvertToSingle(Vector.LoadUnsafe(in encoded[i]));
+                (values * scaleVector * inverseVector).StoreUnsafe(ref destination[i]);
+            }
+        }
+
+        for (; i < destination.Length; i++)
         {
             destination[i] = encoded[i] * scale * inverse;
         }
@@ -82,7 +100,24 @@ internal static class AlpTables
     {
         double scale = F10Double[exponentF];
         double inverse = If10Double[exponentE];
-        for (int i = 0; i < destination.Length; i++)
+
+        int i = 0;
+        if (Vector<long>.IsSupported && destination.Length >= Vector<long>.Count)
+        {
+            Vector<double> scaleVector = new Vector<double>(scale);
+            Vector<double> inverseVector = new Vector<double>(inverse);
+            int lanes = Vector<long>.Count;
+            for (; i <= destination.Length - lanes; i += lanes)
+            {
+                // NEON has the i64 -> f64 conversion natively, which AVX2 does not; writing this on
+                // `Vector<T>` rather than a fixed width is what lets the same source use it here and
+                // fall back to whatever the JIT emits elsewhere.
+                Vector<double> values = Vector.ConvertToDouble(Vector.LoadUnsafe(in encoded[i]));
+                (values * scaleVector * inverseVector).StoreUnsafe(ref destination[i]);
+            }
+        }
+
+        for (; i < destination.Length; i++)
         {
             destination[i] = encoded[i] * scale * inverse;
         }

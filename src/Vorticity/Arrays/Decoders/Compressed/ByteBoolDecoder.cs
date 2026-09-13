@@ -3,6 +3,7 @@
 // index 0. ANY non-zero byte is true, not just 1: upstream's canonicalization is
 // `BitBuffer::from_iter(bytes.iter().map(|&b| b != 0))`.
 using System;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Types;
 
@@ -56,16 +57,11 @@ public sealed class ByteBoolDecoder : ArrayDecoder
         }
 
         int bitmapBytes = (length + 7) / 8;
-        VortexBuffer bits = CompressedValues.Allocate(
+
+        // Uninitialized: PackBytes writes every byte of the bitmap, the partial last one included.
+        VortexBuffer bits = CompressedValues.AllocateUninitialized(
             context, bitmapBytes, 8, Id, out Span<byte> destination);
-        ReadOnlySpan<byte> source = values.Span;
-        for (int i = 0; i < length; i++)
-        {
-            if (source[i] != 0)
-            {
-                destination[i >> 3] |= (byte)(1 << (i & 7));
-            }
-        }
+        BitmapKernels.PackBytes(values.Span, destination);
 
         return context.Canonical.AddBool(dtype, length, validity, bits, 0);
     }

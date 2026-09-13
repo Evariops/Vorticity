@@ -11,6 +11,9 @@
 // same layout and stay where they are - a loop that genuinely touches scattered bits should keep
 // using them.
 using System;
+using System.Buffers.Binary;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
@@ -79,6 +82,66 @@ internal static class BitmapKernels
         }
 
         bits[lastByte] &= (byte)~lastMask;
+    }
+
+    /// <summary>
+    /// Packs one byte per boolean into one bit per boolean: bit i is set iff
+    /// <c>source[i] != 0</c>.
+    /// </summary>
+    /// <param name="source">One byte per value; ANY non-zero byte is true, as upstream has it.</param>
+    /// <param name="destination">
+    /// <c>(source.Length + 7) / 8</c> bytes; every one of them is written, including the partial
+    /// last byte, whose bits past the value count are cleared.
+    /// </param>
+    /// <remarks>
+    /// <c>vortex.bytebool</c> is this loop and nothing else, and it was a read-modify-write of the
+    /// destination byte per VALUE. Sixteen bytes compare to zero in one instruction and their
+    /// sixteen sign bits extract to a <see cref="ushort"/> in one more, so the vector path writes
+    /// two output bytes per iteration and touches each of them once.
+    /// </remarks>
+    internal static void PackBytes(ReadOnlySpan<byte> source, Span<byte> destination)
+    {
+        int length = source.Length;
+        int i = 0;
+
+        if (Vector128.IsHardwareAccelerated && length >= Vector128<byte>.Count)
+        {
+            ref byte input = ref MemoryMarshal.GetReference(source);
+            for (; i <= length - Vector128<byte>.Count; i += Vector128<byte>.Count)
+            {
+                Vector128<byte> values = Vector128.LoadUnsafe(ref input, (uint)i);
+
+                // Equals gives 0xFF where the byte IS zero, so the mask of its sign bits is the
+                // complement of what the bitmap wants.
+                uint zeros = Vector128.Equals(values, Vector128<byte>.Zero)
+                    .ExtractMostSignificantBits();
+                BinaryPrimitives.WriteUInt16LittleEndian(
+                    destination.Slice(i >> 3, 2), (ushort)~zeros);
+            }
+        }
+
+        // Whole bytes of the tail, still written once each rather than bit by bit.
+        for (; i + 8 <= length; i += 8)
+        {
+            byte packed = 0;
+            for (int k = 0; k < 8; k++)
+            {
+                packed |= (byte)((source[i + k] != 0 ? 1 : 0) << k);
+            }
+
+            destination[i >> 3] = packed;
+        }
+
+        if (i < length)
+        {
+            byte packed = 0;
+            for (int k = 0; i + k < length; k++)
+            {
+                packed |= (byte)((source[i + k] != 0 ? 1 : 0) << k);
+            }
+
+            destination[i >> 3] = packed;
+        }
     }
 
     /// <summary>Sets or clears <paramref name="count"/> bits from <paramref name="start"/>.</summary>

@@ -9,6 +9,7 @@
 // (vortex-fastlanes-0.86.1/src/for/array/for_decompress.rs uses `wrapping_add`).
 using System;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Types;
 
@@ -80,12 +81,31 @@ internal static class IntegerKernels
         }
     }
 
+    // POINTWISE, CONTIGUOUS, NO BRANCH: the shape a vector unit exists for, and bench/SIMD.md left
+    // both of these in its "unknown" column rather than its "measured not to help" one. The JIT does
+    // not vectorize a generic loop over `IBinaryInteger<T>` -- verified by the scalar and
+    // DOTNET_EnableHWIntrinsic=0 runs reading the same time -- so it is written out. `Vector<T>`
+    // rather than a fixed width, so the same source is 128-bit here and wider on a machine that has
+    // it, and so the `Vector<T>.IsSupported` guard leaves a complete scalar implementation behind
+    // for the no-intrinsics run to exercise.
     private static void AddWrapping<T>(ReadOnlySpan<byte> source, Span<byte> destination, T reference)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
         ReadOnlySpan<T> src = MemoryMarshal.Cast<byte, T>(source);
         Span<T> dst = MemoryMarshal.Cast<byte, T>(destination);
-        for (int i = 0; i < src.Length; i++)
+
+        int i = 0;
+        if (Vector<T>.IsSupported && src.Length >= Vector<T>.Count)
+        {
+            Vector<T> offset = new Vector<T>(reference);
+            int lanes = Vector<T>.Count;
+            for (; i <= src.Length - lanes; i += lanes)
+            {
+                (Vector.LoadUnsafe(in src[i]) + offset).StoreUnsafe(ref dst[i]);
+            }
+        }
+
+        for (; i < src.Length; i++)
         {
             dst[i] = unchecked(src[i] + reference);
         }
@@ -96,7 +116,24 @@ internal static class IntegerKernels
     {
         ReadOnlySpan<T> src = MemoryMarshal.Cast<byte, T>(source);
         Span<T> dst = MemoryMarshal.Cast<byte, T>(destination);
-        for (int i = 0; i < src.Length; i++)
+
+        int i = 0;
+        if (Vector<T>.IsSupported && src.Length >= Vector<T>.Count)
+        {
+            Vector<T> ones = new Vector<T>(T.One);
+            int lanes = Vector<T>.Count;
+            for (; i <= src.Length - lanes; i += lanes)
+            {
+                Vector<T> value = Vector.LoadUnsafe(in src[i]);
+
+                // The same identity as the scalar line: shift the magnitude down and XOR with the
+                // sign extended from the low bit, which is 0 or all-ones.
+                Vector<T> sign = Vector<T>.Zero - (value & ones);
+                (ShiftRightOne(value) ^ sign).StoreUnsafe(ref dst[i]);
+            }
+        }
+
+        for (; i < src.Length; i++)
         {
             T value = src[i];
             dst[i] = (value >> 1) ^ unchecked(T.Zero - (value & T.One));
@@ -181,6 +218,37 @@ internal static class IntegerKernels
         {
             destination[i] = unchecked(destination[i] + (long.CreateTruncating(src[i]) * scale));
         }
+    }
+
+    /// <summary>
+    /// One logical right shift, reinterpreting to the concrete lane type.
+    /// </summary>
+    /// <remarks>
+    /// <c>Vector.ShiftRightLogical</c> has no overload open in the lane type, so the vector is
+    /// reinterpreted to the one <typeparamref name="T"/> actually is. The typeof comparisons are
+    /// compile-time constants for a value-type instantiation and the JIT drops the dead branches;
+    /// <c>Vector.As</c> is a no-op reinterpretation, not a conversion.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector<T> ShiftRightOne<T>(Vector<T> value)
+        where T : unmanaged
+    {
+        if (typeof(T) == typeof(byte))
+        {
+            return Vector.As<byte, T>(Vector.ShiftRightLogical(Vector.As<T, byte>(value), 1));
+        }
+
+        if (typeof(T) == typeof(ushort))
+        {
+            return Vector.As<ushort, T>(Vector.ShiftRightLogical(Vector.As<T, ushort>(value), 1));
+        }
+
+        if (typeof(T) == typeof(uint))
+        {
+            return Vector.As<uint, T>(Vector.ShiftRightLogical(Vector.As<T, uint>(value), 1));
+        }
+
+        return Vector.As<ulong, T>(Vector.ShiftRightLogical(Vector.As<T, ulong>(value), 1));
     }
 
     private static void RequireSameLength(int source, int destination)

@@ -65,7 +65,7 @@ public sealed class ScanContext : IDisposable
         Types = new DTypeArena();
         Scalars = new ScalarStore();
         Nodes = new ArrayNodeArena();
-        Canonical = new CanonicalArena();
+        _batchCanonical = new CanonicalArena();
         Segments = new SegmentRequestSet();
         Decode = new ArrayDecodeContext(this);
     }
@@ -111,7 +111,7 @@ public sealed class ScanContext : IDisposable
         Types = new DTypeArena();
         Scalars = new ScalarStore();
         Nodes = new ArrayNodeArena();
-        Canonical = new CanonicalArena();
+        _batchCanonical = new CanonicalArena();
         Segments = new SegmentRequestSet();
         Decode = new ArrayDecodeContext(this);
     }
@@ -154,7 +154,21 @@ public sealed class ScanContext : IDisposable
     public ArrayNodeArena Nodes { get; }
 
     /// <summary>One record per decoded node.</summary>
-    public CanonicalArena Canonical { get; }
+    /// <remarks>
+    /// USUALLY THE BATCH'S ARENA, AND BRIEFLY NOT. A chunk larger than a batch is decoded into the
+    /// arena that will RETAIN it, so no copy is needed to move it there --
+    /// <see cref="BeginRetainedDecode"/> redirects this property for the duration of that one
+    /// decode and <see cref="EndRetainedDecode"/> puts it back. The redirect is never observable
+    /// from outside a single <c>LayoutReader.Execute</c> call, and every node the redirected decode
+    /// produces is reachable only through the index that call returns.
+    /// </remarks>
+    public CanonicalArena Canonical => _redirect ?? _batchCanonical;
+
+    /// <summary>The batch's own arena, which <see cref="ResetBatch"/> clears.</summary>
+    private readonly CanonicalArena _batchCanonical;
+
+    /// <summary>Set while a chunk is being decoded straight into the arena that will retain it.</summary>
+    private CanonicalArena? _redirect;
 
     /// <summary>
     /// The <see cref="Vorticity.Buffers.SegmentOwner"/> references for this batch's segments. Exactly one refcount
@@ -308,12 +322,21 @@ public sealed class ScanContext : IDisposable
         return false;
     }
 
-    /// <summary>Retains a decoded node, evicting entries no live batch can be borrowing.</summary>
-    /// <param name="segmentId">The segment the node decodes.</param>
-    /// <param name="source">The arena holding it, normally the batch's.</param>
-    /// <param name="nodeIndex">The node.</param>
-    /// <param name="arena">The arena the copy now lives in.</param>
-    /// <returns>Its index in <paramref name="arena"/>.</returns>
+    /// <summary>
+    /// Picks the arena a chunk will be RETAINED in and redirects <see cref="Canonical"/> at it, so
+    /// the decode lands there instead of being copied there afterwards.
+    /// </summary>
+    /// <returns>The arena, which the caller must close with <see cref="EndRetainedDecode"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE COPY WAS THE SECOND FULL PASS OVER EVERY LARGE CHUNK. This method used to be
+    /// <c>Retain(segmentId, source, nodeIndex)</c>, which decoded into the batch's arena and then
+    /// deep-copied the result -- every buffer, every byte -- into an arena that outlives the batch.
+    /// It was 26% of a 1M-row `vortex.sequence` scan and a proportional share of every other
+    /// encoding on this path. Decoding into the destination removes it entirely; nothing else about
+    /// the lifetime argument changes, because the arena was always the retained one.
+    /// </para>
+    /// </remarks>
     /// <remarks>
     /// <para>
     /// THE EVICTION RULE IS A PROOF, NOT A HEURISTIC, and the first version of this cache had no
@@ -335,8 +358,16 @@ public sealed class ScanContext : IDisposable
     /// kept and refilled rather than reallocated.
     /// </para>
     /// </remarks>
-    internal int Retain(uint segmentId, CanonicalArena source, int nodeIndex, out CanonicalArena arena)
+    internal CanonicalArena BeginRetainedDecode()
     {
+        if (_redirect is not null)
+        {
+            // A flat layout is a leaf: its decode never re-enters Execute, so a nested redirect
+            // would mean the reader tree changed shape under an assumption this method makes.
+            throw new InvalidOperationException(
+                "A retained decode is already in flight on this scan context.");
+        }
+
         _retained ??= [];
         for (int i = _retained.Count - 1; i >= 0; i--)
         {
@@ -354,17 +385,45 @@ public sealed class ScanContext : IDisposable
         CanonicalArena fresh = _spareArenas is { Count: > 0 }
             ? _spareArenas.Pop()
             : new CanonicalArena();
-        int index = fresh.CopyFrom(source, nodeIndex);
+        _redirect = fresh;
+        return fresh;
+    }
+
+    /// <summary>
+    /// Ends the redirect and records the decoded node, or discards the arena when the decode
+    /// failed.
+    /// </summary>
+    /// <param name="segmentId">The segment the node decodes, or 0 when discarding.</param>
+    /// <param name="nodeIndex">The decoded node's index in the redirected arena, or -1.</param>
+    /// <remarks>
+    /// Called from a <c>finally</c>, so it has to be correct for the throwing path too: a decode
+    /// that raised leaves an arena full of half-built records, which is reset and returned to the
+    /// spares rather than published.
+    /// </remarks>
+    internal void EndRetainedDecode(uint segmentId, int nodeIndex)
+    {
+        CanonicalArena? fresh = _redirect;
+        _redirect = null;
+        if (fresh is null)
+        {
+            return;
+        }
+
+        if (nodeIndex < 0)
+        {
+            fresh.Reset();
+            (_spareArenas ??= new Stack<CanonicalArena>()).Push(fresh);
+            return;
+        }
+
+        _retained ??= [];
         _retained.Add(new RetainedChunk
         {
             Arena = fresh,
             SegmentId = segmentId,
-            NodeIndex = index,
+            NodeIndex = nodeIndex,
             LastTouched = _batchNumber,
         });
-
-        arena = fresh;
-        return index;
     }
 
     public void ResetBatch()
@@ -376,7 +435,7 @@ public sealed class ScanContext : IDisposable
         _selectionCount = 0;
         Segments.Release();
         Nodes.Reset();
-        Canonical.Reset();
+        _batchCanonical.Reset();
         Scalars.Clear();
         Decode.ResetBatch();
     }
@@ -390,7 +449,7 @@ public sealed class ScanContext : IDisposable
         }
 
         _disposed = true;
-        Canonical.Reset();
+        _batchCanonical.Reset();
         if (_retained is not null)
         {
             foreach (RetainedChunk entry in _retained)

@@ -104,11 +104,14 @@ public sealed class FlatLayoutDecodeCountTests
     /// supposedly fixed.
     ///
     /// Re-creating the child's RECORDS while its buffers stay views costs neither correctness nor
-    /// bytes, and the quantity that proves it is exact. NOT zero: retaining the chunk in the first
-    /// place is one honest copy out of the batch arena into an arena that outlives it, which is
-    /// `ScanContext.Retain` and is the fix, not the defect. What must be zero is everything AFTER
-    /// that -- and the assertion is equality with the one copy rather than a bound, so the seven
-    /// per-batch copies the defect added (800 000 bytes each) cannot hide inside slack.
+    /// bytes, and the quantity that proves it is exact: ZERO bytes materialized for a whole scan.
+    ///
+    /// It read 1 600 000 when this test was written -- one honest copy of the chunk out of the
+    /// batch arena into an arena that outlives it -- and that copy has since gone too: the chunk is
+    /// decoded straight into the arena that retains it. So the number this pins is now the strongest
+    /// one available, and the two defects it stands against are visible as two different multiples
+    /// of nothing: 7 200 000 bytes when the elements child was re-copied per batch, 1 600 000 when
+    /// only the retain copied.
     /// </remarks>
     [Fact]
     public async Task AWindowOntoARetainedListChunkCopiesNoBytes()
@@ -131,19 +134,16 @@ public sealed class FlatLayoutDecodeCountTests
 
             long copied = CanonicalArena.BytesMaterialized - before;
 
-            // One retain: the elements child (2 per row), the offsets and the sizes, all i64.
-            const long OneRetain = ((long)Rows * 2 * sizeof(long)) + ((long)Rows * 2 * sizeof(long));
             Console.Out.Write(
                 "LIST WINDOW: " + rows.ToString(CultureInfo.InvariantCulture) + " list rows in one chunk, read as " +
                 batches.ToString(CultureInfo.InvariantCulture) + " batches, materialized " +
-                copied.ToString(CultureInfo.InvariantCulture) + " bytes -- " +
-                ((double)copied / OneRetain).ToString("F2", CultureInfo.InvariantCulture) +
-                "x the one retain a correct reader pays.\n" +
-                "Anything above 1.00x is the elements child re-copied per batch, and grows with the row count.\n");
+                copied.ToString(CultureInfo.InvariantCulture) + " bytes.\n" +
+                "A correct reader copies nothing: it decodes into the arena that retains the chunk, " +
+                "and every batch window is a record over the same buffers.\n");
 
             Assert.Equal(Rows, rows);
             Assert.True(batches > 1, "the chunk must exceed one batch for this test to mean anything");
-            Assert.Equal(OneRetain, copied);
+            Assert.Equal(0, copied);
         }
         finally
         {

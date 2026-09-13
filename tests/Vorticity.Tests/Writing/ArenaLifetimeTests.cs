@@ -46,20 +46,31 @@ public sealed class ArenaLifetimeTests
     /// An index from an earlier batch no longer addresses the later batch's arena at all.
     /// </summary>
     /// <remarks>
-    /// THIS TEST USED TO ASSERT THE OPPOSITE, and the change is the point. It was written to show
-    /// that a stale canonical index reads live, plausible, WRONG data rather than failing -- the
-    /// mechanism behind the shared-dictionary layout coming back permuted twice, with three
-    /// unrelated causes eliminated in between.
+    /// THIS TEST HAS ASSERTED THREE DIFFERENT THINGS, and the third is the durable one.
     ///
-    /// `FlatLayoutReader` now decodes a chunk larger than a batch ONCE, into an arena
-    /// `ResetBatch` does not touch, and copies only the batch's window into the batch's own arena.
-    /// So the batch arena no longer holds the decoded tree, and an index captured from it in batch 1
-    /// is out of range in batch 2: the failure went from silent to loud, which is strictly better.
+    /// It was written to show that a stale canonical index reads live, plausible, WRONG data rather
+    /// than failing -- the mechanism behind the shared-dictionary layout coming back permuted twice,
+    /// with three unrelated causes eliminated in between. When `FlatLayoutReader` started decoding
+    /// an oversized chunk once into a retained arena and copying the batch's window out of it, the
+    /// batch arena stopped holding the decoded tree, a batch-1 index fell out of range in batch 2,
+    /// and the test was changed to assert a `VortexFormatException`: silent had become loud.
     ///
-    /// WHAT IS UNCHANGED, and is what the hazard actually was: there is still ONE arena, reset and
-    /// refilled per batch. `Assert.Same` below is the part that still matters. Anything wanting
-    /// canonical data to outlive its batch must copy the bytes -- `CanonicalArena.CopyFrom` -- and
-    /// that is as true now as when this file was written.
+    /// THAT LOUDNESS WAS AN ARTIFACT OF THE COPY, not a property of the model. The chunk is now
+    /// decoded straight into the arena that retains it -- the copy was a second full pass over
+    /// every byte, 26% of a 1M-row scan -- so the batch arena holds the same handful of window
+    /// records in both batches and a batch-1 index addresses a perfectly real batch-2 node again.
+    /// Nothing about the lifetime rule changed; what changed is that a violation of it is no longer
+    /// caught by accident. It never was in general: the arena had no generation and a raw index
+    /// carries none, so there is no index for which the library could promise to notice.
+    ///
+    /// So the assertion is back to the hazard itself, stated as strongly as the model permits: a
+    /// stale root index yields the CURRENT batch's data, never the batch it was captured from.
+    ///
+    /// WHAT IS UNCHANGED, and is what the hazard actually was: there is still ONE batch arena,
+    /// reset and refilled per batch. `Assert.Same` below is the part that still matters. Anything
+    /// wanting canonical data to outlive its batch must own its own arena --
+    /// `CanonicalArena.CopyFrom` for the bytes, `ReferenceFrom` when the source outlives the
+    /// borrower -- and that is as true now as when this file was written.
     /// </remarks>
     [Fact]
     public async Task AnIndexFromAnEarlierBatchNoLongerAddressesTheLaterBatch()
@@ -88,8 +99,16 @@ public sealed class ArenaLifetimeTests
             Assert.Same(captured, batch.Arena);
             Read(batch, second);
 
-            Assert.Throws<VortexFormatException>(
-                () => new RecordBatch(captured, capturedRoot, 0).Dispose());
+            List<int> stale = [];
+            using (RecordBatch reused = new RecordBatch(captured, capturedRoot, 0))
+            {
+                Read(reused, stale);
+            }
+
+            // The stale index is meaningless, and this is what "meaningless" looks like: it names
+            // whatever node happens to sit at that slot NOW. Never the first batch's values.
+            Assert.NotEqual(first, stale);
+            Assert.Equal(second, stale);
             checkedStale = true;
             break;
         }
