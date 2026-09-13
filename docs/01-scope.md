@@ -40,14 +40,42 @@ stabilization; it is the edition registry that evolves.
 | F13 | **Byte-sortable row encoding** | Columns → `ListView<u8>` such that `memcmp` of encoded rows equals tuple comparison. Ships as the separate `Vorticity.RowEncoding` **0.x** package, not in the 1.0 core contract — the upstream format is experimental and reserves the right to change ([09-contracts.md](09-contracts.md) §3). Spec: [06-row-encoding.md](06-row-encoding.md) |
 | F14 | **Zstd** | `vortex.zstd` arrays and Zstd-compressed segments, via the in-box `System.IO.Compression.ZstandardDecoder` |
 
+### Scope decision, 2026-09-13: full parity with what Vortex Rust supports
+
+**The encodings below were deferred to 1.1 and are now in scope for 1.0.** The owner's instruction is
+"on veut un support complet de ce que la version rust supporte", and that settles a question this
+document had answered on a different basis — rarity and effort — rather than on capability.
+
+| now in scope | was deferred because | still true, and now irrelevant |
+|---|---|---|
+| **`vortex.pco`** | a full integer/float codec, sizeable work; writer opt-in upstream so it never appears in default-written files | the effort is real; rarity is not a reason when parity is the target |
+| **`vortex.zstd_buffers`** | draft `zstd2026.02.0` edition, no read-forever guarantee | still a draft edition; decode is trivial now that `vortex.zstd` is in place |
+| **`vortex.variant`, `vortex.parquet.variant`, `vortex.map`, Union** | very recent (`core2026.08.2`/`.3`), rarely present | recency is not a reason either |
+| **`fastlanes.delta`** | belonged to no core edition, so nothing required it | Rust writes it, so parity requires reading it |
+
+**What this costs, measured rather than estimated.** `CorpusCoverageTests` records 45 corpus files
+this build cannot read. 43 of them are exactly these components — `vortex.map` alone is 22 — so this
+decision converts almost the whole of that number from *scope* into *work*. That test's header says
+"it is not a work queue"; as of this decision, it is one.
+
+**What is NOT moved by this decision**, because "parity with Rust" is not the axis that excluded
+them. Each is listed in the table below with its own reason, and each is a separate call:
+
+* **IPC format** — upstream calls it under construction, with no shared-array support.
+* **`tensor`, `spatial`, `json` editions** — plugins outside `core`, a product-surface question.
+* **Apache.Arrow interop** — would break the zero-dependency rule, which is an architectural
+  invariant of this library rather than a scope preference.
+* **CUDA, DataFusion, DuckDB, Spark** — engine integrations, not format support.
+* **Encryption**, **forward compatibility / WASM** — nothing to implement; upstream has neither.
+
+If any of those was also meant by "support complet", it needs saying separately: three of the five
+are not encodings at all, and one of them costs the zero-dependency guarantee.
+
 ### Out of scope (1.0)
 
 | Exclusion | Reason |
 |---|---|
 | **IPC format** | Explicitly marked unstable and incomplete upstream ("under construction", no shared-array support) |
-| **`vortex.pco`** | Pcodec is a full integer/float codec — pure algorithm, no BCL blocker, just a sizeable body of work. Writer opt-in upstream (`pco` feature), so it never appears in default-written files. Target 1.1 |
-| **`vortex.zstd_buffers`** | Belongs to the draft `zstd2026.02.0` edition, which carries no read-forever guarantee. Decode once it stabilizes; trivial once `vortex.zstd` is in place |
-| **`vortex.variant`, `vortex.parquet.variant`, `vortex.map`, Union** | Very recent additions (`core2026.08.2`/`.3`), rarely present; target 1.1 |
 | **`tensor`, `spatial`, `json` editions** | Optional plugins outside `core` |
 | **Encryption** | `EncryptionSpec` is an empty reserved table in the spec; nothing to implement |
 | **Forward compatibility / WASM** | Not yet implemented upstream (planned before Vortex 1.0) |
