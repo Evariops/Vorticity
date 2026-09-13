@@ -52,6 +52,7 @@ public static class ArrayDecoderTable
         Register(DeltaDecoder.Instance);
         Register(MapDecoder.Instance);
         Register(PatchedArrayDecoder.Instance);
+        Register(ZstdBuffersDecoder.Instance);
         Register(BitPackedDecoder.Instance);
         Register(FastLanesRleDecoder.Instance);
         Register(ZigZagDecoder.Instance);

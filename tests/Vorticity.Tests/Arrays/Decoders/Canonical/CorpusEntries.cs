@@ -183,9 +183,5 @@ internal static class UnsupportedCorpusEntries
         "encodings/variant_r1",
         "encodings/variant_r1023",
         "encodings/variant_r1025",
-        "encodings/zstd_buffers",
-        "encodings/zstd_buffers_r1",
-        "encodings/zstd_buffers_r1023",
-        "encodings/zstd_buffers_r1025",
     ];
 }

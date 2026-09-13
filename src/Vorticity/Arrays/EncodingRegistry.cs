@@ -81,6 +81,9 @@ public enum ArrayEncodingId : ushort
     /// <summary><c>vortex.patched</c>.</summary>
     Patched,
 
+    /// <summary><c>vortex.zstd_buffers</c>.</summary>
+    ZstdBuffers,
+
     /// <summary><c>fastlanes.rle</c>.</summary>
     FastLanesRle,
 
@@ -260,9 +263,15 @@ public static class EncodingRegistry
                 return idUtf8.SequenceEqual("vortex.varbinview"u8) ? ArrayEncodingId.VarBinView : ArrayEncodingId.Unknown;
 
             case 19:
-                return idUtf8.SequenceEqual("fastlanes.bitpacked"u8)
-                    ? ArrayEncodingId.FastLanesBitPacked
-                    : ArrayEncodingId.Unknown;
+                // Two 19-byte ids, split on byte 7: the 'z' of "vortex.zstd_buffers" against the
+                // 'e' of "fastlanes" -- the same trap the 13- and 15-byte cases document.
+                return idUtf8[7] == (byte)'z'
+                    ? (idUtf8.SequenceEqual("vortex.zstd_buffers"u8)
+                        ? ArrayEncodingId.ZstdBuffers
+                        : ArrayEncodingId.Unknown)
+                    : (idUtf8.SequenceEqual("fastlanes.bitpacked"u8)
+                        ? ArrayEncodingId.FastLanesBitPacked
+                        : ArrayEncodingId.Unknown);
 
             case 22:
                 return idUtf8.SequenceEqual("vortex.fixed_size_list"u8)

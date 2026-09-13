@@ -48,7 +48,6 @@ public sealed class EncodingRegistryTests
     }
 
     [Theory]
-    [InlineData("vortex.zstd_buffers")]
     [InlineData("vortex.pco")]
     [InlineData("vortex.variant")]
     [InlineData("vortex.parquet.variant")]

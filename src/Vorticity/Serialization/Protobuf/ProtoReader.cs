@@ -57,6 +57,26 @@ public ref struct ProtoReader
     /// <summary>Bytes not yet consumed.</summary>
     public readonly int Remaining => _data.Length - _position;
 
+    /// <summary>Reads the next varint, or reports that the buffer is exhausted.</summary>
+    /// <param name="value">The varint read; zero when the buffer is exhausted.</param>
+    /// <returns><see langword="false"/> at the end of the buffer.</returns>
+    /// <remarks>
+    /// For PACKED repeated fields, whose elements carry no tags: the reader is handed the field's
+    /// length-delimited body and drains it. <see cref="TryReadTag"/> cannot serve, because inside a
+    /// packed blob the bytes are values rather than tags and would decode as field numbers.
+    /// </remarks>
+    public bool TryReadVarint(out ulong value)
+    {
+        if (_position >= _data.Length)
+        {
+            value = 0;
+            return false;
+        }
+
+        value = ReadVarint();
+        return true;
+    }
+
     /// <summary>
     /// Reads the next field tag.
     /// </summary>
