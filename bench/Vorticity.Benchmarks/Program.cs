@@ -28,6 +28,7 @@
 // live, and until the gate existed nothing defended them.
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -51,7 +52,28 @@ internal static class Program
 
         if (args.Length > 0 && args[0] == "--ratio-check")
         {
-            return await RatioCheck.RunAsync().ConfigureAwait(false);
+            // `--recalibrate` takes an optional count: `--recalibrate 5`, or bare for three. The
+            // count is swallowed only when it parses as one, so `--recalibrate full scan` keeps
+            // `full` as an axis filter rather than eating it.
+            int recalibrate = 0;
+            int counted = -1;
+            int flag = Array.IndexOf(args, "--recalibrate");
+            if (flag >= 0)
+            {
+                int passes = 0;
+                bool given = flag + 1 < args.Length &&
+                    int.TryParse(args[flag + 1], CultureInfo.InvariantCulture, out passes) &&
+                    passes > 0;
+                recalibrate = given ? passes : 3;
+                counted = given ? flag + 1 : -1;
+            }
+
+            string[] axes =
+            [
+                .. args.Where((a, i) =>
+                    i > 0 && i != counted && !a.StartsWith("--", StringComparison.Ordinal))
+            ];
+            return await RatioCheck.RunAsync(axes, recalibrate).ConfigureAwait(false);
         }
 
         if (args.Length > 0 && args[0] == "--throughput")

@@ -26,6 +26,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -83,8 +84,7 @@ internal static class RatioCheck
     private const double Margin = 1.15;
 
     /// <summary>One axis: what both sides do, and what the quotient is allowed to be.</summary>
-    /// <param name="Name">The axis, for the report.</param>
-    /// <param name="Reference">The ratio measured by this harness when the ceiling was last set.</param>
+    /// <param name="Name">The axis, for the report and its key in <see cref="References"/>.</param>
     /// <param name="Ours">Our side.</param>
     /// <param name="Theirs">Rust's side.</param>
     /// <param name="Path">
@@ -94,7 +94,6 @@ internal static class RatioCheck
     /// </param>
     private sealed record Axis(
         string Name,
-        double Reference,
         Func<string, Task<long>> Ours,
         Func<string, long> Theirs,
         string? Path = null);
@@ -138,49 +137,40 @@ internal static class RatioCheck
     [
         new Axis(
             "full scan",
-            0.536,
             ScanAll,
             p => RustReader.Require(RustReader.ScanCanonical(p), "scan")),
         new Axis(
             "full scan, upstream lazy",
-            0.537,
             ScanAll,
             p => RustReader.Require(RustReader.ScanAll(p), "scan")),
         new Axis(
             "projected scan, 1 of 5 columns",
-            0.510,
             ScanProjected,
             p => RustReader.Require(RustReader.ScanProjected(p, Field), "projected scan")),
         new Axis(
             "open to first batch",
-            0.093,
             FirstBatch,
             p => RustReader.Require(RustReader.OpenFirstBatch(p), "first batch")),
         new Axis(
             "open, footer only",
-            0.732,
             FooterOnly,
             p => RustReader.Require(RustReader.OpenOnly(p), "open")),
         new Axis(
             "read and write back",
-            1.82,
             ReadAndWrite,
             p => RustReader.Require(RustReader.Write(p), "write")),
         new Axis(
             "filtered scan, 1% band",
-            0.237,
             p => FilteredScan(p, BandLow, NarrowBand),
             p => RustReader.Require(
                 RustReader.ScanFiltered(p, Field, BandLow, NarrowBand), "filtered scan")),
         new Axis(
             "filtered scan, half the rows",
-            0.340,
             p => FilteredScan(p, BandLow, WideBand),
             p => RustReader.Require(
                 RustReader.ScanFiltered(p, Field, BandLow, WideBand), "filtered scan")),
         new Axis(
             "scattered take, 64 of 64 splits",
-            0.262,
             p => ScatteredTake(p, TakeCount, TakeStride),
             p => RustReader.Require(RustReader.Take(p, TakeCount, TakeStride), "take")),
     ];
@@ -229,21 +219,60 @@ internal static class RatioCheck
     /// The ratios the rewritten group was measured at, keyed by axis name, in the same order as
     /// <see cref="Rewritten"/>. Kept beside <see cref="Axes"/>'s references and lowered the same way.
     /// </summary>
+    /// <summary>
+    /// The ratio each axis was measured at when its ceiling was last set. ONE TABLE, for every axis,
+    /// because `--recalibrate` prints a replacement for it and a reference split across two places
+    /// is a reference that gets updated in one.
+    /// </summary>
     /// <remarks>
+    /// <para>
+    /// LOWER A REFERENCE BY HAND when an improvement lands, in the same commit, and never raise one
+    /// without saying in the commit message what got slower and why that is acceptable.
+    /// `--recalibrate N` does the measuring: N passes, the max per axis, printed ready to paste.
+    /// </para>
+    /// <para>
     /// `rewritten zoned, ours` is a ceiling of FIVE, and it is not a typo. The pair says what it was
     /// built to say: our reader takes 990 us on bytes our writer produced against 610 us on the
     /// reference's, while the Rust reader goes the other way, 1 315 us down to 195 us. The encoding
     /// is not the problem -- the reference implementation reads our file nearly seven times faster
     /// than it reads its own -- so this is our decoder on a scheme our writer likes. Written up as a
-    /// finding in BENCH-AUDIT.md §5.A; the reference holds the current number until it moves.
+    /// finding in BENCH-AUDIT.md §5.A.
+    /// </para>
     /// </remarks>
-    private static readonly Dictionary<string, double> RewrittenReferences = new()
+    private static readonly Dictionary<string, double> References = new()
     {
-        ["rewritten zoned, reference's"] = 0.457,
-        ["rewritten zoned, ours"] = 5.023,
-        ["rewritten high card, reference's"] = 0.828,
-        ["rewritten high card, ours"] = 0.890,
+        ["full scan"] = 0.462,   // 3 passes, spread 0.455-0.462; was 0.536, -13.8%
+        ["full scan, upstream lazy"] = 0.463,   // 3 passes, spread 0.455-0.463; was 0.537, -13.7%
+        ["projected scan, 1 of 5 columns"] = 0.471,   // 3 passes, spread 0.459-0.471; was 0.510, -7.7%
+        ["open to first batch"] = 0.086,   // 3 passes, spread 0.085-0.086; was 0.093, -7.9%
+        ["open, footer only"] = 0.732,   // 3 passes, spread 0.729-0.744; HELD at 0.732: peaked at 0.744, no loosening
+        ["read and write back"] = 1.027,   // 3 passes, spread 1.011-1.027; was 1.820, -43.6%
+        ["filtered scan, 1% band"] = 0.235,   // 3 passes, spread 0.226-0.235; was 0.237, -0.7%
+        ["filtered scan, half the rows"] = 0.321,   // 3 passes, spread 0.314-0.321; was 0.340, -5.5%
+        ["scattered take, 64 of 64 splits"] = 0.245,   // 3 passes, spread 0.244-0.245; was 0.262, -6.5%
+        ["rewritten zoned, reference's"] = 0.457,   // 3 passes, spread 0.459-0.462; HELD at 0.457: peaked at 0.462, no loosening
+        ["rewritten zoned, ours"] = 5.023,   // 3 passes, spread 4.997-5.048; HELD at 5.023: peaked at 5.048, no loosening
+        ["rewritten high card, reference's"] = 0.828,   // 3 passes, spread 0.794-0.864; HELD at 0.828: peaked at 0.864, no loosening
+        ["rewritten high card, ours"] = 0.890,   // 3 passes, spread 0.864-0.928; HELD at 0.890: peaked at 0.928, no loosening
     };
+
+    /// <summary>
+    /// How far under its reference a ratio may sit before it is called stale.
+    /// </summary>
+    /// <remarks>
+    /// TIGHTER THAN `ThroughputCheck`'s 0.70, and the difference is measured rather than chosen.
+    /// That gate's references are a max over three runs of encodings whose own run-to-run spread is
+    /// 20-25%; these axes are longer and mostly steadier -- +-2% on `full scan` and `scattered take`
+    /// against +12 to +22% on the four short ones (BENCH-AUDIT.md annexe A.1). 0.85 is what the
+    /// steady axes leave comfortable; the short ones are why it is not tighter still, and why B2 --
+    /// deciding on an interval rather than a point -- is what actually fixes this gate's resolution.
+    ///
+    /// A ratio far BELOW its reference is reported rather than silently accepted: a ratchet that is
+    /// never lowered stops being a ratchet. The state this was written to end had five axes of nine
+    /// stale at once, `read and write back` by 41%, and nothing said so -- that axis could have
+    /// regressed by 75% and still passed.
+    /// </remarks>
+    private const double StaleBelow = 0.85;
 
     /// <summary>The field the projection, filter and band axes read; it exists in the dataset.</summary>
     private const string Field = "monotone";
@@ -279,9 +308,19 @@ internal static class RatioCheck
     /// <summary>How many warm-up iterations each axis got, for the report.</summary>
     private static readonly Dictionary<string, int> Warmed = [];
 
-    /// <summary>Runs every axis and reports.</summary>
+    /// <summary>Runs the selected axes and reports.</summary>
+    /// <param name="only">
+    /// Substrings selecting axes by name; empty runs all of them. A kernel change touches one axis
+    /// and waiting 29 s for thirteen is the difference between checking it and not bothering --
+    /// the same reason `--throughput` takes a family.
+    /// </param>
+    /// <param name="recalibrate">
+    /// When positive, measure that many passes and print a replacement <see cref="References"/>
+    /// table instead of gating. The max over the passes, matching `ThroughputCheck`'s convention: a
+    /// ratchet set from a mean would go red on half the runs that produced it.
+    /// </param>
     /// <returns>0 when every axis is inside its ceiling, 1 when one is not, 2 with no harness.</returns>
-    internal static async Task<int> RunAsync()
+    internal static async Task<int> RunAsync(string[] only, int recalibrate)
     {
         if (!RustReader.Available)
         {
@@ -309,58 +348,30 @@ internal static class RatioCheck
         List<string> temporary = [];
         try
         {
-            Axis[] axes = [.. Axes, .. await RewrittenAxesAsync(temporary).ConfigureAwait(false)];
+            bool Selected(string name) => only.Length == 0 ||
+                only.Any(o => name.Contains(o, StringComparison.OrdinalIgnoreCase));
 
-            Console.Out.WriteLine(
-                $"RATIO CHECK: median of {Rounds} interleaved rounds after a " +
-                $"{WarmupBudget.TotalSeconds.ToString("F0", CultureInfo.InvariantCulture)}s warm-up per axis, " +
-                $"ceiling = reference x {Margin.ToString("F2", CultureInfo.InvariantCulture)}");
-            Console.Out.WriteLine(
-                "  axis                             ours      rust     ratio  reference  ceiling   warmed");
-
-            int over = 0;
-            foreach (Axis axis in axes)
+            // The rewritten group is BUILT only when it is selected: constructing it writes two
+            // files with our own writer, which is a second or two that a `--ratio-check "full scan"`
+            // should not pay to then throw away.
+            Axis[] axes =
+            [
+                .. Axes.Where(a => Selected(a.Name)),
+                .. RewrittenNames().Any(Selected)
+                    ? await RewrittenAxesAsync(temporary, Selected).ConfigureAwait(false)
+                    : [],
+            ];
+            if (axes.Length == 0)
             {
-                string file = axis.Path ?? path;
-
-                // PER AXIS, not once for the file. The precondition above covers the full scan; the
-                // filter and take axes select rows, and two readers that disagree about WHICH rows
-                // survive would produce a ratio between two different amounts of work. That is the
-                // failure `--ffi-check` was written for, and it only ever checked the full scan.
-                long mineRows = await axis.Ours(file).ConfigureAwait(false);
-                long rustRows = axis.Theirs(file);
-                if (mineRows != rustRows)
-                {
-                    Console.Error.WriteLine(
-                        $"The two readers disagree on the `{axis.Name}` axis: {mineRows} rows " +
-                        $"versus {rustRows}. No ratio over it means anything.");
-                    return 2;
-                }
-
-                (double mine, double rust) = await MeasureAsync(file, axis).ConfigureAwait(false);
-                double ratio = mine / rust;
-                double ceiling = axis.Reference * Margin;
-                bool bad = ratio > ceiling;
-                over += bad ? 1 : 0;
-
-                // The warm-up count is reported, not asserted: it is the number that explains an
-                // implausible ratio, and a plausible one is not evidence that it was high enough.
-                string verdict = bad ? "   OVER" : string.Empty;
-                int warmed = Warmed[axis.Name];
-                Console.Out.WriteLine(string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"  {axis.Name,-30} {mine,8:F1}us {rust,8:F1}us {ratio,8:F3} {axis.Reference,10:F3} {ceiling,8:F3} {warmed,8}{verdict}"));
+                Console.Error.WriteLine(
+                    $"No axis matches {string.Join(", ", only)}. The axes are:\n  " +
+                    string.Join("\n  ", Axes.Select(a => a.Name).Concat(RewrittenNames())));
+                return 2;
             }
 
-            Console.Out.WriteLine(
-                "  The `rewritten` pairs read as a 2x2 per file: compare the two RATIOS for our " +
-                "decoder, the two `rust` columns for the writer's encoding choice.");
-            Console.Out.WriteLine(
-                over == 0
-                    ? "Every axis is inside its ceiling."
-                    : $"{over} axis/axes above ceiling. A ratio only moves when the code moves: " +
-                      "find the change, do not raise the ceiling.");
-            return over == 0 ? 0 : 1;
+            return recalibrate > 0
+                ? await RecalibrateAsync(path, axes, recalibrate).ConfigureAwait(false)
+                : await CheckAsync(path, axes).ConfigureAwait(false);
         }
         finally
         {
@@ -369,6 +380,205 @@ internal static class RatioCheck
                 System.IO.File.Delete(file);
             }
         }
+    }
+
+    /// <summary>Measures each axis once and holds it to its ceiling.</summary>
+    private static async Task<int> CheckAsync(string path, Axis[] axes)
+    {
+        Console.Out.WriteLine(
+            $"RATIO CHECK: median of {Rounds} interleaved rounds after a " +
+            $"{WarmupBudget.TotalSeconds.ToString("F0", CultureInfo.InvariantCulture)}s warm-up per axis, " +
+            $"ceiling = reference x {Margin.ToString("F2", CultureInfo.InvariantCulture)}");
+        Console.Out.WriteLine(
+            "  axis                             ours      rust     ratio  reference  ceiling   warmed");
+
+        int over = 0;
+        List<string> stale = [];
+        List<string> unreferenced = [];
+        foreach (Axis axis in axes)
+        {
+            (double mine, double rust, int rows) = await MeasureOnceAsync(path, axis).ConfigureAwait(false);
+            if (rows != 0)
+            {
+                return rows;
+            }
+
+            double ratio = mine / rust;
+            int warmed = Warmed[axis.Name];
+            string columns;
+            string verdict = string.Empty;
+            if (!References.TryGetValue(axis.Name, out double reference))
+            {
+                unreferenced.Add(string.Create(
+                    CultureInfo.InvariantCulture, $"        [\"{axis.Name}\"] = {ratio:F3},"));
+                columns = "         --       --";
+                verdict = "   NO REF";
+            }
+            else
+            {
+                double ceiling = reference * Margin;
+                columns = string.Create(
+                    CultureInfo.InvariantCulture, $" {reference,10:F3} {ceiling,8:F3}");
+                if (ratio > ceiling)
+                {
+                    verdict = "   OVER";
+                    over++;
+                }
+                else if (ratio < reference * StaleBelow)
+                {
+                    verdict = "   STALE";
+                    stale.Add(string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"  {axis.Name}: {ratio:F3} against a {reference:F3} reference " +
+                        $"({(1 - (ratio / reference)) * 100:F0}% under) -- lower it."));
+                }
+            }
+
+            // The warm-up count is reported, not asserted: it is the number that explains an
+            // implausible ratio, and a plausible one is not evidence that it was high enough.
+            Console.Out.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"  {axis.Name,-30} {mine,8:F1}us {rust,8:F1}us {ratio,8:F3}{columns} {warmed,8}{verdict}"));
+        }
+
+        if (axes.Any(a => a.Path is not null))
+        {
+            Console.Out.WriteLine(
+                "  The `rewritten` pairs read as a 2x2 per file: compare the two RATIOS for our " +
+                "decoder, the two `rust` columns for the writer's encoding choice.");
+        }
+
+        if (unreferenced.Count > 0)
+        {
+            Console.Out.WriteLine(
+                $"\n{unreferenced.Count} axis/axes have no reference. Add these to " +
+                "RatioCheck.References, having checked the machine is quiet:");
+            unreferenced.ForEach(Console.Out.WriteLine);
+        }
+
+        if (stale.Count > 0)
+        {
+            Console.Out.WriteLine(
+                $"\n{stale.Count} axis/axes are STALE -- the code got faster and the ratchet did " +
+                "not follow, so they defend nothing:");
+            stale.ForEach(Console.Out.WriteLine);
+            Console.Out.WriteLine("  Recalibrate with: --ratio-check --recalibrate 3");
+        }
+
+        Console.Out.WriteLine(
+            over == 0
+                ? "Every axis is inside its ceiling."
+                : $"{over} axis/axes above ceiling. A ratio only moves when the code moves: " +
+                  "find the change, do not raise the ceiling.");
+        return over == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// Measures each axis over several passes and prints a <see cref="References"/> table to paste.
+    /// </summary>
+    /// <remarks>
+    /// STALE says a reference is wrong; this is what makes it right, so that lowering a ratchet is a
+    /// command rather than an afternoon. It prints and gates nothing: a recalibration that could
+    /// also pass its own gate would be a ratchet setting itself.
+    /// </remarks>
+    private static async Task<int> RecalibrateAsync(string path, Axis[] axes, int passes)
+    {
+        Console.Out.WriteLine(
+            $"RECALIBRATE: {passes} passes over {axes.Length} axis/axes, max per axis. " +
+            "Nothing is gated; paste the table below into RatioCheck.References.");
+
+        Dictionary<string, List<double>> ratios = [];
+        for (int pass = 1; pass <= passes; pass++)
+        {
+            foreach (Axis axis in axes)
+            {
+                (double mine, double rust, int rows) = await MeasureOnceAsync(path, axis).ConfigureAwait(false);
+                if (rows != 0)
+                {
+                    return rows;
+                }
+
+                if (!ratios.TryGetValue(axis.Name, out List<double>? seen))
+                {
+                    seen = [];
+                    ratios[axis.Name] = seen;
+                }
+
+                seen.Add(mine / rust);
+            }
+
+            Console.Out.WriteLine($"  pass {pass} of {passes} done.");
+        }
+
+        int held = 0;
+        foreach (Axis axis in axes)
+        {
+            List<double> seen = ratios[axis.Name];
+            double max = seen.Max();
+            double min = seen.Min();
+            bool known = References.TryGetValue(axis.Name, out double current);
+
+            // A RATCHET ONLY EVER COMES DOWN. When the passes peak above the reference the old value
+            // is printed back, not the new one: this command exists to lower ceilings that the code
+            // outran, and a recalibration that also raised them would launder run-to-run noise into
+            // a looser gate -- the one thing BENCH-AUDIT.md §8 forbids outright. If a measurement
+            // above the reference is REAL, it is a regression and belongs in the OVER column, not
+            // here.
+            bool loosens = known && max >= current;
+            held += loosens ? 1 : 0;
+            double value = loosens ? current : max;
+            string movement = !known
+                ? "new"
+                : loosens
+                    ? string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"HELD at {current:F3}: {passes} passes peaked at {max:F3}, no loosening")
+                    : string.Create(
+                        CultureInfo.InvariantCulture, $"was {current:F3}, {(max / current) - 1:+0.0%;-0.0%;0.0%}");
+            Console.Out.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"        [\"{axis.Name}\"] = {value:F3},   // {passes} passes, spread " +
+                $"{min:F3}-{max:F3}; {movement}"));
+        }
+
+        if (held > 0)
+        {
+            Console.Out.WriteLine(
+                $"\n{held} axis/axes measured ABOVE their reference and were printed back " +
+                "unchanged. Paste the table as it stands: if one of those is a real regression, " +
+                "`--ratio-check` says OVER and raising the reference is not the answer.");
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Asserts the two readers agree on the axis, then times both sides interleaved.
+    /// </summary>
+    /// <returns>
+    /// The two medians in microseconds, and an exit code that is 0 unless the readers disagreed.
+    /// </returns>
+    private static async Task<(double Ours, double Theirs, int Exit)> MeasureOnceAsync(
+        string path, Axis axis)
+    {
+        string file = axis.Path ?? path;
+
+        // PER AXIS, not once for the file. The precondition in RunAsync covers the full scan; the
+        // filter and take axes select rows, and two readers that disagree about WHICH rows survive
+        // would produce a ratio between two different amounts of work. That is the failure
+        // `--ffi-check` was written for, and it only ever checked the full scan.
+        long mineRows = await axis.Ours(file).ConfigureAwait(false);
+        long rustRows = axis.Theirs(file);
+        if (mineRows != rustRows)
+        {
+            Console.Error.WriteLine(
+                $"The two readers disagree on the `{axis.Name}` axis: {mineRows} rows " +
+                $"versus {rustRows}. No ratio over it means anything.");
+            return (0, 0, 2);
+        }
+
+        (double mine, double rust) = await MeasureAsync(file, axis).ConfigureAwait(false);
+        return (mine, rust, 0);
     }
 
     /// <summary>
@@ -383,11 +593,17 @@ internal static class RatioCheck
     /// is the one failure this group can produce that the per-axis row check would not catch --
     /// that check compares the two READERS on one file, not the two FILES.
     /// </remarks>
-    private static async Task<List<Axis>> RewrittenAxesAsync(List<string> temporary)
+    private static async Task<List<Axis>> RewrittenAxesAsync(
+        List<string> temporary, Func<string, bool> selected)
     {
         List<Axis> axes = [];
         foreach ((string entry, string label) in Rewritten)
         {
+            if (!Names(label).Any(selected))
+            {
+                continue;
+            }
+
             string reference = Corpus.Path(entry);
             string ours = System.IO.Path.Combine(
                 System.IO.Path.GetTempPath(), $"vorticity-rewritten-{Guid.NewGuid():N}.vortex");
@@ -406,9 +622,13 @@ internal static class RatioCheck
                 new[] { ("reference's", reference), ("ours", ours) })
             {
                 string name = $"rewritten {label}, {suffix}";
+                if (!selected(name))
+                {
+                    continue;
+                }
+
                 axes.Add(new Axis(
                     name,
-                    RewrittenReferences[name],
                     ScanAll,
                     p => RustReader.Require(RustReader.ScanCanonical(p), "scan"),
                     file));
@@ -417,6 +637,14 @@ internal static class RatioCheck
 
         return axes;
     }
+
+    /// <summary>The two axis names of one rewritten entry.</summary>
+    private static IEnumerable<string> Names(string label) =>
+        [$"rewritten {label}, reference's", $"rewritten {label}, ours"];
+
+    /// <summary>Every axis name the rewritten group would produce.</summary>
+    private static IEnumerable<string> RewrittenNames() =>
+        Rewritten.SelectMany(r => Names(r.Label));
 
     /// <summary>Reads a file with our reader and writes it back with our writer.</summary>
     private static async Task Rewrite(string source, string destination)

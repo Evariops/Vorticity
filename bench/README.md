@@ -15,7 +15,7 @@ dotnet run -c Release PROJ -- <arguments>
 | a kernel | `-- fastlanes` (its class) | 1–8 s | did the kernel move, against the ported arm on the same clock |
 | anything, want a direction | no argument at all | **14 s** | the four default classes, 10 cases, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
-| a read path | `-- --ratio-check` | 29 s | the thirteen axes against Rust, interleaved, each held to a ceiling |
+| a read path | `-- --ratio-check [axis…]` | 29 s, or 5 s for one axis | the thirteen axes against Rust, interleaved, each held to a ceiling |
 | a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust |
 | the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 50 files |
 | the FFI harness, or before trusting any ratio | `-- --ffi-check` | < 1 s | both readers return the same rows on the same files |
@@ -77,12 +77,28 @@ in [BASELINE.md](BASELINE.md) and in the commits.
   four `rewritten` ones that read a file **our writer produced** beside the reference's — the only
   place our own encoding choices are measured at all. Each has a ceiling in `RatioCheck.cs`; over it,
   non-zero exit. 29 s.
+  A bare word narrows it to the axes whose name contains it — `-- --ratio-check write`, `--
+  --ratio-check rewritten` — which is the difference between checking one change and waiting for
+  thirteen axes.
 * **`--throughput [family…] [--check]`** — 50 encodings at a million rows, where the fixed
   open-and-walk cost is under a percent instead of most of the measurement. A bare family name
   narrows the report; `--check` makes it a gate.
 
 **A ceiling only ever comes down, and only behind a real improvement.** Raising one to make a run
 pass is the one thing this directory forbids outright.
+
+**When the code outran a ceiling, `--ratio-check` says `STALE`** — more than 15 % under its reference
+— because a ratchet that is never lowered defends nothing. `read and write back` sat 43 % under its
+own for five commits, which left room for a 75 % regression to pass. Lower them with:
+
+```
+dotnet run -c Release PROJ -- --ratio-check --recalibrate 3     # ~90 s, prints a table to paste
+```
+
+It measures N passes, takes the max per axis, and prints the `RatioCheck.References` table ready to
+paste. An axis that measures *above* its reference is printed back **unchanged** and flagged `HELD`:
+the command lowers ratchets and never raises one. If such an axis is a real regression, plain
+`--ratio-check` says `OVER`, and the answer is the code, not the number.
 
 **A red gate is not believed on the first run, yet.** Measured run-to-run spread is +12 to +22 % on
 four of the nine ratio axes (BENCH-AUDIT.md annexe A.1), and two invocations in four were red with
