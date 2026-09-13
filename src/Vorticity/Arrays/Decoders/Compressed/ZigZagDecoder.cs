@@ -98,7 +98,10 @@ public sealed class ZigZagDecoder : ArrayDecoder
                 dtype, produced, child.Validity, signed, VortexBuffer.Empty);
         }
 
-        VortexBuffer output = CompressedValues.Allocate(
+        // Uninitialized: ZigZagDecode is pointwise over spans it requires to be the same length,
+        // so it writes every byte of the destination. See CanonicalArena.AllocateUninitialized for
+        // why that bar is "provably", not "probably".
+        VortexBuffer output = CompressedValues.AllocateUninitialized(
             context, total, width, Id, out Span<byte> destination);
         IntegerKernels.ZigZagDecode(child.Values.Span[..total], destination, width);
         return context.Canonical.AddPrimitive(dtype, produced, child.Validity, signed, output);

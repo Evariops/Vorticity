@@ -335,16 +335,11 @@ public sealed class ZstdDecoder : ArrayDecoder
                 throw new VortexFormatException($"Row {row} of a Utf8 array is not valid UTF-8.");
             }
 
+            // Buffer index 0: see the header note on why the second segment is unreachable. One
+            // call for both shapes, and two register stores rather than a memset plus a Memmove
+            // per row - the same change ViewKernels.Write documents.
             Span<byte> view = writable.Slice(row * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
-            if (size <= CanonicalSupport.MaxInlineViewLength)
-            {
-                CanonicalSupport.WriteInlineView(view, value);
-            }
-            else
-            {
-                // Buffer index 0: see the header note on why the second segment is unreachable.
-                CanonicalSupport.WriteReferenceView(view, (int)size, value, bufferIndex: 0, offset: start);
-            }
+            CanonicalSupport.WriteView(view, value, (int)size, bufferIndex: 0, offset: start);
 
             offset = start + (int)size;
             written++;

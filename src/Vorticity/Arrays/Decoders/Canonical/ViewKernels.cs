@@ -67,6 +67,29 @@ internal static class ViewKernels
         ReadOnlySpan<byte> lengths, PType ptype, ReadOnlySpan<int> wanted, int count)
     {
         bool selective = !wanted.IsEmpty;
+
+        // THE DENSE UNSIGNED SUM IS A REDUCTION, so it is one. The generic loop below reads one
+        // length at a time through a bounds check and adds it to a scalar - about 5% of a 1M-row
+        // FSST scan and 10% of an OnPair one, to add a million numbers. Widening into 64-bit lanes
+        // keeps the total exact for every unsigned width: a `uint` length is at most 2^32-1 and
+        // there are at most 2^31 of them, so the sum cannot leave a `ulong`, and the narrower types
+        // only make that slacker. The SIGNED types keep the scalar loop, because their answer is
+        // not the sum - it is the INDEX of the first negative length, which a reduction discards.
+        if (!selective)
+        {
+            switch (ptype)
+            {
+                case PType.U8:
+                    return (SumWidening(lengths[..count]), 0, -1);
+                case PType.U16:
+                    return (SumWidening(MemoryMarshal.Cast<byte, ushort>(lengths)[..count]), 0, -1);
+                case PType.U32:
+                    return (SumWidening(MemoryMarshal.Cast<byte, uint>(lengths)[..count]), 0, -1);
+                default:
+                    break;
+            }
+        }
+
         return ptype switch
         {
             PType.U8 => SumLengths<byte>(lengths, wanted, selective, count),
@@ -137,6 +160,126 @@ internal static class ViewKernels
         }
 
         return (total, longest, -1);
+    }
+
+    /// <summary>Sums unsigned lengths, widening to 64-bit lanes so nothing can wrap.</summary>
+    /// <param name="values">The lengths, exactly as many as are wanted.</param>
+    /// <returns>The total.</returns>
+    /// <remarks>
+    /// <c>Vector.Widen</c> splits each vector into two of the next width up, so a byte vector takes
+    /// three splits to reach 64-bit lanes and a <see cref="uint"/> one takes a single split. The
+    /// accumulators stay in 64-bit lanes throughout rather than summing narrow and widening at the
+    /// end, because the whole point is that no intermediate can overflow.
+    /// </remarks>
+    /// <remarks>
+    /// WRITTEN OUT PER WIDTH RATHER THAN ONCE GENERICALLY, because the widening ladder changes the
+    /// element type at every rung and a generic method cannot: a recursive
+    /// <c>WidenToUInt64&lt;T&gt;</c> that re-enters through <c>Vector.As</c> REINTERPRETS the bits
+    /// instead of widening them, so <c>T</c> never changes and the recursion never ends. It cost a
+    /// stack overflow in the corpus suite, which is the only reason that is written down here.
+    /// </remarks>
+    private static long SumWidening(ReadOnlySpan<uint> values)
+    {
+        ulong total = 0;
+        int i = 0;
+
+        if (Vector<uint>.IsSupported)
+        {
+            int lanes = Vector<uint>.Count;
+            ref uint source = ref MemoryMarshal.GetReference(values);
+            Vector<ulong> sum = Vector<ulong>.Zero;
+            for (; i <= values.Length - lanes; i += lanes)
+            {
+                Vector.Widen(
+                    Vector.LoadUnsafe(ref source, (nuint)i),
+                    out Vector<ulong> low,
+                    out Vector<ulong> high);
+                sum += low + high;
+            }
+
+            total = Vector.Sum(sum);
+        }
+
+        for (; i < values.Length; i++)
+        {
+            total += values[i];
+        }
+
+        return (long)total;
+    }
+
+    /// <inheritdoc cref="SumWidening(ReadOnlySpan{uint})"/>
+    private static long SumWidening(ReadOnlySpan<ushort> values)
+    {
+        ulong total = 0;
+        int i = 0;
+
+        if (Vector<ushort>.IsSupported)
+        {
+            int lanes = Vector<ushort>.Count;
+            ref ushort source = ref MemoryMarshal.GetReference(values);
+            Vector<ulong> sum = Vector<ulong>.Zero;
+            for (; i <= values.Length - lanes; i += lanes)
+            {
+                Vector.Widen(
+                    Vector.LoadUnsafe(ref source, (nuint)i),
+                    out Vector<uint> low,
+                    out Vector<uint> high);
+                Vector.Widen(low, out Vector<ulong> a, out Vector<ulong> b);
+                Vector.Widen(high, out Vector<ulong> c, out Vector<ulong> d);
+                sum += a + b + c + d;
+            }
+
+            total = Vector.Sum(sum);
+        }
+
+        for (; i < values.Length; i++)
+        {
+            total += values[i];
+        }
+
+        return (long)total;
+    }
+
+    /// <inheritdoc cref="SumWidening(ReadOnlySpan{uint})"/>
+    private static long SumWidening(ReadOnlySpan<byte> values)
+    {
+        ulong total = 0;
+        int i = 0;
+
+        if (Vector<byte>.IsSupported)
+        {
+            int lanes = Vector<byte>.Count;
+            ref byte source = ref MemoryMarshal.GetReference(values);
+            Vector<ulong> sum = Vector<ulong>.Zero;
+            for (; i <= values.Length - lanes; i += lanes)
+            {
+                Vector.Widen(
+                    Vector.LoadUnsafe(ref source, (nuint)i),
+                    out Vector<ushort> low,
+                    out Vector<ushort> high);
+                sum += WidenPair(low) + WidenPair(high);
+            }
+
+            total = Vector.Sum(sum);
+        }
+
+        for (; i < values.Length; i++)
+        {
+            total += values[i];
+        }
+
+        return (long)total;
+    }
+
+    /// <summary>Widens a 16-bit vector to 64-bit lanes and sums the four quarters.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector<ulong> WidenPair(Vector<ushort> value)
+    {
+        Vector.Widen(value, out Vector<uint> low, out Vector<uint> high);
+        Vector.Widen(low, out Vector<ulong> a, out Vector<ulong> b);
+        Vector.Widen(high, out Vector<ulong> c, out Vector<ulong> d);
+        return a + b + c + d;
     }
 
     /// <summary>Whether <typeparamref name="TLen"/> can hold a negative value.</summary>
@@ -246,11 +389,17 @@ internal static class ViewKernels
         int i = 1;
         if (Vector<T>.IsSupported && count > Vector<T>.Count)
         {
+            // The base reference is taken once. `LoadUnsafe(in typed[i])` bounds-checks the
+            // INDEXER before handing over a reference the load then treats as unchecked anyway, so
+            // the check bought nothing and cost a compare and a branch per vector - on a loop whose
+            // body is one compare.
+            ref T source = ref MemoryMarshal.GetReference(typed);
             int lanes = Vector<T>.Count;
             for (; i <= count - lanes; i += lanes)
             {
                 if (Vector.LessThanAny(
-                        Vector.LoadUnsafe(in typed[i]), Vector.LoadUnsafe(in typed[i - 1])))
+                        Vector.LoadUnsafe(ref source, (nuint)i),
+                        Vector.LoadUnsafe(ref source, (nuint)(i - 1))))
                 {
                     break;
                 }
@@ -312,18 +461,56 @@ internal static class ViewKernels
         where TLen : unmanaged
     {
         ReadOnlySpan<TLen> typed = MemoryMarshal.Cast<byte, TLen>(lengths);
-        bool selective = !wanted.IsEmpty;
         bool referenced = false;
         int offset = 0;
 
+        if (wanted.IsEmpty)
+        {
+            // THE DENSE LOOP IS ITS OWN LOOP. `selective` is loop-invariant, and testing it per row
+            // cost a branch AND the `wanted[i]` bounds check on a path that has no `wanted` at all.
+            // The two spans are addressed by reference for the same reason: `heap.Slice` and
+            // `views.Slice` each built a span - a check and a two-field construction - per row, to
+            // hand WriteView a pointer it takes the reference of immediately.
+            //
+            // The remaining per-row check is the one that is NOT redundant: `size` comes from the
+            // file, and the sum of the sizes is what the caller allocated the heap from, so a row
+            // running past the end means the two disagree and the file is malformed.
+            ReadOnlySpan<TLen> dense = typed[..count];
+            ref byte heapRef = ref MemoryMarshal.GetReference(heap);
+            ref byte viewRef = ref MemoryMarshal.GetReference(views);
+            int heapLength = heap.Length;
+
+            for (int i = 0; i < count; i++)
+            {
+                int size = (int)Widen(dense[i]);
+                if ((uint)size > (uint)(heapLength - offset))
+                {
+                    ThrowRowPastHeap(i, offset, size, heapLength);
+                }
+
+                ref byte value = ref Unsafe.Add(ref heapRef, offset);
+
+                // The whole heap is already known valid; a row is valid iff it starts on a
+                // code-point boundary. The row AFTER the last one ends at the heap's end, which is
+                // a boundary by construction, so only the starts are tested.
+                if (requireUtf8 && size != 0 && (value & 0xC0) == 0x80)
+                {
+                    ThrowInvalidRow(i);
+                }
+
+                referenced |= CanonicalSupport.WriteView(
+                    ref Unsafe.Add(ref viewRef, i * ViewSize), ref value, size, 0, offset);
+                offset += size;
+            }
+
+            return referenced;
+        }
+
         for (int i = 0; i < count; i++)
         {
-            int size = (int)Widen(typed[selective ? wanted[i] : i]);
+            int size = (int)Widen(typed[wanted[i]]);
             ReadOnlySpan<byte> value = heap.Slice(offset, size);
 
-            // The whole heap is already known valid; a row is valid iff it starts on a code-point
-            // boundary. The row AFTER the last one ends at the heap's end, which is a boundary by
-            // construction, so only the starts are tested.
             if (requireUtf8 && size != 0 && (heap[offset] & 0xC0) == 0x80)
             {
                 ThrowInvalidRow(i);
@@ -335,6 +522,12 @@ internal static class ViewKernels
 
         return referenced;
     }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowRowPastHeap(int row, int offset, int size, int heapLength) =>
+        throw new VortexFormatException(
+            $"Row {row} spans [{offset}, {(long)offset + size}) of a {heapLength}-byte decoded " +
+            "heap; the row lengths and the heap disagree.");
 
     /// <summary>
     /// Cuts <paramref name="heap"/> into views by <c>offsets[i]..offsets[i + 1]</c>.
@@ -400,40 +593,58 @@ internal static class ViewKernels
         bool requireUtf8, bool wholeHeap, in ValidityMask mask)
         where TOff : unmanaged
     {
-        ReadOnlySpan<TOff> typed = MemoryMarshal.Cast<byte, TOff>(offsets);
+        // Addressed by reference for the reason FromLengths documents: the two `Slice` calls were a
+        // bounds check and a span construction per row, handed to a method that takes the reference
+        // of each immediately. `offsets` is sliced once to the count+1 entries the caller promised,
+        // and the heap range is checked per row because the offsets come from the FILE - the
+        // ascending and in-heap properties were established by RequireAscending on the whole
+        // buffer, and this is the check that keeps that from being load-bearing here.
+        ReadOnlySpan<TOff> typed = MemoryMarshal.Cast<byte, TOff>(offsets)[..(count + 1)];
         bool allValid = mask.AllValid;
         int start = (int)Widen(typed[0]);
+
+        ref byte heapRef = ref MemoryMarshal.GetReference(heap);
+        ref byte viewRef = ref MemoryMarshal.GetReference(views);
+        int heapLength = heap.Length;
 
         for (int i = 0; i < count; i++)
         {
             int end = (int)Widen(typed[i + 1]);
+            ref byte view = ref Unsafe.Add(ref viewRef, i * ViewSize);
+
             if (!allValid && !mask.IsValid(i))
             {
                 // BinaryView::empty_view(), written rather than inherited from the allocator.
-                views.Slice(i * ViewSize, ViewSize).Clear();
+                Unsafe.WriteUnaligned(ref view, 0UL);
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), 0UL);
                 start = end;
                 continue;
             }
 
             int size = end - start;
-            ReadOnlySpan<byte> value = heap.Slice(start, size);
+            if ((uint)start > (uint)heapLength || (uint)size > (uint)(heapLength - start))
+            {
+                ThrowRowPastHeap(i, start, size, heapLength);
+            }
+
+            ref byte value = ref Unsafe.Add(ref heapRef, start);
 
             if (requireUtf8)
             {
                 if (wholeHeap)
                 {
-                    if (size != 0 && (heap[start] & 0xC0) == 0x80)
+                    if (size != 0 && (value & 0xC0) == 0x80)
                     {
                         ThrowInvalidRow(i);
                     }
                 }
-                else if (!Utf8.IsValid(value))
+                else if (!Utf8.IsValid(MemoryMarshal.CreateReadOnlySpan(ref value, size)))
                 {
                     ThrowInvalidRow(i);
                 }
             }
 
-            Write(views.Slice(i * ViewSize, ViewSize), value, size, start);
+            CanonicalSupport.WriteView(ref view, ref value, size, 0, start);
             start = end;
         }
     }
@@ -441,20 +652,12 @@ internal static class ViewKernels
     /// <summary>Writes one view, every byte of it.</summary>
     /// <returns><see langword="true"/> when the view references the heap.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool Write(Span<byte> view, ReadOnlySpan<byte> value, int size, int offset)
-    {
-        if (size <= Inline)
-        {
-            // Cleared first: `WriteInlineView` leaves the bytes past the value untouched, and
-            // leaving those as the pool found them would make two decodes of one file differ.
-            view.Clear();
-            CanonicalSupport.WriteInlineView(view, value);
-            return false;
-        }
+    private static bool Write(Span<byte> view, ReadOnlySpan<byte> value, int size, int offset) =>
 
-        CanonicalSupport.WriteReferenceView(view, size, value, bufferIndex: 0, offset: offset);
-        return true;
-    }
+        // Two register stores, no memset and no Memmove. This was `view.Clear()` plus
+        // `WriteInlineView` - two out-of-line calls per row to move at most twelve bytes - and it
+        // was 78% of a 1M-row `vortex.parquet.variant` scan. See CanonicalSupport.WriteView.
+        CanonicalSupport.WriteView(view, value, size, bufferIndex: 0, offset: offset);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong Widen<T>(T value)

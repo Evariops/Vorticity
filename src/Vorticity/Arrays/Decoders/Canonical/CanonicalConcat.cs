@@ -230,7 +230,17 @@ internal static class CanonicalConcat
         PType ptype = arena.GetNode(chunks[0]).PType;
         int width = ptype.ByteWidth();
         int totalBytes = ArrayDecodeContext.CheckedMultiply(length, width, "concatenated values");
-        VortexBuffer values = CanonicalSupport.Allocate(context, totalBytes, Align, out Span<byte> writable);
+
+        // UNINITIALIZED, because the chunks tile the output: each contributes its whole values
+        // buffer, and the widths agree, so the copies below cover every byte. Zero-filling first
+        // doubled the memory traffic of a concatenation that is already bandwidth-bound - 8 MB of
+        // memset in front of 8 MB of copy, on the one encoding whose entire cost is this loop.
+        //
+        // "Cover every byte" is CHECKED rather than assumed: if the chunks come up short the tail
+        // is cleared below, so a disagreement between a chunk's declared length and its buffer
+        // cannot leak pool bytes into a column. See CanonicalArena.AllocateUninitialized.
+        VortexBuffer values = CanonicalSupport.AllocateUninitialized(
+            context, totalBytes, Align, out Span<byte> writable);
 
         int offset = 0;
         for (int i = 0; i < chunks.Length; i++)
@@ -245,6 +255,11 @@ internal static class CanonicalConcat
             ReadOnlySpan<byte> source = chunk.Values.Span;
             source.CopyTo(writable[offset..]);
             offset += source.Length;
+        }
+
+        if (offset < totalBytes)
+        {
+            writable[offset..].Clear();
         }
 
         return arena.AddPrimitive(dtype, length, validity, ptype, values);
