@@ -23,6 +23,7 @@
 // without its bitmap comes back as a column of zeros that claims every row is present. The
 // asymmetry is the reason Validity is switched on rather than tested for "has a bitmap".
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -288,39 +289,55 @@ internal static class ArrayBlobWriter
         int blockBytes = FastLanes.BlockByteLength(bitWidth);
         int elementBits = ptype.ByteWidth() * 8;
 
-        ulong[] block = new ulong[FastLanes.BlockSize];
-        for (int b = 0; b < blocks; b++)
+        // BOTH SCRATCH BUFFERS ARE RENTED AND LIVE FOR THE WHOLE COLUMN. `block` was allocated per
+        // column, but the NARROW copy inside `PackInto` was allocated per 1024-ROW BLOCK -- a fresh
+        // `byte[1024]`, `ushort[1024]` or `uint[1024]` for every block of every bit-packed column
+        // in the file. The narrow buffer is sized in BYTES here so one rental serves whichever
+        // width the column turns out to be.
+        ulong[] block = ArrayPool<ulong>.Shared.Rent(FastLanes.BlockSize);
+        byte[] narrow = ArrayPool<byte>.Shared.Rent(FastLanes.BlockSize * sizeof(uint));
+        try
         {
-            int start = b * FastLanes.BlockSize;
-            int count = Math.Min(FastLanes.BlockSize, length - start);
-            Array.Clear(block);
-
-            for (int i = 0; i < count; i++)
+            Span<ulong> wide = block.AsSpan(0, FastLanes.BlockSize);
+            for (int b = 0; b < blocks; b++)
             {
-                int row = start + i;
+                int start = b * FastLanes.BlockSize;
+                int count = Math.Min(FastLanes.BlockSize, length - start);
+                wide.Clear();
 
-                // A null row encodes as zero under either transform: its value is never read back
-                // and a stable zero compresses better than whatever the buffer held.
-                block[i] = mask.IsValid(row)
-                    ? BitPackPlan.Encode(
-                        CompressedValues.ReadUnsigned(values, ToUnsigned(ptype), row),
-                        plan.Transform, plan.Reference, elementBits)
-                    : 0;
+                for (int i = 0; i < count; i++)
+                {
+                    int row = start + i;
+
+                    // A null row encodes as zero under either transform: its value is never read
+                    // back and a stable zero compresses better than whatever the buffer held.
+                    wide[i] = mask.IsValid(row)
+                        ? BitPackPlan.Encode(
+                            CompressedValues.ReadUnsigned(values, ToUnsigned(ptype), row),
+                            plan.Transform, plan.Reference, elementBits)
+                        : 0;
+                }
+
+                PackInto(wide, narrow, bitWidth, ptype, destination.AsSpan(b * blockBytes, blockBytes));
             }
-
-            PackInto(block, bitWidth, ptype, destination.AsSpan(b * blockBytes, blockBytes));
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(narrow);
+            ArrayPool<ulong>.Shared.Return(block);
         }
 
         return destination;
     }
 
-    private static void PackInto(ulong[] block, int bitWidth, PType ptype, Span<byte> destination)
+    private static void PackInto(
+        ReadOnlySpan<ulong> block, byte[] scratch, int bitWidth, PType ptype, Span<byte> destination)
     {
         switch (ptype.ByteWidth())
         {
             case 1:
             {
-                byte[] narrow = new byte[FastLanes.BlockSize];
+                Span<byte> narrow = scratch.AsSpan(0, FastLanes.BlockSize);
                 for (int i = 0; i < narrow.Length; i++)
                 {
                     narrow[i] = (byte)block[i];
@@ -332,7 +349,8 @@ internal static class ArrayBlobWriter
 
             case 2:
             {
-                ushort[] narrow = new ushort[FastLanes.BlockSize];
+                Span<ushort> narrow = MemoryMarshal.Cast<byte, ushort>(
+                    scratch.AsSpan(0, FastLanes.BlockSize * sizeof(ushort)));
                 for (int i = 0; i < narrow.Length; i++)
                 {
                     narrow[i] = (ushort)block[i];
@@ -344,7 +362,8 @@ internal static class ArrayBlobWriter
 
             case 4:
             {
-                uint[] narrow = new uint[FastLanes.BlockSize];
+                Span<uint> narrow = MemoryMarshal.Cast<byte, uint>(
+                    scratch.AsSpan(0, FastLanes.BlockSize * sizeof(uint)));
                 for (int i = 0; i < narrow.Length; i++)
                 {
                     narrow[i] = (uint)block[i];

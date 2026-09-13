@@ -54,17 +54,44 @@ internal sealed class FsstPlan
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         int rows = node.Length;
-        List<ReadOnlyMemory<byte>> values = new List<ReadOnlyMemory<byte>>(rows);
+
+        // ONE HEAP, NOT ONE ARRAY PER ROW. This was `ValueOf(node, i).ToArray()` per row: a managed
+        // allocation for every string in the column, 65 536 of them on the witness file, which is
+        // most of what puts the write path at 314x the read path's allocation and 43% of its time
+        // inside the finalizer queue. The values have to be copied at all only because they live in
+        // NATIVE arena buffers and `ReadOnlyMemory<byte>` cannot point at those -- so they are
+        // copied once, contiguously, and the rows become slices of that.
         long plain = 0;
+        for (int i = 0; i < rows; i++)
+        {
+            if (IsValid(arena, node, i))
+            {
+                plain += ValueOf(node, i).Length;
+            }
+        }
+
+        if (plain > int.MaxValue)
+        {
+            return null;
+        }
+
+        byte[] heap = new byte[Math.Max((int)plain, 1)];
+        List<ReadOnlyMemory<byte>> values = new List<ReadOnlyMemory<byte>>(rows);
+        int at = 0;
         for (int i = 0; i < rows; i++)
         {
             // A null row contributes nothing to the corpus AND nothing to the stream: its bytes
             // are unspecified, and encoding them would pay for values no reader will ever ask for.
-            ReadOnlyMemory<byte> value = IsValid(arena, node, i)
-                ? new ReadOnlyMemory<byte>(ValueOf(node, i).ToArray())
-                : ReadOnlyMemory<byte>.Empty;
-            values.Add(value);
-            plain += value.Length;
+            if (!IsValid(arena, node, i))
+            {
+                values.Add(ReadOnlyMemory<byte>.Empty);
+                continue;
+            }
+
+            ReadOnlySpan<byte> value = ValueOf(node, i);
+            value.CopyTo(heap.AsSpan(at));
+            values.Add(new ReadOnlyMemory<byte>(heap, at, value.Length));
+            at += value.Length;
         }
 
         FsstSymbols? table = FsstSymbols.Train(values);

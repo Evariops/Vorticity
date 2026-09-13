@@ -24,6 +24,7 @@
 // target as a SIZE ratio precisely because "the compressor is a sampler, so two honest
 // implementations of the same algorithm diverge on borderline data".
 using System;
+using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 
 namespace Vorticity.Writing;
@@ -80,20 +81,50 @@ internal sealed class FsstSymbols
     /// <summary>The longest run of one line the sampler takes.</summary>
     private const int SampleLine = 512;
 
+    /// <summary>Slots in the symbol table; a power of two, four times <see cref="MaxSymbols"/>.</summary>
+    private const int SlotCount = 1024;
+
+    /// <summary>The multiplier of the multiply-shift hash; the reference's own constant.</summary>
+    private const ulong HashPrime = 2971215073UL;
+
     private readonly ulong[] _bits = new ulong[MaxSymbols];
     private readonly byte[] _lengths = new byte[MaxSymbols];
     private readonly short[] _oneByte = new short[256];
     private readonly short[] _twoByte = new short[65536];
-    private readonly Dictionary<ulong, int>[] _byLength = new Dictionary<ulong, int>[MaxSymbolLength + 1];
+
+    /// <summary>
+    /// The symbols of length 3..8, indexed by their first THREE bytes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This was six <c>Dictionary&lt;ulong, int&gt;</c>, one per length, probed longest-first -- so
+    /// matching one byte of input cost up to SIX dictionary lookups, each with its own hashing,
+    /// bucket walk and generic comparer call. The table is walked over the whole sample five times
+    /// during training and again over the whole column during compression, and `dotnet-trace` puts
+    /// `FsstSymbols.Train` at a third of the write path.
+    /// </para>
+    /// <para>
+    /// EVERY SYMBOL OF LENGTH THREE OR MORE SHARES ITS FIRST THREE BYTES WITH ANY INPUT IT MATCHES,
+    /// which is the observation the reference's table is built on. So one hash of those three bytes
+    /// names a short chain of candidates, and the longest whose own bytes match is the answer --
+    /// one probe and a walk of one or two entries instead of six probes.
+    /// </para>
+    /// <para>
+    /// EXACT, NOT LOSSY, and that is where this parts company with fsst-rs: the reference keeps ONE
+    /// symbol per slot and DROPS a symbol whose slot is taken, which is a speed trade a writer has
+    /// no reason to make -- it would change which symbols are chosen, which changes the file. Here
+    /// the chain holds every collision, the match test compares the candidate's full bytes at its
+    /// own length, and the longest wins. `WrittenSizeTests` is byte-exact, and the whole argument
+    /// for touching the writer at all is that this is neutral to the output.
+    /// </para>
+    /// </remarks>
+    private readonly short[] _prefixHeads = new short[SlotCount];
+    private readonly short[] _prefixChain = new short[MaxSymbols];
+
     private int _count;
 
     private FsstSymbols()
     {
-        for (int i = 3; i <= MaxSymbolLength; i++)
-        {
-            _byLength[i] = [];
-        }
-
         Clear();
     }
 
@@ -417,13 +448,30 @@ internal sealed class FsstSymbols
     /// </returns>
     private int FindLongest(ulong word, int remaining, out int length)
     {
-        int longest = Math.Min(MaxSymbolLength, remaining);
-        for (int width = longest; width >= 3; width--)
+        int limit = Math.Min(MaxSymbolLength, remaining);
+        if (limit >= 3)
         {
-            if (_byLength[width].TryGetValue(word & Mask(width), out int code))
+            int best = -1;
+            int bestLength = 2;
+            for (int code = _prefixHeads[Bucket(word)]; code >= 0; code = _prefixChain[code])
             {
-                length = width;
-                return CodeBase + code;
+                int width = _lengths[code];
+                if (width > limit || width <= bestLength)
+                {
+                    continue;
+                }
+
+                if ((word & Mask(width)) == _bits[code])
+                {
+                    best = code;
+                    bestLength = width;
+                }
+            }
+
+            if (best >= 0)
+            {
+                length = bestLength;
+                return CodeBase + best;
             }
         }
 
@@ -448,6 +496,15 @@ internal sealed class FsstSymbols
     /// <summary>The next up-to-8 bytes as a little-endian word, zero-padded past the end.</summary>
     private static ulong Word(ReadOnlySpan<byte> data, int at)
     {
+        // One load when the bytes are there, which is every position but the last seven of a value.
+        // Assembling it a byte at a time cost eight loads, eight shifts and eight ORs on the
+        // innermost loop of both training and compression.
+        if (at + MaxSymbolLength <= data.Length)
+        {
+            return System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(
+                data.Slice(at, MaxSymbolLength));
+        }
+
         ulong word = 0;
         int available = Math.Min(MaxSymbolLength, data.Length - at);
         for (int i = 0; i < available; i++)
@@ -528,9 +585,9 @@ internal sealed class FsstSymbols
         }
         else
         {
-            // Exact, not lossy: the reference's perfect hash table can refuse an insert and drop
-            // the symbol, which is a speed trade we have no reason to take in a writer.
-            _byLength[length][bits] = code;
+            int bucket = Bucket(bits);
+            _prefixChain[code] = _prefixHeads[bucket];
+            _prefixHeads[bucket] = (short)code;
         }
 
         _bits[code] = bits;
@@ -543,10 +600,22 @@ internal sealed class FsstSymbols
         _count = 0;
         Array.Fill(_oneByte, (short)-1);
         Array.Fill(_twoByte, (short)-1);
-        for (int i = 3; i <= MaxSymbolLength; i++)
-        {
-            _byLength[i].Clear();
-        }
+        Array.Fill(_prefixHeads, (short)-1);
+    }
+
+    /// <summary>
+    /// The bucket a symbol's first three bytes fall in.
+    /// </summary>
+    /// <param name="bits">The symbol's bytes, or the next eight bytes of input.</param>
+    /// <remarks>
+    /// Three bytes because that is the shortest symbol this table indexes, so a symbol and the
+    /// input it matches always agree on them. The multiplier is the reference's own hash constant.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int Bucket(ulong bits)
+    {
+        ulong mixed = (bits & 0xFFFFFFUL) * HashPrime;
+        return (int)((mixed ^ (mixed >> 15)) & (SlotCount - 1));
     }
 
     /// <summary>A symbol proposed for the table: its bytes and its length.</summary>

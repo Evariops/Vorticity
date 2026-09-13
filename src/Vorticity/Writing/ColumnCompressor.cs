@@ -26,6 +26,7 @@
 // that barely benefits costs a second array, its metadata and a decode step on every read; the
 // asymmetry favours leaving data alone.
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -367,9 +368,6 @@ internal static class ColumnCompressor
     private static ColumnPlan Dictionary(
         CanonicalArena arena, CanonicalNode node, in RowComparer comparer, int length, long budget)
     {
-        Dictionary<int, List<int>> byHash = new Dictionary<int, List<int>>();
-        List<int> firstOccurrences = [];
-        int[] codes = new int[length];
         int minimumEntry = node.Kind switch
         {
             CanonicalKind.Primitive => node.PType.ByteWidth(),
@@ -378,65 +376,106 @@ internal static class ColumnCompressor
             _ => 1,
         };
 
-        for (int row = 0; row < length; row++)
+        // A CHAINED HASH IN THREE FLAT ARRAYS, not a `Dictionary<int, List<int>>`. The dictionary
+        // form allocated one `List<int>` per distinct HASH -- 1153 of them on a single 8193-row
+        // column of `types/binary_nonnull_r8193` -- plus the dictionary's own rehashing, and all of
+        // it is thrown away the moment the plan is abandoned. Here `buckets[h]` is the newest code
+        // with that hash and `chain[c]` the one before it, which is the same collision list with no
+        // object per bucket. All three are rented, so a column that abandons allocates NOTHING.
+        //
+        // `codes` is rented for the same reason: it was `new int[length]` written before the
+        // abandonment test could fire, so every column that considered a dictionary and refused one
+        // allocated a full row vector to throw away.
+        int capacity = BucketCount(length);
+        int[] buckets = ArrayPool<int>.Shared.Rent(capacity);
+        int[] chain = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        int[] firstRows = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        int[] codes = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        try
         {
-            int hash = comparer.Hash(row);
-            if (!byHash.TryGetValue(hash, out List<int>? candidates))
-            {
-                candidates = [];
-                byHash.Add(hash, candidates);
-            }
+            buckets.AsSpan(0, capacity).Fill(-1);
+            int mask = capacity - 1;
+            int distinct = 0;
 
-            int code = -1;
-            for (int i = 0; i < candidates.Count; i++)
+            for (int row = 0; row < length; row++)
             {
-                if (comparer.Equal(firstOccurrences[candidates[i]], row))
+                int bucket = comparer.Hash(row) & mask;
+                int code = -1;
+                for (int candidate = buckets[bucket]; candidate >= 0; candidate = chain[candidate])
                 {
-                    code = candidates[i];
-                    break;
+                    if (comparer.Equal(firstRows[candidate], row))
+                    {
+                        code = candidate;
+                        break;
+                    }
                 }
-            }
 
-            if (code < 0)
-            {
-                code = firstOccurrences.Count;
-                firstOccurrences.Add(row);
-                candidates.Add(code);
-
-                // Give up as soon as the dictionary provably cannot win, rather than building one
-                // and then discarding it: every row needs at least a one-byte code, and every
-                // entry costs at least `minimumEntry` bytes however it is written.
-                if (length + ((long)firstOccurrences.Count * minimumEntry) >= budget)
+                if (code < 0)
                 {
-                    return ColumnPlan.Canonical;
+                    code = distinct++;
+                    firstRows[code] = row;
+                    chain[code] = buckets[bucket];
+                    buckets[bucket] = code;
+
+                    // Give up as soon as the dictionary provably cannot win, rather than building
+                    // one and then discarding it: every row needs at least a one-byte code, and
+                    // every entry costs at least `minimumEntry` bytes however it is written.
+                    if (length + ((long)distinct * minimumEntry) >= budget)
+                    {
+                        return ColumnPlan.Canonical;
+                    }
                 }
+
+                codes[row] = code;
             }
 
-            codes[row] = code;
+            // Priced, not assumed: codes at the narrowest width that indexes the entries, plus the
+            // entries themselves in whatever form they will actually be written.
+            long encoded = ((long)length * FsstPlan.IndexPType(distinct).ByteWidth())
+                + EntriesSize(arena, node, firstRows.AsSpan(0, distinct));
+            if (encoded + DictionaryOverhead >= budget)
+            {
+                return ColumnPlan.Canonical;
+            }
+
+            // Only here, where the plan is kept, does anything become a real array.
+            return ColumnPlan.Dictionary(
+                firstRows.AsSpan(0, distinct).ToArray(), codes.AsSpan(0, length).ToArray());
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(codes);
+            ArrayPool<int>.Shared.Return(firstRows);
+            ArrayPool<int>.Shared.Return(chain);
+            ArrayPool<int>.Shared.Return(buckets);
+        }
+    }
+
+    /// <summary>Buckets for <paramref name="length"/> rows: a power of two, load factor under a half.</summary>
+    private static int BucketCount(int length)
+    {
+        int capacity = 16;
+        while (capacity < length && capacity < (1 << 30))
+        {
+            capacity <<= 1;
         }
 
-        // Priced, not assumed: codes at the narrowest width that indexes the entries, plus the
-        // entries themselves in whatever form they will actually be written.
-        long encoded = ((long)length * FsstPlan.IndexPType(firstOccurrences.Count).ByteWidth())
-            + EntriesSize(arena, node, firstOccurrences);
-        return encoded + DictionaryOverhead < budget
-            ? ColumnPlan.Dictionary([.. firstOccurrences], codes)
-            : ColumnPlan.Canonical;
+        return capacity;
     }
 
     /// <summary>What the gathered dictionary entries will occupy once written.</summary>
-    private static long EntriesSize(CanonicalArena arena, CanonicalNode node, List<int> rows)
+    private static long EntriesSize(CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> rows)
     {
         switch (node.Kind)
         {
             case CanonicalKind.Bool:
-                return (rows.Count + 7) / 8;
+                return (rows.Length + 7) / 8;
 
             case CanonicalKind.Primitive:
-                return (long)rows.Count * node.PType.ByteWidth();
+                return (long)rows.Length * node.PType.ByteWidth();
 
             case CanonicalKind.Decimal:
-                return (long)rows.Count * DecimalStorage.ByteWidth(node.Storage);
+                return (long)rows.Length * DecimalStorage.ByteWidth(node.Storage);
 
             default:
             {
@@ -445,7 +484,7 @@ internal static class ColumnCompressor
                 ValidityMask mask = ValidityMask.From(arena, node.Validity);
                 ReadOnlySpan<byte> views = node.Views.Span;
                 long heap = 0;
-                for (int i = 0; i < rows.Count; i++)
+                for (int i = 0; i < rows.Length; i++)
                 {
                     if (mask.IsValid(rows[i]))
                     {
@@ -454,8 +493,8 @@ internal static class ColumnCompressor
                     }
                 }
 
-                long varbin = (((long)rows.Count + 1) * FsstPlan.IndexPType(heap).ByteWidth()) + heap;
-                return Math.Min(((long)rows.Count * 16) + heap, varbin);
+                long varbin = (((long)rows.Length + 1) * FsstPlan.IndexPType(heap).ByteWidth()) + heap;
+                return Math.Min(((long)rows.Length * 16) + heap, varbin);
             }
         }
     }
