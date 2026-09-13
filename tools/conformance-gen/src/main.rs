@@ -156,8 +156,9 @@ fn main() -> anyhow::Result<()> {
                 out.display()
             );
             let n = throughput::write_throughput_corpus(&session, &out, rows).await?;
-            eprintln!("{n} files written. These are NOT corpus files: no sidecar, no manifest, \
-                       nothing should assert a value from them.");
+            eprintln!("{n} files written, plus manifest.json. These are NOT corpus files: no \
+                       sidecar, nothing should assert a VALUE from them -- the manifest says which \
+                       bytes a ratchet was measured against, not what they contain.");
             Ok(())
         });
     }

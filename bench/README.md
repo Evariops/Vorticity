@@ -81,8 +81,17 @@ in [BASELINE.md](BASELINE.md) and in the commits.
   --ratio-check rewritten` — which is the difference between checking one change and waiting for
   thirteen axes.
 * **`--throughput [family…] [--check]`** — 50 encodings at a million rows, where the fixed
-  open-and-walk cost is under a percent instead of most of the measurement. A bare family name
-  narrows the report; `--check` makes it a gate.
+  open-and-walk cost is under a percent instead of most of the measurement. `--check` makes it a
+  gate. Its inputs are 330 MB and are not committed: run `bench/gen-throughput.sh` once, and it
+  finds them in `~/.cache/vorticity/throughput-1M` by itself (`VORTICITY_THROUGHPUT_CORPUS`
+  overrides). `--check` refuses a corpus with no `manifest.json`, one generated at another row
+  count, or one whose files do not match their recorded sha256 — fifty ratchets against bytes that
+  live outside the repository need to know *which* bytes.
+
+  **A bare family name narrows the report, and does not currently give the gate's ratio**:
+  `fsst` reads 1.27 in the full run and 1.63–1.66 on its own, reproducibly, on the same bytes — over
+  its ceiling on a healthy tree. Use the narrow form to see a direction; confirm with the full run
+  before believing a red. BENCH-AUDIT.md B8.
 
 **A ceiling only ever comes down, and only behind a real improvement.** Raising one to make a run
 pass is the one thing this directory forbids outright.
