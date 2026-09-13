@@ -116,14 +116,16 @@ internal static class ThroughputCheck
         ("masked_all_valid", 1.26),   // 2 runs, spread 1.26-1.26
         ("null", 1.31),   // 2 runs, spread 1.12-1.31
         ("onpair", 1.61),   // 2 runs, spread 1.61-1.61
+        ("parquet_variant", 8.11),   // 2 runs, spread 7.69-8.11
         ("pco", 1.35),   // 2 runs, spread 1.32-1.35
         ("primitive", 0.38),   // 2 runs, spread 0.29-0.38
         ("runend", 1.37),   // 2 runs, spread 1.37-1.37
         ("sequence", 1.97),   // 2 runs, spread 1.91-1.97
         ("sparse", 1.04),   // 2 runs, spread 0.95-1.04
         ("struct", 0.08),   // 2 runs, spread 0.07-0.08
-        ("varbin", 0.15),   // 2 runs, spread 0.14-0.15
+        ("varbin", 0.07),   // 2 runs, spread 0.07-0.07
         ("varbinview", 0.08),   // 2 runs, spread 0.07-0.08
+        ("variant", 4.89),   // 2 runs, spread 4.57-4.89
         ("zigzag", 1.09),   // 2 runs, spread 0.94-1.09
         ("zstd", 1.27),   // 2 runs, spread 1.25-1.27
         ("zstd_buffers", 0.16),   // 2 runs, spread 0.16-0.16

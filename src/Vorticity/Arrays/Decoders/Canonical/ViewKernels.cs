@@ -29,6 +29,7 @@
 // those bytes into a whole-heap check would refuse a file the reference accepts. So VarBin takes
 // the fast path when its validity says every row is valid, and the row-at-a-time path otherwise.
 using System;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.Unicode;
@@ -189,6 +190,82 @@ internal static class ViewKernels
         }
 
         return Unsafe.As<TLen, long>(ref value);
+    }
+
+    /// <summary>
+    /// Class I: the offsets that cut a heap must not decrease.
+    /// </summary>
+    /// <param name="offsets"><paramref name="count"/> offsets, as <paramref name="ptype"/>.</param>
+    /// <param name="ptype">Their physical type.</param>
+    /// <param name="count">How many to check.</param>
+    /// <param name="encodingId">The encoding asking, for the message.</param>
+    /// <exception cref="VortexFormatException">A pair decreases.</exception>
+    /// <remarks>
+    /// Upstream's <c>build_views_from_offsets</c> computes lengths with a <c>wrapping_sub</c>, so a
+    /// non-monotone pair produces a huge wrapped length that then indexes out of the heap -- which
+    /// is why this is a hard check here and only a `debug_assert` there. A shifted compare puts it
+    /// on the vector unit; the scalar loop names the offending pair when a block fails.
+    /// </remarks>
+    internal static void RequireAscending(
+        ReadOnlySpan<byte> offsets, PType ptype, int count, string encodingId)
+    {
+        switch (ptype)
+        {
+            case PType.U8:
+                RequireAscending<byte>(offsets, count, encodingId);
+                break;
+            case PType.U16:
+                RequireAscending<ushort>(offsets, count, encodingId);
+                break;
+            case PType.U32:
+                RequireAscending<uint>(offsets, count, encodingId);
+                break;
+            case PType.U64:
+                RequireAscending<ulong>(offsets, count, encodingId);
+                break;
+            case PType.I8:
+                RequireAscending<sbyte>(offsets, count, encodingId);
+                break;
+            case PType.I16:
+                RequireAscending<short>(offsets, count, encodingId);
+                break;
+            case PType.I32:
+                RequireAscending<int>(offsets, count, encodingId);
+                break;
+            default:
+                RequireAscending<long>(offsets, count, encodingId);
+                break;
+        }
+    }
+
+    private static void RequireAscending<T>(ReadOnlySpan<byte> offsets, int count, string encodingId)
+        where T : unmanaged, INumber<T>
+    {
+        ReadOnlySpan<T> typed = MemoryMarshal.Cast<byte, T>(offsets)[..count];
+
+        int i = 1;
+        if (Vector<T>.IsSupported && count > Vector<T>.Count)
+        {
+            int lanes = Vector<T>.Count;
+            for (; i <= count - lanes; i += lanes)
+            {
+                if (Vector.LessThanAny(
+                        Vector.LoadUnsafe(in typed[i]), Vector.LoadUnsafe(in typed[i - 1])))
+                {
+                    break;
+                }
+            }
+        }
+
+        for (; i < count; i++)
+        {
+            if (typed[i] < typed[i - 1])
+            {
+                throw new VortexFormatException(
+                    $"{encodingId} offsets must not decrease; offset {i} is {typed[i]} after " +
+                    $"{typed[i - 1]}.");
+            }
+        }
     }
 
     /// <summary>

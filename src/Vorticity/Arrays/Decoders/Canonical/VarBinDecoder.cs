@@ -66,11 +66,24 @@ public sealed class VarBinDecoder : ArrayDecoder
         ValidateOffsets(offsetBytes, offsetsPType, length, bytes.Length);
 
         int viewBytes = ArrayDecodeContext.CheckedMultiply(length, CanonicalSupport.ViewSize, Id + " views");
-        VortexBuffer views = CanonicalSupport.Allocate(
+
+        // Uninitialized: `ViewKernels` writes all sixteen bytes of every view, the null rows'
+        // `empty_view()` included, rather than inheriting the zeros from the allocator.
+        VortexBuffer views = CanonicalSupport.AllocateUninitialized(
             context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
 
-        BuildViews(context, offsetBytes, offsetsPType, bytes, writable, validity, length,
-            dtype.Kind == DTypeKind.Utf8);
+        ValidityMask mask = ValidityMask.From(context, validity);
+        if (mask.AllInvalid)
+        {
+            // Every row is null, so every view is `empty_view()` and no offset is read.
+            writable.Clear();
+        }
+        else
+        {
+            ViewKernels.BuildFromOffsets(
+                offsetBytes, offsetsPType, bytes.Span, writable, length,
+                dtype.Kind == DTypeKind.Utf8, in mask);
+        }
 
         if (bytes.Length == 0)
         {
@@ -87,82 +100,28 @@ public sealed class VarBinDecoder : ArrayDecoder
     /// <summary>
     /// Class I: offsets must start at zero, never decrease, and never leave the byte heap.
     /// </summary>
+    /// <remarks>
+    /// THE MONOTONICITY CHECK IS A SHIFTED COMPARE, and the same one `vortex.list`'s size vector
+    /// and `vortex.patched`'s indices use. It was a `ReadInteger` switch twice per row -- 16% of a
+    /// 1M-row `vortex.parquet.variant` scan, which is two varbin columns and nothing else.
+    /// </remarks>
     private static void ValidateOffsets(
         ReadOnlySpan<byte> offsets, PType ptype, int length, int byteCount)
     {
-        long previous = CanonicalSupport.ReadInteger(offsets, ptype, 0);
-        if (previous != 0)
+        long first = CanonicalSupport.ReadInteger(offsets, ptype, 0);
+        if (first != 0)
         {
             throw new VortexFormatException(
-                $"{Id} offsets must start at 0; this array starts at {previous}.");
+                $"{Id} offsets must start at 0; this array starts at {first}.");
         }
 
-        for (int i = 1; i <= length; i++)
-        {
-            long current = CanonicalSupport.ReadInteger(offsets, ptype, i);
-            if (current < previous)
-            {
-                throw new VortexFormatException(
-                    $"{Id} offsets must not decrease; offset {i} is {current} after {previous}.");
-            }
+        ViewKernels.RequireAscending(offsets, ptype, length + 1, Id);
 
-            previous = current;
-        }
-
-        if (previous > byteCount)
+        long last = CanonicalSupport.ReadInteger(offsets, ptype, length);
+        if (last > byteCount)
         {
             throw new VortexFormatException(
-                $"{Id} offsets end at {previous}, past the {byteCount}-byte value heap.");
-        }
-    }
-
-    private static void BuildViews(
-        ArrayDecodeContext context,
-        ReadOnlySpan<byte> offsets,
-        PType ptype,
-        VortexBuffer bytes,
-        Span<byte> views,
-        Validity validity,
-        int length,
-        bool requireUtf8)
-    {
-        ValidityMask mask = ValidityMask.From(context, validity);
-        if (mask.AllInvalid)
-        {
-            // Every row is null and `views` came back zeroed, which is BinaryView::empty_view().
-            return;
-        }
-
-        ReadOnlySpan<byte> heap = bytes.Span;
-        bool allValid = mask.AllValid;
-
-        for (int i = 0; i < length; i++)
-        {
-            if (!allValid && !mask.IsValid(i))
-            {
-                // Null rows get BinaryView::empty_view() - the zeros Allocate already wrote.
-                continue;
-            }
-
-            int start = (int)CanonicalSupport.ReadInteger(offsets, ptype, i);
-            int end = (int)CanonicalSupport.ReadInteger(offsets, ptype, i + 1);
-            int size = end - start;
-            ReadOnlySpan<byte> value = heap.Slice(start, size);
-
-            if (requireUtf8 && !Utf8.IsValid(value))
-            {
-                throw new VortexFormatException($"Row {i} of a Utf8 array is not valid UTF-8.");
-            }
-
-            Span<byte> view = views.Slice(i * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
-            if (size <= CanonicalSupport.MaxInlineViewLength)
-            {
-                CanonicalSupport.WriteInlineView(view, value);
-            }
-            else
-            {
-                CanonicalSupport.WriteReferenceView(view, size, value, bufferIndex: 0, offset: start);
-            }
+                $"{Id} offsets end at {last}, past the {byteCount}-byte value heap.");
         }
     }
 }
