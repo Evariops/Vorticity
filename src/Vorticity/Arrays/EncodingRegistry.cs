@@ -84,6 +84,7 @@ public enum ArrayEncodingId : ushort
     /// <summary><c>vortex.zstd_buffers</c>.</summary>
     ZstdBuffers,
 
+
     /// <summary><c>fastlanes.rle</c>.</summary>
     FastLanesRle,
 
