@@ -24,6 +24,7 @@ namespace Vorticity.Benchmarks;
 
 /// <summary>The two shapes of the unpack loop, against one clock.</summary>
 [Config(typeof(BenchmarkConfig))]
+[BenchmarkCategory(BenchmarkConfig.Kernel)]
 public class FastLanesKernelBenchmarks
 {
     private const int Blocks = 64;

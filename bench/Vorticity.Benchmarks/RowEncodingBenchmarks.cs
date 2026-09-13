@@ -30,6 +30,7 @@ namespace Vorticity.Benchmarks;
 
 /// <summary>Encoding a batch's rows into comparable byte keys.</summary>
 [Config(typeof(BenchmarkConfig))]
+[BenchmarkCategory(BenchmarkConfig.Path)]
 public class RowEncodingBenchmarks
 {
     private VortexFile? _file;

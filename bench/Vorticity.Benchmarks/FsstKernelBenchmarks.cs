@@ -41,6 +41,7 @@ namespace Vorticity.Benchmarks;
 
 /// <summary>The FSST inner loop, bare and as a decoder runs it, against one clock.</summary>
 [Config(typeof(BenchmarkConfig))]
+[BenchmarkCategory(BenchmarkConfig.Kernel)]
 public class FsstKernelBenchmarks
 {
     private byte[] _symbols = [];

@@ -59,6 +59,27 @@ public sealed class BenchmarkConfig : ManualConfig
     /// <summary>The category name for a curve: excluded unless <c>--explore</c> asks for it.</summary>
     public const string Explore = "explore";
 
+    /// <summary>
+    /// A micro-benchmark of one kernel, measured against a ported arm in the same process: the
+    /// classes a kernel change runs before it commits.
+    /// </summary>
+    public const string Kernel = "kernel";
+
+    /// <summary>
+    /// A library path measured through its public API rather than at a kernel. Slower per case than
+    /// <see cref="Kernel"/>, and in the run with no argument for the same reason: it guards a number
+    /// nothing else guards.
+    /// </summary>
+    public const string Path = "path";
+
+    /// <summary>
+    /// Every class carries exactly one of these. The run with no argument is <see cref="Kernel"/>
+    /// plus <see cref="Path"/>; <c>--explore</c> adds the third. <see cref="Program"/> asserts the
+    /// labelling at startup, so a class that arrives without one is a build-time-loud mistake rather
+    /// than a case that silently stops running.
+    /// </summary>
+    public static readonly string[] Categories = [Kernel, Path, Explore];
+
     public BenchmarkConfig()
     {
         Job job = Job.Default.WithToolchain(InProcessEmitToolchain.Instance);

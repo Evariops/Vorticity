@@ -2,9 +2,14 @@
 //
 // `dotnet run -c Release --project bench/Vorticity.Benchmarks` runs everything in the FAST profile
 // (BenchmarkConfig.cs says what that is and what it costs in fidelity); `-- --filter '*Fsst*'`
-// narrows it to one class, which is what a kernel change wants; `-- --full` selects the reference
+// narrows it to one class, which is what a kernel change wants, and `-- fsst` is the same thing
+// without the quoting -- a bare word becomes `--filter '*word*'`; `-- --full` selects the reference
 // profile, for the one class whose number is about to be written down; `-- --explore` adds back the
-// CURVES, which are exploration rather than guards and are out of the default run.
+// CURVES, which are exploration rather than guards and are out of the default run. Selection by
+// category -- `-- --anyCategories kernel` -- is BenchmarkDotNet's own, and works because every class
+// is labelled `kernel`, `path` or `explore`; this file refuses to run if one is not.
+//
+// bench/README.md is the one-page version of all of it.
 //
 // `-- --ffi-check` is not a benchmark: it verifies that the native comparison harness is present
 // and that both implementations AGREE on what they read. A ratio between two readers that return
@@ -22,6 +27,7 @@
 // the same kind of gate, per encoding. That is where the largest measured gaps in this repository
 // live, and until the gate existed nothing defended them.
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -69,9 +75,101 @@ internal static class Program
         BenchmarkConfig.Full = Array.IndexOf(args, "--full") >= 0;
         BenchmarkConfig.Exploring = Array.IndexOf(args, "--explore") >= 0;
         string[] forwarded = [.. args.Where(a => a is not ("--full" or "--explore"))];
-        BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(forwarded);
+
+        if (UncategorizedClasses() is { Length: > 0 } uncategorized)
+        {
+            Console.Error.WriteLine(
+                $"These benchmark classes carry none of [{string.Join(", ", BenchmarkConfig.Categories)}]: " +
+                $"{string.Join(", ", uncategorized)}.\n" +
+                "A class without a category still runs, but `--anyCategories kernel` would not find " +
+                "it. Add [BenchmarkCategory(BenchmarkConfig.Kernel)] or Path, or Explore for a curve.");
+            return 2;
+        }
+
+        BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(BareWordsToFilters(forwarded));
         return 0;
     }
+
+    /// <summary>
+    /// The selection arguments, from the two shorthands this project adds to BenchmarkDotNet's own.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// `-- fsst` means `--filter '*fsst*'`. The three glob stars are the whole reason it exists: the
+    /// shell eats them unquoted, and a developer who wants one class should not have to remember
+    /// that. A word is BARE when nothing that looks like an option precedes it -- which is what keeps
+    /// `--list flat` and `--filter '*Fsst*'` intact, their values being preceded by their option.
+    /// Our own two flags are stripped before this runs, so `--full FastLanes` arrives as a bare word.
+    /// </para>
+    /// <para>
+    /// And NO argument means every benchmark, not a prompt. Left alone, BenchmarkSwitcher asks which
+    /// class to run and reads the answer from the console, which makes `dotnet run -c Release PROJ`
+    /// -- the command BENCH-AUDIT.md §4.3 calls the default run, and the one a script or a CI job
+    /// would use -- do nothing at all when stdin is not a terminal. The fast profile exists so that
+    /// running everything is the cheap thing to do; it should also be the thing that happens.
+    /// </para>
+    /// </remarks>
+    private static string[] BareWordsToFilters(string[] args)
+    {
+        List<string> result = [];
+        List<string> words = [];
+        for (int i = 0; i < args.Length; i++)
+        {
+            bool precededByOption = i > 0 && args[i - 1].StartsWith('-');
+            if (!args[i].StartsWith('-') && !precededByOption)
+            {
+                words.Add($"*{args[i]}*");
+            }
+            else
+            {
+                result.Add(args[i]);
+            }
+        }
+
+        if (words.Count == 0 && !result.Any(a => Selectors.Contains(a, StringComparer.OrdinalIgnoreCase)))
+        {
+            words.Add("*");
+        }
+
+        if (words.Count > 0)
+        {
+            result.Add("--filter");
+            result.AddRange(words);
+        }
+
+        return [.. result];
+    }
+
+    /// <summary>
+    /// The arguments that already say what to run, or that print instead of running. One of these
+    /// present is what stops <see cref="BareWordsToFilters"/> from adding `--filter *`.
+    /// </summary>
+    private static readonly string[] Selectors =
+        ["--filter", "-f", "--categories", "--anyCategories", "--allCategories", "--attribute",
+         "--list", "--help", "-h", "--info", "--version"];
+
+    /// <summary>
+    /// The classes that hold a `[Benchmark]` but none of <see cref="BenchmarkConfig.Categories"/>.
+    /// Checked rather than trusted because the failure is silent in the other direction: the run with
+    /// no argument selects by EXCLUDING `explore`, so an unlabelled class runs and only its
+    /// `--anyCategories` selection quietly returns nothing.
+    /// </summary>
+#pragma warning disable IL2026, IL2070 // The benchmark host is never trimmed: BenchmarkSwitcher
+                                       // reflects over this same assembly to find the classes at all.
+    private static string[] UncategorizedClasses() =>
+    [
+        .. typeof(Program).Assembly.GetTypes()
+            .Where(t => t.GetMethods().Any(m => m.GetCustomAttributes(
+                typeof(BenchmarkDotNet.Attributes.BenchmarkAttribute), inherit: true).Length > 0))
+            .Where(t => t.GetCustomAttributes(
+                    typeof(BenchmarkDotNet.Attributes.BenchmarkCategoryAttribute), inherit: true)
+                .Cast<BenchmarkDotNet.Attributes.BenchmarkCategoryAttribute>()
+                .SelectMany(a => a.Categories)
+                .All(c => !BenchmarkConfig.Categories.Contains(c, StringComparer.OrdinalIgnoreCase)))
+            .Select(t => t.Name)
+            .Order(StringComparer.Ordinal),
+    ];
+#pragma warning restore IL2026, IL2070
 
     private static async Task<int> FfiCheck()
     {

@@ -43,6 +43,7 @@ namespace Vorticity.Benchmarks;
 
 /// <summary>A `<` predicate over an i64 column: the library against the best scalar loop.</summary>
 [Config(typeof(BenchmarkConfig))]
+[BenchmarkCategory(BenchmarkConfig.Kernel)]
 public class FilterKernelBenchmarks
 {
     /// <summary>Trilean's three states, as the kernels write them.</summary>

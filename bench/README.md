@@ -1,0 +1,99 @@
+# The bench, in one page
+
+Every command below is run from the repository root. `PROJ` stands for
+`--project bench/Vorticity.Benchmarks`; add `-c Release` always — a Debug benchmark measures the
+JIT's unoptimized output and is worth nothing.
+
+```
+dotnet run -c Release PROJ -- <arguments>
+```
+
+## The loop: what you changed, what you run
+
+| you changed | you run | it costs | what it answers |
+|---|---|---|---|
+| a kernel | `-- fastlanes` (its class) | 1–8 s | did the kernel move, against the ported arm on the same clock |
+| anything, want a direction | no argument at all | **14 s** | the four default classes, 10 cases, fast profile |
+| a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
+| a read path | `-- --ratio-check` | 21 s | the nine axes against Rust, interleaved, each held to a ceiling |
+| a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust |
+| the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 50 files |
+| the FFI harness, or before trusting any ratio | `-- --ffi-check` | < 1 s | both readers return the same rows on the same files |
+| a hot path you want to profile | `-- --profile <scenario> [seconds]` | as asked | a bare loop for `dotnet-trace`, no harness in the profile |
+| a ratchet | `dotnet test Vorticity.slnx -c Release` | ~1 min | the suite plus the eight allocation and count ratchets |
+
+**A fast-profile figure is a direction, not a number.** Anything under about 5 % on a kernel, and
+every figure that goes into [BASELINE.md](BASELINE.md), is confirmed with `--full` on the one class
+concerned. Why, and what the fast profile costs in fidelity: `BenchmarkConfig.cs`, and BENCH-AUDIT.md
+§4.2 for the measurements behind it.
+
+**Never run the whole BDN suite to decide one change.** Run the class, before and after, on the same
+build. The gates are the other instrument: they are *commands*, deliberately not `dotnet test` cases
+(BENCH-AUDIT.md §8), so CI calls them and a red one never silently stops the suite from running.
+
+## Selecting
+
+Three mechanisms, finest first:
+
+| form | means |
+|---|---|
+| `-- fsst` | a bare word becomes `--filter '*fsst*'` — the shell would eat the stars |
+| `-- --filter '*Fsst*.Library'` | BenchmarkDotNet's own glob, over `Class.Method` |
+| `-- --anyCategories kernel` | by category: every class is `kernel`, `path` or `explore` |
+| `-- --list flat` | what exists under the current selection |
+
+`--full` and `--explore` are ours and are consumed before BenchmarkDotNet sees the rest, so
+`-- --full fastlanes` works as written. Everything else is forwarded.
+
+**No argument means all of them**, not a prompt: without one, BenchmarkDotNet asks the console which
+class to run, which makes the default run do nothing under a script or in CI. `Program.cs` supplies
+`--filter *` when nothing else has said what to run.
+
+## The classes, and why there are only seven
+
+| class | category | in the default run |
+|---|---|---|
+| `FastLanesKernelBenchmarks` | `kernel` | yes — 17 bits; `--full` adds 10 and 33 |
+| `FsstKernelBenchmarks` | `kernel` | yes |
+| `FilterKernelBenchmarks` | `kernel` | yes |
+| `RowEncodingBenchmarks` | `path` | yes |
+| `RandomAccessBenchmarks` | `explore` | no — `--explore` |
+| `FilterSelectivityBenchmarks` | `explore` | no — `--explore` |
+| `RewrittenComparison` | `explore` | no — `--explore` |
+
+`explore` holds the **curves** — a selectivity sweep, a take sweep — which answered their question
+once and do not guard against anything. They stay runnable and stay out of the default run.
+
+Eight other classes were deleted rather than demoted: each measured something another instrument
+measures with a better estimator, and BENCH-AUDIT.md §3.1 names the replacement for every one. The
+numbers they produced are not lost — they are in [BASELINE.md](BASELINE.md) and in the commits.
+
+## The gates, and their ceilings
+
+* **`--ratio-check`** — nine axes (full scan, full scan upstream-lazy, projected, first batch, footer
+  only, read-and-write-back, filtered 1 %, filtered half, scattered take), ours against Rust,
+  **interleaved against one clock** so that drift is common to both arms. Each has a ceiling in
+  `RatioCheck.cs`; over it, non-zero exit.
+* **`--throughput [family…] [--check]`** — 50 encodings at a million rows, where the fixed
+  open-and-walk cost is under a percent instead of most of the measurement. A bare family name
+  narrows the report; `--check` makes it a gate.
+
+**A ceiling only ever comes down, and only behind a real improvement.** Raising one to make a run
+pass is the one thing this directory forbids outright.
+
+**A red gate is not believed on the first run, yet.** Measured run-to-run spread is +12 to +22 % on
+four of the nine ratio axes (BENCH-AUDIT.md annexe A.1), and two invocations in four were red with
+no byte changed. Replay three times: two reds out of three is a regression, otherwise it is noise —
+and either way the observation is data for B2, the statistical gate that is meant to end this
+paragraph.
+
+## Where the rest lives
+
+| file | what it holds |
+|---|---|
+| [BASELINE.md](BASELINE.md) | the current number on every axis, its machine, its commit. A record, not a gate |
+| [PROFILE.md](PROFILE.md) | the CPU profiling session: what actually costs, as opposed to what should |
+| [ALLOCATIONS.md](ALLOCATIONS.md), [BRANCHING.md](BRANCHING.md), [STRUCTURE.md](STRUCTURE.md) | the three code audits |
+| [PERF-AUDIT.md](PERF-AUDIT.md) | v1, the archive: three passes, 41 steps, the negative results |
+| `../PERF-AUDIT-v2.md` | the open work list |
+| `../BENCH-AUDIT.md` | this instrument, audited: what every figure above comes from |
