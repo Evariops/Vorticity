@@ -86,14 +86,33 @@ internal static class Program
                 .. args.Where((a, i) =>
                     i > 0 && i != counted && !a.StartsWith("--", StringComparison.Ordinal))
             ];
-            return await RatioCheck.RunAsync(axes, recalibrate).ConfigureAwait(false);
+            bool rebase = Array.IndexOf(args, "--rebase") >= 0;
+            return await RatioCheck.RunAsync(axes, recalibrate, rebase).ConfigureAwait(false);
         }
 
         if (args.Length > 0 && args[0] == "--throughput")
         {
             bool check = Array.IndexOf(args, "--check") >= 0;
-            string[] only = [.. args[1..].Where(a => !a.StartsWith("--", StringComparison.Ordinal))];
-            return await ThroughputCheck.RunAsync(check, only).ConfigureAwait(false);
+            ThroughputCheck.Quick = Array.IndexOf(args, "--quick") >= 0;
+            int tpFlag = Array.IndexOf(args, "--recalibrate");
+            int tpPasses = 0;
+            int tpCounted = -1;
+            if (tpFlag >= 0)
+            {
+                int n = 0;
+                bool given = tpFlag + 1 < args.Length &&
+                    int.TryParse(args[tpFlag + 1], CultureInfo.InvariantCulture, out n) && n > 0;
+                tpPasses = given ? n : 3;
+                tpCounted = given ? tpFlag + 1 : -1;
+            }
+
+            string[] only =
+            [
+                .. args.Where((a, i) =>
+                    i > 0 && i != tpCounted && !a.StartsWith("--", StringComparison.Ordinal))
+            ];
+            return await ThroughputCheck.RunAsync(
+                check, only, tpPasses, Array.IndexOf(args, "--rebase") >= 0).ConfigureAwait(false);
         }
 
         if (args.Length > 1 && args[0] == "--profile")

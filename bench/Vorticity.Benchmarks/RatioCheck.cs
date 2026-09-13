@@ -60,18 +60,47 @@ internal static class RatioCheck
     private static readonly TimeSpan WarmupBudget = TimeSpan.FromSeconds(2);
 
     /// <summary>
-    /// Interleaved rounds measured, per axis.
+    /// Rounds measured before the interval is consulted.
     /// </summary>
     /// <remarks>
-    /// Raised from 21 because the short axes needed it. Interleaving buys immunity to thermal drift
-    /// and charges for it in cache locality: `open to first batch` is ~100 us of managed work
-    /// measured immediately after a 1.2 ms native call that has just walked over the caches, where
-    /// BenchmarkDotNet runs it in a tight loop of nothing but itself. The effect is real and one-
-    /// sided, and it showed up as a median moving +-9% run to run on that axis against +-1% on the
-    /// full scan. More rounds is the cheap fix: every round of that axis is dominated by Rust's side
-    /// anyway, so 51 of them still costs under a tenth of a second.
+    /// Interleaving buys immunity to thermal drift and charges for it in cache locality: `open to
+    /// first batch` is ~100 us of managed work measured immediately after a 1.2 ms native call that
+    /// has just walked over the caches, where BenchmarkDotNet runs it in a tight loop of nothing but
+    /// itself. The effect is real and one-sided. Rounds are the cheap fix, and how many are needed
+    /// is not the same for every axis -- so this is a FLOOR, and <see cref="MaxRounds"/> with
+    /// <see cref="Precision"/> decide the rest.
     /// </remarks>
-    private const int Rounds = 51;
+    private const int MinRounds = 21;
+
+    /// <summary>The ceiling on rounds, when the interval never gets tight enough.</summary>
+    private const int MaxRounds = 501;
+
+    /// <summary>
+    /// Rounds stop when half the interval width is within this fraction of the median.
+    /// </summary>
+    /// <remarks>
+    /// 5% against a 15% margin: the gate can then see a regression a third the size of what it is
+    /// allowed to pass, rather than the +12 to +22% run-to-run spread that used to sit on top of it.
+    /// An axis that cannot get there inside <see cref="Budget"/> says so in its own column instead
+    /// of pretending.
+    /// </remarks>
+    private const double Precision = 0.05;
+
+    /// <summary>Wall clock an axis may spend on rounds before it stops asking for more.</summary>
+    private const double Budget = 10.0;
+
+    /// <summary>
+    /// A round times at least this long, by repeating the work when one call is shorter.
+    /// </summary>
+    /// <remarks>
+    /// Under ~200 us a single `Stopwatch`-timed call is dominated by timer, cache and scheduler
+    /// jitter, and a median over rounds does not recover what no round resolved (BENCH-AUDIT.md
+    /// §4.4). Repeating k times inside one timed round is the same total work with the jitter
+    /// divided by k. The estimator changes with it -- k calls in a row measure a WARM path, where a
+    /// single call measured a cache-cold one -- which is the path a reader that opens ten files in
+    /// a row actually exercises.
+    /// </remarks>
+    private const double MinRoundMicroseconds = 1_000;
 
     /// <summary>
     /// The margin over the reference ratio, per docs/05's "failure beyond +15% of the reference".
@@ -241,19 +270,19 @@ internal static class RatioCheck
     /// </remarks>
     private static readonly Dictionary<string, double> References = new()
     {
-        ["full scan"] = 0.462,   // 3 passes, spread 0.455-0.462; was 0.536, -13.8%
-        ["full scan, upstream lazy"] = 0.463,   // 3 passes, spread 0.455-0.463; was 0.537, -13.7%
-        ["projected scan, 1 of 5 columns"] = 0.471,   // 3 passes, spread 0.459-0.471; was 0.510, -7.7%
-        ["open to first batch"] = 0.086,   // 3 passes, spread 0.085-0.086; was 0.093, -7.9%
-        ["open, footer only"] = 0.732,   // 3 passes, spread 0.729-0.744; HELD at 0.732: peaked at 0.744, no loosening
-        ["read and write back"] = 1.027,   // 3 passes, spread 1.011-1.027; was 1.820, -43.6%
-        ["filtered scan, 1% band"] = 0.235,   // 3 passes, spread 0.226-0.235; was 0.237, -0.7%
-        ["filtered scan, half the rows"] = 0.321,   // 3 passes, spread 0.314-0.321; was 0.340, -5.5%
-        ["scattered take, 64 of 64 splits"] = 0.245,   // 3 passes, spread 0.244-0.245; was 0.262, -6.5%
-        ["rewritten zoned, reference's"] = 0.457,   // 3 passes, spread 0.459-0.462; HELD at 0.457: peaked at 0.462, no loosening
-        ["rewritten zoned, ours"] = 5.023,   // 3 passes, spread 4.997-5.048; HELD at 5.023: peaked at 5.048, no loosening
-        ["rewritten high card, reference's"] = 0.828,   // 3 passes, spread 0.794-0.864; HELD at 0.828: peaked at 0.864, no loosening
-        ["rewritten high card, ours"] = 0.890,   // 3 passes, spread 0.864-0.928; HELD at 0.890: peaked at 0.928, no loosening
+        ["full scan"] = 0.462,   // 3 passes, spread 0.459-0.466; held
+        ["full scan, upstream lazy"] = 0.463,   // 3 passes, spread 0.460-0.466; held
+        ["projected scan, 1 of 5 columns"] = 0.477,   // rebased for k>1 (warm), was 0.471
+        ["open to first batch"] = 0.086,   // 3 passes, spread 0.083-0.087; held
+        ["open, footer only"] = 0.767,   // rebased for k=19 (warm open), was 0.732
+        ["read and write back"] = 1.027,   // 3 passes, spread 1.021-1.029; held
+        ["filtered scan, 1% band"] = 0.237,   // rebased for k>1 (warm), was 0.235
+        ["filtered scan, half the rows"] = 0.321,   // rebased for k>1 (warm), unchanged in practice
+        ["scattered take, 64 of 64 splits"] = 0.245,   // 3 passes, spread 0.239-0.248; held
+        ["rewritten zoned, reference's"] = 0.457,   // 3 passes, spread 0.456-0.466; held
+        ["rewritten zoned, ours"] = 5.023,   // 3 passes, spread 4.976-5.186; held
+        ["rewritten high card, reference's"] = 0.857,   // rebased for k=22 (warm open), was 0.828
+        ["rewritten high card, ours"] = 0.927,   // rebased for k=18 (warm), was 0.890
     };
 
     /// <summary>
@@ -320,7 +349,13 @@ internal static class RatioCheck
     /// ratchet set from a mean would go red on half the runs that produced it.
     /// </param>
     /// <returns>0 when every axis is inside its ceiling, 1 when one is not, 2 with no harness.</returns>
-    internal static async Task<int> RunAsync(string[] only, int recalibrate)
+    /// <param name="rebase">
+    /// Let <c>--recalibrate</c> raise a reference. THE ONE LEGITIMATE USE is an estimator change --
+    /// when the harness stops measuring what the old numbers describe, holding them is not a ratchet,
+    /// it is a comparison between two different measurements. It is a flag rather than a default so
+    /// that a raise is always a deliberate act with a commit message behind it.
+    /// </param>
+    internal static async Task<int> RunAsync(string[] only, int recalibrate, bool rebase)
     {
         if (!RustReader.Available)
         {
@@ -370,7 +405,7 @@ internal static class RatioCheck
             }
 
             return recalibrate > 0
-                ? await RecalibrateAsync(path, axes, recalibrate).ConfigureAwait(false)
+                ? await RecalibrateAsync(path, axes, recalibrate, rebase).ConfigureAwait(false)
                 : await CheckAsync(path, axes).ConfigureAwait(false);
         }
         finally
@@ -386,31 +421,36 @@ internal static class RatioCheck
     private static async Task<int> CheckAsync(string path, Axis[] axes)
     {
         Console.Out.WriteLine(
-            $"RATIO CHECK: median of {Rounds} interleaved rounds after a " +
-            $"{WarmupBudget.TotalSeconds.ToString("F0", CultureInfo.InvariantCulture)}s warm-up per axis, " +
+            $"RATIO CHECK: median per-round ratio with a 95% bootstrap interval, {MinRounds}+ " +
+            $"interleaved rounds after a " +
+            $"{WarmupBudget.TotalSeconds.ToString("F0", CultureInfo.InvariantCulture)}s warm-up, " +
             $"ceiling = reference x {Margin.ToString("F2", CultureInfo.InvariantCulture)}");
         Console.Out.WriteLine(
-            "  axis                             ours      rust     ratio  reference  ceiling   warmed");
+            "  OVER needs the whole interval above the ceiling; STALE needs it all under " +
+            $"{StaleBelow.ToString("F2", CultureInfo.InvariantCulture)} x reference. " +
+            "mde = smallest change this axis can currently see.");
+        Console.Out.WriteLine(
+            "  axis                             ours      rust     ratio  [   95% interval]  reference  ceiling   n  k     mde");
 
         int over = 0;
         List<string> stale = [];
         List<string> unreferenced = [];
+        List<string> blunt = [];
         foreach (Axis axis in axes)
         {
-            (double mine, double rust, int rows) = await MeasureOnceAsync(path, axis).ConfigureAwait(false);
+            (Measurement m, int rows) = await MeasureOnceAsync(path, axis).ConfigureAwait(false);
             if (rows != 0)
             {
                 return rows;
             }
 
-            double ratio = mine / rust;
-            int warmed = Warmed[axis.Name];
+            Interval ratio = m.Ratio;
             string columns;
             string verdict = string.Empty;
             if (!References.TryGetValue(axis.Name, out double reference))
             {
                 unreferenced.Add(string.Create(
-                    CultureInfo.InvariantCulture, $"        [\"{axis.Name}\"] = {ratio:F3},"));
+                    CultureInfo.InvariantCulture, $"        [\"{axis.Name}\"] = {ratio.Median:F3},"));
                 columns = "         --       --";
                 verdict = "   NO REF";
             }
@@ -419,26 +459,44 @@ internal static class RatioCheck
                 double ceiling = reference * Margin;
                 columns = string.Create(
                     CultureInfo.InvariantCulture, $" {reference,10:F3} {ceiling,8:F3}");
-                if (ratio > ceiling)
+
+                // THE LOWER BOUND DECIDES. A median over the ceiling with an interval straddling it
+                // is a coin toss, and failing on it is how this gate produced two false reds in four
+                // invocations. Failing only when the whole interval is over means a red is a claim
+                // the numbers support.
+                if (ratio.Low > ceiling)
                 {
                     verdict = "   OVER";
                     over++;
                 }
-                else if (ratio < reference * StaleBelow)
+                else if (ratio.High < reference * StaleBelow)
                 {
                     verdict = "   STALE";
                     stale.Add(string.Create(
                         CultureInfo.InvariantCulture,
-                        $"  {axis.Name}: {ratio:F3} against a {reference:F3} reference " +
-                        $"({(1 - (ratio / reference)) * 100:F0}% under) -- lower it."));
+                        $"  {axis.Name}: {ratio.Median:F3} {ratio} against a {reference:F3} reference " +
+                        $"({(1 - (ratio.Median / reference)) * 100:F0}% under) -- lower it."));
+                }
+                else if (ratio.Median > ceiling)
+                {
+                    // Over on the point estimate, not on the interval: reported so that a developer
+                    // who is looking at a real regression is not told everything is fine.
+                    verdict = "   noisy";
+                    string over_ = string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"{ratio.Median:F3} is over the {ceiling:F3} ceiling but {ratio} straddles it");
+                    blunt.Add(
+                        $"  {axis.Name}: {over_} -- indistinguishable from noise at " +
+                        $"{ratio.Samples} rounds. Re-run; if it stays over, it is real.");
                 }
             }
 
-            // The warm-up count is reported, not asserted: it is the number that explains an
-            // implausible ratio, and a plausible one is not evidence that it was high enough.
+            // n, k and mde are reported, not asserted. They are what explains an implausible ratio,
+            // and a plausible one is not evidence that any of them was good enough.
             Console.Out.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"  {axis.Name,-30} {mine,8:F1}us {rust,8:F1}us {ratio,8:F3}{columns} {warmed,8}{verdict}"));
+                $"  {axis.Name,-30} {m.Ours,8:F1}us {m.Theirs,8:F1}us {ratio.Median,8:F3}  {ratio}{columns} " +
+                $"{ratio.Samples,3} {m.Repeats,2} {ratio.MinimumDetectableEffect,6:P1}{verdict}"));
         }
 
         if (axes.Any(a => a.Path is not null))
@@ -454,6 +512,14 @@ internal static class RatioCheck
                 $"\n{unreferenced.Count} axis/axes have no reference. Add these to " +
                 "RatioCheck.References, having checked the machine is quiet:");
             unreferenced.ForEach(Console.Out.WriteLine);
+        }
+
+        if (blunt.Count > 0)
+        {
+            Console.Out.WriteLine(
+                $"\n{blunt.Count} axis/axes are over the ceiling on the median but not on the " +
+                "interval:");
+            blunt.ForEach(Console.Out.WriteLine);
         }
 
         if (stale.Count > 0)
@@ -481,18 +547,25 @@ internal static class RatioCheck
     /// command rather than an afternoon. It prints and gates nothing: a recalibration that could
     /// also pass its own gate would be a ratchet setting itself.
     /// </remarks>
-    private static async Task<int> RecalibrateAsync(string path, Axis[] axes, int passes)
+    private static async Task<int> RecalibrateAsync(string path, Axis[] axes, int passes, bool rebase)
     {
         Console.Out.WriteLine(
-            $"RECALIBRATE: {passes} passes over {axes.Length} axis/axes, max per axis. " +
+            $"RECALIBRATE: {passes} passes over {axes.Length} axis/axes, upper bound per axis. " +
             "Nothing is gated; paste the table below into RatioCheck.References.");
+        if (rebase)
+        {
+            Console.Out.WriteLine(
+                "  --rebase: references may RISE. Only for an estimator change, and the commit " +
+                "message has to say which one.");
+        }
 
         Dictionary<string, List<double>> ratios = [];
+        Dictionary<string, bool> grouped = [];
         for (int pass = 1; pass <= passes; pass++)
         {
             foreach (Axis axis in axes)
             {
-                (double mine, double rust, int rows) = await MeasureOnceAsync(path, axis).ConfigureAwait(false);
+                (Measurement m, int rows) = await MeasureOnceAsync(path, axis).ConfigureAwait(false);
                 if (rows != 0)
                 {
                     return rows;
@@ -504,7 +577,15 @@ internal static class RatioCheck
                     ratios[axis.Name] = seen;
                 }
 
-                seen.Add(mine / rust);
+                // THE MEDIAN, and the interval deliberately NOT folded in. Taking each pass's
+                // upper bound instead was tried and rejected in the same sitting: it stacked the
+                // within-pass uncertainty on top of the between-pass spread and then on top of the
+                // x1.15 margin, and twelve of thirteen references rose by 2 to 20 %. Uncertainty is
+                // applied ONCE, at the decision -- a red needs the whole interval over the ceiling --
+                // so applying it again here would buy the same protection twice and pay for it in a
+                // gate that no longer catches anything.
+                seen.Add(m.Ratio.Median);
+                grouped[axis.Name] = m.Repeats > 1;
             }
 
             Console.Out.WriteLine($"  pass {pass} of {passes} done.");
@@ -524,11 +605,21 @@ internal static class RatioCheck
             // a looser gate -- the one thing BENCH-AUDIT.md §8 forbids outright. If a measurement
             // above the reference is REAL, it is a regression and belongs in the OVER column, not
             // here.
-            bool loosens = known && max >= current;
+            // --rebase raises ONLY an axis that now groups calls into a round, because k > 1 IS
+            // the estimator change: k calls in a row measure a warm path where a single timed call
+            // measured a cache-cold one. An axis still timed one call at a time is measuring what it
+            // always did, so a higher number there is noise or a regression -- neither of which a
+            // rebase may absorb.
+            bool changedEstimator = rebase && grouped.GetValueOrDefault(axis.Name);
+            bool loosens = known && max >= current && !changedEstimator;
             held += loosens ? 1 : 0;
             double value = loosens ? current : max;
             string movement = !known
                 ? "new"
+                : changedEstimator && known && max >= current
+                    ? string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"REBASED UP from {current:F3} (k>1): {(max / current) - 1:+0.0%}")
                 : loosens
                     ? string.Create(
                         CultureInfo.InvariantCulture,
@@ -558,7 +649,7 @@ internal static class RatioCheck
     /// <returns>
     /// The two medians in microseconds, and an exit code that is 0 unless the readers disagreed.
     /// </returns>
-    private static async Task<(double Ours, double Theirs, int Exit)> MeasureOnceAsync(
+    private static async Task<(Measurement Result, int Exit)> MeasureOnceAsync(
         string path, Axis axis)
     {
         string file = axis.Path ?? path;
@@ -574,11 +665,10 @@ internal static class RatioCheck
             Console.Error.WriteLine(
                 $"The two readers disagree on the `{axis.Name}` axis: {mineRows} rows " +
                 $"versus {rustRows}. No ratio over it means anything.");
-            return (0, 0, 2);
+            return (default, 2);
         }
 
-        (double mine, double rust) = await MeasureAsync(file, axis).ConfigureAwait(false);
-        return (mine, rust, 0);
+        return (await MeasureAsync(file, axis).ConfigureAwait(false), 0);
     }
 
     /// <summary>
@@ -662,59 +752,120 @@ internal static class RatioCheck
     }
 
     /// <summary>
-    /// Times both sides of one axis, interleaved, and returns the median microseconds of each.
+    /// Times both sides of one axis, interleaved, until the ratio's interval is tight enough.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Which side goes first alternates by round. Without that, whichever runs first in every round
     /// pays the cache-cold cost every time and the other never does - a bias that would be stable
     /// across runs, which is worse than noise because it looks like a result.
+    /// </para>
+    /// <para>
+    /// THE RATIO IS PER ROUND, not median over median. The two sides of a round are measured
+    /// microseconds apart, so whatever slowed one slowed the other: the pairing is real, and it is
+    /// what makes a per-round ratio a sample rather than an arithmetic accident. The median of those
+    /// ratios is what the gate holds, and bootstrapping them is what gives it an interval.
+    /// </para>
+    /// <para>
+    /// ROUNDS ARE ADAPTIVE. A long axis reaches 5% half-width in the 21 minimum rounds and stops; a
+    /// short one keeps going until it gets there or spends its budget. The old fixed 51 gave the
+    /// long axes more than they needed and the short ones less.
+    /// </para>
     /// </remarks>
-    private static async Task<(double Ours, double Theirs)> MeasureAsync(string path, Axis axis)
+    private static async Task<Measurement> MeasureAsync(string path, Axis axis)
     {
         long deadline = Stopwatch.GetTimestamp() +
             (long)(WarmupBudget.TotalSeconds * Stopwatch.Frequency);
         int warmed = 0;
+        double lastOurs = 0;
+        double lastTheirs = 0;
         do
         {
-            await axis.Ours(path).ConfigureAwait(false);
-            axis.Theirs(path);
+            lastOurs = await TimeAsync(axis.Ours, path, 1).ConfigureAwait(false);
+            lastTheirs = Time(axis.Theirs, path, 1);
             warmed++;
         }
         while (Stopwatch.GetTimestamp() < deadline);
 
         Warmed[axis.Name] = warmed;
 
-        double[] mine = new double[Rounds];
-        double[] rust = new double[Rounds];
-        for (int round = 0; round < Rounds; round++)
+        // k from the warm-up's own timing, on the slower side: a round must clear the timer's noise
+        // floor, and it is the round that is timed, not either call.
+        int repeats = Repeats(Math.Max(lastOurs, lastTheirs));
+
+        List<double> ratios = [];
+        List<double> mine = [];
+        List<double> rust = [];
+        long stop = Stopwatch.GetTimestamp() + (long)(Budget * Stopwatch.Frequency);
+        Interval interval = default;
+        for (int round = 0; round < MaxRounds; round++)
         {
+            double ours;
+            double theirs;
             if (round % 2 == 0)
             {
-                mine[round] = await TimeAsync(axis.Ours, path).ConfigureAwait(false);
-                rust[round] = Time(axis.Theirs, path);
+                ours = await TimeAsync(axis.Ours, path, repeats).ConfigureAwait(false);
+                theirs = Time(axis.Theirs, path, repeats);
             }
             else
             {
-                rust[round] = Time(axis.Theirs, path);
-                mine[round] = await TimeAsync(axis.Ours, path).ConfigureAwait(false);
+                theirs = Time(axis.Theirs, path, repeats);
+                ours = await TimeAsync(axis.Ours, path, repeats).ConfigureAwait(false);
+            }
+
+            mine.Add(ours);
+            rust.Add(theirs);
+            ratios.Add(theirs == 0 ? 0 : ours / theirs);
+
+            if (round + 1 >= MinRounds)
+            {
+                interval = Statistics.Bootstrap(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(ratios));
+                if (interval.MinimumDetectableEffect <= Precision ||
+                    Stopwatch.GetTimestamp() >= stop)
+                {
+                    break;
+                }
             }
         }
 
-        return (Median(mine), Median(rust));
+        return new Measurement(Median([.. mine]), Median([.. rust]), interval, repeats);
     }
 
-    private static async Task<double> TimeAsync(Func<string, Task<long>> work, string path)
+    /// <summary>One axis measured: both sides, the ratio's interval, and how it was timed.</summary>
+    /// <param name="Ours">Median microseconds per round on our side.</param>
+    /// <param name="Theirs">Median microseconds per round on Rust's.</param>
+    /// <param name="Ratio">The median per-round ratio and its 95% interval.</param>
+    /// <param name="Repeats">Calls per timed round.</param>
+    private readonly record struct Measurement(
+        double Ours, double Theirs, Interval Ratio, int Repeats);
+
+    /// <summary>Calls per timed round, so that one round clears the timer's noise floor.</summary>
+    private static int Repeats(double microseconds) =>
+        microseconds <= 0 ? 1 : Math.Max(1, (int)Math.Ceiling(MinRoundMicroseconds / microseconds));
+
+    /// <summary>Microseconds per call, timing <paramref name="repeats"/> of them as one round.</summary>
+    private static async Task<double> TimeAsync(
+        Func<string, Task<long>> work, string path, int repeats)
     {
         long start = Stopwatch.GetTimestamp();
-        await work(path).ConfigureAwait(false);
-        return Stopwatch.GetElapsedTime(start).TotalMicroseconds;
+        for (int i = 0; i < repeats; i++)
+        {
+            await work(path).ConfigureAwait(false);
+        }
+
+        return Stopwatch.GetElapsedTime(start).TotalMicroseconds / repeats;
     }
 
-    private static double Time(Func<string, long> work, string path)
+    /// <summary>Microseconds per call, timing <paramref name="repeats"/> of them as one round.</summary>
+    private static double Time(Func<string, long> work, string path, int repeats)
     {
         long start = Stopwatch.GetTimestamp();
-        work(path);
-        return Stopwatch.GetElapsedTime(start).TotalMicroseconds;
+        for (int i = 0; i < repeats; i++)
+        {
+            work(path);
+        }
+
+        return Stopwatch.GetElapsedTime(start).TotalMicroseconds / repeats;
     }
 
     private static double Median(double[] samples)

@@ -89,6 +89,9 @@ in [BASELINE.md](BASELINE.md) and in the commits.
   count, or one whose files do not match their recorded sha256 — fifty ratchets against bytes that
   live outside the repository need to know *which* bytes.
 
+  `--quick` (23 s instead of 70) shortens the warm-up and the per-file budget: a direction, not a
+  gate. `--recalibrate N` prints a replacement reference table, as it does for `--ratio-check`.
+
   **A bare family name narrows the report, and does not currently give the gate's ratio**:
   `fsst` reads 1.27 in the full run and 1.63–1.66 on its own, reproducibly, on the same bytes — over
   its ceiling on a healthy tree. Use the narrow form to see a direction; confirm with the full run
@@ -96,6 +99,19 @@ in [BASELINE.md](BASELINE.md) and in the commits.
 
 **A ceiling only ever comes down, and only behind a real improvement.** Raising one to make a run
 pass is the one thing this directory forbids outright.
+
+**Both gates decide on an interval, not a point.** Each round times both sides microseconds apart,
+so the rounds are paired and a per-round ratio is a sample; the median of those ratios is what is
+held, with a 95% bootstrap interval around it. A ratio is `OVER` only when the *whole* interval is
+above the ceiling, `STALE` only when all of it is under 0.85 × reference, and `noisy` when the median
+is over but the interval straddles — which used to be reported as a failure and was a coin toss.
+Rounds keep coming until half the interval is within 5% of the median, and a call shorter than the
+timer's noise floor is repeated inside one timed round (the `k` column). The `mde` column is the
+smallest change that axis can currently see.
+
+**An interval is within one run, and the residual is between them** — see BENCH-AUDIT.md B2.5. A
+ratio can read 1.30 [1.28; 1.31] in eight runs and 1.71 [1.65; 1.77] in the ninth. Narrow does not
+mean reproducible, so the replay rule below still stands.
 
 **When the code outran a ceiling, `--ratio-check` says `STALE`** — more than 15 % under its reference
 — because a ratchet that is never lowered defends nothing. `read and write back` sat 43 % under its
@@ -105,10 +121,15 @@ own for five commits, which left room for a 75 % regression to pass. Lower them 
 dotnet run -c Release PROJ -- --ratio-check --recalibrate 3     # ~90 s, prints a table to paste
 ```
 
-It measures N passes, takes the max per axis, and prints the `RatioCheck.References` table ready to
-paste. An axis that measures *above* its reference is printed back **unchanged** and flagged `HELD`:
-the command lowers ratchets and never raises one. If such an axis is a real regression, plain
-`--ratio-check` says `OVER`, and the answer is the code, not the number.
+It measures N passes, takes the max of the per-pass medians, and prints the `RatioCheck.References`
+table ready to paste. An axis that measures *above* its reference is printed back **unchanged** and
+flagged `HELD`: the command lowers ratchets and never raises one. If such an axis is a real
+regression, plain `--ratio-check` says `OVER`, and the answer is the code, not the number.
+
+`--rebase` is the one exception and it is deliberately awkward: it lets a reference rise, and only on
+an axis whose `k > 1`, because grouping calls into a round changes what is being measured — k calls
+in a row are a *warm* path where a single timed call was cache-cold. Use it when the harness changed,
+never when the number did, and say which change in the commit message.
 
 **A red gate is not believed on the first run, yet.** Measured run-to-run spread is +12 to +22 % on
 four of the nine ratio axes (BENCH-AUDIT.md annexe A.1), and two invocations in four were red with

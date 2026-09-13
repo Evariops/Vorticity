@@ -37,6 +37,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -74,6 +75,64 @@ internal static class ThroughputCheck
 
     /// <summary>The manifest shapes this build knows how to read.</summary>
     private const string ManifestFormat = "vorticity-throughput-corpus/1";
+
+    /// <summary>
+    /// Prints a replacement <see cref="References"/> table from several measured passes.
+    /// </summary>
+    /// <remarks>
+    /// The same rules as `RatioCheck.RecalibrateAsync`, and for the same reasons: the MEDIAN of each
+    /// pass rather than its interval's top, because uncertainty is applied once at the decision and
+    /// folding it in here too would buy the same protection twice; the max over passes, because a
+    /// ceiling set from an average goes red on half the runs that produced it; and a value that
+    /// would RISE is printed back unchanged unless `--rebase` and the encoding now groups scans into
+    /// a round, k > 1 being the estimator change itself.
+    /// </remarks>
+    private static int PrintRecalibration(
+        Dictionary<string, List<double>> measured,
+        Dictionary<string, bool> grouped,
+        int passes,
+        bool rebase)
+    {
+        Console.Out.WriteLine(
+            $"\nRECALIBRATE: {passes} passes, max of the per-pass medians. Paste into " +
+            "ThroughputCheck.References.");
+        int held = 0;
+        int rebased = 0;
+        foreach ((string name, double current) in References)
+        {
+            if (!measured.TryGetValue(name, out List<double>? seen) || seen.Count == 0)
+            {
+                Console.Out.WriteLine($"        (\"{name}\", {current:F2}),   // not measured this run");
+                continue;
+            }
+
+            double max = seen.Max();
+            double min = seen.Min();
+            bool changedEstimator = rebase && grouped.GetValueOrDefault(name);
+            bool loosens = max >= current && !changedEstimator;
+            held += loosens ? 1 : 0;
+            double value = loosens ? current : max;
+            rebased += !loosens && max > current ? 1 : 0;
+            string note = loosens
+                ? string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"HELD at {current:F2}: {passes} passes peaked at {max:F2}, no loosening")
+                : max > current
+                    ? string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"REBASED UP from {current:F2} (k>1): {(max / current) - 1:+0.0%}")
+                    : string.Create(
+                        CultureInfo.InvariantCulture, $"was {current:F2}, {(max / current) - 1:+0.0%;-0.0%;0.0%}");
+            Console.Out.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"        (\"{name}\", {value:F2}),   // {passes} passes, spread {min:F2}-{max:F2}; {note}"));
+        }
+
+        Console.Out.WriteLine(
+            $"\n{held} held (measured above their reference, printed back unchanged), " +
+            $"{rebased} rebased for a changed estimator.");
+        return 0;
+    }
 
     /// <summary>What produced a set of inputs, as `manifest.json` records it.</summary>
     internal sealed record Manifest(
@@ -193,10 +252,47 @@ internal static class ThroughputCheck
             : commit[..7];
 
     /// <summary>Wall-clock warm-up per file, for the same reason RatioCheck uses one.</summary>
-    private static readonly TimeSpan WarmupBudget = TimeSpan.FromSeconds(1);
+    private static TimeSpan WarmupBudget => TimeSpan.FromSeconds(Quick ? 0.3 : 1.0);
 
-    /// <summary>Timed rounds per file. Odd, so the median is an observation.</summary>
-    private const int Rounds = 7;
+    /// <summary>
+    /// Rounds measured before the interval is consulted.
+    /// </summary>
+    /// <remarks>
+    /// Seven was a fixed count, and B2 is what a fixed count costs: at a million rows a scan is
+    /// milliseconds, but a ratio out of seven paired rounds has an interval wider than the x1.15
+    /// margin on the cheap encodings, which is how this gate failed two invocations in four with
+    /// nothing changed. Rounds are adaptive now -- this is the floor, and <see cref="Precision"/>
+    /// decides when to stop.
+    /// </remarks>
+    private const int MinRounds = 9;
+
+    /// <summary>The ceiling on rounds, when the interval never gets tight enough.</summary>
+    private const int MaxRounds = 151;
+
+    /// <summary>Rounds stop when half the interval width is within this fraction of the median.</summary>
+    private const double Precision = 0.05;
+
+    /// <summary>Wall clock one file may spend on rounds before it stops asking for more.</summary>
+    /// <remarks>
+    /// Fifty files at 54 s total means about a second each today. Two seconds is the most a file may
+    /// take to reach its precision; `--quick` cuts it, and the encodings that need it are the cheap
+    /// ones whose rounds are sub-millisecond anyway.
+    /// </remarks>
+    private static double Budget => Quick ? 0.4 : 2.0;
+
+    /// <summary>
+    /// A round times at least this long, by repeating the scan when one is shorter.
+    /// </summary>
+    /// <remarks>
+    /// Twenty files of the fifty scan in under 200 us at a million rows, and for half of those the
+    /// ~40 us open is most of the measurement -- the 1M axis was built to escape the fixed cost and
+    /// falls back into it from the other end on the cheap encodings (BENCH-AUDIT.md §4.4). k scans
+    /// per timed round is the same work with the timer's jitter divided by k.
+    /// </remarks>
+    private const double MinRoundMicroseconds = 2_000;
+
+    /// <summary>Set by <c>--quick</c>: shorter warm-up and budget, for a direction rather than a gate.</summary>
+    internal static bool Quick { get; set; }
 
     /// <summary>
     /// The margin over the reference ratio, the same +15% RatioCheck uses and for the same reason:
@@ -229,56 +325,56 @@ internal static class ThroughputCheck
     /// </remarks>
     private static readonly (string Encoding, double Reference)[] References =
     [
-        ("alp", 0.91),   // 3 runs, spread 0.87-0.91
-        ("alp_no_patches", 0.93),   // held: 3 runs peaked at 0.94, inside the x1.15 ceiling -- a ratchet does not loosen on noise
-        ("alp_patched_no_chunk_offsets", 0.91),   // 3 runs, spread 0.85-0.91
-        ("alprd", 1.15),   // 3 runs, spread 1.10-1.15
-        ("bool", 0.88),   // 3 runs, spread 0.83-0.88
-        ("bool_bit_offset3", 0.95),   // 3 runs, spread 0.88-0.95
-        ("bool_bit_offset7", 0.91),   // 3 runs, spread 0.90-0.91
-        ("bool_bit_offset_straddle", 0.89),   // 3 runs, spread 0.86-0.89
-        ("bytebool", 1.09),   // 3 runs, spread 1.01-1.09
-        ("chunked", 0.35),   // 3 runs, spread 0.30-0.35
-        ("chunked_empty_chunks", 0.33),   // 3 runs, spread 0.31-0.33
-        ("chunked_one_chunk", 0.35),   // 3 runs, spread 0.34-0.35
-        ("constant", 1.02),   // 3 runs, spread 0.91-1.02
-        ("datetimeparts", 1.22),   // 2 runs, spread 1.22-1.22
-        ("decimal", 0.35),   // 3 runs, spread 0.33-0.35
-        ("decimal_byte_parts", 0.34),   // 3 runs, spread 0.31-0.34
-        ("dict", 1.04),   // 2 runs, spread 0.95-1.04
-        ("dict_nullable_codes", 0.85),   // held: 3 runs peaked at 0.89, inside the x1.15 ceiling -- a ratchet does not loosen on noise
-        ("dict_nullable_values_nonnull_codes", 1.26),   // 3 runs, spread 1.23-1.26
-        ("dict_u64_codes", 1.11),   // 3 runs, spread 1.05-1.11
-        ("dict_u8_codes", 0.96),   // 3 runs, spread 0.94-0.96
-        ("ext", 0.35),   // 3 runs, spread 0.34-0.35
-        ("fastlanes_bitpacked", 1.25),   // 3 runs, spread 1.20-1.25
-        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.21),   // held: 3 runs peaked at 1.22, inside the x1.15 ceiling -- a ratchet does not loosen on noise
-        ("fastlanes_delta", 1.06),   // 3 runs, spread 1.02-1.06
-        ("fastlanes_for", 0.99),   // 3 runs, spread 0.89-0.99
-        ("fastlanes_rle", 0.90),   // 3 runs, spread 0.86-0.90
-        ("fixed_size_list", 0.25),   // 3 runs, spread 0.24-0.25
-        ("fsst", 1.31),   // 3 runs, spread 1.27-1.31
-        ("list", 0.58),   // 3 runs, spread 0.51-0.58
-        ("listview", 0.67),   // 3 runs, spread 0.58-0.67
-        ("map", 0.16),   // 2 runs, spread 0.15-0.16
-        ("masked", 0.37),   // 3 runs, spread 0.35-0.37
-        ("masked_all_invalid", 0.38),   // 3 runs, spread 0.34-0.38
-        ("masked_all_valid", 0.40),   // 3 runs, spread 0.37-0.40
-        ("null", 0.94),   // 3 runs, spread 0.81-0.94
-        ("onpair", 1.20),   // 3 runs, spread 1.15-1.20
-        ("parquet_variant", 5.95),   // 3 runs, spread 5.18-5.95
-        ("pco", 0.86),   // 3 runs, spread 0.83-0.86
-        ("primitive", 0.33),   // 3 runs, spread 0.32-0.33
-        ("runend", 1.16),   // 3 runs, spread 1.12-1.16
-        ("sequence", 0.95),   // 3 runs, spread 0.87-0.95
-        ("sparse", 1.02),   // 3 runs, spread 0.91-1.02
-        ("struct", 0.07),   // 3 runs, spread 0.07-0.07
-        ("varbin", 0.05),   // 3 runs, spread 0.04-0.05
-        ("varbinview", 0.08),   // 2 runs, spread 0.07-0.08
-        ("variant", 4.89),   // held: 3 runs peaked at 5.55, inside the x1.15 ceiling -- a ratchet does not loosen on noise
-        ("zigzag", 0.86),   // 3 runs, spread 0.82-0.86
-        ("zstd", 1.10),   // 3 runs, spread 1.04-1.10
-        ("zstd_buffers", 0.16),   // held: 3 runs peaked at 0.17, inside the x1.15 ceiling -- a ratchet does not loosen on noise
+        ("alp", 0.90),   // 3 passes, spread 0.89-0.90; was 0.91, -0.8%
+        ("alp_no_patches", 0.85),   // 3 passes, spread 0.82-0.85; was 0.93, -9.0%
+        ("alp_patched_no_chunk_offsets", 0.87),   // 3 passes, spread 0.83-0.87; was 0.91, -4.0%
+        ("alprd", 1.26),   // 3 passes, spread 1.22-1.26; REBASED UP from 1.15 (k>1): +9.2%
+        ("bool", 0.82),   // 3 passes, spread 0.81-0.82; was 0.88, -6.6%
+        ("bool_bit_offset3", 0.84),   // 3 passes, spread 0.79-0.84; was 0.95, -12.1%
+        ("bool_bit_offset7", 0.84),   // 3 passes, spread 0.80-0.84; was 0.91, -8.2%
+        ("bool_bit_offset_straddle", 0.83),   // 3 passes, spread 0.82-0.83; was 0.89, -6.4%
+        ("bytebool", 1.04),   // 3 passes, spread 1.00-1.04; was 1.09, -4.9%
+        ("chunked", 0.29),   // 3 passes, spread 0.24-0.29; was 0.35, -17.4%
+        ("chunked_empty_chunks", 0.27),   // 3 passes, spread 0.24-0.27; was 0.33, -17.3%
+        ("chunked_one_chunk", 0.30),   // 3 passes, spread 0.23-0.30; was 0.35, -14.2%
+        ("constant", 1.00),   // 3 passes, spread 0.95-1.00; was 1.02, -1.5%
+        ("datetimeparts", 1.21),   // 3 passes, spread 1.18-1.21; was 1.22, -0.6%
+        ("decimal", 0.27),   // 3 passes, spread 0.21-0.27; was 0.35, -21.8%
+        ("decimal_byte_parts", 0.28),   // 3 passes, spread 0.23-0.28; was 0.34, -17.4%
+        ("dict", 0.97),   // 3 passes, spread 0.95-0.97; was 1.04, -7.0%
+        ("dict_nullable_codes", 0.86),   // 3 passes, spread 0.84-0.86; REBASED UP from 0.85 (k>1): +1.1%
+        ("dict_nullable_values_nonnull_codes", 1.31),   // 3 passes, spread 1.26-1.31; REBASED UP from 1.26 (k>1): +4.2%
+        ("dict_u64_codes", 1.11),   // 3 passes, spread 1.08-1.11; was 1.11, -0.4%
+        ("dict_u8_codes", 0.94),   // 3 passes, spread 0.93-0.94; was 0.96, -2.2%
+        ("ext", 0.29),   // 3 passes, spread 0.25-0.29; was 0.35, -18.6%
+        ("fastlanes_bitpacked", 1.55),   // 3 passes, spread 1.54-1.55; REBASED UP from 1.25 (k>1): +23.8%
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.48),   // 3 passes, spread 1.44-1.48; REBASED UP from 1.21 (k>1): +22.0%
+        ("fastlanes_delta", 1.02),   // 3 passes, spread 0.99-1.02; was 1.06, -4.0%
+        ("fastlanes_for", 0.99),   // 3 passes, spread 0.97-0.99; REBASED UP from 0.99 (k>1): +0.1%
+        ("fastlanes_rle", 0.88),   // 3 passes, spread 0.84-0.88; was 0.90, -2.4%
+        ("fixed_size_list", 0.21),   // 3 passes, spread 0.18-0.21; was 0.25, -16.6%
+        ("fsst", 1.31),   // 3 passes, spread 1.33-1.40; HELD at 1.31: 3 passes peaked at 1.40, no loosening
+        ("list", 0.51),   // 3 passes, spread 0.47-0.51; was 0.58, -11.5%
+        ("listview", 0.67),   // 3 passes, spread 0.68-0.69; HELD at 0.67: 3 passes peaked at 0.69, no loosening
+        ("map", 0.15),   // 3 passes, spread 0.15-0.15; was 0.16, -6.5%
+        ("masked", 0.33),   // 3 passes, spread 0.31-0.33; was 0.37, -10.3%
+        ("masked_all_invalid", 0.34),   // 3 passes, spread 0.33-0.34; was 0.38, -11.4%
+        ("masked_all_valid", 0.34),   // 3 passes, spread 0.33-0.34; was 0.40, -16.2%
+        ("null", 0.92),   // 3 passes, spread 0.90-0.92; was 0.94, -1.9%
+        ("onpair", 1.20),   // 3 passes, spread 1.16-1.28; HELD at 1.20: 3 passes peaked at 1.28, no loosening
+        ("parquet_variant", 5.95),   // 3 passes, spread 6.22-6.37; HELD at 5.95: 3 passes peaked at 6.37, no loosening
+        ("pco", 0.85),   // 3 passes, spread 0.84-0.85; was 0.86, -0.7%
+        ("primitive", 0.28),   // 3 passes, spread 0.24-0.28; was 0.33, -16.0%
+        ("runend", 1.22),   // 3 passes, spread 1.19-1.22; REBASED UP from 1.16 (k>1): +5.4%
+        ("sequence", 0.97),   // 3 passes, spread 0.93-0.97; REBASED UP from 0.95 (k>1): +2.2%
+        ("sparse", 0.84),   // 3 passes, spread 0.83-0.84; was 1.02, -17.7%
+        ("struct", 0.07),   // 3 passes, spread 0.07-0.07; HELD at 0.07: 3 passes peaked at 0.07, no loosening
+        ("varbin", 0.04),   // 3 passes, spread 0.04-0.04; was 0.05, -10.4%
+        ("varbinview", 0.08),   // 3 passes, spread 0.07-0.08; was 0.08, -4.8%
+        ("variant", 6.50),   // 3 passes, spread 6.25-6.50; REBASED UP from 4.89 (k>1): +32.8%
+        ("zigzag", 0.82),   // 3 passes, spread 0.78-0.82; was 0.86, -4.8%
+        ("zstd", 1.06),   // 3 passes, spread 1.04-1.06; was 1.10, -3.7%
+        ("zstd_buffers", 0.15),   // 3 passes, spread 0.14-0.15; was 0.16, -8.6%
     ];
 
     /// <summary>
@@ -294,7 +390,21 @@ internal static class ThroughputCheck
     /// <summary>Measures every generated file and reports ns/value for both readers.</summary>
     /// <param name="check">Whether to hold each ratio to its ceiling and exit non-zero when over.</param>
     /// <returns>0 on success, 1 when an encoding is over its ceiling, 2 when the inputs are absent.</returns>
-    internal static async Task<int> RunAsync(bool check, string[] only)
+    internal static async Task<int> RunAsync(bool check, string[] only) =>
+        await RunAsync(check, only, 0, false).ConfigureAwait(false);
+
+    /// <summary>Measures every generated file and reports ns/value for both readers.</summary>
+    /// <param name="check">Whether to hold each ratio to its ceiling and exit non-zero when over.</param>
+    /// <param name="only">Family name substrings; empty measures everything.</param>
+    /// <param name="recalibrate">
+    /// When positive, measure that many passes and print a replacement <see cref="References"/>
+    /// table instead of gating -- the same command `RatioCheck` has, for the same reason: lowering
+    /// fifty ratchets by hand is how they stop being lowered.
+    /// </param>
+    /// <param name="rebase">
+    /// Let a reference RISE, and only where the estimator changed (k > 1). See `RatioCheck`.
+    /// </param>
+    internal static async Task<int> RunAsync(bool check, string[] only, int recalibrate, bool rebase)
     {
         string? configured = Environment.GetEnvironmentVariable(Variable);
         string root = string.IsNullOrEmpty(configured) ? DefaultRoot : configured;
@@ -366,7 +476,7 @@ internal static class ThroughputCheck
         }
 
         Console.Out.WriteLine(
-            $"THROUGHPUT: median of {Rounds} interleaved rounds after a " +
+            $"THROUGHPUT: median per-round ratio with a 95% bootstrap interval, {MinRounds}+ rounds after a " +
             $"{WarmupBudget.TotalSeconds.ToString("F0", CultureInfo.InvariantCulture)}s warm-up per file, " +
             $"from {root}");
         Console.Out.WriteLine(manifest is null
@@ -382,13 +492,23 @@ internal static class ThroughputCheck
 
         Console.Out.WriteLine(
             rust
-                ? "  encoding                             rows batches       ours       rust   ns/value   rust ns/v   ratio" +
-                  (check ? "  reference  ceiling" : string.Empty)
+                ? "  encoding                             rows      ours      rust  ns/value   rust ns/v  ratio  [   95% interval]   n   k     mde" +
+                  (check ? " reference ceiling" : string.Empty)
                 : "  encoding                             rows batches       ours   ns/value   (no vxbench: absolutes only)");
 
         List<string> failures = [];
         List<string> stale = [];
+        List<string> blunt = [];
+        Dictionary<string, List<double>> measured = [];
+        Dictionary<string, bool> grouped = [];
         List<string> unreferenced = [];
+        for (int pass = 0; pass < Math.Max(1, recalibrate); pass++)
+        {
+        if (recalibrate > 0)
+        {
+            Console.Out.WriteLine($"  pass {pass + 1} of {recalibrate}...");
+        }
+
         foreach (string file in files)
         {
             string name = Path.GetFileNameWithoutExtension(file);
@@ -411,13 +531,28 @@ internal static class ThroughputCheck
             }
 
             long batches = await CountBatches(file).ConfigureAwait(false);
-            (double ours, double theirs) = await MeasureAsync(file, rust).ConfigureAwait(false);
+            Measurement m = await MeasureAsync(file, rust).ConfigureAwait(false);
+            if (recalibrate > 0)
+            {
+                if (!measured.TryGetValue(name, out List<double>? seen))
+                {
+                    seen = [];
+                    measured[name] = seen;
+                }
+
+                seen.Add(m.Ratio.Median);
+                grouped[name] = m.Repeats > 1;
+                continue;
+            }
+
+            double ours = m.Ours;
+            double theirs = m.Theirs;
             double nsPerValue = ours * 1000.0 / rows;
 
             if (rust && theirs > 0)
             {
                 double rustNs = theirs * 1000.0 / rows;
-                double ratio = ours / theirs;
+                Interval ratio = m.Ratio;
                 string suffix = string.Empty;
                 if (check)
                 {
@@ -426,35 +561,47 @@ internal static class ThroughputCheck
                     {
                         unreferenced.Add(string.Create(
                             CultureInfo.InvariantCulture,
-                            $"        (\"{name}\", {ratio:F2}),"));
-                        suffix = "         --       --   NO REF";
+                            $"        (\"{name}\", {ratio.Median:F2}),"));
+                        suffix = "        --      --   NO REF";
                     }
                     else
                     {
                         double ceiling = reference.Value * Margin;
                         suffix = string.Create(
                             CultureInfo.InvariantCulture,
-                            $" {reference.Value,10:F2} {ceiling,8:F2}");
-                        if (ratio > ceiling)
+                            $" {reference.Value,9:F2} {ceiling,7:F2}");
+
+                        // THE LOWER BOUND DECIDES, for B2's reason: a median over the ceiling with
+                        // an interval straddling it is a coin toss, and failing on it is what made
+                        // two of four invocations red with nothing changed.
+                        if (ratio.Low > ceiling)
                         {
                             suffix += "   OVER";
                             failures.Add(string.Create(
                                 CultureInfo.InvariantCulture,
-                                $"  {name}: {ratio:F2} over the {ceiling:F2} ceiling ({reference.Value:F2} x {Margin:F2})."));
+                                $"  {name}: {ratio.Median:F2} {ratio} entirely over the {ceiling:F2} ceiling."));
                         }
-                        else if (ratio < reference.Value * StaleBelow)
+                        else if (ratio.High < reference.Value * StaleBelow)
                         {
                             suffix += "   STALE";
                             stale.Add(string.Create(
                                 CultureInfo.InvariantCulture,
-                                $"  {name}: {ratio:F2} against a {reference.Value:F2} reference -- lower it."));
+                                $"  {name}: {ratio.Median:F2} against a {reference.Value:F2} reference -- lower it."));
+                        }
+                        else if (ratio.Median > ceiling)
+                        {
+                            suffix += "   noisy";
+                            blunt.Add(string.Create(
+                                CultureInfo.InvariantCulture,
+                                $"  {name}: {ratio.Median:F2} is over {ceiling:F2} but {ratio} straddles it."));
                         }
                     }
                 }
 
                 Console.Out.WriteLine(string.Create(
                     CultureInfo.InvariantCulture,
-                    $"  {name,-32} {rows,10} {batches,7} {ours,9:F0}us {theirs,9:F0}us {nsPerValue,10:F2} {rustNs,11:F2} {ratio,7:F2}{suffix}"));
+                    $"  {name,-32} {rows,10} {ours,9:F0}us {theirs,9:F0}us {nsPerValue,9:F2} {rustNs,10:F2} " +
+                    $"{ratio.Median,6:F2} {ratio} {ratio.Samples,3} {m.Repeats,3} {ratio.MinimumDetectableEffect,6:P1}{suffix}"));
             }
             else
             {
@@ -462,6 +609,12 @@ internal static class ThroughputCheck
                     CultureInfo.InvariantCulture,
                     $"  {name,-32} {rows,10} {batches,7} {ours,9:F0}us {nsPerValue,10:F2}"));
             }
+        }
+        }
+
+        if (recalibrate > 0)
+        {
+            return PrintRecalibration(measured, grouped, recalibrate, rebase);
         }
 
         if (!rust)
@@ -480,6 +633,14 @@ internal static class ThroughputCheck
             {
                 Console.Out.WriteLine(line);
             }
+        }
+
+        if (blunt.Count > 0)
+        {
+            Console.Out.WriteLine(
+                $"\n{blunt.Count} encoding(s) are over the ceiling on the median but not on the " +
+                "interval -- re-run; if one stays over, it is real:");
+            blunt.ForEach(Console.Out.WriteLine);
         }
 
         foreach (string line in stale)
@@ -520,53 +681,100 @@ internal static class ThroughputCheck
         return null;
     }
 
-    private static async Task<(double Ours, double Theirs)> MeasureAsync(string path, bool rust)
+    /// <summary>Times both readers on one file, interleaved, until the ratio's interval is tight.</summary>
+    /// <remarks>
+    /// The same three changes as `RatioCheck`, for the same reason (BENCH-AUDIT.md B2): the ratio is
+    /// taken PER ROUND because the rounds are paired, the rounds keep coming until the bootstrapped
+    /// interval is tight enough or the budget is spent, and a scan shorter than
+    /// <see cref="MinRoundMicroseconds"/> is repeated inside one timed round.
+    /// </remarks>
+    private static async Task<Measurement> MeasureAsync(string path, bool rust)
     {
         long deadline = Stopwatch.GetTimestamp() +
             (long)(WarmupBudget.TotalSeconds * Stopwatch.Frequency);
+        double lastOurs = 0;
+        double lastTheirs = 0;
         do
         {
-            await ScanAll(path).ConfigureAwait(false);
-            if (rust)
-            {
-                RustReader.ScanCanonical(path);
-            }
+            lastOurs = await TimeAsync(path, 1).ConfigureAwait(false);
+            lastTheirs = rust ? Time(path, 1) : 0;
         }
         while (Stopwatch.GetTimestamp() < deadline);
 
-        double[] mine = new double[Rounds];
-        double[] theirs = new double[Rounds];
-        for (int round = 0; round < Rounds; round++)
+        int repeats = Repeats(Math.Max(lastOurs, lastTheirs));
+
+        List<double> ratios = [];
+        List<double> mine = [];
+        List<double> theirs = [];
+        long stop = Stopwatch.GetTimestamp() + (long)(Budget * Stopwatch.Frequency);
+        Interval interval = default;
+        for (int round = 0; round < MaxRounds; round++)
         {
+            double ours;
+            double rustTime;
+
             // Alternating, for RatioCheck's reason: a fixed order gives one side the cache-cold
             // cost every round, which is a stable bias and therefore worse than noise.
             if (round % 2 == 0)
             {
-                mine[round] = await TimeAsync(path).ConfigureAwait(false);
-                theirs[round] = rust ? Time(path) : 0;
+                ours = await TimeAsync(path, repeats).ConfigureAwait(false);
+                rustTime = rust ? Time(path, repeats) : 0;
             }
             else
             {
-                theirs[round] = rust ? Time(path) : 0;
-                mine[round] = await TimeAsync(path).ConfigureAwait(false);
+                rustTime = rust ? Time(path, repeats) : 0;
+                ours = await TimeAsync(path, repeats).ConfigureAwait(false);
+            }
+
+            mine.Add(ours);
+            theirs.Add(rustTime);
+            ratios.Add(rustTime == 0 ? 0 : ours / rustTime);
+
+            if (round + 1 >= MinRounds)
+            {
+                interval = Statistics.Bootstrap(
+                    System.Runtime.InteropServices.CollectionsMarshal.AsSpan(ratios));
+                if (!rust || interval.MinimumDetectableEffect <= Precision ||
+                    Stopwatch.GetTimestamp() >= stop)
+                {
+                    break;
+                }
             }
         }
 
-        return (Median(mine), Median(theirs));
+        return new Measurement(Median([.. mine]), Median([.. theirs]), interval, repeats);
     }
 
-    private static async Task<double> TimeAsync(string path)
+    /// <summary>One file measured: both readers, the ratio's interval, and how it was timed.</summary>
+    private readonly record struct Measurement(
+        double Ours, double Theirs, Interval Ratio, int Repeats);
+
+    /// <summary>Scans per timed round, so that one round clears the timer's noise floor.</summary>
+    private static int Repeats(double microseconds) =>
+        microseconds <= 0 ? 1 : Math.Max(1, (int)Math.Ceiling(MinRoundMicroseconds / microseconds));
+
+    /// <summary>Microseconds per scan, timing <paramref name="repeats"/> of them as one round.</summary>
+    private static async Task<double> TimeAsync(string path, int repeats)
     {
         long start = Stopwatch.GetTimestamp();
-        await ScanAll(path).ConfigureAwait(false);
-        return Stopwatch.GetElapsedTime(start).TotalMicroseconds;
+        for (int i = 0; i < repeats; i++)
+        {
+            await ScanAll(path).ConfigureAwait(false);
+        }
+
+        return Stopwatch.GetElapsedTime(start).TotalMicroseconds / repeats;
     }
 
-    private static double Time(string path)
+    /// <summary>Microseconds per scan, timing <paramref name="repeats"/> of them as one round.</summary>
+    private static double Time(string path, int repeats)
     {
         long start = Stopwatch.GetTimestamp();
-        RustReader.ScanCanonical(path);
-        return Stopwatch.GetElapsedTime(start).TotalMicroseconds;
+        for (int i = 0; i < repeats; i++)
+        {
+            RustReader.ScanCanonical(path);
+        }
+
+        return Stopwatch.GetElapsedTime(start).TotalMicroseconds / repeats;
     }
 
     private static double Median(double[] values)
