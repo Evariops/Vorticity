@@ -97,7 +97,7 @@ internal static class ThroughputCheck
         ("decimal_byte_parts", 0.39),   // 2 runs, spread 0.31-0.39
         ("dict", 1.04),   // 2 runs, spread 0.95-1.04
         ("dict_nullable_codes", 0.85),   // 2 runs, spread 0.81-0.85
-        ("dict_nullable_values_nonnull_codes", 1.77),   // 2 runs, spread 1.76-1.77
+        ("dict_nullable_values_nonnull_codes", 1.40),   // dictionary validity expanded to a byte; spread 1.32-1.40
         ("dict_u64_codes", 1.18),   // 2 runs, spread 1.11-1.18
         ("dict_u8_codes", 0.99),   // 2 runs, spread 0.95-0.99
         ("ext", 0.45),   // 2 runs, spread 0.34-0.45

@@ -33,6 +33,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
@@ -238,6 +239,71 @@ internal static class RowKernels
         };
     }
 
+    /// <summary>
+    /// The nullable-values gather with the dictionary's validity already one byte per entry.
+    /// </summary>
+    /// <remarks>
+    /// Every access is provable before the loop: <paramref name="codes"/> and
+    /// <paramref name="target"/> are both exactly the row count, a code past
+    /// <paramref name="limit"/> returns before it indexes anything, and
+    /// <paramref name="flags"/> has one entry per value -- which is what
+    /// <paramref name="limit"/> counts.
+    /// </remarks>
+    private static int MaskedExpanded<TCode, TValue>(
+        ReadOnlySpan<TCode> codes, ReadOnlySpan<TValue> source, Span<TValue> target,
+        ReadOnlySpan<byte> flags, uint limit, Span<byte> outputBits)
+        where TCode : unmanaged
+        where TValue : unmanaged
+    {
+        ref TCode codeRef = ref MemoryMarshal.GetReference(codes);
+        ref TValue sourceRef = ref MemoryMarshal.GetReference(source);
+        ref TValue targetRef = ref MemoryMarshal.GetReference(target);
+        ref byte flagRef = ref MemoryMarshal.GetReference(flags);
+
+        // THE FULL BLOCK IS ITS OWN LOOP, with a CONSTANT eight iterations, for the reason the
+        // bitmap form documents: a variable trip count costs the unroll, and with it the constant
+        // shift amounts and the eight independent gathers in flight at once.
+        int whole = target.Length & ~7;
+        for (int block = 0; block < whole; block += 8)
+        {
+            int mask = 0;
+            for (int k = 0; k < 8; k++)
+            {
+                int row = block + k;
+                uint code = WidenCode(Unsafe.Add(ref codeRef, row));
+                if (code >= limit)
+                {
+                    return row;
+                }
+
+                Unsafe.Add(ref targetRef, row) = Unsafe.Add(ref sourceRef, (nint)code);
+                mask |= Unsafe.Add(ref flagRef, (nint)code) << k;
+            }
+
+            outputBits[block >> 3] = (byte)mask;
+        }
+
+        if (whole < target.Length)
+        {
+            int mask = 0;
+            for (int row = whole; row < target.Length; row++)
+            {
+                uint code = WidenCode(Unsafe.Add(ref codeRef, row));
+                if (code >= limit)
+                {
+                    return row;
+                }
+
+                Unsafe.Add(ref targetRef, row) = Unsafe.Add(ref sourceRef, (nint)code);
+                mask |= Unsafe.Add(ref flagRef, (nint)code) << (row - whole);
+            }
+
+            outputBits[whole >> 3] = (byte)mask;
+        }
+
+        return -1;
+    }
+
     private static int MaskedCore<TCode, TValue>(
         ReadOnlySpan<TCode> codes, ReadOnlySpan<byte> values, int valuesLength,
         Span<byte> destination, int count,
@@ -279,6 +345,38 @@ internal static class RowKernels
                 && (long)valueBits.Length * 8 >= (long)valueBitOffset + valuesLength)
             {
                 ReadOnlySpan<TCode> rowCodes = codes[..target.Length];
+
+                // ONE BYTE PER DICTIONARY ENTRY, EXPANDED ONCE. The row body gathers TWICE from
+                // the dictionary -- the value, and the value's validity BIT -- and the second
+                // gather was seven operations to extract one bit: an add for the bit index, a
+                // shift to find its byte, a load, a shift and a mask to select it, then the shift
+                // and the or that place it in the output byte. Against a table of bytes the whole
+                // thing is a load, a shift and an or.
+                //
+                // The expansion is O(dictionary) against O(rows), and it is taken only when the
+                // dictionary is the smaller of the two -- which is what dictionary encoding MEANS.
+                // A dictionary wider than the column it encodes keeps the bitmap form below, where
+                // the table would cost more cache than the bit arithmetic it saves.
+                if (valuesLength <= target.Length)
+                {
+                    Scratch<byte> flagScratch = new Scratch<byte>(valuesLength, default);
+                    try
+                    {
+                        Span<byte> flags = flagScratch.Span;
+                        for (int entry = 0; entry < valuesLength; entry++)
+                        {
+                            int at = valueBitOffset + entry;
+                            flags[entry] = (byte)((valueBits[at >> 3] >> (at & 7)) & 1);
+                        }
+
+                        return MaskedExpanded(rowCodes, source, target, flags, limit, outputBits);
+                    }
+                    finally
+                    {
+                        flagScratch.Dispose();
+                    }
+                }
+
                 ref TCode codeRef = ref MemoryMarshal.GetReference(rowCodes);
                 ref TValue sourceRef = ref MemoryMarshal.GetReference(source);
                 ref TValue targetRef = ref MemoryMarshal.GetReference(target);
