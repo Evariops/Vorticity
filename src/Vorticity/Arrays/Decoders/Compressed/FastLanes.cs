@@ -233,41 +233,61 @@ internal static class FastLanes
         packed.Clear();
         ReadOnlySpan<int> index = PackedIndexTable(elementBits);
 
+        // PERF-AUDIT-v2.md W-14. THE LOOPS ARE NESTED ROW-OUTER, AND THAT IS THE WHOLE CHANGE.
+        // Everything the body computes from `row` -- the two word indices, the shift, the spill
+        // width -- does not depend on `lane` at all, and the mask does not depend on either; nested
+        // lane-outer, all five were recomputed for every one of the 1 024 elements of a block,
+        // including two integer divisions and two modulos. Hoisted, the inner loop is a table read,
+        // an AND, a shift and an OR.
+        //
+        // REORDERING IS EXACT, not an approximation: each (lane, row) pair ORs into
+        // `packed[lanes * word + lane]`, the writes for one row are disjoint across lanes, and `|=`
+        // over rows is commutative -- so the same bits land in the same words in any order. The
+        // access pattern gets better as a side effect: consecutive lanes are consecutive words,
+        // where lane-outer strode by `lanes` on both the read and the write.
+        //
+        // Measured by doubling the call on `--throughput --write` at a million rows: `PackBlock` is
+        // **at least 6,8 %** of a `fastlanes_bitpacked` write (18 118 us against 19 350 doubled),
+        // 1,5 % of `fastlanes_for` and nothing measurable on `primitive`. "At least" because a
+        // doubling measures a floor -- §1.6, and W-7b is where that was learned.
         if (bitWidth == elementBits)
         {
-            for (int lane = 0; lane < lanes; lane++)
+            for (int row = 0; row < elementBits; row++)
             {
-                for (int row = 0; row < elementBits; row++)
+                ReadOnlySpan<int> rowIndex = index.Slice(row * lanes, lanes);
+                Span<T> target = packed.Slice(lanes * row, lanes);
+                for (int lane = 0; lane < lanes; lane++)
                 {
-                    packed[(lanes * row) + lane] = values[index[(row * lanes) + lane]];
+                    target[lane] = values[rowIndex[lane]];
                 }
             }
 
             return;
         }
 
-        for (int lane = 0; lane < lanes; lane++)
+        T mask = Mask<T>(bitWidth);
+        for (int row = 0; row < elementBits; row++)
         {
-            for (int row = 0; row < elementBits; row++)
+            int currentWord = row * bitWidth / elementBits;
+            int nextWord = ((row + 1) * bitWidth) / elementBits;
+            int shift = (row * bitWidth) % elementBits;
+            int currentBits = bitWidth - (((row + 1) * bitWidth) % elementBits);
+
+            // Same guard as the unpack, for the same reason: the last row of a lane can land
+            // exactly on the boundary, leaving no next word to spill into.
+            bool spills = nextWord > currentWord && nextWord < bitWidth;
+
+            ReadOnlySpan<int> rowIndex = index.Slice(row * lanes, lanes);
+            Span<T> current = packed.Slice(lanes * currentWord, lanes);
+            Span<T> next = spills ? packed.Slice(lanes * nextWord, lanes) : default;
+
+            for (int lane = 0; lane < lanes; lane++)
             {
-                T value = values[index[(row * lanes) + lane]] & Mask<T>(bitWidth);
-                int currentWord = row * bitWidth / elementBits;
-                int nextWord = ((row + 1) * bitWidth) / elementBits;
-                int shift = (row * bitWidth) % elementBits;
-
-                packed[(lanes * currentWord) + lane] |= value << shift;
-
-                if (nextWord > currentWord)
+                T value = values[rowIndex[lane]] & mask;
+                current[lane] |= value << shift;
+                if (spills)
                 {
-                    int remainingBits = ((row + 1) * bitWidth) % elementBits;
-                    int currentBits = bitWidth - remainingBits;
-
-                    // Same guard as the unpack, for the same reason: the last row of a lane can
-                    // land exactly on the boundary, leaving no next word to spill into.
-                    if (nextWord < bitWidth)
-                    {
-                        packed[(lanes * nextWord) + lane] |= value >> currentBits;
-                    }
+                    next[lane] |= value >> currentBits;
                 }
             }
         }
