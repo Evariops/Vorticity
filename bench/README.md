@@ -64,6 +64,35 @@ per case, GC and runtime jobs, and `--disasm` (41 874 bytes of arm64 for `FsstKe
 It costs the host's build: `--full` on a two-case class is 2 min 10 rather than 7 s, which is why
 the fast profile stays in this process. `--full --inprocess` is the escape hatch.
 
+## Reading the assembly a kernel actually got
+
+Two routes, and they answer slightly different questions.
+
+```sh
+# The whole class, through BenchmarkDotNet. Needs --full, because the disassembler needs the
+# out-of-process toolchain (bench/README's profile table). Writes <Class>-asm.md under the
+# artifacts directory: 41 874 bytes of arm64 for FsstKernelBenchmarks, in 36 s.
+dotnet run -c Release --project bench/Vorticity.Benchmarks -- \
+    --full --filter '*FsstKernelBenchmarks.Library*' --disasm
+
+# One named method, no harness, no benchmark. Seconds, and it works in any run of anything.
+DOTNET_TieredCompilation=0 \
+DOTNET_JitDisasm='*UnpackBlocks*' \
+DOTNET_JitStdOutFile=/tmp/jit.asm \
+    dotnet run -c Release --project bench/Vorticity.Benchmarks -- FastLanesKernel
+```
+
+`DOTNET_TieredCompilation=0` is not optional if you want the code that runs in steady state: with
+tiering on, the listing's header says `Tier0-FullOpts ... optimized using Synthesized PGO`, which is
+the first full-opts compilation and not necessarily the last. With it off the header says `FullOpts`
+and there is one listing per generic instantiation.
+
+**Hardware counters do not work here.** `[HardwareCounters]` needs
+`BenchmarkDotNet.Diagnostics.Windows` and ETW; on this machine the run prints `Unable to resolve
+IHardwareCountersDiagnoser diagnoser using dynamic assembly loading` and then completes **without
+counters and without failing** — so a table that looks normal is simply missing the columns you
+asked for. Branch mispredictions and cache misses need a Windows machine (BENCH-AUDIT.md D5b).
+
 **No argument means all of them**, not a prompt: without one, BenchmarkDotNet asks the console which
 class to run, which makes the default run do nothing under a script or in CI. `Program.cs` supplies
 `--filter *` when nothing else has said what to run.
