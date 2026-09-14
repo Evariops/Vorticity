@@ -9,7 +9,17 @@
 //
 // The values are chosen so that AND and OR are table lookups rather than branches, and so that the
 // final selection -- "a row is returned only when the filter evaluates to true" -- is `== True`.
+// PERF-AUDIT-v2.md F-4, and it needs saying because §11 parks a neighbouring idea. What was
+// measured 1.8x SLOWER there is vectorizing the COMPARISON: it reads eight-byte values and must
+// write one-byte states, so the lanes do not line up and the packing eats the gain -- "do not
+// vectorize a computation whose OUTPUT resists". The three kernels below read bytes and write
+// bytes, sixteen lanes in and sixteen out, with nothing to pack. The rule does not reach them, and
+// F-10 measured what leaving them scalar costs: an `Or` over 65 536 states was 28,7 us, MORE than
+// a full `<` comparison over 65 536 i64 values, which is what made `IN (8)` twenty times the price
+// of one compare.
 using System;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 namespace Vorticity.Compute;
 
@@ -38,7 +48,31 @@ internal static class Trilean
     /// <param name="right">The other operand; same length.</param>
     internal static void And(Span<byte> left, ReadOnlySpan<byte> right)
     {
-        for (int i = 0; i < left.Length; i++)
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated && left.Length >= Vector128<byte>.Count)
+        {
+            ref byte a0 = ref MemoryMarshal.GetReference(left);
+            ref byte b0 = ref MemoryMarshal.GetReference(right);
+            Vector128<byte> ones = Vector128.Create(True);
+            Vector128<byte> unknowns = Vector128.Create(Unknown);
+            Vector128<byte> zeros = Vector128<byte>.Zero;
+            int last = left.Length - Vector128<byte>.Count;
+            for (; i <= last; i += Vector128<byte>.Count)
+            {
+                Vector128<byte> a = Vector128.LoadUnsafe(ref a0, (nuint)i);
+                Vector128<byte> b = Vector128.LoadUnsafe(ref b0, (nuint)i);
+
+                // The mirror of Or: False wins outright, and between the other two it is True only
+                // when both sides are.
+                Vector128<byte> anyFalse = Vector128.Equals(a, zeros) | Vector128.Equals(b, zeros);
+                Vector128<byte> bothTrue = Vector128.Equals(a, ones) & Vector128.Equals(b, ones);
+                Vector128<byte> decided =
+                    (bothTrue & ones) | Vector128.AndNot(unknowns, bothTrue);
+                Vector128.AndNot(decided, anyFalse).StoreUnsafe(ref a0, (nuint)i);
+            }
+        }
+
+        for (; i < left.Length; i++)
         {
             byte a = left[i];
             byte b = right[i];
@@ -56,7 +90,31 @@ internal static class Trilean
     /// <param name="right">The other operand; same length.</param>
     internal static void Or(Span<byte> left, ReadOnlySpan<byte> right)
     {
-        for (int i = 0; i < left.Length; i++)
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated && left.Length >= Vector128<byte>.Count)
+        {
+            ref byte a0 = ref MemoryMarshal.GetReference(left);
+            ref byte b0 = ref MemoryMarshal.GetReference(right);
+            Vector128<byte> ones = Vector128.Create(True);
+            Vector128<byte> unknowns = Vector128.Create(Unknown);
+            int last = left.Length - Vector128<byte>.Count;
+            for (; i <= last; i += Vector128<byte>.Count)
+            {
+                Vector128<byte> a = Vector128.LoadUnsafe(ref a0, (nuint)i);
+                Vector128<byte> b = Vector128.LoadUnsafe(ref b0, (nuint)i);
+
+                // True wins outright; otherwise an Unknown on either side survives. Both tests are
+                // masks, so the choice between them is an AndNot rather than a branch.
+                Vector128<byte> anyTrue = Vector128.Equals(a, ones) | Vector128.Equals(b, ones);
+                Vector128<byte> anyUnknown =
+                    Vector128.Equals(a, unknowns) | Vector128.Equals(b, unknowns);
+                Vector128<byte> result =
+                    (anyTrue & ones) | Vector128.AndNot(anyUnknown & unknowns, anyTrue);
+                result.StoreUnsafe(ref a0, (nuint)i);
+            }
+        }
+
+        for (; i < left.Length; i++)
         {
             byte a = left[i];
             byte b = right[i];
@@ -70,7 +128,26 @@ internal static class Trilean
     /// <param name="values">The operand, overwritten.</param>
     internal static void Not(Span<byte> values)
     {
-        for (int i = 0; i < values.Length; i++)
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated && values.Length >= Vector128<byte>.Count)
+        {
+            ref byte a0 = ref MemoryMarshal.GetReference(values);
+            Vector128<byte> ones = Vector128.Create(True);
+            Vector128<byte> unknowns = Vector128.Create(Unknown);
+            int last = values.Length - Vector128<byte>.Count;
+            for (; i <= last; i += Vector128<byte>.Count)
+            {
+                Vector128<byte> a = Vector128.LoadUnsafe(ref a0, (nuint)i);
+
+                // False and True are 0 and 1, so flipping them is one XOR; Unknown keeps itself.
+                Vector128<byte> isUnknown = Vector128.Equals(a, unknowns);
+                Vector128<byte> result =
+                    (isUnknown & unknowns) | Vector128.AndNot(a ^ ones, isUnknown);
+                result.StoreUnsafe(ref a0, (nuint)i);
+            }
+        }
+
+        for (; i < values.Length; i++)
         {
             byte value = values[i];
             values[i] = value == Unknown ? Unknown : value == True ? False : True;
