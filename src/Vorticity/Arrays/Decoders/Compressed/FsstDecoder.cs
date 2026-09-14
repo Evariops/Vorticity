@@ -103,9 +103,20 @@ public sealed class FsstDecoder : ArrayDecoder
 
         FsstMetadata metadata = FsstMetadata.Read(node.Metadata);
 
-        // The padded decode tables are built ONCE, here, and handed to whichever path runs: the
-        // selective path calls the kernel per wanted row, and rebuilding 2.3 KiB per row would cost
-        // more than the branches the padding removes.
+        // The padded decode tables are built once PER CALL and handed to whichever path runs.
+        //
+        // THAT IS NOT ONCE PER TAKE, AND THE COMMENT HERE USED TO IMPLY IT WAS. PERF-AUDIT-v2.md
+        // R11, measured on `--throughput --take` at a million rows: 54 976 calls to `Prepare` for
+        // 54 976 wanted rows -- **one per row**. The 64 rows of a take are spread over the file, so
+        // each lands in its own split, and each split is one `DecodeSelected` call that rebuilds
+        // 2.3 KiB of tables to decode a single row. Doubling the build costs **at least 4,5 %** of
+        // that take.
+        //
+        // It is left as it is, and the number is why: the `fsst` take axis reads **0.23** -- four
+        // times the reference -- so 4,5 % of it buys nothing anyone is waiting for. The fix is not
+        // here either: it is one prepared table cached per node for the life of a scan, which is
+        // `ScanContext` scratch and therefore R14. On a full scan the count is what the audit
+        // expected -- 86 calls for 86 million rows.
         Span<byte> symbolScratch = stackalloc byte[FsstSymbolTable.SymbolScratchBytes];
         Span<byte> widthScratch = stackalloc byte[FsstSymbolTable.WidthScratchBytes];
         FsstDecodeTable table = FsstSymbolTable
