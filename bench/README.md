@@ -82,7 +82,17 @@ VORTICITY_THROUGHPUT_CORPUS=/tmp/pair \
 That pair is how BENCH-AUDIT.md A5 was attributed: our rewrite scans in 914 µs against 342 µs for
 the same rewrite without zstd, while the reference reads both in 140 µs. Note that
 `vxdump --encodings` cannot answer the same question by itself — the reference interns all 34
-encodings of the registry whatever the file uses, so only OUR dictionary is informative.
+encodings of the registry whatever the file uses, so only OUR dictionary is informative. What does
+answer it is `vxdump --layout`, whose `encoding=` column names the array encoding of every terminal
+node (B10):
+
+```sh
+dotnet run -c Release --project tools/vxdump -- /tmp/pair/ours.vortex --layout |
+    grep -o 'encoding=.*' | sort | uniq -c | sort -rn
+```
+
+Three `vortex.zstd` nodes on our side and none on the reference's, all three on the `strs` column —
+which is A5's 63 % located to a column rather than inferred from a target edition.
 
 ## Reading the assembly a kernel actually got
 

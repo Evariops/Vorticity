@@ -18,7 +18,10 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Vorticity.Arrays;
+using Vorticity.Arrays.Metadata;
+using Vorticity.Buffers;
 using Vorticity.File;
+using Vorticity.IO;
 using Vorticity.Layouts;
 using Vorticity.RowEncoding;
 using Vorticity.Serialization.Schemas;
@@ -39,7 +42,7 @@ internal static class Program
 
                   vxdump <file.vortex> [options]
 
-                  --layout      the layout tree (default)
+                  --layout      the layout tree, with each node's array encoding (default)
                   --schema      the file's dtype, one line per root field
                   --encodings   the array and layout encoding dictionaries
                   --segments    every segment's offset, length and alignment
@@ -72,7 +75,7 @@ internal static class Program
 
             if (sections.Layout)
             {
-                Layout(output, file);
+                await Layout(output, file).ConfigureAwait(false);
             }
 
             if (sections.Segments)
@@ -169,14 +172,61 @@ internal static class Program
         }
     }
 
-    private static void Layout(StringBuilder output, VortexFile file)
+    /// <summary>
+    /// The layout tree, with the ARRAY encoding of every terminal node beside it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// BENCH-AUDIT.md B10. `--encodings` prints the file's two dictionaries, and a dictionary
+    /// attributes nothing: our writer interns only what it actually posts (nine entries on
+    /// `zoned_many_zones_nulls`) while the reference interns its whole registry (thirty-four), so
+    /// "who encoded this column how" could not be answered by comparing two files -- the A5
+    /// attribution had to go around through a target edition instead. The layout tree names the
+    /// LAYOUT encodings (`vortex.flat`, `vortex.chunked`), which is the shape of the file, not the
+    /// shape of the data. What the data is encoded as lives one level down, in the array blob each
+    /// flat node holds, and this build already parses it to decode anything at all.
+    /// </para>
+    /// <para>
+    /// IT COSTS THE SEGMENT READS, and that is the honest price of the answer: a flat node's blob
+    /// cannot be walked without the bytes its buffer specs point into. Nothing is decompressed --
+    /// the walk resolves buffer spans and reads ids -- so the cost is I/O and not CPU, and on a
+    /// file with a thousand chunks it is a thousand reads. `--schema`, `--encodings` and
+    /// `--segments` stay metadata-only for when that matters.
+    /// </para>
+    /// <para>
+    /// A NODE THAT WILL NOT PARSE PRINTS WHY AND THE WALK CONTINUES. A dump that refused the whole
+    /// file because one blob uses a buffer compression this build lacks would be useless for
+    /// exactly the file one is dumping to find that out -- and CI runs `--all` over the corpus,
+    /// where such files are the point.
+    /// </para>
+    /// </remarks>
+    /// <param name="output">The report.</param>
+    /// <param name="file">The open file.</param>
+    /// <returns>The completed walk.</returns>
+    private static async Task Layout(StringBuilder output, VortexFile file)
     {
         output.Append("\nlayout\n");
         LayoutTree tree = LayoutTree.Parse(file);
-        Node(output, tree.Root, depth: 1);
+
+        ArrayEncodingId[] encodings = new ArrayEncodingId[file.ArrayEncodingCount];
+        for (int i = 0; i < encodings.Length; i++)
+        {
+            encodings[i] = file.GetArrayEncoding(i);
+        }
+
+        // ONE ARENA FOR THE WHOLE WALK: `ArrayBlobReader.Load` resets it, and a tree of ten
+        // thousand flat nodes should not allocate ten thousand arenas to read one id each.
+        ArrayNodeArena arena = new ArrayNodeArena();
+        await Node(output, file, tree.Root, depth: 1, arena, encodings).ConfigureAwait(false);
     }
 
-    private static void Node(StringBuilder output, LayoutNode node, int depth)
+    private static async Task Node(
+        StringBuilder output,
+        VortexFile file,
+        LayoutNode node,
+        int depth,
+        ArrayNodeArena arena,
+        ArrayEncodingId[] encodings)
     {
         output.Append(' ', depth * 2)
             .Append(node.EncodingIdText)
@@ -211,12 +261,118 @@ internal static class Program
             output.Append("  dtype=").Append(node.DType.ToString());
         }
 
+        if (node.Encoding == LayoutEncodingId.Flat)
+        {
+            output.Append("  encoding=")
+                .Append(await ArrayEncodingOf(file, node, arena, encodings).ConfigureAwait(false));
+        }
+
         output.Append('\n');
 
         for (int i = 0; i < node.ChildCount; i++)
         {
-            Node(output, node.GetChild(i), depth + 1);
+            await Node(output, file, node.GetChild(i), depth + 1, arena, encodings)
+                .ConfigureAwait(false);
         }
+    }
+
+    /// <summary>The array encoding tree inside one <c>vortex.flat</c> node, as one expression.</summary>
+    /// <param name="file">The open file, for its segments and its encoding dictionary.</param>
+    /// <param name="node">The flat layout node.</param>
+    /// <param name="arena">The arena the blob is parsed into; it is reset by the load.</param>
+    /// <param name="encodings">Spec index to resolved id, as <c>ArrayBlobReader</c> wants it.</param>
+    /// <returns>
+    /// Something like <c>vortex.dict(vortex.primitive,fastlanes.bitpacked)</c>, or a parenthesised
+    /// reason the node could not be read.
+    /// </returns>
+    private static async Task<string> ArrayEncodingOf(
+        VortexFile file, LayoutNode node, ArrayNodeArena arena, ArrayEncodingId[] encodings)
+    {
+        ReadOnlySpan<uint> segments = node.Segments;
+        if (segments.Length != 1)
+        {
+            // The layout says flat and carries no single segment: the file is malformed in a way
+            // `--layout` is precisely the tool for looking at, so it is reported and not thrown.
+            return $"(flat with {segments.Length} segments)";
+        }
+
+        uint index = segments[0];
+        if (index >= (uint)file.SegmentSpecs.Length)
+        {
+            return $"(segment {Text(index)} is out of range)";
+        }
+
+        SegmentSpec spec = file.SegmentSpecs[(int)index];
+
+        // THE METADATA IS COPIED OUT BEFORE THE AWAIT, because `node.Metadata` is a span over the
+        // layout buffer and a span cannot cross one. The inlined-tree variant is the reason it is
+        // needed at all: `vortex.flat` may carry the Array FlatBuffer in its own metadata, and then
+        // the segment is read from offset 0 as pure buffer region (contract §11.3).
+        byte[]? inlined = null;
+        FlatLayoutMetadata metadata = FlatLayoutMetadata.Read(node.Metadata);
+        if (metadata.HasArrayEncodingTree)
+        {
+            inlined = metadata.ArrayEncodingTree.ToArray();
+        }
+
+        try
+        {
+            using SegmentOwner owner =
+                await file.Segments.ReadAsync(spec, CancellationToken.None).ConfigureAwait(false);
+            if (inlined is null)
+            {
+                ArrayBlobReader.Load(arena, owner.Buffer, encodings);
+            }
+            else
+            {
+                ArrayBlobReader.Load(arena, inlined, owner.Buffer, encodings);
+            }
+
+            StringBuilder tree = new StringBuilder();
+            ArrayEncoding(tree, file, arena.Root);
+            return tree.ToString();
+        }
+        catch (VortexUnsupportedException error)
+        {
+            return $"(unsupported: {error.Message})";
+        }
+        catch (VortexFormatException error)
+        {
+            return $"(malformed: {error.Message})";
+        }
+    }
+
+    /// <summary>Writes one array node and its children as <c>id(child,child)</c>.</summary>
+    /// <remarks>
+    /// THE TEXT ID, not the resolved enum, so that an encoding this build does not implement still
+    /// names itself -- which is the whole question the column is here to answer, and `Unknown` is
+    /// not an answer. It is marked with a `?` so that a reader does not take a name this build
+    /// cannot decode for one it can.
+    /// </remarks>
+    /// <param name="output">The expression being built.</param>
+    /// <param name="file">The file, for the encoding dictionary the spec index points into.</param>
+    /// <param name="node">The array node.</param>
+    private static void ArrayEncoding(StringBuilder output, VortexFile file, ArrayNode node)
+    {
+        output.Append(file.GetArrayEncodingId(node.EncodingSpecIndex))
+            .Append(node.Encoding == ArrayEncodingId.Unknown ? "?" : string.Empty);
+        if (node.ChildCount == 0)
+        {
+            return;
+        }
+
+        output.Append('(');
+        for (int i = 0; i < node.ChildCount; i++)
+        {
+            if (i != 0)
+            {
+                output.Append(',');
+            }
+
+            ArrayEncoding(output, file, node.GetChild(i));
+        }
+
+        output.Append(')');
     }
 
     private static void Segments(StringBuilder output, VortexFile file)
