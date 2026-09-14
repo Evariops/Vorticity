@@ -63,6 +63,23 @@ public class FilterKernelBenchmarks
     private CanonicalArena? _arena;
     private int _node;
 
+    // PERF-AUDIT-v2.md F-10. The four columns below exist so that the four kernels F-4 names are
+    // REACHED by something. Counted on the two `--ratio-check` filter axes, which are F-4's own
+    // closing criterion: 58 904 calls and 60,3 M rows, ALL of them through `CompareSigned`. `In`,
+    // `CompareBool`, `CompareFloat` and `CompareBytes` each saw zero. Their correctness is covered
+    // -- `ScanFilterTests` exercises `In`, `f64` with NaN and `utf8` -- but a correctness test says
+    // nothing about cost, and eight points of this audit were written by reading a file rather than
+    // measuring one.
+    private int _floatNode;
+    private int _boolNode;
+    private int _utf8Node;
+    private byte[] _scratch = [];
+    private FilterLiteral[] _inSet = [];
+
+    // Built once: `FilterLiteral.From(string)` encodes, and an allocation inside the timed body
+    // would be charged to the kernel it is meant to measure.
+    private FilterLiteral _utf8Wanted;
+
     /// <summary>Rows compared per operation: one split's worth, several times over.</summary>
     [Params(65536)]
     public int Count { get; set; } = 65536;
@@ -96,6 +113,56 @@ public class FilterKernelBenchmarks
             Validity.NonNullable,
             PType.I64,
             buffer);
+
+        // f64, the same values, so the only difference between this arm and the i64 one is which
+        // kernel runs.
+        VortexBuffer floats = _arena.AllocateUninitialized(Count * 8, 8, out Span<byte> floatBytes);
+        Span<double> asDouble = MemoryMarshal.Cast<byte, double>(floatBytes);
+        for (int i = 0; i < Count; i++)
+        {
+            asDouble[i] = typed[i];
+        }
+
+        _floatNode = _arena.AddPrimitive(
+            types.Primitive(PType.F64, Nullability.NonNullable),
+            Count, Validity.NonNullable, PType.F64, floats);
+
+        // Bool, one bit per row, the same band so the selectivity matches.
+        VortexBuffer bits = _arena.AllocateUninitialized((Count + 7) / 8, 8, out Span<byte> bitBytes);
+        bitBytes.Clear();
+        for (int i = 0; i < Count; i++)
+        {
+            if (typed[i] < _wanted)
+            {
+                bitBytes[i >> 3] |= (byte)(1 << (i & 7));
+            }
+        }
+
+        _boolNode = _arena.AddBool(types.Bool(Nullability.NonNullable), Count, Validity.NonNullable, bits, 0);
+
+        // Utf8, as views. Every value is short enough to live inline, which is the shape 65 % of a
+        // real VarBinView carries (PERF-AUDIT-v2.md R28) and the one `CompareBytes` sees most.
+        VortexBuffer views = _arena.AllocateUninitialized(Count * 16, 16, out Span<byte> viewBytes);
+        viewBytes.Clear();
+        for (int i = 0; i < Count; i++)
+        {
+            Span<byte> view = viewBytes.Slice(i * 16, 16);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(view, 6);
+            System.Text.Encoding.ASCII.GetBytes($"v{typed[i] % 100000:D5}", view[4..]);
+        }
+
+        _utf8Node = _arena.AddVarBinView(
+            types.Utf8(Nullability.NonNullable), Count, Validity.NonNullable, views, default);
+
+        // `In` is an OR of equalities, so its cost is the set size times one Compare plus the ORs.
+        // Eight candidates: enough that the fold is visible, few enough to stay a realistic `IN`.
+        _utf8Wanted = FilterLiteral.From("v01024");
+        _scratch = new byte[Count];
+        _inSet = new FilterLiteral[8];
+        for (int i = 0; i < _inSet.Length; i++)
+        {
+            _inSet[i] = FilterLiteral.From((long)(i * 131));
+        }
     }
 
     [GlobalCleanup]
@@ -115,6 +182,50 @@ public class FilterKernelBenchmarks
     {
         ComparisonKernels.Compare(
             _arena!, _node, ComparisonOp.Less, FilterLiteral.From(_wanted), _destination);
+        return _destination.Length;
+    }
+
+    /// <summary>`f64 &lt; literal`, through <c>CompareFloat</c>.</summary>
+    /// <remarks>
+    /// PERF-AUDIT-v2.md F-10. Same values as the i64 arm, widened: the distance between the two is
+    /// what the float kernel costs over the signed one, and nothing else.
+    /// </remarks>
+    [Benchmark(Description = "library, f64 <")]
+    public int LibraryFloat()
+    {
+        ComparisonKernels.Compare(
+            _arena!, _floatNode, ComparisonOp.Less, FilterLiteral.From((double)_wanted), _destination);
+        return _destination.Length;
+    }
+
+    /// <summary>`bool = literal`, through <c>CompareBool</c>.</summary>
+    [Benchmark(Description = "library, bool =")]
+    public int LibraryBool()
+    {
+        ComparisonKernels.Compare(
+            _arena!, _boolNode, ComparisonOp.Equal, FilterLiteral.From(true), _destination);
+        return _destination.Length;
+    }
+
+    /// <summary>`utf8 = literal`, through <c>CompareBytes</c>.</summary>
+    [Benchmark(Description = "library, utf8 =")]
+    public int LibraryUtf8()
+    {
+        ComparisonKernels.Compare(
+            _arena!, _utf8Node, ComparisonOp.Equal, _utf8Wanted, _destination);
+        return _destination.Length;
+    }
+
+    /// <summary>`i64 IN (eight candidates)`, through <c>In</c>.</summary>
+    /// <remarks>
+    /// The one arm whose shape is not a single kernel: `In` folds N equalities with
+    /// <c>Trilean.Or</c>, so what it measures is N passes over the column plus N-1 ORs -- which is
+    /// precisely the thing F-4 proposed to replace with one pass, and could not price.
+    /// </remarks>
+    [Benchmark(Description = "library, i64 IN (8)")]
+    public int LibraryIn()
+    {
+        ComparisonKernels.In(_arena!, _node, _inSet, _destination, _scratch);
         return _destination.Length;
     }
 
