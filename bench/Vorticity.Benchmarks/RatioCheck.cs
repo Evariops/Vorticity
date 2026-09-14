@@ -32,6 +32,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Vorticity.Columns;
+using Vorticity.Editions;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Scan;
@@ -920,6 +921,44 @@ internal static class RatioCheck
     /// <summary>Every axis name the rewritten group would produce.</summary>
     private static IEnumerable<string> RewrittenNames() =>
         Rewritten.SelectMany(r => Names(r.Label));
+
+    /// <summary>Reads a file with our reader and writes it back with our writer, to a path.</summary>
+    /// <param name="source">The file to read.</param>
+    /// <param name="destination">Where to write it.</param>
+    /// <remarks>
+    /// EXPOSED FOR A5. The `rewritten` axes write this file into a temporary directory and delete
+    /// it, which is right for a gate and useless for the question A5 asks -- WHICH encoding our
+    /// writer puts where the reference puts another. `--rewrite <in> <out>` keeps the bytes so
+    /// `vxdump --encodings` and `--throughput` can be pointed at them.
+    /// </remarks>
+    /// <param name="edition">
+    /// The edition the writer targets. Older editions exclude later encodings, which is how
+    /// `--rewrite <in> <out> <edition>` isolates one of them: `Core20250500` has no
+    /// `vortex.zstd`, so the difference between the two rewrites IS zstd (BENCH-AUDIT.md A5).
+    /// </param>
+    internal static async Task RewriteAsync(
+        string source, string destination, VortexEdition? edition)
+    {
+        if (edition is null)
+        {
+            await Rewrite(source, destination).ConfigureAwait(false);
+            return;
+        }
+
+        await using VortexFile file = await VortexFile.OpenAsync(source, CancellationToken.None);
+        await using Vorticity.Writing.VortexFileWriter writer =
+            Vorticity.Writing.VortexFileWriter.Create(
+                destination,
+                file.Schema,
+                new Vorticity.Writing.VortexWriteOptions { TargetEdition = edition.Value });
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            await writer.WriteAsync(batch, CancellationToken.None);
+        }
+
+        await writer.CompleteAsync(CancellationToken.None);
+    }
 
     /// <summary>Reads a file with our reader and writes it back with our writer.</summary>
     private static async Task Rewrite(string source, string destination)

@@ -64,6 +64,25 @@ per case, GC and runtime jobs, and `--disasm` (41 874 bytes of arm64 for `FsstKe
 It costs the host's build: `--full` on a two-case class is 2 min 10 rather than 7 s, which is why
 the fast profile stays in this process. `--full --inprocess` is the escape hatch.
 
+## Asking what our own writer costs to read back
+
+```sh
+# Write the file out with our writer, keeping the bytes. A third argument is a target edition,
+# which excludes the encodings that came later: Core20250500 has no vortex.zstd.
+dotnet run -c Release --project bench/Vorticity.Benchmarks -- \
+    --rewrite tests/Vorticity.Conformance/corpus/containers/zoned_many_zones_nulls.vortex \
+    /tmp/pair/ours.vortex
+
+# Then measure any directory of files, both readers, one clock.
+VORTICITY_THROUGHPUT_CORPUS=/tmp/pair \
+    dotnet run -c Release --project bench/Vorticity.Benchmarks -- --throughput
+```
+
+That pair is how BENCH-AUDIT.md A5 was attributed: our rewrite scans in 914 µs against 342 µs for
+the same rewrite without zstd, while the reference reads both in 140 µs. Note that
+`vxdump --encodings` cannot answer the same question by itself — the reference interns all 34
+encodings of the registry whatever the file uses, so only OUR dictionary is informative.
+
 ## Reading the assembly a kernel actually got
 
 Two routes, and they answer slightly different questions.

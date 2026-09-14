@@ -106,6 +106,28 @@ internal static class Program
             return await RatioCheck.RunAsync(axes, recalibrate, rebase, onePass).ConfigureAwait(false);
         }
 
+        if (args.Length > 0 && args[0] == "--rewrite")
+        {
+            if (args.Length < 3)
+            {
+                Console.Error.WriteLine(
+                    "--rewrite <in> <out> [edition]: reads a file with our reader and writes it back " +
+                    "with our writer, keeping the bytes. An edition name (Core20250500 …) " +
+                    "excludes the encodings that came later (BENCH-AUDIT.md A5).");
+                return 2;
+            }
+
+            Vorticity.Editions.VortexEdition? edition =
+                args.Length > 3 && Enum.TryParse(args[3], out Vorticity.Editions.VortexEdition e)
+                    ? e
+                    : null;
+            await RatioCheck.RewriteAsync(args[1], args[2], edition).ConfigureAwait(false);
+            Console.Out.WriteLine(
+                $"{args[2]}: {new System.IO.FileInfo(args[2]).Length} bytes from " +
+                $"{new System.IO.FileInfo(args[1]).Length}.");
+            return 0;
+        }
+
         if (args.Length > 0 && args[0] == "--ab")
         {
             if (args.Length < 3)
