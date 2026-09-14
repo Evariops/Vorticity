@@ -510,7 +510,7 @@ internal static class ThroughputCheck
         ("chunked_one_chunk", 0.26),   // 3 processes, spread 0.24-0.26; was 0.30, -14.6%
         ("chunked_varbinview", 0.08),   // 5 processes, spread 0.07-0.08; was 0.09, -15.2% (v2 R8b)
         ("constant", 0.97),   // 3 processes, spread 0.96-0.97; was 1.00, -3.3%
-        ("datetimeparts", 1.21),   // 3 processes, spread 1.11-1.22; HELD at 1.21: 3 processes peaked at 1.22, no loosening
+        ("datetimeparts", 0.83),   // 5 processes, spread 0.79-0.83; was 1.21, -31.6% (v2 R1)
         ("decimal", 0.27),   // 3 processes, spread 0.26-0.27; REBASED UP from 0.27 (k>1): +0.3%
         ("decimal_byte_parts", 0.25),   // 3 processes, spread 0.24-0.25; was 0.28, -12.2%
         ("dict", 1.01),   // 3 processes, spread 0.98-1.01; REBASED UP from 0.97 (k>1): +4.2%

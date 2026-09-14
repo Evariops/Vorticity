@@ -196,6 +196,126 @@ internal static class IntegerKernels
         }
     }
 
+    /// <summary>
+    /// <c>destination[i] = a[i] * scaleA + b[i] * scaleB + c[i]</c>, wrapping, in ONE pass.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// PERF-AUDIT-v2.md R1. The same arithmetic as <see cref="WidenScaled(ReadOnlySpan{byte},
+    /// PType, Span{long}, long)"/> followed by two <see cref="AddWidenScaled(ReadOnlySpan{byte},
+    /// PType, Span{long}, long)"/>, with the two read-modify-write passes over the destination
+    /// gone: three reads and one write per element instead of three reads and five accesses to the
+    /// output. On `datetimeparts` at a million rows the three-pass form was **93,2 %** of the scan.
+    /// </para>
+    /// <para>
+    /// THE THREE TYPES ARE RESOLVED BEFORE THE LOOP, nested the way <c>RowKernels.Gather</c>
+    /// resolves its codes. Only the shapes a file actually uses are ever instantiated, and the
+    /// reference corpus has exactly one (I64, I32, I32).
+    /// </para>
+    /// <para>
+    /// The wrapping is the three kernels' wrapping, unchanged: <c>CreateTruncating</c> and
+    /// <c>unchecked</c>, because the reference multiplies i64 in release mode and a hostile file
+    /// must produce a wrong timestamp rather than an exception we would not share with it.
+    /// </para>
+    /// </remarks>
+    /// <param name="a">The first part's values, little-endian.</param>
+    /// <param name="aPType">The first part's physical type; must be an integer.</param>
+    /// <param name="b">The second part's values.</param>
+    /// <param name="bPType">The second part's physical type; must be an integer.</param>
+    /// <param name="c">The third part's values, added unscaled.</param>
+    /// <param name="cPType">The third part's physical type; must be an integer.</param>
+    /// <param name="destination">The i64 output; every element is assigned.</param>
+    /// <param name="scaleA">The multiplier for <paramref name="a"/>.</param>
+    /// <param name="scaleB">The multiplier for <paramref name="b"/>.</param>
+    /// <exception cref="ArgumentOutOfRangeException">A physical type is not an integer.</exception>
+    public static void Recompose(
+        ReadOnlySpan<byte> a, PType aPType,
+        ReadOnlySpan<byte> b, PType bPType,
+        ReadOnlySpan<byte> c, PType cPType,
+        Span<long> destination,
+        long scaleA,
+        long scaleB)
+    {
+        switch (aPType)
+        {
+            case PType.U8: RecomposeB<byte>(a, b, bPType, c, cPType, destination, scaleA, scaleB); break;
+            case PType.U16: RecomposeB<ushort>(a, b, bPType, c, cPType, destination, scaleA, scaleB); break;
+            case PType.U32: RecomposeB<uint>(a, b, bPType, c, cPType, destination, scaleA, scaleB); break;
+            case PType.U64: RecomposeB<ulong>(a, b, bPType, c, cPType, destination, scaleA, scaleB); break;
+            case PType.I8: RecomposeB<sbyte>(a, b, bPType, c, cPType, destination, scaleA, scaleB); break;
+            case PType.I16: RecomposeB<short>(a, b, bPType, c, cPType, destination, scaleA, scaleB); break;
+            case PType.I32: RecomposeB<int>(a, b, bPType, c, cPType, destination, scaleA, scaleB); break;
+            case PType.I64: RecomposeB<long>(a, b, bPType, c, cPType, destination, scaleA, scaleB); break;
+            default:
+                throw new ArgumentOutOfRangeException(
+                    nameof(aPType), aPType, "Widening needs an integer physical type.");
+        }
+    }
+
+    private static void RecomposeB<TA>(
+        ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, PType bPType, ReadOnlySpan<byte> c, PType cPType,
+        Span<long> destination, long scaleA, long scaleB)
+        where TA : unmanaged, IBinaryInteger<TA>
+    {
+        switch (bPType)
+        {
+            case PType.U8: RecomposeC<TA, byte>(a, b, c, cPType, destination, scaleA, scaleB); break;
+            case PType.U16: RecomposeC<TA, ushort>(a, b, c, cPType, destination, scaleA, scaleB); break;
+            case PType.U32: RecomposeC<TA, uint>(a, b, c, cPType, destination, scaleA, scaleB); break;
+            case PType.U64: RecomposeC<TA, ulong>(a, b, c, cPType, destination, scaleA, scaleB); break;
+            case PType.I8: RecomposeC<TA, sbyte>(a, b, c, cPType, destination, scaleA, scaleB); break;
+            case PType.I16: RecomposeC<TA, short>(a, b, c, cPType, destination, scaleA, scaleB); break;
+            case PType.I32: RecomposeC<TA, int>(a, b, c, cPType, destination, scaleA, scaleB); break;
+            case PType.I64: RecomposeC<TA, long>(a, b, c, cPType, destination, scaleA, scaleB); break;
+            default:
+                throw new ArgumentOutOfRangeException(
+                    nameof(bPType), bPType, "Widening needs an integer physical type.");
+        }
+    }
+
+    private static void RecomposeC<TA, TB>(
+        ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, ReadOnlySpan<byte> c, PType cPType,
+        Span<long> destination, long scaleA, long scaleB)
+        where TA : unmanaged, IBinaryInteger<TA>
+        where TB : unmanaged, IBinaryInteger<TB>
+    {
+        switch (cPType)
+        {
+            case PType.U8: RecomposeCore<TA, TB, byte>(a, b, c, destination, scaleA, scaleB); break;
+            case PType.U16: RecomposeCore<TA, TB, ushort>(a, b, c, destination, scaleA, scaleB); break;
+            case PType.U32: RecomposeCore<TA, TB, uint>(a, b, c, destination, scaleA, scaleB); break;
+            case PType.U64: RecomposeCore<TA, TB, ulong>(a, b, c, destination, scaleA, scaleB); break;
+            case PType.I8: RecomposeCore<TA, TB, sbyte>(a, b, c, destination, scaleA, scaleB); break;
+            case PType.I16: RecomposeCore<TA, TB, short>(a, b, c, destination, scaleA, scaleB); break;
+            case PType.I32: RecomposeCore<TA, TB, int>(a, b, c, destination, scaleA, scaleB); break;
+            case PType.I64: RecomposeCore<TA, TB, long>(a, b, c, destination, scaleA, scaleB); break;
+            default:
+                throw new ArgumentOutOfRangeException(
+                    nameof(cPType), cPType, "Widening needs an integer physical type.");
+        }
+    }
+
+    private static void RecomposeCore<TA, TB, TC>(
+        ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, ReadOnlySpan<byte> c,
+        Span<long> destination, long scaleA, long scaleB)
+        where TA : unmanaged, IBinaryInteger<TA>
+        where TB : unmanaged, IBinaryInteger<TB>
+        where TC : unmanaged, IBinaryInteger<TC>
+    {
+        int count = destination.Length;
+        ReadOnlySpan<TA> sa = MemoryMarshal.Cast<byte, TA>(a)[..count];
+        ReadOnlySpan<TB> sb = MemoryMarshal.Cast<byte, TB>(b)[..count];
+        ReadOnlySpan<TC> sc = MemoryMarshal.Cast<byte, TC>(c)[..count];
+
+        for (int i = 0; i < count; i++)
+        {
+            destination[i] = unchecked(
+                (long.CreateTruncating(sa[i]) * scaleA) +
+                (long.CreateTruncating(sb[i]) * scaleB) +
+                long.CreateTruncating(sc[i]));
+        }
+    }
+
     // CreateTruncating, never CreateChecked or CreateSaturating: the reference widens with Rust's
     // `as` cast (num_traits AsPrimitive), which keeps the low 64 bits of a u64 rather than clamping
     // it to i64::MAX. CompressedValues.ReadInteger saturates instead, and is right to - its callers

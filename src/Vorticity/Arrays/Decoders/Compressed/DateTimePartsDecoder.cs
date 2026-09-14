@@ -96,16 +96,31 @@ public sealed class DateTimePartsDecoder : ArrayDecoder
         CanonicalNode subseconds)
     {
         int total = ArrayDecodeContext.CheckedMultiply(length, sizeof(long), "DateTimeParts values");
-        VortexBuffer output = CompressedValues.Allocate(
+
+        // PERF-AUDIT-v2.md R1. UNINITIALIZED, because the fused pass below assigns every element
+        // exactly once -- it opens with `=`, not `+=`, which is precisely what the three-pass form
+        // could not do. At a million rows that is 8 MB of memset in front of 8 MB of stores.
+        VortexBuffer output = CompressedValues.AllocateUninitialized(
             context, total, sizeof(long), Id, out Span<byte> destination);
         Span<long> values = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(destination);
 
-        // Three passes, each monomorphic on one part's physical type, rather than one pass with a
-        // switch per element. Same shape as the reference's three match_each_integer_ptype! blocks.
-        IntegerKernels.WidenScaled(
-            days.Values.Span, days.PType, values, unchecked(SecondsPerDay * divisor));
-        IntegerKernels.AddWidenScaled(seconds.Values.Span, seconds.PType, values, divisor);
-        IntegerKernels.AddWidenScaled(subseconds.Values.Span, subseconds.PType, values, 1);
+        // ONE PASS, NOT THREE. The three-pass form -- a write then two read-modify-writes, each
+        // monomorphic on one part -- walked the 8 MB output three times and touched ~40 MB of
+        // traffic for 24 MB of data. Measured by short-circuiting the whole recomposition on
+        // `datetimeparts` at a million rows: it is **93,2 %** of that scan (1 900 us against 130),
+        // on an axis that reads **1.18**, slower than the reference.
+        //
+        // The three types are resolved before the loop, nested the way `RowKernels.Gather` resolves
+        // its codes, so the loop that runs is monomorphic in all three. Only the shapes a file
+        // actually uses are instantiated, and the corpus has exactly one: I64 days, I32 seconds,
+        // I32 subseconds.
+        IntegerKernels.Recompose(
+            days.Values.Span, days.PType,
+            seconds.Values.Span, seconds.PType,
+            subseconds.Values.Span, subseconds.PType,
+            values,
+            unchecked(SecondsPerDay * divisor),
+            divisor);
 
         return context.Canonical.AddPrimitive(
             storageDType, length, days.Validity, PType.I64, output);
