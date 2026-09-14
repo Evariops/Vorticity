@@ -515,7 +515,7 @@ internal static class ThroughputCheck
         ("chunked_empty_chunks", 0.26),   // 3 passes, spread 0.24-0.27; HELD at 0.26: 3 passes peaked at 0.27, no loosening
         ("chunked_mixed_validity", 1.23),   // 3 passes, spread 1.16-1.24; HELD at 1.23: 3 passes peaked at 1.24, no loosening. THE WORST AXIS OF THE FIFTY: v2 R8c/R8e
         ("chunked_one_chunk", 0.26),   // 3 passes, spread 0.23-0.26; HELD at 0.26: 3 passes peaked at 0.26, no loosening
-        ("chunked_varbinview", 0.07),   // 3 passes, spread 0.07-0.07; was 0.08, -8.7% (v2 R8b)
+        ("chunked_varbinview", 0.06),   // v2 R28 : 0.07 -> 0.06. Deux runs, 3 355 et 3 392 us contre 4 160 et 3 924 (v2 R8b avant)
         ("constant", 0.97),   // 3 passes, spread 0.94-0.97; was 0.97, -0.1%
         ("datetimeparts", 0.83),   // 3 passes, spread 0.78-0.83; was 0.83, -0.5% (v2 R1)
         ("decimal", 0.25),   // 3 passes, spread 0.23-0.25; was 0.27, -7.6%
@@ -547,11 +547,11 @@ internal static class ThroughputCheck
         ("runend", 0.82),   // v2 R29 : 1.22 -> 0.82. Un run complet lit 0.80 [0.788; 0.815] et 149 us contre 240 et 229 avant ; la reference est le haut de cet intervalle
         ("sequence", 0.95),   // 3 passes, spread 0.93-0.95; was 0.95, 0.0%
         ("sparse", 0.65),   // 3 passes, spread 0.61-0.65; was 0.67, -3.1% (v2 R5)
-        ("struct", 0.07),   // 3 passes, spread 0.06-0.07; was 0.07, -6.8%
-        ("table_mixed", 0.07),   // 3 passes, spread 0.06-0.07; was 0.07, -2.6% (B6/D3)
+        ("struct", 0.04),   // v2 R28 : 0.07 -> 0.04, STALE sur deux runs. Ses colonnes utf8 sont des varbinview, donc elles passent par ValidateViews
+        ("table_mixed", 0.06),   // v2 R28 : 0.07 -> 0.06. Deux runs, 6 011 et 6 076 us contre 7 615 et 7 129 (B6/D3 avant)
         ("table_wide", 0.10),   // 3 passes, spread 0.09-0.10; HELD at 0.10: 3 passes peaked at 0.10, no loosening (B6/D3)
         ("varbin", 0.04),   // 3 passes, spread 0.04-0.05; HELD at 0.04: 3 passes peaked at 0.05, no loosening
-        ("varbinview", 0.06),   // 3 passes, spread 0.06-0.06; was 0.08, -25.5%
+        ("varbinview", 0.05),   // v2 R28 : 0.06 -> 0.05. Deux runs consecutifs, 2 636 et 2 693 us contre 3 398 et 3 623 avant ; intervalles [0.041; 0.047] et [0.041; 0.049]
         ("variant", 6.51),   // 3 passes, spread 6.33-6.87; HELD at 6.51: 3 passes peaked at 6.87, no loosening
         ("zigzag", 0.82),   // 3 passes, spread 0.81-0.84; HELD at 0.82: 3 passes peaked at 0.84, no loosening
         ("zstd", 1.06),   // 3 passes, spread 1.04-1.08; HELD at 1.06: 3 passes peaked at 1.08, no loosening

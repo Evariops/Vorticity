@@ -116,7 +116,8 @@ public sealed class VarBinViewDecoder : ArrayDecoder
             {
                 // Inlined: the value is the first `size` of the 12 bytes that follow, so it can
                 // never escape the view. Only the UTF-8 rule can fail.
-                if (requireUtf8 && !Utf8.IsValid(view.Slice(4, (int)size)))
+                if (requireUtf8 && !IsInlineAscii(view, (int)size)
+                    && !Utf8.IsValid(view.Slice(4, (int)size)))
                 {
                     ThrowNotUtf8(i);
                 }
@@ -151,6 +152,43 @@ public sealed class VarBinViewDecoder : ArrayDecoder
                 ThrowNotUtf8(i);
             }
         }
+    }
+
+    /// <summary>
+    /// True when an inlined value is all-ASCII, and therefore valid UTF-8, without a call.
+    /// </summary>
+    /// <param name="view">The whole sixteen-byte view; its bytes 4..16 hold the value.</param>
+    /// <param name="size">The value's length, twelve or fewer by the inline rule.</param>
+    /// <remarks>
+    /// PERF-AUDIT-v2.md R28, and the counts chose this shape rather than the one the point
+    /// proposed. `ViewKernels` replaces a per-row <c>Utf8.IsValid</c> with a whole-heap pass plus
+    /// one byte test per boundary, which works because those encodings TILE their heap. A
+    /// VarBinView does not tile, and on the 1M axis **65 % of its views carry their value INLINE**
+    /// -- inside the sixteen bytes of the view itself, where there is no buffer to sweep. So the
+    /// equivalence could have covered at most the other 35 %, and this covers the 65 instead.
+    ///
+    /// THE TWELVE BYTES ARE ALWAYS READABLE, which is what makes this branchless: the value lives
+    /// at [4, 4 + size) of a view that is exactly sixteen bytes, so the two loads below are in
+    /// bounds whatever `size` is, and the mask is what restricts them to the value. A first attempt
+    /// walked the bytes in a loop instead and was MEASURED SLOWER than the call it replaced --
+    /// `varbinview` 3 398 -> 4 708 us -- because on sixteen bytes an intrinsified validator beats a
+    /// scalar loop. The cost is the call, so what replaces it must not be a loop.
+    ///
+    /// Everything with a high bit set falls through to <c>Utf8.IsValid</c>, which decides. Nothing
+    /// here changes what is accepted.
+    /// </remarks>
+    private static bool IsInlineAscii(ReadOnlySpan<byte> view, int size)
+    {
+        ulong low = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(view.Slice(4, 8));
+        ulong high = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view.Slice(12, 4));
+
+        // `size` is at most twelve, so the second shift is at most 32 and neither is the
+        // undefined-by-masking case a 64-bit shift would be.
+        ulong lowMask = size >= 8 ? ulong.MaxValue : (1UL << (size * 8)) - 1;
+        ulong highMask = size <= 8 ? 0UL : (1UL << ((size - 8) * 8)) - 1;
+
+        const ulong HighBits = 0x8080_8080_8080_8080UL;
+        return (((low & lowMask) | (high & highMask)) & HighBits) == 0;
     }
 
     private static void ThrowPrefixMismatch(int row) =>
