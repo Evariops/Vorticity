@@ -22,6 +22,8 @@
 # * The BenchmarkDotNet classes. They are a direction, not a gate (§4.2), and 59 seconds of them
 #   would double this script for a number nobody can fail on.
 # * `--throughput --write`, 8 minutes, and it has no ratchet table yet (§3.2).
+# * The Rust cross-check, which needs cargo and a minute: `gate.sh --crosscheck` adds it, and
+#   `bench/crosscheck.sh` runs it alone.
 #
 # A RED RATIO IS NOT BELIEVED THE FIRST TIME while the axes are this close to their margins: the
 # script says so and tells you to replay. Two reds out of three is a regression; one is noise, and
@@ -31,7 +33,11 @@ set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project="$root/bench/Vorticity.Benchmarks"
 throughput=0
-[ "${1:-}" = "--throughput" ] && throughput=1
+crosscheck=0
+for flag in "$@"; do
+    [ "$flag" = "--throughput" ] && throughput=1
+    [ "$flag" = "--crosscheck" ] && crosscheck=1
+done
 
 ratchets=(PathAllocationTests ScanAllocationTests WriteAllocationTests WrittenSizeTests
           FlatLayoutDecodeCountTests RoundTripCountTests LiveMemoryTests CorpusCoverageTests)
@@ -66,6 +72,7 @@ step "--ffi-check" dotnet run -c Release --project "$project" -- --ffi-check
 step "--ratio-check" dotnet run -c Release --project "$project" -- --ratio-check
 [ "$throughput" = 1 ] && step "--throughput --check" \
     dotnet run -c Release --project "$project" -- --throughput --check
+[ "$crosscheck" = 1 ] && step "cross-check (cargo)" "$root/bench/crosscheck.sh"
 
 if [ ${#failed[@]} -eq 0 ]; then
     echo "gate: green in ${SECONDS}s."

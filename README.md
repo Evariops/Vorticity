@@ -33,7 +33,7 @@ file format (LF AI & Data, formerly SpiralDB).
 |---|---|
 | Conformance corpus | **821 of 821** files in scope, all read back value for value against the Rust sidecars — 2.51 M rows, 5.60 M values and validity bits compared |
 | Round trip | all 821 written by Vorticity and read back, 2.51 M rows compared |
-| **Cross-check** | 819 of 820 **read by Vortex Rust**, 2.50 M rows compared scalar by scalar against its own file. The one that disagrees is `experimental_patched_array_editions_off`: we now read `vortex.patched` and write it back, and the 0.86.1 reference does not know that encoding |
+| **Cross-check** | 819 of 820 **read by Vortex Rust**, 2.50 M rows compared scalar by scalar against its own file, and **no file disagrees** (`bench/crosscheck.sh`). The 820th is skipped rather than failed: `experimental_patched_array_editions_off` carries a `vortex.patched` that belongs to no edition, and the verifier pins two — so it is the REFERENCE's own bytes that cannot be read there, before ours are looked at. Our written copy of that file contains no `vortex.patched` at all |
 | Tests | 5237, on a corpus of 821 files |
 | Native AOT | `vxdump` publishes with no trim or AOT warnings and opens 818 of 819 corpus files |
 

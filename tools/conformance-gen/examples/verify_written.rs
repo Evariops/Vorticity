@@ -71,6 +71,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         let mut failures: Vec<String> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
         let mut rows_compared: u64 = 0;
         let mut files_compared: usize = 0;
 
@@ -79,6 +80,22 @@ fn main() -> anyhow::Result<()> {
             let theirs = original.join(rel);
             if !theirs.exists() {
                 failures.push(format!("{}: no original to compare against", rel.display()));
+                continue;
+            }
+
+            // A FILE THE REFERENCE CANNOT READ ON ITS OWN SIDE IS NOT A DISAGREEMENT. The session
+            // above pins two editions, and the corpus deliberately contains a file written with
+            // editions OFF -- `experimental_patched_array_editions_off`, whose `vortex.patched`
+            // belongs to no edition. Asking a pinned session to read it fails on the REFERENCE's
+            // own bytes, before ours are looked at, and reporting that as "1 of 820 files
+            // disagreed" said the opposite of what had happened for as long as anyone remembered
+            // to run this (BENCH-AUDIT.md B7).
+            if let Err(error) = read_all(&session, &theirs).await {
+                skipped.push(format!(
+                    "{}: the reference's own file is unreadable under the enabled editions \
+                     ({error}); nothing to compare against",
+                    rel.display()
+                ));
                 continue;
             }
 
@@ -95,6 +112,16 @@ fn main() -> anyhow::Result<()> {
             "CROSS-CHECK: {files_compared} Vorticity-written files read by Vortex Rust, \
              {rows_compared} rows compared scalar by scalar against the reference's own file."
         );
+
+        if !skipped.is_empty() {
+            println!(
+                "  {} file(s) skipped, the reference's own bytes being unreadable here:",
+                skipped.len()
+            );
+            for skip in &skipped {
+                println!("    {skip}");
+            }
+        }
 
         if !failures.is_empty() {
             for failure in failures.iter().take(40) {
