@@ -86,41 +86,6 @@ internal static class ComparisonKernels
         }
     }
 
-    /// <summary>
-    /// The integer comparison loop, reachable without an arena, for
-    /// <c>FilterKernelBenchmarks</c>.
-    /// </summary>
-    /// <param name="bytes">The column's values, little-endian.</param>
-    /// <param name="ptype">Their physical type; must be a signed integer.</param>
-    /// <param name="op">The operator, with the column on the left.</param>
-    /// <param name="wanted">The literal.</param>
-    /// <param name="destination">One <see cref="Trilean"/> state per row.</param>
-    /// <remarks>
-    /// Internal and for the benchmark only. It exists so that benchmark's control arm can be the
-    /// LIBRARY rather than a hand-written copy of what the library used to look like -- the failure
-    /// mode FsstKernelBenchmarks documents, where a benchmark kept demonstrating a speedup that had
-    /// already been collected because both of its arms had drifted into the same shape.
-    /// </remarks>
-    internal static void CompareForBenchmark(
-        ReadOnlySpan<byte> bytes, PType ptype, ComparisonOp op, long wanted, Span<byte> destination)
-    {
-        switch (ptype)
-        {
-            case PType.I8:
-                CompareOp<sbyte, long>(bytes, default, op, wanted, destination);
-                break;
-            case PType.I16:
-                CompareOp<short, long>(bytes, default, op, wanted, destination);
-                break;
-            case PType.I32:
-                CompareOp<int, long>(bytes, default, op, wanted, destination);
-                break;
-            default:
-                CompareOp<long, long>(bytes, default, op, wanted, destination);
-                break;
-        }
-    }
-
     /// <summary>Evaluates <c>column IN (literals)</c>, which is an OR of equalities.</summary>
     /// <param name="arena">The arena.</param>
     /// <param name="nodeIndex">The column.</param>

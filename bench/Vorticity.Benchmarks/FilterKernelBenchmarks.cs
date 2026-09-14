@@ -17,7 +17,11 @@
 //
 //   * HOISTED      - all three branches lifted out of the loop, still scalar, still one value at a
 //                    time. The FLOOR, and the baseline.
-//   * LIBRARY      - `ComparisonKernels.Compare` as it stands, through its own entry point. Its
+//   * LIBRARY      - `ComparisonKernels.Compare` as it stands, through THE entry point the scan
+//                    calls, over an arena node built here from the same values the other arm sees.
+//                    It went through a second entry point, `CompareForBenchmark`, until 2026-09-14:
+//                    a shape that could drift from `Compare` without anything noticing, which is
+//                    the failure this arm exists to prevent (BENCH-AUDIT.md E3). Its
 //                    distance from HOISTED is what the library still pays, including the validity
 //                    resolution and the bounds checks the bare arm does not have. A benchmark whose
 //                    control is a hand-written copy of "the library shape" cannot say whether the
@@ -36,8 +40,11 @@ using System.Runtime.InteropServices;
 
 using BenchmarkDotNet.Attributes;
 
+using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
+using Vorticity.Types;
 
 namespace Vorticity.Benchmarks;
 
@@ -53,6 +60,8 @@ public class FilterKernelBenchmarks
     private byte[] _values = [];
     private byte[] _destination = [];
     private long _wanted;
+    private CanonicalArena? _arena;
+    private int _node;
 
     /// <summary>Rows compared per operation: one split's worth, several times over.</summary>
     [Params(65536)]
@@ -72,7 +81,25 @@ public class FilterKernelBenchmarks
 
         // Selective, like the predicate the scan benchmarks use: a narrow band, not half the column.
         _wanted = 1024;
+
+        // THE SAME BYTES IN AN ARENA, so the library arm can go through `Compare` -- which needs a
+        // node, not a span -- while still comparing the values the bare arm compares. Building the
+        // node here rather than opening a corpus file keeps the two arms on one array and keeps the
+        // row count the parameter says it is.
+        DTypeArena types = new DTypeArena();
+        _arena = new CanonicalArena();
+        VortexBuffer buffer = _arena.AllocateUninitialized(_values.Length, 8, out Span<byte> into);
+        _values.AsSpan().CopyTo(into);
+        _node = _arena.AddPrimitive(
+            types.Primitive(PType.I64, Nullability.NonNullable),
+            Count,
+            Validity.NonNullable,
+            PType.I64,
+            buffer);
     }
+
+    [GlobalCleanup]
+    public void Cleanup() => _arena?.Reset();
 
     /// <summary>What the library actually runs, through its own entry point.</summary>
     /// <remarks>
@@ -86,8 +113,8 @@ public class FilterKernelBenchmarks
     [Benchmark(Description = "library")]
     public int Library()
     {
-        ComparisonKernels.CompareForBenchmark(
-            _values, Vorticity.Types.PType.I64, ComparisonOp.Less, _wanted, _destination);
+        ComparisonKernels.Compare(
+            _arena!, _node, ComparisonOp.Less, FilterLiteral.From(_wanted), _destination);
         return _destination.Length;
     }
 
