@@ -237,7 +237,8 @@ internal static class CanonicalConcat
         // not a lucky one: chunk buffers come either from consecutive segments of the same mapped
         // file or from consecutive bump allocations in the same arena. Concatenating them then
         // means memcpying several megabytes onto a byte-identical image of themselves.
-        if (TryBorrowContiguous(arena, chunks, ptype, totalBytes, out VortexBuffer borrowed))
+        if (SameKind(arena, chunks, ptype) &&
+            TryBorrowRun(arena, chunks, width, totalBytes, out VortexBuffer borrowed))
         {
             return arena.AddPrimitive(dtype, length, validity, ptype, borrowed);
         }
@@ -276,6 +277,24 @@ internal static class CanonicalConcat
         return arena.AddPrimitive(dtype, length, validity, ptype, values);
     }
 
+    /// <summary>Whether every chunk holds <paramref name="ptype"/>, so the borrow may be tried.</summary>
+    /// <remarks>
+    /// A mismatch is a format error, but it is NOT raised here: the copying path raises it with the
+    /// chunk index in the message, and declining is what keeps this a fast-path test.
+    /// </remarks>
+    private static bool SameKind(CanonicalArena arena, ReadOnlySpan<int> chunks, PType ptype)
+    {
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            if (arena.GetNode(chunks[i]).PType != ptype)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /// <summary>
     /// The chunks' values as ONE buffer, without copying, when they are already adjacent and in
     /// order.
@@ -286,8 +305,21 @@ internal static class CanonicalConcat
     /// where the previous one ended, and the run must add up to <paramref name="totalBytes"/>.
     /// Anything else - a repeated chunk, a reordered one, alignment padding between two segments,
     /// a chunk whose buffer is shorter than its declared length - fails the walk and takes the
-    /// copy. A physical-type disagreement is still a FORMAT ERROR and is raised by the copying
-    /// path, so this one declines rather than deciding.
+    /// copy.
+    /// </para>
+    /// <para>
+    /// PERF-AUDIT-v2.md R8a. Taken by WIDTH rather than by <c>PType</c>, since a decimal run has a
+    /// storage width and no ptype and the walk never looked at anything else. The kind check each
+    /// caller needs -- same physical type, same decimal storage -- stays with the caller, which is
+    /// also where a disagreement is a FORMAT ERROR rather than a reason to decline.
+    /// </para>
+    /// <para>
+    /// IT FIRES MORE OFTEN THAN IT LOOKS, AND FAILS FOR ONE REASON. Counted over the fifty files of
+    /// a million: 1 672 borrows out of 2 093 attempts, and every one of the 421 failures is a
+    /// column whose chunks carry a validity bitmap -- the counts match exactly, on three different
+    /// corpora. Decoding such a chunk allocates its values AND its bits, so the next chunk's values
+    /// no longer start where the previous one ended. That is R8e, and it is why a nullable chunked
+    /// column never borrows.
     /// </para>
     /// <para>
     /// The borrowed bytes outlive the result for the same reason every other decoder's do: they
@@ -295,12 +327,11 @@ internal static class CanonicalConcat
     /// node in that same arena.
     /// </para>
     /// </remarks>
-    private static bool TryBorrowContiguous(
-        CanonicalArena arena, ReadOnlySpan<int> chunks, PType ptype, int totalBytes,
+    private static bool TryBorrowRun(
+        CanonicalArena arena, ReadOnlySpan<int> chunks, int width, int totalBytes,
         out VortexBuffer values)
     {
         values = VortexBuffer.Empty;
-        int width = ptype.ByteWidth();
 
         ReadOnlySpan<byte> first = default;
         ReadOnlySpan<byte> previous = default;
@@ -311,11 +342,6 @@ internal static class CanonicalConcat
         for (int i = 0; i < chunks.Length; i++)
         {
             CanonicalNode chunk = arena.GetNode(chunks[i]);
-            if (chunk.PType != ptype)
-            {
-                return false;
-            }
-
             VortexBuffer buffer = chunk.Values;
             ReadOnlySpan<byte> span = buffer.Span;
 
@@ -383,7 +409,29 @@ internal static class CanonicalConcat
         }
 
         int totalBytes = ArrayDecodeContext.CheckedMultiply(length, width, "concatenated decimals");
-        VortexBuffer values = CanonicalSupport.Allocate(context, totalBytes, Align, out Span<byte> writable);
+
+        // PERF-AUDIT-v2.md R8a. THE WIDENING PATH BELOW NEVER RUNS on anything measured: across the
+        // 856-file corpus and the fifty files of a million, every chunk of every decimal column
+        // already carried the widest storage, so the loop was `CopyTo` and nothing else. Which
+        // makes this exactly `ConcatPrimitive`'s case and it gets the same two answers.
+        //
+        // FIRST, THE BORROW. Chunks decoded into one arena usually land end to end, and then the
+        // concatenation is a memcpy of several megabytes onto a byte-identical image of itself.
+        // Measured by short-circuiting the copy on `chunked_decimal` at a million rows: the loop is
+        // **75 % of that scan** (447 us against 110).
+        if (NoWideningNeeded(arena, chunks, width) &&
+            TryBorrowRun(arena, chunks, width, totalBytes, out VortexBuffer contiguous))
+        {
+            return arena.AddDecimal(
+                dtype, length, validity, storage, dtype.Precision, dtype.Scale, contiguous);
+        }
+
+        // SECOND, NO ZERO-FILL. The chunks tile the output when no widening is needed, and when one
+        // is, the fill below writes the sign bytes of every row it touches. Either way the memset
+        // is paid for nothing -- and the tail is cleared if the chunks come up short, exactly as
+        // `ConcatPrimitive` does, so a length disagreement cannot leak pool bytes into a column.
+        VortexBuffer values = CanonicalSupport.AllocateUninitialized(
+            context, totalBytes, Align, out Span<byte> writable);
 
         int offset = 0;
         for (int i = 0; i < chunks.Length; i++)
@@ -409,8 +457,34 @@ internal static class CanonicalConcat
             }
         }
 
+        // The guard that pays for `AllocateUninitialized`: if the chunks' buffers came up short of
+        // their declared rows, the rest is zeroed rather than left as the pool found it.
+        if (offset < totalBytes)
+        {
+            writable[offset..].Clear();
+        }
+
         return arena.AddDecimal(
             dtype, length, validity, storage, dtype.Precision, dtype.Scale, values);
+    }
+
+    /// <summary>Whether every chunk already stores at <paramref name="width"/> bytes a row.</summary>
+    /// <remarks>
+    /// The borrow needs the bytes to be usable as they lie; a narrower chunk has to be sign-extended
+    /// into place and cannot be. Across everything measured this is true of every decimal column
+    /// there is, which is why the widening loop below has never actually run.
+    /// </remarks>
+    private static bool NoWideningNeeded(CanonicalArena arena, ReadOnlySpan<int> chunks, int width)
+    {
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            if (DecimalStorage.ByteWidth(arena.GetNode(chunks[i]).Storage) != width)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static int ConcatVarBinView(

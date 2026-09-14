@@ -503,8 +503,12 @@ internal static class ThroughputCheck
         ("bool_bit_offset_straddle", 0.84),   // 3 processes, spread 0.83-0.84; REBASED UP from 0.83 (k>1): +0.8%
         ("bytebool", 1.05),   // 3 processes, spread 1.02-1.05; REBASED UP from 1.04 (k>1): +1.4%
         ("chunked", 0.26),   // 3 processes, spread 0.24-0.26; was 0.29, -11.4%
+        ("chunked_bool", 0.72),   // 5 processes, spread 0.70-0.72; first calibration (v2 R8)
+        ("chunked_decimal", 0.26),   // 5 processes, spread 0.21-0.26; first calibration, after R8a (was 1.28 before it)
         ("chunked_empty_chunks", 0.26),   // 3 processes, spread 0.23-0.26; was 0.27, -5.4%
+        ("chunked_mixed_validity", 1.23),   // 5 processes, spread 1.17-1.23; first calibration. THE WORST AXIS OF THE FIFTY: v2 R8c/R8e
         ("chunked_one_chunk", 0.26),   // 3 processes, spread 0.24-0.26; was 0.30, -14.6%
+        ("chunked_varbinview", 0.09),   // 5 processes, spread 0.09-0.09; first calibration (v2 R8b)
         ("constant", 0.97),   // 3 processes, spread 0.96-0.97; was 1.00, -3.3%
         ("datetimeparts", 1.21),   // 3 processes, spread 1.11-1.22; HELD at 1.21: 3 processes peaked at 1.22, no loosening
         ("decimal", 0.27),   // 3 processes, spread 0.26-0.27; REBASED UP from 0.27 (k>1): +0.3%
