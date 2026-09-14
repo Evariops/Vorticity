@@ -23,7 +23,7 @@ dotnet run -c Release PROJ -- <arguments>
 | the OnPair token concatenation | `-- OnPairKernel` | 6 s | 48% of an OnPair scan, against the per-code switch it replaced |
 | doubting a kernel figure's buffers | `-- --explore Alignment` | 25 s | the same kernels 64-byte aligned and eight bytes past: 0.3-1.8% on M4 Pro |
 | whether your change moved anything | `bench/compare.sh --record before <filter>`, then `--record after`, then `bench/compare.sh before after` | 2x the class | Mann-Whitney per case: Faster / Same / Slower |
-| a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust |
+| a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust. **Reports, never gates**: a run of one file is +32% on our side (B8) |
 | the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 50 files |
 | a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 50 files, against Rust |
 | a lane, or the degree of parallelism | `-- LanesBench` (`--full` walks 1, 2, 4, 8) | 15 s | ours at n lanes against the reference's pool at n workers, threads pinned both sides |

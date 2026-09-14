@@ -701,6 +701,28 @@ internal static class ThroughputCheck
             return 2;
         }
 
+        // THE NARROW FORM DOES NOT GATE (BENCH-AUDIT.md B8). Measured on identical bytes: the same
+        // file reads 6 452 us when the run holds three files and 8 557 us when it holds one --
+        // +32 % on OUR side, with the reference flat at 5 071-5 235 either way. It is not the rank
+        // in the run (three files behave like fifty-four) and not the process state after 49
+        // decodes: it is dynamic PGO. `DOTNET_TieredCompilation=0` or `DOTNET_TieredPGO=0` closes
+        // the gap to 0.4 % (7 029 against 7 056), so a run that measures one file is judging code
+        // the runtime never finished optimizing.
+        //
+        // A systematic bias is worse than dispersion, because it looks like a result: `fsst` came
+        // out at 1.68 against a 1.51 ceiling on a healthy repository. So the filter and `--check`
+        // are refused together, and the message says which of the two to drop.
+        if (check && only.Length > 0 && recalibrate == 0)
+        {
+            Console.Error.WriteLine(
+                $"`--throughput {string.Join(" ", only)} --check` is refused: a run that measures " +
+                "a few files judges code the JIT has not finished optimizing, which costs OUR " +
+                "side up to 32% and the reference nothing (BENCH-AUDIT.md B8). Either gate on the " +
+                "whole axis:\n  --throughput --check\nor measure the family without gating:\n  " +
+                $"--throughput {string.Join(" ", only)}");
+            return 2;
+        }
+
         Manifest? manifest = ReadManifest(root, out string manifestProblem);
         if (check && manifest is null)
         {

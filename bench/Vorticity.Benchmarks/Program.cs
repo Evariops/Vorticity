@@ -358,7 +358,9 @@ internal static class Program
                                      --rebase          let a reference rise, only where k > 1
                                      --lanes N         adds `full scan, N lanes`, threads pinned
           --throughput [family…]   50 encodings at a million rows, ~55 s
-                                     --check           hold each ratio to its ceiling
+                                     --check           hold each ratio to its ceiling. Refused
+                                                       with a family filter: a short run is +32%
+                                                       on our side (BENCH-AUDIT.md B8)
                                      --quick           23 s instead of 70; a direction
                                      --take            64 rows spread over each file
                                      --write           read back out to a discarding sink, ~8 min
