@@ -342,7 +342,7 @@ public sealed class OnPairDecoder : ArrayDecoder
     /// decreases and spans at most <see cref="MaxTokenSize"/>, so the table needs no checking of
     /// its own and every size fits comfortably in the high half.
     /// </remarks>
-    private static void BuildTokenTable(
+    internal static void BuildTokenTable(
         ReadOnlySpan<byte> dictOffsets, PType offsetsPType, int tokenCount, Span<long> tokens)
     {
         int previous = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, 0);
@@ -355,7 +355,11 @@ public sealed class OnPairDecoder : ArrayDecoder
     }
 
     /// <summary>The concatenation itself, with the code width resolved once.</summary>
-    private static int Concatenate(
+    /// <remarks>
+    /// INTERNAL RATHER THAN PRIVATE so `OnPairKernelBenchmarks` can put it against the loop it
+    /// replaced in one process (BENCH-AUDIT.md §3.2). It has no callers outside this file.
+    /// </remarks>
+    internal static int Concatenate(
         ReadOnlySpan<byte> codes,
         PType codesPType,
         int codeStart,
