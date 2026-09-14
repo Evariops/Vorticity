@@ -140,7 +140,8 @@ internal sealed class ZonePruner
             return true;
         }
 
-        foreach (int zone in column.Zones(rows))
+        ZoneRange zones = column.Zones(rows);
+        for (int zone = zones.Start; zone < zones.End; zone++)
         {
             if (ZoneMayMatch(column, zone, op, value))
             {
@@ -159,7 +160,8 @@ internal sealed class ZonePruner
             return true;
         }
 
-        foreach (int zone in column.Zones(rows))
+        ZoneRange zones = column.Zones(rows);
+        for (int zone = zones.Start; zone < zones.End; zone++)
         {
             ZoneBounds bounds = column.Bounds(zone);
             if (!bounds.HasNullCount)

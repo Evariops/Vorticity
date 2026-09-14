@@ -50,22 +50,30 @@ internal sealed class ZoneColumn
         return end - start;
     }
 
-    /// <summary>The zones overlapping <paramref name="rows"/>.</summary>
+    /// <summary>The zones overlapping <paramref name="rows"/>, as a half-open index range.</summary>
     /// <param name="rows">A row range in the column's own coordinates.</param>
-    internal IEnumerable<int> Zones(RowRange rows)
+    /// <returns>The first zone and the one past the last; empty when nothing overlaps.</returns>
+    /// <remarks>
+    /// A RANGE AND NOT AN ITERATOR. PERF-AUDIT-v2.md F-5: this was an `IEnumerable&lt;int&gt;` built
+    /// with `yield`, so every call allocated an iterator to hand back consecutive integers -- and it
+    /// is called once per split and per predicate, **128 times** on the corpus filter that
+    /// `PathAllocationTests` holds. Two `int`s say the same thing, and the callers were already
+    /// plain `foreach` loops that a `for` expresses without losing anything.
+    /// </remarks>
+    internal ZoneRange Zones(RowRange rows)
     {
         if (ZoneLength <= 0 || rows.Length <= 0)
         {
-            yield break;
+            return default;
         }
 
         long first = rows.Start / ZoneLength;
-        long last = (rows.End - 1) / ZoneLength;
-        long limit = Math.Min(last, _zones.Length - 1);
-
-        for (long z = first; z <= limit; z++)
-        {
-            yield return (int)z;
-        }
+        long last = Math.Min((rows.End - 1) / ZoneLength, _zones.Length - 1);
+        return last < first ? default : new ZoneRange((int)first, (int)last + 1);
     }
 }
+
+/// <summary>A half-open range of zone indices.</summary>
+/// <param name="Start">The first zone.</param>
+/// <param name="End">One past the last; equal to <paramref name="Start"/> when empty.</param>
+internal readonly record struct ZoneRange(int Start, int End);

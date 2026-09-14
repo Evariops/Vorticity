@@ -91,6 +91,9 @@ public sealed class PathAllocationTests
     /// <summary>Runs measured, of which the minimum is the answer.</summary>
     private const int Runs = 10;
 
+    /// <summary>Samples taken at each end of the retention check, of which the minimum counts.</summary>
+    private const int Samples = 3;
+
     /// <summary>
     /// The ceilings, in bytes. LOWER THESE BY HAND when a change earns it, in the same commit, and
     /// never raise one without saying in the commit message what grew and why that is acceptable.
@@ -130,14 +133,16 @@ public sealed class PathAllocationTests
         ("full scan", File, 190_976, FullScan),
         ("projected scan, 1 of 5 columns", File, 134_144, ProjectedScan),
         ("take 64 rows from 64 splits", File, 192_000, ScatteredTake),
-        ("selective filter, pruning on", File, 165_376, PrunedFilter),
+        ("selective filter, pruning on", File, 154_112, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
         // masks. The two allocate differently by construction, and only one of them was watched.
         // The first thing the pair says is not what one would guess: on this file PRUNING ALLOCATES
-        // 30 144 B MORE than not pruning (165 144 against 135 000) while keeping ~100 rows of
-        // 65 536. Written up as PERF-AUDIT-v2.md F-9; the ceiling here only pins it.
+        // MORE than not pruning while keeping ~100 rows of 65 536. It was 30 144 B when the pair was
+        // added; F-5 took 11 264 of that off by making `ZoneColumn.Zones` a range instead of an
+        // iterator, and 18 880 B remain. Written up as PERF-AUDIT-v2.md F-9; the ceilings here only
+        // pin it.
         ("selective filter, pruning off", File, 135_168, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
@@ -197,9 +202,23 @@ public sealed class PathAllocationTests
     /// The floor is a steady-state figure, so the paths must not keep growing across runs.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The floor alone cannot tell "this path costs 190 kB every time" from "this path costs 190 kB
     /// once and 400 kB thereafter", and only the first is a bounded open. A cache that never
     /// evicts, or a static list appended to per open, shows up here and nowhere else in the suite.
+    /// </para>
+    /// <para>
+    /// BOTH ENDS ARE FLOORS, for the reason the class comment gives about the other test: a tiered
+    /// promotion allocates, and a single measured run is whichever one happened to absorb it. This
+    /// compared two single samples, and it was a latent flake -- 224 bytes, the size of one
+    /// promotion -- that only started landing once F-5 took 11 kB off the filter path and moved
+    /// where the promotions fall. It surfaced on `full scan`, an axis that change does not touch,
+    /// which is how it was identified as the estimator's problem and not the path's.
+    /// </para>
+    /// <para>
+    /// The assertion is unchanged and so is what it catches: a path that retains across opens
+    /// raises its floor too, and a floor is the steady-state figure retention actually moves.
+    /// </para>
     /// </remarks>
     [Fact]
     public void TheLastRunOfAPathCostsWhatTheFirstDid()
@@ -213,18 +232,27 @@ public sealed class PathAllocationTests
                 Complete(path(file));
             }
 
-            long first = Measure(path, file);
+            long first = long.MaxValue;
+            for (int i = 0; i < Samples; i++)
+            {
+                first = Math.Min(first, Measure(path, file));
+            }
+
             for (int i = 0; i < Runs; i++)
             {
                 Complete(path(file));
             }
 
-            long last = Measure(path, file);
+            long last = long.MaxValue;
+            for (int i = 0; i < Samples; i++)
+            {
+                last = Math.Min(last, Measure(path, file));
+            }
             Assert.True(
                 last <= first,
                 string.Create(
                     CultureInfo.InvariantCulture,
-                    $"{axis} allocated {first} B early and {last} B after {Runs} more opens, so something is retained across opens"));
+                    $"{axis} allocated {first} B early and {last} B after {Runs} more opens (floor of {Samples} at each end), so something is retained across opens"));
         }
     }
 
