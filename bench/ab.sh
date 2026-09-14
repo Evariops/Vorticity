@@ -61,6 +61,16 @@ build_side() {
     git -C "$root" worktree add --detach "$tree" "$sha" > /dev/null 2>&1 || {
         echo "could not create a worktree at $tree" >&2; return 1; }
     trees+=("$tree")
+    # THE DESTINATION IS CLEARED FIRST, and B15 is the whole reason. `cp -R src dst` copies INTO
+    # dst when dst already exists, and every commit since the scenario project was created carries
+    # one -- so the copy produced bench/Vorticity.Benchmarks.Scenarios/Vorticity.Benchmarks.
+    # Scenarios/, both source trees compiled together, and the build died on 29 errors: five CS0579
+    # for duplicated assembly attributes, then CS0101 and CS0111 on every member of ScenarioSet.
+    # The script then blamed "the scenario project does not build against <sha>", which is the
+    # wrong cause -- the project builds fine, the copy doubled. Replacing rather than merging is
+    # also what the trick means: TODAY'S scenarios, that commit's library, with nothing of that
+    # commit's own copy left behind.
+    rm -rf "$tree/bench/$project"
     cp -R "$root/bench/$project" "$tree/bench/$project"
     rm -rf "$tree/bench/$project/bin" "$tree/bench/$project/obj"
     dotnet build "$tree/bench/$project" -c Release -v q --nologo > "$tree/build.log" 2>&1 || {
@@ -79,5 +89,10 @@ if [ -n "$after_commit" ]; then
     after_args=(--after "$side_dir")
 fi
 
+# `"${after_args[@]}"` ON AN EMPTY ARRAY IS AN UNBOUND VARIABLE under `set -u` in bash 3.2, which is
+# what /bin/bash is on macOS -- so the form WITHOUT --after, the one the header documents first,
+# died on "after_args[@]: unbound variable" even once B15's copy was fixed. The `+` expansion is the
+# portable spelling: expand to nothing when unset, to the words when set. Same shape as the
+# `"${trees[@]:-}"` in cleanup, and for the same reason.
 dotnet run -c Release --project "$root/bench/Vorticity.Benchmarks" -- \
-    --ab "$before_dir" "$root/$file" "$@" "${after_args[@]}"
+    --ab "$before_dir" "$root/$file" "$@" ${after_args[@]+"${after_args[@]}"}
