@@ -21,6 +21,7 @@
 // 65 536 codes over a 4 096-token dictionary of 1 to 16 bytes: the token count OnPair actually
 // reaches (`MaxTokenCount` is 1 << 16) and the size range its wide store is built around.
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 using BenchmarkDotNet.Attributes;
@@ -53,6 +54,18 @@ public class OnPairKernelBenchmarks
     private byte[] _dictionary = [];
     private byte[] _destination = [];
     private long[] _table = [];
+
+    /// <summary>
+    /// What one invocation moves: <c>Codes</c> codes, and the tokens they concatenate.
+    /// </summary>
+    /// <param name="parameters">Unused; this class has no <c>[Params]</c>.</param>
+    /// <remarks>
+    /// The byte count is the AVERAGE token size times the codes: the sizes are uniform on
+    /// 1..<see cref="MaxTokenSize"/>, so a code writes 8.5 bytes on average.
+    /// </remarks>
+    public static (long Rows, long Bytes) BenchmarkWork(
+        string method, IReadOnlyDictionary<string, object?> parameters) =>
+        (Codes, (Codes * (MaxTokenSize + 1)) / 2);
 
     [GlobalSetup]
     public void Setup()

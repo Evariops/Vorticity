@@ -127,6 +127,8 @@ public sealed class BenchmarkConfig : ManualConfig
         // `Faster` / `Same` / `Slower`. BENCH-AUDIT.md C3 proposed 3%; the rule it automates says
         // 5%, so 5% is what the column carries -- a threshold that disagrees with the rule it
         // stands for would be worse than no column.
+        // ns/row and GB/s for the classes that declare what one invocation moves (C6).
+        AddColumn(new PerRowColumn(), new ThroughputColumn());
         AddColumn(new StatisticalTestColumn(
             new PercentValue(5).ToThreshold()));
 

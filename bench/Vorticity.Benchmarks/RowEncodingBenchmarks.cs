@@ -70,11 +70,55 @@ public class RowEncodingBenchmarks
         _fields = new RowSortField[_batch.FieldCount];
         Array.Fill(_fields, RowSortField.Ascending);
 
-        // Printed rather than returned, because the interesting figures are per ROW and per BYTE and
-        // BenchmarkDotNet reports neither: the mean below divides by these two.
-        using RowKeys probe = RowEncoder.Encode(_batch, _fields);
-        Console.Error.WriteLine(
-            $"ROWENC {Entry}: rows={_batch.RowCount} fields={_batch.FieldCount} keyBytes={probe.TotalBytes}");
+    }
+
+    /// <summary>
+    /// What one invocation moves: the batch's rows, and the key bytes they encode to.
+    /// </summary>
+    /// <param name="parameters">The case's parameters; <c>Entry</c> says which file.</param>
+    /// <remarks>
+    /// THIS REPLACES A LINE ON STDERR (BENCH-AUDIT.md C6). The setup printed `rows=… keyBytes=…`
+    /// and left the division to the reader, which meant it was not done. The figures are properties
+    /// of the corpus entry, so they are measured here the same way -- one encode, once, while the
+    /// report is being built -- and land in the table as `ns/row` and `GB/s`.
+    /// </remarks>
+    public static (long Rows, long Bytes) BenchmarkWork(
+        string method, IReadOnlyDictionary<string, object?> parameters)
+    {
+        // `Entry` is a `[Params]` property, so it arrives in the dictionary: the two cases of this
+        // class read different files and therefore move different numbers of rows.
+        if (parameters.GetValueOrDefault("Entry") is not string entry)
+        {
+            return (0, 0);
+        }
+
+        VortexFile file = VortexFile.OpenAsync(Corpus.Path(entry), CancellationToken.None)
+            .AsTask().GetAwaiter().GetResult();
+        try
+        {
+            IAsyncEnumerator<RecordBatch> batches = file.Scan().ExecuteAsync().GetAsyncEnumerator();
+            try
+            {
+                if (!batches.MoveNextAsync().AsTask().GetAwaiter().GetResult())
+                {
+                    return (0, 0);
+                }
+
+                RecordBatch batch = batches.Current;
+                RowSortField[] fields = new RowSortField[batch.FieldCount];
+                Array.Fill(fields, RowSortField.Ascending);
+                using RowKeys keys = RowEncoder.Encode(batch, fields);
+                return (batch.RowCount, keys.TotalBytes);
+            }
+            finally
+            {
+                batches.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
+        }
+        finally
+        {
+            file.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
     }
 
     [GlobalCleanup]

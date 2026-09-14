@@ -58,6 +58,17 @@ public class FastLanesKernelBenchmarks
     /// <summary>The widths the current profile measures.</summary>
     public static IEnumerable<int> BitWidths => BenchmarkConfig.Full ? [10, 17, 33] : [17];
 
+    /// <summary>What one invocation moves: <c>Blocks</c> blocks of 1 024 values, at its width.</summary>
+    /// <param name="method">The arm, which says whether a value is four bytes or eight.</param>
+    /// <param name="parameters">Unused; the row count does not depend on the bit width.</param>
+    public static (long Rows, long Bytes) BenchmarkWork(
+        string method, IReadOnlyDictionary<string, object?> parameters)
+    {
+        long values = (long)Blocks * FastLanes.BlockSize;
+        int width = method.EndsWith("32", StringComparison.Ordinal) ? sizeof(uint) : sizeof(ulong);
+        return (values, values * width);
+    }
+
     [GlobalSetup]
     public void Setup()
     {

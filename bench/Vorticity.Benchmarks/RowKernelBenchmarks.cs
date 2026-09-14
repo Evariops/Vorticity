@@ -20,6 +20,7 @@
 // shape `vortex.dict` actually has -- a small dictionary read at random, a big output written in
 // order -- and it keeps the measurement about dispatch rather than about DRAM.
 using System;
+using System.Collections.Generic;
 
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
@@ -52,6 +53,20 @@ public class RowKernelBenchmarks
     private byte[] _codeBits = [];
     private byte[] _outputBits = [];
     private byte[] _element = [];
+
+    /// <summary>What one invocation moves, per arm.</summary>
+    /// <param name="method">The arm.</param>
+    /// <param name="parameters">Unused; this class has no <c>[Params]</c>.</param>
+    /// <remarks>
+    /// A gather reads a code and writes a row; a tile writes rows and reads one element. The codes
+    /// are four bytes each, which is a fifth of the traffic at this width and not noise.
+    /// </remarks>
+    public static (long Rows, long Bytes) BenchmarkWork(
+        string method, IReadOnlyDictionary<string, object?> parameters) => method switch
+    {
+        nameof(TileScalar) or nameof(TileLibrary) => (Rows, (long)Rows * Width),
+        _ => (Rows, (long)Rows * (Width + sizeof(uint))),
+    };
 
     [GlobalSetup]
     public void Setup()

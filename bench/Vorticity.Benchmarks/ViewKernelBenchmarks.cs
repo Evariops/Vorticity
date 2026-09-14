@@ -23,6 +23,7 @@
 // the inline branch -- the one `vortex.fsst` takes for short strings, and the one where the
 // per-row overhead has the least other work to hide behind.
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text.Unicode;
 
@@ -55,6 +56,24 @@ public class ViewKernelBenchmarks
     private byte[] _offsets = [];
     private byte[] _heap = [];
     private byte[] _views = [];
+
+    /// <summary>What one invocation moves, per arm.</summary>
+    /// <param name="method">The arm.</param>
+    /// <param name="parameters">Unused; this class has no <c>[Params]</c>.</param>
+    /// <remarks>
+    /// THE THREE ARMS READ THREE DIFFERENT THINGS. Summing lengths reads four bytes a row;
+    /// checking offsets reads four bytes a row plus one; building views reads the heap and writes
+    /// sixteen bytes a row. One number for the class put `require ascending` at 292 GB/s, which
+    /// this machine cannot do.
+    /// </remarks>
+    public static (long Rows, long Bytes) BenchmarkWork(
+        string method, IReadOnlyDictionary<string, object?> parameters) => method switch
+    {
+        nameof(BuildScalar) or nameof(BuildLibrary) =>
+            (Rows, (long)Rows * (Width + ViewSize + sizeof(uint))),
+        nameof(AscendingScalar) or nameof(AscendingLibrary) => (Rows, (Rows + 1L) * sizeof(uint)),
+        _ => (Rows, (long)Rows * sizeof(uint)),
+    };
 
     [GlobalSetup]
     public void Setup()

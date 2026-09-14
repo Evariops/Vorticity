@@ -25,6 +25,7 @@
 // `CopyRange`, a read-modify-write per value in `PackBytes`. Where that loop was already the right
 // shape, the ratio will say so, and that is a result too.
 using System;
+using System.Collections.Generic;
 
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
@@ -50,6 +51,22 @@ public class BitmapKernelBenchmarks
     private byte[] _destination = [];
     private byte[] _values = [];
     private byte[] _packed = [];
+
+    /// <summary>What one invocation moves, which is not the same for every arm.</summary>
+    /// <param name="method">The arm.</param>
+    /// <param name="parameters">Unused; this class has no <c>[Params]</c>.</param>
+    /// <remarks>
+    /// `PackBytes` reads one BYTE per row and writes one bit, so it touches nine times what
+    /// `Classify` does over the same rows. Declaring one number for the class would have made that
+    /// arm read nine times too slow.
+    /// </remarks>
+    public static (long Rows, long Bytes) BenchmarkWork(
+        string method, IReadOnlyDictionary<string, object?> parameters) => method switch
+    {
+        nameof(PackScalar) or nameof(PackLibrary) => (Bits, Bits + Bytes),
+        nameof(CopyScalar) or nameof(CopyLibrary) => (Bits, 2L * Bytes),
+        _ => (Bits, Bytes),
+    };
 
     [GlobalSetup]
     public void Setup()
