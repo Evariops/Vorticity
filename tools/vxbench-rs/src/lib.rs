@@ -582,6 +582,13 @@ pub unsafe extern "C" fn vxbench_batch_count(path: *const c_char) -> i64 {
 
 /// Decodes the C string, runs the body on the shared session, and turns every failure mode -
 /// including a panic, which must never unwind across the ABI - into a negative return.
+///
+/// THE ERROR IS PRINTED BEFORE IT IS FLATTENED, and BENCH-AUDIT.md B14 is why. An i64 can carry
+/// "it failed" across the ABI and nothing more, so discarding the `VortexError` left the .NET side
+/// with a message it had invented -- "the Rust reader returned an error" -- and no way to learn
+/// which call, which encoding, or what the reference actually refused. One `eprintln!` is the
+/// difference between a diagnosable reference and an opaque one; a panic's payload is printed by
+/// the default hook already.
 fn run<F>(path: *const c_char, body: F) -> i64
 where
     F: FnOnce(VortexSession, String) -> VortexResult<i64>,
@@ -591,9 +598,13 @@ where
     };
 
     let session = SESSION.get_or_init(VortexSession::default).clone();
+    let reported = path.clone();
     match catch_unwind(AssertUnwindSafe(move || body(session, path))) {
         Ok(Ok(rows)) => rows,
-        Ok(Err(_)) => ERR_FAILED,
+        Ok(Err(error)) => {
+            eprintln!("vxbench: {reported}: {error:?}");
+            ERR_FAILED
+        }
         Err(_) => ERR_PANIC,
     }
 }

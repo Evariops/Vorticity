@@ -28,7 +28,7 @@ dotnet run -c Release PROJ -- <arguments>
 | a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 50 files, against Rust |
 | a lane, or the degree of parallelism | `-- LanesBench` (`--full` walks 1, 2, 4, 8) | 15 s | ours at n lanes against the reference's pool at n workers, threads pinned both sides |
 | the compressor's decision | `-- CompressorBench` | 12 s | `Choose` and one arm per candidate; `--full` adds the utf8 and f64 columns |
-| the writer, per encoding | `-- --throughput --write` | 8 min | each file read back out to a discarding sink, against Rust. Reports; does not gate yet |
+| the writer, per encoding | `-- --throughput --write --check` | 9 min | each file read back out to a discarding sink, against Rust. **Gates since B14** — 53 references, first calibrated 2026-09-15. Three are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`) : re-run before believing a red. `list`, `listview` et `map` ne s'écrivent pas (W-22b) et `zstd_nullable` est refusé **par la référence** |
 | every file we write, read by Rust | `bench/crosscheck.sh` | 79 s | 819 files compared scalar by scalar; needs cargo. `gate.sh --crosscheck` folds it in |
 | **anything, before you push** | `bench/gate.sh` | 35 s | the eight ratchets, `--ffi-check`, `--ratio-check`; exit 1 if one is red. `--throughput` adds the full axis (92 s) |
 | a change too big for a ported arm | `bench/ab.sh <commit> [--after <commit>] <file> [scenario…]` | 7 s | two builds of the library in one process, interleaved, ratio per round |

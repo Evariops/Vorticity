@@ -468,6 +468,28 @@ internal static class ThroughputCheck
     /// </summary>
     private const double Margin = 1.15;
 
+    /// <summary>
+    /// Files the REFERENCE cannot write, with the reason it gives. BENCH-AUDIT.md B14.
+    /// </summary>
+    /// <remarks>
+    /// This is a declared capability gap, not a swallowed exception, and the distinction is the
+    /// whole point: a name in this list is skipped with its reason printed, and ANY OTHER failure
+    /// still aborts the axis loudly. Wrapping the measurement in a catch would have hidden the next
+    /// one.
+    /// <para>
+    /// <c>zstd_nullable</c> is the only entry, and it is the LAST of the fifty-seven, so its abort
+    /// cost the whole pass every time -- exit 134 after fifty-six files measured. Vortex Rust
+    /// 0.86.1 READS it (the scan axis has referenced it since R23) and refuses to write it back:
+    /// <c>Other error: append_to_builder for Zstd requires a variable-binary builder</c>. The
+    /// non-nullable <c>zstd</c> writes fine at 225x, so it is validity plus zstd on the reference's
+    /// write path, inside its own writer, on arrays its own scan produced. Nothing here can fix it;
+    /// what this repository owed was to say which file, which call and what the reference actually
+    /// refused -- see <c>tools/vxbench-rs/src/lib.rs</c>, which now prints the error instead of
+    /// flattening it into an i64 nobody can read.
+    /// </para>
+    /// </remarks>
+    private static readonly string[] ReferenceCannotWrite = ["zstd_nullable"];
+
     /// <summary>Below this ratio, two decimals cannot express a reference. BENCH-AUDIT.md B13.</summary>
     /// <remarks>
     /// A two-decimal table quantizes a reference to the nearest 0,005, and that step is a FRACTION
@@ -606,9 +628,81 @@ internal static class ThroughputCheck
     /// Its own table for <see cref="TakeReferences"/>'s reason, and one more: the read is inside
     /// the measurement on both sides, so an encoding whose scan ratio is 0.04 starts this axis
     /// already ahead. The number gates the writer against its own past, not against the scan.
+    /// <para>
+    /// FIRST CALIBRATION, 2026-09-15, BENCH-AUDIT.md B14 -- this table was EMPTY until then, so the
+    /// axis printed NO REF fifty-three times and could not fail whatever the writer did. Three
+    /// processes, the maximum of the three kept, which is the generous choice a first calibration
+    /// owes a gate it has never run.
+    /// </para>
+    /// <para>
+    /// THREE AXES ARE NOISIER THAN THE MARGIN, measured here and not assumed: between processes,
+    /// `onpair` spreads 169.37-204.19 (+20,6 %), `sparse` 1.75-2.06 (+17,7 %) and `constant`
+    /// 0.86-1.00 (+16,3 %), against a <see cref="Margin"/> of 15 %. That is B19's finding on a
+    /// second axis, and B19 owns the remedy -- a per-axis margin, or two consecutive runs before
+    /// returning 1. Until then these three are the ones to re-run before believing a red.
+    /// </para>
+    /// <para>
+    /// The ratios here are not a ranking of this library against the reference so much as a map of
+    /// where the writer has never been looked at: `zstd` 245, `onpair` 204, `parquet_variant` 85,
+    /// `fsst` 81, `varbin` 25. Those are v2 W-22b's territory, and the point of writing them down
+    /// is that the next person to touch the writer sees them move.
+    /// </para>
     /// </remarks>
     private static readonly (string Encoding, double Reference)[] WriteReferences =
     [
+        ("alp", 1.22),   // 3 passes, spread 1.19-1.22; first calibration
+        ("alp_no_patches", 2.66),   // 3 passes, spread 2.58-2.66; first calibration
+        ("alp_patched_no_chunk_offsets", 2.41),   // 3 passes, spread 2.36-2.41; first calibration
+        ("alprd", 1.60),   // 3 passes, spread 1.55-1.60; first calibration
+        ("bool", 13.52),   // 3 passes, spread 11.97-13.52; first calibration
+        ("bool_bit_offset3", 12.37),   // 3 passes, spread 11.87-12.37; first calibration
+        ("bool_bit_offset7", 13.02),   // 3 passes, spread 11.74-13.02; first calibration
+        ("bool_bit_offset_straddle", 12.89),   // 3 passes, spread 12.71-12.89; first calibration
+        ("bytebool", 10.97),   // 3 passes, spread 10.36-10.97; first calibration
+        ("chunked", 0.63),   // 3 passes, spread 0.61-0.63; first calibration
+        ("chunked_bool", 10.53),   // 3 passes, spread 9.48-10.53; first calibration
+        ("chunked_decimal", 1.12),   // 3 passes, spread 1.10-1.12; first calibration
+        ("chunked_empty_chunks", 0.41),   // 3 passes, spread 0.39-0.41; first calibration
+        ("chunked_mixed_validity", 1.47),   // 3 passes, spread 1.46-1.47; first calibration
+        ("chunked_one_chunk", 0.29),   // 3 passes, spread 0.27-0.29; first calibration
+        ("chunked_varbinview", 13.44),   // 3 passes, spread 12.99-13.44; first calibration
+        ("constant", 1.00),   // 3 passes, spread 0.86-1.00; first calibration -- +16,3 %, au-dessus de la marge (B19)
+        ("datetimeparts", 0.53),   // 3 passes, spread 0.51-0.53; first calibration
+        ("decimal", 1.21),   // 3 passes, spread 1.17-1.21; first calibration
+        ("decimal_byte_parts", 1.20),   // 3 passes, spread 1.18-1.20; first calibration
+        ("dict", 2.26),   // 3 passes, spread 2.21-2.26; first calibration
+        ("dict_nullable_codes", 2.50),   // 3 passes, spread 2.39-2.50; first calibration
+        ("dict_nullable_values_nonnull_codes", 2.61),   // 3 passes, spread 2.54-2.61; first calibration
+        ("dict_u64_codes", 2.28),   // 3 passes, spread 2.22-2.28; first calibration
+        ("dict_u8_codes", 2.20),   // 3 passes, spread 2.17-2.20; first calibration
+        ("ext", 0.073),   // 3 passes, spread 0.069-0.073; first calibration
+        ("fastlanes_bitpacked", 4.69),   // 3 passes, spread 4.10-4.69; first calibration
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 4.17),   // 3 passes, spread 3.87-4.17; first calibration
+        ("fastlanes_delta", 0.31),   // 3 passes, spread 0.30-0.31; first calibration
+        ("fastlanes_for", 1.96),   // 3 passes, spread 1.83-1.96; first calibration
+        ("fastlanes_rle", 1.20),   // 3 passes, spread 1.12-1.20; first calibration
+        ("fixed_size_list", 0.12),   // 3 passes, spread 0.12-0.12; first calibration
+        ("fsst", 81.66),   // 3 passes, spread 80.10-81.66; first calibration
+        ("masked", 1.89),   // 3 passes, spread 1.79-1.89; first calibration
+        ("masked_all_invalid", 3.76),   // 3 passes, spread 3.56-3.76; first calibration
+        ("masked_all_valid", 0.37),   // 3 passes, spread 0.33-0.37; first calibration
+        ("null", 0.21),   // 3 passes, spread 0.20-0.21; first calibration
+        ("onpair", 204.19),   // 3 passes, spread 169.37-204.19; first calibration -- +20,6 %, le plus bruyant des 53 (B19)
+        ("parquet_variant", 85.58),   // 3 passes, spread 76.82-85.58; first calibration
+        ("pco", 0.21),   // 3 passes, spread 0.20-0.21; first calibration
+        ("primitive", 0.29),   // 3 passes, spread 0.28-0.29; first calibration
+        ("runend", 0.98),   // 3 passes, spread 0.94-0.98; first calibration
+        ("sequence", 0.25),   // 3 passes, spread 0.24-0.25; first calibration
+        ("sparse", 2.06),   // 3 passes, spread 1.75-2.06; first calibration -- +17,7 %, au-dessus de la marge (B19)
+        ("struct", 0.59),   // 3 passes, spread 0.58-0.59; first calibration
+        ("table_mixed", 9.46),   // 3 passes, spread 9.03-9.46; first calibration
+        ("table_wide", 0.91),   // 3 passes, spread 0.87-0.91; first calibration
+        ("varbin", 25.36),   // 3 passes, spread 24.23-25.36; first calibration
+        ("varbinview", 12.33),   // 3 passes, spread 11.45-12.33; first calibration
+        ("variant", 8.85),   // 3 passes, spread 8.61-8.85; first calibration
+        ("zigzag", 1.84),   // 3 passes, spread 1.81-1.84; first calibration
+        ("zstd", 245.61),   // 3 passes, spread 225.45-245.61; first calibration
+        ("zstd_buffers", 0.18),   // 3 passes, spread 0.17-0.18; first calibration
     ];
 
     private static readonly (string Encoding, double Reference)[] TakeReferences =
@@ -825,6 +919,14 @@ internal static class ThroughputCheck
         foreach (string file in files)
         {
             string name = Path.GetFileNameWithoutExtension(file);
+            if (Axis == Workload.Write && Array.IndexOf(ReferenceCannotWrite, name) >= 0)
+            {
+                Console.Out.WriteLine(
+                    $"  {name,-32} skipped: the reference cannot write this encoding " +
+                    "(append_to_builder for Zstd requires a variable-binary builder)");
+                continue;
+            }
+
             long rows;
             try
             {
@@ -962,8 +1064,10 @@ internal static class ThroughputCheck
         if (unreferenced.Count > 0)
         {
             Console.Out.WriteLine(
+                // B14: it used to name References whatever the axis was, so the fifty-five lines a
+                // write run printed invited pasting write ratios into the SCAN table.
                 $"\n{unreferenced.Count} encoding(s) have no reference. Add these lines to " +
-                "ThroughputCheck.References, having checked the machine is quiet:");
+                $"ThroughputCheck.{TableName}, having checked the machine is quiet:");
             foreach (string line in unreferenced)
             {
                 Console.Out.WriteLine(line);
