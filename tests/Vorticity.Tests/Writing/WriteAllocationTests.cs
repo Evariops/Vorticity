@@ -80,6 +80,16 @@ public sealed class WriteAllocationTests
     /// `map` -2 304, `delta`, `pco` and `zstd` -576 each -- and the five that did not are the ones
     /// that elect neither.
     ///
+    /// AND W-4 MOVED ALL TWELVE, which none of the others did: the blob a column's chunk is
+    /// serialized into is rented rather than allocated. It was `new byte[total]` once per column per
+    /// chunk -- 20 arrays and 305 kio for the 65 536-row rewrite below, 950 and 5,1 Mio for a
+    /// million-row `varbinview` -- and none of it outlives the `WriteAsync` that consumes it.
+    /// `high_cardinality_i64_r8193` -32,8 %, `alprd` -20,5 %, `map` -14,8 %, `alp` -12,5 %,
+    /// `zoned_many_zones_nulls` -12,7 % (-305 560 B), then -0,5 to -2,2 % on the other seven. The
+    /// spread is the point's shape: a file moves in proportion to how many chunks x columns it
+    /// writes, not to how large each one is -- no blob in any corpus file reaches the 85 kio LOH
+    /// threshold the audit expected, and the win is Gen0 volume rather than LOH.
+    ///
     /// AND FIVE WITH W-5, which is the largest of the three by an order of magnitude on the file it
     /// touches: a zstd frame is no longer copied out of the buffer it was compressed into.
     /// `zoned_many_zones_nulls` -35 600 B, `fsst` -2 784, `types/utf8_nullable_r1025` -2 224,
@@ -104,11 +114,11 @@ public sealed class WriteAllocationTests
     /// </remarks>
     private static readonly (string Id, long Ceiling)[] Files =
     [
-        ("containers/zoned_many_zones_nulls", 2_450_000),
-        ("distributions/high_cardinality_i64_r8193", 204_000),
-        ("encodings/fsst", 238_500),
-        ("encodings/onpair", 232_000),
-        ("types/utf8_nullable_r1025", 224_700),
+        ("containers/zoned_many_zones_nulls", 2_133_000),
+        ("distributions/high_cardinality_i64_r8193", 136_900),
+        ("encodings/fsst", 235_100),
+        ("encodings/onpair", 227_000),
+        ("types/utf8_nullable_r1025", 219_700),
 
         // THE LATE COMPONENTS, on the write side, for PERF-AUDIT-v2.md F2's reason: `fastlanes.delta`,
         // `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant` were watched by no
@@ -117,18 +127,18 @@ public sealed class WriteAllocationTests
         // so these axes measure "what does writing this SHAPE of data cost", which is the question
         // a ratchet can answer. Whether our writer re-elects the same encoding is a different
         // question and `bench/crosscheck.sh` is where it is asked.
-        ("encodings/fastlanes_delta", 63_300),
-        ("encodings/pco", 65_300),
-        ("encodings/zstd", 227_400),
-        ("encodings/map", 117_800),
-        ("encodings/variant", 64_400),
+        ("encodings/fastlanes_delta", 62_900),
+        ("encodings/pco", 64_400),
+        ("encodings/zstd", 223_400),
+        ("encodings/map", 100_200),
+        ("encodings/variant", 63_600),
 
         // THE TWO ALP SHAPES, added with W-6 because that point moved them and nothing watched it:
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a
         // patch. The second is the case that made the patch buffers worth renting, and a ratchet
         // that only held the easy shape would have said nothing about it.
-        ("encodings/alp", 136_700),
-        ("encodings/alprd", 164_000),
+        ("encodings/alp", 119_600),
+        ("encodings/alprd", 130_300),
     ];
 
     // FOUR OF THESE FIVE CAME DOWN AGAIN WHEN FSST STOPPED ALLOCATING WHAT IT THROWS AWAY.

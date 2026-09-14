@@ -44,10 +44,10 @@ internal static class ZoneMapWriter
         EncodingDictionary encodings,
         uint zoneLength,
         out byte[] metadata,
-        out byte[] blob)
+        out ArrayBlobWriter.BlobLease blob)
     {
         metadata = [];
-        blob = [];
+        blob = default;
 
         if (zones.Count == 0 || zoneLength == 0)
         {
@@ -99,7 +99,8 @@ internal static class ZoneMapWriter
         }
         finally
         {
-            // The blob is a byte[] copy by the time Write returns, so nothing outlives the arena.
+            // The blob is a copy by the time Write returns -- into a rented buffer since W-4, but
+            // still a copy -- so nothing outlives the arena.
             arena.Reset();
         }
     }

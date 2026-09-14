@@ -354,8 +354,10 @@ public sealed class VortexFileWriter : IAsyncDisposable
         for (int field = 0; field < _fieldCount; field++)
         {
             int node = _isTabular ? arena.GetNode(rootIndex).GetFieldIndex(field) : rootIndex;
-            byte[] blob = ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress);
-            _columnSegments[field].Add(await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false));
+            using ArrayBlobWriter.BlobLease blob =
+                ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress);
+            _columnSegments[field].Add(
+                await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false));
 
             // Summarized from the canonical column before the arena is reused, which is the only
             // moment the values are in hand.
@@ -495,13 +497,17 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
             if (!ZoneMapWriter.TryBuild(
                     column, _columnZones[field], _arrayEncodings, zoneLength,
-                    out byte[] metadata, out byte[] blob))
+                    out byte[] metadata, out ArrayBlobWriter.BlobLease blob))
             {
                 continue;
             }
 
-            _zoneMetadata[field] = metadata;
-            _zoneSegments[field] = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
+            using (blob)
+            {
+                _zoneMetadata[field] = metadata;
+                _zoneSegments[field] =
+                    await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 
@@ -569,7 +575,8 @@ public sealed class VortexFileWriter : IAsyncDisposable
     /// to start somewhere that satisfies the widest of them. 64 is the format's ceiling
     /// (VortexLimits.MaxAlignment), so one choice covers every buffer a canonical array can have.
     /// </remarks>
-    private async ValueTask<int> WriteSegmentAsync(byte[] blob, CancellationToken cancellationToken)
+    private async ValueTask<int> WriteSegmentAsync(
+        ArrayBlobWriter.BlobLease blob, CancellationToken cancellationToken)
     {
         long position = _sink.Position;
         long aligned = (position + VortexLimits.MaxAlignment - 1) & ~((long)VortexLimits.MaxAlignment - 1);
@@ -579,8 +586,9 @@ public sealed class VortexFileWriter : IAsyncDisposable
             await _sink.WriteAsync(_padding.AsMemory(0, padding), cancellationToken).ConfigureAwait(false);
         }
 
-        await _sink.WriteAsync(blob, cancellationToken).ConfigureAwait(false);
+        await _sink.WriteAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
 
+        // blob.Length, never blob.Memory.Length's array: the rental is longer than the blob (W-4).
         _segments.Add(new SegmentSpec(
             (ulong)aligned, (uint)blob.Length, (byte)VortexLimits.MaxAlignmentExponent, 0, 0));
         return _segments.Count - 1;

@@ -56,7 +56,7 @@ internal static class ArrayBlobWriter
     /// <param name="compress">Whether to let ColumnCompressor pick an encoding for the column.</param>
     /// <returns>The blob.</returns>
     /// <exception cref="NotSupportedException">The canonical form has no writer.</exception>
-    internal static byte[] Write(
+    internal static BlobLease Write(
         CanonicalArena arena, int nodeIndex, EncodingDictionary encodings, bool compress = false)
     {
         List<PendingBuffer> buffers = [];
@@ -96,20 +96,36 @@ internal static class ArrayBlobWriter
         long flatStart = Align(offset, 8);
         long total = flatStart + flatBuffer.Length + sizeof(uint);
 
-        byte[] blob = new byte[checked((int)total)];
+        // Rented, not allocated (W-4). The rental is longer than `total` and its tail holds
+        // whatever the last renter wrote, so the padding between buffers has to be cleared rather
+        // than assumed zero the way a fresh array allowed -- a file is byte-exact or it is wrong.
+        int exact = checked((int)total);
+        byte[] blob = ArrayPool<byte>.Shared.Rent(exact);
         long cursor = 0;
         for (int i = 0; i < buffers.Count; i++)
         {
-            cursor += specs[i].Padding;
+            int padding = specs[i].Padding;
+            if (padding > 0)
+            {
+                blob.AsSpan((int)cursor, padding).Clear();
+                cursor += padding;
+            }
+
             buffers[i].Bytes.AsSpan(0, buffers[i].Length).CopyTo(blob.AsSpan((int)cursor));
             cursor += buffers[i].Length;
+        }
+
+        // The gap before the FlatBuffer is the other run of bytes nothing writes.
+        if (flatStart > cursor)
+        {
+            blob.AsSpan((int)cursor, (int)(flatStart - cursor)).Clear();
         }
 
         flatBuffer.CopyTo(blob.AsSpan((int)flatStart));
         BinaryPrimitives.WriteUInt32LittleEndian(
             blob.AsSpan((int)(total - sizeof(uint))), (uint)flatBuffer.Length);
 
-        return blob;
+        return new BlobLease(blob, exact);
         }
         finally
         {
@@ -1502,6 +1518,48 @@ internal static class ArrayBlobWriter
 
     private static long Align(long offset, int alignment) =>
         (offset + alignment - 1) & ~((long)alignment - 1);
+
+    /// <summary>One serialized array, in a buffer the caller gives back.</summary>
+    /// <remarks>
+    /// <para>
+    /// PERF-AUDIT-v2.md W-4. A blob was <c>new byte[total]</c>, allocated and dropped once per
+    /// column per chunk — 20 of them and 305 kio for a 65 536-row rewrite, 950 and 5,1 Mio for a
+    /// million-row <c>varbinview</c>. None of it survives the <c>WriteAsync</c> that consumes it,
+    /// so none of it needs to be allocated.
+    /// </para>
+    /// <para>
+    /// THE LENGTH IS SEPARATE FROM THE ARRAY, for the same reason
+    /// <see cref="PendingBuffer.Length"/> is: a rented array is at least as long as asked for and
+    /// usually longer, so <c>Bytes.Length</c> is not the number of bytes that belong in the file.
+    /// Every consumer takes <see cref="Memory"/> or <see cref="Length"/> and never the array's own.
+    /// </para>
+    /// </remarks>
+    internal readonly struct BlobLease : IDisposable
+    {
+        private readonly byte[]? _bytes;
+
+        internal BlobLease(byte[] bytes, int length)
+        {
+            _bytes = bytes;
+            Length = length;
+        }
+
+        /// <summary>Bytes of the rental that belong in the file.</summary>
+        internal int Length { get; }
+
+        /// <summary>The blob, exactly <see cref="Length"/> bytes of it.</summary>
+        internal ReadOnlyMemory<byte> Memory =>
+            _bytes is null ? default : _bytes.AsMemory(0, Length);
+
+        /// <summary>Hands the rental back. Safe on a default lease, and safe twice.</summary>
+        public void Dispose()
+        {
+            if (_bytes is not null)
+            {
+                ArrayPool<byte>.Shared.Return(_bytes);
+            }
+        }
+    }
 
     /// <summary>One buffer waiting to be laid into the blob, and whether the pool owns it.</summary>
     /// <remarks>
