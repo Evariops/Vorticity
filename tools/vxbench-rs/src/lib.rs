@@ -41,6 +41,8 @@ use vortex::expr::root;
 use vortex::expr::select;
 use vortex::file::OpenOptionsSessionExt;
 use vortex::file::WriteOptionsSessionExt;
+use vortex::io::runtime::BlockingRuntime;
+use vortex::io::runtime::current::CurrentThreadRuntime;
 use vortex::io::runtime::single::block_on;
 use vortex::io::session::RuntimeSessionExt;
 use vortex::array::stream::ArrayStreamExt;
@@ -129,6 +131,49 @@ pub unsafe extern "C" fn vxbench_scan_canonical(path: *const c_char) -> i64 {
 
                 Ok(rows)
             }
+        })
+    })
+}
+
+/// Scans `path` canonically on upstream's multi-threaded runtime with exactly `threads` workers.
+///
+/// THE CONTENTION FAMILY HAD NO NUMBER AT ALL (BENCH-AUDIT.md D2, PERF-AUDIT-v2.md §7). Our reader
+/// has `WithDegreeOfParallelism` and nothing measured it; the reference side was single-threaded by
+/// construction here, so a ratio at more than one lane could not exist. It can now, and the thread
+/// count is PINNED on both sides -- docs/05 §5's rule -- because a ratio between an `n`-lane reader
+/// and a reference free to use every core measures a threading model, not a decoder.
+///
+/// `threads = 1` is NOT the same measurement as `vxbench_scan_canonical`: this one still hands the
+/// work to a worker pool and pays for the hand-off, where the single-thread runtime drives the
+/// future on the calling thread. Comparing lanes against lanes is the point; comparing this at 1
+/// against the single-threaded entry point prices the pool itself.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vxbench_scan_canonical_threads(path: *const c_char, threads: i64) -> i64 {
+    if threads <= 0 {
+        return ERR_BAD_PATH;
+    }
+
+    run(path, move |session, path| {
+        let runtime = CurrentThreadRuntime::new();
+        let pool = runtime.new_pool();
+        pool.set_workers(threads as usize);
+        let session = session.with_handle(runtime.handle());
+        runtime.block_on(async move {
+            let mut ctx = session.create_execution_ctx();
+            let file = session.open_options().open_path(&path).await?;
+            let stream = file.scan()?.into_array_stream()?;
+            pin_mut!(stream);
+            let mut rows: i64 = 0;
+            while let Some(array) = stream.next().await {
+                let array = array?;
+                rows += array.len() as i64;
+                let _canonical: Canonical = array.execute(&mut ctx)?;
+            }
+
+            Ok(rows)
         })
     })
 }

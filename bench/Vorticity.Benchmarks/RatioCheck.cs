@@ -194,6 +194,23 @@ internal static class RatioCheck
         FromScenario("take"),
     ];
 
+    /// <summary>Lanes asked for by `--lanes N`, or 0 for the lane-free axes only.</summary>
+    /// <remarks>
+    /// A LANE AXIS IS ADDED, NOT SUBSTITUTED. The thirteen axes are ratchets measured at one lane;
+    /// swapping one for a lane version would compare a number against a reference that does not
+    /// describe it. This appends `full scan, N lanes` instead, with the thread count PINNED on both
+    /// sides (docs/05 §5) -- and it arrives without a reference, so the gate prints the line to
+    /// paste once the machine has been quiet enough to trust it.
+    /// </remarks>
+    internal static int Lanes { get; set; }
+
+    /// <summary>The lane axis, when `--lanes N` asked for one.</summary>
+    private static Axis LaneAxis(int lanes) => new Axis(
+        string.Create(CultureInfo.InvariantCulture, $"full scan, {lanes} lanes"),
+        p => Vorticity.Bench.Scenarios.ScenarioSet.ScanAllLanes(p, lanes),
+        p => RustReader.Require(
+            RustReader.ScanCanonicalThreads(p, lanes), "threaded scan"));
+
     /// <summary>The axis a shared scenario defines.</summary>
     /// <param name="name">Its `--profile` name.</param>
     private static Axis FromScenario(string name)
@@ -398,6 +415,7 @@ internal static class RatioCheck
                 .. RewrittenNames().Any(Selected)
                     ? await RewrittenAxesAsync(temporary, Selected).ConfigureAwait(false)
                     : [],
+                .. Lanes > 1 ? new[] { LaneAxis(Lanes) } : [],
             ];
             if (axes.Length == 0)
             {

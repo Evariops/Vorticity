@@ -82,6 +82,27 @@ public static class ScenarioSet
         return rows;
     }
 
+    /// <summary>Every row, canonicalized, with <paramref name="degree"/> lanes in flight.</summary>
+    /// <param name="path">The file.</param>
+    /// <param name="degree">Lanes; 1 is the default scan.</param>
+    /// <remarks>
+    /// `WithDegreeOfParallelism` existed and nothing measured it (BENCH-AUDIT.md D2). A lane is a
+    /// split decoded on the thread pool while another is being consumed, so the interesting number
+    /// is not the speed-up alone but where it stops.
+    /// </remarks>
+    public static async Task<long> ScanAllLanes(string path, int degree)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().WithDegreeOfParallelism(degree)
+            .ExecuteAsync().WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
     /// <summary>One column of five.</summary>
     /// <param name="path">The file.</param>
     public static async Task<long> ScanProjected(string path)

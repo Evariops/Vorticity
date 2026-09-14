@@ -81,10 +81,19 @@ internal static class Program
                 counted = given ? flag + 1 : -1;
             }
 
+            // `--lanes N` swallows its count the way `--recalibrate N` does, or the number would
+            // arrive as an axis filter and match nothing.
+            int lanesFlag = Array.IndexOf(args, "--lanes");
+            RatioCheck.Lanes = lanesFlag >= 0 && lanesFlag + 1 < args.Length &&
+                int.TryParse(args[lanesFlag + 1], CultureInfo.InvariantCulture, out int lanes)
+                ? lanes
+                : 0;
+
             string[] axes =
             [
                 .. args.Where((a, i) =>
-                    i > 0 && i != counted && !a.StartsWith("--", StringComparison.Ordinal))
+                    i > 0 && i != counted && i != lanesFlag + 1 &&
+                    !a.StartsWith("--", StringComparison.Ordinal))
             ];
             bool rebase = Array.IndexOf(args, "--rebase") >= 0;
             bool onePass = Array.IndexOf(args, RatioCheck.PassFlag) >= 0;

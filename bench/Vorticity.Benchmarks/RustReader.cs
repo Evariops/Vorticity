@@ -117,6 +117,21 @@ internal static partial class RustReader
     [LibraryImport(Library, EntryPoint = "vxbench_scan_checksum", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long ScanChecksum(string path);
 
+    /// <summary>
+    /// Scans <paramref name="path"/> canonically on the reference's worker pool with exactly
+    /// <paramref name="threads"/> workers.
+    /// </summary>
+    /// <param name="path">The file.</param>
+    /// <param name="threads">Worker threads; must be positive.</param>
+    /// <returns>Rows, or a negative error code.</returns>
+    /// <remarks>
+    /// The thread count is pinned on both sides (docs/05 §5): a ratio between an n-lane reader and
+    /// a reference free to use every core measures a threading model, not a decoder. At 1 this is
+    /// NOT <see cref="ScanCanonical"/> -- it still pays the pool hand-off, which is the point.
+    /// </remarks>
+    [LibraryImport(Library, EntryPoint = "vxbench_scan_canonical_threads", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial long ScanCanonicalThreads(string path, long threads);
+
     /// <summary>Opens a file and scans one field of every batch.</summary>
     /// <param name="path">The file to scan, as a UTF-8 C string.</param>
     /// <param name="field">The root field to project.</param>
