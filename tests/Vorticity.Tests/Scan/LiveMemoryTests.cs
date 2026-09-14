@@ -52,10 +52,25 @@ public sealed class LiveMemoryTests
     /// Not zero, and not a ratchet on a measured value: <see cref="GC.GetTotalMemory"/> after a
     /// forced collection still includes whatever the runtime itself has settled into, and tiered
     /// recompilation continues well past twenty scans. What the number has to be small enough to
-    /// catch is ACCUMULATION - anything retained per scan would add megabytes over sixty passes,
-    /// which this is three orders of magnitude below.
+    /// catch is ACCUMULATION - anything retained per scan would add megabytes over sixty passes.
+    ///
+    /// LOWERED 256 KiB -> 64 KiB on 2026-09-14 (BENCH-AUDIT.md §3.3): three runs measured the
+    /// growth at 0 B, 32 B and 0 B, so the old ceiling was eight thousand times the observed value
+    /// and would have let a real leak of a kilobyte per scan through. 64 KiB is still two thousand
+    /// times the worst reading, which is the margin this needs rather than the margin it had: the
+    /// figures above come from ONE machine, and CI runs four operating systems where tiering
+    /// settles differently.
     /// </remarks>
-    private const long ManagedGrowthCeiling = 256 * 1024;
+    private const long ManagedGrowthCeiling = 64 * 1024;
+
+    /// <summary>Parked pool blocks the second reading may exceed the first by.</summary>
+    /// <remarks>
+    /// LOWERED 64 -> 16 on the same day and by the same reasoning: the pool parked 15 blocks after
+    /// twenty scans and the same 15 after eighty, three runs out of three. Sixteen leaves room for
+    /// a later scan to touch size classes it had never seen, which is what the assertion below is
+    /// worded to allow; sixty-four was room for a leak.
+    /// </remarks>
+    private const int ParkedGrowthCeiling = 16;
 
     [Fact]
     public async Task SixtyMoreScansRetainNothing()
@@ -94,7 +109,7 @@ public sealed class LiveMemoryTests
         // strict - a later scan may touch one more class - but growth proportional to the scan count
         // is what a leak looks like, and sixty scans adding at most a handful of blocks is not that.
         Assert.True(
-            secondParked - firstParked <= 64,
+            secondParked - firstParked <= ParkedGrowthCeiling,
             $"the shared pool retained {secondParked - firstParked} more blocks over {Between} scans.\n{report}");
     }
 
