@@ -104,6 +104,19 @@ internal static partial class RustReader
     [LibraryImport(Library, EntryPoint = "vxbench_take", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long Take(string path, long count, long stride);
 
+    /// <summary>
+    /// Scans <paramref name="path"/> and folds every decoded value into one 64-bit checksum.
+    /// </summary>
+    /// <param name="path">The file.</param>
+    /// <returns>The checksum, or a negative error code.</returns>
+    /// <remarks>
+    /// The precondition `--ffi-check` never had (BENCH-AUDIT.md A3): a row count is not evidence of
+    /// a decode. `Checksum.cs` computes the same number on our side, byte for byte by the same
+    /// encoding, and the two must agree.
+    /// </remarks>
+    [LibraryImport(Library, EntryPoint = "vxbench_scan_checksum", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial long ScanChecksum(string path);
+
     /// <summary>Opens a file and scans one field of every batch.</summary>
     /// <param name="path">The file to scan, as a UTF-8 C string.</param>
     /// <param name="field">The root field to project.</param>

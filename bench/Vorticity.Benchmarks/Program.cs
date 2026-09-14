@@ -338,7 +338,17 @@ internal static class Program
             long theirs = RustReader.ScanAll(path);
             long footer = RustReader.OpenOnly(path);
             long theirBatches = RustReader.BatchCount(path);
-            string verdict = ours == theirs && ours == footer ? "ok" : "MISMATCH";
+
+            // THE ROW COUNT IS NOT THE CHECK, it is the cheap half of it (BENCH-AUDIT.md A3). A
+            // lazy scan answers `len()` from metadata without decoding a byte, which is how a
+            // ratio came to compare a decode against an absence of one. The checksum folds every
+            // decoded VALUE in file order on both sides, by one encoding written down in
+            // Checksum.cs and in vxbench's `vxbench_scan_checksum`.
+            long ourSum = await Checksum.OfFileAsync(path).ConfigureAwait(false);
+            long theirSum = RustReader.ScanChecksum(path);
+            bool counts = ours == theirs && ours == footer;
+            bool values = ourSum == theirSum;
+            string verdict = counts && values ? "ok" : !counts ? "ROWS DIFFER" : "VALUES DIFFER";
             if (verdict != "ok")
             {
                 mismatches++;
@@ -347,14 +357,16 @@ internal static class Program
             // Batch counts are REPORTED, not asserted: the split strategy is a reader choice, not
             // a format rule, and the two are allowed to differ. What is not allowed is quoting a
             // time-to-first-batch ratio without saying that the batches are different sizes.
-            Console.Out.WriteLine(
+            Console.Out.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
                 $"  {id,-42} rows ours={ours,7} rust={theirs,7}  batches ours={ourBatches,3} " +
-                $"rust={theirBatches,3}  {verdict}");
+                $"rust={theirBatches,3}  values {(values ? "match" : $"{ourSum:x16} vs {theirSum:x16}")}" +
+                $"  {verdict}"));
         }
 
         Console.Out.WriteLine(
             mismatches == 0
-                ? "Both readers agree on every file; the ratio is meaningful."
+                ? "Both readers agree on every row AND every value; the ratio is meaningful."
                 : $"{mismatches} files disagree; a ratio over them would be meaningless.");
         return mismatches == 0 ? 0 : 1;
     }

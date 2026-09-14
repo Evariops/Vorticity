@@ -43,6 +43,12 @@ use vortex::file::OpenOptionsSessionExt;
 use vortex::file::WriteOptionsSessionExt;
 use vortex::io::runtime::single::block_on;
 use vortex::io::session::RuntimeSessionExt;
+use vortex::array::stream::ArrayStreamExt;
+use vortex::dtype::DType;
+use vortex::scalar::DecimalValue;
+use vortex::scalar::PValue;
+use vortex::scalar::Scalar;
+use vortex::scalar::ScalarValue;
 use vortex::session::VortexSession;
 
 /// The path was not valid UTF-8, or a null pointer.
@@ -310,6 +316,164 @@ pub unsafe extern "C" fn vxbench_scan_filtered(
             }
         })
     })
+}
+
+/// Scans `path` and folds every decoded VALUE into one 64-bit checksum.
+///
+/// THE PRECONDITION `--ffi-check` NEVER HAD. It compared row counts, and a row count is not
+/// evidence of a decode: upstream's lazy scan answers `len()` from metadata without materializing
+/// a byte, which is how a "0.96x" ratio came to compare a decode against an absence of one. Same
+/// rows, same order, same bytes is what this says instead -- and it proves, by construction, that
+/// `vxbench_scan_canonical` really canonicalizes.
+///
+/// THE ENCODING IS A CONTRACT WITH THE .NET SIDE, byte for byte
+/// (bench/Vorticity.Benchmarks/Checksum.cs):
+///
+///   null 0x00 · bool 0x01 + byte · signed 0x02 + width + LE bytes · unsigned 0x03 + width + LE
+///   bytes · float 0x04 + width + LE bits · utf8/binary 0x05 + u32 LE length + bytes · struct 0x06
+///   + u32 field count + fields in order · list 0x07 + u32 count + elements · decimal 0x08 + width
+///   + LE bits · extension 0x09 + the storage value
+///
+/// It is a checksum of VALUES and not of buffers, because a buffer is where the two
+/// implementations are allowed to differ: an Arrow view's buffer index and offset, a validity
+/// bitmap that is absent here and all-ones there, the bytes under a null. None of that is data.
+///
+/// FNV-1a, because the mixing does not have to be good -- it has to be identical.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vxbench_scan_checksum(path: *const c_char) -> i64 {
+    run(path, |session, path| {
+        block_on(|handle| {
+            let session = session.with_handle(handle);
+            async move {
+                let mut ctx = session.create_execution_ctx();
+                let file = session.open_options().open_path(&path).await?;
+                let array = file.scan()?.into_array_stream()?.read_all().await?;
+                let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+                let dtype = array.dtype().clone();
+                for row in 0..array.len() {
+                    let scalar: Scalar = array.execute_scalar(row, &mut ctx)?;
+                    hash_value(&dtype, scalar.value(), &mut hash);
+                }
+
+                Ok(hash as i64)
+            }
+        })
+    })
+}
+
+/// Folds one byte in.
+fn hash_byte(byte: u8, hash: &mut u64) {
+    *hash = (*hash ^ byte as u64).wrapping_mul(0x100_0000_01b3);
+}
+
+/// Folds a run of bytes in.
+fn hash_bytes(bytes: &[u8], hash: &mut u64) {
+    for byte in bytes {
+        hash_byte(*byte, hash);
+    }
+}
+
+/// Folds a u32 count in, little-endian, as the .NET side writes it.
+fn hash_count(count: usize, hash: &mut u64) {
+    hash_bytes(&(count as u32).to_le_bytes(), hash);
+}
+
+/// Folds one scalar in, by the encoding above.
+///
+/// THE DTYPE IS CARRIED because a `Tuple` is a struct, a list and a fixed-size list on this side,
+/// and the .NET side tags a struct 0x06 and a list 0x07 -- the value alone cannot say which. It is
+/// the same reason `sidecar.rs` walks a dtype beside its value.
+fn hash_value(dtype: &DType, value: Option<&ScalarValue>, hash: &mut u64) {
+    let Some(value) = value else {
+        hash_byte(0x00, hash);
+        return;
+    };
+
+    match (dtype, value) {
+        (DType::Null, _) => hash_byte(0x00, hash),
+        (DType::Bool(_), ScalarValue::Bool(b)) => {
+            hash_byte(0x01, hash);
+            hash_byte(u8::from(*b), hash);
+        }
+        (DType::Primitive(_, _), ScalarValue::Primitive(p)) => hash_primitive(p, hash),
+        (DType::Utf8(_), ScalarValue::Utf8(s)) => {
+            hash_byte(0x05, hash);
+            hash_count(s.as_str().len(), hash);
+            hash_bytes(s.as_str().as_bytes(), hash);
+        }
+        (DType::Binary(_), ScalarValue::Binary(b)) => {
+            hash_byte(0x05, hash);
+            hash_count(b.as_slice().len(), hash);
+            hash_bytes(b.as_slice(), hash);
+        }
+        (DType::Decimal(_, _), ScalarValue::Decimal(d)) => hash_decimal(d, hash),
+        (DType::Struct(fields, _), ScalarValue::Tuple(children)) => {
+            hash_byte(0x06, hash);
+            hash_count(children.len(), hash);
+            for (index, child) in children.iter().enumerate() {
+                match fields.field_by_index(index) {
+                    Some(child_dtype) => hash_value(&child_dtype, child.as_ref(), hash),
+                    None => hash_byte(0xFE, hash),
+                }
+            }
+        }
+        (DType::List(element, _), ScalarValue::Tuple(children))
+        | (DType::FixedSizeList(element, _, _), ScalarValue::Tuple(children)) => {
+            hash_byte(0x07, hash);
+            hash_count(children.len(), hash);
+            for child in children.iter() {
+                hash_value(element, child.as_ref(), hash);
+            }
+        }
+        (DType::Extension(ext), v) => {
+            hash_byte(0x09, hash);
+            hash_value(ext.storage_dtype(), Some(v), hash);
+        }
+        (dtype, value) => {
+            // LOUD RATHER THAN SILENT. A shape neither side has an encoding for would otherwise
+            // fold into something plausible and the check would pass for no reason at all.
+            hash_byte(0xFF, hash);
+            hash_bytes(format!("{dtype} {value:?}").as_bytes(), hash);
+        }
+    }
+}
+
+/// Folds a primitive in: tag, width, then the value's own little-endian bytes.
+fn hash_primitive(value: &PValue, hash: &mut u64) {
+    let (tag, bytes): (u8, Vec<u8>) = match value {
+        PValue::U8(v) => (0x03, v.to_le_bytes().to_vec()),
+        PValue::U16(v) => (0x03, v.to_le_bytes().to_vec()),
+        PValue::U32(v) => (0x03, v.to_le_bytes().to_vec()),
+        PValue::U64(v) => (0x03, v.to_le_bytes().to_vec()),
+        PValue::I8(v) => (0x02, v.to_le_bytes().to_vec()),
+        PValue::I16(v) => (0x02, v.to_le_bytes().to_vec()),
+        PValue::I32(v) => (0x02, v.to_le_bytes().to_vec()),
+        PValue::I64(v) => (0x02, v.to_le_bytes().to_vec()),
+        PValue::F16(v) => (0x04, v.to_bits().to_le_bytes().to_vec()),
+        PValue::F32(v) => (0x04, v.to_bits().to_le_bytes().to_vec()),
+        PValue::F64(v) => (0x04, v.to_bits().to_le_bytes().to_vec()),
+    };
+    hash_byte(tag, hash);
+    hash_byte(bytes.len() as u8, hash);
+    hash_bytes(&bytes, hash);
+}
+
+/// Folds a decimal in: its storage width, then its bits.
+fn hash_decimal(value: &DecimalValue, hash: &mut u64) {
+    let bytes: Vec<u8> = match value {
+        DecimalValue::I8(v) => v.to_le_bytes().to_vec(),
+        DecimalValue::I16(v) => v.to_le_bytes().to_vec(),
+        DecimalValue::I32(v) => v.to_le_bytes().to_vec(),
+        DecimalValue::I64(v) => v.to_le_bytes().to_vec(),
+        DecimalValue::I128(v) => v.to_le_bytes().to_vec(),
+        DecimalValue::I256(v) => v.to_le_bytes().to_vec(),
+    };
+    hash_byte(0x08, hash);
+    hash_byte(bytes.len() as u8, hash);
+    hash_bytes(&bytes, hash);
 }
 
 /// Opens `path` and reads its row count from the footer, touching no data segment.
