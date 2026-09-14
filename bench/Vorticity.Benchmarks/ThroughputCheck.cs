@@ -79,13 +79,44 @@ internal static class ThroughputCheck
     /// <summary>The prefix a recalibration pass prints its measurements under.</summary>
     private const string PassPrefix = "PASS\t";
 
+    /// <summary>What the axis times on each side.</summary>
+    internal enum Workload
+    {
+        /// <summary>Every row of the file, canonicalized. The default.</summary>
+        Scan,
+
+        /// <summary>
+        /// <see cref="TakeCount"/> rows spread evenly over the file, canonicalized.
+        /// </summary>
+        /// <remarks>
+        /// BENCH-AUDIT.md §3.2: ten decoders have a `DecodeSelected` and nine do not, and nothing
+        /// measured the selective path anywhere but on two files of 4 096 rows. `--ratio-check`'s
+        /// `scattered take` axis is one file; this is the same question asked of every encoding.
+        /// </remarks>
+        Take,
+    }
+
+    /// <summary>Which workload this invocation measures.</summary>
+    internal static Workload Axis { get; set; } = Workload.Scan;
+
+    /// <summary>Rows a take asks for.</summary>
+    /// <remarks>
+    /// Sixty-four, as in `RatioCheck`, but the stride SPREADS them over the whole file rather than
+    /// packing them into its first 65 536 rows: a take that never leaves the first split measures
+    /// one split's decode, not the skipping that makes a take worth having.
+    /// </remarks>
+    private const long TakeCount = 64;
+
+    /// <summary>The gap between taken rows, so the last one is near the end of the file.</summary>
+    private static long TakeStride => Math.Max(1, ReferenceRows / TakeCount);
+
     /// <summary>Runs each recalibration pass in its own process, then prints the table.</summary>
     private static async Task<int> RecalibrateAcrossProcessesAsync(
         string[] only, int passes, bool rebase)
     {
         Console.Out.WriteLine(
             $"RECALIBRATE: {passes} PROCESSES. Nothing is gated; paste the table below into " +
-            "ThroughputCheck.References.");
+            $"ThroughputCheck.{(Axis == Workload.Take ? "TakeReferences" : "References")}.");
 
         string self = Environment.ProcessPath
             ?? throw new InvalidOperationException("No process path; cannot re-run for a pass.");
@@ -99,6 +130,11 @@ internal static class ThroughputCheck
                 RedirectStandardError = true,
             };
             start.ArgumentList.Add("--throughput");
+            if (Axis == Workload.Take)
+            {
+                start.ArgumentList.Add("--take");
+            }
+
             foreach (string family in only)
             {
                 start.ArgumentList.Add(family);
@@ -174,12 +210,14 @@ internal static class ThroughputCheck
         int passes,
         bool rebase)
     {
+        (string Encoding, double Reference)[] table =
+            Axis == Workload.Take ? TakeReferences : References;
         Console.Out.WriteLine(
             $"\nRECALIBRATE: {passes} passes, max of the per-pass medians. Paste into " +
-            "ThroughputCheck.References.");
+            $"ThroughputCheck.{(Axis == Workload.Take ? "TakeReferences" : "References")}.");
         int held = 0;
         int rebased = 0;
-        foreach ((string name, double current) in References)
+        foreach ((string name, double current) in table)
         {
             if (!measured.TryGetValue(name, out List<double>? seen) || seen.Count == 0)
             {
@@ -207,6 +245,23 @@ internal static class ThroughputCheck
             Console.Out.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"        (\"{name}\", {value:F2}),   // {passes} passes, spread {min:F2}-{max:F2}; {note}"));
+        }
+
+        // An axis calibrated for the first time has an empty table, so every name it measured is
+        // new. Printing them here is what makes `--recalibrate` the way a new axis gets its
+        // ratchets, instead of fifty numbers copied by hand out of a report.
+        HashSet<string> known = [.. table.Select(entry => entry.Encoding)];
+        foreach ((string name, List<double> seen) in measured.OrderBy(e => e.Key, StringComparer.Ordinal))
+        {
+            if (known.Contains(name) || seen.Count == 0)
+            {
+                continue;
+            }
+
+            Console.Out.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"        (\"{name}\", {seen.Max():F2}),   // {passes} passes, spread " +
+                $"{seen.Min():F2}-{seen.Max():F2}; first calibration"));
         }
 
         Console.Out.WriteLine(
@@ -466,6 +521,69 @@ internal static class ThroughputCheck
     /// the sub-millisecond encodings is itself 20-25% (`constant` read 10.53, 11.00 and 13.11 with
     /// no code change between them). A tighter threshold would report staleness that is noise.
     /// </remarks>
+    /// <summary>
+    /// The ratio each encoding's TAKE was measured at, same rule as <see cref="References"/>.
+    /// </summary>
+    /// <remarks>
+    /// Separate from the scan table on purpose: the two axes do not move together. A decoder with
+    /// a `DecodeSelected` pays for 64 rows here and for a million there, so an encoding can be
+    /// inside its scan ceiling and far outside this one -- which is the whole reason §3.2 asks for
+    /// this axis. Empty until recalibrated: `--throughput --take --recalibrate 3` prints the table.
+    /// </remarks>
+    private static readonly (string Encoding, double Reference)[] TakeReferences =
+    [
+        ("alp", 31.74),   // 5 processes, spread 28.14-31.74; first calibration
+        ("alp_no_patches", 0.37),   // 5 processes, spread 0.35-0.37; first calibration
+        ("alp_patched_no_chunk_offsets", 0.86),   // 5 processes, spread 0.81-0.86; first calibration
+        ("alprd", 109.76),   // 5 processes, spread 89.68-109.76; first calibration
+        ("bool", 0.88),   // 5 processes, spread 0.87-0.88; first calibration
+        ("bool_bit_offset3", 0.89),   // 5 processes, spread 0.87-0.89; first calibration
+        ("bool_bit_offset7", 0.91),   // 5 processes, spread 0.88-0.91; first calibration
+        ("bool_bit_offset_straddle", 0.89),   // 5 processes, spread 0.87-0.89; first calibration
+        ("bytebool", 15.33),   // 5 processes, spread 14.86-15.33; first calibration
+        ("chunked", 0.44),   // 5 processes, spread 0.39-0.44; first calibration
+        ("chunked_empty_chunks", 0.43),   // 5 processes, spread 0.42-0.43; first calibration
+        ("chunked_one_chunk", 0.39),   // 5 processes, spread 0.38-0.39; first calibration
+        ("constant", 0.94),   // 5 processes, spread 0.90-0.94; first calibration
+        ("datetimeparts", 70.08),   // 5 processes, spread 67.53-70.08; first calibration
+        ("decimal", 0.36),   // 5 processes, spread 0.34-0.36; first calibration
+        ("decimal_byte_parts", 0.37),   // 5 processes, spread 0.35-0.37; first calibration
+        ("dict", 0.61),   // 5 processes, spread 0.59-0.61; first calibration
+        ("dict_nullable_codes", 0.84),   // 5 processes, spread 0.80-0.84; first calibration
+        ("dict_nullable_values_nonnull_codes", 0.88),   // 5 processes, spread 0.85-0.88; first calibration
+        ("dict_u64_codes", 0.43),   // 5 processes, spread 0.40-0.43; first calibration
+        ("dict_u8_codes", 1.11),   // 5 processes, spread 1.10-1.11; first calibration
+        ("ext", 0.37),   // 5 processes, spread 0.36-0.37; first calibration
+        ("fastlanes_bitpacked", 0.87),   // 5 processes, spread 0.82-0.87; first calibration
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.80),   // 5 processes, spread 1.72-1.80; first calibration
+        ("fastlanes_delta", 38.92),   // 5 processes, spread 36.00-38.92; first calibration
+        ("fastlanes_for", 0.38),   // 5 processes, spread 0.35-0.38; first calibration
+        ("fastlanes_rle", 36.16),   // 5 processes, spread 33.73-36.16; first calibration
+        ("fixed_size_list", 0.31),   // 5 processes, spread 0.29-0.31; first calibration
+        ("fsst", 0.26),   // 5 processes, spread 0.24-0.26; first calibration
+        ("list", 15.17),   // 5 processes, spread 13.33-15.17; first calibration
+        ("listview", 36.41),   // 5 processes, spread 35.87-36.41; first calibration
+        ("map", 7.59),   // 5 processes, spread 7.11-7.59; first calibration
+        ("masked", 0.55),   // 5 processes, spread 0.53-0.55; first calibration
+        ("masked_all_invalid", 1.87),   // 5 processes, spread 1.77-1.87; first calibration
+        ("masked_all_valid", 1.97),   // 5 processes, spread 1.83-1.97; first calibration
+        ("null", 0.96),   // 5 processes, spread 0.92-0.96; first calibration
+        ("onpair", 0.55),   // 5 processes, spread 0.51-0.55; first calibration
+        ("parquet_variant", 257.55),   // 5 processes, spread 237.88-257.55; first calibration
+        ("pco", 49.41),   // 5 processes, spread 46.65-49.41; first calibration
+        ("primitive", 0.35),   // 5 processes, spread 0.34-0.35; first calibration
+        ("runend", 13.21),   // 5 processes, spread 11.34-13.21; first calibration
+        ("sequence", 1.02),   // 5 processes, spread 0.98-1.02; first calibration
+        ("sparse", 38.13),   // 5 processes, spread 34.04-38.13; first calibration
+        ("struct", 2.62),   // 5 processes, spread 2.53-2.62; first calibration
+        ("varbin", 1.99),   // 5 processes, spread 1.91-1.99; first calibration
+        ("varbinview", 3.00),   // 5 processes, spread 2.87-3.00; first calibration
+        ("variant", 194.52),   // 5 processes, spread 163.91-194.52; first calibration
+        ("zigzag", 0.53),   // 5 processes, spread 0.51-0.53; first calibration
+        ("zstd", 64.79),   // 5 processes, spread 62.95-64.79; first calibration
+        ("zstd_buffers", 6.94),   // 5 processes, spread 6.86-6.94; first calibration
+    ];
+
     private const double StaleBelow = 0.70;
 
     /// <summary>Measures every generated file and reports ns/value for both readers.</summary>
@@ -556,8 +674,13 @@ internal static class ThroughputCheck
             return 2;
         }
 
+        string what = Axis == Workload.Take
+            ? string.Create(
+                CultureInfo.InvariantCulture,
+                $"TAKE ({TakeCount} rows every {TakeStride})")
+            : "THROUGHPUT";
         Console.Out.WriteLine(
-            $"THROUGHPUT: median per-round ratio with a 95% bootstrap interval, {MinRounds}+ rounds after a " +
+            $"{what}: median per-round ratio with a 95% bootstrap interval, {MinRounds}+ rounds after a " +
             $"{WarmupBudget.TotalSeconds.ToString("F0", CultureInfo.InvariantCulture)}s warm-up per file, " +
             $"from {root}");
         Console.Out.WriteLine(manifest is null
@@ -600,7 +723,7 @@ internal static class ThroughputCheck
             long rows;
             try
             {
-                rows = await ScanAll(file).ConfigureAwait(false);
+                rows = await OursAsync(file).ConfigureAwait(false);
             }
             catch (Exception e) when (e is VortexUnsupportedException or VortexFormatException)
             {
@@ -615,7 +738,8 @@ internal static class ThroughputCheck
                 continue;
             }
 
-            long batches = await CountBatches(file).ConfigureAwait(false);
+            // A take emits one batch per selected split; the count is the scan's story, not its.
+            long batches = Axis == Workload.Take ? 0 : await CountBatches(file).ConfigureAwait(false);
             Measurement m = await MeasureAsync(file, rust).ConfigureAwait(false);
             if (recalibrate > 0)
             {
@@ -762,7 +886,8 @@ internal static class ThroughputCheck
     /// <param name="encoding">The file's base name.</param>
     private static double? ReferenceFor(string encoding)
     {
-        foreach ((string name, double reference) in References)
+        foreach ((string name, double reference) in
+            Axis == Workload.Take ? TakeReferences : References)
         {
             if (string.Equals(name, encoding, StringComparison.Ordinal))
             {
@@ -851,7 +976,7 @@ internal static class ThroughputCheck
         long start = Stopwatch.GetTimestamp();
         for (int i = 0; i < repeats; i++)
         {
-            await ScanAll(path).ConfigureAwait(false);
+            await OursAsync(path).ConfigureAwait(false);
         }
 
         return Stopwatch.GetElapsedTime(start).TotalMicroseconds / repeats;
@@ -863,7 +988,7 @@ internal static class ThroughputCheck
         long start = Stopwatch.GetTimestamp();
         for (int i = 0; i < repeats; i++)
         {
-            RustReader.ScanCanonical(path);
+            Theirs(path);
         }
 
         return Stopwatch.GetElapsedTime(start).TotalMicroseconds / repeats;
@@ -874,6 +999,36 @@ internal static class ThroughputCheck
         double[] copy = (double[])values.Clone();
         Array.Sort(copy);
         return copy[copy.Length / 2];
+    }
+
+    /// <summary>Our side of the current axis.</summary>
+    private static Task<long> OursAsync(string path) =>
+        Axis == Workload.Take ? ScatteredTake(path) : ScanAll(path);
+
+    /// <summary>The reference's side of the current axis.</summary>
+    private static long Theirs(string path) =>
+        Axis == Workload.Take
+            ? RustReader.Require(RustReader.Take(path, TakeCount, TakeStride), "take")
+            : RustReader.ScanCanonical(path);
+
+    /// <summary>Takes the same strided rows the reference is given.</summary>
+    private static async Task<long> ScatteredTake(string path)
+    {
+        long[] indices = new long[TakeCount];
+        for (int i = 0; i < indices.Length; i++)
+        {
+            indices[i] = (i * TakeStride) + (TakeStride / 2);
+        }
+
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().Take(indices).ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
     }
 
     private static async Task<long> ScanAll(string path)

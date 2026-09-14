@@ -19,6 +19,7 @@ dotnet run -c Release PROJ -- <arguments>
 | a read path | `-- --ratio-check [axis…]` | 29 s, or 5 s for one axis | the thirteen axes against Rust, interleaved, each held to a ceiling |
 | a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust |
 | the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 50 files |
+| a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 50 files, against Rust |
 | the FFI harness, or before trusting any ratio | `-- --ffi-check` | < 1 s | both readers return the same rows on the same files |
 | a hot path you want to profile | `-- --profile <scenario> [seconds]` | as asked | a bare loop for `dotnet-trace`, no harness in the profile |
 | a ratchet | `dotnet test Vorticity.slnx -c Release` | ~1 min | the suite plus the eight allocation and count ratchets |
@@ -88,6 +89,14 @@ in [BASELINE.md](BASELINE.md) and in the commits.
   overrides). `--check` refuses a corpus with no `manifest.json`, one generated at another row
   count, or one whose files do not match their recorded sha256 — fifty ratchets against bytes that
   live outside the repository need to know *which* bytes.
+
+  **`--take`** asks the same fifty files for 64 rows spread evenly over each (one every 15 625),
+  against `vxbench_take`, with its own ratchet table — the two axes do not move together, and that
+  is the point: a decoder without a `DecodeSelected` override decodes the whole split around each
+  taken row. Nine of them have none (PERF-AUDIT-v2.md R17), and the axis prices it: `zstd` 64×,
+  `datetimeparts` 60×, `alprd` 95×, against `fsst` 0.22× and `onpair` 0.46× where the override
+  exists. `--ratio-check`'s single `scattered take` axis reads 0.25× and says none of this, because
+  it is one file whose encodings all have the override.
 
   `--quick` (23 s instead of 70) shortens the warm-up and the per-file budget: a direction, not a
   gate. `--recalibrate N` prints a replacement reference table, as it does for `--ratio-check`.
