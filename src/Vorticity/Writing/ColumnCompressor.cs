@@ -28,6 +28,8 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -631,11 +633,30 @@ internal static class ColumnCompressor
         private readonly CanonicalNode _node;
         private readonly ValidityMask _mask;
 
+        /// <summary>
+        /// Bytes per row for a fixed-width column, or 0 for <c>Bool</c> and <c>VarBinView</c>.
+        /// </summary>
+        /// <remarks>
+        /// PERF-AUDIT-v2.md W-7b. The kind and the width are properties of the COLUMN, and they were
+        /// being re-derived on every call: `switch` on the kind, then `PType.ByteWidth()` or
+        /// `DecimalStorage.ByteWidth()`. Measured on `--throughput --write` at a million rows,
+        /// `Equal` is called **349 446 863 times** and `Hash` **120 108 814 times** for one pass over
+        /// the corpus's columns, and doubling the pair costs **30,6 %** of a `dict` write. Resolving
+        /// both once in the constructor turns the hot path into a width test the JIT can fold.
+        /// </remarks>
+        private readonly int _width;
+
         internal RowComparer(CanonicalArena arena, int nodeIndex)
         {
             _arena = arena;
             _node = arena.GetNode(nodeIndex);
             _mask = ValidityMask.From(arena, _node.Validity);
+            _width = _node.Kind switch
+            {
+                CanonicalKind.Bool or CanonicalKind.VarBinView => 0,
+                CanonicalKind.Decimal => Types.Numerics.DecimalStorage.ByteWidth(_node.Storage),
+                _ => _node.PType.ByteWidth(),
+            };
         }
 
         internal bool Equal(int a, int b)
@@ -651,14 +672,28 @@ internal static class ColumnCompressor
                 return true;
             }
 
-            return _node.Kind switch
+            // THE ZERO-WIDTH KINDS FIRST, and not as a style choice: `CanonicalNode.Values` THROWS on
+            // a Bool or a VarBinView, so the span may not be taken before the width has ruled them
+            // out. The suite caught exactly that, on 23 tests.
+            if (_width == 0)
             {
-                CanonicalKind.Bool =>
-                    CanonicalSupport.BitAt(_node.Bits.Span, _node.BitOffset + a) ==
-                    CanonicalSupport.BitAt(_node.Bits.Span, _node.BitOffset + b),
-                CanonicalKind.VarBinView => Bytes(a).SequenceEqual(Bytes(b)),
-                CanonicalKind.Decimal => Fixed(a, DecimalWidth).SequenceEqual(Fixed(b, DecimalWidth)),
-                _ => Fixed(a, _node.PType.ByteWidth()).SequenceEqual(Fixed(b, _node.PType.ByteWidth())),
+                return _node.Kind == CanonicalKind.Bool
+                    ? CanonicalSupport.BitAt(_node.Bits.Span, _node.BitOffset + a) ==
+                      CanonicalSupport.BitAt(_node.Bits.Span, _node.BitOffset + b)
+                    : Bytes(a).SequenceEqual(Bytes(b));
+            }
+
+            // THE WIDTHS THAT ARE ONE LOAD ARE ONE LOAD. `SequenceEqual` over four bytes is a call
+            // with a length check in front of it, and four bytes is what the average row of this
+            // corpus actually is -- 464 MB hashed over 120 M calls, 3,9 bytes a call.
+            ReadOnlySpan<byte> values = _node.Values.Span;
+            return _width switch
+            {
+                1 => values[a] == values[b],
+                2 => Read<ushort>(values, a) == Read<ushort>(values, b),
+                4 => Read<uint>(values, a) == Read<uint>(values, b),
+                8 => Read<ulong>(values, a) == Read<ulong>(values, b),
+                _ => Fixed(a).SequenceEqual(Fixed(b)),
             };
         }
 
@@ -669,20 +704,50 @@ internal static class ColumnCompressor
                 return 0;
             }
 
-            return _node.Kind switch
+            if (_width == 0)
             {
-                CanonicalKind.Bool =>
-                    CanonicalSupport.BitAt(_node.Bits.Span, _node.BitOffset + row) ? 1 : 2,
-                CanonicalKind.VarBinView => Hash(Bytes(row)),
-                CanonicalKind.Decimal => Hash(Fixed(row, DecimalWidth)),
-                _ => Hash(Fixed(row, _node.PType.ByteWidth())),
+                return _node.Kind == CanonicalKind.Bool
+                    ? CanonicalSupport.BitAt(_node.Bits.Span, _node.BitOffset + row) ? 1 : 2
+                    : Hash(Bytes(row));
+            }
+
+            ReadOnlySpan<byte> values = _node.Values.Span;
+            return _width switch
+            {
+                1 => Mix(values[row]),
+                2 => Mix(Read<ushort>(values, row)),
+                4 => Mix(Read<uint>(values, row)),
+                8 => Mix(Read<ulong>(values, row)),
+                _ => Hash(Fixed(row)),
             };
         }
 
-        private int DecimalWidth => Types.Numerics.DecimalStorage.ByteWidth(_node.Storage);
+        /// <summary>Row <paramref name="row"/> of a fixed-width column, read as its own width.</summary>
+        private static T Read<T>(ReadOnlySpan<byte> values, int row)
+            where T : unmanaged =>
+            MemoryMarshal.Read<T>(values.Slice(row * Unsafe.SizeOf<T>(), Unsafe.SizeOf<T>()));
 
-        private ReadOnlySpan<byte> Fixed(int row, int width) =>
-            _node.Values.Span.Slice(row * width, width);
+        /// <summary>
+        /// A whole fixed-width value mixed in one step, where <see cref="Hash(ReadOnlySpan{byte})"/>
+        /// would have taken one step per byte.
+        /// </summary>
+        /// <remarks>
+        /// IT NEED NOT AGREE WITH FNV-1a, and does not. Nothing persists this hash: it picks a
+        /// bucket, collisions are settled by <see cref="Equal"/>, and a dictionary code is handed
+        /// out by order of first appearance -- so the FILE's bytes do not depend on it at all.
+        /// `WrittenSizeTests` is the proof and it is byte-exact.
+        /// </remarks>
+        private static int Mix(ulong value)
+        {
+            ulong hash = value * 0x9E3779B97F4A7C15UL;
+            hash ^= hash >> 29;
+            hash *= 0xBF58476D1CE4E5B9UL;
+            hash ^= hash >> 32;
+            return (int)hash;
+        }
+
+        private ReadOnlySpan<byte> Fixed(int row) =>
+            _node.Values.Span.Slice(row * _width, _width);
 
         private ReadOnlySpan<byte> Bytes(int row)
         {
