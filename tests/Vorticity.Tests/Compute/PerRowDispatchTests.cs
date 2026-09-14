@@ -76,7 +76,6 @@ public sealed partial class PerRowDispatchTests
         ("Arrays/Decoders/Canonical/CanonicalConcat.cs", 4, 4, "R7"),
         ("Arrays/Decoders/Canonical/ConstantCanonicalizer.cs", 1, 0, "legitimate: one write, then Tile"),
         ("Arrays/Decoders/Canonical/ListDecoder.cs", 2, 0, "legitimate: bounds"),
-        ("Arrays/Decoders/Canonical/ListViewDecoder.cs", 2, 2, "R7"),
         ("Arrays/Decoders/Canonical/VarBinDecoder.cs", 2, 0, "legitimate: bounds"),
         ("Arrays/Decoders/Canonical/ViewKernels.cs", 4, 0, "legitimate: one bound, three error paths"),
         ("Arrays/Decoders/Compressed/AlpRdDecoder.cs", 1, 1, "R4"),
@@ -101,7 +100,12 @@ public sealed partial class PerRowDispatchTests
     ];
 
     /// <summary>The grand totals, which are annexe A's two headline numbers.</summary>
-    private const int TotalCalls = 66;
+    /// <remarks>
+    /// 66 when this test was written; **64 since R7** removed both calls from
+    /// <c>ListViewDecoder.ValidateRanges</c>, which no longer appears here at all — the file went
+    /// to zero calls and its row went with it, which is the shape a wired site is supposed to make.
+    /// </remarks>
+    private const int TotalCalls = 64;
 
     /// <summary>Calls annexe A classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
@@ -109,8 +113,11 @@ public sealed partial class PerRowDispatchTests
     /// `RowKernels`. The file still has one call and the ceiling is still 1, but its COMPOSITION
     /// changed -- what is left is `ThrowCode`, an error path -- and that is the change this column
     /// exists to record. A total that only ever moved with the ceiling would have missed it.
+    ///
+    /// **24 since R7**: `ListViewDecoder.ValidateRanges` resolves both physical types before its
+    /// loop, so its two per-row calls went away with its ceiling.
     /// </remarks>
-    private const int TotalPerRow = 26;
+    private const int TotalPerRow = 24;
 
     [Fact]
     public void NoFileDispatchesPerRowMoreOftenThanItsCeiling()

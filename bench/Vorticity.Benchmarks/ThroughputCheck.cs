@@ -523,8 +523,8 @@ internal static class ThroughputCheck
         ("fixed_size_list", 0.18),   // 3 processes, spread 0.16-0.18; was 0.21, -12.9%
         ("fsst", 1.31),   // 3 processes, spread 1.35-1.38; HELD at 1.31: 3 processes peaked at 1.38, no loosening
         ("list", 0.50),   // 3 processes, spread 0.47-0.50; was 0.51, -1.7%
-        ("listview", 0.67),   // 3 processes, spread 0.67-0.68; HELD at 0.67: 3 processes peaked at 0.68, no loosening
-        ("map", 0.15),   // 3 processes, spread 0.15-0.15; HELD at 0.15: 3 processes peaked at 0.15, no loosening
+        ("listview", 0.19),   // 5 processes, spread 0.18-0.19; was 0.67, -72.1% (v2 R7)
+        ("map", 0.09),   // 5 processes, spread 0.08-0.09; was 0.15, -41.3% (v2 R7)
         ("masked", 0.33),   // 3 processes, spread 0.31-0.33; REBASED UP from 0.33 (k>1): +1.3%
         ("masked_all_invalid", 0.35),   // 3 processes, spread 0.34-0.35; REBASED UP from 0.34 (k>1): +3.6%
         ("masked_all_valid", 0.36),   // 3 processes, spread 0.33-0.36; REBASED UP from 0.34 (k>1): +5.8%

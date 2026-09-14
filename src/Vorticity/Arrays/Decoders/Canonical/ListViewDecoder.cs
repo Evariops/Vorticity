@@ -12,6 +12,8 @@
 // Upstream widens to u64 and uses `checked_add` (`validate_offsets_and_sizes`); after the two sign
 // checks both operands are in [0, long.MaxValue], so a ulong add is exact and is the same test.
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
 
@@ -78,6 +80,30 @@ public sealed class ListViewDecoder : ArrayDecoder
     /// for every row, with the addition done UNSIGNED so it cannot wrap. A signed add of two
     /// legal i64 offsets near 2^62 wraps to a negative sum that passes the bound.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// PERF-AUDIT-v2.md R7. This is the ONE loop of a listview scan: a canonical ListView borrows
+    /// its offsets and sizes buffers as they are, so once the children are decoded there is nothing
+    /// else per row to do. Which means the type switch inside <c>ReadInteger</c> — twice per row,
+    /// on a property of the CALL and not of the row — was the scan. Short-circuited on
+    /// `listview.vortex` at a million rows, the free version reads **164 µs against 2 552**: the
+    /// check was **93,6 %** of it.
+    /// </para>
+    /// <para>
+    /// THE TWO TYPES ARE RESOLVED BEFORE THE LOOP, the way <c>RowKernels.Gather</c> resolves its
+    /// codes: one switch picks the offsets' type, a second picks the sizes' type, and
+    /// the loop that runs is monomorphic in both. Only the pairs a file actually uses are ever
+    /// instantiated, and in practice that is one.
+    /// </para>
+    /// <para>
+    /// THE SEMANTICS ARE THE OLD ONES, TO THE MESSAGE. <see cref="Widen{T}"/> reproduces
+    /// <c>ReadInteger</c>'s saturation exactly — a <c>u64</c> above <c>long.MaxValue</c> becomes
+    /// <c>long.MaxValue</c>, which stays non-negative and fails the bound on the second check
+    /// rather than the first — so a malformed file gets the same exception with the same numbers as
+    /// before. The integer-ness of both ptypes is already established by
+    /// <c>RequireIntegerPType</c> above, which is why the last arm widens rather than throwing.
+    /// </para>
+    /// </remarks>
     internal static void ValidateRanges(
         ReadOnlySpan<byte> offsets,
         PType offsetPType,
@@ -86,10 +112,55 @@ public sealed class ListViewDecoder : ArrayDecoder
         int length,
         int elementsLength)
     {
-        for (int i = 0; i < length; i++)
+        switch (offsetPType)
         {
-            long offset = CanonicalSupport.ReadInteger(offsets, offsetPType, i);
-            long size = CanonicalSupport.ReadInteger(sizes, sizePType, i);
+            case PType.U8: ValidateSizes<byte>(offsets, sizes, sizePType, length, elementsLength); break;
+            case PType.U16: ValidateSizes<ushort>(offsets, sizes, sizePType, length, elementsLength); break;
+            case PType.U32: ValidateSizes<uint>(offsets, sizes, sizePType, length, elementsLength); break;
+            case PType.U64: ValidateSizes<ulong>(offsets, sizes, sizePType, length, elementsLength); break;
+            case PType.I8: ValidateSizes<sbyte>(offsets, sizes, sizePType, length, elementsLength); break;
+            case PType.I16: ValidateSizes<short>(offsets, sizes, sizePType, length, elementsLength); break;
+            case PType.I32: ValidateSizes<int>(offsets, sizes, sizePType, length, elementsLength); break;
+            default: ValidateSizes<long>(offsets, sizes, sizePType, length, elementsLength); break;
+        }
+    }
+
+    /// <summary>The second half of the dispatch: the sizes' physical type.</summary>
+    private static void ValidateSizes<TOffset>(
+        ReadOnlySpan<byte> offsets,
+        ReadOnlySpan<byte> sizes,
+        PType sizePType,
+        int length,
+        int elementsLength)
+        where TOffset : unmanaged
+    {
+        switch (sizePType)
+        {
+            case PType.U8: ValidateCore<TOffset, byte>(offsets, sizes, length, elementsLength); break;
+            case PType.U16: ValidateCore<TOffset, ushort>(offsets, sizes, length, elementsLength); break;
+            case PType.U32: ValidateCore<TOffset, uint>(offsets, sizes, length, elementsLength); break;
+            case PType.U64: ValidateCore<TOffset, ulong>(offsets, sizes, length, elementsLength); break;
+            case PType.I8: ValidateCore<TOffset, sbyte>(offsets, sizes, length, elementsLength); break;
+            case PType.I16: ValidateCore<TOffset, short>(offsets, sizes, length, elementsLength); break;
+            case PType.I32: ValidateCore<TOffset, int>(offsets, sizes, length, elementsLength); break;
+            default: ValidateCore<TOffset, long>(offsets, sizes, length, elementsLength); break;
+        }
+    }
+
+    /// <summary>The loop, with both widths resolved and both spans cast once.</summary>
+    private static void ValidateCore<TOffset, TSize>(
+        ReadOnlySpan<byte> offsets, ReadOnlySpan<byte> sizes, int length, int elementsLength)
+        where TOffset : unmanaged
+        where TSize : unmanaged
+    {
+        ReadOnlySpan<TOffset> typedOffsets = MemoryMarshal.Cast<byte, TOffset>(offsets)[..length];
+        ReadOnlySpan<TSize> typedSizes = MemoryMarshal.Cast<byte, TSize>(sizes)[..length];
+        ulong limit = (ulong)elementsLength;
+
+        for (int i = 0; i < typedOffsets.Length; i++)
+        {
+            long offset = Widen(typedOffsets[i]);
+            long size = Widen(typedSizes[i]);
 
             if (offset < 0 || size < 0)
             {
@@ -101,12 +172,62 @@ public sealed class ListViewDecoder : ArrayDecoder
             // non-negative int. The message reports `end`, not `offset + size`: the latter is the
             // wrapped value this check exists to catch.
             ulong end = (ulong)offset + (ulong)size;
-            if (end > (ulong)elementsLength)
+            if (end > limit)
             {
                 throw new VortexFormatException(
                     $"List row {i} spans [{offset}, {end}) of an elements child holding " +
                     $"{elementsLength} values.");
             }
         }
+    }
+
+    /// <summary>
+    /// One value as a <c>long</c>, saturating exactly as <c>CanonicalSupport.ReadInteger</c> does.
+    /// </summary>
+    /// <remarks>
+    /// Written as <c>typeof(T) == typeof(X)</c> rather than generic math because that is the form
+    /// the JIT folds away per instantiation — <c>RowKernels.WidenCode</c> is the same shape, for
+    /// the same reason.
+    /// </remarks>
+    private static long Widen<T>(T value)
+        where T : unmanaged
+    {
+        if (typeof(T) == typeof(byte))
+        {
+            return Unsafe.As<T, byte>(ref value);
+        }
+
+        if (typeof(T) == typeof(ushort))
+        {
+            return Unsafe.As<T, ushort>(ref value);
+        }
+
+        if (typeof(T) == typeof(uint))
+        {
+            return Unsafe.As<T, uint>(ref value);
+        }
+
+        if (typeof(T) == typeof(ulong))
+        {
+            ulong wide = Unsafe.As<T, ulong>(ref value);
+            return wide > long.MaxValue ? long.MaxValue : (long)wide;
+        }
+
+        if (typeof(T) == typeof(sbyte))
+        {
+            return Unsafe.As<T, sbyte>(ref value);
+        }
+
+        if (typeof(T) == typeof(short))
+        {
+            return Unsafe.As<T, short>(ref value);
+        }
+
+        if (typeof(T) == typeof(int))
+        {
+            return Unsafe.As<T, int>(ref value);
+        }
+
+        return Unsafe.As<T, long>(ref value);
     }
 }
