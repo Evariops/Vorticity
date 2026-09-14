@@ -93,6 +93,12 @@ public sealed class BenchmarkConfig : ManualConfig
                 .WithMinWarmupCount(4)
                 .WithMaxWarmupCount(30));
         AddExporter(BenchmarkDotNet.Exporters.MarkdownExporter.GitHub);
+
+        // THE FULL JSON IS WHAT MAKES TWO RUNS COMPARABLE. The markdown table is for reading; it
+        // carries a mean and a standard deviation, which is not enough to test whether two runs
+        // differ. `JsonExporter.Full` writes every measurement, and `--compare` (BENCH-AUDIT.md C2)
+        // reads two of those files and prints Faster / Same / Slower per case.
+        AddExporter(BenchmarkDotNet.Exporters.Json.JsonExporter.Full);
         AddLogger(BenchmarkDotNet.Loggers.ConsoleLogger.Default);
         AddColumnProvider(DefaultColumnProviders.Instance);
         AddDiagnoser(BenchmarkDotNet.Diagnosers.MemoryDiagnoser.Default);

@@ -88,3 +88,6 @@ LOOP-PROMPT.md
 LOOP-PROMPT-AUDITS.md
 todo2.md
 todo2.previous.md
+
+# ---- Recorded benchmark runs (bench/compare.sh --record) ----
+bench/.runs/

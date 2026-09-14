@@ -91,6 +91,19 @@ internal static class Program
             return await RatioCheck.RunAsync(axes, recalibrate, rebase, onePass).ConfigureAwait(false);
         }
 
+        if (args.Length > 0 && args[0] == "--compare")
+        {
+            if (args.Length < 3)
+            {
+                Console.Error.WriteLine(
+                    "--compare <base> <diff>: two *-report-full.json files, or two directories " +
+                    "holding them (BENCH-AUDIT.md C2).");
+                return 2;
+            }
+
+            return Compare.Run(args[1], args[2]);
+        }
+
         if (args.Length > 0 && args[0] == "--throughput")
         {
             bool check = Array.IndexOf(args, "--check") >= 0;
