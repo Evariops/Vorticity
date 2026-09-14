@@ -51,8 +51,14 @@ Three mechanisms, finest first:
 | `-- --anyCategories kernel` | by category: every class is `kernel`, `path` or `explore` |
 | `-- --list flat` | what exists under the current selection |
 
-`--full` and `--explore` are ours and are consumed before BenchmarkDotNet sees the rest, so
-`-- --full fastlanes` works as written. Everything else is forwarded.
+`--full`, `--explore` and `--inprocess` are ours and are consumed before BenchmarkDotNet sees the
+rest, so `-- --full fastlanes` works as written. Everything else is forwarded.
+
+**`--full` runs out of process; the fast profile does not.** BenchmarkDotNet 0.16.0-preview.1 is the
+first version that can build a `net11.0` host, so the reference profile now gets process isolation
+per case, GC and runtime jobs, and `--disasm` (41 874 bytes of arm64 for `FsstKernelBenchmarks`).
+It costs the host's build: `--full` on a two-case class is 2 min 10 rather than 7 s, which is why
+the fast profile stays in this process. `--full --inprocess` is the escape hatch.
 
 **No argument means all of them**, not a prompt: without one, BenchmarkDotNet asks the console which
 class to run, which makes the default run do nothing under a script or in CI. `Program.cs` supplies

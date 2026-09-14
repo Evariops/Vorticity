@@ -1,14 +1,19 @@
 // The two configuration decisions this project makes: the toolchain, and the profile.
 //
-// THE TOOLCHAIN IS IN-PROCESS. BenchmarkDotNet's default toolchain generates a project, builds it and
-// runs it out of process, which is what makes its numbers trustworthy across runtimes. 0.15.x cannot
-// do that here: it does not know the `net11.0` moniker, and its SDK validator throws
-// `GetRuntimeVersion not implemented for NotRecognized` before a single benchmark runs (reproduced on
-// 0.15.8; 0.16.0-preview.1 is the first version that runs net11.0 out of process -- see
-// BENCH-AUDIT.md §6). The in-process emit toolchain runs the benchmarks in the host process instead.
-// What that costs: no process isolation, no different runtime or GC mode per job, a shared JIT state.
-// What it does not cost: the measurement itself -- same warmup strategy, same statistics, same
-// MemoryDiagnoser.
+// THE TOOLCHAIN DEPENDS ON THE PROFILE, and that is new. BenchmarkDotNet's default toolchain
+// generates a project, builds it and runs it out of process, which is what makes its numbers
+// trustworthy across runtimes. 0.15.x could not do that here -- it does not know the `net11.0`
+// moniker and throws `GetRuntimeVersion not implemented for NotRecognized` before a single benchmark
+// runs (reproduced on 0.15.8) -- so everything was in-process. **0.16.0-preview.1 runs net11.0 out of
+// process** (BENCH-AUDIT.md §6), so:
+//
+//   fast (the default)   in-process     three seconds of measurement does not pay ten of building a host
+//   --full               out of process process isolation per case, GC and runtime jobs, and `--disasm`
+//   --full --inprocess   in-process     the escape hatch, when the generated host is the problem
+//
+// What in-process costs: no process isolation, no different runtime or GC mode per job, a shared JIT
+// state, and no disassembly at all. What it does not cost: the measurement itself -- same warmup
+// strategy, same statistics, same MemoryDiagnoser.
 //
 // THE PROFILE IS FAST BY DEFAULT, AND `--full` IS THE EXCEPTION. A class under `Job.Default` spends its
 // time in the job, not in the kernel: FsstKernelBenchmarks reads 102 s for four cases, of which the
@@ -57,6 +62,19 @@ public sealed class BenchmarkConfig : ManualConfig
     /// </summary>
     internal static bool Exploring { get; set; }
 
+    /// <summary>
+    /// Set the same way: <c>--inprocess</c>, which keeps <c>--full</c> in this process.
+    /// </summary>
+    /// <remarks>
+    /// The fast profile is in-process unconditionally -- three seconds of measurement does not pay
+    /// ten seconds of generating and building a host. <c>--full</c> is the opposite trade and now
+    /// runs OUT of process by default (BENCH-AUDIT.md §6): process isolation per case, no JIT or
+    /// `ArrayPool.Shared` state carried from the previous class, GC and runtime jobs side by side,
+    /// and `--disasm`, which the in-process toolchain cannot do at all. This flag is the escape
+    /// hatch for the case where the generated host is the problem rather than the answer.
+    /// </remarks>
+    internal static bool InProcess { get; set; }
+
     /// <summary>The category name for a curve: excluded unless <c>--explore</c> asks for it.</summary>
     public const string Explore = "explore";
 
@@ -83,10 +101,10 @@ public sealed class BenchmarkConfig : ManualConfig
 
     public BenchmarkConfig()
     {
-        Job job = Job.Default.WithToolchain(InProcessEmitToolchain.Instance);
+        Job inProcess = Job.Default.WithToolchain(InProcessEmitToolchain.Default);
         AddJob(Full
-            ? job.WithId("full")
-            : job.WithId("fast")
+            ? (InProcess ? inProcess.WithId("full, in process") : Job.Default.WithId("full"))
+            : inProcess.WithId("fast")
                 .WithIterationTime(TimeInterval.FromMilliseconds(100))
                 .WithMinIterationTime(TimeInterval.FromMilliseconds(50))
                 .WithIterationCount(5)

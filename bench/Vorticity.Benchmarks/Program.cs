@@ -146,7 +146,9 @@ internal static class Program
         // the [Config] attributes instantiate afterwards.
         BenchmarkConfig.Full = Array.IndexOf(args, "--full") >= 0;
         BenchmarkConfig.Exploring = Array.IndexOf(args, "--explore") >= 0;
-        string[] forwarded = [.. args.Where(a => a is not ("--full" or "--explore"))];
+        BenchmarkConfig.InProcess = Array.IndexOf(args, "--inprocess") >= 0;
+        string[] forwarded =
+            [.. args.Where(a => a is not ("--full" or "--explore" or "--inprocess"))];
 
         if (UncategorizedClasses() is { Length: > 0 } uncategorized)
         {
