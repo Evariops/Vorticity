@@ -957,21 +957,49 @@ internal static class RatioCheck
     /// `--rewrite <in> <out> <edition>` isolates one of them: `Core20250500` has no
     /// `vortex.zstd`, so the difference between the two rewrites IS zstd (BENCH-AUDIT.md A5).
     /// </param>
+    /// <param name="rowBlock">
+    /// `VortexWriteOptions.RowBlockSize`, or null for its default of 8192.
+    /// </param>
+    /// <param name="dataBlockBytes">
+    /// `VortexWriteOptions.DataBlockTargetBytes`: a byte count, or null to leave the default of
+    /// 1 MiB, or `Off` to disable the coalescing entirely.
+    /// </param>
+    /// <remarks>
+    /// THE TWO BLOCK KNOBS ARE HERE BECAUSE B12 COULD NOT BE MEASURED WITHOUT THEM. They decide the
+    /// file's chunking, a zone is a chunk, and a filter that keeps 219 rows out of a 24 576-row
+    /// chunk decodes all 24 576 -- so they decide what a selective scan costs, and nothing in this
+    /// bench could vary them. `Off` is spelled out rather than `0` because zero is a legal target
+    /// that means "no minimum", and the difference between that and "no coalescing at all" is
+    /// exactly what the point is about.
+    /// </remarks>
     internal static async Task RewriteAsync(
-        string source, string destination, VortexEdition? edition)
+        string source,
+        string destination,
+        VortexEdition? edition,
+        int? rowBlock = null,
+        long? dataBlockBytes = null)
     {
-        if (edition is null)
+        if (edition is null && rowBlock is null && dataBlockBytes is null)
         {
             await Rewrite(source, destination).ConfigureAwait(false);
             return;
         }
 
+        Vorticity.Writing.VortexWriteOptions options = new Vorticity.Writing.VortexWriteOptions
+        {
+            TargetEdition = edition ?? Vorticity.Writing.VortexWriteOptions.Default.TargetEdition,
+            RowBlockSize = rowBlock ?? Vorticity.Writing.VortexWriteOptions.Default.RowBlockSize,
+            DataBlockTargetBytes = dataBlockBytes switch
+            {
+                null => Vorticity.Writing.VortexWriteOptions.Default.DataBlockTargetBytes,
+                Off => null,
+                long bytes => bytes,
+            },
+        };
+
         await using VortexFile file = await VortexFile.OpenAsync(source, CancellationToken.None);
         await using Vorticity.Writing.VortexFileWriter writer =
-            Vorticity.Writing.VortexFileWriter.Create(
-                destination,
-                file.Schema,
-                new Vorticity.Writing.VortexWriteOptions { TargetEdition = edition.Value });
+            Vorticity.Writing.VortexFileWriter.Create(destination, file.Schema, options);
         await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
@@ -980,6 +1008,9 @@ internal static class RatioCheck
 
         await writer.CompleteAsync(CancellationToken.None);
     }
+
+    /// <summary>The <c>dataBlockBytes</c> value that means "no byte coalescing at all".</summary>
+    internal const long Off = -1;
 
     /// <summary>Reads a file with our reader and writes it back with our writer.</summary>
     private static async Task Rewrite(string source, string destination)

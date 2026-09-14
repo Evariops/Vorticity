@@ -111,9 +111,12 @@ internal static class Program
             if (args.Length < 3)
             {
                 Console.Error.WriteLine(
-                    "--rewrite <in> <out> [edition]: reads a file with our reader and writes it back " +
-                    "with our writer, keeping the bytes. An edition name (Core20250500 …) " +
-                    "excludes the encodings that came later (BENCH-AUDIT.md A5).");
+                    "--rewrite <in> <out> [edition] [--row-block N] [--data-block-bytes N|off]: " +
+                    "reads a file with our reader and writes it back with our writer, keeping the " +
+                    "bytes. An edition name (Core20250500 …) excludes the encodings that came " +
+                    "later (BENCH-AUDIT.md A5). The two block knobs decide the file's chunking, " +
+                    "and a zone is a chunk, so they decide what a selective scan costs (B12): " +
+                    "`--data-block-bytes off` writes chunks of exactly one row block.");
                 return 2;
             }
 
@@ -121,7 +124,25 @@ internal static class Program
                 args.Length > 3 && Enum.TryParse(args[3], out Vorticity.Editions.VortexEdition e)
                     ? e
                     : null;
-            await RatioCheck.RewriteAsync(args[1], args[2], edition).ConfigureAwait(false);
+
+            int rowBlockFlag = Array.IndexOf(args, "--row-block");
+            int? rowBlock = rowBlockFlag >= 0 && rowBlockFlag + 1 < args.Length &&
+                int.TryParse(args[rowBlockFlag + 1], out int rows)
+                    ? rows
+                    : null;
+
+            int bytesFlag = Array.IndexOf(args, "--data-block-bytes");
+            long? dataBlockBytes = null;
+            if (bytesFlag >= 0 && bytesFlag + 1 < args.Length)
+            {
+                string value = args[bytesFlag + 1];
+                dataBlockBytes = value.Equals("off", StringComparison.OrdinalIgnoreCase)
+                    ? RatioCheck.Off
+                    : long.TryParse(value, out long bytes) ? bytes : null;
+            }
+
+            await RatioCheck.RewriteAsync(args[1], args[2], edition, rowBlock, dataBlockBytes)
+                .ConfigureAwait(false);
             Console.Out.WriteLine(
                 $"{args[2]}: {new System.IO.FileInfo(args[2]).Length} bytes from " +
                 $"{new System.IO.FileInfo(args[1]).Length}.");

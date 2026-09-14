@@ -74,6 +74,12 @@ dotnet run -c Release --project bench/Vorticity.Benchmarks -- \
     --rewrite tests/Vorticity.Conformance/corpus/containers/zoned_many_zones_nulls.vortex \
     /tmp/pair/ours.vortex
 
+# The two block knobs decide the file's chunking, and a zone IS a chunk, so they decide what a
+# selective scan costs and how much per-chunk fixed cost the file pays (B12). `off` disables the
+# 1 MiB coalescing, which leaves chunks of exactly one row block.
+dotnet run -c Release --project bench/Vorticity.Benchmarks -- \
+    --rewrite in.vortex out.vortex --row-block 8192 --data-block-bytes off
+
 # Then measure any directory of files, both readers, one clock.
 VORTICITY_THROUGHPUT_CORPUS=/tmp/pair \
     dotnet run -c Release --project bench/Vorticity.Benchmarks -- --throughput
