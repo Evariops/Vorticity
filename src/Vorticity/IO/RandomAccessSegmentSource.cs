@@ -49,6 +49,7 @@ public sealed class RandomAccessSegmentSource : ISegmentSource
     private int _disposed;
     private int _slicedRuns;
     private int _copiedRuns;
+    private int _unpooledBlocks;
 
     /// <summary>
     /// A run at or below this size is always published by slicing, however sparse it is: holding
@@ -80,6 +81,17 @@ public sealed class RandomAccessSegmentSource : ISegmentSource
 
     /// <summary>Diagnostics: runs whose segments were copied out so the run buffer could go back.</summary>
     internal int CopiedRunCount => Volatile.Read(ref _copiedRuns);
+
+    /// <summary>Diagnostics: blocks too large for the pool, allocated and freed per read.</summary>
+    /// <remarks>
+    /// PERF-AUDIT-v2.md W-10. Two ceilings disagree by a factor of two --
+    /// <see cref="SegmentReadOptions.DefaultMaxCoalescedReadBytes"/> lets a run reach 16 MiB while
+    /// <see cref="SegmentReadOptions.DefaultMaxPooledBytes"/> and
+    /// <see cref="AlignedBufferPool.Shared"/> both stop at 8 -- so a run in that band is a fresh
+    /// native allocation and a free on every read. This counts how often that actually happens,
+    /// which is the thing the point could not be decided without.
+    /// </remarks>
+    internal int UnpooledBlockCount => Volatile.Read(ref _unpooledBlocks);
 
     /// <summary>Opens <paramref name="path"/> read-only for asynchronous positional reads.</summary>
     /// <param name="path">A local file path.</param>
@@ -452,10 +464,16 @@ public sealed class RandomAccessSegmentSource : ISegmentSource
 
     // ---- I/O ----------------------------------------------------------------------------------
 
-    private NativeSegmentOwner RentBlock(int length) =>
-        length <= _options.MaxPooledBytes
-            ? AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment)
-            : NativeSegmentOwner.Allocate(length, VortexLimits.MaxAlignment);
+    private NativeSegmentOwner RentBlock(int length)
+    {
+        if (length <= _options.MaxPooledBytes)
+        {
+            return AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
+        }
+
+        Interlocked.Increment(ref _unpooledBlocks);
+        return NativeSegmentOwner.Allocate(length, VortexLimits.MaxAlignment);
+    }
 
     /// <summary>
     /// Reads exactly <paramref name="length"/> bytes into <paramref name="owner"/> at
