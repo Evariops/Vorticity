@@ -26,6 +26,7 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -411,14 +412,15 @@ internal static class ArrayBlobWriter
         }
     }
 
-    private static PType ToUnsigned(PType ptype) => ptype switch
-    {
-        PType.I8 => PType.U8,
-        PType.I16 => PType.U16,
-        PType.I32 => PType.U32,
-        PType.I64 => PType.U64,
-        _ => ptype,
-    };
+    /// <remarks>
+    /// ARITHMETIC RATHER THAN A SWITCH, and the enum is what makes it legitimate: U8..U64 are 0..3
+    /// and I8..I64 are 4..7, so the signed block sits exactly <c>I8</c> above the unsigned one --
+    /// the same fact <see cref="PTypeExtensions.IsSignedInteger"/> is already written from. Four
+    /// mappings enumerated by hand said nothing this does not, and left the other seven PTypes to a
+    /// <c>_</c> arm that read as a fallthrough.
+    /// </remarks>
+    private static PType ToUnsigned(PType ptype) =>
+        ptype.IsSignedInteger() ? (PType)(ptype - PType.I8) : ptype;
 
     private static byte[] BitPackedBytes(uint bitWidth, bool hasPatches, in PatchesMetadata patches)
     {
@@ -477,13 +479,23 @@ internal static class ArrayBlobWriter
     }
 
     /// <summary>Widens a narrow signed value's raw bits back to 64 bits.</summary>
-    private static ulong SignExtend(ulong bits, PType ptype) => ptype switch
+    /// <remarks>
+    /// THE WIDTH IS THE ANSWER, not the tag: shifting the value up to the top of a 64-bit word and
+    /// back down arithmetically is what sign extension IS, and it is written once instead of once
+    /// per narrow signed type. The three cases a switch spelled out were I8, I16 and I32 -- that
+    /// is <c>ByteWidth</c> 1, 2 and 4 -- and everything else returned its bits unchanged, which
+    /// here is the shift of zero that <c>I64</c> produces.
+    /// </remarks>
+    private static ulong SignExtend(ulong bits, PType ptype)
     {
-        PType.I8 => unchecked((ulong)(long)(sbyte)bits),
-        PType.I16 => unchecked((ulong)(long)(short)bits),
-        PType.I32 => unchecked((ulong)(long)(int)bits),
-        _ => bits,
-    };
+        if (!ptype.IsSignedInteger())
+        {
+            return bits;
+        }
+
+        int shift = 64 - (ptype.ByteWidth() * 8);
+        return unchecked((ulong)((long)(bits << shift) >> shift));
+    }
 
     /// <summary>
     /// Writes <c>vortex.fsst</c>: three buffers and two or three children.
@@ -979,47 +991,43 @@ internal static class ArrayBlobWriter
         bool compress)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
-        switch (node.Kind)
+
+        // EXHAUSTIVE BY CONSTRUCTION (PERF-AUDIT-v2.md §2.4bis, Z1b-c1), and this is the site where
+        // it matters most. Every kind is NAMED and the `_` arm throws; it used to be
+        // `default: WriteExtension`, so a tenth kind was written as `vortex.ext` -- a COHERENT file
+        // carrying the wrong array, which byte-exact WrittenSizeTests cannot catch because the
+        // bytes agree with themselves. IDE0072 -- error, see .editorconfig -- now fails the build
+        // when a named kind is missing.
+        return node.Kind switch
         {
-            case CanonicalKind.Null:
-                return Node(builder, encodings, "vortex.null"u8, default, [], []);
+            CanonicalKind.Null => Node(builder, encodings, "vortex.null"u8, default, [], []),
+            CanonicalKind.Bool => WriteBool(builder, arena, node, buffers, encodings),
+            CanonicalKind.Primitive => WritePrimitive(builder, arena, node, buffers, encodings),
+            CanonicalKind.Decimal => WriteDecimal(builder, arena, node, buffers, encodings),
+            CanonicalKind.VarBinView => WriteVarBinView(builder, arena, node, buffers, encodings),
 
-            case CanonicalKind.Bool:
-                return WriteBool(builder, arena, node, buffers, encodings);
+            // A map node IS a ListView wearing the map dtype - see MapDecoder - so the kind alone
+            // does not say which id to write. Emitting `vortex.listview` under a map schema
+            // produces a file THIS READER REFUSES, correctly: "vortex.listview produces a List
+            // dtype; it was asked for Map".
+            CanonicalKind.ListView => node.DType.Kind == DTypeKind.Map
+                ? WriteMap(builder, arena, node, buffers, encodings, compress)
+                : WriteListView(builder, arena, node, buffers, encodings, compress),
 
-            case CanonicalKind.Primitive:
-                return WritePrimitive(builder, arena, node, buffers, encodings);
+            CanonicalKind.FixedSizeList =>
+                WriteFixedSizeList(builder, arena, node, buffers, encodings, compress),
 
-            case CanonicalKind.Decimal:
-                return WriteDecimal(builder, arena, node, buffers, encodings);
+            // THE DTYPE DECIDES, as it does for a map above: a Struct wearing a VARIANT dtype is a
+            // variant column in this library's canonical form, and writing it as `vortex.struct`
+            // would produce a file whose array says "two fields" and whose schema says "variant" --
+            // which every reader, this one included, refuses.
+            CanonicalKind.Struct => node.DType.Kind == DTypeKind.Variant
+                ? WriteParquetVariant(builder, arena, node, buffers, encodings, compress)
+                : WriteStruct(builder, arena, node, buffers, encodings, compress),
 
-            case CanonicalKind.VarBinView:
-                return WriteVarBinView(builder, arena, node, buffers, encodings);
-
-            case CanonicalKind.ListView:
-                // A map node IS a ListView wearing the map dtype - see MapDecoder - so the kind
-                // alone does not say which id to write. Emitting `vortex.listview` under a map
-                // schema produces a file THIS READER REFUSES, correctly: "vortex.listview produces
-                // a List dtype; it was asked for Map".
-                return node.DType.Kind == DTypeKind.Map
-                    ? WriteMap(builder, arena, node, buffers, encodings, compress)
-                    : WriteListView(builder, arena, node, buffers, encodings, compress);
-
-            case CanonicalKind.FixedSizeList:
-                return WriteFixedSizeList(builder, arena, node, buffers, encodings, compress);
-
-            case CanonicalKind.Struct:
-                // THE DTYPE DECIDES, as it does for a map above: a Struct wearing a VARIANT dtype
-                // is a variant column in this library's canonical form, and writing it as
-                // `vortex.struct` would produce a file whose array says "two fields" and whose
-                // schema says "variant" -- which every reader, this one included, refuses.
-                return node.DType.Kind == DTypeKind.Variant
-                    ? WriteParquetVariant(builder, arena, node, buffers, encodings, compress)
-                    : WriteStruct(builder, arena, node, buffers, encodings, compress);
-
-            default:
-                return WriteExtension(builder, arena, node, buffers, encodings, compress);
-        }
+            CanonicalKind.Extension => WriteExtension(builder, arena, node, buffers, encodings, compress),
+            _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
+        };
     }
 
     /// <remarks>Writes a child that is a column in its own right, compressing it when asked.</remarks>

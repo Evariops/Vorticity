@@ -7,6 +7,7 @@
 // this file is a switch over the nine kinds rather than a general kernel. Buffers come from
 // CanonicalArena.Allocate, which is the only writable memory a decoder may have (contract §8.4).
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Buffers;
@@ -129,6 +130,11 @@ internal static class CanonicalConcat
 
         Validity validity = ConcatValidity(context, dtype, length, chunks);
 
+        // EXHAUSTIVE BY CONSTRUCTION (PERF-AUDIT-v2.md §2.4bis, Z1b-c1): the `_` arm this had was a
+        // Struct arm in disguise, so a tenth kind would have been concatenated field by field over
+        // fields it does not have. Every kind is NAMED now -- Null and Extension included, at the
+        // throw the two early returns above make unreachable -- and IDE0072 (error, see
+        // .editorconfig) fails the build when a named kind is missing.
         return kind switch
         {
             CanonicalKind.Bool => ConcatBool(context, dtype, length, chunks, validity),
@@ -137,7 +143,10 @@ internal static class CanonicalConcat
             CanonicalKind.VarBinView => ConcatVarBinView(context, dtype, length, chunks, validity),
             CanonicalKind.ListView => ConcatListView(context, dtype, length, chunks, validity, depth),
             CanonicalKind.FixedSizeList => ConcatFixedSizeList(context, dtype, length, chunks, validity, depth),
-            _ => ConcatStruct(context, dtype, length, chunks, validity, depth),
+            CanonicalKind.Struct => ConcatStruct(context, dtype, length, chunks, validity, depth),
+            CanonicalKind.Null or CanonicalKind.Extension => throw new UnreachableException(
+                $"{kind} returns above, before ConcatValidity."),
+            _ => throw new UnreachableException($"CanonicalKind {(byte)kind} is not defined."),
         };
     }
 

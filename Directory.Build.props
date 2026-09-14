@@ -8,7 +8,11 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <WarningsNotAsErrors>NU1902;NU1903</WarningsNotAsErrors>
-    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+    <!-- IDE rules run in the build ONLY for what .editorconfig raises to `error`; every other IDE
+         diagnostic defaults to `silent` and stays invisible. Turned on for IDE0072, which is the
+         only thing that fails the build when a CanonicalKind is added and a switch forgets it
+         (PERF-AUDIT-v2.md §2.4bis). -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <Deterministic>true</Deterministic>

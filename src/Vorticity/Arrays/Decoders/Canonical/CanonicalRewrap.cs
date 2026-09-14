@@ -7,6 +7,7 @@
 // segments or to the canonical arena's own rentals - either way to something whose lifetime is the
 // batch (Phase 1 contract §2.2 rule 2).
 using System;
+using System.Diagnostics;
 using Vorticity.Buffers;
 using Vorticity.Types;
 
@@ -28,6 +29,12 @@ internal static class CanonicalRewrap
     /// <param name="length">Row count; must equal the source's.</param>
     /// <returns>The new canonical node's index.</returns>
     /// <exception cref="VortexFormatException">The source's row count disagrees with the parent's.</exception>
+    /// <remarks>
+    /// EXHAUSTIVE BY CONSTRUCTION (PERF-AUDIT-v2.md §2.4bis, Z1b-c1): every kind is NAMED, and the
+    /// <c>_</c> arm throws. It used to be <c>default: RewrapExtension</c>, so a tenth kind had its
+    /// mask pushed down to a storage child it does not have. IDE0072 -- error here, see
+    /// <c>.editorconfig</c> -- now fails the build when a named kind is missing.
+    /// </remarks>
     internal static int WithValidity(
         ArrayDecodeContext context, int sourceIndex, DType dtype, Validity validity, int length)
     {
@@ -39,41 +46,27 @@ internal static class CanonicalRewrap
                 $"A masked child of {source.Length} rows cannot describe an array of {length}.");
         }
 
-        switch (source.Kind)
+        return source.Kind switch
         {
-            case CanonicalKind.Null:
-                return arena.AddNull(dtype, length);
+            CanonicalKind.Null => arena.AddNull(dtype, length),
+            CanonicalKind.Bool => arena.AddBool(dtype, length, validity, source.Bits, source.BitOffset),
+            CanonicalKind.Primitive =>
+                arena.AddPrimitive(dtype, length, validity, source.PType, source.Values),
+            CanonicalKind.Decimal => arena.AddDecimal(
+                dtype, length, validity, source.Storage, source.Precision, source.Scale, source.Values),
+            CanonicalKind.ListView => arena.AddListView(
+                dtype, length, validity, source.ElementsIndex,
+                source.Offsets, source.OffsetPType, source.Sizes, source.SizePType),
+            CanonicalKind.FixedSizeList => arena.AddFixedSizeList(
+                dtype, length, validity, source.ElementsIndex, source.FixedSize),
+            CanonicalKind.VarBinView => RewrapVarBinView(arena, in source, dtype, validity, length),
+            CanonicalKind.Struct => RewrapStruct(arena, in source, dtype, validity, length),
 
-            case CanonicalKind.Bool:
-                return arena.AddBool(dtype, length, validity, source.Bits, source.BitOffset);
-
-            case CanonicalKind.Primitive:
-                return arena.AddPrimitive(dtype, length, validity, source.PType, source.Values);
-
-            case CanonicalKind.Decimal:
-                return arena.AddDecimal(
-                    dtype, length, validity, source.Storage, source.Precision, source.Scale, source.Values);
-
-            case CanonicalKind.ListView:
-                return arena.AddListView(
-                    dtype, length, validity, source.ElementsIndex,
-                    source.Offsets, source.OffsetPType, source.Sizes, source.SizePType);
-
-            case CanonicalKind.FixedSizeList:
-                return arena.AddFixedSizeList(
-                    dtype, length, validity, source.ElementsIndex, source.FixedSize);
-
-            case CanonicalKind.VarBinView:
-                return RewrapVarBinView(arena, in source, dtype, validity, length);
-
-            case CanonicalKind.Struct:
-                return RewrapStruct(arena, in source, dtype, validity, length);
-
-            default:
-                // Extension: its validity is the storage's, so the mask has to be pushed down one
-                // level rather than applied to the wrapper.
-                return RewrapExtension(context, in source, dtype, validity, length);
-        }
+            // An extension's validity is the storage's, so the mask has to be pushed down one level
+            // rather than applied to the wrapper.
+            CanonicalKind.Extension => RewrapExtension(context, in source, dtype, validity, length),
+            _ => throw new UnreachableException($"CanonicalKind {(byte)source.Kind} is not defined."),
+        };
     }
 
     private static int RewrapVarBinView(

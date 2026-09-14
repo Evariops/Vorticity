@@ -19,6 +19,7 @@
 // valid becomes AllValid rather than carrying a bitmap of ones.
 using System;
 using System.Buffers;
+using System.Diagnostics;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
@@ -59,40 +60,30 @@ internal static class CanonicalFilter
     /// <param name="indices">The selected rows, ascending and within the node's length.</param>
     /// <returns>The new node's index.</returns>
     /// <exception cref="NotSupportedException">The node's canonical form has no gather.</exception>
+    /// <remarks>
+    /// EXHAUSTIVE BY CONSTRUCTION (PERF-AUDIT-v2.md §2.4bis, Z1b-c1): every kind is NAMED, and the
+    /// <c>_</c> arm throws instead of gathering. It used to be <c>default: FilterExtension</c>, so a
+    /// tenth kind was gathered through an extension's storage child it does not have. IDE0072 --
+    /// error here, see <c>.editorconfig</c> -- now fails the build when a named kind is missing.
+    /// </remarks>
     internal static int Apply(CanonicalArena arena, int nodeIndex, ReadOnlySpan<int> indices)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         int count = indices.Length;
 
-        switch (node.Kind)
+        return node.Kind switch
         {
-            case CanonicalKind.Null:
-                return arena.AddNull(node.DType, count);
-
-            case CanonicalKind.Bool:
-                return FilterBool(arena, node, indices);
-
-            case CanonicalKind.Primitive:
-                return FilterPrimitive(arena, node, indices);
-
-            case CanonicalKind.Decimal:
-                return FilterDecimal(arena, node, indices);
-
-            case CanonicalKind.VarBinView:
-                return FilterVarBinView(arena, node, indices);
-
-            case CanonicalKind.ListView:
-                return FilterListView(arena, node, indices);
-
-            case CanonicalKind.FixedSizeList:
-                return FilterFixedSizeList(arena, node, nodeIndex, indices);
-
-            case CanonicalKind.Struct:
-                return FilterStruct(arena, node, indices);
-
-            default:
-                return FilterExtension(arena, node, indices);
-        }
+            CanonicalKind.Null => arena.AddNull(node.DType, count),
+            CanonicalKind.Bool => FilterBool(arena, node, indices),
+            CanonicalKind.Primitive => FilterPrimitive(arena, node, indices),
+            CanonicalKind.Decimal => FilterDecimal(arena, node, indices),
+            CanonicalKind.VarBinView => FilterVarBinView(arena, node, indices),
+            CanonicalKind.ListView => FilterListView(arena, node, indices),
+            CanonicalKind.FixedSizeList => FilterFixedSizeList(arena, node, nodeIndex, indices),
+            CanonicalKind.Struct => FilterStruct(arena, node, indices),
+            CanonicalKind.Extension => FilterExtension(arena, node, indices),
+            _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
+        };
     }
 
     private static int FilterBool(CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices)

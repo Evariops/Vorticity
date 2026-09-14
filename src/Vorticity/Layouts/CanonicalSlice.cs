@@ -7,6 +7,7 @@
 // whole reason the flat reader can decode a 8192-row chunk and hand back rows 1023..1025 without
 // copying anything.
 using System;
+using System.Diagnostics;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -111,74 +112,109 @@ internal static class CanonicalSlice
 
         Validity validity = SliceValidity(source, destination, node.Validity, start, length, depth);
 
-        switch (node.Kind)
+        // EXHAUSTIVE BY CONSTRUCTION (PERF-AUDIT-v2.md §2.4bis, Z1b-c1): the `default:` this had was
+        // the Struct arm, so a tenth kind would have been sliced field by field over fields it does
+        // not have. Every kind is NAMED now -- Null and Extension included, at the throw the two
+        // early returns above make unreachable -- and IDE0072 (error, see .editorconfig) fails the
+        // build when a named kind is missing. Each arm is its own method so that this stays an
+        // expression, which is the form IDE0072 checks.
+        return node.Kind switch
         {
-            case CanonicalKind.Bool:
-            {
-                // The bit offset moves with the window; the bitmap itself is never shifted, which
-                // would be a copy per batch (contract §2.6 rule 5).
-                long firstBit = (long)node.BitOffset + start;
-                int byteStart = (int)(firstBit >> 3);
-                int bitOffset = (int)(firstBit & 7);
-                int bytes = (int)(((long)bitOffset + length + 7) / 8);
-                return destination.AddBool(dtype, length, validity, node.Bits.Slice(byteStart, bytes), bitOffset);
-            }
+            CanonicalKind.Bool => SliceBool(destination, in node, dtype, validity, start, length),
+            CanonicalKind.Primitive => SlicePrimitive(destination, in node, dtype, validity, start, length),
+            CanonicalKind.Decimal => SliceDecimal(destination, in node, dtype, validity, start, length),
+            CanonicalKind.VarBinView => SliceVarBinView(destination, in node, dtype, validity, start, length),
+            CanonicalKind.ListView =>
+                SliceListView(source, destination, in node, dtype, validity, start, length),
+            CanonicalKind.FixedSizeList =>
+                SliceFixedSizeList(source, destination, in node, dtype, validity, start, length, depth),
+            CanonicalKind.Struct =>
+                SliceStruct(source, destination, nodeIndex, dtype, validity, start, length, depth),
+            CanonicalKind.Null or CanonicalKind.Extension => throw new UnreachableException(
+                $"{node.Kind} returns above, before SliceValidity."),
+            _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
+        };
+    }
 
-            case CanonicalKind.Primitive:
-            {
-                int width = node.PType.ByteWidth();
-                return destination.AddPrimitive(
-                    dtype, length, validity, node.PType, node.Values.Slice(start * width, length * width));
-            }
+    /// <remarks>
+    /// The bit offset moves with the window; the bitmap itself is never shifted, which would be a
+    /// copy per batch (contract §2.6 rule 5).
+    /// </remarks>
+    private static int SliceBool(
+        CanonicalArena destination, in CanonicalNode node, DType dtype, Validity validity, int start, int length)
+    {
+        long firstBit = (long)node.BitOffset + start;
+        int byteStart = (int)(firstBit >> 3);
+        int bitOffset = (int)(firstBit & 7);
+        int bytes = (int)(((long)bitOffset + length + 7) / 8);
+        return destination.AddBool(dtype, length, validity, node.Bits.Slice(byteStart, bytes), bitOffset);
+    }
 
-            case CanonicalKind.Decimal:
-            {
-                int width = DecimalStorage.ByteWidth(node.Storage);
-                return destination.AddDecimal(
-                    dtype,
-                    length,
-                    validity,
-                    node.Storage,
-                    node.Precision,
-                    node.Scale,
-                    node.Values.Slice(start * width, length * width));
-            }
+    private static int SlicePrimitive(
+        CanonicalArena destination, in CanonicalNode node, DType dtype, Validity validity, int start, int length)
+    {
+        int width = node.PType.ByteWidth();
+        return destination.AddPrimitive(
+            dtype, length, validity, node.PType, node.Values.Slice(start * width, length * width));
+    }
 
-            case CanonicalKind.VarBinView:
-                return SliceVarBinView(destination, in node, dtype, validity, start, length);
+    private static int SliceDecimal(
+        CanonicalArena destination, in CanonicalNode node, DType dtype, Validity validity, int start, int length)
+    {
+        int width = DecimalStorage.ByteWidth(node.Storage);
+        return destination.AddDecimal(
+            dtype,
+            length,
+            validity,
+            node.Storage,
+            node.Precision,
+            node.Scale,
+            node.Values.Slice(start * width, length * width));
+    }
 
-            case CanonicalKind.ListView:
-            {
-                // Offsets are absolute into the elements array, so the elements child is shared
-                // unchanged and only the per-row offset and size vectors are narrowed.
-                int offsetWidth = node.OffsetPType.ByteWidth();
-                int sizeWidth = node.SizePType.ByteWidth();
-                return destination.AddListView(
-                    dtype,
-                    length,
-                    validity,
-                    ReferenceEquals(source, destination)
-                        ? node.ElementsIndex
-                        : destination.ReferenceFrom(source, node.ElementsIndex),
-                    node.Offsets.Slice(start * offsetWidth, length * offsetWidth),
-                    node.OffsetPType,
-                    node.Sizes.Slice(start * sizeWidth, length * sizeWidth),
-                    node.SizePType);
-            }
+    /// <remarks>
+    /// Offsets are absolute into the elements array, so the elements child is shared unchanged and
+    /// only the per-row offset and size vectors are narrowed.
+    /// </remarks>
+    private static int SliceListView(
+        CanonicalArena source,
+        CanonicalArena destination,
+        in CanonicalNode node,
+        DType dtype,
+        Validity validity,
+        int start,
+        int length)
+    {
+        int offsetWidth = node.OffsetPType.ByteWidth();
+        int sizeWidth = node.SizePType.ByteWidth();
+        return destination.AddListView(
+            dtype,
+            length,
+            validity,
+            ReferenceEquals(source, destination)
+                ? node.ElementsIndex
+                : destination.ReferenceFrom(source, node.ElementsIndex),
+            node.Offsets.Slice(start * offsetWidth, length * offsetWidth),
+            node.OffsetPType,
+            node.Sizes.Slice(start * sizeWidth, length * sizeWidth),
+            node.SizePType);
+    }
 
-            case CanonicalKind.FixedSizeList:
-            {
-                uint size = node.FixedSize;
-                int elementStart = ArrayDecodeContext.CheckedMultiply(start, (int)size, "fixed-size-list slice");
-                int elementCount = ArrayDecodeContext.CheckedMultiply(length, (int)size, "fixed-size-list slice");
-                int elements = Slice(source, destination, node.ElementsIndex, elementStart, elementCount, depth + 1);
-                return destination.AddFixedSizeList(dtype, length, validity, elements, size);
-            }
-
-            default:
-                // Struct: every field is narrowed to the same window.
-                return SliceStruct(source, destination, nodeIndex, dtype, validity, start, length, depth);
-        }
+    private static int SliceFixedSizeList(
+        CanonicalArena source,
+        CanonicalArena destination,
+        in CanonicalNode node,
+        DType dtype,
+        Validity validity,
+        int start,
+        int length,
+        int depth)
+    {
+        uint size = node.FixedSize;
+        int elementStart = ArrayDecodeContext.CheckedMultiply(start, (int)size, "fixed-size-list slice");
+        int elementCount = ArrayDecodeContext.CheckedMultiply(length, (int)size, "fixed-size-list slice");
+        int elements = Slice(source, destination, node.ElementsIndex, elementStart, elementCount, depth + 1);
+        return destination.AddFixedSizeList(dtype, length, validity, elements, size);
     }
 
     private static int SliceVarBinView(

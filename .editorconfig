@@ -107,3 +107,30 @@ dotnet_diagnostic.CA1835.severity = error
 # VSTHRD003 (avoid awaiting foreign Tasks) is a deadlock rule for code with a main thread; this
 # library has no synchronization context of its own and the rule fires on every legitimate await
 # of a caller's task.
+
+# ---------------------------------------------------------------------------------------------
+# SCOPED TO FIVE FILES ON PURPOSE, and this is the rule that pays for the scoping note.
+#
+# IDE0072 asks a switch EXPRESSION over an enum to name every member rather than leave some to
+# `_`. Repository-wide it fires 48 times, almost all of them on PType and on encoding ids where
+# the `_` arm IS the answer -- "this width has no kernel", "this encoding is not compressed" --
+# and where naming twenty members would say less than the one arm does.
+#
+# On CanonicalKind it is the opposite, and PERF-AUDIT-v2.md §2.4bis is why. These five files each
+# carry THE exhaustive switch over the nine kinds, and each of their `default:`/`_` arms was not a
+# throw but the LAST KIND'S ARM: a tenth kind would have been filtered, re-wrapped, sliced,
+# concatenated and WRITTEN as an extension or a struct, with no build error and no exception --
+# and on ArrayBlobWriter that is a coherent file carrying the wrong array, which byte-exact
+# WrittenSizeTests cannot catch because the bytes agree with themselves.
+#
+# WHY NOT THE COMPILER. The audit expected CS8509. It does not apply: an enum switch expression
+# that names every member and drops `_` is CS8524 instead -- the UNNAMED values are uncovered --
+# which is an error here today, so the `_` arm cannot be removed, and while it is there CS8509
+# never fires. IDE0072 is the only diagnostic that fires on a missing NAMED member, and it needs
+# EnforceCodeStyleInBuild, which Directory.Build.props now sets.
+#
+# These five were clean when it was turned on, the other switch expressions they contain included.
+# ---------------------------------------------------------------------------------------------
+[src/Vorticity/{Compute/CanonicalFilter,Layouts/CanonicalSlice,Writing/ArrayBlobWriter,Arrays/Decoders/Canonical/CanonicalRewrap,Arrays/Decoders/Canonical/CanonicalConcat}.cs]
+
+dotnet_diagnostic.IDE0072.severity = error
