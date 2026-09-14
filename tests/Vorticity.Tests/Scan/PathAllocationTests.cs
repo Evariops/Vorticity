@@ -33,7 +33,9 @@
 // run still raises it.
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -73,6 +75,46 @@ namespace Vorticity.Tests.Scan;
 [CollectionDefinition(nameof(AllocationCollection), DisableParallelization = true)]
 public sealed class AllocationCollection
 {
+}
+
+/// <summary>The configuration guard every allocation ceiling in this repository sits behind.</summary>
+/// <remarks>
+/// EVERY CEILING IN THESE THREE FILES IS A RELEASE FIGURE, and a Debug build allocates more -- the
+/// JIT optimizer is off, so the escape analysis that keeps a decode path's transients off the heap
+/// does not run. The gap is not small and it is not uniform: measured on the same commit,
+/// `open, footer only` reads 14 936 B in Release and 15 456 in Debug, while `full scan` reads
+/// 190 600 against 215 264 and `take 64 rows from 64 splits` 191 888 against 223 848. It scales
+/// with how much code the axis runs, which is exactly what makes it look like a regression.
+/// <para>
+/// WHY THIS GUARD EXISTS AT ALL (BENCH-AUDIT.md B22). `dotnet test` with no argument builds Debug,
+/// so the plain, documented, obvious command turned all twelve axes red at once with numbers that
+/// were individually plausible. That cost a bisect over twenty commits before the configuration was
+/// suspected -- and the failure would have said nothing about the library even if every commit had
+/// been correct, which they were. CI and `bench/gate.sh` both pass `-c Release`, so the ratchet
+/// still bites where it is meant to; what was missing was for a Debug run to SAY SO instead of
+/// lying quantitatively.
+/// </para>
+/// <para>
+/// It reads the attribute of the assembly UNDER TEST rather than <c>#if DEBUG</c> here, because
+/// what decides the figure is how <c>Vorticity</c> was compiled, not how this project was.
+/// </para>
+/// </remarks>
+internal static class ReleaseOnlyCeilings
+{
+    /// <summary>Skips the calling test, with the reason, unless the library is optimized.</summary>
+    internal static void Require()
+    {
+        DebuggableAttribute? debuggable =
+            typeof(VortexFile).Assembly.GetCustomAttribute<DebuggableAttribute>();
+        bool optimized = debuggable is null || !debuggable.IsJITOptimizerDisabled;
+
+        Assert.SkipUnless(
+            optimized,
+            "Allocation ceilings are Release figures: a Debug build has the JIT optimizer off and "
+                + "allocates more on every axis, by 500 B to 32 kB depending on how much the axis "
+                + "decodes. Nothing is wrong with the library. Run `dotnet test -c Release`, which "
+                + "is what CI and bench/gate.sh run. See BENCH-AUDIT.md B22.");
+    }
 }
 
 /// <summary>Whole-path allocation ceilings, on the <see cref="WrittenSizeTests"/> ratchet model.</summary>
@@ -163,6 +205,7 @@ public sealed class PathAllocationTests
     [Fact]
     public void EveryReadPathAllocatesWithinItsCeiling()
     {
+        ReleaseOnlyCeilings.Require();
         Decoders.EnsureRegistered();
 
         StringBuilder report = new StringBuilder("PATH ALLOCATIONS: floor of ")

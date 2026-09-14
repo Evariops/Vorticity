@@ -188,6 +188,7 @@ public sealed class WriteAllocationTests
     [Fact]
     public async Task WritingAllocatesWithinItsPerRowCeiling()
     {
+        ReleaseOnlyCeilings.Require();
         Decoders.EnsureRegistered();
 
         StringBuilder report = new StringBuilder("WRITE ALLOCATIONS: floor of ")

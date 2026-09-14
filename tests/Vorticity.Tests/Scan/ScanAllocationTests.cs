@@ -34,6 +34,7 @@ public sealed class ScanAllocationTests
     [Fact]
     public async Task SteadyStateAllocatesNothingBeyondOneRecordBatch()
     {
+        ReleaseOnlyCeilings.Require();
         Decoders.EnsureRegistered();
         long batchObject = MeasureOneRecordBatch();
         Assert.True(batchObject > 0, "a RecordBatch must cost something, or the probe is wrong");
