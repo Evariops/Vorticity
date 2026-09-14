@@ -369,8 +369,13 @@ public sealed class AlpRdDecoder : ArrayDecoder
                 $"{Id} declares patch chunk offsets, which the encoding does not carry.");
         }
 
+        bool walked = context.IsNodeChecked(in node);
         Patches patches = Patches.Create(
-            context, in patchesMetadata, length, indicesIndex, valuesIndex, Id);
+            context, in patchesMetadata, length, indicesIndex, valuesIndex, Id, walked);
+        if (!walked)
+        {
+            context.MarkNodeChecked(in node);
+        }
 
         CanonicalNode values = CanonicalSupport.RequirePrimitiveChild(
             context, valuesIndex, leftPType, patchCount, Id + " patch_values");

@@ -194,8 +194,13 @@ public sealed class AlpDecoder : ArrayDecoder
                 "patch_chunk_offsets");
         }
 
+        bool walked = context.IsNodeChecked(in node);
         Patches patches = Patches.Create(
-            context, in patchesMetadata, length, indicesIndex, valuesIndex, Id);
+            context, in patchesMetadata, length, indicesIndex, valuesIndex, Id, walked);
+        if (!walked)
+        {
+            context.MarkNodeChecked(in node);
+        }
 
         CanonicalNode values = context.Canonical.GetNode(valuesIndex);
         if (values.Kind != CanonicalKind.Primitive)

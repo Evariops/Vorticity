@@ -297,6 +297,160 @@ public sealed class ScanContext : IDisposable
     internal static long SegmentKey(uint segmentId) => segmentId;
 
     /// <summary>
+    /// How many validated nodes are remembered at once. One per column that carries a side table
+    /// needing an O(n) check, which the schema bounds; past it, nodes are simply re-checked.
+    /// </summary>
+    private const int CheckedNodeSlots = 8;
+
+    /// <summary>
+    /// Keys of the nodes whose O(n) validation has already passed, or null when none has.
+    /// </summary>
+    /// <remarks>
+    /// LAZY, AND A RATCHET IS WHY - the same lesson the retained-chunk list learned two fields up.
+    /// Written first as an <c>[InlineArray]</c> struct field on the belief that a struct field
+    /// allocates nothing: it allocates nothing SEPARATELY, and it makes this object 64 bytes bigger
+    /// on every scan that constructs one. `PathAllocationTests` charged exactly that and turned red
+    /// by 64 bytes on `scan, fastlanes.delta`, an axis with EIGHT bytes of headroom. Allocated on
+    /// first use instead, a scan that never takes a row pays nothing at all.
+    /// </remarks>
+    /// <summary>
+    /// The open scope in slot 0 and the passed checks in slots 1.., each stored as its value PLUS
+    /// ONE so that 0 means empty. Null until a scope is opened.
+    /// </summary>
+    /// <remarks>
+    /// ONE FIELD, AND THREE MEASUREMENTS FORCED IT. This began as three -- an inline array of keys,
+    /// a count, and a nullable segment id -- which is 24 bytes on every <see cref="ScanContext"/>,
+    /// and `scan, fastlanes.delta` has SIXTEEN bytes of headroom over its ceiling. Moving one field
+    /// to <c>ArrayDecodeContext</c> changed nothing: that object is smaller, so the same field
+    /// crossed an alignment boundary there too. Two fields would land the axis at exactly zero
+    /// headroom, which is a ratchet the next unrelated change breaks.
+    ///
+    /// So the state is one reference, allocated only when a reader opens a scope -- which only a
+    /// take on a node bigger than its batch does. A full scan never allocates it and never pays a
+    /// byte, which is why `scan, fastlanes.delta` is unchanged while the take path pays 88 bytes of
+    /// its 128 (v2 R26).
+    /// </remarks>
+    private long[]? _nodeChecks;
+
+    /// <summary>The segment whose blob is being decoded, while a node-check scope is open.</summary>
+    internal uint? NodeCheckScope =>
+        _nodeChecks is { } slots && slots[0] != 0 ? (uint)(slots[0] - 1) : null;
+
+    /// <summary>Opens a node-check scope. See <see cref="ArrayDecodeContext.IsNodeChecked"/>.</summary>
+    /// <param name="segmentId">The segment whose blob is being decoded.</param>
+    /// <returns>What was in force, for <see cref="EndNodeCheckScope"/>.</returns>
+    internal uint? BeginNodeCheckScope(uint segmentId)
+    {
+        uint? previous = NodeCheckScope;
+        (_nodeChecks ??= new long[CheckedNodeSlots + 1])[0] = (long)segmentId + 1;
+        return previous;
+    }
+
+    /// <summary>Restores what <see cref="BeginNodeCheckScope"/> displaced.</summary>
+    /// <param name="previous">Its return value.</param>
+    internal void EndNodeCheckScope(uint? previous)
+    {
+        if (_nodeChecks is { } slots)
+        {
+            slots[0] = previous is uint segment ? (long)segment + 1 : 0;
+        }
+    }
+
+    /// <summary>
+    /// Whether a per-NODE validation walk has already been run and passed during this scan.
+    /// </summary>
+    /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
+    /// <returns><see langword="true"/> when the walk may be skipped.</returns>
+    /// <remarks>
+    /// <para>
+    /// A VERDICT, NOT A RESULT, AND THAT IS THE WHOLE POINT. `vortex.runend` checks that its run
+    /// ends ascend and `Patches` checks that its indices do - O(side table) walks over bytes that
+    /// belong to the NODE, not to the batch. `FlatLayoutReader` serves a take one batch at a time,
+    /// so they ran once per batch: 93% of a selective run-end take was that one walk (v2 R26),
+    /// 1 086 µs against 72 with it short-circuited.
+    /// </para>
+    /// <para>
+    /// R25 TRIED TO CACHE THE DECODE AND COULD NOT AFFORD IT: an entry costs a retained
+    /// <see cref="CanonicalArena"/>, and `PathAllocationTests` leaves 216 bytes of headroom on the
+    /// take axis and EIGHT on `scan, fastlanes.delta`. A verdict is a long in an inline array -- a
+    /// struct field of this object, so the whole mechanism allocates nothing, on any path, ever.
+    /// That is why this one fits where that one did not.
+    /// </para>
+    /// <para>
+    /// NEVER CLEARED BY <see cref="ResetBatch"/>, and it must not be: the fact it records is about
+    /// the file's bytes, which do not change between batches. Overflow is not an error and not a
+    /// correctness problem - past <see cref="CheckedNodeSlots"/> entries a node is re-checked, which
+    /// is exactly today's behaviour.
+    /// </para>
+    /// </remarks>
+    internal bool IsNodeChecked(long key)
+    {
+        if (_nodeChecks is not { } slots)
+        {
+            return false;
+        }
+
+        long stored = key + 1;
+        for (int i = 1; i <= CheckedNodeSlots; i++)
+        {
+            long slot = slots[i];
+            if (slot == stored)
+            {
+                return true;
+            }
+
+            if (slot == 0)
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Records that the walk named by <paramref name="key"/> ran and passed.</summary>
+    /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
+    /// <remarks>
+    /// Past <see cref="CheckedNodeSlots"/> entries a node is simply re-checked, which is exactly
+    /// today's behaviour: this may only ever save work, never skip a check that has not passed.
+    /// </remarks>
+    internal void MarkNodeChecked(long key)
+    {
+        if (_nodeChecks is not { } slots)
+        {
+            return;
+        }
+
+        for (int i = 1; i <= CheckedNodeSlots; i++)
+        {
+            if (slots[i] == 0)
+            {
+                slots[i] = key + 1;
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Names one serialized node of one segment's array blob, or <see langword="null"/> when the
+    /// pair cannot be named without collision.
+    /// </summary>
+    /// <remarks>
+    /// A NODE INDEX IS STABLE ACROSS BATCHES, which is what makes this a key rather than a guess:
+    /// <c>ArrayBlobReader.LoadCore</c> RESETS the node arena before every parse, so the arena holds
+    /// one blob at a time and a node's index is a deterministic function of that blob's bytes. Parse
+    /// the same segment in any batch, next to any other column, and the same node lands at the same
+    /// index. The null return is a proof rather than a hope: 31 bits each is far above any real
+    /// file, and one that exceeded it would re-check rather than confuse two nodes.
+    /// </remarks>
+    /// <param name="segmentId">The segment whose blob was parsed.</param>
+    /// <param name="nodeIndex">The node's index in the node arena.</param>
+    internal static long? NodeCheckKey(uint segmentId, int nodeIndex) =>
+        segmentId < (1u << 31) && nodeIndex >= 0
+            ? ((long)segmentId << 31) | (uint)nodeIndex
+            : null;
+
+    /// <summary>
     /// The retention key for a whole LAYOUT NODE, which its index identifies within the tree.
     /// </summary>
     /// <remarks>

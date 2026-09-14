@@ -195,7 +195,22 @@ public sealed class FlatLayoutReader : LayoutReader
                 return Gather(held, retained, in fields, context, total);
             }
 
-            return Push(in chunkRoot, in node, in fields, context, total);
+            // THE SPECIALIZED ROUTE RE-ESTABLISHES ITS OWN INVARIANTS, once per batch, and this is
+            // where that stops. The encoding takes its rows without decoding the node -- that part
+            // works -- but the O(n) checks it runs on its side tables are facts about the NODE, not
+            // about the selection: `vortex.runend` re-walked 15 625 run ends and ALP re-walked
+            // 16 454 patch indices on every visit. Measured at 93% of a selective run-end take
+            // (v2 R26). The scope is opened only here, under `length < total`, because below that
+            // the node is visited once and there is nothing to remember.
+            uint? outer = context.Decode.BeginNodeCheckScope(node.Segments[0]);
+            try
+            {
+                return Push(in chunkRoot, in node, in fields, context, total);
+            }
+            finally
+            {
+                context.Decode.EndNodeCheckScope(outer);
+            }
         }
 
         ArrayNode wholeRoot = LoadRoot(in node, context);

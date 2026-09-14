@@ -238,15 +238,26 @@ public readonly ref struct Patches
     /// <param name="indicesNodeIndex">The decoded <c>patch_indices</c> child.</param>
     /// <param name="valuesNodeIndex">The decoded <c>patch_values</c> child.</param>
     /// <param name="encodingId">The encoding asking, for the error messages.</param>
+    /// <param name="indicesAlreadyChecked">
+    /// <see langword="true"/> when THIS scan has already walked these indices and found them
+    /// ascending, so the O(n) walk may be skipped. Everything else here is O(1) and always runs.
+    /// </param>
     /// <returns>The validated patch set.</returns>
-    /// <exception cref="VortexFormatException">Any of the class I rules above fails.</exception>
+    /// <remarks>
+    /// THE ONE O(n) STEP IS THE MONOTONICITY WALK, and on a take it was re-run for every batch of
+    /// the same node - 16 454 patch indices per call on the 1M-row ALP axis. Ascending is a property
+    /// of the node's bytes, not of the batch, so the caller may answer it once per scan through
+    /// <see cref="ArrayDecodeContext.IsNodeChecked"/>; outside a take on an oversized node that
+    /// method answers false and this walks exactly as before (v2 R26).
+    /// </remarks>
     public static Patches Create(
         ArrayDecodeContext ctx,
         in PatchesMetadata metadata,
         int arrayLength,
         int indicesNodeIndex,
         int valuesNodeIndex,
-        string encodingId)
+        string encodingId,
+        bool indicesAlreadyChecked = false)
     {
         ArgumentNullException.ThrowIfNull(ctx);
 
@@ -290,7 +301,10 @@ public readonly ref struct Patches
         // index is inside the array then every index is -- so the per-index work is a monotonicity
         // check, which is a shifted compare and belongs to the vector unit.
         ulong unsignedOffset = (ulong)offset;
-        RequireAscending(indices, indicesPType, count, encodingId);
+        if (!indicesAlreadyChecked)
+        {
+            RequireAscending(indices, indicesPType, count, encodingId);
+        }
 
         ulong first = CompressedValues.ReadUnsigned(indices, indicesPType, 0);
         if (first < unsignedOffset)

@@ -118,7 +118,15 @@ public sealed class RunEndDecoder : ArrayDecoder
             }
         }
 
-        ValidateEnds(ends, metadata.EndsPType, runCount, offset, length);
+        // ONCE PER NODE PER SCAN, not once per batch. The ends belong to the node and cannot change
+        // between two batches of it, so the walk is a question already answered -- see
+        // `ArrayDecodeContext.IsNodeChecked`, which answers false outside a take on an oversized
+        // node and therefore leaves every other path walking exactly as before.
+        if (!context.IsNodeChecked(in node))
+        {
+            ValidateEnds(ends, metadata.EndsPType, runCount, offset, length);
+            context.MarkNodeChecked(in node);
+        }
 
         ValidityReader valuesValidity = ValidityReader.Of(context.Canonical, values.Validity);
         bool tracked = !values.Validity.IsAllValid;

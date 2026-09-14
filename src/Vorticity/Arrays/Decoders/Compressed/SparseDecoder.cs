@@ -49,8 +49,13 @@ public sealed class SparseDecoder : ArrayDecoder
         int indicesIndex = context.DecodeChild(in node, 0, indicesType, patchCount);
         int valuesIndex = context.DecodeChild(in node, 1, dtype, patchCount);
 
+        bool walked = context.IsNodeChecked(in node);
         Patches patches = Patches.Create(
-            context, in patchesMetadata, length, indicesIndex, valuesIndex, Id);
+            context, in patchesMetadata, length, indicesIndex, valuesIndex, Id, walked);
+        if (!walked)
+        {
+            context.MarkNodeChecked(in node);
+        }
 
         // The fill value is interpreted against the array's own dtype, exactly as
         // `ScalarValue::from_proto_bytes(scalar_bytes, dtype, session)` does.

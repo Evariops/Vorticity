@@ -147,6 +147,60 @@ public sealed class ArrayDecodeContext
     }
 
     /// <summary>
+    /// Opens a scope in which a per-NODE validation walk may be remembered across the batches of
+    /// one node.
+    /// </summary>
+    /// <param name="segmentId">The segment the blob being decoded came from.</param>
+    /// <returns>What was in force, to be restored by <see cref="EndNodeCheckScope"/>.</returns>
+    /// <remarks>
+    /// OPENED BY THE READER, NOT BY A DECODER, because only the reader knows the two facts that make
+    /// remembering sound: which SEGMENT the blob came from - a decoder sees nodes, not segments -
+    /// and whether this node is bigger than the batch, below which it is visited once and there is
+    /// nothing to remember. <c>FlatLayoutReader</c> owns both.
+    /// </remarks>
+    internal uint? BeginNodeCheckScope(uint segmentId) => _scan.BeginNodeCheckScope(segmentId);
+
+    /// <summary>Restores what <see cref="BeginNodeCheckScope"/> displaced.</summary>
+    /// <param name="previous">Its return value.</param>
+    internal void EndNodeCheckScope(uint? previous) => _scan.EndNodeCheckScope(previous);
+
+    /// <summary>
+    /// Whether an O(n) validation of <paramref name="node"/> has already run and passed in this
+    /// scan, so this decode may skip it.
+    /// </summary>
+    /// <param name="node">The node about to be walked.</param>
+    /// <returns><see langword="false"/> whenever there is any doubt, so the walk runs.</returns>
+    /// <remarks>
+    /// <para>
+    /// A CHECK THAT IS A PROPERTY OF THE NODE MAY BE ASKED ONCE. `vortex.runend`'s "the run ends
+    /// ascend" and `Patches`'s "the patch indices ascend" are facts about bytes that do not change
+    /// between batches, and both were re-established on every batch of a take: measured at 93% of a
+    /// selective run-end take, 1 086 µs against 72 with the walk short-circuited (v2 R26).
+    /// </para>
+    /// <para>
+    /// IT IS NOT A WAY TO SKIP VALIDATION. Outside a reader-opened scope this returns false, so a
+    /// full scan, a filter and every first visit walk exactly as before; only a node ALREADY walked
+    /// and passed in this same scan is spared, and only the second time onward. A malformed file
+    /// still throws on its first batch, which is the batch that would have thrown anyway.
+    /// </para>
+    /// </remarks>
+    public bool IsNodeChecked(in ArrayNode node) =>
+        _scan.NodeCheckScope is uint segment &&
+        ScanContext.NodeCheckKey(segment, node.Index) is long key &&
+        _scan.IsNodeChecked(key);
+
+    /// <summary>Records that <paramref name="node"/>'s validation walk ran and passed.</summary>
+    /// <param name="node">The node just walked.</param>
+    public void MarkNodeChecked(in ArrayNode node)
+    {
+        if (_scan.NodeCheckScope is uint segment &&
+            ScanContext.NodeCheckKey(segment, node.Index) is long key)
+        {
+            _scan.MarkNodeChecked(key);
+        }
+    }
+
+    /// <summary>
     /// The shared validity rule of contract §2.6, whose body is the reference's
     /// <c>deserialize_validity</c> (vortex-array-0.86.1/src/validity.rs) plus the required
     /// constant collapse.
