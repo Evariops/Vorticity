@@ -238,7 +238,7 @@ internal static class ThroughputCheck
         {
             if (!measured.TryGetValue(name, out List<double>? seen) || seen.Count == 0)
             {
-                Console.Out.WriteLine($"        (\"{name}\", {current:F2}),   // not measured this run");
+                Console.Out.WriteLine($"        (\"{name}\", {Ref(current)}),   // not measured this run");
                 continue;
             }
 
@@ -252,16 +252,16 @@ internal static class ThroughputCheck
             string note = loosens
                 ? string.Create(
                     CultureInfo.InvariantCulture,
-                    $"HELD at {current:F2}: {passes} passes peaked at {max:F2}, no loosening")
+                    $"HELD at {Ref(current)}: {passes} passes peaked at {Ref(max)}, no loosening")
                 : max > current
                     ? string.Create(
                         CultureInfo.InvariantCulture,
-                        $"REBASED UP from {current:F2} (k>1): {(max / current) - 1:+0.0%}")
+                        $"REBASED UP from {Ref(current)} (k>1): {(max / current) - 1:+0.0%}")
                     : string.Create(
-                        CultureInfo.InvariantCulture, $"was {current:F2}, {(max / current) - 1:+0.0%;-0.0%;0.0%}");
+                        CultureInfo.InvariantCulture, $"was {Ref(current)}, {(max / current) - 1:+0.0%;-0.0%;0.0%}");
             Console.Out.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"        (\"{name}\", {value:F2}),   // {passes} passes, spread {min:F2}-{max:F2}; {note}"));
+                $"        (\"{name}\", {Ref(value)}),   // {passes} passes, spread {Ref(min)}-{Ref(max)}; {note}"));
         }
 
         // An axis calibrated for the first time has an empty table, so every name it measured is
@@ -277,8 +277,8 @@ internal static class ThroughputCheck
 
             Console.Out.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"        (\"{name}\", {seen.Max():F2}),   // {passes} passes, spread " +
-                $"{seen.Min():F2}-{seen.Max():F2}; first calibration"));
+                $"        (\"{name}\", {Ref(seen.Max())}),   // {passes} passes, spread " +
+                $"{Ref(seen.Min())}-{Ref(seen.Max())}; first calibration"));
         }
 
         Console.Out.WriteLine(
@@ -468,6 +468,28 @@ internal static class ThroughputCheck
     /// </summary>
     private const double Margin = 1.15;
 
+    /// <summary>Below this ratio, two decimals cannot express a reference. BENCH-AUDIT.md B13.</summary>
+    /// <remarks>
+    /// A two-decimal table quantizes a reference to the nearest 0,005, and that step is a FRACTION
+    /// of the value: 12,5 % at a ratio of 0,04, 10 % at 0,05, 8,3 % at 0,06, 5 % at 0,10. Against
+    /// <see cref="Margin"/>'s 15 %, the rounding alone eats most of what the gate allows, and below
+    /// about 0,038 it eats all of it -- an axis whose true ratio is just above its rounded-down
+    /// reference then prints OVER forever, on the encodings where this library is TWENTY TIMES
+    /// faster than the reference. <c>--ratio-check</c> never had the defect, its references being
+    /// three-decimal already.
+    /// <para>
+    /// Six of the fifty-seven axes are under it (struct, varbin, varbinview, chunked_varbinview,
+    /// table_mixed, map), and <c>table_wide</c> sits exactly on it.
+    /// </para>
+    /// </remarks>
+    private const double FineBelow = 0.1;
+
+    /// <summary>Formats a ratio with the number of decimals its magnitude needs.</summary>
+    /// <param name="ratio">A ratio, a reference, or a ceiling.</param>
+    /// <returns>Three decimals under <see cref="FineBelow"/>, two above.</returns>
+    private static string Ref(double ratio) =>
+        ratio.ToString(ratio < FineBelow ? "F3" : "F2", CultureInfo.InvariantCulture);
+
     /// <summary>
     /// The ratio each encoding was measured at when the ceiling was last set, on the machine named
     /// in bench/BASELINE.md. LOWER ONE BY HAND when an improvement lands, in the same commit.
@@ -515,7 +537,7 @@ internal static class ThroughputCheck
         ("chunked_empty_chunks", 0.26),   // 3 passes, spread 0.24-0.27; HELD at 0.26: 3 passes peaked at 0.27, no loosening
         ("chunked_mixed_validity", 1.23),   // 3 passes, spread 1.16-1.24; HELD at 1.23: 3 passes peaked at 1.24, no loosening. THE WORST AXIS OF THE FIFTY: v2 R8c/R8e
         ("chunked_one_chunk", 0.26),   // 3 passes, spread 0.23-0.26; HELD at 0.26: 3 passes peaked at 0.26, no loosening
-        ("chunked_varbinview", 0.06),   // v2 R28 : 0.07 -> 0.06. Deux runs, 3 355 et 3 392 us contre 4 160 et 3 924 (v2 R8b avant)
+        ("chunked_varbinview", 0.060),   // B13 : trois decimales. Inchangee — les deux runs se contredisent (0.061 et 0.060), donc rien ne descend
         ("constant", 0.97),   // 3 passes, spread 0.94-0.97; was 0.97, -0.1%
         ("datetimeparts", 0.83),   // 3 passes, spread 0.78-0.83; was 0.83, -0.5% (v2 R1)
         ("decimal", 0.25),   // 3 passes, spread 0.23-0.25; was 0.27, -7.6%
@@ -535,7 +557,7 @@ internal static class ThroughputCheck
         ("fsst", 1.31),   // 3 passes, spread 1.29-1.31; was 1.31, -0.2%
         ("list", 0.48),   // 3 passes, spread 0.42-0.48; was 0.50, -4.3%
         ("listview", 0.19),   // 3 passes, spread 0.19-0.21; HELD at 0.19: 3 passes peaked at 0.21, no loosening (v2 R7)
-        ("map", 0.08),   // 3 passes, spread 0.08-0.08; was 0.09, -13.4% (v2 R7)
+        ("map", 0.063),   // B13 : 0.08 -> 0.063, la plus grosse prise de mou des six. Deux runs, [0.052; 0.060] et [0.058; 0.063] — la reference etait loin au-dessus sans jamais dire STALE (seuil 0.70, soit 0.056)
         ("masked", 0.33),   // 3 passes, spread 0.29-0.37; HELD at 0.33: 3 passes peaked at 0.37, no loosening
         ("masked_all_invalid", 0.32),   // 3 passes, spread 0.31-0.32; was 0.35, -8.2%
         ("masked_all_valid", 0.34),   // 3 passes, spread 0.31-0.34; was 0.36, -4.7%
@@ -547,11 +569,11 @@ internal static class ThroughputCheck
         ("runend", 0.82),   // v2 R29 : 1.22 -> 0.82. Un run complet lit 0.80 [0.788; 0.815] et 149 us contre 240 et 229 avant ; la reference est le haut de cet intervalle
         ("sequence", 0.95),   // 3 passes, spread 0.93-0.95; was 0.95, 0.0%
         ("sparse", 0.65),   // 3 passes, spread 0.61-0.65; was 0.67, -3.1% (v2 R5)
-        ("struct", 0.04),   // v2 R28 : 0.07 -> 0.04, STALE sur deux runs. Ses colonnes utf8 sont des varbinview, donc elles passent par ValidateViews
-        ("table_mixed", 0.06),   // v2 R28 : 0.07 -> 0.06. Deux runs, 6 011 et 6 076 us contre 7 615 et 7 129 (B6/D3 avant)
+        ("struct", 0.040),   // B13 : trois decimales, valeur inchangee — deux runs plafonnent exactement a 0.040. v2 R28 : 0.07 -> 0.04, STALE sur deux runs, ses colonnes utf8 etant des varbinview
+        ("table_mixed", 0.060),   // B13 : trois decimales. Inchangee — les deux runs se contredisent (0.061 et 0.059), donc rien ne descend
         ("table_wide", 0.10),   // 3 passes, spread 0.09-0.10; HELD at 0.10: 3 passes peaked at 0.10, no loosening (B6/D3)
-        ("varbin", 0.04),   // 3 passes, spread 0.04-0.05; HELD at 0.04: 3 passes peaked at 0.05, no loosening
-        ("varbinview", 0.05),   // v2 R28 : 0.06 -> 0.05. Deux runs consecutifs, 2 636 et 2 693 us contre 3 398 et 3 623 avant ; intervalles [0.041; 0.047] et [0.041; 0.049]
+        ("varbin", 0.040),   // B13 : NON RECALIBREE, et c'est le constat. Les deux runs lisent [0.042; 0.046] et [0.041; 0.046], soit une mediane egale au plafond. 0.046 est HORS de la bande d'arrondi de 0,04 ([0.035; 0.045)), donc l'ecrire serait remonter une reference, pas la noter finement. Voir B23
+        ("varbinview", 0.049),   // B13 : 0.05 -> 0.049. Deux runs, [0.044; 0.049] et [0.040; 0.047] — du mou que deux decimales ne pouvaient pas reprendre. v2 R28 avait fait 0.06 -> 0.05
         ("variant", 6.51),   // 3 passes, spread 6.33-6.87; HELD at 6.51: 3 passes peaked at 6.87, no loosening
         ("zigzag", 0.82),   // 3 passes, spread 0.81-0.84; HELD at 0.82: 3 passes peaked at 0.84, no loosening
         ("zstd", 1.06),   // 3 passes, spread 1.04-1.08; HELD at 1.06: 3 passes peaked at 1.08, no loosening
@@ -867,7 +889,7 @@ internal static class ThroughputCheck
                     {
                         unreferenced.Add(string.Create(
                             CultureInfo.InvariantCulture,
-                            $"        (\"{name}\", {ratio.Median:F2}),"));
+                            $"        (\"{name}\", {Ref(ratio.Median)}),"));
                         suffix = "        --      --   NO REF";
                     }
                     else
@@ -875,7 +897,7 @@ internal static class ThroughputCheck
                         double ceiling = reference.Value * Margin;
                         suffix = string.Create(
                             CultureInfo.InvariantCulture,
-                            $" {reference.Value,9:F2} {ceiling,7:F2}");
+                            $" {Ref(reference.Value),9} {Ref(ceiling),7}");
 
                         // THE LOWER BOUND DECIDES, for B2's reason: a median over the ceiling with
                         // an interval straddling it is a coin toss, and failing on it is what made
@@ -885,21 +907,21 @@ internal static class ThroughputCheck
                             suffix += "   OVER";
                             failures.Add(string.Create(
                                 CultureInfo.InvariantCulture,
-                                $"  {name}: {ratio.Median:F2} {ratio} entirely over the {ceiling:F2} ceiling."));
+                                $"  {name}: {Ref(ratio.Median)} {ratio} entirely over the {Ref(ceiling)} ceiling."));
                         }
                         else if (ratio.High < reference.Value * StaleBelow)
                         {
                             suffix += "   STALE";
                             stale.Add(string.Create(
                                 CultureInfo.InvariantCulture,
-                                $"  {name}: {ratio.Median:F2} against a {reference.Value:F2} reference -- lower it."));
+                                $"  {name}: {Ref(ratio.Median)} against a {Ref(reference.Value)} reference -- lower it."));
                         }
                         else if (ratio.Median > ceiling)
                         {
                             suffix += "   noisy";
                             blunt.Add(string.Create(
                                 CultureInfo.InvariantCulture,
-                                $"  {name}: {ratio.Median:F2} is over {ceiling:F2} but {ratio} straddles it."));
+                                $"  {name}: {Ref(ratio.Median)} is over {Ref(ceiling)} but {ratio} straddles it."));
                         }
                     }
                 }
@@ -907,7 +929,7 @@ internal static class ThroughputCheck
                 Console.Out.WriteLine(string.Create(
                     CultureInfo.InvariantCulture,
                     $"  {name,-32} {rows,10} {ours,9:F0}us {theirs,9:F0}us {nsPerValue,9:F2} {rustNs,10:F2} " +
-                    $"{ratio.Median,6:F2} {ratio} {ratio.Samples,3} {m.Repeats,3} {ratio.MinimumDetectableEffect,6:P1}{suffix}"));
+                    $"{Ref(ratio.Median),6} {ratio} {ratio.Samples,3} {m.Repeats,3} {ratio.MinimumDetectableEffect,6:P1}{suffix}"));
             }
             else
             {
