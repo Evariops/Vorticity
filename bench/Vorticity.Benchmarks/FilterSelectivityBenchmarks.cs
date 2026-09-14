@@ -29,14 +29,20 @@ namespace Vorticity.Benchmarks;
 [BenchmarkCategory(BenchmarkConfig.Explore)]
 public class FilterSelectivityBenchmarks
 {
-    /// <summary>`monotone` starts here and steps by 3, so a band of 3n rows is n wide in value.</summary>
-    private const long Base = 1_000_000;
+    /// <summary>The column the band is taken on.</summary>
+    private const string Field = "monotone";
 
-    /// <summary>The step between consecutive values of the `monotone` column.</summary>
-    private const long Step = 3;
-
-    /// <summary>Rows in the file, which turns a percentage into a band width.</summary>
-    private const long Rows = 65_536;
+    /// <summary>
+    /// The file's own shape: rows, the column's first value, and its step.
+    /// </summary>
+    /// <remarks>
+    /// READ FROM THE FILE, NOT WRITTEN DOWN (BENCH-AUDIT.md A4). These were three constants --
+    /// 65 536 rows, a base of 1 000 000, a step of 3 -- all properties of ONE corpus entry, in a
+    /// class that honours `VORTICITY_BENCH_DATA`. Pointing that variable at another file kept the
+    /// constants and measured a band with nothing in it, silently: a percentage of a row count that
+    /// was not the row count, starting at a value the column never takes.
+    /// </remarks>
+    private Corpus.ColumnShape _shape;
 
     private string _path = string.Empty;
 
@@ -53,8 +59,11 @@ public class FilterSelectivityBenchmarks
     public bool Prune { get; set; }
 
     [GlobalSetup]
-    public void Setup() =>
+    public void Setup()
+    {
         _path = Corpus.Dataset("VORTICITY_BENCH_DATA", "containers/zoned_many_zones_nulls");
+        _shape = Corpus.RequireIntegerColumn(_path, Field, "VORTICITY_BENCH_DATA");
+    }
 
     [Benchmark(Description = "selective filter")]
     public async Task<long> Filter()
@@ -62,15 +71,15 @@ public class FilterSelectivityBenchmarks
         // The band starts at the column's own base, so every selectivity measures a PREFIX of the
         // column. Starting it in the middle would change which zones are skippable as well as how
         // many, and two variables in one axis is not an axis.
-        long width = Rows * Step * Percent / 100;
+        long width = _shape.Rows * _shape.Step * Percent / 100;
         VortexExpr filter = Expr.And(
-            Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(Base))),
-            Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(Base + width))));
+            Expr.Ge(Expr.Field(Field), Expr.Literal(FilterLiteral.From(_shape.First))),
+            Expr.Lt(Expr.Field(Field), Expr.Literal(FilterLiteral.From(_shape.First + width))));
 
         await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None);
         long rows = 0;
         await foreach (RecordBatch batch in file.Scan()
-            .Project("monotone")
+            .Project(Field)
             .Where(filter)
             .WithPruning(Prune)
             .ExecuteAsync()

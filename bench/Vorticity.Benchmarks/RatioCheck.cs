@@ -442,6 +442,26 @@ internal static class RatioCheck
 
         string path = Corpus.Dataset("VORTICITY_BENCH_DATA", "containers/zoned_many_zones_nulls");
 
+        // THE GATE REFUSES A FILE OF ANOTHER SHAPE rather than deriving one (BENCH-AUDIT.md A4).
+        // The classes that only report can adapt to whatever file they are given; these thirteen
+        // references cannot -- they are ratchets measured against this file's columns, its zones
+        // and its splits, so the same numbers over another file would be a comparison with nothing.
+        // The band's own constants are checked by using them: `monotone` has to exist and be an
+        // integer, and the axes read exactly the values this file has. A gate says why and exits
+        // rather than throwing a stack trace at a script.
+        try
+        {
+            Corpus.RequireIntegerColumn(path, Scenarios.Field, "VORTICITY_BENCH_DATA");
+        }
+        catch (Exception e) when (e is InvalidOperationException or ArgumentException
+            or VortexFormatException or VortexUnsupportedException)
+        {
+            Console.Error.WriteLine(
+                $"{e.Message}\nThe references are ratchets against this file's columns, zones and " +
+                "splits; the same numbers over another file would be a comparison with nothing.");
+            return 2;
+        }
+
         // The same precondition --ffi-check exists for, asserted here rather than assumed: a ratio
         // between two readers that return different row counts is not a ratio, and this would
         // report one just as confidently.

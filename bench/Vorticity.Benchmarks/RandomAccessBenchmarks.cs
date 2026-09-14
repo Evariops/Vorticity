@@ -34,8 +34,8 @@ namespace Vorticity.Benchmarks;
 [BenchmarkCategory(BenchmarkConfig.Explore)]
 public class RandomAccessBenchmarks
 {
-    /// <summary>Rows in the file, which turns a count into a stride.</summary>
-    private const long Rows = 65_536;
+    /// <summary>The column whose presence says the file is the shape this class expects.</summary>
+    private const string Field = "monotone";
 
     private string _path = string.Empty;
     private long[] _rows = [];
@@ -52,12 +52,16 @@ public class RandomAccessBenchmarks
     [GlobalSetup]
     public void Setup()
     {
+        // THE ROW COUNT COMES FROM THE FOOTER (BENCH-AUDIT.md A4). It was the constant 65 536 in a
+        // class that honours `VORTICITY_BENCH_DATA`, so a smaller file was asked for rows past
+        // its end and a larger one had most of itself never touched.
         _path = Corpus.Dataset("VORTICITY_BENCH_DATA", "containers/zoned_many_zones_nulls");
+        long rows = Corpus.RequireIntegerColumn(_path, Field, "VORTICITY_BENCH_DATA").Rows;
         _rows = new long[Count];
-        long stride = Math.Max(Rows / Count, 1);
+        long stride = Math.Max(rows / Count, 1);
         for (int i = 0; i < Count; i++)
         {
-            _rows[i] = Math.Min(i * stride, Rows - 1);
+            _rows[i] = Math.Min(i * stride, rows - 1);
         }
     }
 
