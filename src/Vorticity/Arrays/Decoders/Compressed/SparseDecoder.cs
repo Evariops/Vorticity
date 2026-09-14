@@ -111,6 +111,31 @@ public sealed class SparseDecoder : ArrayDecoder
                 validity.SetValidRange(0, length);
             }
 
+            // THE CASE THE ENCODING IS FOR, TAKEN WHOLE. PERF-AUDIT-v2.md R5: the loop below asks
+            // three questions per patch that are properties of the ARRAY -- what kind the writer is
+            // (inside `Copy`), whether this patch value is null, and whether validity is tracked --
+            // and on a `vortex.sparse` node the usual answers are "primitive", "no" and "already
+            // set". Measured by short-circuiting it: the loop is **23,5 %** of a million-row sparse
+            // scan (0,136 ms against 0,104).
+            //
+            // WHEN THE FILL IS NOT NULL AND NO PATCH VALUE IS, the per-patch validity work is not
+            // merely hoistable, it is REDUNDANT: `SetValidRange(0, length)` above has already set
+            // every bit this loop would set again. So the fast path is a pure scatter, and
+            // `Patches.ApplyAll` is already that scatter, typed on both the index width and the
+            // value width -- it is what `AlpDecoder` uses and what R4 found the other callers did
+            // not need.
+            //
+            // Primitive only. `Copy` also shifts a VarBinView's buffer index and writes a bit for a
+            // Bool, and `ApplyAll` does neither; a Decimal is fixed-width but goes through the same
+            // `Copy` and is left with the general loop rather than assumed.
+            if (writer.Kind == CanonicalKind.Primitive && valuesValidity.IsAllValid && !fillIsNull)
+            {
+                patches.ApplyAll(values.Bytes, writer.Width, writer.Bytes);
+
+                return writer.Complete(
+                    context, dtype, validity.Complete(context, dtype, Id), dataBuffers.Buffers);
+            }
+
             for (int i = 0; i < patches.Count; i++)
             {
                 int position = patches.GetPosition(i);

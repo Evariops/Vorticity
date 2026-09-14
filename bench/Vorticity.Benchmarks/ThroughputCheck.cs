@@ -535,7 +535,7 @@ internal static class ThroughputCheck
         ("primitive", 0.26),   // 3 processes, spread 0.21-0.26; was 0.28, -7.7%
         ("runend", 1.23),   // 3 processes, spread 1.19-1.23; REBASED UP from 1.22 (k>1): +0.6%
         ("sequence", 0.95),   // 3 processes, spread 0.93-0.95; was 0.97, -2.2%
-        ("sparse", 0.88),   // 3 processes, spread 0.82-0.88; REBASED UP from 0.84 (k>1): +4.4%
+        ("sparse", 0.67),   // PERF-AUDIT-v2.md R5: 0.88 -> 0.67. Full run reads 0.64 [0.613; 0.671]; the reference is that interval's top, which is 0.64 + one mde and still 24% under the old value
         ("struct", 0.07),   // 3 processes, spread 0.07-0.07; HELD at 0.07: 3 processes peaked at 0.07, no loosening
         ("varbin", 0.04),   // 3 processes, spread 0.04-0.05; HELD at 0.04: 3 processes peaked at 0.05, no loosening
         ("varbinview", 0.08),   // 3 processes, spread 0.07-0.08; was 0.08, -4.7%
