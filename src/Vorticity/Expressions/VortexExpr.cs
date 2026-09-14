@@ -90,9 +90,25 @@ public abstract class VortexExpr
 /// <summary>A column reference, by dotted path.</summary>
 public sealed class FieldExpr : VortexExpr
 {
+    /// <remarks>
+    /// EMPTY SEGMENTS ARE THE SCHEMA'S BUSINESS, NOT THIS CONSTRUCTOR'S. PERF-AUDIT-v2.md R18a: a
+    /// Vortex field name may be empty -- `corpus/types/struct_field_names` has one, and its first
+    /// column is literally named "" -- and `Projection` reaches it, because it splits on dots and
+    /// lets `DType.IndexOfField` decide whether the segment names anything. This refused the same
+    /// path up front, so `Project("")` worked and `Expr.Field("")` threw: the same file, the same
+    /// grammar, two answers.
+    ///
+    /// A path naming nothing still fails, at the place that can say so usefully -- the scan, which
+    /// has the schema and reports which path is unknown. What is gone is the guess made before
+    /// anything was known.
+    ///
+    /// Neither grammar can address a field whose NAME contains a dot, and that is deliberate on
+    /// both sides: `Projection`'s header says it invents no escaping syntax and points at
+    /// `ProjectFields(ReadOnlySpan&lt;int&gt;)` as the documented way in.
+    /// </remarks>
     internal FieldExpr(string path)
     {
-        ArgumentException.ThrowIfNullOrEmpty(path);
+        ArgumentNullException.ThrowIfNull(path);
         Path = path;
 
         // Split and encode ONCE, here, because resolving the path is a per-batch operation and
@@ -103,13 +119,6 @@ public sealed class FieldExpr : VortexExpr
         SegmentsUtf8 = new byte[parts.Length][];
         for (int i = 0; i < parts.Length; i++)
         {
-            if (parts[i].Length == 0)
-            {
-                throw new ArgumentException(
-                    $"'{path}' has an empty path segment; a field path is dot-separated names.",
-                    nameof(path));
-            }
-
             SegmentsUtf8[i] = System.Text.Encoding.UTF8.GetBytes(parts[i]);
         }
     }

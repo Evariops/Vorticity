@@ -339,6 +339,68 @@ public sealed class ScanFilterTests
         return values;
     }
 
+    /// <summary>
+    /// A field a projection can name, a filter can name too.
+    /// </summary>
+    /// <remarks>
+    /// PERF-AUDIT-v2.md R18a. A Vortex field name may be empty, and `types/struct_field_names` has
+    /// one -- its first column is literally named "". `Projection` reaches it, because it splits on
+    /// dots and asks the schema what each segment names; `FieldExpr` used to refuse the same path in
+    /// its constructor, so the same file answered `Project("")` and threw on `Expr.Field("")`.
+    ///
+    /// THE TEST IS THE PARITY, not the empty name: what matters is that one grammar does not accept
+    /// what the other rejects, because a caller writes both against the same schema.
+    /// </remarks>
+    [Fact]
+    public async Task AFieldTheProjectionCanNameTheFilterCanNameToo()
+    {
+        Decoders.EnsureRegistered();
+        await using VortexFile file = await VortexFile.OpenAsync(
+            Corpus.Path("types/struct_field_names"), CancellationToken.None);
+
+        long projected = 0;
+        await foreach (RecordBatch batch in file.Scan().Project("").ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            projected += batch.RowCount;
+        }
+
+        Assert.True(projected > 0, "the projection reached the field named \"\"");
+
+        // The same path, through the filter. `>= long.MinValue` is true of every non-null value, so
+        // this asserts the path RESOLVED rather than asserting a particular predicate's result.
+        VortexExpr everything = Expr.Ge(
+            Expr.Field(string.Empty), Expr.Literal(FilterLiteral.From(long.MinValue)));
+        long filtered = 0;
+        await foreach (RecordBatch batch in file.Scan().Where(everything).ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            filtered += batch.RowCount;
+        }
+
+        Assert.Equal(projected, filtered);
+    }
+
+    /// <summary>A path naming nothing still fails -- at the scan, which knows the schema.</summary>
+    [Fact]
+    public async Task AFieldNoSchemaHasStillFails()
+    {
+        Decoders.EnsureRegistered();
+        await using VortexFile file = await VortexFile.OpenAsync(
+            Corpus.Path("types/struct_field_names"), CancellationToken.None);
+
+        VortexExpr unknown = Expr.Ge(
+            Expr.Field("no.such.path"), Expr.Literal(FilterLiteral.From(0L)));
+        await Assert.ThrowsAnyAsync<ArgumentException>(async () =>
+        {
+            await foreach (RecordBatch batch in file.Scan().Where(unknown).ExecuteAsync()
+                .WithCancellation(CancellationToken.None))
+            {
+                _ = batch.RowCount;
+            }
+        });
+    }
+
     private static async Task Read(
         string id, string column, VortexExpr? filter, Action<RecordBatch, byte[], int> read)
     {
