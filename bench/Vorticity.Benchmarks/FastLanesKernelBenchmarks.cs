@@ -43,6 +43,8 @@ public class FastLanesKernelBenchmarks
     private ulong[] _output64 = [];
     private uint[] _packed32 = [];
     private uint[] _output32 = [];
+    private ulong[] _values64 = [];
+    private uint[] _values32 = [];
 
     /// <summary>
     /// Bits per packed value. 17 by default -- the width the reference chose for
@@ -72,6 +74,25 @@ public class FastLanesKernelBenchmarks
         _packed32 = new uint[Blocks * 32 * width32];
         random.NextBytes(MemoryMarshal.AsBytes(_packed32.AsSpan()));
         _output32 = new uint[Blocks * FastLanes.BlockSize];
+
+        // THE PACK SIDE HAS ITS OWN INPUT, and it is masked to the width: `PackBlock` requires
+        // every value below 2^bitWidth, and reusing an unpack arm's output would make one arm
+        // depend on another having run. v2 W-14 asks for these arms -- `PackBlock` is the exact
+        // mirror of `UnpackBlock`, which went 3.6x (i64) and 7x (i32) when it was vectorized, and
+        // it is still the scalar loop through the index table.
+        _values64 = new ulong[Blocks * FastLanes.BlockSize];
+        ulong mask64 = BitWidth == 64 ? ulong.MaxValue : (1UL << BitWidth) - 1;
+        for (int i = 0; i < _values64.Length; i++)
+        {
+            _values64[i] = (ulong)random.NextInt64() & mask64;
+        }
+
+        _values32 = new uint[Blocks * FastLanes.BlockSize];
+        uint mask32 = width32 == 32 ? uint.MaxValue : (1u << width32) - 1;
+        for (int i = 0; i < _values32.Length; i++)
+        {
+            _values32[i] = (uint)random.Next() & mask32;
+        }
     }
 
     [Benchmark(Baseline = true, Description = "i64 scalar")]
@@ -122,6 +143,37 @@ public class FastLanesKernelBenchmarks
         }
 
         return sink;
+    }
+
+    [Benchmark(Description = "i64 pack")]
+    public int Pack64()
+    {
+        int words = 16 * BitWidth;
+        for (int block = 0; block < Blocks; block++)
+        {
+            FastLanes.PackBlock<ulong>(
+                _values64.AsSpan(block * FastLanes.BlockSize, FastLanes.BlockSize),
+                BitWidth,
+                _packed64.AsSpan(block * words, words));
+        }
+
+        return _packed64.Length;
+    }
+
+    [Benchmark(Description = "i32 pack")]
+    public int Pack32()
+    {
+        int width = Math.Min(BitWidth, 31);
+        int words = 32 * width;
+        for (int block = 0; block < Blocks; block++)
+        {
+            FastLanes.PackBlock<uint>(
+                _values32.AsSpan(block * FastLanes.BlockSize, FastLanes.BlockSize),
+                width,
+                _packed32.AsSpan(block * words, words));
+        }
+
+        return _packed32.Length;
     }
 
     [Benchmark(Description = "i32 vector")]
