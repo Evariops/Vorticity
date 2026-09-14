@@ -91,6 +91,28 @@ internal static class Program
             return await RatioCheck.RunAsync(axes, recalibrate, rebase, onePass).ConfigureAwait(false);
         }
 
+        if (args.Length > 0 && args[0] == "--ab")
+        {
+            if (args.Length < 3)
+            {
+                Console.Error.WriteLine(
+                    "--ab <before-directory> <file> [scenario…]: two builds of the library in one " +
+                    "process (BENCH-AUDIT.md C1). bench/ab.sh <commit> builds the other side.");
+                return 2;
+            }
+
+            int afterFlag = Array.IndexOf(args, "--after");
+            string? after = afterFlag >= 0 && afterFlag + 1 < args.Length
+                ? args[afterFlag + 1]
+                : null;
+            string[] scenarios =
+            [
+                .. args.Where((a, i) =>
+                    i >= 3 && i != afterFlag + 1 && !a.StartsWith("--", StringComparison.Ordinal))
+            ];
+            return await AbCheck.RunAsync(args[1], after, args[2], scenarios).ConfigureAwait(false);
+        }
+
         if (args.Length > 0 && args[0] == "--compare")
         {
             if (args.Length < 3)

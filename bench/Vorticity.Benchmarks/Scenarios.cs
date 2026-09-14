@@ -1,64 +1,52 @@
 // One definition of what a scan, a projection, a take and a write-back ARE, for every estimator.
 //
 // BENCH-AUDIT.md A2: `ScanAll` had been written out seven times across this project, `DiscardSink`
-// twice, and A1 is what that produces -- a correction applied to one copy. §3's pruning removed
-// four of those copies by deleting the classes that held them, which left the two gates and the
-// profiler still each carrying their own; the write axis added a third `DiscardSink` the day it
-// landed. This file is the one definition, and the table at the bottom is what makes `--profile`
-// and `--ratio-check` provably the same scenario rather than two that look alike.
+// twice, and A1 is what that produces -- a correction applied to one copy. This file is the one
+// table; the scenarios THEMSELVES live in `Vorticity.Benchmarks.Scenarios`, a separate assembly,
+// because `--ab` (C1) loads two builds of them in one process and an assembly that referenced the
+// FFI reader or BenchmarkDotNet could not be built inside a worktree of an arbitrary old commit.
 //
-// WHY A TABLE AND NOT JUST SHARED METHODS. The methods alone would stop the drift inside one
-// scenario; they would not stop the profiler from sampling `Scan().Project("monotone")` while the
-// gate measured `Scan().Project("id")`. The profile exists to say where the gate's time goes, and
-// that sentence is only true if the two run the same code with the same arguments. So the
-// arguments -- the field, the take's count and stride, the band -- live here too.
-//
-// THE RUST SIDE IS IN THE TABLE AS WELL, because the pairing is the point: an axis is a scenario
-// plus the reference's answer to the same question. `RatioCheck` builds its first axes from this
-// table and keeps its own entries for the ones the profiler has no use for (the footer-only open,
-// the four `rewritten` axes, which need a file written on the spot).
+// WHAT STAYS HERE is the pairing: an axis is a scenario plus the REFERENCE's answer to the same
+// question, and the reference is `RustReader`, which belongs to this assembly. `RatioCheck` builds
+// its first axes from this table and keeps its own entries for the ones the profiler has no use for
+// (the footer-only open, the four `rewritten` axes, which write a file on the spot).
 using System;
-using System.Threading;
 using System.Threading.Tasks;
 
-using Vorticity.Columns;
-using Vorticity.Expressions;
-using Vorticity.File;
-using Vorticity.Scan;
-using Vorticity.Writing;
+using Set = Vorticity.Bench.Scenarios.ScenarioSet;
 
 namespace Vorticity.Benchmarks;
 
-/// <summary>The scenarios, once, with the arguments that make them comparable.</summary>
+/// <summary>The scenarios paired with the reference's answer to the same question.</summary>
 internal static class Scenarios
 {
     /// <summary>The column the projection keeps and the filter tests.</summary>
-    internal const string Field = "monotone";
+    internal const string Field = Set.Field;
 
     /// <summary>Rows a scattered take asks for.</summary>
-    internal const long TakeCount = 64;
+    internal const long TakeCount = Set.TakeCount;
 
     /// <summary>The gap between taken rows on the 65 536-row file.</summary>
-    internal const long TakeStride = 1024;
+    internal const long TakeStride = Set.TakeStride;
 
     /// <summary>The low edge of the filter band.</summary>
-    internal const long BandLow = 1_000_000;
+    internal const long BandLow = Set.BandLow;
 
     /// <summary>A band that keeps about one row in a hundred.</summary>
-    internal const long NarrowBand = 656;
+    internal const long NarrowBand = Set.NarrowBand;
 
     /// <summary>A band that keeps about half the rows.</summary>
-    internal const long WideBand = 32_768;
+    internal const long WideBand = Set.WideBand;
 
     /// <summary>A scenario: a name, an axis label, and both sides of the same question.</summary>
-    /// <param name="Name">What `--profile` calls it.</param>
+    /// <param name="Name">What `--profile` and `--ab` call it.</param>
     /// <param name="Axis">What `--ratio-check` calls it; also the key into its reference table.</param>
     /// <param name="Ours">Our reader, returning rows.</param>
     /// <param name="Theirs">The reference, returning rows.</param>
     internal sealed record Scenario(
         string Name, string Axis, Func<string, Task<long>> Ours, Func<string, long> Theirs);
 
-    /// <summary>The scenarios both the gate and the profiler run.</summary>
+    /// <summary>The scenarios the gate, the profiler and the A/B all run.</summary>
     internal static readonly Scenario[] All =
     [
         new Scenario(
@@ -98,122 +86,20 @@ internal static class Scenarios
         return null;
     }
 
-    /// <summary>Every row of every column, canonicalized.</summary>
-    /// <param name="path">The file.</param>
-    internal static async Task<long> ScanAll(string path)
-    {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-        }
+    /// <inheritdoc cref="Set.ScanAll"/>
+    internal static Task<long> ScanAll(string path) => Set.ScanAll(path);
 
-        return rows;
-    }
+    /// <inheritdoc cref="Set.ScanProjected"/>
+    internal static Task<long> ScanProjected(string path) => Set.ScanProjected(path);
 
-    /// <summary>One column of five.</summary>
-    /// <param name="path">The file.</param>
-    internal static async Task<long> ScanProjected(string path)
-    {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Project(Field).ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-        }
+    /// <inheritdoc cref="Set.ScatteredTake"/>
+    internal static Task<long> ScatteredTake(string path, long count, long stride) =>
+        Set.ScatteredTake(path, count, stride);
 
-        return rows;
-    }
+    /// <inheritdoc cref="Set.FilteredScan"/>
+    internal static Task<long> FilteredScan(string path, long low, long width) =>
+        Set.FilteredScan(path, low, width);
 
-    /// <summary>Rows spread through the file, one every <paramref name="stride"/>.</summary>
-    /// <param name="path">The file.</param>
-    /// <param name="count">How many rows.</param>
-    /// <param name="stride">The gap between them; the row taken is the middle of each gap.</param>
-    internal static async Task<long> ScatteredTake(string path, long count, long stride)
-    {
-        long[] indices = new long[count];
-        for (int i = 0; i < indices.Length; i++)
-        {
-            indices[i] = (i * stride) + (stride / 2);
-        }
-
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Take(indices).ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-        }
-
-        return rows;
-    }
-
-    /// <summary>A half-open band on <see cref="Field"/>.</summary>
-    /// <param name="path">The file.</param>
-    /// <param name="low">The band's low edge, inclusive.</param>
-    /// <param name="width">Its width.</param>
-    internal static async Task<long> FilteredScan(string path, long low, long width)
-    {
-        VortexExpr band = Expr.And(
-            Expr.Ge(Expr.Field(Field), Expr.Literal(FilterLiteral.From(low))),
-            Expr.Lt(Expr.Field(Field), Expr.Literal(FilterLiteral.From(low + width))));
-
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Where(band).ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-        }
-
-        return rows;
-    }
-
-    /// <summary>The file read back out to a sink that keeps nothing.</summary>
-    /// <param name="path">The file.</param>
-    /// <remarks>
-    /// The read is inside the measurement on both sides and is therefore common-mode, but it is not
-    /// small: subtract the scan axis before reading the quotient as a statement about writers.
-    /// </remarks>
-    internal static async Task<long> ReadAndWrite(string path)
-    {
-        await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await using VortexFileWriter writer =
-            VortexFileWriter.Create(new DiscardSink(), source.Schema);
-
-        long rows = 0;
-        await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-            await writer.WriteAsync(batch, CancellationToken.None);
-        }
-
-        await writer.CompleteAsync(CancellationToken.None);
-        return rows;
-    }
-
-    /// <summary>A sink that counts bytes and keeps none of them.</summary>
-    /// <remarks>
-    /// A write benchmark that measures the filesystem measures the filesystem, and `vxbench_write`
-    /// writes into a `Vec&lt;u8&gt;` for the same reason.
-    /// </remarks>
-    internal sealed class DiscardSink : ISegmentSink
-    {
-        /// <summary>Bytes written so far.</summary>
-        public long Position { get; private set; }
-
-        /// <inheritdoc/>
-        public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
-        {
-            Position += data.Length;
-            return ValueTask.CompletedTask;
-        }
-
-        /// <inheritdoc/>
-        public ValueTask FlushAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
-    }
+    /// <inheritdoc cref="Set.ReadAndWrite"/>
+    internal static Task<long> ReadAndWrite(string path) => Set.ReadAndWrite(path);
 }

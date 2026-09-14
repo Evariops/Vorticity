@@ -91,3 +91,4 @@ todo2.previous.md
 
 # ---- Recorded benchmark runs (bench/compare.sh --record) ----
 bench/.runs/
+bench/.ab/

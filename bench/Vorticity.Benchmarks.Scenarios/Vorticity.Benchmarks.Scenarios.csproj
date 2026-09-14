@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Vorticity.Bench.Scenarios</RootNamespace>
+    <AssemblyName>Vorticity.Benchmarks.Scenarios</AssemblyName>
+
+    <!-- THIS ASSEMBLY IS BUILT TWICE, once here and once inside a worktree of an OLD commit
+         (bench/ab.sh), so that the A/B mode can load both against one clock. That is why it is its own
+         project and why it depends on nothing but the library: everything else it might reference
+         (the FFI reader, BenchmarkDotNet, the corpus helper) would have to exist, unchanged, in
+         every commit anyone ever wants to compare against. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
+  </ItemGroup>
+
+</Project>
