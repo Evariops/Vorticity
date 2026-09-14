@@ -203,15 +203,66 @@ public readonly ref struct Patches
     /// <param name="wanted">The selected rows, strictly ascending.</param>
     /// <param name="destination">The selected rows' values, in selection order.</param>
     /// <remarks>
+    /// <para>
     /// A MERGE, not a search per patch: both sides are ascending, so one walk over each is enough.
-    /// The patch set is left whole rather than selected into - there are few patches by
-    /// construction, and pushing a second selection into their own child arrays would mean
+    /// The patch set is left whole rather than selected into - ~~there are few patches by
+    /// construction~~ - and pushing a second selection into their own child arrays would mean
     /// re-basing indices that are expressed in the parent's row space.
+    /// </para>
+    /// <para>
+    /// A MERGE WALKS THE LONGER LIST, AND THAT IS THE WHOLE COST HERE. "Few patches by construction"
+    /// is true of a ratio and false of a count: the 1M-row ALP axis carries 16 454 of them, and
+    /// `FlatLayoutReader` serves a take one batch at a time, so this ran 16 454 iterations to place
+    /// AT MOST ONE row, on every batch. Short-circuiting it took that take from 12 198 µs to 244 -
+    /// `14.97` to `0.40`, 98% of everything left after v2 R26.
+    /// </para>
+    /// <para>
+    /// SO THE SHORTER LIST DRIVES. When there are fewer wanted rows than patches, each wanted row
+    /// binary-searches the patches from where the last one landed: O(wanted . log patches) instead
+    /// of O(patches). When there are more, the original merge is already the right shape and is
+    /// kept. The test is the two lengths against each other - no threshold, no tuning.
+    /// </para>
+    /// <para>
+    /// THE SEARCH RELIES ON `RequireAscending`, which <see cref="Create"/> runs. Since v2 R26 that
+    /// walk may be SKIPPED on later batches of a node it has already passed for - skipped because
+    /// the answer is known, never because it was not asked - so the ordering this search needs holds
+    /// either way.
+    /// </para>
     /// </remarks>
     public static void ApplySelected(
         in Patches patches, ReadOnlySpan<byte> values, int width, ReadOnlySpan<int> wanted,
         Span<byte> destination)
     {
+        if (wanted.Length < patches.Count)
+        {
+            int from = 0;
+            for (int w = 0; w < wanted.Length; w++)
+            {
+                int found = Find(in patches, wanted[w], from);
+                if (found < 0)
+                {
+                    // `Find` returns the insertion point negated, which is where the NEXT wanted
+                    // row's search may start: both lists ascend, so nothing before it can match.
+                    from = ~found;
+                    if (from >= patches.Count)
+                    {
+                        return;
+                    }
+
+                    continue;
+                }
+
+                values.Slice(found * width, width).CopyTo(destination.Slice(w * width, width));
+                from = found + 1;
+                if (from >= patches.Count)
+                {
+                    return;
+                }
+            }
+
+            return;
+        }
+
         int at = 0;
         for (int i = 0; i < patches.Count && at < wanted.Length; i++)
         {
@@ -226,6 +277,39 @@ public readonly ref struct Patches
                 values.Slice(i * width, width).CopyTo(destination.Slice(at * width, width));
             }
         }
+    }
+
+    /// <summary>
+    /// The patch at <paramref name="row"/>, searched in <c>[from, Count)</c>, or the bitwise
+    /// complement of the first patch beyond it when there is none.
+    /// </summary>
+    /// <param name="patches">The patch set, whose positions ascend.</param>
+    /// <param name="row">The row to find.</param>
+    /// <param name="from">The first patch that may still match.</param>
+    private static int Find(in Patches patches, int row, int from)
+    {
+        int low = from;
+        int high = patches.Count - 1;
+        while (low <= high)
+        {
+            int middle = low + ((high - low) >> 1);
+            int position = patches.GetPosition(middle);
+            if (position == row)
+            {
+                return middle;
+            }
+
+            if (position < row)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return ~low;
     }
 
     /// <summary>
