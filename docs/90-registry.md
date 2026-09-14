@@ -143,7 +143,7 @@ documents the fallback honestly everywhere else.
 | Patches (shared) | merge against the selection — implemented once, used by BitPacked and ALP | **yes** |
 | `vortex.fsst` | seek each row's codes through `codes_offsets` | **yes** — 0.99× a full scan to 0.27× |
 | `vortex.onpair` | the same, same children | **yes** — 0.83× a full scan to 0.34× |
-| `vortex.alprd` | **fallback**: decode the containing zone, then index | |
+| `vortex.alprd` | take on both children, recombined per selected row | **yes** — 2.94× the reference to 0.42× |
 | everything else | **fallback** | |
 
 The mechanism is a selection pushed DOWN rather than a gather pulled up. `ArrayDecoder` grows one

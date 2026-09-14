@@ -64,10 +64,50 @@ public sealed class AlpRdDecoder : ArrayDecoder
     public override ArrayEncodingId EncodingId => ArrayEncodingId.AlpRd;
 
     /// <inheritdoc/>
+    public override bool SelectsWithoutFullDecode => true;
+
+    /// <inheritdoc/>
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false);
+    }
 
+    /// <summary>
+    /// ALP-RD is pointwise, so a take reaches straight through it to the two children underneath.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ONE OUTPUT PER INPUT, which is the only property a selective decode needs: row i is
+    /// `(dictionary[left[i]] &lt;&lt; right_bit_width) | right[i]`, so the rows nobody asked for
+    /// need never be combined and, where the children can do it, never be decoded. The selection is
+    /// pushed into both children unchanged - they live in this node's row space - exactly as
+    /// `vortex.alp` and `fastlanes.for` do.
+    /// </para>
+    /// <para>
+    /// THE MEASUREMENT THAT ASKED FOR IT (v2 R17, after R23): on the 1M-row axis a take of 64 rows
+    /// cost 1 056 µs and a full scan of that same file cost 1 041 µs. The take WAS the scan - the
+    /// fallback decoded the whole node once and gathered 64 rows out of it - so the wanted rows were
+    /// 0.006% of the work done for them.
+    /// </para>
+    /// <para>
+    /// Patches are the one place this differs from `vortex.alp`, and not in the walk: a patch here
+    /// replaces a LEFT part, so the patched row is recombined with the right part it already has,
+    /// which after a selective decode sits at the SELECTED index rather than the file's.
+    /// </para>
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted, selective: true);
+    }
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted, bool selective)
+    {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         if (dtype.Kind != DTypeKind.Primitive || dtype.PType is not (PType.F32 or PType.F64))
         {
@@ -113,20 +153,28 @@ public sealed class AlpRdDecoder : ArrayDecoder
         int expectedChildren = metadata.HasPatches ? 4 : 2;
         ArrayDecodeContext.RequireChildCount(node.ChildCount, expectedChildren, Id);
 
+        // The children live in THIS node's row space -- one row each per row here -- so a selection
+        // reaches them unchanged, and whether they can honour it positionally is their business.
+        int produced = selective ? wanted.Length : length;
+
         DType leftType = context.Types.Primitive(leftPType, dtype.Nullability);
-        int leftIndex = context.DecodeChild(in node, 0, leftType, length);
+        int leftIndex = selective
+            ? context.DecodeChildSelected(in node, 0, leftType, length, wanted)
+            : context.DecodeChild(in node, 0, leftType, length);
         CanonicalNode left = CanonicalSupport.RequirePrimitiveChild(
-            context, leftIndex, leftPType, length, Id + " left_parts");
+            context, leftIndex, leftPType, produced, Id + " left_parts");
 
         PType rightPType = isSingle ? PType.U32 : PType.U64;
         DType rightType = context.Types.Primitive(rightPType, Nullability.NonNullable);
-        int rightIndex = context.DecodeChild(in node, 1, rightType, length);
+        int rightIndex = selective
+            ? context.DecodeChildSelected(in node, 1, rightType, length, wanted)
+            : context.DecodeChild(in node, 1, rightType, length);
         CanonicalNode right = CanonicalSupport.RequirePrimitiveChild(
-            context, rightIndex, rightPType, length, Id + " right_parts");
+            context, rightIndex, rightPType, produced, Id + " right_parts");
 
-        int total = ArrayDecodeContext.CheckedMultiply(length, width, Id + " values");
+        int total = ArrayDecodeContext.CheckedMultiply(produced, width, Id + " values");
 
-        // UNINITIALIZED: `Combine` casts the destination to exactly `length` elements of `width`
+        // UNINITIALIZED: `Combine` casts the destination to exactly `produced` elements of `width`
         // bytes -- which is `total` -- and assigns every one of them. `ApplyLeftPartPatches` only
         // ever overwrites rows the combine already wrote. The one path that stops short is
         // `ThrowCode`, and it throws: the buffer is never reachable from a decode that failed.
@@ -134,17 +182,17 @@ public sealed class AlpRdDecoder : ArrayDecoder
             context, total, width, out Span<byte> destination);
 
         Combine(
-            left.Values.Span, leftPType, right.Values.Span, destination, length,
-            dictionary[..dictionaryLength], (int)metadata.RightBitWidth, isSingle);
+            left.Values.Span, leftPType, right.Values.Span, destination, produced,
+            dictionary[..dictionaryLength], (int)metadata.RightBitWidth, isSingle, wanted);
 
         if (metadata.HasPatches)
         {
             ApplyLeftPartPatches(
                 context, in node, length, in metadata, leftPType, right.Values.Span, destination,
-                (int)metadata.RightBitWidth, isSingle);
+                (int)metadata.RightBitWidth, isSingle, wanted, selective);
         }
 
-        return context.Canonical.AddPrimitive(dtype, length, left.Validity, dtype.PType, output);
+        return context.Canonical.AddPrimitive(dtype, produced, left.Validity, dtype.PType, output);
     }
 
     /// <summary>
@@ -159,7 +207,8 @@ public sealed class AlpRdDecoder : ArrayDecoder
         int length,
         ReadOnlySpan<uint> dictionary,
         int rightBitWidth,
-        bool isSingle)
+        bool isSingle,
+        ReadOnlySpan<int> wanted)
     {
         // The physical type of the left parts and the output width are properties of the NODE, and
         // this loop was asking about both on every row: `ReadUnsigned`'s switch to fetch the code,
@@ -168,16 +217,16 @@ public sealed class AlpRdDecoder : ArrayDecoder
         switch (leftPType)
         {
             case PType.U8:
-                CombineCodes<byte>(left, right, destination, length, dictionary, rightBitWidth, isSingle);
+                CombineCodes<byte>(left, right, destination, length, dictionary, rightBitWidth, isSingle, wanted);
                 break;
             case PType.U16:
-                CombineCodes<ushort>(left, right, destination, length, dictionary, rightBitWidth, isSingle);
+                CombineCodes<ushort>(left, right, destination, length, dictionary, rightBitWidth, isSingle, wanted);
                 break;
             case PType.U32:
-                CombineCodes<uint>(left, right, destination, length, dictionary, rightBitWidth, isSingle);
+                CombineCodes<uint>(left, right, destination, length, dictionary, rightBitWidth, isSingle, wanted);
                 break;
             default:
-                CombineCodes<ulong>(left, right, destination, length, dictionary, rightBitWidth, isSingle);
+                CombineCodes<ulong>(left, right, destination, length, dictionary, rightBitWidth, isSingle, wanted);
                 break;
         }
     }
@@ -189,7 +238,8 @@ public sealed class AlpRdDecoder : ArrayDecoder
         int length,
         ReadOnlySpan<uint> dictionary,
         int rightBitWidth,
-        bool isSingle)
+        bool isSingle,
+        ReadOnlySpan<int> wanted)
         where TCode : unmanaged
     {
         ReadOnlySpan<TCode> codes = MemoryMarshal.Cast<byte, TCode>(left)[..length];
@@ -202,7 +252,7 @@ public sealed class AlpRdDecoder : ArrayDecoder
                 uint code = Widen(codes[i]);
                 if (code >= (uint)dictionary.Length)
                 {
-                    ThrowCode(i, code, dictionary.Length);
+                    ThrowCode(Row(i, wanted), code, dictionary.Length);
                 }
 
                 target[i] = unchecked((dictionary[(int)code] << rightBitWidth) | low[i]);
@@ -218,12 +268,22 @@ public sealed class AlpRdDecoder : ArrayDecoder
             uint code = Widen(codes[i]);
             if (code >= (uint)dictionary.Length)
             {
-                ThrowCode(i, code, dictionary.Length);
+                ThrowCode(Row(i, wanted), code, dictionary.Length);
             }
 
             output[i] = unchecked(((ulong)dictionary[(int)code] << rightBitWidth) | wide[i]);
         }
     }
+
+    /// <summary>
+    /// The row a combine index names in the FILE, which after a selective decode is not the index.
+    /// </summary>
+    /// <remarks>
+    /// Only ever called on the way to a throw, so the indirection costs nothing and buys a message
+    /// that points at the row the reader can go and look at.
+    /// </remarks>
+    private static int Row(int index, ReadOnlySpan<int> wanted) =>
+        wanted.IsEmpty ? index : wanted[index];
 
     /// <summary>Widens one left-parts code, saturating so an over-large one is refused.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -261,10 +321,19 @@ public sealed class AlpRdDecoder : ArrayDecoder
     /// recombines those rows.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Upstream dictionary-decodes into a scratch buffer, patches it, and only then combines. The
     /// two agree byte for byte, because a patch replaces the left part outright and the right part
     /// is untouched either way -- so recombining the patched row from the right part it already has
     /// saves the scratch buffer without changing a bit.
+    /// </para>
+    /// <para>
+    /// THE PATCH SET IS DECODED WHOLE EVEN FOR A SELECTIVE DECODE, and deliberately: patch indices
+    /// are positions in the FILE's row space, so finding which of them the selection touches means
+    /// having them all. They are the rows the dictionary could not hold - a small minority by
+    /// construction, or the encoder would have chosen something else - and the two sorted lists are
+    /// then walked together once, exactly as <c>Patches.ApplySelected</c> does for `vortex.alp`.
+    /// </para>
     /// </remarks>
     private static void ApplyLeftPartPatches(
         ArrayDecodeContext context,
@@ -275,7 +344,9 @@ public sealed class AlpRdDecoder : ArrayDecoder
         ReadOnlySpan<byte> right,
         Span<byte> destination,
         int rightBitWidth,
-        bool isSingle)
+        bool isSingle,
+        ReadOnlySpan<int> wanted,
+        bool selective)
     {
         PatchesMetadata patchesMetadata = metadata.Patches;
         int patchCount = ArrayDecodeContext.CheckedLength(patchesMetadata.Length, $"{Id} patch count");
@@ -308,12 +379,45 @@ public sealed class AlpRdDecoder : ArrayDecoder
             CompressedThrow.Format($"{Id} patch values must not contain nulls.");
         }
 
+        // ONE LOOP FOR BOTH PATHS, and the F3 ratchet is why: it counts CALL SITES of
+        // `ReadUnsigned` per file, so a second copy of this walk reads as a second per-row dispatch
+        // whatever the loop around it says. Splitting the two would have meant raising a ceiling to
+        // pass, which is the one thing a ratchet may never be asked to do. The branch below is per
+        // PATCH -- the rows the dictionary could not hold, a minority by construction -- and the
+        // dense path pays exactly one predictable test for each of them.
+        //
+        // Both lists ascend, so one walk finds the intersection. `at` is where the patched row
+        // landed in the SELECTION, which is also where its right part is: the right child was
+        // decoded selectively, so it holds `wanted.Length` rows in the same order.
         ReadOnlySpan<byte> source = values.Values.Span;
+        int at = 0;
         for (int i = 0; i < patches.Count; i++)
         {
             int position = patches.GetPosition(i);
+            int target = position;
+
+            if (selective)
+            {
+                while (at < wanted.Length && wanted[at] < position)
+                {
+                    at++;
+                }
+
+                if (at == wanted.Length)
+                {
+                    return;
+                }
+
+                if (wanted[at] != position)
+                {
+                    continue;
+                }
+
+                target = at;
+            }
+
             ulong high = CompressedValues.ReadUnsigned(source, leftPType, i);
-            Write(destination, position, high, right, rightBitWidth, isSingle);
+            Write(destination, target, high, right, rightBitWidth, isSingle);
         }
     }
 
