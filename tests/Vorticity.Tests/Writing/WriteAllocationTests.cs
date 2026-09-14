@@ -74,6 +74,19 @@ public sealed class WriteAllocationTests
         ("encodings/fsst", 310_000),
         ("encodings/onpair", 370_000),
         ("types/utf8_nullable_r1025", 305_000),
+
+        // THE LATE COMPONENTS, on the write side, for PERF-AUDIT-v2.md F2's reason: `fastlanes.delta`,
+        // `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant` were watched by no
+        // allocation ratchet on either side. Note that what is written here is the CANONICAL form
+        // of each file -- our compressor picks the encoding, it does not preserve the source's --
+        // so these axes measure "what does writing this SHAPE of data cost", which is the question
+        // a ratchet can answer. Whether our writer re-elects the same encoding is a different
+        // question and `bench/crosscheck.sh` is where it is asked.
+        ("encodings/fastlanes_delta", 64_000),
+        ("encodings/pco", 66_000),
+        ("encodings/zstd", 364_000),
+        ("encodings/map", 456_000),
+        ("encodings/variant", 65_000),
     ];
 
     // FOUR OF THESE FIVE CAME DOWN AGAIN WHEN FSST STOPPED ALLOCATING WHAT IT THROWS AWAY.

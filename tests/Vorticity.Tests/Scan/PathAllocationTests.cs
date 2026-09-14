@@ -80,8 +80,8 @@ public sealed class AllocationCollection
 public sealed class PathAllocationTests
 {
     /// <summary>
-    /// The file every axis reads: the same one the benchmarks use, so the two sets of numbers are
-    /// about the same work. 65 536 rows over five mixed columns in 64 splits.
+    /// The file the whole-path axes read: the same one the benchmarks use, so the two sets of
+    /// numbers are about the same work. 65 536 rows over five mixed columns in 64 splits.
     /// </summary>
     private const string File = "containers/zoned_many_zones_nulls";
 
@@ -109,20 +109,45 @@ public sealed class PathAllocationTests
     /// run of this test with another run of this test, never with bench/BASELINE.md.
     /// </remarks>
     /// <seealso cref="AllocationCollection"/>
-    private static readonly (string Axis, long Ceiling, Func<ValueTask<long>> Path)[] Axes =
+    /// <remarks>
+    /// EACH AXIS NAMES ITS OWN FILE, which PERF-AUDIT-v2.md F2 is: six axes over one file left the
+    /// components that arrived last -- `fastlanes.delta`, `vortex.pco`, `vortex.zstd`, `vortex.map`,
+    /// `vortex.variant` -- watched by no allocation ratchet at all, on either side. They are the
+    /// decoders most likely to allocate per page or per chunk and the least exercised, which is the
+    /// wrong pair of properties. One scan axis each is the cheapest thing that makes a regression
+    /// there red.
+    /// </remarks>
+    private static readonly (string Axis, string File, long Ceiling, Func<string, ValueTask<long>> Path)[] Axes =
     [
-        ("open, footer only", 15_360, FooterOnly),
+        ("open, footer only", File, 15_360, FooterOnly),
         // 133_632 -> 133_640: `VortexFile` gained one reference field, the lazily parsed
         // `LayoutTree` that every scan of an open file now shares instead of re-deriving. Eight
         // bytes once per OPEN, against a layout-tree parse once per `ExecuteAsync` - and this axis
         // opens the file and reads one batch, so it pays the eight and collects none of the
         // saving. The ratchet is here to make a change like that be noticed and argued, which is
         // what this comment is.
-        ("open, first batch", 133_640, FirstBatch),
-        ("full scan", 190_976, FullScan),
-        ("projected scan, 1 of 5 columns", 134_144, ProjectedScan),
-        ("take 64 rows from 64 splits", 192_000, ScatteredTake),
-        ("selective filter, pruning on", 165_376, PrunedFilter),
+        ("open, first batch", File, 133_640, FirstBatch),
+        ("full scan", File, 190_976, FullScan),
+        ("projected scan, 1 of 5 columns", File, 134_144, ProjectedScan),
+        ("take 64 rows from 64 splits", File, 192_000, ScatteredTake),
+        ("selective filter, pruning on", File, 165_376, PrunedFilter),
+
+        // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
+        // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
+        // masks. The two allocate differently by construction, and only one of them was watched.
+        // The first thing the pair says is not what one would guess: on this file PRUNING ALLOCATES
+        // 30 144 B MORE than not pruning (165 144 against 135 000) while keeping ~100 rows of
+        // 65 536. Written up as PERF-AUDIT-v2.md F-9; the ceiling here only pins it.
+        ("selective filter, pruning off", File, 135_168, UnprunedFilter),
+
+        // One scan per late component. They are single-column files of 4 096 rows, so the figure is
+        // dominated by the decoder rather than by the open, which is the point of putting them here
+        // rather than adding columns to the file above.
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_648, FullScan),
+        ("scan, vortex.pco", "encodings/pco", 29_696, FullScan),
+        ("scan, vortex.zstd", "encodings/zstd", 27_648, FullScan),
+        ("scan, vortex.map", "encodings/map", 28_160, FullScan),
+        ("scan, vortex.variant", "encodings/variant", 27_648, FullScan),
     ];
 
     [Fact]
@@ -134,14 +159,12 @@ public sealed class PathAllocationTests
             .Append(Runs.ToString(CultureInfo.InvariantCulture))
             .Append(" runs after ")
             .Append(Warmup.ToString(CultureInfo.InvariantCulture))
-            .Append(" warm-ups, on ")
-            .Append(File)
-            .Append('\n');
+            .Append(" warm-ups\n");
 
         List<string> over = [];
-        foreach ((string axis, long ceiling, Func<ValueTask<long>> path) in Axes)
+        foreach ((string axis, string file, long ceiling, Func<string, ValueTask<long>> path) in Axes)
         {
-            long floor = Floor(path);
+            long floor = Floor(path, file);
             long headroom = ceiling - floor;
             report.Append("    ")
                 .Append(axis.PadRight(32))
@@ -183,20 +206,20 @@ public sealed class PathAllocationTests
     {
         Decoders.EnsureRegistered();
 
-        foreach ((string axis, _, Func<ValueTask<long>> path) in Axes)
+        foreach ((string axis, string file, _, Func<string, ValueTask<long>> path) in Axes)
         {
             for (int i = 0; i < Warmup; i++)
             {
-                Complete(path());
+                Complete(path(file));
             }
 
-            long first = Measure(path);
+            long first = Measure(path, file);
             for (int i = 0; i < Runs; i++)
             {
-                Complete(path());
+                Complete(path(file));
             }
 
-            long last = Measure(path);
+            long last = Measure(path, file);
             Assert.True(
                 last <= first,
                 string.Create(
@@ -205,26 +228,26 @@ public sealed class PathAllocationTests
         }
     }
 
-    private static long Floor(Func<ValueTask<long>> path)
+    private static long Floor(Func<string, ValueTask<long>> path, string file)
     {
         for (int i = 0; i < Warmup; i++)
         {
-            Complete(path());
+            Complete(path(file));
         }
 
         long floor = long.MaxValue;
         for (int i = 0; i < Runs; i++)
         {
-            floor = Math.Min(floor, Measure(path));
+            floor = Math.Min(floor, Measure(path, file));
         }
 
         return floor;
     }
 
-    private static long Measure(Func<ValueTask<long>> path)
+    private static long Measure(Func<string, ValueTask<long>> path, string file)
     {
         long before = GC.GetAllocatedBytesForCurrentThread();
-        Complete(path());
+        Complete(path(file));
         return GC.GetAllocatedBytesForCurrentThread() - before;
     }
 
@@ -248,15 +271,15 @@ public sealed class PathAllocationTests
         return work.Result;
     }
 
-    private static async ValueTask<long> FooterOnly()
+    private static async ValueTask<long> FooterOnly(string id)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(File), CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
         return file.RowCount;
     }
 
-    private static async ValueTask<long> FirstBatch()
+    private static async ValueTask<long> FirstBatch(string id)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(File), CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
         await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
@@ -266,9 +289,9 @@ public sealed class PathAllocationTests
         return 0;
     }
 
-    private static async ValueTask<long> FullScan()
+    private static async ValueTask<long> FullScan(string id)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(File), CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
         long rows = 0;
         await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -279,9 +302,9 @@ public sealed class PathAllocationTests
         return rows;
     }
 
-    private static async ValueTask<long> ProjectedScan()
+    private static async ValueTask<long> ProjectedScan(string id)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(File), CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
         long rows = 0;
         await foreach (RecordBatch batch in file.Scan().Project("monotone").ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -292,7 +315,7 @@ public sealed class PathAllocationTests
         return rows;
     }
 
-    private static async ValueTask<long> ScatteredTake()
+    private static async ValueTask<long> ScatteredTake(string id)
     {
         // One row from each of the file's 64 splits of 1024, the take axis of `--ratio-check`'s shape.
         long[] indices = new long[64];
@@ -301,7 +324,7 @@ public sealed class PathAllocationTests
             indices[i] = (i * 1024L) + 511;
         }
 
-        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(File), CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
         long rows = 0;
         await foreach (RecordBatch batch in file.Scan().Take(indices).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -312,20 +335,28 @@ public sealed class PathAllocationTests
         return rows;
     }
 
-    private static async ValueTask<long> PrunedFilter()
+    /// <summary>A narrow band of the sorted column: ~100 rows of 65 536, pruning's own case.</summary>
+    private static async ValueTask<long> PrunedFilter(string id)
     {
-        // A narrow band of the sorted column: ~100 rows of 65 536,
-        // which is the case pruning exists for.
+        return await Band(id, pruning: true);
+    }
+
+    /// <summary>The same band with pruning off: every split decoded, then masked.</summary>
+    private static ValueTask<long> UnprunedFilter(string id) => Band(id, pruning: false);
+
+    private static async ValueTask<long> Band(string path, bool pruning)
+    {
         VortexExpr filter = Expr.And(
             Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_000L))),
             Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_300L))));
 
-        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(File), CancellationToken.None);
+        await using VortexFile opened = await VortexFile.OpenAsync(
+            Corpus.Path(path), CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in opened.Scan()
             .Project("monotone")
             .Where(filter)
-            .WithPruning(true)
+            .WithPruning(pruning)
             .ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
