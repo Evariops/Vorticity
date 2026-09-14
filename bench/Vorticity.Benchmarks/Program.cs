@@ -58,6 +58,12 @@ internal static class Program
             return 2;
         }
 
+        if (args.Length > 0 && args[0] is "--help" or "-h")
+        {
+            Usage();
+            return 0;
+        }
+
         if (args.Length > 0 && args[0] == "--ffi-check")
         {
             return await FfiCheck().ConfigureAwait(false);
@@ -305,6 +311,54 @@ internal static class Program
             .Order(StringComparer.Ordinal),
     ];
 #pragma warning restore IL2026, IL2070
+
+    /// <summary>Prints what this project can be asked to do.</summary>
+    /// <remarks>
+    /// BENCH-AUDIT.md E4. `--help` reached BenchmarkDotNet's own help, which describes `--job` and
+    /// `--wasmEngine` and not one of the six modes this project actually has -- so a developer
+    /// asking the obvious question was told about a tool they were not using. This answers first;
+    /// BenchmarkDotNet's options are still forwarded and still work.
+    ///
+    /// A `switch` with a usage rather than `System.CommandLine`: a NuGet dependency taken on for a
+    /// help text, in a repository whose first line is "dependency-free", would cost more than the
+    /// problem.
+    /// </remarks>
+    private static void Usage() => Console.Out.Write(
+        """
+        dotnet run -c Release --project bench/Vorticity.Benchmarks -- [mode] [options]
+
+        MODES, decided by the first argument:
+
+          (nothing)                every class, fast profile, ~2 min
+          <word> [<word>…]         bare words become a filter: `fsst` is `--filter *fsst*`
+          --ratio-check [axis…]    16 axes, ours over the reference, one clock, ~35 s
+                                     --recalibrate N   N processes, prints the table to paste
+                                     --rebase          let a reference rise, only where k > 1
+                                     --lanes N         adds `full scan, N lanes`, threads pinned
+          --throughput [family…]   50 encodings at a million rows, ~55 s
+                                     --check           hold each ratio to its ceiling
+                                     --quick           23 s instead of 70; a direction
+                                     --take            64 rows spread over each file
+                                     --write           read back out to a discarding sink, ~8 min
+                                     --recalibrate N   as above
+          --ffi-check              rows AND decoded values agree with the reference, < 1 s
+          --profile <name> [secs]  one scenario in a bare loop, for dotnet-trace
+          --ab <dir> <file> [name…] two builds of the library in one process
+                                     --after <dir>     judge a commit against its parent, not HEAD
+          --compare <base> <diff>  two recorded runs, Mann-Whitney per case
+          --help                   this
+
+        PROFILE FLAGS, anywhere:
+
+          --full        the reference profile, OUT of process: slower, isolated, allows --disasm
+          --inprocess   keep --full in this process
+          --explore     also run the `explore` classes, which are curves rather than gates
+
+        Everything else is forwarded to BenchmarkDotNet: --filter, --anyCategories, --list flat,
+        --artifacts <dir>, --disasm (needs --full). Scripts: bench/gate.sh, bench/compare.sh,
+        bench/ab.sh, bench/gen-throughput.sh. One page: bench/README.md.
+
+        """);
 
     private static async Task<int> FfiCheck()
     {

@@ -55,7 +55,7 @@ Three mechanisms, finest first:
 | `-- --anyCategories kernel` | by category: every class is `kernel`, `path` or `explore` |
 | `-- --list flat` | what exists under the current selection |
 
-`--full`, `--explore` and `--inprocess` are ours and are consumed before BenchmarkDotNet sees the
+**`-- --help` lists every mode**, its flags and what each costs. `--full`, `--explore` and `--inprocess` are ours and are consumed before BenchmarkDotNet sees the
 rest, so `-- --full fastlanes` works as written. Everything else is forwarded.
 
 **`--full` runs out of process; the fast profile does not.** BenchmarkDotNet 0.16.0-preview.1 is the
