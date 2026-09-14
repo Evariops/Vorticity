@@ -68,8 +68,13 @@ internal static class ZonePruningPlan
             return null;
         }
 
+        // PERF-AUDIT-v2.md R30, and it is the whole cost of pruning. This context reads one zone
+        // map per filtered column -- a struct of a few aggregates, one row per zone -- and is
+        // disposed on the next line but one. Sized for a batch it allocated 18 192 bytes, which the
+        // F-9 probe measured as 97,3 % of everything pruning costs over not pruning: the arenas
+        // were dimensioned for millions of rows to hold sixty-four bounds.
         ZoneColumn[] columns = new ZoneColumn[candidates.Count];
-        using ScanContext context = new ScanContext(file);
+        using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
 
         // One registration pass over every zones child, then ONE coalesced read for all of them:
         // the same register-then-execute split a batch uses (docs/03-architecture.md §3.6), which

@@ -37,10 +37,39 @@ public sealed class ScanContext : IDisposable
     private readonly string[] _arrayEncodingIds;
     private bool _disposed;
 
+    /// <summary>The arena capacity a context that will decode batches starts from.</summary>
+    private const int ScanCapacity = 64;
+
+    /// <summary>
+    /// The arena capacity for a context that reads METADATA and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// PERF-AUDIT-v2.md R30. `ZonePruningPlan` builds a context to read one zone map -- a struct of
+    /// a few aggregate columns, one row per zone -- and then throws it away. Sized for a batch, that
+    /// context allocated <b>18 192 bytes</b>, which the F-9 probe measured as <b>97,3 %</b> of
+    /// everything pruning costs over not pruning. Three of its seven parts carry 87,8 % of that and
+    /// all three take a capacity: <see cref="ArrayNodeArena"/> 7 368 o, <see cref="CanonicalArena"/>
+    /// 6 760, <see cref="DTypeArena"/> 1 840.
+    ///
+    /// Eight rather than four, because the arenas DOUBLE when they fill and a zone map of a struct
+    /// with three aggregates already needs five or six nodes: undersizing would trade one
+    /// allocation for two. Nothing about correctness depends on the number -- an arena that fills
+    /// grows -- so this is a starting point and not a bound.
+    /// </remarks>
+    internal const int MetadataCapacity = 8;
+
     /// <summary>Creates a scan context over an open file.</summary>
     /// <param name="file">The file being scanned; its encoding table and read options are copied in.</param>
     /// <exception cref="ArgumentNullException"><paramref name="file"/> is null.</exception>
     public ScanContext(VortexFile file)
+        : this(file, ScanCapacity)
+    {
+    }
+
+    /// <summary>Creates a scan context whose arenas start at <paramref name="capacity"/>.</summary>
+    /// <param name="file">The file being scanned.</param>
+    /// <param name="capacity">Initial node capacity; see <see cref="MetadataCapacity"/>.</param>
+    internal ScanContext(VortexFile file, int capacity)
     {
         ArgumentNullException.ThrowIfNull(file);
         _file = file;
@@ -62,10 +91,12 @@ public sealed class ScanContext : IDisposable
             _arrayEncodings[i] = file.GetArrayEncoding(i);
         }
 
-        Types = new DTypeArena();
+        // `DTypeArena`'s own default is 16, not 64, so it is capped rather than widened: a full
+        // scan must keep exactly the capacity it had before this parameter existed.
+        Types = new DTypeArena(Math.Min(capacity, 16));
         Scalars = new ScalarStore();
-        Nodes = new ArrayNodeArena();
-        _batchCanonical = new CanonicalArena();
+        Nodes = new ArrayNodeArena(capacity);
+        _batchCanonical = new CanonicalArena(capacity);
         Segments = new SegmentRequestSet();
         Decode = new ArrayDecodeContext(this);
     }

@@ -133,16 +133,21 @@ public sealed class PathAllocationTests
         ("full scan", File, 190_976, FullScan),
         ("projected scan, 1 of 5 columns", File, 134_144, ProjectedScan),
         ("take 64 rows from 64 splits", File, 192_000, ScatteredTake),
-        ("selective filter, pruning on", File, 154_112, PrunedFilter),
+        ("selective filter, pruning on", File, 141_824, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
         // masks. The two allocate differently by construction, and only one of them was watched.
         // The first thing the pair says is not what one would guess: on this file PRUNING ALLOCATES
-        // MORE than not pruning while keeping ~100 rows of 65 536. It was 30 144 B when the pair was
-        // added; F-5 took 11 264 of that off by making `ZoneColumn.Zones` a range instead of an
-        // iterator, and 18 880 B remain. Written up as PERF-AUDIT-v2.md F-9; the ceilings here only
-        // pin it.
+        // MORE than not pruning while keeping ~100 rows of 65 536.
+        //
+        // THE GAP, AND WHAT TOOK IT DOWN. 30 144 B when the pair was added. F-5 took 11 264 off by
+        // making `ZoneColumn.Zones` a range instead of an iterator, leaving 18 880. The F-9 probe
+        // then attributed those: `ZonePruner.MayMatch` allocates ZERO over 2 304 calls, and 97,3 %
+        // of the gap was one object -- the `ScanContext` the plan builds to read the zone map,
+        // whose arenas were sized for a batch. R30 sized them for what they hold, and the gap is
+        // now 6 496 B. What remains is the rest of that context plus the zone decode itself, and
+        // no part of it grows with the number of zones.
         ("selective filter, pruning off", File, 135_168, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
