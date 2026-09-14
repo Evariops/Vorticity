@@ -318,6 +318,16 @@ internal static class RatioCheck
     /// The ratios the rewritten group was measured at, keyed by axis name, in the same order as
     /// <see cref="Rewritten"/>. Kept beside <see cref="Axes"/>'s references and lowered the same way.
     /// </summary>
+    /// <summary>A ratchet: the ratio an axis was measured at, and the k it was measured with.</summary>
+    /// <param name="Ratio">The ratio the ceiling is built on.</param>
+    /// <param name="Repeats">
+    /// Calls per timed round at the time. IT IS PART OF THE REFERENCE, not a note about it: k
+    /// decides whether the number describes a cache-cold call or a warm one, and two ratios measured
+    /// at different k are not the same quantity. Recording it is what lets `--rebase` tell an
+    /// estimator change from a regression -- see `RecalibrateAsync`.
+    /// </param>
+    private readonly record struct Reference(double Ratio, int Repeats);
+
     /// <summary>
     /// The ratio each axis was measured at when its ceiling was last set. ONE TABLE, for every axis,
     /// because `--recalibrate` prints a replacement for it and a reference split across two places
@@ -338,23 +348,23 @@ internal static class RatioCheck
     /// finding in BENCH-AUDIT.md §5.A.
     /// </para>
     /// </remarks>
-    private static readonly Dictionary<string, double> References = new()
+    private static readonly Dictionary<string, Reference> References = new()
     {
-        ["full scan"] = 0.462,   // 5 passes, spread 0.447-0.468; HELD at 0.462: 5 passes peaked at 0.468, no loosening
-        ["full scan, upstream lazy"] = 0.463,   // 5 passes, spread 0.452-0.468; HELD at 0.463: 5 passes peaked at 0.468, no loosening
-        ["projected scan, 1 of 5 columns"] = 0.435,   // 5 passes, spread 0.423-0.435; was 0.467, -6.8%
-        ["open to first batch"] = 0.086,   // 5 passes, spread 0.084-0.092; HELD at 0.086: 5 passes peaked at 0.092, no loosening
-        ["open, footer only"] = 0.761,   // 5 passes, spread 0.741-0.761; was 0.774, -1.7%
-        ["read and write back"] = 1.027,   // 5 passes, spread 0.999-1.040; HELD at 1.027: 5 passes peaked at 1.040, no loosening
-        ["filtered scan, 1% band"] = 0.219,   // 5 passes, spread 0.210-0.219; was 0.238, -8.0%
-        ["filtered scan, half the rows"] = 0.326,   // 5 passes, spread 0.284-0.326; was 0.327, -0.3%
-        ["scattered take, 64 of 64 splits"] = 0.245,   // 5 passes, spread 0.237-0.251; HELD at 0.245: 5 passes peaked at 0.251, no loosening
-        ["rewritten zoned, reference's"] = 0.457,   // 5 passes, spread 0.452-0.469; HELD at 0.457: 5 passes peaked at 0.469, no loosening
-        ["rewritten zoned, ours"] = 5.189,   // 5 passes, spread 4.723-6.582; HELD at 5.189: 5 passes peaked at 6.582, no loosening
-        ["rewritten high card, reference's"] = 0.862,   // 5 passes, spread 0.831-0.862; was 0.868, -0.7%
-        ["rewritten high card, ours"] = 0.920,   // 5 passes, spread 0.892-0.920; was 0.927, -0.8%
-        ["full scan, 1M table"] = 0.068,   // 5 passes, spread 0.065-0.068; new
-        ["projected scan, 1 of 50 columns"] = 0.124,   // 5 passes, spread 0.120-0.124; new
+        ["full scan"] = new(0.466, 2),   // 5 passes, spread 0.456-0.466; REBASED UP from 0.462 (k 1->2): +0.8%
+        ["full scan, upstream lazy"] = new(0.467, 2),   // 5 passes, spread 0.462-0.467; REBASED UP from 0.463 (k 1->2): +0.9%
+        ["projected scan, 1 of 5 columns"] = new(0.441, 9),   // 5 passes, spread 0.425-0.441; REBASED UP from 0.435 (k 5->9): +1.4%
+        ["open to first batch"] = new(0.085, 10),   // 5 passes, spread 0.079-0.085; was 0.086, -0.8%
+        ["open, footer only"] = new(0.787, 28),   // 5 passes, spread 0.755-0.787; REBASED UP from 0.761 (k 19->28): +3.5%
+        ["read and write back"] = new(1.027, 1),   // 5 passes, spread 1.017-1.062; HELD at 1.027: 5 passes peaked at 1.062, no loosening
+        ["filtered scan, 1% band"] = new(0.217, 10),   // 5 passes, spread 0.208-0.217; was 0.219, -0.9%
+        ["filtered scan, half the rows"] = new(0.325, 5),   // 5 passes, spread 0.320-0.325; was 0.326, -0.4%
+        ["scattered take, 64 of 64 splits"] = new(0.250, 3),   // 5 passes, spread 0.244-0.250; REBASED UP from 0.245 (k 1->3): +2.0%
+        ["rewritten zoned, reference's"] = new(0.470, 2),   // 5 passes, spread 0.463-0.470; REBASED UP from 0.457 (k 1->2): +2.8%
+        ["rewritten zoned, ours"] = new(5.325, 5),   // 5 passes, spread 5.024-5.325; REBASED UP from 5.189 (k 1->5): +2.6%
+        ["rewritten high card, reference's"] = new(0.881, 28),   // 5 passes, spread 0.858-0.881; REBASED UP from 0.862 (k 23->28): +2.2%
+        ["rewritten high card, ours"] = new(0.915, 22),   // 5 passes, spread 0.897-0.915; was 0.920, -0.5%
+        ["full scan, 1M table"] = new(0.068, 1),   // 5 passes, spread 0.066-0.069; HELD at 0.068: 5 passes peaked at 0.069, no loosening
+        ["projected scan, 1 of 50 columns"] = new(0.096, 11),   // 5 passes, spread 0.092-0.096; was 0.124, -22.8%
     };
 
     /// <summary>
@@ -547,15 +557,17 @@ internal static class RatioCheck
             Interval ratio = m.Ratio;
             string columns;
             string verdict = string.Empty;
-            if (!References.TryGetValue(axis.Name, out double reference))
+            if (!References.TryGetValue(axis.Name, out Reference entry))
             {
                 unreferenced.Add(string.Create(
-                    CultureInfo.InvariantCulture, $"        [\"{axis.Name}\"] = {ratio.Median:F3},"));
+                    CultureInfo.InvariantCulture,
+                    $"        [\"{axis.Name}\"] = new({ratio.Median:F3}, {m.Repeats}),"));
                 columns = "         --       --";
                 verdict = "   NO REF";
             }
             else
             {
+                double reference = entry.Ratio;
                 double ceiling = reference * Margin;
                 columns = string.Create(
                     CultureInfo.InvariantCulture, $" {reference,10:F3} {ceiling,8:F3}");
@@ -660,7 +672,7 @@ internal static class RatioCheck
         }
 
         Dictionary<string, List<double>> ratios = [];
-        Dictionary<string, bool> grouped = [];
+        Dictionary<string, int> grouped = [];
         for (int pass = 1; pass <= passes; pass++)
         {
             // A PASS IS A PROCESS, and B2.5 is why. Measured over twenty runs of one axis each:
@@ -682,7 +694,9 @@ internal static class RatioCheck
             List<double> seen = ratios[axis.Name];
             double max = seen.Max();
             double min = seen.Min();
-            bool known = References.TryGetValue(axis.Name, out double current);
+            bool known = References.TryGetValue(axis.Name, out Reference entry);
+            double current = entry.Ratio;
+            int repeats = grouped.GetValueOrDefault(axis.Name, 1);
 
             // A RATCHET ONLY EVER COMES DOWN. When the passes peak above the reference the old value
             // is printed back, not the new one: this command exists to lower ceilings that the code
@@ -690,12 +704,14 @@ internal static class RatioCheck
             // a looser gate -- the one thing BENCH-AUDIT.md §8 forbids outright. If a measurement
             // above the reference is REAL, it is a regression and belongs in the OVER column, not
             // here.
-            // --rebase raises ONLY an axis that now groups calls into a round, because k > 1 IS
-            // the estimator change: k calls in a row measure a warm path where a single timed call
-            // measured a cache-cold one. An axis still timed one call at a time is measuring what it
-            // always did, so a higher number there is noise or a regression -- neither of which a
-            // rebase may absorb.
-            bool changedEstimator = rebase && grouped.GetValueOrDefault(axis.Name);
+            // --rebase raises ONLY an axis whose k HAS MOVED SINCE ITS REFERENCE WAS SET, because
+            // that move IS the estimator change: k calls in a row measure a warm path where a
+            // single timed call measured a cache-cold one, and the two are not the same quantity.
+            // An axis measured at the same k as its reference is measuring exactly what it always
+            // did, so a higher number there is noise or a regression -- neither of which a rebase
+            // may absorb. The test was `k > 1` until B9 made k > 1 the ordinary case on nearly every
+            // axis, at which point it stopped discriminating and started rubber-stamping.
+            bool changedEstimator = rebase && known && repeats != entry.Repeats;
             bool loosens = known && max >= current && !changedEstimator;
             held += loosens ? 1 : 0;
             double value = loosens ? current : max;
@@ -704,7 +720,8 @@ internal static class RatioCheck
                 : changedEstimator && known && max >= current
                     ? string.Create(
                         CultureInfo.InvariantCulture,
-                        $"REBASED UP from {current:F3} (k>1): {(max / current) - 1:+0.0%}")
+                        $"REBASED UP from {current:F3} (k {entry.Repeats}->{repeats}): " +
+                        $"{(max / current) - 1:+0.0%}")
                 : loosens
                     ? string.Create(
                         CultureInfo.InvariantCulture,
@@ -713,8 +730,8 @@ internal static class RatioCheck
                         CultureInfo.InvariantCulture, $"was {current:F3}, {(max / current) - 1:+0.0%;-0.0%;0.0%}");
             Console.Out.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"        [\"{axis.Name}\"] = {value:F3},   // {passes} passes, spread " +
-                $"{min:F3}-{max:F3}; {movement}"));
+                $"        [\"{axis.Name}\"] = new({value:F3}, {repeats}),   // {passes} passes, " +
+                $"spread {min:F3}-{max:F3}; {movement}"));
         }
 
         if (held > 0)
@@ -763,7 +780,7 @@ internal static class RatioCheck
         int pass,
         int passes,
         Dictionary<string, List<double>> ratios,
-        Dictionary<string, bool> grouped)
+        Dictionary<string, int> grouped)
     {
         string self = Environment.ProcessPath
             ?? throw new InvalidOperationException("No process path; cannot re-run for a pass.");
@@ -818,7 +835,11 @@ internal static class RatioCheck
             // between-pass spread and then on the x1.15 margin, and twelve of thirteen references
             // rose by 2 to 20 %. Uncertainty is applied ONCE, at the decision.
             values.Add(median);
-            grouped[parts[0]] = repeats > 1;
+
+            // The LAST pass's k, and the passes agree: k comes from a two-second warm-up of the
+            // same work on the same machine, so a pass that disagreed would be reporting a machine
+            // that changed under it, which the spread would show first.
+            grouped[parts[0]] = repeats;
             seen++;
         }
 
@@ -1000,22 +1021,26 @@ internal static class RatioCheck
     {
         long deadline = Stopwatch.GetTimestamp() +
             (long)(WarmupBudget.TotalSeconds * Stopwatch.Frequency);
-        int warmed = 0;
-        double lastOurs = 0;
-        double lastTheirs = 0;
+        List<double> warmOurs = [];
+        List<double> warmTheirs = [];
         do
         {
-            lastOurs = await TimeAsync(axis.Ours, path, 1).ConfigureAwait(false);
-            lastTheirs = Time(axis.Theirs, path, 1);
-            warmed++;
+            warmOurs.Add(await TimeAsync(axis.Ours, path, 1).ConfigureAwait(false));
+            warmTheirs.Add(Time(axis.Theirs, path, 1));
         }
         while (Stopwatch.GetTimestamp() < deadline);
 
-        Warmed[axis.Name] = warmed;
+        Warmed[axis.Name] = warmOurs.Count;
 
-        // k from the warm-up's own timing, on the slower side: a round must clear the timer's noise
-        // floor, and it is the round that is timed, not either call.
-        int repeats = Repeats(Math.Max(lastOurs, lastTheirs));
+        // k FROM THE WARM-UP'S TAIL, not from its last call. k is data now that a reference records
+        // it (see `Reference`), and a k read off one timing jittered by a call or two on the short
+        // axes -- 18 one run, 19 the next -- which would have let `--rebase` mistake noise for an
+        // estimator change. The second half of the warm-up is the part that is actually warm.
+        double hotOurs = Median([.. warmOurs.Skip(warmOurs.Count / 2)]);
+        double hotTheirs = Median([.. warmTheirs.Skip(warmTheirs.Count / 2)]);
+
+        // On the FASTER side, because it is the faster side that needs the grouping: see `Repeats`.
+        int repeats = Repeats(Math.Min(hotOurs, hotTheirs), hotOurs + hotTheirs);
 
         List<double> ratios = [];
         List<double> mine = [];
@@ -1064,8 +1089,43 @@ internal static class RatioCheck
         double Ours, double Theirs, Interval Ratio, int Repeats);
 
     /// <summary>Calls per timed round, so that one round clears the timer's noise floor.</summary>
-    private static int Repeats(double microseconds) =>
-        microseconds <= 0 ? 1 : Math.Max(1, (int)Math.Ceiling(MinRoundMicroseconds / microseconds));
+    /// <param name="microseconds">One call on the FASTER of the two sides.</param>
+    /// <param name="roundMicroseconds">One call on each side, for the budget cap.</param>
+    /// <returns>Calls per timed round, at least one.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE FASTER SIDE SETS k, and taking the slower one was BENCH-AUDIT.md B9: a round whose two
+    /// halves are 93 us and 1 223 us clears a millisecond on the strength of the slow half alone, so
+    /// `open to first batch` grouped k = 1 and OUR term stayed timed on a single 93 us call -- the
+    /// exact case §4.4 wanted grouped, and the worst mde of the axes. The ratio is a quotient of two
+    /// timings and it is no better resolved than its worse-resolved term, so the floor has to be met
+    /// by the term that is furthest from it.
+    /// </para>
+    /// <para>
+    /// AND CAPPED BY THE BUDGET, because k multiplies the round and <see cref="MinRounds"/> of them
+    /// are not optional: an axis whose fast side is a microsecond would ask for a thousand calls and
+    /// spend its whole <see cref="Budget"/> before the interval was ever consulted. The cap is the
+    /// arithmetic that keeps the floor of rounds affordable; when it binds, the round is shorter
+    /// than the noise floor and the mde column is where that shows.
+    /// </para>
+    /// </remarks>
+    private static int Repeats(double microseconds, double roundMicroseconds)
+    {
+        if (microseconds <= 0)
+        {
+            return 1;
+        }
+
+        int wanted = Math.Max(1, (int)Math.Ceiling(MinRoundMicroseconds / microseconds));
+        if (roundMicroseconds <= 0)
+        {
+            return wanted;
+        }
+
+        int affordable = Math.Max(
+            1, (int)(Budget * 1_000_000 / (MinRounds * roundMicroseconds)));
+        return Math.Min(wanted, affordable);
+    }
 
     /// <summary>Microseconds per call, timing <paramref name="repeats"/> of them as one round.</summary>
     private static async Task<double> TimeAsync(
