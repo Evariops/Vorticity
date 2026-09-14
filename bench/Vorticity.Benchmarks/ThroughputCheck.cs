@@ -490,66 +490,73 @@ internal static class ThroughputCheck
     /// a mistake: upstream's scan of those files materializes far more than ours does. They are
     /// gated all the same, because a regression there is still a regression.
     /// </para>
+    /// <para>
+    /// The whole table was recalibrated at once on 2026-09-14 (`--recalibrate 3`, no `--rebase`),
+    /// after phases 1 to 3 of PERF-AUDIT-v2: thirty-nine references came down, eighteen were held
+    /// because the run measured above them, none went up. Before that pass the entries were a
+    /// patchwork of three-, five- and single-axis calibrations spread over the audit; they are now
+    /// one dated measurement, which is what makes a spread comparable from one line to the next.
+    /// </para>
     /// </remarks>
     private static readonly (string Encoding, double Reference)[] References =
     [
-        ("alp", 0.91),   // 3 processes, spread 0.89-0.91; REBASED UP from 0.90 (k>1): +0.8%
-        ("alp_no_patches", 0.89),   // 3 processes, spread 0.82-0.89; REBASED UP from 0.85 (k>1): +4.4%
-        ("alp_patched_no_chunk_offsets", 0.86),   // 3 processes, spread 0.82-0.86; was 0.87, -0.6%
-        ("alprd", 1.28),   // 3 processes, spread 1.14-1.28; REBASED UP from 1.26 (k>1): +1.2%
-        ("bool", 0.85),   // 3 processes, spread 0.81-0.85; REBASED UP from 0.82 (k>1): +3.2%
-        ("bool_bit_offset3", 0.86),   // 3 processes, spread 0.82-0.86; REBASED UP from 0.84 (k>1): +2.2%
-        ("bool_bit_offset7", 0.84),   // 3 processes, spread 0.81-0.84; REBASED UP from 0.84 (k>1): +0.0%
-        ("bool_bit_offset_straddle", 0.84),   // 3 processes, spread 0.83-0.84; REBASED UP from 0.83 (k>1): +0.8%
-        ("bytebool", 1.05),   // 3 processes, spread 1.02-1.05; REBASED UP from 1.04 (k>1): +1.4%
-        ("chunked", 0.26),   // 3 processes, spread 0.24-0.26; was 0.29, -11.4%
-        ("chunked_bool", 0.72),   // 5 processes, spread 0.70-0.72; first calibration (v2 R8)
-        ("chunked_decimal", 0.26),   // 5 processes, spread 0.21-0.26; first calibration, after R8a (was 1.28 before it)
-        ("chunked_empty_chunks", 0.26),   // 3 processes, spread 0.23-0.26; was 0.27, -5.4%
-        ("chunked_mixed_validity", 1.23),   // 5 processes, spread 1.17-1.23; first calibration. THE WORST AXIS OF THE FIFTY: v2 R8c/R8e
-        ("chunked_one_chunk", 0.26),   // 3 processes, spread 0.24-0.26; was 0.30, -14.6%
-        ("chunked_varbinview", 0.08),   // 5 processes, spread 0.07-0.08; was 0.09, -15.2% (v2 R8b)
-        ("constant", 0.97),   // 3 processes, spread 0.96-0.97; was 1.00, -3.3%
-        ("datetimeparts", 0.83),   // 5 processes, spread 0.79-0.83; was 1.21, -31.6% (v2 R1)
-        ("decimal", 0.27),   // 3 processes, spread 0.26-0.27; REBASED UP from 0.27 (k>1): +0.3%
-        ("decimal_byte_parts", 0.25),   // 3 processes, spread 0.24-0.25; was 0.28, -12.2%
-        ("dict", 1.01),   // 3 processes, spread 0.98-1.01; REBASED UP from 0.97 (k>1): +4.2%
-        ("dict_nullable_codes", 0.85),   // 3 processes, spread 0.83-0.85; was 0.86, -0.8%
-        ("dict_nullable_values_nonnull_codes", 1.33),   // 3 processes, spread 1.28-1.33; REBASED UP from 1.31 (k>1): +1.1%
-        ("dict_u64_codes", 1.11),   // 3 processes, spread 1.07-1.11; REBASED UP from 1.11 (k>1): +0.0%
-        ("dict_u8_codes", 0.94),   // 3 processes, spread 0.92-0.94; was 0.94, -0.2%
-        ("ext", 0.27),   // 3 processes, spread 0.24-0.27; was 0.29, -7.1%
-        ("fastlanes_bitpacked", 1.30),   // 3 processes, spread 1.29-1.30; was 1.55, -16.1%
-        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.21),   // 3 processes, spread 1.20-1.21; was 1.48, -18.4%
-        ("fastlanes_delta", 1.07),   // 3 processes, spread 1.01-1.07; REBASED UP from 1.02 (k>1): +5.1%
-        ("fastlanes_for", 1.01),   // 3 processes, spread 0.98-1.01; REBASED UP from 0.99 (k>1): +2.1%
-        ("fastlanes_rle", 0.88),   // 3 processes, spread 0.84-0.88; was 0.88, -0.3%
-        ("fixed_size_list", 0.18),   // 3 processes, spread 0.16-0.18; was 0.21, -12.9%
-        ("fsst", 1.31),   // 3 processes, spread 1.35-1.38; HELD at 1.31: 3 processes peaked at 1.38, no loosening
-        ("list", 0.50),   // 3 processes, spread 0.47-0.50; was 0.51, -1.7%
-        ("listview", 0.19),   // 5 processes, spread 0.18-0.19; was 0.67, -72.1% (v2 R7)
-        ("map", 0.09),   // 5 processes, spread 0.08-0.09; was 0.15, -41.3% (v2 R7)
-        ("masked", 0.33),   // 3 processes, spread 0.31-0.33; REBASED UP from 0.33 (k>1): +1.3%
-        ("masked_all_invalid", 0.35),   // 3 processes, spread 0.34-0.35; REBASED UP from 0.34 (k>1): +3.6%
-        ("masked_all_valid", 0.36),   // 3 processes, spread 0.33-0.36; REBASED UP from 0.34 (k>1): +5.8%
-        ("null", 0.92),   // 3 processes, spread 0.92-0.92; was 0.92, -0.2%
-        ("onpair", 1.20),   // 3 processes, spread 1.17-1.21; HELD at 1.20: 3 processes peaked at 1.21, no loosening
-        ("parquet_variant", 5.95),   // 3 processes, spread 5.94-6.14; HELD at 5.95: 3 processes peaked at 6.14, no loosening
-        ("pco", 0.85),   // 3 processes, spread 0.84-0.85; was 0.85, -0.3%
-        ("primitive", 0.26),   // 3 processes, spread 0.21-0.26; was 0.28, -7.7%
-        ("runend", 1.23),   // 3 processes, spread 1.19-1.23; REBASED UP from 1.22 (k>1): +0.6%
-        ("sequence", 0.95),   // 3 processes, spread 0.93-0.95; was 0.97, -2.2%
-        ("sparse", 0.67),   // PERF-AUDIT-v2.md R5: 0.88 -> 0.67. Full run reads 0.64 [0.613; 0.671]; the reference is that interval's top, which is 0.64 + one mde and still 24% under the old value
-        ("struct", 0.07),   // 3 processes, spread 0.07-0.07; HELD at 0.07: 3 processes peaked at 0.07, no loosening
-        ("table_mixed", 0.07),   // 5 processes, spread 0.07-0.07; first calibration (livré par B6/D3, jamais gaté)
-        ("table_wide", 0.10),   // 5 processes, spread 0.09-0.10; first calibration (livré par B6/D3, jamais gaté)
-        ("varbin", 0.04),   // 3 processes, spread 0.04-0.05; HELD at 0.04: 3 processes peaked at 0.05, no loosening
-        ("varbinview", 0.08),   // 3 processes, spread 0.07-0.08; was 0.08, -4.7%
-        ("variant", 6.51),   // 3 processes, spread 6.41-6.51; REBASED UP from 6.50 (k>1): +0.1%
-        ("zigzag", 0.82),   // 3 processes, spread 0.80-0.82; was 0.82, -0.4%
-        ("zstd", 1.06),   // 3 processes, spread 1.02-1.07; HELD at 1.06: 3 processes peaked at 1.07, no loosening
-        ("zstd_buffers", 0.14),   // 3 processes, spread 0.14-0.14; was 0.15, -5.4%
-        ("zstd_nullable", 0.71),   // 5 processes, spread 0.66-0.71; first calibration (livré par v2 R3b, jamais gaté)
+        ("alp", 0.91),   // 3 passes, spread 0.90-0.92; HELD at 0.91: 3 passes peaked at 0.92, no loosening
+        ("alp_no_patches", 0.88),   // 3 passes, spread 0.82-0.88; was 0.89, -0.8%
+        ("alp_patched_no_chunk_offsets", 0.86),   // 3 passes, spread 0.84-0.87; HELD at 0.86: 3 passes peaked at 0.87, no loosening
+        ("alprd", 1.23),   // 3 passes, spread 1.18-1.23; was 1.28, -3.6%
+        ("bool", 0.82),   // 3 passes, spread 0.80-0.82; was 0.85, -3.6%
+        ("bool_bit_offset3", 0.83),   // 3 passes, spread 0.81-0.83; was 0.86, -4.0%
+        ("bool_bit_offset7", 0.84),   // 3 passes, spread 0.79-0.84; was 0.84, 0.0%
+        ("bool_bit_offset_straddle", 0.83),   // 3 passes, spread 0.81-0.83; was 0.84, -0.9%
+        ("bytebool", 1.04),   // 3 passes, spread 0.97-1.04; was 1.05, -0.7%
+        ("chunked", 0.25),   // 3 passes, spread 0.18-0.25; was 0.26, -5.2%
+        ("chunked_bool", 0.72),   // 3 passes, spread 0.70-0.72; HELD at 0.72: 3 passes peaked at 0.72, no loosening (v2 R8)
+        ("chunked_decimal", 0.26),   // 3 passes, spread 0.22-0.26; HELD at 0.26: 3 passes peaked at 0.26, no loosening (v2 R8a)
+        ("chunked_empty_chunks", 0.26),   // 3 passes, spread 0.24-0.27; HELD at 0.26: 3 passes peaked at 0.27, no loosening
+        ("chunked_mixed_validity", 1.23),   // 3 passes, spread 1.16-1.24; HELD at 1.23: 3 passes peaked at 1.24, no loosening. THE WORST AXIS OF THE FIFTY: v2 R8c/R8e
+        ("chunked_one_chunk", 0.26),   // 3 passes, spread 0.23-0.26; HELD at 0.26: 3 passes peaked at 0.26, no loosening
+        ("chunked_varbinview", 0.07),   // 3 passes, spread 0.07-0.07; was 0.08, -8.7% (v2 R8b)
+        ("constant", 0.97),   // 3 passes, spread 0.94-0.97; was 0.97, -0.1%
+        ("datetimeparts", 0.83),   // 3 passes, spread 0.78-0.83; was 0.83, -0.5% (v2 R1)
+        ("decimal", 0.25),   // 3 passes, spread 0.23-0.25; was 0.27, -7.6%
+        ("decimal_byte_parts", 0.24),   // 3 passes, spread 0.19-0.24; was 0.25, -2.3%
+        ("dict", 0.99),   // 3 passes, spread 0.95-0.99; was 1.01, -1.7%
+        ("dict_nullable_codes", 0.84),   // 3 passes, spread 0.82-0.84; was 0.85, -1.6%
+        ("dict_nullable_values_nonnull_codes", 1.32),   // 3 passes, spread 1.25-1.32; was 1.33, -0.4%
+        ("dict_u64_codes", 1.09),   // 3 passes, spread 1.06-1.09; was 1.11, -2.2%
+        ("dict_u8_codes", 0.93),   // 3 passes, spread 0.87-0.93; was 0.94, -0.8%
+        ("ext", 0.21),   // 3 passes, spread 0.18-0.21; was 0.27, -21.6%
+        ("fastlanes_bitpacked", 1.30),   // 3 passes, spread 1.23-1.32; HELD at 1.30: 3 passes peaked at 1.32, no loosening
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.19),   // 3 passes, spread 1.14-1.19; was 1.21, -1.8%
+        ("fastlanes_delta", 1.07),   // 3 passes, spread 1.06-1.26; HELD at 1.07: 3 passes peaked at 1.26, no loosening
+        ("fastlanes_for", 1.00),   // 3 passes, spread 0.98-1.00; was 1.01, -0.6%
+        ("fastlanes_rle", 0.86),   // 3 passes, spread 0.81-0.86; was 0.88, -2.1%
+        ("fixed_size_list", 0.16),   // 3 passes, spread 0.12-0.16; was 0.18, -11.4%
+        ("fsst", 1.31),   // 3 passes, spread 1.29-1.31; was 1.31, -0.2%
+        ("list", 0.48),   // 3 passes, spread 0.42-0.48; was 0.50, -4.3%
+        ("listview", 0.19),   // 3 passes, spread 0.19-0.21; HELD at 0.19: 3 passes peaked at 0.21, no loosening (v2 R7)
+        ("map", 0.08),   // 3 passes, spread 0.08-0.08; was 0.09, -13.4% (v2 R7)
+        ("masked", 0.33),   // 3 passes, spread 0.29-0.37; HELD at 0.33: 3 passes peaked at 0.37, no loosening
+        ("masked_all_invalid", 0.32),   // 3 passes, spread 0.31-0.32; was 0.35, -8.2%
+        ("masked_all_valid", 0.34),   // 3 passes, spread 0.31-0.34; was 0.36, -4.7%
+        ("null", 0.92),   // 3 passes, spread 0.89-0.95; HELD at 0.92: 3 passes peaked at 0.95, no loosening
+        ("onpair", 1.18),   // 3 passes, spread 1.09-1.18; was 1.20, -1.8%
+        ("parquet_variant", 5.95),   // 3 passes, spread 4.79-5.95; was 5.95, 0.0%
+        ("pco", 0.83),   // 3 passes, spread 0.80-0.83; was 0.85, -2.3%
+        ("primitive", 0.23),   // 3 passes, spread 0.18-0.23; was 0.26, -12.7%
+        ("runend", 1.22),   // 3 passes, spread 1.16-1.22; was 1.23, -1.1%
+        ("sequence", 0.95),   // 3 passes, spread 0.93-0.95; was 0.95, 0.0%
+        ("sparse", 0.65),   // 3 passes, spread 0.61-0.65; was 0.67, -3.1% (v2 R5)
+        ("struct", 0.07),   // 3 passes, spread 0.06-0.07; was 0.07, -6.8%
+        ("table_mixed", 0.07),   // 3 passes, spread 0.06-0.07; was 0.07, -2.6% (B6/D3)
+        ("table_wide", 0.10),   // 3 passes, spread 0.09-0.10; HELD at 0.10: 3 passes peaked at 0.10, no loosening (B6/D3)
+        ("varbin", 0.04),   // 3 passes, spread 0.04-0.05; HELD at 0.04: 3 passes peaked at 0.05, no loosening
+        ("varbinview", 0.06),   // 3 passes, spread 0.06-0.06; was 0.08, -25.5%
+        ("variant", 6.51),   // 3 passes, spread 6.33-6.87; HELD at 6.51: 3 passes peaked at 6.87, no loosening
+        ("zigzag", 0.82),   // 3 passes, spread 0.81-0.84; HELD at 0.82: 3 passes peaked at 0.84, no loosening
+        ("zstd", 1.06),   // 3 passes, spread 1.04-1.08; HELD at 1.06: 3 passes peaked at 1.08, no loosening
+        ("zstd_buffers", 0.14),   // 3 passes, spread 0.14-0.16; HELD at 0.14: 3 passes peaked at 0.16, no loosening
+        ("zstd_nullable", 0.67),   // 3 passes, spread 0.65-0.67; was 0.71, -5.0% (v2 R3b)
     ];
 
     /// <summary>
