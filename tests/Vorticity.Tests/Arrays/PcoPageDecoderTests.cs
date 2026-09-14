@@ -33,10 +33,17 @@ public sealed class PcoPageDecoderTests
         PcoChunkMeta chunk = PcoChunkMeta.Read(vector.Header, vector.Meta, latentBits: 64);
 
         List<long> decoded = [];
+        PcoLatentState[] states = new PcoLatentState[PcoPageDecoder.MaxLatentVars];
+        for (int i = 0; i < states.Length; i++)
+        {
+            states[i] = new PcoLatentState();
+        }
+
         PcoBatchScratch scratch = new PcoBatchScratch(
             new ulong[PcoPageDecoder.BatchSize],
             new int[PcoPageDecoder.BatchSize],
-            new long[PcoPageDecoder.BatchSize]);
+            new long[PcoPageDecoder.BatchSize],
+            states);
         for (int page = 0; page < vector.Pages.Length; page++)
         {
             ulong[] primary = new ulong[vector.PerPage[page]];

@@ -20,6 +20,12 @@ namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 /// <summary>Decodes one pco page into latents and then into numbers.</summary>
 internal static class PcoPageDecoder
 {
+    /// <summary>Latent variables a page can have: the delta, the primary and the secondary.</summary>
+    internal const int MaxLatentVars = 3;
+
+    /// <summary>Largest delta order the metadata can express: it is written in three bits.</summary>
+    internal const int MaxDeltaOrder = 7;
+
     /// <summary>Values per batch. Also the size of the buffers in <see cref="PcoBatchScratch"/>.</summary>
     internal const int BatchSize = 256;
 
@@ -48,14 +54,24 @@ internal static class PcoPageDecoder
     {
         PcoBitReader reader = new PcoBitReader(page);
 
+        // THE THREE STATES ARE THE CALLER'S AND ARE RESET, NOT BUILT. PERF-AUDIT-v2.md R13: each one
+        // used to be a fresh object with an `int[4]` and a `ulong[deltaOrder]` of its own, and a
+        // page has up to three -- on a million-row column that was **1 954 states and 226 664
+        // bytes, 59 % of everything the scan allocated on the managed heap**. A page needs at most
+        // three and never keeps them, so `PcoDecoder` builds three per NODE and every page resets
+        // them in place.
+        //
+        // Reset rather than a ref struct over borrowed spans, which was tried first: `Read` returns
+        // the state, so spans it captured could outlive their frame and the compiler says so
+        // (CS8352). Three objects per node is the same saving without arguing with ref-safety.
         PcoLatentState? delta = chunk.DeltaLatent is { } deltaVar
-            ? PcoLatentState.Read(ref reader, deltaVar, 0, valueCount)
+            ? scratch.States[0].Reset(ref reader, deltaVar, 0)
             : null;
-        PcoLatentState primary = PcoLatentState.Read(
-            ref reader, chunk.Primary, DeltaOrderFor(chunk, primary: true), valueCount);
+        PcoLatentState primary = scratch.States[1].Reset(
+            ref reader, chunk.Primary, DeltaOrderFor(chunk, primary: true));
         PcoLatentState? secondary = chunk.Secondary is { } secondaryVar
-            ? PcoLatentState.Read(
-                ref reader, secondaryVar, DeltaOrderFor(chunk, primary: false), valueCount)
+            ? scratch.States[2].Reset(
+                ref reader, secondaryVar, DeltaOrderFor(chunk, primary: false))
             : null;
 
         reader.DrainEmptyByte("page metadata");
@@ -153,11 +169,20 @@ internal readonly ref struct PcoBatchScratch
     /// <param name="values">The batch's latents.</param>
     /// <param name="offsetBits">Per-value offset widths.</param>
     /// <param name="offsetCumulative">Per-value offset positions.</param>
-    internal PcoBatchScratch(Span<ulong> values, Span<int> offsetBits, Span<long> offsetCumulative)
+    /// <param name="states">
+    /// <see cref="PcoPageDecoder.MaxLatentVars"/> reusable latent states, one per variable slot,
+    /// built once for the node and reset by each page (R13).
+    /// </param>
+    internal PcoBatchScratch(
+        Span<ulong> values,
+        Span<int> offsetBits,
+        Span<long> offsetCumulative,
+        PcoLatentState[] states)
     {
         Values = values;
         OffsetBits = offsetBits;
         OffsetCumulative = offsetCumulative;
+        States = states;
     }
 
     /// <summary>The batch's latents, before they are copied out.</summary>
@@ -168,50 +193,54 @@ internal readonly ref struct PcoBatchScratch
 
     /// <summary>Each value's bit position within the offset stream.</summary>
     internal Span<long> OffsetCumulative { get; }
+
+    /// <summary>The page's three latent-state slots, reset per page rather than rebuilt (R13).</summary>
+    internal PcoLatentState[] States { get; }
 }
 
 /// <summary>One latent variable's decoding state within a page.</summary>
 internal sealed class PcoLatentState
 {
-    private readonly PcoAnsTable _table;
-    private readonly int _ansSizeLog;
-    private readonly int _binCount;
+    private PcoAnsTable _table;
+    private int _ansSizeLog;
+    private int _binCount;
+    private int _deltaOrder;
+
     // PER STATE, because both carry across the batches of one page: the four interleaved ANS
     // positions are read-modify-written per value, and a delta moment is updated by the untransform
     // and read again by the next batch.
+    //
+    // SIZED BY THE FORMAT AND REUSED ACROSS PAGES (R13). Four, because the interleaving is four;
+    // seven, because the metadata writes the delta order in three bits
+    // (`PcoChunkMeta.DeltaOrderBits`), so it can never ask for more. Only `_deltaOrder` of the
+    // moments are live, which is why every reader below slices rather than walking the array.
     private readonly int[] _stateIndices = new int[4];
-    private readonly ulong[] _deltaMoments;
+    private readonly ulong[] _deltaMoments = new ulong[PcoPageDecoder.MaxDeltaOrder];
 
-    private PcoLatentState(PcoAnsTable table, int ansSizeLog, int binCount, ulong[] deltaMoments)
+    /// <summary>Creates an empty slot; a page fills it with <see cref="Reset"/>.</summary>
+    internal PcoLatentState()
     {
-        _table = table;
-        _ansSizeLog = ansSizeLog;
-        _binCount = binCount;
-        _deltaMoments = deltaMoments;
+        _table = default!;
     }
 
-    /// <summary>Reads this variable's page metadata: its delta moments and four ANS states.</summary>
+    /// <summary>Refills this slot from one variable's page metadata: delta moments and ANS states.</summary>
     /// <param name="reader">The page reader, positioned at this variable's metadata.</param>
     /// <param name="variable">The chunk-level table for this variable.</param>
     /// <param name="deltaOrder">Delta moments stored for this variable.</param>
-    /// <param name="valueCount">Values in the page; unused beyond validation.</param>
-    /// <returns>The state.</returns>
-    internal static PcoLatentState Read(
-        ref PcoBitReader reader, PcoLatentVar variable, int deltaOrder, int valueCount)
+    /// <returns>This slot, refilled, so a caller can assign it in one expression.</returns>
+    internal PcoLatentState Reset(
+        ref PcoBitReader reader, PcoLatentVar variable, int deltaOrder)
     {
-        _ = valueCount;
-
-        ulong[] moments = new ulong[deltaOrder];
+        _table = variable.Table;
+        _ansSizeLog = variable.AnsSizeLog;
+        _binCount = variable.Bins.Length;
+        _deltaOrder = deltaOrder;
         for (int i = 0; i < deltaOrder; i++)
         {
-            moments[i] = reader.ReadUInt(64);
+            _deltaMoments[i] = reader.ReadUInt(64);
         }
 
-        PcoLatentState state = new PcoLatentState(
-            variable.Table,
-            variable.AnsSizeLog,
-            variable.Bins.Length,
-            moments);
+        PcoLatentState state = this;
 
         for (int i = 0; i < 4; i++)
         {
@@ -234,10 +263,10 @@ internal sealed class PcoLatentState
         // The values that come from the delta moments are not on the wire, so the symbol pass is
         // shorter than the batch by the delta order - but only at the end of the page.
         Span<ulong> scratch = scratchBuffers.Values;
-        int preDelta = Math.Min(batch, Math.Max(0, remaining - _deltaMoments.Length));
+        int preDelta = Math.Min(batch, Math.Max(0, remaining - _deltaOrder));
         ReadPreDelta(ref reader, preDelta, in scratchBuffers);
 
-        if (_deltaMoments.Length > 0)
+        if (_deltaOrder > 0)
         {
             UndoConsecutiveDelta(batch, in scratchBuffers);
         }
@@ -348,7 +377,7 @@ internal sealed class PcoLatentState
             values[biased] = unchecked(values[biased] + (1UL << 63));
         }
 
-        for (int order = _deltaMoments.Length - 1; order >= 0; order--)
+        for (int order = _deltaOrder - 1; order >= 0; order--)
         {
             ulong moment = _deltaMoments[order];
             for (int i = 0; i < batch; i++)

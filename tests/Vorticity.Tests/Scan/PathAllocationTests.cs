@@ -144,7 +144,7 @@ public sealed class PathAllocationTests
         // dominated by the decoder rather than by the open, which is the point of putting them here
         // rather than adding columns to the file above.
         ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_648, FullScan),
-        ("scan, vortex.pco", "encodings/pco", 29_696, FullScan),
+        ("scan, vortex.pco", "encodings/pco", 29_184, FullScan),
         ("scan, vortex.zstd", "encodings/zstd", 27_648, FullScan),
         ("scan, vortex.map", "encodings/map", 28_160, FullScan),
         ("scan, vortex.variant", "encodings/variant", 27_648, FullScan),

@@ -92,8 +92,16 @@ public sealed class PcoDecoder : ArrayDecoder
         Scratch<long> batchOffsetCumulative = new Scratch<long>(PcoPageDecoder.BatchSize, default);
         try
         {
+            // Three latent states for the whole node, reset by each page rather than rebuilt:
+            // PERF-AUDIT-v2.md R13, same reason as the buffers above.
+            PcoLatentState[] states = new PcoLatentState[PcoPageDecoder.MaxLatentVars];
+            for (int i = 0; i < states.Length; i++)
+            {
+                states[i] = new PcoLatentState();
+            }
+
             PcoBatchScratch batchScratch = new PcoBatchScratch(
-                batchValues.Span, batchOffsetBits.Span, batchOffsetCumulative.Span);
+                batchValues.Span, batchOffsetBits.Span, batchOffsetCumulative.Span, states);
             int pageBuffer = wrapper.Chunks.Count;
             int written = 0;
             for (int chunk = 0; chunk < wrapper.Chunks.Count; chunk++)
