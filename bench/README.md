@@ -17,6 +17,7 @@ dotnet run -c Release PROJ -- <arguments>
 | anything, want a direction | no argument at all | **14 s** | the four default classes, 10 cases, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
 | a read path | `-- --ratio-check [axis…]` | 29 s, or 5 s for one axis | the thirteen axes against Rust, interleaved, each held to a ceiling |
+| a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
 | a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust |
 | the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 50 files |
 | a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 50 files, against Rust |
