@@ -78,6 +78,26 @@ internal static class AbCheck
     internal static async Task<int> RunAsync(
         string beforeDirectory, string? afterDirectory, string file, string[] names)
     {
+        // THIS AXIS REFUSES TO REPORT A RATIO IT CANNOT MEAN (BENCH-AUDIT.md B24), and the check
+        // comes before the arguments because it is a precondition of the tool, not of a call. Two
+        // sides of the SAME commit -- library identical to the byte -- read 3.177 one way round and
+        // 0.294 the other, purely on which side the JIT had promoted: one at ~740 us, the other at
+        // ~2450, the latter WORSE than the 980 us scalar fallback, which is the signature of
+        // vectorised code left at tier-0. Pinned, the same control reads 1.009. There is no API to
+        // ask the runtime whether tiering is on, so the variable that turns it off is what gets
+        // checked; bench/ab.sh sets it. Refusing rather than warning is the point: a warning above
+        // a table of plausible numbers is exactly how this tool's own validation got believed.
+        if (Environment.GetEnvironmentVariable("DOTNET_TieredCompilation") != "0")
+        {
+            Console.Error.WriteLine(
+                "--ab needs DOTNET_TieredCompilation=0: without it the ratio measures which side " +
+                "the JIT promoted, not the code. A null control -- the same commit on both sides " +
+                "-- reads 3.18 or 0.29 instead of 1.00.\n" +
+                "Run it through bench/ab.sh, which sets it, or set it yourself. See " +
+                "BENCH-AUDIT.md B24.");
+            return 2;
+        }
+
         string probe = Path.Combine(beforeDirectory, ScenarioAssembly);
         if (!System.IO.File.Exists(probe))
         {

@@ -94,5 +94,15 @@ fi
 # died on "after_args[@]: unbound variable" even once B15's copy was fixed. The `+` expansion is the
 # portable spelling: expand to nothing when unset, to the words when set. Same shape as the
 # `"${trees[@]:-}"` in cleanup, and for the same reason.
+# TIERING IS PINNED OFF, and B24 is why: without it this tool does not measure the code, it measures
+# which side the JIT happened to promote. Null controls -- the SAME commit on both sides, library
+# identical to the byte -- read 3.177 and 0.294 depending only on how the other side was loaded, one
+# side at ~740 us and the other at ~2450. The slow side was WORSE than the scalar fallback (980 us
+# with DOTNET_EnableHWIntrinsic=0), which is the signature of vectorised code left at tier-0. With
+# tiering pinned the same control reads 1.009 [1.003; 1.017], both sides at 781 and 789 us.
+#
+# It is also what this tool is FOR: an A/B of two builds wants their steady, fully-optimised code,
+# not the tier-0 to tier-1 transition. The cost is a slower first call on both sides, paid equally.
+DOTNET_TieredCompilation=0 \
 dotnet run -c Release --project "$root/bench/Vorticity.Benchmarks" -- \
     --ab "$before_dir" "$root/$file" "$@" ${after_args[@]+"${after_args[@]}"}
