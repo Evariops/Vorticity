@@ -37,6 +37,9 @@ public sealed class DictDecoder : ArrayDecoder
     public override ArrayEncodingId EncodingId => ArrayEncodingId.Dict;
 
     /// <inheritdoc/>
+    public override bool SelectsWithoutFullDecode => true;
+
+    /// <inheritdoc/>
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);

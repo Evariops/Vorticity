@@ -18,6 +18,8 @@
 // the same block or the same run.
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -137,6 +139,68 @@ public sealed class TakeSpecializationTests
         }
 
         Assert.Equal(expected, await ReadTake(path, wanted));
+    }
+
+    /// <summary>
+    /// <c>SelectsWithoutFullDecode</c> says exactly which encodings override <c>DecodeSelected</c>.
+    /// </summary>
+    /// <remarks>
+    /// A FLAG THAT DESCRIBES CODE MUST BE CHECKED AGAINST THE CODE. `FlatLayoutReader` routes a take
+    /// through the retained-chunk cache for every encoding whose `DecodeSelected` is the fallback,
+    /// and straight through for every encoding that overrides it (v2 R23). Both halves are load-
+    /// bearing and in opposite directions: a false negative leaves an encoding decoding its node
+    /// once per wanted row - 64.17 on `vortex.zstd` - and a false positive forces a full decode on
+    /// an encoding that reaches one row without one, which would cost the `fsst` take its 0.21.
+    ///
+    /// A hand-maintained list would drift the first time a decoder is specialized, so the list is
+    /// not maintained here: the declaring type of the method IS the fact, and the flag is asserted
+    /// against it.
+    /// </remarks>
+    [Fact]
+    [UnconditionalSuppressMessage(
+        "Trimming",
+        "IL2075:DynamicallyAccessedMembers",
+        Justification = "A test, never trimmed, and the decoders it reflects over are rooted by the table.")]
+    public void TheSelectionFlagMatchesTheOverridesItDescribes()
+    {
+        Decoders.EnsureRegistered();
+
+        StringBuilder wrong = new StringBuilder();
+        int specialized = 0;
+        foreach (ArrayEncodingId id in Enum.GetValues<ArrayEncodingId>())
+        {
+            if (id == ArrayEncodingId.Unknown || !ArrayDecoderTable.IsImplemented(id))
+            {
+                continue;
+            }
+
+            ArrayDecoder decoder = ArrayDecoderTable.Get(id, id.ToString());
+            MethodInfo? method = decoder.GetType().GetMethod(
+                nameof(ArrayDecoder.DecodeSelected),
+                BindingFlags.Instance | BindingFlags.Public);
+            bool overridden = method is not null && method.DeclaringType != typeof(ArrayDecoder);
+
+            if (overridden)
+            {
+                specialized++;
+            }
+
+            if (overridden != decoder.SelectsWithoutFullDecode)
+            {
+                wrong.Append(id.ToString())
+                    .Append(": overrides DecodeSelected = ")
+                    .Append(overridden)
+                    .Append(", SelectsWithoutFullDecode = ")
+                    .Append(decoder.SelectsWithoutFullDecode)
+                    .Append('\n');
+            }
+        }
+
+        Assert.Equal(string.Empty, wrong.ToString());
+
+        // Not a ceiling: a lower bound that says the sweep found the overrides at all, so a broken
+        // reflection lookup cannot pass this test by finding nothing anywhere.
+        Assert.True(specialized >= 10, $"only {specialized} specialized decoders were found");
     }
 
     /// <summary>Awkward on purpose: block boundaries, both ends, and a prime stride between.</summary>

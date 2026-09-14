@@ -77,10 +77,7 @@ public sealed class FlatLayoutReader : LayoutReader
         // is carried in the row argument's coordinate space rather than in absolute file rows.
         if (context.HasSelection)
         {
-            ArrayNode selectedRoot = LoadRoot(in node, context);
-            int taken = context.Decode.DecodeRootSelected(
-                in selectedRoot, node.DType, total, context.Selection);
-            return MaskProjection.Apply(context.Decode, taken, in fields);
+            return ExecuteSelected(in node, in fields, context, total, length);
         }
 
         // WHOLE-NODE BATCH: nothing to retain, because there is no second batch to serve. This is
@@ -132,6 +129,101 @@ public sealed class FlatLayoutReader : LayoutReader
 
         int sliced = CanonicalSlice.SliceAcross(held, context.Canonical, retained, (int)rows.Start, length);
         return MaskProjection.Apply(context.Decode, sliced, in fields);
+    }
+
+    /// <summary>
+    /// Produces the selected rows of this node, through the retained chunk when the encoding's
+    /// <c>DecodeSelected</c> is the whole-node fallback.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A TAKE USED TO PAY THE QUADRATIC THE SCAN HAD ALREADY LEFT. The branch above serves one batch
+    /// at a time and the selection is split across batches too, so an encoding that lands on
+    /// <see cref="ArrayDecoder.DecodeSelected"/>'s default decoded the SAME node once per batch:
+    /// counted on `vortex.zstd`, 5 824 calls for 5 824 wanted rows - one row each - decoding a
+    /// million rows and ~881 zstd frames every time. 64 rows cost 427 ms where a full scan of that
+    /// node costs 7 ms, which is 59 scans of the file to deliver 64 rows. The cure is the cache the
+    /// batch path already has, used for the same reason.
+    /// </para>
+    /// <para>
+    /// AND IT IS GATED, because for ten encodings it would be a regression rather than a cure: they
+    /// override <c>DecodeSelected</c> and reach one row without materializing a node, so the `fsst`
+    /// take reads 0.21 against the reference and a forced full decode would cost it the 26.5 ms this
+    /// file's other comment names. <see cref="ArrayDecoder.SelectsWithoutFullDecode"/> is the
+    /// question, asked of the ROOT decoder - a specialized root pushes the selection into its own
+    /// children, and what those children are is its business, not this reader's.
+    /// </para>
+    /// <para>
+    /// THE HIT PATH NEVER PARSES THE BLOB, which is the same 15% the batch path refuses to pay: the
+    /// retained entry is looked up before <see cref="LoadRoot"/>, so only the first batch of a take
+    /// touches the node arena at all.
+    /// </para>
+    /// </remarks>
+    private int ExecuteSelected(
+        in LayoutNode node, in FieldMask fields, ScanContext context, int total, int length)
+    {
+        // NOTHING TO RETAIN WHEN THIS CALL IS SERVED THE WHOLE NODE, which is the same argument the
+        // whole-node batch above makes: no second call will come for the rest of it, so an entry
+        // would be created, used once and evicted. It is not free to get this wrong - the take axis
+        // of `PathAllocationTests` is 64 chunks of 1024 rows, and retaining every one of them put it
+        // 7 008 B over a ceiling that may not rise.
+        if (length < total)
+        {
+            long key = ScanContext.SegmentKey(node.Segments[0]);
+            if (context.TryGetRetained(key, out CanonicalArena hit, out int hitNode))
+            {
+                return Gather(hit, hitNode, in fields, context, total);
+            }
+
+            ArrayNode chunkRoot = LoadRoot(in node, context);
+            if (!ArrayDecoderTable
+                    .Require(context, chunkRoot.Encoding, chunkRoot.EncodingSpecIndex)
+                    .SelectsWithoutFullDecode)
+            {
+                System.Threading.Interlocked.Add(ref ValuesDecoded, total);
+                CanonicalArena held = context.BeginRetainedDecode();
+                int retained = -1;
+                try
+                {
+                    retained = context.Decode.DecodeRoot(in chunkRoot, node.DType, total);
+                }
+                finally
+                {
+                    context.EndRetainedDecode(key, retained);
+                }
+
+                return Gather(held, retained, in fields, context, total);
+            }
+
+            return Push(in chunkRoot, in node, in fields, context, total);
+        }
+
+        ArrayNode wholeRoot = LoadRoot(in node, context);
+        return Push(in wholeRoot, in node, in fields, context, total);
+    }
+
+    /// <summary>Lets the encoding take the wanted rows itself, which is what it did before R23.</summary>
+    private static int Push(
+        in ArrayNode root, in LayoutNode node, in FieldMask fields, ScanContext context, int total)
+    {
+        int taken = context.Decode.DecodeRootSelected(in root, node.DType, total, context.Selection);
+        return MaskProjection.Apply(context.Decode, taken, in fields);
+    }
+
+    /// <summary>Gathers <see cref="ScanContext.Selection"/> out of a retained whole-node decode.</summary>
+    /// <remarks>
+    /// Two steps and only the second moves bytes: the window is a full-width view onto the retained
+    /// storage - records, no memory traffic, the property <see cref="CanonicalSlice.SliceAcross"/>
+    /// exists for - and the gather then materializes exactly the wanted rows. The result borrows the
+    /// retained arena, which <see cref="ScanContext.TryGetRetained"/> has just made un-evictable for
+    /// the rest of this batch.
+    /// </remarks>
+    private static int Gather(
+        CanonicalArena held, int retained, in FieldMask fields, ScanContext context, int total)
+    {
+        int whole = CanonicalSlice.SliceAcross(held, context.Canonical, retained, 0, total);
+        int taken = Compute.CanonicalFilter.Apply(context.Canonical, whole, context.Selection);
+        return MaskProjection.Apply(context.Decode, taken, in fields);
     }
 
     /// <summary>

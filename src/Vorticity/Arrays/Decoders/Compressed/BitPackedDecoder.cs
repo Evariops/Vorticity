@@ -39,6 +39,9 @@ public sealed class BitPackedDecoder : ArrayDecoder
     /// <inheritdoc/>
     public override ArrayEncodingId EncodingId => ArrayEncodingId.FastLanesBitPacked;
 
+    /// <inheritdoc/>
+    public override bool SelectsWithoutFullDecode => true;
+
     /// <summary>
     /// Unpacks only the wanted rows, one at a time, without materializing a single block.
     /// </summary>

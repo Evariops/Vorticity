@@ -34,6 +34,9 @@ public sealed class ConstantDecoder : ArrayDecoder
     public override ArrayEncodingId EncodingId => ArrayEncodingId.Constant;
 
     /// <inheritdoc/>
+    public override bool SelectsWithoutFullDecode => true;
+
+    /// <inheritdoc/>
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);

@@ -17,6 +17,7 @@
 // pins today's number so the fix is visible as a drop and a regression as a rise. The target is in
 // `Ideal`, and it is not what the assertion uses, because a red suite is not a plan.
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -29,6 +30,7 @@ using Vorticity.Layouts;
 using Vorticity.Scan;
 using Vorticity.Types;
 using Vorticity.Editions;
+using Vorticity.Tests.Writing;
 using Vorticity.Writing;
 using Xunit;
 
@@ -154,6 +156,87 @@ public sealed class FlatLayoutDecodeCountTests
         }
     }
 
+    /// <summary>A TAKE on one oversized chunk decodes it ONCE, not once per wanted row.</summary>
+    /// <remarks>
+    /// <para>
+    /// THE THIRD FACE OF THE SAME DEFECT, and the last one to be seen. The scan left the quadratic
+    /// and the take stayed in it: `FlatLayoutReader` served a selection one batch at a time through
+    /// the encoding's own `DecodeSelected`, whose DEFAULT decodes the whole node and gathers. So a
+    /// take of n rows spread over a chunk decoded that chunk n times. Counted on the 1M-row
+    /// `vortex.zstd` axis: 5 824 calls for 5 824 wanted rows - one row each - a million rows and
+    /// ~881 zstd frames every time, 427 ms for 64 rows against 7 ms for a full scan of the same
+    /// node. Fifty-nine scans of the file to deliver sixty-four rows.
+    /// </para>
+    /// <para>
+    /// TWO ASSERTIONS, AND THE VALUES ARE THE IMPORTANT ONE. The count pins the shape; the oracle
+    /// pins correctness, and it is needed here rather than in <c>TakeSpecializationTests</c> because
+    /// no corpus file is bigger than a batch - so the whole corpus, which is that test's oracle,
+    /// never reaches this branch at all.
+    /// </para>
+    /// <para>
+    /// `ValuesDecoded` read ZERO on this path before the fix, which is its own small lesson: the
+    /// counter that caught the scan quadratic never covered the take, and a defect no instrument
+    /// counts is a defect nobody sees.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ATakeOnAnOversizedChunkMaterializesItOnce()
+    {
+        string path = WriteOneChunk(Rows, compressible: false);
+        try
+        {
+            long[] wanted = [0, 1, 1023, 1024, 8191, 8192, 8193, 20_000, 33_333, Rows - 1];
+
+            List<string> all = [];
+            await using (VortexFile scanned = await VortexFile.OpenAsync(path, CancellationToken.None))
+            {
+                await foreach (RecordBatch batch in scanned.Scan().ExecuteAsync()
+                    .WithCancellation(CancellationToken.None))
+                {
+                    Values.DescribeRows(batch, all);
+                }
+            }
+
+            List<string> expected = [];
+            foreach (long index in wanted)
+            {
+                expected.Add(all[(int)index]);
+            }
+
+            FlatLayoutReader.ValuesDecoded = 0;
+            List<string> taken = [];
+            await using (VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None))
+            {
+                await foreach (RecordBatch batch in opened.Scan().Take(wanted).ExecuteAsync()
+                    .WithCancellation(CancellationToken.None))
+                {
+                    Values.DescribeRows(batch, taken);
+                }
+            }
+
+            long decoded = FlatLayoutReader.ValuesDecoded;
+            Console.Out.Write(
+                "FLAT TAKE: " + wanted.Length.ToString(CultureInfo.InvariantCulture) + " rows wanted from a " +
+                Rows.ToString(CultureInfo.InvariantCulture) + "-row chunk materialized " +
+                decoded.ToString(CultureInfo.InvariantCulture) + " values -- " +
+                ((double)decoded / Ideal).ToString("F1", CultureInfo.InvariantCulture) + "x the " +
+                Ideal.ToString(CultureInfo.InvariantCulture) + " one decode costs.\n" +
+                "The defect decoded the chunk once per wanted row and counted none of them.\n");
+
+            Assert.Equal(expected, taken);
+
+            // EQUALITY, like the scan above: one decode of the chunk, whatever the take asks for.
+            Assert.Equal(Ideal, decoded);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(path))
+            {
+                System.IO.File.Delete(path);
+            }
+        }
+    }
+
     /// <summary>Writes one chunk of <paramref name="rows"/> two-element lists.</summary>
     /// <param name="rows">List rows in the single chunk.</param>
     private static string WriteOneListChunk(int rows)
@@ -200,11 +283,21 @@ public sealed class FlatLayoutDecodeCountTests
 
     /// <summary>Writes one chunk of <paramref name="rows"/> rows and returns the file path.</summary>
     /// <param name="rows">Rows in the single chunk.</param>
+    /// <param name="compressible">
+    /// <see langword="true"/> for the values 0..n, which the writer turns into `vortex.sequence`.
+    /// <see langword="false"/> for a xorshift stream, which no encoding here can model.
+    /// </param>
     /// <remarks>
     /// Built straight into an arena rather than scanned out of a corpus file, because a scan never
     /// yields a batch above 8192 rows and the whole point is a chunk that does.
+    ///
+    /// THE TAKE TEST NEEDS THE INCOMPRESSIBLE ONE and it took a red assertion to see why: 0..n is
+    /// `vortex.sequence`, which OVERRIDES `DecodeSelected` and therefore takes its rows without
+    /// decoding a node at all - so the take never reached the branch it was written to pin, and the
+    /// counter read zero. The defect lives on the encodings that fall back, which is what a stream
+    /// nothing can model produces.
     /// </remarks>
-    private static string WriteOneChunk(int rows)
+    private static string WriteOneChunk(int rows, bool compressible = true)
     {
         DTypeArena types = new DTypeArena();
         CanonicalArena arena = new CanonicalArena();
@@ -213,9 +306,13 @@ public sealed class FlatLayoutDecodeCountTests
 
         VortexBuffer values = arena.Allocate(rows * sizeof(long), sizeof(long), out Span<byte> destination);
         Span<long> longs = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(destination);
+        ulong state = 0x2545F4914F6CDD1DUL;
         for (int i = 0; i < rows; i++)
         {
-            longs[i] = i;
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            longs[i] = compressible ? i : unchecked((long)state);
         }
 
         int column = arena.AddPrimitive(i64, rows, Validity.NonNullable, PType.I64, values);

@@ -220,6 +220,18 @@ path, which decompresses the whole stream in one pass deliberately. It did not m
 The fallback is correct, just not fast. Documenting which encodings take it — and measuring how much
 of the bill it is — is what keeps F5 an engineering claim rather than a slogan.
 
+**And most of that bill was not the fallback's.** "Decode the node whole, then gather" is one decode
+per CALL, and `FlatLayoutReader` served a selection one batch at a time without the retained-chunk
+cache its batch path uses — so a take of n rows spread over a chunk decoded that chunk n times.
+Counted on a 1M-row `vortex.zstd` column: 64 wanted rows, 64 calls, a million rows and ~881 zstd
+frames each, 427 ms against the 7 ms a full scan of that same node costs. Routing the fallback
+through the cache (PERF-AUDIT-v2 R23) took that column from **65.20× the reference to 1.09**,
+`zstd_nullable` from 40.51 to 0.67 and `zstd_buffers` from 6.82 to 0.15, with no change to any
+encoding in the table above: `ArrayDecoder.SelectsWithoutFullDecode` says which rows of it specialize,
+and only the ones that do not are rerouted. So the rows still marked **fallback** now cost one decode
+per scan rather than one per wanted row, and the table's "worth specializing" column should be read
+against that much smaller bill.
+
 Correctness is a corpus-wide differential: `TakeSpecializationTests` takes a scattered, awkward set
 of indices from every in-scope file (both ends, both sides of the 1024-element block boundary, a
 prime stride between) and asserts every value equals what a full scan put at that index. 565 files,

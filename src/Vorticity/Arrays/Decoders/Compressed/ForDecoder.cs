@@ -28,6 +28,9 @@ public sealed class ForDecoder : ArrayDecoder
     public override ArrayEncodingId EncodingId => ArrayEncodingId.FastLanesFor;
 
     /// <inheritdoc/>
+    public override bool SelectsWithoutFullDecode => true;
+
+    /// <inheritdoc/>
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);

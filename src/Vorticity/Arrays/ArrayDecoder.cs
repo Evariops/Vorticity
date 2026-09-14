@@ -76,4 +76,24 @@ public abstract class ArrayDecoder
         int decoded = Decode(context, in node, dtype, length);
         return Compute.CanonicalFilter.Apply(context.Canonical, decoded, wanted);
     }
+
+    /// <summary>
+    /// Whether <see cref="DecodeSelected"/> is overridden, i.e. whether this encoding can produce
+    /// the wanted rows WITHOUT materializing the whole node.
+    /// </summary>
+    /// <remarks>
+    /// THE CALLER OF THE FALLBACK NEEDS TO KNOW IT IS THE FALLBACK, and that is the whole reason
+    /// this exists. `FlatLayoutReader` serves a take one batch at a time, so an encoding that lands
+    /// on the default above decodes the SAME million-row node once per batch: 64 rows of
+    /// `vortex.zstd` cost 427 ms against 7 ms for a full scan of that node, which is 59 scans of
+    /// the file to deliver 64 rows (v2 R23). The cure is the retained-chunk cache the batch path
+    /// already uses - decode the node once, gather out of it - and the cure is a REGRESSION for the
+    /// ten encodings below, which reach one row without decoding a node at all: the `fsst` take
+    /// reads 0.21 against the reference and a forced full decode would cost it 26.5 ms instead of
+    /// 0.2. So the reader asks this before choosing, and only the fallback is rerouted.
+    ///
+    /// <c>TakeSpecializationTests</c> asserts this flag against the declared method table, so it
+    /// cannot drift from the overrides it claims to describe.
+    /// </remarks>
+    public virtual bool SelectsWithoutFullDecode => false;
 }
