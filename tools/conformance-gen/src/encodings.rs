@@ -163,6 +163,78 @@ fn b_struct(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
     .into_array())
 }
 
+/// A table the compressor sees as a table: integers, floats, timestamps and strings together.
+///
+/// BENCH-AUDIT.md B6 / D3: every ratio in this repository is measured on ONE file of 65 536 rows
+/// and five columns, or on single-encoding files of a million. Neither is what a reader meets. This
+/// is the mixture -- a monotone key, a high-cardinality measure, a low-cardinality label, a price
+/// and a timestamp -- at a million rows, so the compressor makes five different decisions in one
+/// file and the scan pays for all of them.
+fn b_table_mixed(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let key: Buffer<i64> = (0..rows as i64).collect();
+    let measure: Buffer<i64> = (0..rows as i64).map(|i| i.wrapping_mul(2_654_435_761) >> 7).collect();
+    let price: Buffer<f64> = (0..rows).map(|i| (i as f64) * 0.01 + 1.23).collect();
+    let stamp: Buffer<i64> = (0..rows as i64).map(|i| 1_700_000_000_000 + i * 137).collect();
+    let ext = Timestamp::new(TimeUnit::Milliseconds, NN).erased();
+
+    Ok(StructArray::try_from_iter([
+        ("key", PrimitiveArray::new(key, Validity::NonNullable).into_array()),
+        ("measure", PrimitiveArray::new(measure, Validity::NonNullable).into_array()),
+        ("price", PrimitiveArray::new(price, Validity::NonNullable).into_array()),
+        (
+            "label",
+            // Sixteen distinct labels: a dictionary's case, and the one a column of a million
+            // distinct strings would never exercise.
+            VarBinViewArray::from_iter_str((0..rows).map(|i| format!("label-{:02}", i % 16)))
+                .into_array(),
+        ),
+        (
+            "name",
+            // Distinct per row and long enough to straddle the inline boundary: FSST's case.
+            VarBinViewArray::from_iter_str((0..rows).map(|i| format!("subject-name-{i:09}")))
+                .into_array(),
+        ),
+        (
+            "stamp",
+            ExtensionArray::try_new(
+                ext,
+                PrimitiveArray::new(stamp, Validity::NonNullable).into_array(),
+            )?
+            .into_array(),
+        ),
+    ])?
+    .into_array())
+}
+
+/// Fifty columns, so a projection can keep one of fifty.
+///
+/// docs/05 §3 describes the projection axis as "1 column of 50" and the only file it could run on
+/// had five (BENCH-AUDIT.md B6). Keeping one column of fifty is a different question from keeping
+/// one of five: it is mostly about how much of the layout tree a reader walks to decide it does not
+/// need a column, and that cost does not show at all at five.
+fn b_table_wide(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    // ONE TWENTIETH OF THE ROWS, DELIBERATELY. Fifty columns is the point; a million rows each is
+    // not, and at eight bytes a value that file is 400 MB -- more than the other fifty-one put
+    // together, in a cache directory. The projection question is how much layout a reader walks to
+    // decline forty-nine columns, and that does not need more rows than it needs columns.
+    let rows = rows / 20;
+    let mut fields: Vec<(String, ArrayRef)> = Vec::with_capacity(50);
+    for column in 0..50usize {
+        let values: Buffer<i64> = (0..rows as i64)
+            .map(|i| i.wrapping_mul(column as i64 + 1) % 100_003)
+            .collect();
+        fields.push((
+            format!("c{column:02}"),
+            PrimitiveArray::new(values, Validity::NonNullable).into_array(),
+        ));
+    }
+
+    Ok(StructArray::try_from_iter(
+        fields.iter().map(|(name, array)| (name.as_str(), array.clone())),
+    )?
+    .into_array())
+}
+
 fn b_listview(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
     // ListView is the canonical encoding for `DType::List` in 0.86.1, so the builder produces it.
     let elem = Arc::new(DType::Primitive(PType::I32, NN));
@@ -829,6 +901,20 @@ pub fn encoding_cases() -> Vec<EncodingCase> {
             how: "ZstdBuffers::compress at level 3 over a primitive array, editions disabled",
             build: b_zstd_buffers,
             disable_editions: true,
+        },
+        EncodingCase {
+            id: "table_mixed",
+            array_id: "vortex.struct",
+            how: "six columns: monotone key, high-cardinality measure, f64 price, 16 labels, distinct names, timestamp",
+            build: b_table_mixed,
+            disable_editions: false,
+        },
+        EncodingCase {
+            id: "table_wide",
+            array_id: "vortex.struct",
+            how: "fifty i64 columns, for the projection axis docs/05 §3 describes",
+            build: b_table_wide,
+            disable_editions: false,
         },
     ]
 }

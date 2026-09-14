@@ -118,6 +118,22 @@ public static class ScenarioSet
         return rows;
     }
 
+    /// <summary>One named column, whichever file it is in.</summary>
+    /// <param name="path">The file.</param>
+    /// <param name="field">The column to keep.</param>
+    public static async Task<long> ScanProjectedField(string path, string field)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().Project(field).ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
     /// <summary>Rows spread through the file, one every <paramref name="stride"/>.</summary>
     /// <param name="path">The file.</param>
     /// <param name="count">How many rows.</param>
