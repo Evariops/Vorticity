@@ -312,6 +312,121 @@ fn b_chunked(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
     Ok(StructArray::try_from_iter([("chunked", chunked)])?.into_array())
 }
 
+/// A `vortex.chunked` whose chunks are Bool, so `ConcatBool` has a file to be read from.
+///
+/// PERF-AUDIT-v2.md F1. `b_chunked` and its two degenerate siblings are all `PrimitiveArray<i64>`
+/// `NonNullable`, so the only concatenation path any corpus file exercised was `ConcatPrimitive` --
+/// the one path that borrows adjacent chunks instead of copying. The other four were reachable only
+/// from unit tests, which is a correctness gap before it is a performance one.
+///
+/// The nesting inside a struct is `b_chunked`'s reason, not a new one: a top-level ChunkedArray is
+/// split by `to_array_stream()` into one stream item per chunk and becomes a chunked LAYOUT.
+fn b_chunked_bool(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let chunked = chunk_with(rows, |start, end, chunk| {
+        BoolArray::new(
+            BitBuffer::collect_bool(end - start, |i| (start + i + chunk) % 3 == 0),
+            Validity::NonNullable,
+        )
+        .into_array()
+    })?;
+    Ok(StructArray::try_from_iter([("chunked", chunked)])?.into_array())
+}
+
+/// Chunks that represent their validity differently, which is what `ConcatValidity` is for.
+///
+/// NOT "CHUNKS THAT DISAGREE ABOUT NULLABILITY", which PERF-AUDIT-v2.md F1 asked for and which the
+/// format cannot express: `ChunkedArray::try_new` requires one dtype across the chunks and
+/// nullability is part of a dtype, so a `NonNullable` chunk beside an `AllValid` one is rejected
+/// with "expected type: i64 but instead got i64?". The dtype here is `i64?` throughout.
+///
+/// WHAT VARIES IS THE REPRESENTATION, and that is the whole of `ConcatValidity`'s job: `AllValid`
+/// and `AllInvalid` carry no bitmap at all, `Array` carries one, and concatenating the four cannot
+/// be a buffer copy because three of them have nothing to copy and the result must have a bitmap.
+/// A corpus of uniformly non-nullable chunks never asks the question.
+fn b_chunked_mixed_validity(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let chunked = chunk_with(rows, |start, end, chunk| {
+        let values: Buffer<i64> = (start..end).map(|i| i as i64).collect();
+        let validity = match chunk {
+            0 => Validity::AllValid,
+            1 => Validity::Array(
+                BoolArray::new(
+                    BitBuffer::collect_bool(end - start, |i| (start + i) % 4 != 1),
+                    Validity::NonNullable,
+                )
+                .into_array(),
+            ),
+            2 => Validity::AllInvalid,
+            _ => Validity::Array(
+                BoolArray::new(
+                    BitBuffer::collect_bool(end - start, |i| (start + i) % 3 == 0),
+                    Validity::NonNullable,
+                )
+                .into_array(),
+            ),
+        };
+        PrimitiveArray::new(values, validity).into_array()
+    })?;
+    Ok(StructArray::try_from_iter([("chunked", chunked)])?.into_array())
+}
+
+/// A chunked Decimal, for `ConcatDecimal`.
+///
+/// One decimal dtype across the chunks, because a chunked array requires it: what varies is the
+/// values, and what is exercised is the storage-width copy the concat does per chunk.
+fn b_chunked_decimal(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let decimal = DecimalDType::try_new(18, 4)?;
+    let chunked = try_chunk_with(rows, |start, end, chunk| {
+        let values: Buffer<i64> = (start..end)
+            .map(|i| (i as i64) * 1_000_003 - 7 + (chunk as i64))
+            .collect();
+        Ok(DecimalArray::try_new(values, decimal, Validity::NonNullable)?.into_array())
+    })?;
+    Ok(StructArray::try_from_iter([("chunked", chunked)])?.into_array())
+}
+
+/// A chunked VarBinView, for `ConcatVarBinView` -- the one concat that rebases view by view.
+///
+/// Lengths straddle the 12-byte inline boundary in every chunk, as `b_varbinview` does, because the
+/// rebasing only happens for the views that point INTO a buffer: an all-inline chunk would leave
+/// the interesting half of the concat unexecuted.
+fn b_chunked_varbinview(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let chunked = chunk_with(rows, |start, end, chunk| {
+        VarBinViewArray::from_iter_str(
+            (start..end).map(|i| "x".repeat((i + chunk) % 20)),
+        )
+        .into_array()
+    })?;
+    Ok(StructArray::try_from_iter([("chunked", chunked)])?.into_array())
+}
+
+/// Four chunks covering exactly `rows` rows, built by `make`, as one `ChunkedArray`.
+///
+/// The boundaries are `b_chunked`'s -- `rows * (c + 1) / 4` -- so the degenerate lengths land as
+/// empty and single-row chunks at small row counts rather than being rounded away.
+fn chunk_with(
+    rows: usize,
+    make: impl Fn(usize, usize, usize) -> ArrayRef,
+) -> VortexResult<ArrayRef> {
+    try_chunk_with(rows, |start, end, chunk| Ok(make(start, end, chunk)))
+}
+
+/// `chunk_with` for a builder that can fail.
+fn try_chunk_with(
+    rows: usize,
+    make: impl Fn(usize, usize, usize) -> VortexResult<ArrayRef>,
+) -> VortexResult<ArrayRef> {
+    let mut chunks: Vec<ArrayRef> = Vec::with_capacity(4);
+    let mut start = 0usize;
+    for c in 0..4 {
+        let end = rows * (c + 1) / 4;
+        chunks.push(make(start, end, c)?);
+        start = end;
+    }
+
+    let dtype = chunks[0].dtype().clone();
+    Ok(ChunkedArray::try_new(chunks, dtype)?.into_array())
+}
+
 fn b_constant(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
     Ok(ConstantArray::new(Scalar::primitive(7i64, NN), rows).into_array())
 }
@@ -865,6 +980,34 @@ pub fn encoding_cases() -> Vec<EncodingCase> {
             array_id: "vortex.chunked",
             how: "zero-row chunks first, in the middle and last, around two non-empty ones",
             build: b_chunked_empty_chunks,
+            disable_editions: false,
+        },
+        EncodingCase {
+            id: "chunked_bool",
+            array_id: "vortex.chunked",
+            how: "four Bool chunks nested as a struct field (PERF-AUDIT-v2.md F1: ConcatBool)",
+            build: b_chunked_bool,
+            disable_editions: false,
+        },
+        EncodingCase {
+            id: "chunked_mixed_validity",
+            array_id: "vortex.chunked",
+            how: "four i64? chunks whose validity representations differ: all-valid, an array, all-invalid, an array",
+            build: b_chunked_mixed_validity,
+            disable_editions: false,
+        },
+        EncodingCase {
+            id: "chunked_decimal",
+            array_id: "vortex.chunked",
+            how: "four Decimal(18,4) chunks nested as a struct field (ConcatDecimal)",
+            build: b_chunked_decimal,
+            disable_editions: false,
+        },
+        EncodingCase {
+            id: "chunked_varbinview",
+            array_id: "vortex.chunked",
+            how: "four VarBinView chunks whose lengths straddle the inline boundary (ConcatVarBinView)",
+            build: b_chunked_varbinview,
             disable_editions: false,
         },
         EncodingCase {

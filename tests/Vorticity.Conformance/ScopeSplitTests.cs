@@ -21,13 +21,13 @@ public sealed class ScopeSplitTests
     // vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst, +46 vortex.onpair, and
     // finally +8 for vortex.variant and vortex.parquet.variant.
     //
-    // THE SPLIT IS NOW 821/0, and the zero is the point: every file of the conformance corpus is
+    // THE SPLIT IS NOW 851/0, and the zero is the point: every file of the conformance corpus is
     // readable by this build. There is no remaining component "deferred to Vortex 1.1" and none in
     // no core edition -- `fastlanes.delta` and `vortex.zstd_buffers` are both read, and both
     // variants are. What is still refused is a SHAPE rather than an id: a shredded variant, the
     // two-buffer form of fsst, the pco modes the generator cannot produce. Each of those is refused
     // by its decoder with a message naming the shape, and none of them is in the corpus.
-    private const int ExpectedInScope = 821;
+    private const int ExpectedInScope = 851;
     private const int ExpectedOutOfScope = 0;
 
     [Fact]
@@ -63,7 +63,7 @@ public sealed class ScopeSplitTests
 
         Console.Out.Write(report.ToString());
 
-        Assert.Equal(821, total);
+        Assert.Equal(851, total);
         Assert.Equal(ExpectedInScope, inScope);
         Assert.Equal(ExpectedOutOfScope, outOfScope);
     }

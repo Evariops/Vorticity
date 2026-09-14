@@ -18,13 +18,15 @@
     ]
   },
   "coverage": {
-    "files": 821,
-    "total_bytes": 15018413,
-    "total_rows": 2510023,
+    "files": 851,
+    "total_bytes": 15974497,
+    "total_rows": 2541054,
     "row_counts": [
       0,
       1,
       16,
+      51,
+      204,
       256,
       300,
       1023,
@@ -7652,6 +7654,568 @@
       ]
     },
     {
+      "id": "encodings/chunked_bool",
+      "dimension": "B",
+      "description": "vortex.chunked forced (4096 rows): four Bool chunks nested as a struct field (PERF-AUDIT-v2.md F1: ConcatBool)",
+      "path": "encodings/chunked_bool.vortex",
+      "sidecar": "encodings/chunked_bool.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 4096,
+      "dtype": "{chunked=bool}",
+      "array_ids": [
+        "vortex.bool",
+        "vortex.chunked",
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.bool/c0/b1",
+        "vortex.chunked/c5/b0",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c1/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "f89d6e44019ea57efabbe8a752e8bb024bdf4558119e059a1fa6c666bea55dcd",
+      "sidecar_sha256": "9a1f6949f5336d1e3a4d7a7276d2ee9428b1116530d2ee9d14669756740ff7f0",
+      "size_bytes": 2436,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 0
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 15895185986588876622,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_bool_r0",
+      "dimension": "B",
+      "description": "vortex.chunked forced (0 rows): four Bool chunks nested as a struct field (PERF-AUDIT-v2.md F1: ConcatBool)",
+      "path": "encodings/chunked_bool_r0.vortex",
+      "sidecar": "encodings/chunked_bool_r0.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 0,
+      "dtype": "{chunked=bool}",
+      "array_ids": [],
+      "array_node_shapes": [],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.chunked"
+      ],
+      "declared_array_ids": 0,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "6462313029ec4e9709fb6617eb9a591afae821b5e7a1a0971e53ebe55f39c6c7",
+      "sidecar_sha256": "3353589288f18a7ce974fa4103e32db777d79bb1f06efd0741fb4d1ef7d581ba",
+      "size_bytes": 1412,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {},
+      "expected_array_ids": [],
+      "missing_expected_array_ids": [],
+      "seed": 1153765743582253559,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
+        "zero rows: the layout has no children and no segments, so `array_ids` is empty by construction and no encoding is claimed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_bool_r1",
+      "dimension": "B",
+      "description": "vortex.chunked forced (1 rows): four Bool chunks nested as a struct field (PERF-AUDIT-v2.md F1: ConcatBool)",
+      "path": "encodings/chunked_bool_r1.vortex",
+      "sidecar": "encodings/chunked_bool_r1.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1,
+      "dtype": "{chunked=bool}",
+      "array_ids": [
+        "vortex.bool",
+        "vortex.chunked",
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.bool/c0/b1",
+        "vortex.chunked/c5/b0",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c1/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "97719cc8175101ff452814a8e4b0c01b607c5984185bbe1bcf2e7dc11b09f230",
+      "sidecar_sha256": "d4dfb21e10a077504def2a782a79ee979287a1613d65c409f6f6e34a232120af",
+      "size_bytes": 1932,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 0
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 3223162837434228926,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_bool_r1023",
+      "dimension": "B",
+      "description": "vortex.chunked forced (1023 rows): four Bool chunks nested as a struct field (PERF-AUDIT-v2.md F1: ConcatBool)",
+      "path": "encodings/chunked_bool_r1023.vortex",
+      "sidecar": "encodings/chunked_bool_r1023.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1023,
+      "dtype": "{chunked=bool}",
+      "array_ids": [
+        "vortex.bool",
+        "vortex.chunked",
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.bool/c0/b1",
+        "vortex.chunked/c5/b0",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c1/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "d561b179fc1978d42f4420d4554888a7f11079be5d9099682ffa6a0d7586cf5f",
+      "sidecar_sha256": "a57a1825acd080daad3f45dc1ccb96af1a0d715a508ea8d5c7a397d5d489de63",
+      "size_bytes": 2052,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 0
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 1676861859168351523,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_bool_r1025",
+      "dimension": "B",
+      "description": "vortex.chunked forced (1025 rows): four Bool chunks nested as a struct field (PERF-AUDIT-v2.md F1: ConcatBool)",
+      "path": "encodings/chunked_bool_r1025.vortex",
+      "sidecar": "encodings/chunked_bool_r1025.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1025,
+      "dtype": "{chunked=bool}",
+      "array_ids": [
+        "vortex.bool",
+        "vortex.chunked",
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.bool/c0/b1",
+        "vortex.chunked/c5/b0",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c1/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "f6dddeb95628238332fdce83358941c38ff24bad9db2407307c2f75c8d5ddd46",
+      "sidecar_sha256": "b6ff5b4a338084edc8340ba7ab493c6ae608952fc5f6bfdcbff7353df8230470",
+      "size_bytes": 2060,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 0
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 636958613948473415,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_decimal",
+      "dimension": "B",
+      "description": "vortex.chunked forced (4096 rows): four Decimal(18,4) chunks nested as a struct field (ConcatDecimal)",
+      "path": "encodings/chunked_decimal.vortex",
+      "sidecar": "encodings/chunked_decimal.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 4096,
+      "dtype": "{chunked=decimal(18,4)}",
+      "array_ids": [
+        "vortex.chunked",
+        "vortex.decimal",
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.chunked/c5/b0",
+        "vortex.decimal/c0/b1",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c1/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "11c43c416ae763e9b59f8ce44c1ad18acf3ce6d6d271b646e831b5ff89448333",
+      "sidecar_sha256": "97c17d568ad073657e8da6605d54d38544832c8425c938f9642a3c3002e757a7",
+      "size_bytes": 34712,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 0
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 13187295693687161755,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_decimal_r0",
+      "dimension": "B",
+      "description": "vortex.chunked forced (0 rows): four Decimal(18,4) chunks nested as a struct field (ConcatDecimal)",
+      "path": "encodings/chunked_decimal_r0.vortex",
+      "sidecar": "encodings/chunked_decimal_r0.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 0,
+      "dtype": "{chunked=decimal(18,4)}",
+      "array_ids": [],
+      "array_node_shapes": [],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.chunked"
+      ],
+      "declared_array_ids": 0,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "0b051dc63cb13c8508e2891dbd9742180beafcc586f3635f39579806d517f69d",
+      "sidecar_sha256": "666f0502cf053661daf000bc096929f5420b8bee5e18a7065e4883e3d5daf3eb",
+      "size_bytes": 1420,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {},
+      "expected_array_ids": [],
+      "missing_expected_array_ids": [],
+      "seed": 9716275187547168496,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
+        "zero rows: the layout has no children and no segments, so `array_ids` is empty by construction and no encoding is claimed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_decimal_r1",
+      "dimension": "B",
+      "description": "vortex.chunked forced (1 rows): four Decimal(18,4) chunks nested as a struct field (ConcatDecimal)",
+      "path": "encodings/chunked_decimal_r1.vortex",
+      "sidecar": "encodings/chunked_decimal_r1.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1,
+      "dtype": "{chunked=decimal(18,4)}",
+      "array_ids": [
+        "vortex.chunked",
+        "vortex.decimal",
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.chunked/c5/b0",
+        "vortex.decimal/c0/b1",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c1/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "8bc1d1fb87325c52a616b11f6dd5c7453dd36295d93f86fb94eae4a9fd0517db",
+      "sidecar_sha256": "1178922276673656f1efc4a0cfb114e1bd73acc37a71724870bb47a4d1279307",
+      "size_bytes": 1952,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 0
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 4567726914088490201,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_decimal_r1023",
+      "dimension": "B",
+      "description": "vortex.chunked forced (1023 rows): four Decimal(18,4) chunks nested as a struct field (ConcatDecimal)",
+      "path": "encodings/chunked_decimal_r1023.vortex",
+      "sidecar": "encodings/chunked_decimal_r1023.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1023,
+      "dtype": "{chunked=decimal(18,4)}",
+      "array_ids": [
+        "vortex.chunked",
+        "vortex.decimal",
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.chunked/c5/b0",
+        "vortex.decimal/c0/b1",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c1/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "4acbd8a83b7965b069b0d91453d50e71941d72287b3e15d1b8060da23c639383",
+      "sidecar_sha256": "681d5c0a9568e878fd7c019c954f0fe11f7d5c87c7c6e7ac4389c65c5e4c201e",
+      "size_bytes": 10128,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 0
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 3615832812518949237,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_decimal_r1025",
+      "dimension": "B",
+      "description": "vortex.chunked forced (1025 rows): four Decimal(18,4) chunks nested as a struct field (ConcatDecimal)",
+      "path": "encodings/chunked_decimal_r1025.vortex",
+      "sidecar": "encodings/chunked_decimal_r1025.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1025,
+      "dtype": "{chunked=decimal(18,4)}",
+      "array_ids": [
+        "vortex.chunked",
+        "vortex.decimal",
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.chunked/c5/b0",
+        "vortex.decimal/c0/b1",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c1/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "6eb7ef8042b67da8270228d5e446bb3247aa63652f8b4d4fca2217141a441099",
+      "sidecar_sha256": "c745096e69b610734fe536b5df8ea410f5a9039abaf0b6baa49fd83ecb7fa22e",
+      "size_bytes": 10144,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 0
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 8257584603236665381,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
       "id": "encodings/chunked_empty_chunks",
       "dimension": "B",
       "description": "vortex.chunked forced (4096 rows): zero-row chunks first, in the middle and last, around two non-empty ones",
@@ -7919,6 +8483,299 @@
       ],
       "missing_expected_array_ids": [],
       "seed": 8820829046936577494,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_mixed_validity",
+      "dimension": "B",
+      "description": "vortex.chunked forced (4096 rows): four i64? chunks whose validity representations differ: all-valid, an array, all-invalid, an array",
+      "path": "encodings/chunked_mixed_validity.vortex",
+      "sidecar": "encodings/chunked_mixed_validity.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 4096,
+      "dtype": "{chunked=i64?}",
+      "array_ids": [
+        "vortex.bool",
+        "vortex.chunked",
+        "vortex.constant",
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.bool/c0/b1",
+        "vortex.chunked/c5/b0",
+        "vortex.constant/c0/b1",
+        "vortex.primitive/c0/b1",
+        "vortex.primitive/c1/b1",
+        "vortex.struct/c1/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "a3b3a7f88a07787c6c5bb4dd61ae6dd5a212d8013dff125068a8c14925730039",
+      "sidecar_sha256": "478788b1510350f11940f1f0fd564846cff9deeb3df21a2416820db5bd46f95d",
+      "size_bytes": 35132,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 1962
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 725688164022352461,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_mixed_validity_r0",
+      "dimension": "B",
+      "description": "vortex.chunked forced (0 rows): four i64? chunks whose validity representations differ: all-valid, an array, all-invalid, an array",
+      "path": "encodings/chunked_mixed_validity_r0.vortex",
+      "sidecar": "encodings/chunked_mixed_validity_r0.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 0,
+      "dtype": "{chunked=i64?}",
+      "array_ids": [],
+      "array_node_shapes": [],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.chunked"
+      ],
+      "declared_array_ids": 0,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "d0d235f19695b4e7dbb8774436de2a56c40834de54df5f3478ebe299fe6c6a33",
+      "sidecar_sha256": "6a1ae85d3735514ce02905ae6a2aef269e70d62ae98bbfa379d198596c2bf436",
+      "size_bytes": 1420,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {},
+      "expected_array_ids": [],
+      "missing_expected_array_ids": [],
+      "seed": 17104048243180979934,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
+        "zero rows: the layout has no children and no segments, so `array_ids` is empty by construction and no encoding is claimed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_mixed_validity_r1",
+      "dimension": "B",
+      "description": "vortex.chunked forced (1 rows): four i64? chunks whose validity representations differ: all-valid, an array, all-invalid, an array",
+      "path": "encodings/chunked_mixed_validity_r1.vortex",
+      "sidecar": "encodings/chunked_mixed_validity_r1.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1,
+      "dtype": "{chunked=i64?}",
+      "array_ids": [
+        "vortex.bool",
+        "vortex.chunked",
+        "vortex.constant",
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.bool/c0/b1",
+        "vortex.chunked/c5/b0",
+        "vortex.constant/c0/b1",
+        "vortex.primitive/c0/b1",
+        "vortex.primitive/c1/b1",
+        "vortex.struct/c1/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "7dc81b10e2e63f556296c4e5c0383d16b23255e0e866eb5b9edb25768c96610d",
+      "sidecar_sha256": "1e69a6ef343233deb8d59e9bbc61c77c2dac7ba29274255cb2d645a8c6aacec1",
+      "size_bytes": 2124,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 0
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 16843683475694348623,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_mixed_validity_r1023",
+      "dimension": "B",
+      "description": "vortex.chunked forced (1023 rows): four i64? chunks whose validity representations differ: all-valid, an array, all-invalid, an array",
+      "path": "encodings/chunked_mixed_validity_r1023.vortex",
+      "sidecar": "encodings/chunked_mixed_validity_r1023.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1023,
+      "dtype": "{chunked=i64?}",
+      "array_ids": [
+        "vortex.bool",
+        "vortex.chunked",
+        "vortex.constant",
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.bool/c0/b1",
+        "vortex.chunked/c5/b0",
+        "vortex.constant/c0/b1",
+        "vortex.primitive/c0/b1",
+        "vortex.primitive/c1/b1",
+        "vortex.struct/c1/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "8ef2aa43bb04fff56f852a54d31ac31d57bc28ef33a8fcfac6941429dc97e403",
+      "sidecar_sha256": "352ee2d4336d1d16745b8ccdffb8096bac4625515998bb921b566d67cd7b7f74",
+      "size_bytes": 10356,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 491
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 2920549714205098281,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_mixed_validity_r1025",
+      "dimension": "B",
+      "description": "vortex.chunked forced (1025 rows): four i64? chunks whose validity representations differ: all-valid, an array, all-invalid, an array",
+      "path": "encodings/chunked_mixed_validity_r1025.vortex",
+      "sidecar": "encodings/chunked_mixed_validity_r1025.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1025,
+      "dtype": "{chunked=i64?}",
+      "array_ids": [
+        "vortex.bool",
+        "vortex.chunked",
+        "vortex.constant",
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.bool/c0/b1",
+        "vortex.chunked/c5/b0",
+        "vortex.constant/c0/b1",
+        "vortex.primitive/c0/b1",
+        "vortex.primitive/c1/b1",
+        "vortex.struct/c1/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "b876edac20acaa55bc32d2d4695ad44499cc15a5b9673b84d9c31822efc527e2",
+      "sidecar_sha256": "382fb4c0cd3df5aa92420d32599a82f8cb847a50a198a1fa5a6c1d5610fd81f3",
+      "size_bytes": 10380,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 491
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 6840181768037073424,
       "env": {},
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
@@ -8408,6 +9265,287 @@
       ],
       "missing_expected_array_ids": [],
       "seed": 16382566784624081044,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_varbinview",
+      "dimension": "B",
+      "description": "vortex.chunked forced (4096 rows): four VarBinView chunks whose lengths straddle the inline boundary (ConcatVarBinView)",
+      "path": "encodings/chunked_varbinview.vortex",
+      "sidecar": "encodings/chunked_varbinview.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 4096,
+      "dtype": "{chunked=utf8}",
+      "array_ids": [
+        "vortex.chunked",
+        "vortex.primitive",
+        "vortex.struct",
+        "vortex.varbinview"
+      ],
+      "array_node_shapes": [
+        "vortex.chunked/c5/b0",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c1/b0",
+        "vortex.varbinview/c0/b3"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "2f71efb061871a224d8cfa528b7d381225e839d8a2dd447f4b220b87a7c276cb",
+      "sidecar_sha256": "d9e4326d439487c32c358807d81fd0f7edf5249d0f63363639166978ad6b4f1a",
+      "size_bytes": 90500,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 0
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 12523592010903067188,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_varbinview_r0",
+      "dimension": "B",
+      "description": "vortex.chunked forced (0 rows): four VarBinView chunks whose lengths straddle the inline boundary (ConcatVarBinView)",
+      "path": "encodings/chunked_varbinview_r0.vortex",
+      "sidecar": "encodings/chunked_varbinview_r0.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 0,
+      "dtype": "{chunked=utf8}",
+      "array_ids": [],
+      "array_node_shapes": [],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.chunked"
+      ],
+      "declared_array_ids": 0,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "6bcb814d47e7e67546d0c8e04e2dfa0bb7a57ded34ad6e7a8079779302aba613",
+      "sidecar_sha256": "913474904f669ec839c22bfabd705d9252039d76e7356879b1bcda2d37a42ea6",
+      "size_bytes": 1412,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {},
+      "expected_array_ids": [],
+      "missing_expected_array_ids": [],
+      "seed": 11723061587957325039,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
+        "zero rows: the layout has no children and no segments, so `array_ids` is empty by construction and no encoding is claimed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_varbinview_r1",
+      "dimension": "B",
+      "description": "vortex.chunked forced (1 rows): four VarBinView chunks whose lengths straddle the inline boundary (ConcatVarBinView)",
+      "path": "encodings/chunked_varbinview_r1.vortex",
+      "sidecar": "encodings/chunked_varbinview_r1.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1,
+      "dtype": "{chunked=utf8}",
+      "array_ids": [
+        "vortex.chunked",
+        "vortex.primitive",
+        "vortex.struct",
+        "vortex.varbinview"
+      ],
+      "array_node_shapes": [
+        "vortex.chunked/c5/b0",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c1/b0",
+        "vortex.varbinview/c0/b1"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "ae56698ae988c4f0f6dcc2a4f07057ae9445a02ecfa6052c6a39476f7965fa09",
+      "sidecar_sha256": "636ce7814edf89997edd032f1e3c8276577982550c09195c3e241323977d4d4b",
+      "size_bytes": 1956,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 0
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 1274328148101723688,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_varbinview_r1023",
+      "dimension": "B",
+      "description": "vortex.chunked forced (1023 rows): four VarBinView chunks whose lengths straddle the inline boundary (ConcatVarBinView)",
+      "path": "encodings/chunked_varbinview_r1023.vortex",
+      "sidecar": "encodings/chunked_varbinview_r1023.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1023,
+      "dtype": "{chunked=utf8}",
+      "array_ids": [
+        "vortex.chunked",
+        "vortex.primitive",
+        "vortex.struct",
+        "vortex.varbinview"
+      ],
+      "array_node_shapes": [
+        "vortex.chunked/c5/b0",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c1/b0",
+        "vortex.varbinview/c0/b2"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "f2cdb144bab5f7d038f2759679f2711d7dd3fa0d6c84805b4760b8a1be58912b",
+      "sidecar_sha256": "48e0ca798edcbffa13c9685dcd3164a65d6304eda953bf36e56da694c54932bf",
+      "size_bytes": 24052,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 0
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 2483197871443127063,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/chunked_varbinview_r1025",
+      "dimension": "B",
+      "description": "vortex.chunked forced (1025 rows): four VarBinView chunks whose lengths straddle the inline boundary (ConcatVarBinView)",
+      "path": "encodings/chunked_varbinview_r1025.vortex",
+      "sidecar": "encodings/chunked_varbinview_r1025.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1025,
+      "dtype": "{chunked=utf8}",
+      "array_ids": [
+        "vortex.chunked",
+        "vortex.primitive",
+        "vortex.struct",
+        "vortex.varbinview"
+      ],
+      "array_node_shapes": [
+        "vortex.chunked/c5/b0",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c1/b0",
+        "vortex.varbinview/c0/b2"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "cfb805d259a00511b563ff90bc5214fdf2226935fa8f1bf094aa92051405451c",
+      "sidecar_sha256": "2f8717d857499992f9a9019c89fece6dd1455ae0ebb090266ade0a7b06722de5",
+      "size_bytes": 24084,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "chunked": 0
+      },
+      "expected_array_ids": [
+        "vortex.chunked"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 13350239285459298367,
       "env": {},
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
@@ -16502,6 +17640,726 @@
       ],
       "missing_expected_array_ids": [],
       "seed": 8514415535890534233,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/table_mixed",
+      "dimension": "B",
+      "description": "vortex.struct forced (4096 rows): six columns: monotone key, high-cardinality measure, f64 price, 16 labels, distinct names, timestamp",
+      "path": "encodings/table_mixed.vortex",
+      "sidecar": "encodings/table_mixed.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 4096,
+      "dtype": "{key=i64, measure=i64, price=f64, label=utf8, name=utf8, stamp=vortex.timestamp[ms](i64)}",
+      "array_ids": [
+        "vortex.ext",
+        "vortex.primitive",
+        "vortex.struct",
+        "vortex.varbinview"
+      ],
+      "array_node_shapes": [
+        "vortex.ext/c1/b0",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c6/b0",
+        "vortex.varbinview/c0/b1",
+        "vortex.varbinview/c0/b6"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [
+        "vortex.timestamp"
+      ],
+      "sha256": "ea5d66e119ccc32c2949e05001491b9567249eb1dd73372c88271a9e309c6fc5",
+      "sidecar_sha256": "ea5fcf1d80d4da9eba7ff890c4c77c345454300203e559e578c646d0ef90579a",
+      "size_bytes": 354532,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "key": 0,
+        "label": 0,
+        "measure": 0,
+        "name": 0,
+        "price": 0,
+        "stamp": 0
+      },
+      "expected_array_ids": [
+        "vortex.struct"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 5950205804226910096,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/table_mixed_r0",
+      "dimension": "B",
+      "description": "vortex.struct forced (0 rows): six columns: monotone key, high-cardinality measure, f64 price, 16 labels, distinct names, timestamp",
+      "path": "encodings/table_mixed_r0.vortex",
+      "sidecar": "encodings/table_mixed_r0.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 0,
+      "dtype": "{key=i64, measure=i64, price=f64, label=utf8, name=utf8, stamp=vortex.timestamp[ms](i64)}",
+      "array_ids": [],
+      "array_node_shapes": [],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.chunked"
+      ],
+      "declared_array_ids": 0,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [
+        "vortex.timestamp"
+      ],
+      "sha256": "011910a11fc931e1a15853c1edb14d55b719046527959b0869d3bc942553d7dd",
+      "sidecar_sha256": "9437093deac26cbc991a079883122eedce2d1f278e3e9885d460803ac83dace8",
+      "size_bytes": 1692,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {},
+      "expected_array_ids": [],
+      "missing_expected_array_ids": [],
+      "seed": 3885152499827829050,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
+        "zero rows: the layout has no children and no segments, so `array_ids` is empty by construction and no encoding is claimed"
+      ]
+    },
+    {
+      "id": "encodings/table_mixed_r1",
+      "dimension": "B",
+      "description": "vortex.struct forced (1 rows): six columns: monotone key, high-cardinality measure, f64 price, 16 labels, distinct names, timestamp",
+      "path": "encodings/table_mixed_r1.vortex",
+      "sidecar": "encodings/table_mixed_r1.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1,
+      "dtype": "{key=i64, measure=i64, price=f64, label=utf8, name=utf8, stamp=vortex.timestamp[ms](i64)}",
+      "array_ids": [
+        "vortex.ext",
+        "vortex.primitive",
+        "vortex.struct",
+        "vortex.varbinview"
+      ],
+      "array_node_shapes": [
+        "vortex.ext/c1/b0",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c6/b0",
+        "vortex.varbinview/c0/b1",
+        "vortex.varbinview/c0/b2"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [
+        "vortex.timestamp"
+      ],
+      "sha256": "3e9dec6f4250fa7ee564c0eb97cff4531297d7476fcc02c43eef734c96247a74",
+      "sidecar_sha256": "aa33abb82999ce1215800092669fb80daacdc27562aae6187d53e27ec3293bb4",
+      "size_bytes": 2340,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "key": 0,
+        "label": 0,
+        "measure": 0,
+        "name": 0,
+        "price": 0,
+        "stamp": 0
+      },
+      "expected_array_ids": [
+        "vortex.struct"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 13233268185269419007,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/table_mixed_r1023",
+      "dimension": "B",
+      "description": "vortex.struct forced (1023 rows): six columns: monotone key, high-cardinality measure, f64 price, 16 labels, distinct names, timestamp",
+      "path": "encodings/table_mixed_r1023.vortex",
+      "sidecar": "encodings/table_mixed_r1023.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1023,
+      "dtype": "{key=i64, measure=i64, price=f64, label=utf8, name=utf8, stamp=vortex.timestamp[ms](i64)}",
+      "array_ids": [
+        "vortex.ext",
+        "vortex.primitive",
+        "vortex.struct",
+        "vortex.varbinview"
+      ],
+      "array_node_shapes": [
+        "vortex.ext/c1/b0",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c6/b0",
+        "vortex.varbinview/c0/b1",
+        "vortex.varbinview/c0/b4"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [
+        "vortex.timestamp"
+      ],
+      "sha256": "35606dd4c325bbf1c5ad2230f67285b056a6d215ccca761ac3ff9081f6877a67",
+      "sidecar_sha256": "ef4803f2fac3d05f1397ea660396731bad0ad37bab0ac341b44bda16bbc55e6a",
+      "size_bytes": 90248,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "key": 0,
+        "label": 0,
+        "measure": 0,
+        "name": 0,
+        "price": 0,
+        "stamp": 0
+      },
+      "expected_array_ids": [
+        "vortex.struct"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 7424584632721669563,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/table_mixed_r1025",
+      "dimension": "B",
+      "description": "vortex.struct forced (1025 rows): six columns: monotone key, high-cardinality measure, f64 price, 16 labels, distinct names, timestamp",
+      "path": "encodings/table_mixed_r1025.vortex",
+      "sidecar": "encodings/table_mixed_r1025.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1025,
+      "dtype": "{key=i64, measure=i64, price=f64, label=utf8, name=utf8, stamp=vortex.timestamp[ms](i64)}",
+      "array_ids": [
+        "vortex.ext",
+        "vortex.primitive",
+        "vortex.struct",
+        "vortex.varbinview"
+      ],
+      "array_node_shapes": [
+        "vortex.ext/c1/b0",
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c6/b0",
+        "vortex.varbinview/c0/b1",
+        "vortex.varbinview/c0/b4"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [
+        "vortex.timestamp"
+      ],
+      "sha256": "2721ef1685e4466d3516adcd17cce15f646350eed6c56149d39cc429a1a3bda2",
+      "sidecar_sha256": "799083bcf37ac70241ce5c9d577851f76dac3b8d7b884881fc3e833f97ee2035",
+      "size_bytes": 90424,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "key": 0,
+        "label": 0,
+        "measure": 0,
+        "name": 0,
+        "price": 0,
+        "stamp": 0
+      },
+      "expected_array_ids": [
+        "vortex.struct"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 17426669616966457704,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/table_wide",
+      "dimension": "B",
+      "description": "vortex.struct forced (4096 rows): fifty i64 columns, for the projection axis docs/05 §3 describes",
+      "path": "encodings/table_wide.vortex",
+      "sidecar": "encodings/table_wide.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 204,
+      "dtype": "{c00=i64, c01=i64, c02=i64, c03=i64, c04=i64, c05=i64, c06=i64, c07=i64, c08=i64, c09=i64, c10=i64, c11=i64, c12=i64, c13=i64, c14=i64, c15=i64, c16=i64, c17=i64, c18=i64, c19=i64, c20=i64, c21=i64, c22=i64, c23=i64, c24=i64, c25=i64, c26=i64, c27=i64, c28=i64, c29=i64, c30=i64, c31=i64, c32=i64, c33=i64, c34=i64, c35=i64, c36=i64, c37=i64, c38=i64, c39=i64, c40=i64, c41=i64, c42=i64, c43=i64, c44=i64, c45=i64, c46=i64, c47=i64, c48=i64, c49=i64}",
+      "array_ids": [
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c50/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "a03e8f2d251fdd05980366f7122ac74a8efb51f83e1ddef2f81d876647e9eeba",
+      "sidecar_sha256": "46587fabff619ca3742f8f71d97fd55f26569098217679ddb632bff9f966d0d5",
+      "size_bytes": 87736,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "c00": 0,
+        "c01": 0,
+        "c02": 0,
+        "c03": 0,
+        "c04": 0,
+        "c05": 0,
+        "c06": 0,
+        "c07": 0,
+        "c08": 0,
+        "c09": 0,
+        "c10": 0,
+        "c11": 0,
+        "c12": 0,
+        "c13": 0,
+        "c14": 0,
+        "c15": 0,
+        "c16": 0,
+        "c17": 0,
+        "c18": 0,
+        "c19": 0,
+        "c20": 0,
+        "c21": 0,
+        "c22": 0,
+        "c23": 0,
+        "c24": 0,
+        "c25": 0,
+        "c26": 0,
+        "c27": 0,
+        "c28": 0,
+        "c29": 0,
+        "c30": 0,
+        "c31": 0,
+        "c32": 0,
+        "c33": 0,
+        "c34": 0,
+        "c35": 0,
+        "c36": 0,
+        "c37": 0,
+        "c38": 0,
+        "c39": 0,
+        "c40": 0,
+        "c41": 0,
+        "c42": 0,
+        "c43": 0,
+        "c44": 0,
+        "c45": 0,
+        "c46": 0,
+        "c47": 0,
+        "c48": 0,
+        "c49": 0
+      },
+      "expected_array_ids": [
+        "vortex.struct"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 17952579658947261295,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/table_wide_r0",
+      "dimension": "B",
+      "description": "vortex.struct forced (0 rows): fifty i64 columns, for the projection axis docs/05 §3 describes",
+      "path": "encodings/table_wide_r0.vortex",
+      "sidecar": "encodings/table_wide_r0.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 0,
+      "dtype": "{c00=i64, c01=i64, c02=i64, c03=i64, c04=i64, c05=i64, c06=i64, c07=i64, c08=i64, c09=i64, c10=i64, c11=i64, c12=i64, c13=i64, c14=i64, c15=i64, c16=i64, c17=i64, c18=i64, c19=i64, c20=i64, c21=i64, c22=i64, c23=i64, c24=i64, c25=i64, c26=i64, c27=i64, c28=i64, c29=i64, c30=i64, c31=i64, c32=i64, c33=i64, c34=i64, c35=i64, c36=i64, c37=i64, c38=i64, c39=i64, c40=i64, c41=i64, c42=i64, c43=i64, c44=i64, c45=i64, c46=i64, c47=i64, c48=i64, c49=i64}",
+      "array_ids": [],
+      "array_node_shapes": [],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.chunked"
+      ],
+      "declared_array_ids": 0,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "0c4ba86930e8cee92996ef37000422f3835ddf6e3a6213613a794c246bce4716",
+      "sidecar_sha256": "88491a4184ef0a2c0a384c2368d7bf0754ae09f0c186e46ce556c8a6a494be43",
+      "size_bytes": 3188,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {},
+      "expected_array_ids": [],
+      "missing_expected_array_ids": [],
+      "seed": 4260861085933429380,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
+        "zero rows: the layout has no children and no segments, so `array_ids` is empty by construction and no encoding is claimed"
+      ]
+    },
+    {
+      "id": "encodings/table_wide_r1",
+      "dimension": "B",
+      "description": "vortex.struct forced (1 rows): fifty i64 columns, for the projection axis docs/05 §3 describes",
+      "path": "encodings/table_wide_r1.vortex",
+      "sidecar": "encodings/table_wide_r1.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 0,
+      "dtype": "{c00=i64, c01=i64, c02=i64, c03=i64, c04=i64, c05=i64, c06=i64, c07=i64, c08=i64, c09=i64, c10=i64, c11=i64, c12=i64, c13=i64, c14=i64, c15=i64, c16=i64, c17=i64, c18=i64, c19=i64, c20=i64, c21=i64, c22=i64, c23=i64, c24=i64, c25=i64, c26=i64, c27=i64, c28=i64, c29=i64, c30=i64, c31=i64, c32=i64, c33=i64, c34=i64, c35=i64, c36=i64, c37=i64, c38=i64, c39=i64, c40=i64, c41=i64, c42=i64, c43=i64, c44=i64, c45=i64, c46=i64, c47=i64, c48=i64, c49=i64}",
+      "array_ids": [],
+      "array_node_shapes": [],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.chunked"
+      ],
+      "declared_array_ids": 0,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "0c4ba86930e8cee92996ef37000422f3835ddf6e3a6213613a794c246bce4716",
+      "sidecar_sha256": "cdc3c296f638912b2e5f820869fac35f5a27747fe5b433882ad7298346424961",
+      "size_bytes": 3188,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {},
+      "expected_array_ids": [
+        "vortex.struct"
+      ],
+      "missing_expected_array_ids": [
+        "vortex.struct"
+      ],
+      "seed": 13896241843056218859,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/table_wide_r1023",
+      "dimension": "B",
+      "description": "vortex.struct forced (1023 rows): fifty i64 columns, for the projection axis docs/05 §3 describes",
+      "path": "encodings/table_wide_r1023.vortex",
+      "sidecar": "encodings/table_wide_r1023.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 51,
+      "dtype": "{c00=i64, c01=i64, c02=i64, c03=i64, c04=i64, c05=i64, c06=i64, c07=i64, c08=i64, c09=i64, c10=i64, c11=i64, c12=i64, c13=i64, c14=i64, c15=i64, c16=i64, c17=i64, c18=i64, c19=i64, c20=i64, c21=i64, c22=i64, c23=i64, c24=i64, c25=i64, c26=i64, c27=i64, c28=i64, c29=i64, c30=i64, c31=i64, c32=i64, c33=i64, c34=i64, c35=i64, c36=i64, c37=i64, c38=i64, c39=i64, c40=i64, c41=i64, c42=i64, c43=i64, c44=i64, c45=i64, c46=i64, c47=i64, c48=i64, c49=i64}",
+      "array_ids": [
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c50/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "8b1a70d674d774d725e6aa3a35067c334628f85e84948235fc0a8a42355bb2b9",
+      "sidecar_sha256": "04d9c7d39b04721a69d253de05ff2717faf4b682c2803d116f3aa6d34ca79cd3",
+      "size_bytes": 26536,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "c00": 0,
+        "c01": 0,
+        "c02": 0,
+        "c03": 0,
+        "c04": 0,
+        "c05": 0,
+        "c06": 0,
+        "c07": 0,
+        "c08": 0,
+        "c09": 0,
+        "c10": 0,
+        "c11": 0,
+        "c12": 0,
+        "c13": 0,
+        "c14": 0,
+        "c15": 0,
+        "c16": 0,
+        "c17": 0,
+        "c18": 0,
+        "c19": 0,
+        "c20": 0,
+        "c21": 0,
+        "c22": 0,
+        "c23": 0,
+        "c24": 0,
+        "c25": 0,
+        "c26": 0,
+        "c27": 0,
+        "c28": 0,
+        "c29": 0,
+        "c30": 0,
+        "c31": 0,
+        "c32": 0,
+        "c33": 0,
+        "c34": 0,
+        "c35": 0,
+        "c36": 0,
+        "c37": 0,
+        "c38": 0,
+        "c39": 0,
+        "c40": 0,
+        "c41": 0,
+        "c42": 0,
+        "c43": 0,
+        "c44": 0,
+        "c45": 0,
+        "c46": 0,
+        "c47": 0,
+        "c48": 0,
+        "c49": 0
+      },
+      "expected_array_ids": [
+        "vortex.struct"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 12036990485199732159,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/table_wide_r1025",
+      "dimension": "B",
+      "description": "vortex.struct forced (1025 rows): fifty i64 columns, for the projection axis docs/05 §3 describes",
+      "path": "encodings/table_wide_r1025.vortex",
+      "sidecar": "encodings/table_wide_r1025.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 51,
+      "dtype": "{c00=i64, c01=i64, c02=i64, c03=i64, c04=i64, c05=i64, c06=i64, c07=i64, c08=i64, c09=i64, c10=i64, c11=i64, c12=i64, c13=i64, c14=i64, c15=i64, c16=i64, c17=i64, c18=i64, c19=i64, c20=i64, c21=i64, c22=i64, c23=i64, c24=i64, c25=i64, c26=i64, c27=i64, c28=i64, c29=i64, c30=i64, c31=i64, c32=i64, c33=i64, c34=i64, c35=i64, c36=i64, c37=i64, c38=i64, c39=i64, c40=i64, c41=i64, c42=i64, c43=i64, c44=i64, c45=i64, c46=i64, c47=i64, c48=i64, c49=i64}",
+      "array_ids": [
+        "vortex.primitive",
+        "vortex.struct"
+      ],
+      "array_node_shapes": [
+        "vortex.primitive/c0/b1",
+        "vortex.struct/c50/b0"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "8b1a70d674d774d725e6aa3a35067c334628f85e84948235fc0a8a42355bb2b9",
+      "sidecar_sha256": "9f25b2a5cb8304586b1bb4efbf313f1b5733a6a9557b048022d9e55142e9bc47",
+      "size_bytes": 26536,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0,
+        "c00": 0,
+        "c01": 0,
+        "c02": 0,
+        "c03": 0,
+        "c04": 0,
+        "c05": 0,
+        "c06": 0,
+        "c07": 0,
+        "c08": 0,
+        "c09": 0,
+        "c10": 0,
+        "c11": 0,
+        "c12": 0,
+        "c13": 0,
+        "c14": 0,
+        "c15": 0,
+        "c16": 0,
+        "c17": 0,
+        "c18": 0,
+        "c19": 0,
+        "c20": 0,
+        "c21": 0,
+        "c22": 0,
+        "c23": 0,
+        "c24": 0,
+        "c25": 0,
+        "c26": 0,
+        "c27": 0,
+        "c28": 0,
+        "c29": 0,
+        "c30": 0,
+        "c31": 0,
+        "c32": 0,
+        "c33": 0,
+        "c34": 0,
+        "c35": 0,
+        "c36": 0,
+        "c37": 0,
+        "c38": 0,
+        "c39": 0,
+        "c40": 0,
+        "c41": 0,
+        "c42": 0,
+        "c43": 0,
+        "c44": 0,
+        "c45": 0,
+        "c46": 0,
+        "c47": 0,
+        "c48": 0,
+        "c49": 0
+      },
+      "expected_array_ids": [
+        "vortex.struct"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 17155618875852791415,
       "env": {},
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"

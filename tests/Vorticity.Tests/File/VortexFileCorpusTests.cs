@@ -22,7 +22,7 @@ public sealed class VortexFileCorpusTests
     public async Task OpensEveryCorpusFileAndAgreesWithTheManifest()
     {
         CorpusEntry[] entries = CorpusManifest.Entries;
-        Assert.Equal(821, entries.Length);
+        Assert.Equal(851, entries.Length);
 
         List<string> failures = new List<string>();
         HashSet<long> rowCounts = new HashSet<long>();

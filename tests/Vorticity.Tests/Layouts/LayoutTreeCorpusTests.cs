@@ -67,7 +67,7 @@ public sealed class LayoutTreeCorpusTests
             nodes += tree.NodeCount;
         }
 
-        Assert.Equal(820, files);
+        Assert.Equal(850, files);
         Assert.True(nodes > 819, $"Only {nodes} layout nodes over the whole corpus.");
     }
 

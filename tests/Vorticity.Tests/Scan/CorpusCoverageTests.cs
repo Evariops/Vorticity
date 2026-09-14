@@ -1,7 +1,7 @@
 // Which corpus files this build cannot read, and why, as a number that only goes down.
 //
-// THE GAP IS CLOSED: 821 of the 821 shipped files are readable, and the ceiling is 0. What is left
-// is the direction this was always worth more for. The conformance sweep reports "821 of 821
+// THE GAP IS CLOSED: 851 of the 851 shipped files are readable, and the ceiling is 0. What is left
+// is the direction this was always worth more for. The conformance sweep reports "851 of 851
 // IN-SCOPE files read back value for value", which is a true statement about a set THIS BUILD
 // DEFINES: dropping a registration moves a file out of scope, the file leaves the denominator, and
 // the sweep still says 100%. This test counts the files that left, so that failure has somewhere to
