@@ -504,8 +504,17 @@ internal static class CanonicalConcat
 
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             length, CanonicalSupport.ViewSize, "concatenated views");
-        VortexBuffer views = CanonicalSupport.Allocate(
-            context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
+
+        // PERF-AUDIT-v2.md R8b. A NULL ROW IS THE ONLY REASON THIS BUFFER NEEDS ZEROING: it keeps
+        // `BinaryView::empty_view()` and nothing writes it. When every chunk is all-valid the views
+        // tile the output and the memset is 16 MB paid for nothing at a million rows -- the same
+        // argument `ConcatPrimitive` makes, and `TilesFully` checks it rather than assuming it.
+        bool tiled = TilesFully(arena, chunks, length);
+        VortexBuffer views = tiled
+            ? CanonicalSupport.AllocateUninitialized(
+                context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable)
+            : CanonicalSupport.Allocate(
+                context, viewBytes, CanonicalSupport.ViewSize, out writable);
 
         Span<VortexBuffer> stack = stackalloc VortexBuffer[StackSmall];
         Scratch<VortexBuffer> scratch = new Scratch<VortexBuffer>(totalBuffers, stack);
@@ -518,41 +527,25 @@ internal static class CanonicalConcat
             for (int i = 0; i < chunks.Length; i++)
             {
                 CanonicalNode chunk = arena.GetNode(chunks[i]);
-                ValidityMask mask = ValidityMask.From(context, chunk.Validity);
                 ReadOnlySpan<byte> source = chunk.Views.Span;
 
-                for (int j = 0; j < chunk.Length; j++, row++)
+                // THE ALL-VALID CHUNK IS THE SHAPE, not a lucky case: 112 chunks of 112 on
+                // `chunked_varbinview` at a million rows, and a chunked VarBinView written by the
+                // reference is all-valid whenever its column is. It moves its views in ONE copy and
+                // then walks them to rebase, instead of slicing twice and copying sixteen bytes a
+                // row through the validity mask.
+                if (chunk.Validity.IsAllValid)
                 {
-                    if (!mask.IsValid(j))
-                    {
-                        // Null rows keep BinaryView::empty_view(); their stored view was never
-                        // validated and must not be rebased.
-                        continue;
-                    }
-
-                    ReadOnlySpan<byte> view =
-                        source.Slice(j * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
-                    Span<byte> target =
-                        writable.Slice(row * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
-                    view.CopyTo(target);
-
-                    uint size = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view);
-                    if (size <= CanonicalSupport.MaxInlineViewLength)
-                    {
-                        continue;
-                    }
-
-                    uint index =
-                        System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
-                    if (index >= (uint)chunk.DataBufferCount)
-                    {
-                        throw new VortexFormatException(
-                            $"Row {j} of chunk {i} references data buffer {index}; the chunk has " +
-                            $"{chunk.DataBufferCount}.");
-                    }
-
-                    System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
-                        target[8..12], (uint)(bufferBase + (int)index));
+                    int chunkBytes = chunk.Length * CanonicalSupport.ViewSize;
+                    Span<byte> block = writable.Slice(row * CanonicalSupport.ViewSize, chunkBytes);
+                    source[..chunkBytes].CopyTo(block);
+                    Rebase(block, chunk.Length, bufferBase, chunk.DataBufferCount, i);
+                    row += chunk.Length;
+                }
+                else
+                {
+                    ConcatViewsMasked(
+                        context, chunk, source, writable, ref row, bufferBase, i);
                 }
 
                 for (int b = 0; b < chunk.DataBufferCount; b++)
@@ -568,6 +561,123 @@ internal static class CanonicalConcat
         finally
         {
             scratch.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Whether every chunk is all-valid and their rows sum to <paramref name="length"/>, so that
+    /// every output byte is written and the buffer need not be zeroed first.
+    /// </summary>
+    private static bool TilesFully(CanonicalArena arena, ReadOnlySpan<int> chunks, int length)
+    {
+        long covered = 0;
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            CanonicalNode chunk = arena.GetNode(chunks[i]);
+            if (!chunk.Validity.IsAllValid)
+            {
+                return false;
+            }
+
+            // A chunk whose buffer is shorter than its declared rows would leave a hole; the copy
+            // below would throw rather than write it, but this is the test that keeps
+            // `AllocateUninitialized`'s promise a checked one.
+            if (chunk.Views.Span.Length < chunk.Length * CanonicalSupport.ViewSize)
+            {
+                return false;
+            }
+
+            covered += chunk.Length;
+        }
+
+        return covered == length;
+    }
+
+    /// <summary>
+    /// Rewrites each buffered view's data-buffer index from chunk-local to concatenated, in place.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A view is four <c>u32</c>s -- size, prefix, buffer index, offset -- so the walk reads words
+    /// 0 and 2 and writes word 2, with no slicing at all. The cast is the same one
+    /// <c>ViewKernels</c> makes of on-wire little-endian data.
+    /// </para>
+    /// <para>
+    /// THE BOUND IS CHECKED ON EVERY BUFFERED VIEW and the metadata never licenses skipping it
+    /// (Class I). The inline views -- 65 % of them on `chunked_varbinview` -- leave after one load.
+    /// </para>
+    /// </remarks>
+    private static void Rebase(
+        Span<byte> block, int rows, int bufferBase, int dataBufferCount, int chunkIndex)
+    {
+        Span<uint> words = MemoryMarshal.Cast<byte, uint>(block);
+        uint limit = (uint)dataBufferCount;
+
+        for (int j = 0; j < rows; j++)
+        {
+            int w = j * 4;
+            if (words[w] <= CanonicalSupport.MaxInlineViewLength)
+            {
+                continue;
+            }
+
+            uint index = words[w + 2];
+            if (index >= limit)
+            {
+                throw new VortexFormatException(
+                    $"Row {j} of chunk {chunkIndex} references data buffer {index}; the chunk has " +
+                    $"{dataBufferCount}.");
+            }
+
+            words[w + 2] = (uint)(bufferBase + (int)index);
+        }
+    }
+
+    /// <summary>The row-at-a-time path, for a chunk that has null rows to skip over.</summary>
+    private static void ConcatViewsMasked(
+        ArrayDecodeContext context,
+        in CanonicalNode chunk,
+        ReadOnlySpan<byte> source,
+        Span<byte> writable,
+        ref int row,
+        int bufferBase,
+        int chunkIndex)
+    {
+        ValidityMask mask = ValidityMask.From(context, chunk.Validity);
+
+        for (int j = 0; j < chunk.Length; j++, row++)
+        {
+            if (!mask.IsValid(j))
+            {
+                // Null rows keep BinaryView::empty_view(); their stored view was never validated
+                // and must not be rebased. This is also the one thing that stops the caller from
+                // using `AllocateUninitialized`: the zeroes ARE the empty view.
+                continue;
+            }
+
+            ReadOnlySpan<byte> view =
+                source.Slice(j * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
+            Span<byte> target =
+                writable.Slice(row * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
+            view.CopyTo(target);
+
+            uint size = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view);
+            if (size <= CanonicalSupport.MaxInlineViewLength)
+            {
+                continue;
+            }
+
+            uint index =
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
+            if (index >= (uint)chunk.DataBufferCount)
+            {
+                throw new VortexFormatException(
+                    $"Row {j} of chunk {chunkIndex} references data buffer {index}; the chunk has " +
+                    $"{chunk.DataBufferCount}.");
+            }
+
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
+                target[8..12], (uint)(bufferBase + (int)index));
         }
     }
 

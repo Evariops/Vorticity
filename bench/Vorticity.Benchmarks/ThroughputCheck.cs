@@ -508,7 +508,7 @@ internal static class ThroughputCheck
         ("chunked_empty_chunks", 0.26),   // 3 processes, spread 0.23-0.26; was 0.27, -5.4%
         ("chunked_mixed_validity", 1.23),   // 5 processes, spread 1.17-1.23; first calibration. THE WORST AXIS OF THE FIFTY: v2 R8c/R8e
         ("chunked_one_chunk", 0.26),   // 3 processes, spread 0.24-0.26; was 0.30, -14.6%
-        ("chunked_varbinview", 0.09),   // 5 processes, spread 0.09-0.09; first calibration (v2 R8b)
+        ("chunked_varbinview", 0.08),   // 5 processes, spread 0.07-0.08; was 0.09, -15.2% (v2 R8b)
         ("constant", 0.97),   // 3 processes, spread 0.96-0.97; was 1.00, -3.3%
         ("datetimeparts", 1.21),   // 3 processes, spread 1.11-1.22; HELD at 1.21: 3 processes peaked at 1.22, no loosening
         ("decimal", 0.27),   // 3 processes, spread 0.26-0.27; REBASED UP from 0.27 (k>1): +0.3%
@@ -541,12 +541,15 @@ internal static class ThroughputCheck
         ("sequence", 0.95),   // 3 processes, spread 0.93-0.95; was 0.97, -2.2%
         ("sparse", 0.67),   // PERF-AUDIT-v2.md R5: 0.88 -> 0.67. Full run reads 0.64 [0.613; 0.671]; the reference is that interval's top, which is 0.64 + one mde and still 24% under the old value
         ("struct", 0.07),   // 3 processes, spread 0.07-0.07; HELD at 0.07: 3 processes peaked at 0.07, no loosening
+        ("table_mixed", 0.07),   // 5 processes, spread 0.07-0.07; first calibration (livré par B6/D3, jamais gaté)
+        ("table_wide", 0.10),   // 5 processes, spread 0.09-0.10; first calibration (livré par B6/D3, jamais gaté)
         ("varbin", 0.04),   // 3 processes, spread 0.04-0.05; HELD at 0.04: 3 processes peaked at 0.05, no loosening
         ("varbinview", 0.08),   // 3 processes, spread 0.07-0.08; was 0.08, -4.7%
         ("variant", 6.51),   // 3 processes, spread 6.41-6.51; REBASED UP from 6.50 (k>1): +0.1%
         ("zigzag", 0.82),   // 3 processes, spread 0.80-0.82; was 0.82, -0.4%
         ("zstd", 1.06),   // 3 processes, spread 1.02-1.07; HELD at 1.06: 3 processes peaked at 1.07, no loosening
         ("zstd_buffers", 0.14),   // 3 processes, spread 0.14-0.14; was 0.15, -5.4%
+        ("zstd_nullable", 0.71),   // 5 processes, spread 0.66-0.71; first calibration (livré par v2 R3b, jamais gaté)
     ];
 
     /// <summary>
