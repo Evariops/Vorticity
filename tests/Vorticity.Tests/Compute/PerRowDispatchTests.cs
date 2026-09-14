@@ -92,7 +92,7 @@ public sealed partial class PerRowDispatchTests
         ("Columns/VortexColumn.cs", 1, 0, "legitimate: the column API is per row by design"),
         ("Compute/ComparisonKernels.cs", 2, 2, "F-4"),
         ("Compute/LiteralReader.cs", 2, 0, "legitimate: a single literal"),
-        ("Layouts/DictLayoutReader.cs", 1, 1, "R6"),
+        ("Layouts/DictLayoutReader.cs", 1, 0, "R6 done: the one left is an error path"),
         ("Types/Variant/ParquetVariant.cs", 2, 0, "a local method of the same name, not these"),
         ("Writing/ArrayBlobWriter.cs", 1, 1, "W-13"),
         ("Writing/BitPackPlan.cs", 5, 5, "W-11"),
@@ -104,7 +104,13 @@ public sealed partial class PerRowDispatchTests
     private const int TotalCalls = 66;
 
     /// <summary>Calls annexe A classifies as being inside a per-row or per-patch loop.</summary>
-    private const int TotalPerRow = 27;
+    /// <remarks>
+    /// 27 when this test was written; **26 since R6** wired `DictLayoutReader.Gather` onto
+    /// `RowKernels`. The file still has one call and the ceiling is still 1, but its COMPOSITION
+    /// changed -- what is left is `ThrowCode`, an error path -- and that is the change this column
+    /// exists to record. A total that only ever moved with the ceiling would have missed it.
+    /// </remarks>
+    private const int TotalPerRow = 26;
 
     [Fact]
     public void NoFileDispatchesPerRowMoreOftenThanItsCeiling()

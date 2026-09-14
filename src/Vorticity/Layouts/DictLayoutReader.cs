@@ -147,6 +147,18 @@ public sealed class DictLayoutReader : LayoutReader
         return Gather(context, dtype, valuesIndex, valuesLength, codesIndex, length);
     }
 
+    /// <summary>The one message for an out-of-range code, from whichever path found it.</summary>
+    /// <remarks>
+    /// It reads the code ITSELF rather than taking one, so the three call sites do not each put a
+    /// `ReadInteger` in the file for an error path -- `DictDecoder.ThrowCode` is written the same
+    /// way, and PERF-AUDIT-v2.md annexe A counts every call whether or not it is in a loop.
+    /// </remarks>
+    private static void ThrowCode(
+        ReadOnlySpan<byte> codes, PType codesPType, int row, int valuesLength) =>
+        LayoutsThrow.Format(
+            $"A {Id} layout's code {CompressedValues.ReadInteger(codes, codesPType, row)} at " +
+            $"row {row} is outside [0, {valuesLength}).");
+
     /// <summary>result[row] = values[codes[row]], with the codes bounds-checked unconditionally.</summary>
     private static int Gather(
         ScanContext context, DType dtype, int valuesIndex, int valuesLength, int codesIndex, int length)
@@ -172,32 +184,74 @@ public sealed class DictLayoutReader : LayoutReader
         DataBufferSet dataBuffers = DataBufferSet.Collect(arena, in values, false, default);
         try
         {
-            ValueWriter writer = ValueWriter.Create(decode, in values, length, 0, Id);
+            // THE SAME THREE PATHS AS `DictDecoder`, AND FOR THE SAME REASON. PERF-AUDIT-v2.md R6:
+            // this was a hand-rolled row loop -- `ReadInteger`'s switch on the code type, then
+            // `ValueWriter.Copy`'s switch on the kind and a variable-width `memmove` -- while the
+            // array decoder next door had already been wired onto `RowKernels`. Measured by
+            // short-circuiting it on `containers/dict_layout`: the loop is **26,4 %** of that
+            // scan (0,091 ms against 0,067), and the corpus holds **65 dict layouts**.
+            //
+            // A Bool value array keeps the row loop, exactly as it does there: bit-packed values
+            // have no fixed-width row to move, so a typed kernel has nothing to specialize on.
+            bool bitPacked = values.Kind == CanonicalKind.Bool;
+            ValueWriter writer = bitPacked
+                ? ValueWriter.Create(decode, in values, length, 0, Id)
+                : ValueWriter.CreateUninitialized(decode, in values, length, 0, Id);
             ValidityWriter validity = ValidityWriter.Create(decode, length, tracked, Id);
 
-            for (int row = 0; row < length; row++)
+            if (bitPacked)
             {
-                if (!codesValidity.IsValid(row))
+                for (int row = 0; row < length; row++)
                 {
-                    // A null code selects nothing; the row stays zeroed and invalid.
-                    continue;
+                    if (!codesValidity.IsValid(row))
+                    {
+                        // A null code selects nothing; the row stays zeroed and invalid.
+                        continue;
+                    }
+
+                    // `RowKernels.CodeAt` and not `ReadInteger`: the same read without the
+                    // general switch, which is what `DictDecoder.GatherBits` uses and why that
+                    // file appears nowhere in annexe A's count.
+                    uint code = RowKernels.CodeAt(codes, codesPType, row);
+
+                    // Class I: untrusted input, so the bound is checked on every row. The
+                    // metadata's `all_values_referenced` is a hint and never licenses skipping it.
+                    if (code >= (uint)valuesLength)
+                    {
+                        ThrowCode(codes, codesPType, row, valuesLength);
+                    }
+
+                    int index = (int)code;
+                    writer.Copy(in values, index, row);
+                    if (tracked && valuesValidity.IsValid(index))
+                    {
+                        validity.SetValid(row);
+                    }
                 }
-
-                long code = CompressedValues.ReadInteger(codes, codesPType, row);
-
-                // Class I: untrusted input, so the bound is checked on every row. The metadata's
-                // `all_values_referenced` is a hint and never licenses skipping this.
-                if ((ulong)code >= (ulong)(uint)valuesLength)
+            }
+            else if (!tracked)
+            {
+                // The dense path: no validity to read, no validity to write, one load and one
+                // store per row with the physical types resolved before the loop starts.
+                int bad = RowKernels.Gather(
+                    codes, codesPType, values.Bytes, values.Width, valuesLength,
+                    writer.Bytes, length);
+                if (bad >= 0)
                 {
-                    LayoutsThrow.Format(
-                        $"A {Id} layout's code {code} at row {row} is outside [0, {valuesLength}).");
+                    ThrowCode(codes, codesPType, bad, valuesLength);
                 }
-
-                int index = (int)code;
-                writer.Copy(in values, index, row);
-                if (tracked && valuesValidity.IsValid(index))
+            }
+            else
+            {
+                int bad = RowKernels.GatherMasked(
+                    codes, codesPType, values.Bytes, values.Width, valuesLength,
+                    writer.Bytes, length,
+                    codesValidity.Bits, codesValidity.BitOffset,
+                    valuesValidity.Bits, valuesValidity.BitOffset, valuesValidity.IsAllValid,
+                    validity.Bits);
+                if (bad >= 0)
                 {
-                    validity.SetValid(row);
+                    ThrowCode(codes, codesPType, bad, valuesLength);
                 }
             }
 
