@@ -26,6 +26,7 @@ dotnet run -c Release PROJ -- <arguments>
 | a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust |
 | the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 50 files |
 | a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 50 files, against Rust |
+| the compressor's decision | `-- CompressorBench` | 12 s | `Choose` and one arm per candidate; `--full` adds the utf8 and f64 columns |
 | the writer, per encoding | `-- --throughput --write` | 8 min | each file read back out to a discarding sink, against Rust. Reports; does not gate yet |
 | **anything, before you push** | `bench/gate.sh` | 35 s | the eight ratchets, `--ffi-check`, `--ratio-check`; exit 1 if one is red. `--throughput` adds the full axis (92 s) |
 | a change too big for a ported arm | `bench/ab.sh <commit> [--after <commit>] <file> [scenario…]` | 7 s | two builds of the library in one process, interleaved, ratio per round |
