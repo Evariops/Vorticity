@@ -138,17 +138,38 @@ public static class ScenarioSet
     /// <param name="path">The file.</param>
     /// <param name="count">How many rows.</param>
     /// <param name="stride">The gap between them; the row taken is the middle of each gap.</param>
+    /// <remarks>
+    /// THE INDICES PAST THE END ARE DROPPED, NOT SQUEEZED IN, and BENCH-AUDIT.md B16 is why. The
+    /// stride assumed every file in the 1M corpus had a million rows -- `table_wide` has 50 000, so
+    /// the fourth index landed at 54 687, `RowSelection.Create` threw, and an UNCAUGHT throw ends
+    /// the process: every encoding after it went unmeasured, and nothing said so.
+    /// <para>
+    /// B16 proposed clamping the stride to `rows / count`. That would have been wrong, and the
+    /// reference says why: `vxbench_take` builds the SAME strided indices and filters
+    /// `row &lt; rows_in_file` (tools/vxbench-rs/src/lib.rs). On `table_wide` it therefore takes
+    /// THREE rows, not sixty-four. Clamping would have had this side take sixty-four spread over
+    /// 50 000 rows while the reference took three -- a ratio between two different amounts of work,
+    /// which is worse than the exception because it would have looked like a number.
+    /// </para>
+    /// </remarks>
     public static async Task<long> ScatteredTake(string path, long count, long stride)
     {
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+
+        int wanted = 0;
         long[] indices = new long[count];
-        for (int i = 0; i < indices.Length; i++)
+        for (int i = 0; i < count; i++)
         {
-            indices[i] = (i * stride) + (stride / 2);
+            long row = (i * stride) + (stride / 2);
+            if (row < file.RowCount)
+            {
+                indices[wanted++] = row;
+            }
         }
 
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Take(indices).ExecuteAsync()
+        await foreach (RecordBatch batch in file.Scan()
+            .Take(indices.AsSpan(0, wanted).ToArray()).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
