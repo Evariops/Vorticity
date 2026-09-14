@@ -41,11 +41,21 @@ public sealed class RunEndDecoder : ArrayDecoder
     /// </summary>
     /// <remarks>
     /// The `vortex.runend` row of the take table: "binary search in `ends`". The ends and values
-    /// children are one entry per RUN, so they are decoded whole - that is not the expensive part;
-    /// the expansion to one value per ROW is, and it is what this skips.
+    /// children are one entry per RUN, so they are decoded whole - ~~that is not the expensive
+    /// part~~; the expansion to one value per ROW is, and it is what this skips.
     ///
     /// The search is over the ends MINUS the offset, which is the same space `length` and the
     /// wanted rows live in, so a sliced run-end array needs no separate translation.
+    ///
+    /// MEASURED 2026-09-14, AND THE STRUCK-OUT CLAUSE IS TRUE PER CALL AND FALSE IN AGGREGATE. It
+    /// compares one decode of the children against one expansion, and on that comparison it is
+    /// right. But the caller is `FlatLayoutReader`, which serves a take one BATCH at a time: counted
+    /// on the 1M-row axis, this method ran 37 056 times for 37 056 wanted rows - one row each - and
+    /// decoded 15 625 ends AND 15 625 values every time, plus a full `ValidateEnds` walk over them.
+    /// A take of 64 rows costs 1 584 µs where a full scan of the same file costs 205: SEVEN AND A
+    /// HALF SCANS to deliver 64 rows. The children do not depend on the selection and are re-decoded
+    /// once per batch anyway, which is the defect `ScanContext`'s retained-chunk cache removed for
+    /// the root and not for anything below it (v2 R25).
     /// </remarks>
     public override int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
