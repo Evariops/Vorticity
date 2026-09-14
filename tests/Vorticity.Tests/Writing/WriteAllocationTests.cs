@@ -79,14 +79,24 @@ public sealed class WriteAllocationTests
     /// columns elect `fastlanes.for` or `vortex.sequence` -- `zoned_many_zones_nulls` -5 712 B,
     /// `map` -2 304, `delta`, `pco` and `zstd` -576 each -- and the five that did not are the ones
     /// that elect neither.
+    ///
+    /// AND FIVE WITH W-5, which is the largest of the three by an order of magnitude on the file it
+    /// touches: a zstd frame is no longer copied out of the buffer it was compressed into.
+    /// `zoned_many_zones_nulls` -35 600 B, `fsst` -2 784, `types/utf8_nullable_r1025` -2 224,
+    /// `onpair` -272, `zstd` -144.
+    ///
+    /// FIVE OTHERS WENT UP BY 32 TO 128 BYTES in the same change, and that is not noise: carrying
+    /// the rental costs `PendingBuffer` two more fields, and a file that elects zstd nowhere pays
+    /// for them without collecting anything. It is written here rather than absorbed silently
+    /// because a ratchet whose floors drift upward unremarked is how the next one gets excused.
     /// </remarks>
     private static readonly (string Id, long Ceiling)[] Files =
     [
-        ("containers/zoned_many_zones_nulls", 7_891_000),
+        ("containers/zoned_many_zones_nulls", 7_855_000),
         ("distributions/high_cardinality_i64_r8193", 469_800),
-        ("encodings/fsst", 310_000),
-        ("encodings/onpair", 369_900),
-        ("types/utf8_nullable_r1025", 304_900),
+        ("encodings/fsst", 307_200),
+        ("encodings/onpair", 369_600),
+        ("types/utf8_nullable_r1025", 302_600),
 
         // THE LATE COMPONENTS, on the write side, for PERF-AUDIT-v2.md F2's reason: `fastlanes.delta`,
         // `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant` were watched by no
@@ -97,7 +107,7 @@ public sealed class WriteAllocationTests
         // question and `bench/crosscheck.sh` is where it is asked.
         ("encodings/fastlanes_delta", 63_300),
         ("encodings/pco", 65_300),
-        ("encodings/zstd", 363_400),
+        ("encodings/zstd", 363_200),
         ("encodings/map", 453_100),
         ("encodings/variant", 64_680),
     ];

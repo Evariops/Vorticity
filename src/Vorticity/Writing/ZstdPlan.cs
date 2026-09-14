@@ -29,9 +29,10 @@ namespace Vorticity.Writing;
 /// <summary>A zstd-compressed frame over a column's valid values, with its priced size.</summary>
 internal sealed class ZstdPlan
 {
-    private ZstdPlan(byte[] frame, int uncompressedSize, int valueCount)
+    private ZstdPlan(byte[] frame, int frameLength, int uncompressedSize, int valueCount)
     {
         Frame = frame;
+        FrameLength = frameLength;
         UncompressedSize = uncompressedSize;
         ValueCount = valueCount;
     }
@@ -39,11 +40,35 @@ internal sealed class ZstdPlan
     /// <summary>The compressed frame, exactly as it goes into the buffer.</summary>
     internal byte[] Frame { get; }
 
+    /// <summary>Bytes of <see cref="Frame"/> that are the frame.</summary>
+    /// <remarks>
+    /// PERF-AUDIT-v2.md W-5. `Frame` is the buffer zstd compressed INTO, straight from
+    /// `ArrayPool&lt;byte&gt;.Shared`, so it is longer than the frame -- usually much longer, since the
+    /// rental is sized for the worst case `GetMaxCompressedLength` allows. Copying it out to a
+    /// right-sized array was measured at **6,6 % of a 1 M-row utf8 file's whole write** (906 181
+    /// bytes over 123 chunks), 4,0 % on `varbin` and 2,0 % on `table_mixed`.
+    ///
+    /// OWNERSHIP MOVES TO WHOEVER WRITES IT. `ArrayBlobWriter` takes the array as a rented
+    /// `PendingBuffer` and returns it once the blob is laid out; a plan that is built and then NOT
+    /// chosen has to give it back itself, which is what <see cref="Release"/> is for. After either,
+    /// `Frame` names memory that belongs to somebody else and must not be read.
+    /// </remarks>
+    internal int FrameLength { get; }
+
     /// <summary>Bytes the frame decompresses to, which the decoder allocates against a cap.</summary>
     internal int UncompressedSize { get; }
 
     /// <summary>Values stored in the frame: the column's VALID rows, nulls excluded.</summary>
     internal int ValueCount { get; }
+
+    /// <summary>Hands <see cref="Frame"/> back to the pool, for a plan nobody wrote.</summary>
+    /// <remarks>
+    /// `ColumnCompressor` prices zstd and may then prefer FSST, and the loser still holds a rental.
+    /// Not returning it would not corrupt anything -- the array is simply collected instead of
+    /// reused -- but it drains the pool one buffer per column, which is the shape of problem that
+    /// only shows up as a slow leak under load.
+    /// </remarks>
+    internal void Release() => ArrayPool<byte>.Shared.Return(Frame);
 
     /// <summary>
     /// Compresses a varbin column's valid values, and keeps the result only if it is worth reading.
@@ -100,6 +125,7 @@ internal sealed class ZstdPlan
         byte[] stream = ArrayPool<byte>.Shared.Rent((int)streamBytes);
         byte[] destination = ArrayPool<byte>.Shared.Rent(
             checked((int)ZstandardEncoder.GetMaxCompressedLength((int)streamBytes)));
+        bool kept = false;
         try
         {
         int offset = 0;
@@ -131,13 +157,19 @@ internal sealed class ZstdPlan
             return null;
         }
 
-        return new ZstdPlan(
-            destination.AsSpan(0, written).ToArray(), (int)streamBytes, valueCount);
+        // THE RENTAL IS NOT RETURNED HERE on the success path: the plan takes it. `kept` is what
+        // tells the `finally` which of the two happened, and every early return above leaves it
+        // false, so a plan that never existed never keeps a buffer.
+        kept = true;
+        return new ZstdPlan(destination, written, (int)streamBytes, valueCount);
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(stream);
-            ArrayPool<byte>.Shared.Return(destination);
+            if (!kept)
+            {
+                ArrayPool<byte>.Shared.Return(destination);
+            }
         }
     }
 
@@ -169,6 +201,7 @@ internal sealed class ZstdPlan
         byte[] stream = ArrayPool<byte>.Shared.Rent(rows * width);
         byte[] destination = ArrayPool<byte>.Shared.Rent(
             checked((int)ZstandardEncoder.GetMaxCompressedLength(rows * width)));
+        bool kept = false;
         try
         {
             for (int i = 0; i < rows; i++)
@@ -209,12 +242,16 @@ internal sealed class ZstdPlan
                 return null;
             }
 
-            return new ZstdPlan(destination.AsSpan(0, written).ToArray(), streamBytes, valueCount);
+            kept = true;
+            return new ZstdPlan(destination, written, streamBytes, valueCount);
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(stream);
-            ArrayPool<byte>.Shared.Return(destination);
+            if (!kept)
+            {
+                ArrayPool<byte>.Shared.Return(destination);
+            }
         }
     }
 

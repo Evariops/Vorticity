@@ -61,7 +61,8 @@ internal static class ArrayBlobWriter
     {
         List<PendingBuffer> buffers = [];
         using FlatBufferBuilder builder = new FlatBufferBuilder();
-
+        try
+        {
         // The compressed forms are chosen and MATERIALIZED before the builder starts, because both
         // of them add canonical nodes to the arena -- the gathered values child -- and a
         // FlatBuffers table cannot be open while that happens.
@@ -82,9 +83,9 @@ internal static class ArrayBlobWriter
 
             specs[i] = new BufferSpec(
                 (ushort)padding, (byte)pending.AlignmentExponent, (byte)BufferCompression.None,
-                (uint)pending.Bytes.Length);
+                (uint)pending.Length);
 
-            offset = aligned + pending.Bytes.Length;
+            offset = aligned + pending.Length;
         }
 
         int table = ArrayWriter.Write(builder, root, specs);
@@ -100,8 +101,8 @@ internal static class ArrayBlobWriter
         for (int i = 0; i < buffers.Count; i++)
         {
             cursor += specs[i].Padding;
-            buffers[i].Bytes.CopyTo(blob.AsSpan((int)cursor));
-            cursor += buffers[i].Bytes.Length;
+            buffers[i].Bytes.AsSpan(0, buffers[i].Length).CopyTo(blob.AsSpan((int)cursor));
+            cursor += buffers[i].Length;
         }
 
         flatBuffer.CopyTo(blob.AsSpan((int)flatStart));
@@ -109,6 +110,21 @@ internal static class ArrayBlobWriter
             blob.AsSpan((int)(total - sizeof(uint))), (uint)flatBuffer.Length);
 
         return blob;
+        }
+        finally
+        {
+            // AFTER THE COPY INTO `blob` AND NOWHERE EARLIER. A pooled array handed back while the
+            // blob still had to read it would be handed to the next renter and overwritten, and the
+            // file would be wrong in a way no exception reports. In a `finally` so that a throw
+            // between the rent and the copy does not quietly drain the pool either.
+            foreach (PendingBuffer pending in buffers)
+            {
+                if (pending.Rented)
+                {
+                    ArrayPool<byte>.Shared.Return(pending.Bytes);
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -541,7 +557,10 @@ internal static class ArrayBlobWriter
         EncodingDictionary encodings)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
-        buffers.Add(new PendingBuffer(plan.Frame, 0));
+        // THE FRAME IS THE POOL'S, AND OWNERSHIP MOVES HERE. `ZstdPlan` kept the buffer it
+        // compressed into rather than copying it out; from this line the plan's `Frame` must not be
+        // read again, and `Write` is what hands it back after the blob has been laid out.
+        buffers.Add(new PendingBuffer(plan.Frame, plan.FrameLength, 0, rented: true));
         int frameBuffer = buffers.Count - 1;
 
         Span<int> children = stackalloc int[1];
@@ -1484,16 +1503,36 @@ internal static class ArrayBlobWriter
     private static long Align(long offset, int alignment) =>
         (offset + alignment - 1) & ~((long)alignment - 1);
 
+    /// <summary>One buffer waiting to be laid into the blob, and whether the pool owns it.</summary>
+    /// <remarks>
+    /// THE LENGTH IS SEPARATE FROM THE ARRAY because of <see cref="Rented"/>: an array from
+    /// `ArrayPool` is at least as long as asked for and usually longer, so `Bytes.Length` stops
+    /// being the number of bytes that belong in the file the moment one of these is pooled.
+    /// PERF-AUDIT-v2.md W-5.
+    /// </remarks>
     private readonly struct PendingBuffer
     {
         internal PendingBuffer(byte[] bytes, int alignmentExponent)
+            : this(bytes, bytes.Length, alignmentExponent, rented: false)
+        {
+        }
+
+        internal PendingBuffer(byte[] bytes, int length, int alignmentExponent, bool rented)
         {
             Bytes = bytes;
+            Length = length;
             AlignmentExponent = alignmentExponent;
+            Rented = rented;
         }
 
         internal byte[] Bytes { get; }
 
+        /// <summary>Bytes of <see cref="Bytes"/> that belong in the blob.</summary>
+        internal int Length { get; }
+
         internal int AlignmentExponent { get; }
+
+        /// <summary>Whether <c>Write</c> must hand <see cref="Bytes"/> back to the pool.</summary>
+        internal bool Rented { get; }
     }
 }

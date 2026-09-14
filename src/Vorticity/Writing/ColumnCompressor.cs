@@ -350,7 +350,7 @@ internal static class ColumnCompressor
             long ceiling = plain * 9 / 10;
             if (zstd is not null)
             {
-                ceiling = Math.Min(ceiling, zstd.Frame.Length * 10L / 9);
+                ceiling = Math.Min(ceiling, zstd.FrameLength * 10L / 9);
             }
 
             fsst = FsstPlan.TryBuild(arena, nodeIndex, ceiling);
@@ -358,6 +358,8 @@ internal static class ColumnCompressor
 
         if (fsst is not null)
         {
+            // The zstd plan lost, and it is holding a pooled buffer that nothing will write.
+            zstd?.Release();
             return ColumnPlan.ForFsst(fsst);
         }
 
