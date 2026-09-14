@@ -589,6 +589,26 @@ fn b_zstd(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
     Ok(Zstd::from_var_bin_view_without_dict(&vbv, 3, 1024, &mut ctx)?.into_array())
 }
 
+/// A `vortex.zstd` over a NULLABLE PRIMITIVE column, which is the shape its scatter is for.
+///
+/// PERF-AUDIT-v2.md R3b. The existing `zstd` case is a `VarBinView`, so it exercises
+/// `ZstdDecoder.BuildViews`; and `zstd_buffers` is non-nullable, so `ZstdDecoder.Scatter` returns
+/// early on `mask.AllValid` and its loop -- the one the point is about -- runs on no corpus file at
+/// all. Nulls every seventh row, so the compact-to-sparse expansion has real gaps to walk.
+fn b_zstd_nullable(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let mut ctx = session.create_execution_ctx();
+    let values: Buffer<i64> = (0..rows as i64).map(|i| i % 17).collect();
+    let validity = Validity::Array(
+        BoolArray::new(
+            BitBuffer::collect_bool(rows, |i| i % 7 != 3),
+            Validity::NonNullable,
+        )
+        .into_array(),
+    );
+    let parray = PrimitiveArray::new(values, validity);
+    Ok(Zstd::from_primitive(&parray, 3, 1024, &mut ctx)?.into_array())
+}
+
 fn b_pco(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
     let mut ctx = session.create_execution_ctx();
     let values: Buffer<i64> = (0..rows as i64).map(|i| i * 3 + 11).collect();
@@ -867,6 +887,13 @@ pub fn encoding_cases() -> Vec<EncodingCase> {
             array_id: "vortex.zstd",
             how: "Zstd::from_var_bin_view_without_dict, level 3, 1024 values per frame",
             build: b_zstd,
+            disable_editions: false,
+        },
+        EncodingCase {
+            id: "zstd_nullable",
+            array_id: "vortex.zstd",
+            how: "Zstd::from_primitive over a nullable i64, nulls every seventh row (R3b: the scatter)",
+            build: b_zstd_nullable,
             disable_editions: false,
         },
         EncodingCase {

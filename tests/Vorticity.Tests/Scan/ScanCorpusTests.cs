@@ -22,7 +22,7 @@ public sealed class ScanCorpusTests
     [Fact]
     public void TheCorpusIsPresentAndTheDispositionIsComputable()
     {
-        Assert.Equal(851, CorpusManifest.All.Count);
+        Assert.Equal(856, CorpusManifest.All.Count);
 
         List<CorpusEntry> inScope = CorpusManifest.InScope();
 
@@ -31,7 +31,7 @@ public sealed class ScanCorpusTests
         // a list. 616 was Phase 1; +32 vortex.decimal_byte_parts, +6 vortex.datetimeparts,
         // +5 vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst, +46 vortex.onpair,
         // +2 distributions/sorted_disjoint_utf8, +4 fastlanes.delta, +23 vortex.map, +1 vortex.patched, +4 vortex.zstd_buffers, +1 the vortex.list layout, +4 vortex.pco.
-        Assert.Equal(851, inScope.Count);
+        Assert.Equal(856, inScope.Count);
     }
 
     [Fact]
@@ -58,7 +58,7 @@ public sealed class ScanCorpusTests
         }
 
         Assert.Equal(string.Empty, failures.ToString());
-        Assert.Equal(851, checkedFiles);
+        Assert.Equal(856, checkedFiles);
     }
 
     [Fact]

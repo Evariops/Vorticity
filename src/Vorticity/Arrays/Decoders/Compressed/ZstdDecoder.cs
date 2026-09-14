@@ -22,6 +22,7 @@
 // bytes, so the second segment is unreachable here and the views always carry buffer index 0. That
 // is an argument about our own bounds, not an assumption about the file, so it holds for any input.
 using System;
+using System.Runtime.InteropServices;
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
@@ -280,19 +281,74 @@ public sealed class ZstdDecoder : ArrayDecoder
             context, span, byteWidth, out Span<byte> destination);
         ReadOnlySpan<byte> source = values.Span;
 
-        int next = 0;
-        for (int row = 0; row < length; row++)
+        // THE WIDTH IS RESOLVED ONCE, NOT PER ROW. PERF-AUDIT-v2.md R3b: this was a
+        // `Slice(..).CopyTo(..)` whose length is a runtime `byteWidth`, so every valid row paid a
+        // `memmove` call for four or eight bytes. Measured by short-circuiting the loop on a
+        // million-row nullable column: **1,97 ms of 3,57, or 55 % of the whole scan**.
+        //
+        // It could not be measured before, and that is the other half of the point: no corpus file
+        // reached this loop at all. `encodings/zstd` is a `VarBinView`, so it goes to `BuildViews`;
+        // `zstd_buffers` is non-nullable, so the `mask.AllValid` return above takes it. The file
+        // that exercises it -- `encodings/zstd_nullable`, a nullable i64 with a null every seventh
+        // row -- was added to the generator by this point.
+        switch (byteWidth)
         {
-            if (!mask.IsValid(row))
-            {
-                continue;
-            }
-
-            source.Slice(next * byteWidth, byteWidth).CopyTo(destination.Slice(row * byteWidth, byteWidth));
-            next++;
+            case 1:
+                Expand<byte>(source, destination, in mask, length);
+                break;
+            case 2:
+                Expand<ushort>(source, destination, in mask, length);
+                break;
+            case 4:
+                Expand<uint>(source, destination, in mask, length);
+                break;
+            case 8:
+                Expand<ulong>(source, destination, in mask, length);
+                break;
+            default:
+                ExpandWide(source, destination, in mask, length, byteWidth);
+                break;
         }
 
         return context.Canonical.AddPrimitive(dtype, length, validity, dtype.PType, output);
+    }
+
+    /// <summary>Spreads a dense run of <typeparamref name="T"/> over the mask's valid rows.</summary>
+    /// <typeparam name="T">The value type, chosen from the byte width by the caller.</typeparam>
+    private static void Expand<T>(
+        ReadOnlySpan<byte> source, Span<byte> destination, in ValidityMask mask, int length)
+        where T : unmanaged
+    {
+        ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(source);
+        Span<T> rows = MemoryMarshal.Cast<byte, T>(destination);
+        int next = 0;
+        for (int row = 0; row < length; row++)
+        {
+            if (mask.IsValid(row))
+            {
+                rows[row] = values[next++];
+            }
+        }
+    }
+
+    /// <summary>The same, for a width no primitive type has. Kept so the switch is total.</summary>
+    /// <remarks>
+    /// No <c>PType</c> is 3, 5, 6 or 7 bytes wide, so this is unreachable today. It is here because
+    /// a `default` that threw would turn a future width into a crash on a file, and one that did
+    /// nothing would turn it into silent zeros.
+    /// </remarks>
+    private static void ExpandWide(
+        ReadOnlySpan<byte> source, Span<byte> destination, in ValidityMask mask, int length, int width)
+    {
+        int next = 0;
+        for (int row = 0; row < length; row++)
+        {
+            if (mask.IsValid(row))
+            {
+                source.Slice(next * width, width).CopyTo(destination.Slice(row * width, width));
+                next++;
+            }
+        }
     }
 
     /// <summary>
