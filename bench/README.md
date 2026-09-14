@@ -19,6 +19,7 @@ dotnet run -c Release PROJ -- <arguments>
 | a read path | `-- --ratio-check [axis…]` | 29 s, or 5 s for one axis | the thirteen axes against Rust, interleaved, each held to a ceiling |
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
 | a gather, a tile, a dictionary | `-- RowKernel` | 9 s | `Gather`, `GatherMasked`, `Tile` against the per-row type switch each replaced |
+| a string heap cut into views | `-- ViewKernel` | 9 s | `SumLengths`, `BuildFromLengths`, `RequireAscending` against the per-row loops |
 | a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust |
 | the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 50 files |
 | a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 50 files, against Rust |
