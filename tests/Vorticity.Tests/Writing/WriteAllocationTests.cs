@@ -89,10 +89,16 @@ public sealed class WriteAllocationTests
     /// the rental costs `PendingBuffer` two more fields, and a file that elects zstd nowhere pays
     /// for them without collecting anything. It is written here rather than absorbed silently
     /// because a ratchet whose floors drift upward unremarked is how the next one gets excused.
+    ///
+    /// W-6 TOOK 587 096 BYTES OFF `zoned_many_zones_nulls` ALONE -- 119,4 to 110,4 B/row, the
+    /// largest single move any of these has made -- by not encoding an ALP column into a `long[]`
+    /// only to copy it into the `byte[]` the plan carries, and by renting the patch buffers instead
+    /// of growing two `List`s. It is the only one of the original ten with an f64 column, which is
+    /// why `alp` and `alprd` are now axes of their own.
     /// </remarks>
     private static readonly (string Id, long Ceiling)[] Files =
     [
-        ("containers/zoned_many_zones_nulls", 7_855_000),
+        ("containers/zoned_many_zones_nulls", 7_267_000),
         ("distributions/high_cardinality_i64_r8193", 469_800),
         ("encodings/fsst", 307_200),
         ("encodings/onpair", 369_600),
@@ -110,6 +116,13 @@ public sealed class WriteAllocationTests
         ("encodings/zstd", 363_200),
         ("encodings/map", 453_100),
         ("encodings/variant", 64_680),
+
+        // THE TWO ALP SHAPES, added with W-6 because that point moved them and nothing watched it:
+        // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a
+        // patch. The second is the case that made the patch buffers worth renting, and a ratchet
+        // that only held the easy shape would have said nothing about it.
+        ("encodings/alp", 271_000),
+        ("encodings/alprd", 231_000),
     ];
 
     // FOUR OF THESE FIVE CAME DOWN AGAIN WHEN FSST STOPPED ALLOCATING WHAT IT THROWS AWAY.

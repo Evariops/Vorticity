@@ -16,6 +16,7 @@
 // values that compare equal but are not the same - the same rule the row encoder follows for the
 // same reason (docs/08-semantics.md §5).
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
@@ -107,9 +108,27 @@ internal sealed class AlpPlan
         double back = AlpTables.F10Double[f];
         double backInverse = AlpTables.If10Double[e];
 
-        long[] encoded = new long[rows];
-        List<int> indices = [];
-        List<double> patches = [];
+        // ENCODED IS WRITTEN STRAIGHT INTO THE BYTES THE PLAN WILL CARRY. PERF-AUDIT-v2.md W-6: this
+        // was a `long[rows]` filled here and then copied into a `byte[rows * 8]` below, so every ALP
+        // candidate allocated the column TWICE and threw one copy away -- while being PRICED,
+        // whether or not it ends up elected.
+        //
+        // UNINITIALIZED IS SAFE HERE because every slot is written before it is read: the loop
+        // writes the valid unpatched ones and `FillGaps` writes the invalid and the patched ones.
+        // That is not an accident of the code below, it is what `FillGaps` is for.
+        byte[] encodedBytes = GC.AllocateUninitializedArray<byte>(rows * sizeof(long));
+        Span<long> encoded = MemoryMarshal.Cast<byte, long>(encodedBytes);
+
+        // THE PATCH BUFFERS ARE RENTED AND SIZED FOR THE WORST CASE, which is every row a patch. A
+        // `List` that grows by doubling is cheap when ALP fits and ruinous when it does not:
+        // `encodings/alprd` is a column built to defeat ALP, so every row becomes a patch, and the
+        // two lists reallocating their way up were 43 % of that file's whole write. Rented, so the
+        // worst case costs the pool rather than the heap.
+        int[] indices = ArrayPool<int>.Shared.Rent(rows);
+        double[] patches = ArrayPool<double>.Shared.Rent(rows);
+        int patchCount = 0;
+        try
+        {
         long? fill = null;
 
         for (int i = 0; i < rows; i++)
@@ -132,29 +151,35 @@ internal sealed class AlpPlan
                 continue;
             }
 
-            indices.Add(i);
-            patches.Add(value);
+            indices[patchCount] = i;
+            patches[patchCount] = value;
+            patchCount++;
         }
 
         // Patched and null slots take a real encoded value rather than zero: the integers are
         // bit-packed downstream over their own range, and a stray zero among values near 10^9
         // widens that range for nothing.
         long filler = fill ?? 0;
-        FillGaps(encoded, indices, mask, rows, filler);
+        FillGaps(encoded, indices.AsSpan(0, patchCount), mask, rows, filler);
 
-        long size = Estimate(encoded, indices.Count, sizeof(double), sizeof(long));
+        long size = Estimate<long>(encoded, patchCount, sizeof(double), sizeof(long));
         if (size + Overhead >= plain)
         {
             return null;
         }
 
-        byte[] encodedBytes = new byte[rows * sizeof(long)];
-        MemoryMarshal.Cast<long, byte>(encoded).CopyTo(encodedBytes);
-        byte[] patchBytes = new byte[patches.Count * sizeof(double)];
-        MemoryMarshal.Cast<double, byte>(CollectionsMarshal.AsSpan(patches)).CopyTo(patchBytes);
+        byte[] patchBytes = new byte[patchCount * sizeof(double)];
+        MemoryMarshal.Cast<double, byte>(patches.AsSpan(0, patchCount)).CopyTo(patchBytes);
 
         return new AlpPlan(
-            (byte)e, (byte)f, encodedBytes, PType.I64, [.. indices], patchBytes, size);
+            (byte)e, (byte)f, encodedBytes, PType.I64,
+            indices.AsSpan(0, patchCount).ToArray(), patchBytes, size);
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(indices);
+            ArrayPool<double>.Shared.Return(patches);
+        }
     }
 
     private static AlpPlan? BuildSingle(CanonicalArena arena, CanonicalNode node, long plain)
@@ -169,9 +194,13 @@ internal sealed class AlpPlan
         float back = AlpTables.F10Single[f];
         float backInverse = AlpTables.If10Single[e];
 
-        int[] encoded = new int[rows];
-        List<int> indices = [];
-        List<float> patches = [];
+        byte[] encodedBytes = GC.AllocateUninitializedArray<byte>(rows * sizeof(int));
+        Span<int> encoded = MemoryMarshal.Cast<byte, int>(encodedBytes);
+        int[] indices = ArrayPool<int>.Shared.Rent(rows);
+        float[] patches = ArrayPool<float>.Shared.Rent(rows);
+        int patchCount = 0;
+        try
+        {
         int? fill = null;
 
         for (int i = 0; i < rows; i++)
@@ -192,26 +221,32 @@ internal sealed class AlpPlan
                 continue;
             }
 
-            indices.Add(i);
-            patches.Add(value);
+            indices[patchCount] = i;
+            patches[patchCount] = value;
+            patchCount++;
         }
 
         int filler = fill ?? 0;
-        FillGaps(encoded, indices, mask, rows, filler);
+        FillGaps(encoded, indices.AsSpan(0, patchCount), mask, rows, filler);
 
-        long size = Estimate(encoded, indices.Count, sizeof(float), sizeof(int));
+        long size = Estimate<int>(encoded, patchCount, sizeof(float), sizeof(int));
         if (size + Overhead >= plain)
         {
             return null;
         }
 
-        byte[] encodedBytes = new byte[rows * sizeof(int)];
-        MemoryMarshal.Cast<int, byte>(encoded).CopyTo(encodedBytes);
-        byte[] patchBytes = new byte[patches.Count * sizeof(float)];
-        MemoryMarshal.Cast<float, byte>(CollectionsMarshal.AsSpan(patches)).CopyTo(patchBytes);
+        byte[] patchBytes = new byte[patchCount * sizeof(float)];
+        MemoryMarshal.Cast<float, byte>(patches.AsSpan(0, patchCount)).CopyTo(patchBytes);
 
         return new AlpPlan(
-            (byte)e, (byte)f, encodedBytes, PType.I32, [.. indices], patchBytes, size);
+            (byte)e, (byte)f, encodedBytes, PType.I32,
+            indices.AsSpan(0, patchCount).ToArray(), patchBytes, size);
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(indices);
+            ArrayPool<float>.Shared.Return(patches);
+        }
     }
 
     /// <summary>The branchless round-to-nearest of the reference: add the sweet spot and take it away.</summary>
@@ -247,7 +282,7 @@ internal sealed class AlpPlan
         _ => float.IsNaN(value) ? 0 : (int)value,
     };
 
-    private static void FillGaps<T>(T[] encoded, List<int> indices, ValidityMask mask, int rows, T filler)
+    private static void FillGaps<T>(Span<T> encoded, ReadOnlySpan<int> indices, ValidityMask mask, int rows, T filler)
     {
         foreach (int index in indices)
         {
@@ -268,7 +303,7 @@ internal sealed class AlpPlan
     /// bit-packed - which they will, because the writer compresses the encoded child like any other
     /// column.
     /// </summary>
-    private static long Estimate<T>(T[] encoded, int patchCount, int floatWidth, int intWidth)
+    private static long Estimate<T>(ReadOnlySpan<T> encoded, int patchCount, int floatWidth, int intWidth)
         where T : unmanaged, IComparable<T>
     {
         ulong span = Span(encoded, intWidth);
@@ -279,7 +314,7 @@ internal sealed class AlpPlan
         return encodedBytes + ((long)patchCount * (floatWidth + sizeof(uint)));
     }
 
-    private static ulong Span<T>(T[] encoded, int intWidth)
+    private static ulong Span<T>(ReadOnlySpan<T> encoded, int intWidth)
         where T : unmanaged, IComparable<T>
     {
         if (encoded.Length == 0)
