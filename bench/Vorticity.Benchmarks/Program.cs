@@ -95,8 +95,9 @@ internal static class Program
         {
             bool check = Array.IndexOf(args, "--check") >= 0;
             ThroughputCheck.Quick = Array.IndexOf(args, "--quick") >= 0;
-            ThroughputCheck.Axis = Array.IndexOf(args, "--take") >= 0
-                ? ThroughputCheck.Workload.Take
+            ThroughputCheck.Axis =
+                Array.IndexOf(args, "--take") >= 0 ? ThroughputCheck.Workload.Take
+                : Array.IndexOf(args, "--write") >= 0 ? ThroughputCheck.Workload.Write
                 : ThroughputCheck.Workload.Scan;
             int tpFlag = Array.IndexOf(args, "--recalibrate");
             int tpPasses = 0;

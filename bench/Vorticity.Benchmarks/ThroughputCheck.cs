@@ -94,10 +94,28 @@ internal static class ThroughputCheck
         /// `scattered take` axis is one file; this is the same question asked of every encoding.
         /// </remarks>
         Take,
+
+        /// <summary>The file read back and written out to a sink that keeps nothing.</summary>
+        /// <remarks>
+        /// BENCH-AUDIT.md §3.2: `--ratio-check`'s `read and write back` axis sees ONE input shape,
+        /// a 65 536-row file, and the compressor chooses per column -- so a writer regression on a
+        /// string column, or on a column whose best candidate is a dictionary, has nowhere to show.
+        /// The read is on both sides and is therefore common-mode, but it is not small: subtract
+        /// the scan axis from both before reading the quotient as a statement about writers.
+        /// </remarks>
+        Write,
     }
 
     /// <summary>Which workload this invocation measures.</summary>
     internal static Workload Axis { get; set; } = Workload.Scan;
+
+    /// <summary>The field a recalibrated table is pasted into.</summary>
+    private static string TableName => Axis switch
+    {
+        Workload.Take => "TakeReferences",
+        Workload.Write => "WriteReferences",
+        _ => "References",
+    };
 
     /// <summary>Rows a take asks for.</summary>
     /// <remarks>
@@ -116,7 +134,7 @@ internal static class ThroughputCheck
     {
         Console.Out.WriteLine(
             $"RECALIBRATE: {passes} PROCESSES. Nothing is gated; paste the table below into " +
-            $"ThroughputCheck.{(Axis == Workload.Take ? "TakeReferences" : "References")}.");
+            $"ThroughputCheck.{TableName}.");
 
         string self = Environment.ProcessPath
             ?? throw new InvalidOperationException("No process path; cannot re-run for a pass.");
@@ -130,9 +148,9 @@ internal static class ThroughputCheck
                 RedirectStandardError = true,
             };
             start.ArgumentList.Add("--throughput");
-            if (Axis == Workload.Take)
+            if (Axis != Workload.Scan)
             {
-                start.ArgumentList.Add("--take");
+                start.ArgumentList.Add(Axis == Workload.Take ? "--take" : "--write");
             }
 
             foreach (string family in only)
@@ -210,11 +228,10 @@ internal static class ThroughputCheck
         int passes,
         bool rebase)
     {
-        (string Encoding, double Reference)[] table =
-            Axis == Workload.Take ? TakeReferences : References;
+        (string Encoding, double Reference)[] table = ActiveReferences;
         Console.Out.WriteLine(
             $"\nRECALIBRATE: {passes} passes, max of the per-pass medians. Paste into " +
-            $"ThroughputCheck.{(Axis == Workload.Take ? "TakeReferences" : "References")}.");
+            $"ThroughputCheck.{TableName}.");
         int held = 0;
         int rebased = 0;
         foreach ((string name, double current) in table)
@@ -402,6 +419,21 @@ internal static class ThroughputCheck
     /// </remarks>
     private const int MinRounds = 9;
 
+    /// <summary>
+    /// The floor on rounds once one round costs more than <see cref="LongRoundSeconds"/>.
+    /// </summary>
+    /// <remarks>
+    /// The write axis is not a microsecond axis: reading a million rows back out costs 28 ms on
+    /// `dict_u8_codes` and 13.2 SECONDS on `fsst`, where our compressor trains a symbol table on a
+    /// million strings. Nine rounds of that is two minutes for one file, and a gate nobody waits
+    /// for is a gate nobody runs (§8). Five paired rounds on a thirteen-second workload still
+    /// resolve a few percent, because the thing being measured is nothing like the timer's floor.
+    /// </remarks>
+    private const int LongMinRounds = 5;
+
+    /// <summary>Above this, a round is long enough that the round count is the cost.</summary>
+    private const double LongRoundSeconds = 0.2;
+
     /// <summary>The ceiling on rounds, when the interval never gets tight enough.</summary>
     private const int MaxRounds = 151;
 
@@ -414,7 +446,7 @@ internal static class ThroughputCheck
     /// take to reach its precision; `--quick` cuts it, and the encodings that need it are the cheap
     /// ones whose rounds are sub-millisecond anyway.
     /// </remarks>
-    private static double Budget => Quick ? 0.4 : 2.0;
+    private static double Budget => Axis == Workload.Write ? 30.0 : (Quick ? 0.4 : 2.0);
 
     /// <summary>
     /// A round times at least this long, by repeating the scan when one is shorter.
@@ -530,6 +562,19 @@ internal static class ThroughputCheck
     /// inside its scan ceiling and far outside this one -- which is the whole reason §3.2 asks for
     /// this axis. Empty until recalibrated: `--throughput --take --recalibrate 3` prints the table.
     /// </remarks>
+    /// <summary>
+    /// The ratio each encoding's READ-AND-WRITE-BACK was measured at, same rule as
+    /// <see cref="References"/>.
+    /// </summary>
+    /// <remarks>
+    /// Its own table for <see cref="TakeReferences"/>'s reason, and one more: the read is inside
+    /// the measurement on both sides, so an encoding whose scan ratio is 0.04 starts this axis
+    /// already ahead. The number gates the writer against its own past, not against the scan.
+    /// </remarks>
+    private static readonly (string Encoding, double Reference)[] WriteReferences =
+    [
+    ];
+
     private static readonly (string Encoding, double Reference)[] TakeReferences =
     [
         ("alp", 31.74),   // 5 processes, spread 28.14-31.74; first calibration
@@ -674,11 +719,13 @@ internal static class ThroughputCheck
             return 2;
         }
 
-        string what = Axis == Workload.Take
-            ? string.Create(
-                CultureInfo.InvariantCulture,
-                $"TAKE ({TakeCount} rows every {TakeStride})")
-            : "THROUGHPUT";
+        string what = Axis switch
+        {
+            Workload.Take => string.Create(
+                CultureInfo.InvariantCulture, $"TAKE ({TakeCount} rows every {TakeStride})"),
+            Workload.Write => "WRITE (read back out to a sink that keeps nothing)",
+            _ => "THROUGHPUT",
+        };
         Console.Out.WriteLine(
             $"{what}: median per-round ratio with a 95% bootstrap interval, {MinRounds}+ rounds after a " +
             $"{WarmupBudget.TotalSeconds.ToString("F0", CultureInfo.InvariantCulture)}s warm-up per file, " +
@@ -725,6 +772,18 @@ internal static class ThroughputCheck
             {
                 rows = await OursAsync(file).ConfigureAwait(false);
             }
+            catch (Exception e) when (Axis == Workload.Write)
+            {
+                // THE WRITE AXIS REPORTS ITS OWN FAILURES INSTEAD OF DYING ON THEM, and it found
+                // four the first time it ran: `list`, `listview` and `map` throw a format
+                // exception, and `parquet_variant` an InvalidOperationException from inside
+                // `ArrayBlobWriter`. Every one of those files READS, so "unreadable" would have
+                // been a lie; and letting the exception out aborts the other 46 encodings, which
+                // is how one broken column hides a table.
+                string detail = e.Message.Split('\n')[0];
+                Console.Out.WriteLine($"  {name,-32} write failed: {e.GetType().Name}: {detail}");
+                continue;
+            }
             catch (Exception e) when (e is VortexUnsupportedException or VortexFormatException)
             {
                 // An encoding this build cannot read is not a failure of this axis: the corpus
@@ -739,7 +798,9 @@ internal static class ThroughputCheck
             }
 
             // A take emits one batch per selected split; the count is the scan's story, not its.
-            long batches = Axis == Workload.Take ? 0 : await CountBatches(file).ConfigureAwait(false);
+            long batches = Axis == Workload.Scan
+                ? await CountBatches(file).ConfigureAwait(false)
+                : 0;
             Measurement m = await MeasureAsync(file, rust).ConfigureAwait(false);
             if (recalibrate > 0)
             {
@@ -886,8 +947,7 @@ internal static class ThroughputCheck
     /// <param name="encoding">The file's base name.</param>
     private static double? ReferenceFor(string encoding)
     {
-        foreach ((string name, double reference) in
-            Axis == Workload.Take ? TakeReferences : References)
+        foreach ((string name, double reference) in ActiveReferences)
         {
             if (string.Equals(name, encoding, StringComparison.Ordinal))
             {
@@ -919,6 +979,9 @@ internal static class ThroughputCheck
         while (Stopwatch.GetTimestamp() < deadline);
 
         int repeats = Repeats(Math.Max(lastOurs, lastTheirs));
+        int minimum = Math.Max(lastOurs, lastTheirs) >= LongRoundSeconds * 1_000_000
+            ? LongMinRounds
+            : MinRounds;
 
         List<double> ratios = [];
         List<double> mine = [];
@@ -947,7 +1010,7 @@ internal static class ThroughputCheck
             theirs.Add(rustTime);
             ratios.Add(rustTime == 0 ? 0 : ours / rustTime);
 
-            if (round + 1 >= MinRounds)
+            if (round + 1 >= minimum)
             {
                 interval = Statistics.Bootstrap(
                     System.Runtime.InteropServices.CollectionsMarshal.AsSpan(ratios));
@@ -1001,15 +1064,66 @@ internal static class ThroughputCheck
         return copy[copy.Length / 2];
     }
 
+    /// <summary>The ratchet table of the current axis.</summary>
+    private static (string Encoding, double Reference)[] ActiveReferences => Axis switch
+    {
+        Workload.Take => TakeReferences,
+        Workload.Write => WriteReferences,
+        _ => References,
+    };
+
     /// <summary>Our side of the current axis.</summary>
-    private static Task<long> OursAsync(string path) =>
-        Axis == Workload.Take ? ScatteredTake(path) : ScanAll(path);
+    private static Task<long> OursAsync(string path) => Axis switch
+    {
+        Workload.Take => ScatteredTake(path),
+        Workload.Write => ReadAndWrite(path),
+        _ => ScanAll(path),
+    };
 
     /// <summary>The reference's side of the current axis.</summary>
-    private static long Theirs(string path) =>
-        Axis == Workload.Take
-            ? RustReader.Require(RustReader.Take(path, TakeCount, TakeStride), "take")
-            : RustReader.ScanCanonical(path);
+    private static long Theirs(string path) => Axis switch
+    {
+        Workload.Take => RustReader.Require(RustReader.Take(path, TakeCount, TakeStride), "take"),
+        Workload.Write => RustReader.Require(RustReader.Write(path), "write"),
+        _ => RustReader.ScanCanonical(path),
+    };
+
+    /// <summary>Reads the file and writes it back to a sink that keeps nothing.</summary>
+    /// <remarks>
+    /// The sink discards on both sides, because a write benchmark that measures the filesystem
+    /// measures the filesystem -- `vxbench_write` writes into a `Vec<u8>` for the same reason.
+    /// </remarks>
+    private static async Task<long> ReadAndWrite(string path)
+    {
+        await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using Vorticity.Writing.VortexFileWriter writer =
+            Vorticity.Writing.VortexFileWriter.Create(new DiscardSink(), source.Schema);
+
+        long rows = 0;
+        await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+            await writer.WriteAsync(batch, CancellationToken.None);
+        }
+
+        await writer.CompleteAsync(CancellationToken.None);
+        return rows;
+    }
+
+    /// <summary>A sink that counts bytes and keeps none of them.</summary>
+    private sealed class DiscardSink : Vorticity.Writing.ISegmentSink
+    {
+        public long Position { get; private set; }
+
+        public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+        {
+            Position += data.Length;
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask FlushAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
+    }
 
     /// <summary>Takes the same strided rows the reference is given.</summary>
     private static async Task<long> ScatteredTake(string path)

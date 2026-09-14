@@ -20,6 +20,7 @@ dotnet run -c Release PROJ -- <arguments>
 | a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust |
 | the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 50 files |
 | a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 50 files, against Rust |
+| the writer, per encoding | `-- --throughput --write` | 8 min | each file read back out to a discarding sink, against Rust. Reports; does not gate yet |
 | the FFI harness, or before trusting any ratio | `-- --ffi-check` | < 1 s | both readers return the same rows on the same files |
 | a hot path you want to profile | `-- --profile <scenario> [seconds]` | as asked | a bare loop for `dotnet-trace`, no harness in the profile |
 | a ratchet | `dotnet test Vorticity.slnx -c Release` | ~1 min | the suite plus the eight allocation and count ratchets |
@@ -97,6 +98,13 @@ in [BASELINE.md](BASELINE.md) and in the commits.
   `datetimeparts` 60×, `alprd` 95×, against `fsst` 0.22× and `onpair` 0.46× where the override
   exists. `--ratio-check`'s single `scattered take` axis reads 0.25× and says none of this, because
   it is one file whose encodings all have the override.
+
+  **`--write`** reads each file back out into a sink that keeps nothing, against `vxbench_write`,
+  which does the same into a `Vec<u8>`: the read is inside the measurement on both sides, so
+  subtract the scan axis before reading the quotient as a statement about writers. It has no
+  ratchet table yet — one pass is 8 minutes, so a five-process calibration is 40 — and it reports
+  five encodings it cannot write at all (`list`, `listview`, `map`, `variant`, `parquet_variant`;
+  PERF-AUDIT-v2.md W-8) rather than dying on them.
 
   `--quick` (23 s instead of 70) shortens the warm-up and the per-file budget: a direction, not a
   gate. `--recalibrate N` prints a replacement reference table, as it does for `--ratio-check`.
