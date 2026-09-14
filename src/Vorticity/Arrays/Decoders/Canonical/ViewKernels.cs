@@ -178,12 +178,26 @@ internal static class ViewKernels
     /// instead of widening them, so <c>T</c> never changes and the recursion never ends. It cost a
     /// stack overflow in the corpus suite, which is the only reason that is written down here.
     /// </remarks>
+    /// <remarks>
+    /// GUARDED ON THE HARDWARE, NOT ON THE TYPE, and the three rungs below were guarded on the type.
+    /// <c>Vector&lt;uint&gt;.IsSupported</c> asks whether <c>uint</c> is a legal element type; it is,
+    /// everywhere, so the guard was always true and a machine without SIMD walked this ladder in
+    /// SOFTWARE-EMULATED <c>Vector&lt;T&gt;</c>. Measured under <c>DOTNET_EnableHWIntrinsic=0</c>,
+    /// `sum lengths` cost 62.09 µs against the 20.28 µs of the per-row loop this kernel replaced -
+    /// <b>3.06x slower than what it was written to beat</b> - and it is a widening ladder, so the
+    /// emulation pays for three splits and four adds where the scalar loop pays one add.
+    ///
+    /// The other two kernels in this file are NOT in that position and were left alone: measured in
+    /// the same run, `require ascending` reads 0.70 and `build views` 0.39 without SIMD, because a
+    /// compare or a byte move survives emulation where a widening ladder does not. A guard is not a
+    /// style rule; each of these was measured (v2 R19).
+    /// </remarks>
     private static long SumWidening(ReadOnlySpan<uint> values)
     {
         ulong total = 0;
         int i = 0;
 
-        if (Vector<uint>.IsSupported)
+        if (Vector.IsHardwareAccelerated)
         {
             int lanes = Vector<uint>.Count;
             ref uint source = ref MemoryMarshal.GetReference(values);
@@ -214,7 +228,7 @@ internal static class ViewKernels
         ulong total = 0;
         int i = 0;
 
-        if (Vector<ushort>.IsSupported)
+        if (Vector.IsHardwareAccelerated)
         {
             int lanes = Vector<ushort>.Count;
             ref ushort source = ref MemoryMarshal.GetReference(values);
@@ -247,7 +261,7 @@ internal static class ViewKernels
         ulong total = 0;
         int i = 0;
 
-        if (Vector<byte>.IsSupported)
+        if (Vector.IsHardwareAccelerated)
         {
             int lanes = Vector<byte>.Count;
             ref byte source = ref MemoryMarshal.GetReference(values);
