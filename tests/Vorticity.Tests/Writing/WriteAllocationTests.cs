@@ -90,6 +90,12 @@ public sealed class WriteAllocationTests
     /// for them without collecting anything. It is written here rather than absorbed silently
     /// because a ratchet whose floors drift upward unremarked is how the next one gets excused.
     ///
+    /// AND W-7a TOOK TEN OF THE TWELVE DOWN AGAIN, by more than everything before it put together:
+    /// the run scan no longer grows two `List<int>` to one entry per row on every column that has
+    /// no runs. `zoned_many_zones_nulls` -4 828 112 B (-67 %), `map` -74 %, `high_cardinality` -57 %,
+    /// `alp` -50 %. Only `delta` and `pco` do not move, and they are the two whose columns the
+    /// sequence detector claims before the run scan ever runs.
+    ///
     /// W-6 TOOK 587 096 BYTES OFF `zoned_many_zones_nulls` ALONE -- 119,4 to 110,4 B/row, the
     /// largest single move any of these has made -- by not encoding an ALP column into a `long[]`
     /// only to copy it into the `byte[]` the plan carries, and by renting the patch buffers instead
@@ -98,11 +104,11 @@ public sealed class WriteAllocationTests
     /// </remarks>
     private static readonly (string Id, long Ceiling)[] Files =
     [
-        ("containers/zoned_many_zones_nulls", 7_267_000),
-        ("distributions/high_cardinality_i64_r8193", 469_800),
-        ("encodings/fsst", 307_200),
-        ("encodings/onpair", 369_600),
-        ("types/utf8_nullable_r1025", 302_600),
+        ("containers/zoned_many_zones_nulls", 2_450_000),
+        ("distributions/high_cardinality_i64_r8193", 204_000),
+        ("encodings/fsst", 238_500),
+        ("encodings/onpair", 232_000),
+        ("types/utf8_nullable_r1025", 224_700),
 
         // THE LATE COMPONENTS, on the write side, for PERF-AUDIT-v2.md F2's reason: `fastlanes.delta`,
         // `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant` were watched by no
@@ -113,16 +119,16 @@ public sealed class WriteAllocationTests
         // question and `bench/crosscheck.sh` is where it is asked.
         ("encodings/fastlanes_delta", 63_300),
         ("encodings/pco", 65_300),
-        ("encodings/zstd", 363_200),
-        ("encodings/map", 453_100),
-        ("encodings/variant", 64_680),
+        ("encodings/zstd", 227_400),
+        ("encodings/map", 117_800),
+        ("encodings/variant", 64_400),
 
         // THE TWO ALP SHAPES, added with W-6 because that point moved them and nothing watched it:
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a
         // patch. The second is the case that made the patch buffers worth renting, and a ratchet
         // that only held the easy shape would have said nothing about it.
-        ("encodings/alp", 271_000),
-        ("encodings/alprd", 231_000),
+        ("encodings/alp", 136_700),
+        ("encodings/alprd", 164_000),
     ];
 
     // FOUR OF THESE FIVE CAME DOWN AGAIN WHEN FSST STOPPED ALLOCATING WHAT IT THROWS AWAY.

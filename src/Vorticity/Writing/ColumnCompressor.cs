@@ -232,23 +232,46 @@ internal static class ColumnCompressor
         RowComparer comparer = new RowComparer(arena, nodeIndex);
 
         // One pass for runs. It is the cheaper of the two and wins outright when it wins.
-        List<int> runStarts = [];
-        List<int> runEnds = [];
-        runStarts.Add(0);
-        for (int i = 1; i < length; i++)
+        //
+        // RENTED AND SIZED FOR THE WORST CASE, which is one run per row. PERF-AUDIT-v2.md W-7a: two
+        // `List<int>` growing by doubling is cheapest exactly when run-end WINS -- few runs, few
+        // reallocations -- and most expensive when it loses, because a column with no runs at all
+        // makes both lists grow to one entry per row and then throws them away. A column of
+        // distinct measurements is the common case, so the scan paid its worst price on almost
+        // every column: **57,9 % of `table_mixed`'s whole write**, 40,2 % of
+        // `zoned_many_zones_nulls`'s, 34,4 % of `fsst`'s.
+        //
+        // The `finally` covers the scan and the verdict and nothing after: the arrays are dead the
+        // moment the plan has copied the prefixes it keeps, and the schemes weighed below never see
+        // them.
+        int[] runStarts = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        int[] runEnds = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        try
         {
-            if (!comparer.Equal(i - 1, i))
+            int runCount = 1;
+            runStarts[0] = 0;
+            for (int i = 1; i < length; i++)
             {
-                runEnds.Add(i);
-                runStarts.Add(i);
+                if (!comparer.Equal(i - 1, i))
+                {
+                    runEnds[runCount - 1] = i;
+                    runStarts[runCount] = i;
+                    runCount++;
+                }
+            }
+
+            runEnds[runCount - 1] = length;
+
+            if (runCount * RunEndRatio <= length && Allows(target, "vortex.runend"))
+            {
+                return ColumnPlan.Runs(
+                    runStarts.AsSpan(0, runCount).ToArray(), runEnds.AsSpan(0, runCount).ToArray());
             }
         }
-
-        runEnds.Add(length);
-
-        if (runStarts.Count * RunEndRatio <= length && Allows(target, "vortex.runend"))
+        finally
         {
-            return ColumnPlan.Runs([.. runStarts], [.. runEnds]);
+            ArrayPool<int>.Shared.Return(runStarts);
+            ArrayPool<int>.Shared.Return(runEnds);
         }
 
         // Dense integers: a column of a million distinct measurements has no dictionary worth
