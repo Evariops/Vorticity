@@ -69,8 +69,20 @@ public sealed class ZstdDecoder : ArrayDecoder
                 $"{Id} stores primitive, utf8 or binary values; this node's dtype is {dtype}.");
         }
 
+        // PERF-AUDIT-v2.md R3a. One managed array per decode, and its size is the file's: a
+        // million-row `zstd` column carries **977 frames**, so the array was 15 656 bytes and
+        // **10,9 % of everything that scan allocated on the managed heap**. Every consumer below
+        // already took a span, so the array was never anything but a transient.
+        //
+        // SIXTEEN ON THE STACK, because that is the shape the corpus actually has -- the 4 096-row
+        // files carry one to four frames -- and the pool takes the tail for the files that do not
+        // fit. `ZstdFrameMetadata` is not a primitive, so the rental is wiped on the way back;
+        // that is `Scratch`'s rule and it is right here, the struct being two file-supplied
+        // integers the next renter has no business reading.
         int frameCount = ZstdMetadata.CountFrames(node.Metadata);
-        ZstdFrameMetadata[] frames = new ZstdFrameMetadata[frameCount];
+        Span<ZstdFrameMetadata> stack = stackalloc ZstdFrameMetadata[16];
+        using Scratch<ZstdFrameMetadata> scratch = new Scratch<ZstdFrameMetadata>(frameCount, stack);
+        Span<ZstdFrameMetadata> frames = scratch.Span;
         ZstdMetadata metadata = ZstdMetadata.Read(node.Metadata, frames);
 
         // `validate`: the dictionary buffer is present exactly when the metadata declares one, and
