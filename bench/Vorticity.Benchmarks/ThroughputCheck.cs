@@ -1075,9 +1075,9 @@ internal static class ThroughputCheck
     /// <summary>Our side of the current axis.</summary>
     private static Task<long> OursAsync(string path) => Axis switch
     {
-        Workload.Take => ScatteredTake(path),
-        Workload.Write => ReadAndWrite(path),
-        _ => ScanAll(path),
+        Workload.Take => Scenarios.ScatteredTake(path, TakeCount, TakeStride),
+        Workload.Write => Scenarios.ReadAndWrite(path),
+        _ => Scenarios.ScanAll(path),
     };
 
     /// <summary>The reference's side of the current axis.</summary>
@@ -1088,75 +1088,7 @@ internal static class ThroughputCheck
         _ => RustReader.ScanCanonical(path),
     };
 
-    /// <summary>Reads the file and writes it back to a sink that keeps nothing.</summary>
-    /// <remarks>
-    /// The sink discards on both sides, because a write benchmark that measures the filesystem
-    /// measures the filesystem -- `vxbench_write` writes into a `Vec<u8>` for the same reason.
-    /// </remarks>
-    private static async Task<long> ReadAndWrite(string path)
-    {
-        await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await using Vorticity.Writing.VortexFileWriter writer =
-            Vorticity.Writing.VortexFileWriter.Create(new DiscardSink(), source.Schema);
-
-        long rows = 0;
-        await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-            await writer.WriteAsync(batch, CancellationToken.None);
-        }
-
-        await writer.CompleteAsync(CancellationToken.None);
-        return rows;
-    }
-
-    /// <summary>A sink that counts bytes and keeps none of them.</summary>
-    private sealed class DiscardSink : Vorticity.Writing.ISegmentSink
-    {
-        public long Position { get; private set; }
-
-        public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
-        {
-            Position += data.Length;
-            return ValueTask.CompletedTask;
-        }
-
-        public ValueTask FlushAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
-    }
-
-    /// <summary>Takes the same strided rows the reference is given.</summary>
-    private static async Task<long> ScatteredTake(string path)
-    {
-        long[] indices = new long[TakeCount];
-        for (int i = 0; i < indices.Length; i++)
-        {
-            indices[i] = (i * TakeStride) + (TakeStride / 2);
-        }
-
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Take(indices).ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-        }
-
-        return rows;
-    }
-
-    private static async Task<long> ScanAll(string path)
-    {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-        }
-
-        return rows;
-    }
+    private static Task<long> ScanAll(string path) => Scenarios.ScanAll(path);
 
     /// <summary>
     /// Batches the scan emits, reported beside the timing because it is what explains it.

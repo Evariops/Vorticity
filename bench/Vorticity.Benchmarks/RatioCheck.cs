@@ -164,18 +164,14 @@ internal static class RatioCheck
     /// </remarks>
     private static readonly Axis[] Axes =
     [
-        new Axis(
-            "full scan",
-            ScanAll,
-            p => RustReader.Require(RustReader.ScanCanonical(p), "scan")),
+        // THE FIRST FOUR COME FROM `Scenarios`, which is what makes `--profile fullscan` a
+        // statement about THIS axis and not about a scan that resembles it (A2).
+        FromScenario("fullscan"),
         new Axis(
             "full scan, upstream lazy",
             ScanAll,
             p => RustReader.Require(RustReader.ScanAll(p), "scan")),
-        new Axis(
-            "projected scan, 1 of 5 columns",
-            ScanProjected,
-            p => RustReader.Require(RustReader.ScanProjected(p, Field), "projected scan")),
+        FromScenario("projected"),
         new Axis(
             "open to first batch",
             FirstBatch,
@@ -184,10 +180,7 @@ internal static class RatioCheck
             "open, footer only",
             FooterOnly,
             p => RustReader.Require(RustReader.OpenOnly(p), "open")),
-        new Axis(
-            "read and write back",
-            ReadAndWrite,
-            p => RustReader.Require(RustReader.Write(p), "write")),
+        FromScenario("write"),
         new Axis(
             "filtered scan, 1% band",
             p => FilteredScan(p, BandLow, NarrowBand),
@@ -198,11 +191,17 @@ internal static class RatioCheck
             p => FilteredScan(p, BandLow, WideBand),
             p => RustReader.Require(
                 RustReader.ScanFiltered(p, Field, BandLow, WideBand), "filtered scan")),
-        new Axis(
-            "scattered take, 64 of 64 splits",
-            p => ScatteredTake(p, TakeCount, TakeStride),
-            p => RustReader.Require(RustReader.Take(p, TakeCount, TakeStride), "take")),
+        FromScenario("take"),
     ];
+
+    /// <summary>The axis a shared scenario defines.</summary>
+    /// <param name="name">Its `--profile` name.</param>
+    private static Axis FromScenario(string name)
+    {
+        Scenarios.Scenario scenario = Scenarios.ByName(name)
+            ?? throw new InvalidOperationException($"No scenario named '{name}'.");
+        return new Axis(scenario.Axis, scenario.Ours, scenario.Theirs);
+    }
 
     /// <summary>
     /// The corpus entries whose rewrite is worth watching, and the group that reads them.
@@ -967,18 +966,7 @@ internal static class RatioCheck
         return sorted[sorted.Length / 2];
     }
 
-    private static async Task<long> ScanAll(string path)
-    {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-        }
-
-        return rows;
-    }
+    private static Task<long> ScanAll(string path) => Scenarios.ScanAll(path);
 
     /// <summary>Scans under the same half-open band the Rust side is given.</summary>
     /// <param name="path">The file.</param>
@@ -989,45 +977,15 @@ internal static class RatioCheck
     /// exists for. The reference prunes too, from the same zone map, so the two sides are answering
     /// the same question.
     /// </remarks>
-    private static async Task<long> FilteredScan(string path, long low, long width)
-    {
-        VortexExpr band = Expr.And(
-            Expr.Ge(Expr.Field(Field), Expr.Literal(FilterLiteral.From(low))),
-            Expr.Lt(Expr.Field(Field), Expr.Literal(FilterLiteral.From(low + width))));
-
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Where(band).ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-        }
-
-        return rows;
-    }
+    private static Task<long> FilteredScan(string path, long low, long width) =>
+        Scenarios.FilteredScan(path, low, width);
 
     /// <summary>Takes the same strided rows the Rust side is given.</summary>
     /// <param name="path">The file.</param>
     /// <param name="count">How many rows.</param>
     /// <param name="stride">The gap between them.</param>
-    private static async Task<long> ScatteredTake(string path, long count, long stride)
-    {
-        long[] indices = new long[count];
-        for (int i = 0; i < indices.Length; i++)
-        {
-            indices[i] = (i * stride) + (stride / 2);
-        }
-
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Take(indices).ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-        }
-
-        return rows;
-    }
+    private static Task<long> ScatteredTake(string path, long count, long stride) =>
+        Scenarios.ScatteredTake(path, count, stride);
 
     private static async Task<long> ScanProjected(string path)
     {
@@ -1064,37 +1022,7 @@ internal static class RatioCheck
     /// writers. The sink discards, on both sides, because a write benchmark that measures the
     /// filesystem measures the filesystem.
     /// </remarks>
-    private static async Task<long> ReadAndWrite(string path)
-    {
-        await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await using Vorticity.Writing.VortexFileWriter writer =
-            Vorticity.Writing.VortexFileWriter.Create(new DiscardSink(), source.Schema);
-
-        long rows = 0;
-        await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-            await writer.WriteAsync(batch, CancellationToken.None);
-        }
-
-        await writer.CompleteAsync(CancellationToken.None);
-        return rows;
-    }
-
-    /// <summary>A sink that counts bytes and keeps none of them.</summary>
-    private sealed class DiscardSink : Vorticity.Writing.ISegmentSink
-    {
-        public long Position { get; private set; }
-
-        public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
-        {
-            Position += data.Length;
-            return ValueTask.CompletedTask;
-        }
-
-        public ValueTask FlushAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
-    }
+    private static Task<long> ReadAndWrite(string path) => Scenarios.ReadAndWrite(path);
 
     private static async Task<long> FooterOnly(string path)
     {

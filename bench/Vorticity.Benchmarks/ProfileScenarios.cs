@@ -16,13 +16,8 @@
 // the code. `dotnet-trace collect -- dotnet <this>.dll --profile <name>` has neither problem.
 using System;
 using System.Diagnostics;
-using System.Threading;
+using System.Linq;
 using System.Threading.Tasks;
-
-using Vorticity.Columns;
-using Vorticity.File;
-using Vorticity.Scan;
-using Vorticity.Writing;
 
 namespace Vorticity.Benchmarks;
 
@@ -36,21 +31,20 @@ internal static class ProfileScenarios
     internal static async Task<int> RunAsync(string name, double seconds)
     {
         string path = Corpus.Dataset("VORTICITY_BENCH_DATA", "containers/zoned_many_zones_nulls");
-        Func<string, Task<long>> scenario = name switch
-        {
-            "fullscan" => FullScan,
-            "projected" => Projected,
-            "take" => ScatteredTake,
-            "write" => Write,
-            _ => null!,
-        };
-
-        if (scenario is null)
+        // THE SCENARIOS ARE `Scenarios.All`, not copies of them (BENCH-AUDIT.md A2). A profile is a
+        // statement about a gate's time only if the two run the same code with the same arguments,
+        // and two files that merely look alike do not guarantee that -- A1 is what happens when
+        // they drift.
+        Scenarios.Scenario? found = Scenarios.ByName(name);
+        if (found is null)
         {
             Console.Error.WriteLine(
-                $"Unknown scenario '{name}'. One of: fullscan, projected, take, write.");
+                $"Unknown scenario '{name}'. One of: " +
+                string.Join(", ", Scenarios.All.Select(entry => entry.Name)) + ".");
             return 2;
         }
+
+        Func<string, Task<long>> scenario = found.Ours;
 
         // Warm first, and OUTSIDE the profiled window, or the profile is a picture of the JIT. That
         // is not a hypothetical here: tiering has already distorted two measurements in this
@@ -72,88 +66,5 @@ internal static class ProfileScenarios
         Console.Out.WriteLine(
             $"{name}: {iterations} iterations, {rows} rows, over {seconds:F1}s of sampling.");
         return 0;
-    }
-
-    private static async Task<long> FullScan(string path)
-    {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-        }
-
-        return rows;
-    }
-
-    private static async Task<long> Projected(string path)
-    {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Project("monotone").ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-        }
-
-        return rows;
-    }
-
-    private static async Task<long> ScatteredTake(string path)
-    {
-        long[] indices = new long[64];
-        for (int i = 0; i < indices.Length; i++)
-        {
-            indices[i] = (i * 1024L) + 511;
-        }
-
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Take(indices).ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-        }
-
-        return rows;
-    }
-
-    /// <summary>Read every batch and write it back through a discarding sink.</summary>
-    /// <remarks>
-    /// The read half is inside the loop and inside the profile, which is unavoidable without a
-    /// second harness and is not a problem here: a profile attributes by FRAME, so the reader's
-    /// frames and the writer's separate themselves in the output. The totals in
-    /// bench/ALLOCATIONS.md say the write half dominates by 667x on allocation; this says what it
-    /// dominates by on time.
-    /// </remarks>
-    private static async Task<long> Write(string path)
-    {
-        long rows = 0;
-        await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await using VortexFileWriter writer = VortexFileWriter.Create(new DiscardSink(), source.Schema);
-
-        await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-            await writer.WriteAsync(batch, CancellationToken.None);
-        }
-
-        await writer.CompleteAsync(CancellationToken.None);
-        return rows;
-    }
-
-    private sealed class DiscardSink : ISegmentSink
-    {
-        public long Position { get; private set; }
-
-        public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
-        {
-            Position += data.Length;
-            return ValueTask.CompletedTask;
-        }
-
-        public ValueTask FlushAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
     }
 }
