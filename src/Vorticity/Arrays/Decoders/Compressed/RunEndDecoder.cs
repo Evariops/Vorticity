@@ -51,11 +51,16 @@ public sealed class RunEndDecoder : ArrayDecoder
     /// compares one decode of the children against one expansion, and on that comparison it is
     /// right. But the caller is `FlatLayoutReader`, which serves a take one BATCH at a time: counted
     /// on the 1M-row axis, this method ran 37 056 times for 37 056 wanted rows - one row each - and
-    /// decoded 15 625 ends AND 15 625 values every time, plus a full `ValidateEnds` walk over them.
-    /// A take of 64 rows costs 1 584 µs where a full scan of the same file costs 205: SEVEN AND A
-    /// HALF SCANS to deliver 64 rows. The children do not depend on the selection and are re-decoded
-    /// once per batch anyway, which is the defect `ScanContext`'s retained-chunk cache removed for
-    /// the root and not for anything below it (v2 R25).
+    /// re-did everything above the gather every time, for 15 625 runs. A take of 64 rows costs
+    /// 1 584 µs where a full scan of the same file costs 205: SEVEN AND A HALF SCANS for 64 rows.
+    ///
+    /// WHAT REPEATS IS THE CHECKING, NOT THE DECODING, and that took a probe to establish rather
+    /// than a reading. Memoizing the two children across batches hit 98.4% of the time and moved the
+    /// clock by NOTHING. Short-circuiting `ValidateEnds` on this path instead took the same take from
+    /// 1 086 µs to 72 - `6.99` to `0.72`, so NINETY-THREE PER CENT of a selective run-end take is one
+    /// O(num_runs) monotonicity walk, re-run for every batch over a property of the NODE that cannot
+    /// change between them. Hoisting the verdict is v2 R26; it costs a bit, where memoizing the
+    /// decode cost an arena and bought nothing.
     /// </remarks>
     public override int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
