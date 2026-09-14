@@ -11,6 +11,9 @@
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.File;
@@ -346,6 +349,179 @@ internal ref struct ValueWriter
         }
 
         RowKernels.Tile(destination, source.Bytes.Slice(sourceRow * _width, _width));
+    }
+
+    /// <summary>
+    /// Expands every run in ONE call, with the ends' physical type and the value width resolved
+    /// once instead of once per run.
+    /// </summary>
+    /// <param name="source">The run values, one per run.</param>
+    /// <param name="ends">The run ends, as their own physical type.</param>
+    /// <param name="endsPType">The ends' physical type; must be an integer.</param>
+    /// <param name="runCount">How many runs.</param>
+    /// <param name="offset">Subtracted from every end, as <c>vortex.runend</c> defines it.</param>
+    /// <param name="length">Rows to produce.</param>
+    /// <param name="sourceValidity">The run values' validity.</param>
+    /// <param name="validity">The output validity, written when <paramref name="tracked"/>.</param>
+    /// <param name="tracked">Whether the output tracks validity at all.</param>
+    /// <returns>
+    /// The row reached, or <c>-1</c> when this writer's shape has no typed kernel and the caller
+    /// must walk the runs itself.
+    /// </returns>
+    /// <remarks>
+    /// PERF-AUDIT-v2.md R29, and it is the per-call cost that pays rather than the filling. R22
+    /// measured the two apart on the 1M `runend` axis by doubling the calls alone: `Tile` costs
+    /// 32,8 % of that scan in FIXED cost against 27 % of actual filling -- 4,3 ns of prologue per
+    /// run against 3,5 ns of `Fill` for the 256 bytes a 64-row run of `i32` covers. The file's own
+    /// header states the rule this was the last kernel not to follow: "switch on the code's
+    /// physical type once, switch on the value width once, and call a loop generic in both".
+    ///
+    /// The caller's loop stays, and is what a shape without a typed kernel still runs: Bool, a
+    /// VarBinView that has to rebase its buffer index, and any width outside 1/2/4/8/16/32.
+    /// </remarks>
+    public readonly int RepeatRuns(
+        in ValueReader source, ReadOnlySpan<byte> ends, PType endsPType,
+        int runCount, ulong offset, int length,
+        in ValidityReader sourceValidity, in ValidityWriter validity, bool tracked)
+    {
+        if (_kind == CanonicalKind.Bool
+            || (_kind == CanonicalKind.VarBinView && _bufferIndexShift != 0)
+            || !RowKernels.HasTypedWidth(_width))
+        {
+            return -1;
+        }
+
+        return endsPType switch
+        {
+            PType.U8 => Ends<byte>(
+                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+            PType.U16 => Ends<ushort>(
+                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+            PType.U32 => Ends<uint>(
+                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+            PType.U64 => Ends<ulong>(
+                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+            PType.I8 => Ends<sbyte>(
+                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+            PType.I16 => Ends<short>(
+                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+            PType.I32 => Ends<int>(
+                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+            PType.I64 => Ends<long>(
+                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+            _ => -1,
+        };
+    }
+
+    private readonly int Ends<TEnd>(
+        in ValueReader source, ReadOnlySpan<byte> ends,
+        int runCount, ulong offset, int length,
+        in ValidityReader sourceValidity, in ValidityWriter validity, bool tracked)
+        where TEnd : unmanaged
+    {
+        ReadOnlySpan<TEnd> typed = MemoryMarshal.Cast<byte, TEnd>(ends)[..runCount];
+        return _width switch
+        {
+            1 => Runs<TEnd, byte>(
+                typed, in source, offset, length, in sourceValidity, in validity, tracked),
+            2 => Runs<TEnd, ushort>(
+                typed, in source, offset, length, in sourceValidity, in validity, tracked),
+            4 => Runs<TEnd, uint>(
+                typed, in source, offset, length, in sourceValidity, in validity, tracked),
+            8 => Runs<TEnd, ulong>(
+                typed, in source, offset, length, in sourceValidity, in validity, tracked),
+            16 => Runs<TEnd, Vector128<byte>>(
+                typed, in source, offset, length, in sourceValidity, in validity, tracked),
+
+            // Width 32 is `i256`, and it has no 32-byte unmanaged type here the way `RowKernels`
+            // has its own private one. A run-end column of i256 walks the caller's loop.
+            _ => -1,
+        };
+    }
+
+    /// <summary>The run loop with both types resolved: a compare, a widen and a typed fill.</summary>
+    private readonly int Runs<TEnd, TValue>(
+        ReadOnlySpan<TEnd> ends, in ValueReader source, ulong offset, int length,
+        in ValidityReader sourceValidity, in ValidityWriter validity, bool tracked)
+        where TEnd : unmanaged
+        where TValue : unmanaged
+    {
+        ReadOnlySpan<TValue> values = MemoryMarshal.Cast<byte, TValue>(source.Bytes);
+        Span<TValue> destination = MemoryMarshal.Cast<byte, TValue>(_bytes)[..length];
+        ulong unsignedLength = (ulong)(uint)length;
+        int position = 0;
+        for (int run = 0; run < ends.Length && position < length; run++)
+        {
+            ulong end = WidenEnd(ends[run]) - offset;
+            if (end > unsignedLength)
+            {
+                end = unsignedLength;
+            }
+
+            int endRow = (int)end;
+            if (endRow <= position)
+            {
+                continue;
+            }
+
+            destination[position..endRow].Fill(values[run]);
+            if (tracked && sourceValidity.IsValid(run))
+            {
+                validity.SetValidRange(position, endRow - position);
+            }
+
+            position = endRow;
+        }
+
+        return position;
+    }
+
+    /// <summary>Widens one run end to <see cref="ulong"/>, folded at instantiation.</summary>
+    /// <remarks>
+    /// Same shape as <c>RowKernels.WidenCode</c> and for the same reason: every branch but one is
+    /// a constant-false compare of two <c>typeof</c>s, which the JIT removes when it specializes.
+    /// A negative end is impossible here -- `ValidateEnds` has already walked them -- so the signed
+    /// types widen through <c>long</c> and cast.
+    /// </remarks>
+    private static ulong WidenEnd<TEnd>(TEnd end)
+        where TEnd : unmanaged
+    {
+        if (typeof(TEnd) == typeof(byte))
+        {
+            return Unsafe.As<TEnd, byte>(ref end);
+        }
+
+        if (typeof(TEnd) == typeof(ushort))
+        {
+            return Unsafe.As<TEnd, ushort>(ref end);
+        }
+
+        if (typeof(TEnd) == typeof(uint))
+        {
+            return Unsafe.As<TEnd, uint>(ref end);
+        }
+
+        if (typeof(TEnd) == typeof(ulong))
+        {
+            return Unsafe.As<TEnd, ulong>(ref end);
+        }
+
+        if (typeof(TEnd) == typeof(sbyte))
+        {
+            return (ulong)(long)Unsafe.As<TEnd, sbyte>(ref end);
+        }
+
+        if (typeof(TEnd) == typeof(short))
+        {
+            return (ulong)(long)Unsafe.As<TEnd, short>(ref end);
+        }
+
+        if (typeof(TEnd) == typeof(int))
+        {
+            return (ulong)(long)Unsafe.As<TEnd, int>(ref end);
+        }
+
+        return (ulong)Unsafe.As<TEnd, long>(ref end);
     }
 
     /// <summary>Writes one row of raw bytes, already in the output's representation.</summary>

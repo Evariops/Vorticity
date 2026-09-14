@@ -525,13 +525,13 @@ internal static class ThroughputCheck
         ("dict_nullable_values_nonnull_codes", 1.32),   // 3 passes, spread 1.25-1.32; was 1.33, -0.4%
         ("dict_u64_codes", 1.09),   // 3 passes, spread 1.06-1.09; was 1.11, -2.2%
         ("dict_u8_codes", 0.93),   // 3 passes, spread 0.87-0.93; was 0.94, -0.8%
-        ("ext", 0.21),   // 3 passes, spread 0.18-0.21; was 0.27, -21.6%
+        ("ext", 0.27),   // RENDU a 0.27 le 2026-09-14, meme raison que fixed_size_list : baisse a 0.21 le matin, l'axe lit 0.23, 0.18 puis 0.25 sur trois runs -- une reference au milieu de cette bande est rouge une fois sur deux. BENCH-AUDIT.md B19
         ("fastlanes_bitpacked", 1.30),   // 3 passes, spread 1.23-1.32; HELD at 1.30: 3 passes peaked at 1.32, no loosening
         ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.19),   // 3 passes, spread 1.14-1.19; was 1.21, -1.8%
         ("fastlanes_delta", 1.07),   // 3 passes, spread 1.06-1.26; HELD at 1.07: 3 passes peaked at 1.26, no loosening
         ("fastlanes_for", 1.00),   // 3 passes, spread 0.98-1.00; was 1.01, -0.6%
         ("fastlanes_rle", 0.86),   // 3 passes, spread 0.81-0.86; was 0.88, -2.1%
-        ("fixed_size_list", 0.16),   // 3 passes, spread 0.12-0.16; was 0.18, -11.4%
+        ("fixed_size_list", 0.18),   // RENDU a 0.18 le 2026-09-14, apres l'avoir baisse a 0.16 le meme jour : le --recalibrate 3 avait pris le max de trois medianes sur un axe dont le DENOMINATEUR bouge (Rust lit 503, 553 puis 430 us), et les deux runs suivants lisent 0.18 puis 0.19. Voir BENCH-AUDIT.md B19
         ("fsst", 1.31),   // 3 passes, spread 1.29-1.31; was 1.31, -0.2%
         ("list", 0.48),   // 3 passes, spread 0.42-0.48; was 0.50, -4.3%
         ("listview", 0.19),   // 3 passes, spread 0.19-0.21; HELD at 0.19: 3 passes peaked at 0.21, no loosening (v2 R7)
@@ -544,7 +544,7 @@ internal static class ThroughputCheck
         ("parquet_variant", 5.95),   // 3 passes, spread 4.79-5.95; was 5.95, 0.0%
         ("pco", 0.83),   // 3 passes, spread 0.80-0.83; was 0.85, -2.3%
         ("primitive", 0.23),   // 3 passes, spread 0.18-0.23; was 0.26, -12.7%
-        ("runend", 1.22),   // 3 passes, spread 1.16-1.22; was 1.23, -1.1%
+        ("runend", 0.82),   // v2 R29 : 1.22 -> 0.82. Un run complet lit 0.80 [0.788; 0.815] et 149 us contre 240 et 229 avant ; la reference est le haut de cet intervalle
         ("sequence", 0.95),   // 3 passes, spread 0.93-0.95; was 0.95, 0.0%
         ("sparse", 0.65),   // 3 passes, spread 0.61-0.65; was 0.67, -3.1% (v2 R5)
         ("struct", 0.07),   // 3 passes, spread 0.06-0.07; was 0.07, -6.8%

@@ -153,29 +153,43 @@ public sealed class RunEndDecoder : ArrayDecoder
 
             ulong unsignedOffset = (ulong)offset;
             ulong unsignedLength = (ulong)(uint)length;
-            int position = 0;
-            for (int run = 0; run < runCount && position < length; run++)
+
+            // PERF-AUDIT-v2.md R29. The loop below is correct and stays; what it cannot do is stop
+            // paying, once per run, for two answers that hold for the whole node -- the ends'
+            // physical type and the value width. `RepeatRuns` resolves both once and runs the same
+            // loop typed; it returns -1 for the shapes it has no kernel for, and those still walk
+            // here. R22 measured what that per-run resolution costs on the 1M axis: 32,8 % of the
+            // scan in fixed cost, against 27 % of actual filling.
+            int position = writer.RepeatRuns(
+                in values, ends, metadata.EndsPType, runCount, unsignedOffset, length,
+                in valuesValidity, in validity, tracked);
+            if (position < 0)
             {
-                ulong end = CompressedValues.ReadUnsigned(ends, metadata.EndsPType, run) - unsignedOffset;
-                if (end > unsignedLength)
+                position = 0;
+                for (int run = 0; run < runCount && position < length; run++)
                 {
-                    end = unsignedLength;
-                }
+                    ulong end =
+                        CompressedValues.ReadUnsigned(ends, metadata.EndsPType, run) - unsignedOffset;
+                    if (end > unsignedLength)
+                    {
+                        end = unsignedLength;
+                    }
 
-                int endRow = (int)end;
-                if (endRow <= position)
-                {
-                    continue;
-                }
+                    int endRow = (int)end;
+                    if (endRow <= position)
+                    {
+                        continue;
+                    }
 
-                int count = endRow - position;
-                writer.Repeat(in values, run, position, count);
-                if (tracked && valuesValidity.IsValid(run))
-                {
-                    validity.SetValidRange(position, count);
-                }
+                    int count = endRow - position;
+                    writer.Repeat(in values, run, position, count);
+                    if (tracked && valuesValidity.IsValid(run))
+                    {
+                        validity.SetValidRange(position, count);
+                    }
 
-                position = endRow;
+                    position = endRow;
+                }
             }
 
             if (position != length)
