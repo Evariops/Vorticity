@@ -48,9 +48,49 @@ internal sealed class EncodingDictionary
     internal int Count => _ids.Count;
 
     /// <summary>The index of <paramref name="idUtf8"/>, assigning one if it is new.</summary>
-    /// <param name="idUtf8">The component id.</param>
+    /// <param name="idUtf8">The component id, in its wire form.</param>
+    /// <returns>The index this file refers to the id by.</returns>
+    /// <remarks>
+    /// <para>
+    /// PERF-AUDIT-v2.md W-1. Every array node is written from a `u8` literal, so this is called
+    /// once per NODE while the set of distinct ids in a file is a dozen or two. Decoding the span to
+    /// a `string` in order to look it up allocated one string per node and threw it away on the very
+    /// next line, every time but the first. Here the string is built ONLY on a genuine miss.
+    /// </para>
+    /// <para>
+    /// AGAINST THE STRINGS WE ALREADY KEEP, and not against a parallel table of their UTF-8 forms.
+    /// The parallel table was written first and measured WORSE on nine files of ten: it trades one
+    /// string per node for one `byte[]` per distinct id plus a growing `List`, which on a file of a
+    /// few nodes costs more than it saves (`encodings/zstd` +648 B). Comparing straight against the
+    /// `string` costs nothing at all because <see cref="Ascii.Equals(ReadOnlySpan{byte},
+    /// ReadOnlySpan{char})"/> reads both sides in place.
+    /// </para>
+    /// <para>
+    /// ASCII IS NOT AN ASSUMPTION ABOUT THE DATA, it is a fast path: an id with a byte above 0x7F on
+    /// either side simply does not match here and falls through to the `GetString` route, which
+    /// compares it properly. Every component id in the registry is ASCII, so the slow route is
+    /// reached once per distinct id and never in a loop.
+    /// </para>
+    /// <para>
+    /// A LINEAR SCAN AND NOT A HASH, because the table is the size it is: a file names a couple of
+    /// dozen distinct ids, and a hash of the span would have to read every byte of it before doing
+    /// the same comparison anyway. The string dictionary stays for the `string` overload, which the
+    /// layout ids use and which is called a handful of times per file.
+    /// </para>
+    /// </remarks>
     /// <exception cref="InvalidOperationException">The file uses more ids than a u16 can index.</exception>
-    internal ushort Intern(ReadOnlySpan<byte> idUtf8) => Intern(Encoding.UTF8.GetString(idUtf8));
+    internal ushort Intern(ReadOnlySpan<byte> idUtf8)
+    {
+        for (int i = 0; i < _ids.Count; i++)
+        {
+            if (Ascii.Equals(idUtf8, _ids[i]))
+            {
+                return (ushort)i;
+            }
+        }
+
+        return Intern(Encoding.UTF8.GetString(idUtf8));
+    }
 
     /// <summary>The index of <paramref name="id"/>, assigning one if it is new.</summary>
     /// <param name="id">The component id.</param>

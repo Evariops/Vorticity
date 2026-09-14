@@ -67,13 +67,20 @@ public sealed class WriteAllocationTests
     /// schema at two row counts would answer the per-row question, and different schemas answer
     /// which ENCODER is expensive. Both questions are worth one axis each.
     /// </remarks>
+    /// <remarks>
+    /// EIGHT OF THESE TEN CAME DOWN WITH W-1, by the exact bytes it saved, so the headroom is the
+    /// same and the ratchet is tighter: interning a component id no longer decodes the wire bytes
+    /// to a `string` on every node just to look one up. `encodings/fsst` and `encodings/zstd` did
+    /// not move at all, which is its own small fact -- their write is dominated by the compressor
+    /// rather than by the node count.
+    /// </remarks>
     private static readonly (string Id, long Ceiling)[] Files =
     [
-        ("containers/zoned_many_zones_nulls", 7_900_000),
-        ("distributions/high_cardinality_i64_r8193", 470_000),
+        ("containers/zoned_many_zones_nulls", 7_897_000),
+        ("distributions/high_cardinality_i64_r8193", 469_800),
         ("encodings/fsst", 310_000),
-        ("encodings/onpair", 370_000),
-        ("types/utf8_nullable_r1025", 305_000),
+        ("encodings/onpair", 369_900),
+        ("types/utf8_nullable_r1025", 304_900),
 
         // THE LATE COMPONENTS, on the write side, for PERF-AUDIT-v2.md F2's reason: `fastlanes.delta`,
         // `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant` were watched by no
@@ -82,11 +89,11 @@ public sealed class WriteAllocationTests
         // so these axes measure "what does writing this SHAPE of data cost", which is the question
         // a ratchet can answer. Whether our writer re-elects the same encoding is a different
         // question and `bench/crosscheck.sh` is where it is asked.
-        ("encodings/fastlanes_delta", 64_000),
-        ("encodings/pco", 66_000),
+        ("encodings/fastlanes_delta", 63_880),
+        ("encodings/pco", 65_880),
         ("encodings/zstd", 364_000),
-        ("encodings/map", 456_000),
-        ("encodings/variant", 65_000),
+        ("encodings/map", 455_500),
+        ("encodings/variant", 64_680),
     ];
 
     // FOUR OF THESE FIVE CAME DOWN AGAIN WHEN FSST STOPPED ALLOCATING WHAT IT THROWS AWAY.
