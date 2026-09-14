@@ -166,16 +166,67 @@ internal static class ComparisonKernels
         ReadOnlySpan<byte> bits = node.Bits.Span;
         int offset = node.BitOffset;
 
+        // PERF-AUDIT-v2.md F-4c. A bool column has exactly TWO possible answers once the operator
+        // and the literal are fixed, so the whole per-row decision -- `CompareTo`, the `switch` on
+        // the operator, `Trilean.From` -- collapses to picking one of two bytes. It was costing
+        // 4,45x an i64 `<` on the same row count (F-10), which is upside down for one bit per row
+        // against eight bytes per row; the ratio was the dispatch, not the data.
+        byte whenTrue = Trilean.From(true, Apply(op, true.CompareTo(wanted)));
+        byte whenFalse = Trilean.From(true, Apply(op, false.CompareTo(wanted)));
+
+        if (mask.AllInvalid)
+        {
+            Trilean.Fill(destination, Trilean.Unknown);
+            return;
+        }
+
+        if (mask.AllValid)
+        {
+            ExpandBits(bits, offset, destination, whenFalse, whenTrue);
+            return;
+        }
+
         for (int i = 0; i < destination.Length; i++)
         {
-            if (!mask.IsValid(i))
-            {
-                destination[i] = Trilean.Unknown;
-                continue;
-            }
+            destination[i] = !mask.IsValid(i)
+                ? Trilean.Unknown
+                : CanonicalSupport.BitAt(bits, offset + i) ? whenTrue : whenFalse;
+        }
+    }
 
-            bool value = CanonicalSupport.BitAt(bits, offset + i);
-            destination[i] = Trilean.From(true, Apply(op, value.CompareTo(wanted)));
+    /// <summary>Writes one of two states per row, from a bitmap, eight rows per byte read.</summary>
+    /// <remarks>
+    /// The bitmap is LSB-first, so a whole byte answers eight consecutive rows and the shift
+    /// amounts are constants the JIT folds into the selects. Only the lead-in to a byte boundary
+    /// and the tail read a bit at a time, and a sliced column is the only thing that makes the
+    /// lead-in non-empty.
+    /// </remarks>
+    private static void ExpandBits(
+        ReadOnlySpan<byte> bits, int offset, Span<byte> destination, byte whenFalse, byte whenTrue)
+    {
+        int i = 0;
+        int bit = offset;
+        for (; i < destination.Length && (bit & 7) != 0; i++, bit++)
+        {
+            destination[i] = (bits[bit >> 3] & (1 << (bit & 7))) != 0 ? whenTrue : whenFalse;
+        }
+
+        for (; i + 8 <= destination.Length; i += 8, bit += 8)
+        {
+            int block = bits[bit >> 3];
+            destination[i] = (block & 0x01) != 0 ? whenTrue : whenFalse;
+            destination[i + 1] = (block & 0x02) != 0 ? whenTrue : whenFalse;
+            destination[i + 2] = (block & 0x04) != 0 ? whenTrue : whenFalse;
+            destination[i + 3] = (block & 0x08) != 0 ? whenTrue : whenFalse;
+            destination[i + 4] = (block & 0x10) != 0 ? whenTrue : whenFalse;
+            destination[i + 5] = (block & 0x20) != 0 ? whenTrue : whenFalse;
+            destination[i + 6] = (block & 0x40) != 0 ? whenTrue : whenFalse;
+            destination[i + 7] = (block & 0x80) != 0 ? whenTrue : whenFalse;
+        }
+
+        for (; i < destination.Length; i++, bit++)
+        {
+            destination[i] = (bits[bit >> 3] & (1 << (bit & 7))) != 0 ? whenTrue : whenFalse;
         }
     }
 
@@ -206,36 +257,29 @@ internal static class ComparisonKernels
         PType ptype, VortexBuffer values, ValidityMask mask, ComparisonOp op, double wanted,
         Span<byte> destination)
     {
+        // PERF-AUDIT-v2.md F-4c, and the same defect as the bool kernel had: TWO switches per row,
+        // one on the physical type to read the value and one on the operator to compare it. The
+        // integer path has resolved both before the loop since the v1 -- `CompareOp` picks the
+        // operator as a TYPE and `CompareCore` monomorphises on the value type -- and this kernel
+        // simply never joined it.
+        //
+        // IEEE 754 SURVIVES THE MOVE, which is the only thing that had to be checked: `IOrderOp`
+        // is written with C#'s own operators, so every comparison against NaN stays false,
+        // NotEqual included. What would break the rule is `CompareTo`, which orders NaN and would
+        // give the row encoding's TOTAL order (docs/08-semantics.md §2) -- and nothing here calls
+        // it. Widening a `Half` or a `float` to `double` is exact, so the answers are unchanged.
         ReadOnlySpan<byte> bytes = values.Span;
-        for (int i = 0; i < destination.Length; i++)
+        switch (ptype)
         {
-            if (!mask.IsValid(i))
-            {
-                destination[i] = Trilean.Unknown;
-                continue;
-            }
-
-            double value = ptype switch
-            {
-                PType.F16 => (double)BinaryPrimitives.ReadHalfLittleEndian(bytes.Slice(i * 2, 2)),
-                PType.F32 => BinaryPrimitives.ReadSingleLittleEndian(bytes.Slice(i * 4, 4)),
-                _ => BinaryPrimitives.ReadDoubleLittleEndian(bytes.Slice(i * 8, 8)),
-            };
-
-            // IEEE 754 through C#'s own operators: every one of these is false when either side is
-            // NaN, NotEqual included. Routing through CompareTo would order NaN and silently give
-            // the row encoding's total order (docs/08-semantics.md §2).
-            bool result = op switch
-            {
-                ComparisonOp.Equal => value == wanted,
-                ComparisonOp.NotEqual => value != wanted,
-                ComparisonOp.Less => value < wanted,
-                ComparisonOp.LessOrEqual => value <= wanted,
-                ComparisonOp.Greater => value > wanted,
-                _ => value >= wanted,
-            };
-
-            destination[i] = result ? Trilean.True : Trilean.False;
+            case PType.F16:
+                CompareOp<Half, double>(bytes, mask, op, wanted, destination);
+                break;
+            case PType.F32:
+                CompareOp<float, double>(bytes, mask, op, wanted, destination);
+                break;
+            default:
+                CompareOp<double, double>(bytes, mask, op, wanted, destination);
+                break;
         }
     }
 
@@ -531,29 +575,72 @@ internal static class ComparisonKernels
             throw Mismatch("utf8 or binary", literal.Kind);
         }
 
+        // PERF-AUDIT-v2.md F-4c, third of the three: the operator becomes a TYPE, the validity
+        // question is asked once, and the views span is taken once instead of through a property
+        // on every row. `Apply(op, order)` is exactly `TOp.Holds(order, 0)`, so the operator
+        // semantics are the ones already written down rather than a second copy of them.
         ReadOnlySpan<byte> wanted = literal.BytesValue;
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
+        if (mask.AllInvalid)
+        {
+            Trilean.Fill(destination, Trilean.Unknown);
+            return;
+        }
 
+        switch (op)
+        {
+            case ComparisonOp.Equal:
+                BytesCore<EqualOp>(node, mask, wanted, destination);
+                break;
+            case ComparisonOp.NotEqual:
+                BytesCore<NotEqualOp>(node, mask, wanted, destination);
+                break;
+            case ComparisonOp.Less:
+                BytesCore<LessOp>(node, mask, wanted, destination);
+                break;
+            case ComparisonOp.LessOrEqual:
+                BytesCore<LessOrEqualOp>(node, mask, wanted, destination);
+                break;
+            case ComparisonOp.Greater:
+                BytesCore<GreaterOp>(node, mask, wanted, destination);
+                break;
+            default:
+                BytesCore<GreaterOrEqualOp>(node, mask, wanted, destination);
+                break;
+        }
+    }
+
+    /// <summary>The byte comparison with the operator and the validity resolved.</summary>
+    /// <remarks>
+    /// Ordinal byte order, which for utf8 is also code-point order: UTF-8 is designed so that
+    /// memcmp of the encoded bytes equals comparison of the code points. Never a culture-aware
+    /// string comparison (docs/03-architecture.md §1).
+    /// </remarks>
+    private static void BytesCore<TOp>(
+        CanonicalNode node, ValidityMask mask, ReadOnlySpan<byte> wanted, Span<byte> destination)
+        where TOp : struct, IOrderOp
+    {
+        ReadOnlySpan<byte> views = node.Views.Span;
+        bool allValid = mask.AllValid;
         for (int i = 0; i < destination.Length; i++)
         {
-            if (!mask.IsValid(i))
+            if (!allValid && !mask.IsValid(i))
             {
                 destination[i] = Trilean.Unknown;
                 continue;
             }
 
-            // Ordinal byte order, which for utf8 is also code-point order: UTF-8 is designed so
-            // that memcmp of the encoded bytes equals comparison of the code points. Never a
-            // culture-aware string comparison (docs/03-architecture.md §1).
-            ReadOnlySpan<byte> value = Value(node, i);
-            destination[i] = Apply(op, value.SequenceCompareTo(wanted)) ? Trilean.True : Trilean.False;
+            ReadOnlySpan<byte> value = Value(node, views, i);
+            destination[i] = TOp.Holds(value.SequenceCompareTo(wanted), 0)
+                ? Trilean.True
+                : Trilean.False;
         }
     }
 
     /// <summary>Resolves one 16-byte view, inline or by reference.</summary>
-    private static ReadOnlySpan<byte> Value(CanonicalNode node, int index)
+    private static ReadOnlySpan<byte> Value(
+        CanonicalNode node, ReadOnlySpan<byte> views, int index)
     {
-        ReadOnlySpan<byte> views = node.Views.Span;
         ReadOnlySpan<byte> view = views.Slice(index * ViewSize, ViewSize);
         int size = BinaryPrimitives.ReadInt32LittleEndian(view);
         if (size <= MaxInlineLength)
