@@ -73,10 +73,16 @@ public sealed class WriteAllocationTests
     /// to a `string` on every node just to look one up. `encodings/fsst` and `encodings/zstd` did
     /// not move at all, which is its own small fact -- their write is dominated by the compressor
     /// rather than by the node count.
+    ///
+    /// FIVE CAME DOWN AGAIN WITH W-3, the same way: a metadata scalar store is now sized for the two
+    /// integers it holds instead of for a file's statistics. The files that moved are the ones whose
+    /// columns elect `fastlanes.for` or `vortex.sequence` -- `zoned_many_zones_nulls` -5 712 B,
+    /// `map` -2 304, `delta`, `pco` and `zstd` -576 each -- and the five that did not are the ones
+    /// that elect neither.
     /// </remarks>
     private static readonly (string Id, long Ceiling)[] Files =
     [
-        ("containers/zoned_many_zones_nulls", 7_897_000),
+        ("containers/zoned_many_zones_nulls", 7_891_000),
         ("distributions/high_cardinality_i64_r8193", 469_800),
         ("encodings/fsst", 310_000),
         ("encodings/onpair", 369_900),
@@ -89,10 +95,10 @@ public sealed class WriteAllocationTests
         // so these axes measure "what does writing this SHAPE of data cost", which is the question
         // a ratchet can answer. Whether our writer re-elects the same encoding is a different
         // question and `bench/crosscheck.sh` is where it is asked.
-        ("encodings/fastlanes_delta", 63_880),
-        ("encodings/pco", 65_880),
-        ("encodings/zstd", 364_000),
-        ("encodings/map", 455_500),
+        ("encodings/fastlanes_delta", 63_300),
+        ("encodings/pco", 65_300),
+        ("encodings/zstd", 363_400),
+        ("encodings/map", 453_100),
         ("encodings/variant", 64_680),
     ];
 

@@ -413,9 +413,31 @@ internal static class ArrayBlobWriter
     /// validate_parts rejects with "Reference value cannot be null" -- so this is one of the places
     /// where writing nothing is not the same as writing the default.
     /// </remarks>
+    /// <summary>Nodes a metadata store has to hold, which is two.</summary>
+    /// <remarks>
+    /// PERF-AUDIT-v2.md W-3. `new ScalarStore()` is five allocations, not one -- the store, a
+    /// `ScalarNode[16]`, an `int[16]`, a `byte[64]` and a `DType[4]` -- and its default capacity is
+    /// sized for a file's statistics, not for the two integers these two helpers put in it. Measured
+    /// at **992 bytes** per node written with a frame of reference or a sequence, which is 1,8 % of
+    /// `table_wide`'s whole write, 1,1 % of `table_mixed`'s and 4,7 % of a file that is nothing but
+    /// a sequence column. At four it is **416 bytes**.
+    ///
+    /// FOUR AND NOT TWO because the constructor floors it there anyway. The store still grows if
+    /// something ever puts more in it, so this is a size hint and not an invariant.
+    ///
+    /// THE REST OF THE POINT IS DELIBERATELY NOT DONE. Reusing one store instead of sizing it would
+    /// take the remaining 416 bytes, and the audit proposes a field with `Clear()` -- but the only
+    /// correct home for it is `VortexFileWriter`, because `[ThreadStatic]` is banned in this project
+    /// (RS0030, and the reason is exactly this library: an `await` can separate taking the state
+    /// from finishing with it). Getting a field from there to here means a parameter through
+    /// `WriteCompressed`, which has six callers of its own, and about thirty signatures in all. That
+    /// is not a trade worth making for the 0,3 to 0,5 % of a write that is left.
+    /// </remarks>
+    private const int Scalars = 4;
+
     private static byte[] ReferenceBytes(ulong reference, PType ptype)
     {
-        ScalarStore store = new ScalarStore();
+        ScalarStore store = new ScalarStore(Scalars);
         ScalarValue value = ptype.IsSignedInteger()
             ? store.Int64(unchecked((long)SignExtend(reference, ptype)))
             : store.UInt64(reference);
@@ -675,7 +697,7 @@ internal static class ArrayBlobWriter
 
     private static byte[] SequenceBytes(SequencePlan plan, PType ptype)
     {
-        ScalarStore store = new ScalarStore();
+        ScalarStore store = new ScalarStore(Scalars);
 
         // Both fields are bare ScalarValues, and the base is interpreted against the array's own
         // dtype - so its signedness must match the column's, exactly as the frame of reference's
