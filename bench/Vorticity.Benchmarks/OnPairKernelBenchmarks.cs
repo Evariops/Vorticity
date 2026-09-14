@@ -12,6 +12,12 @@
 // `BuildTokenTable` plus `Concatenate` -- the table is built INSIDE the measurement, because it is
 // part of what the new shape costs and leaving it out would flatter it.
 //
+// ALIGNMENT MEASURED, NOT ASSUMED: these buffers are plain GC arrays, and §4.4 asked whether that
+// changes the number against the library's aligned arena allocations. `AlignmentBenchmarks`
+// (`--explore Alignment`) answers on M4 Pro: eight bytes past a 64-byte boundary costs 0.3% to
+// 1.8% over two runs, the same sign every time but under the fast profile's own +-3% fidelity.
+// Not re-measured on x64.
+//
 // 65 536 codes over a 4 096-token dictionary of 1 to 16 bytes: the token count OnPair actually
 // reaches (`MaxTokenCount` is 1 << 16) and the size range its wide store is built around.
 using System;

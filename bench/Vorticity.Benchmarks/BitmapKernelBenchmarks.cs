@@ -14,6 +14,12 @@
 // library arm at 5 to 40 us, far above BenchmarkDotNet's floor (§4.4: "un cas de 12 us n'est pas un
 // probleme"; the driver picks the invocation count).
 //
+// ALIGNMENT MEASURED, NOT ASSUMED: these buffers are plain GC arrays, and §4.4 asked whether that
+// changes the number against the library's aligned arena allocations. `AlignmentBenchmarks`
+// (`--explore Alignment`) answers on M4 Pro: eight bytes past a 64-byte boundary costs 0.3% to
+// 1.8% over two runs, the same sign every time but under the fast profile's own +-3% fidelity.
+// Not re-measured on x64.
+//
 // THE SECOND ARM IS NOT A STRAW MAN. Each scalar arm is the loop the library's own remarks describe
 // as the previous state: a per-byte edge mask in `Classify`, a bit at a time in `CountSet` and
 // `CopyRange`, a read-modify-write per value in `PackBytes`. Where that loop was already the right
