@@ -35,6 +35,7 @@ using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Toolchains.InProcess.Emit;
 
 using Perfolizer.Horology;
+using Perfolizer.Metrology;
 
 namespace Vorticity.Benchmarks;
 
@@ -95,6 +96,15 @@ public sealed class BenchmarkConfig : ManualConfig
         AddLogger(BenchmarkDotNet.Loggers.ConsoleLogger.Default);
         AddColumnProvider(DefaultColumnProviders.Instance);
         AddDiagnoser(BenchmarkDotNet.Diagnosers.MemoryDiagnoser.Default);
+        // THE DECISION RULE, AS A COLUMN. PERF-AUDIT-v2.md §1.1 says a gain counts when `Ratio`
+        // leaves [0.95; 1.05] and `Ratio +- 2*RatioSD` excludes 1 -- arithmetic done by hand on
+        // every table, and therefore done wrong or not at all. This is the same question asked by
+        // the library: a TOST against the baseline arm at the same threshold, printed as
+        // `Faster` / `Same` / `Slower`. BENCH-AUDIT.md C3 proposed 3%; the rule it automates says
+        // 5%, so 5% is what the column carries -- a threshold that disagrees with the rule it
+        // stands for would be worse than no column.
+        AddColumn(new StatisticalTestColumn(
+            new PercentValue(5).ToThreshold()));
 
         // THE OPTIMIZATIONS VALIDATOR IS ON. `ConfigOptions.DisableOptimizationsValidator` used to
         // sit at the end of this constructor, which turned off the one check that refuses to
