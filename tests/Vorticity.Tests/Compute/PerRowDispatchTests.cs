@@ -95,7 +95,6 @@ public sealed partial class PerRowDispatchTests
         ("Types/Variant/ParquetVariant.cs", 2, 0, "a local method of the same name, not these"),
         ("Writing/ArrayBlobWriter.cs", 1, 1, "W-13"),
         ("Writing/BitPackPlan.cs", 5, 5, "W-11"),
-        ("Writing/SequencePlan.cs", 2, 2, "W-9"),
         ("Writing/ZoneStatistics.cs", 2, 2, "W-12"),
     ];
 
@@ -104,8 +103,11 @@ public sealed partial class PerRowDispatchTests
     /// 66 when this test was written; **64 since R7** removed both calls from
     /// <c>ListViewDecoder.ValidateRanges</c>, which no longer appears here at all — the file went
     /// to zero calls and its row went with it, which is the shape a wired site is supposed to make.
+    ///
+    /// **62 since W-9**, which did the same to <c>SequencePlan</c>: its `Read` helper was the two
+    /// calls, and typing the walk removed the helper.
     /// </remarks>
-    private const int TotalCalls = 64;
+    private const int TotalCalls = 62;
 
     /// <summary>Calls annexe A classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
@@ -116,8 +118,12 @@ public sealed partial class PerRowDispatchTests
     ///
     /// **24 since R7**: `ListViewDecoder.ValidateRanges` resolves both physical types before its
     /// loop, so its two per-row calls went away with its ceiling.
+    ///
+    /// **22 since W-9**: `SequencePlan.TryBuild` resolves its physical type before the walk, and
+    /// its two calls went the same way. This is the first WRITE-side site the ratchet has seen
+    /// leave.
     /// </remarks>
-    private const int TotalPerRow = 24;
+    private const int TotalPerRow = 22;
 
     [Fact]
     public void NoFileDispatchesPerRowMoreOftenThanItsCeiling()

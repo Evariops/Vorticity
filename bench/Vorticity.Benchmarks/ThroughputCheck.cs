@@ -623,9 +623,9 @@ internal static class ThroughputCheck
         ("onpair", 0.55),   // 5 processes, spread 0.51-0.55; first calibration
         ("parquet_variant", 257.55),   // 5 processes, spread 237.88-257.55; first calibration
         ("pco", 49.41),   // 5 processes, spread 46.65-49.41; first calibration
-        ("primitive", 0.35),   // 5 processes, spread 0.34-0.35; first calibration
+        ("primitive", 0.32),   // 5 processes, spread 0.29-0.32; was 0.35, -8.6% (v2 W-9)
         ("runend", 13.21),   // 5 processes, spread 11.34-13.21; first calibration
-        ("sequence", 1.02),   // 5 processes, spread 0.98-1.02; first calibration
+        ("sequence", 0.27),   // 5 processes, spread 0.26-0.27; was 1.02, -73.5% (v2 W-9)
         ("sparse", 38.13),   // 5 processes, spread 34.04-38.13; first calibration
         ("struct", 2.62),   // 5 processes, spread 2.53-2.62; first calibration
         ("varbin", 1.99),   // 5 processes, spread 1.91-1.99; first calibration

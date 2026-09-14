@@ -17,9 +17,9 @@
 // column. Signedness is preserved on the wire, width is not, which is exactly what
 // `multiplier_ptype_from_proto` says.
 using System;
+using System.Numerics;
+using System.Runtime.InteropServices;
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Canonical;
-using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Types;
 
 namespace Vorticity.Writing;
@@ -69,18 +69,67 @@ internal sealed class SequencePlan
             return null;
         }
 
-        PType ptype = node.PType;
         ReadOnlySpan<byte> values = node.Values.Span;
-        bool signed = ptype.IsSignedInteger();
+        int length = node.Length;
 
-        Int128 first = Read(values, ptype, signed, 0);
-        Int128 second = Read(values, ptype, signed, 1);
-        Int128 step = second - first;
-
-        Int128 previous = second;
-        for (int row = 2; row < node.Length; row++)
+        // PERF-AUDIT-v2.md W-9. THE WALK IS NOT CHEAP, which the point recorded as a suspicion and
+        // the probe settled: on `--throughput --write` at a million rows it reads **78 % of the rows
+        // it is offered** -- 1 352 columns of 1 728 really are sequences, so the loop runs to the
+        // end rather than bailing at row 3 -- and doubling it costs **26 %** of a `sequence` write
+        // and **25 %** of a `primitive` one. Two `switch`es per row, on a property of the CALL.
+        //
+        // Resolved once instead, the way `RowKernels.Gather` resolves its codes. `Int128` stays in
+        // the arithmetic: a step is the difference of two 64-bit values and does not fit in 64 bits
+        // in general, which is the whole reason this class holds one.
+        return node.PType switch
         {
-            Int128 value = Read(values, ptype, signed, row);
+            PType.U8 => Build<byte>(values, length),
+            PType.U16 => Build<ushort>(values, length),
+            PType.U32 => Build<uint>(values, length),
+            PType.U64 => Build<ulong>(values, length),
+            PType.I8 => Build<sbyte>(values, length),
+            PType.I16 => Build<short>(values, length),
+            PType.I32 => Build<int>(values, length),
+            _ => Build<long>(values, length),
+        };
+    }
+
+    /// <summary>Whether the step is written as <c>uint64_value</c> rather than <c>int64_value</c>.</summary>
+    /// <remarks>
+    /// Only for the one case the signed field cannot hold: an unsigned column climbing by more than
+    /// <see cref="long.MaxValue"/> a row. Everything else takes the signed field, which is what the
+    /// reference emits for both the i32 and i64 sequences in the corpus.
+    /// </remarks>
+    internal bool StepIsUnsigned => Step > long.MaxValue;
+
+    /// <summary>The walk, with the physical type resolved and the span cast once.</summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="Int128.CreateTruncating{TOther}(TOther)"/> reproduces what the two helpers it
+    /// replaces did, and does it from the TYPE rather than from a flag: a signed
+    /// <typeparamref name="T"/> sign-extends as <c>CanonicalSupport.ReadInteger</c> did, an
+    /// unsigned one zero-extends as <c>CompressedValues.ReadUnsigned</c> did. `ReadInteger`'s
+    /// saturation of a <c>u64</c> never applied here -- it is only reached through the signed
+    /// branch, which an unsigned column never took.
+    /// </para>
+    /// <para>
+    /// The base is the column's OWN raw bits, so it is re-read from the typed value rather than
+    /// narrowed from the <see cref="Int128"/>: for a signed column that is the two's-complement
+    /// pattern, for an unsigned one the value itself.
+    /// </para>
+    /// </remarks>
+    private static SequencePlan? Build<T>(ReadOnlySpan<byte> raw, int length)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(raw)[..length];
+
+        Int128 first = Int128.CreateTruncating(values[0]);
+        Int128 step = Int128.CreateTruncating(values[1]) - first;
+        Int128 previous = first + step;
+
+        for (int row = 2; row < values.Length; row++)
+        {
+            Int128 value = Int128.CreateTruncating(values[row]);
             if (value - previous != step)
             {
                 return null;
@@ -98,23 +147,13 @@ internal sealed class SequencePlan
             return null;
         }
 
-        ulong baseBits = signed
-            ? unchecked((ulong)(long)first)
-            : (ulong)first;
-
-        return new SequencePlan(baseBits, step);
+        return new SequencePlan(BaseBitsOf(values[0]), step);
     }
 
-    /// <summary>Whether the step is written as <c>uint64_value</c> rather than <c>int64_value</c>.</summary>
-    /// <remarks>
-    /// Only for the one case the signed field cannot hold: an unsigned column climbing by more than
-    /// <see cref="long.MaxValue"/> a row. Everything else takes the signed field, which is what the
-    /// reference emits for both the i32 and i64 sequences in the corpus.
-    /// </remarks>
-    internal bool StepIsUnsigned => Step > long.MaxValue;
-
-    private static Int128 Read(ReadOnlySpan<byte> values, PType ptype, bool signed, int row) =>
-        signed
-            ? CanonicalSupport.ReadInteger(values, ptype, row)
-            : (Int128)CompressedValues.ReadUnsigned(values, ptype, row);
+    /// <summary>Row 0 as the column's own raw bits, which is what the metadata carries.</summary>
+    private static ulong BaseBitsOf<T>(T value)
+        where T : unmanaged, IBinaryInteger<T> =>
+        T.IsNegative(value)
+            ? unchecked((ulong)long.CreateTruncating(value))
+            : ulong.CreateTruncating(value);
 }
