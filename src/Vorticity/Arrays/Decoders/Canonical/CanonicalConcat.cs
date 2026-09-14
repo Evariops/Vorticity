@@ -804,7 +804,25 @@ internal static class CanonicalConcat
         int depth)
     {
         CanonicalArena arena = context.Canonical;
-        int fieldCount = dtype.FieldCount;
+
+        // A VARIANT DTYPE NAMES NO FIELDS, AND THIS METHOD USED TO ASK IT FOR THEM. A variant
+        // column's canonical form is `Struct{metadata, value}` (VariantDecoder) while its SCHEMA
+        // still says `variant`, whose own FieldCount is 0 -- so the loop below ran zero times, the
+        // per-chunk agreement check that lives INSIDE it never ran, and `AddStruct` published a
+        // struct with no children at all. Both children were dropped in silence, and the failure
+        // surfaced one frame later in the writer ("a variant column is a two-field struct; this one
+        // has 0 fields"): `variant` and `parquet_variant` could not be written back at all as soon
+        // as a file held more than one pending chunk (v2 W-22a).
+        //
+        // Every other walk over a canonical struct in this library -- CanonicalSlice, CanonicalFilter,
+        // MaskProjection, ProjectionTrim -- reads the count off the NODE. This one is the exception,
+        // and it is the exception because it also needs each field's dtype, which for a struct only
+        // the schema has. For a variant the children carry their own: `binary`, and a `binary` whose
+        // nullability the file's metadata decided.
+        bool variant = dtype.Kind == DTypeKind.Variant;
+        int fieldCount = variant
+            ? arena.GetNode(chunks[0]).FieldCount
+            : dtype.FieldCount;
 
         Span<int> perChunkStack = stackalloc int[StackSmall];
         Span<int> fieldStack = stackalloc int[StackSmall];
@@ -815,21 +833,31 @@ internal static class CanonicalConcat
             Span<int> sources = perChunk.Span;
             Span<int> results = fields.Span;
 
+            // CHECKED BEFORE THE FIELD LOOP, NOT INSIDE IT. This is the same check as before and it
+            // used to live one level down, where a `fieldCount` of 0 meant it never ran at all --
+            // which is exactly how a variant's two children came to be dropped without a word. A
+            // guard that is skipped whenever the count is wrong in the one direction that matters
+            // is not a guard.
+            for (int i = 0; i < chunks.Length; i++)
+            {
+                int actual = arena.GetNode(chunks[i]).FieldCount;
+                if (actual != fieldCount)
+                {
+                    throw new VortexFormatException(
+                        $"Chunk {i} has {actual} fields where the dtype declares {fieldCount}.");
+                }
+            }
+
             for (int f = 0; f < fieldCount; f++)
             {
                 for (int i = 0; i < chunks.Length; i++)
                 {
-                    CanonicalNode chunk = arena.GetNode(chunks[i]);
-                    if (chunk.FieldCount != fieldCount)
-                    {
-                        throw new VortexFormatException(
-                            $"Chunk {i} has {chunk.FieldCount} fields where the dtype declares {fieldCount}.");
-                    }
-
-                    sources[i] = chunk.GetFieldIndex(f);
+                    sources[i] = arena.GetNode(chunks[i]).GetFieldIndex(f);
                 }
 
-                results[f] = Concat(context, dtype.GetField(f), length, sources, depth + 1);
+                // Read before the recursion: it appends records, and the arena may reallocate them.
+                DType fieldType = variant ? arena.GetNode(sources[0]).DType : dtype.GetField(f);
+                results[f] = Concat(context, fieldType, length, sources, depth + 1);
             }
 
             return arena.AddStruct(dtype, length, validity, results);

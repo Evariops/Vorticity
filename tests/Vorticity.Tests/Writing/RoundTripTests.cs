@@ -94,6 +94,91 @@ public sealed class RoundTripTests
         }
     }
 
+    /// <summary>
+    /// The same round trip, fed several batches, so the writer CONCATENATES before it emits.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A DIFFERENT CODE PATH, AND NOTHING REACHED IT. `VortexFileWriter` holds batches until it has
+    /// a whole row block AND a whole byte block, so a corpus file handed over in one batch goes out
+    /// as one chunk and `CanonicalConcat` never runs. Every test above, the conformance sweep and
+    /// the Rust cross-check are in exactly that position - which is how `vortex.variant` came to be
+    /// unwritable from more than one batch without a single test noticing (v2 W-22a). It took a
+    /// 1M-row benchmark file to see it, and a benchmark is not a guard.
+    /// </para>
+    /// <para>
+    /// The encodings here are the ones whose CANONICAL form has children the SCHEMA does not name:
+    /// a variant is `Struct{metadata, value}` under a dtype whose own field count is 0, and a map is
+    /// a ListView under a Map dtype. Those are the shapes a walk driven by the schema loses. The
+    /// last two are controls - an ordinary struct of primitives, and a string column - so a failure
+    /// here says which half is broken.
+    /// </para>
+    /// </remarks>
+    /// <param name="id">The corpus entry to rewrite.</param>
+    [Theory]
+    [InlineData("encodings/variant")]
+    [InlineData("encodings/parquet_variant")]
+    [InlineData("encodings/map")]
+    [InlineData("containers/uncompressed_canonical")]
+    [InlineData("types/utf8_nullable_r1025")]
+    public async Task AFileWrittenFromSeveralBatchesReadsBackWithTheSameValues(string id)
+    {
+        Decoders.EnsureRegistered();
+
+        // Small enough that every entry above yields more than one batch, and far below the
+        // writer's 8192-row block, so every one of them is still pending at CompleteAsync.
+        const int BatchRows = 4;
+
+        string written = Path.Combine(Path.GetTempPath(), $"vorticity-concat-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            DType schema;
+            List<string> original = [];
+            int batches = 0;
+
+            await using (VortexFile source = await VortexFile.OpenAsync(
+                Corpus.Path(id), CancellationToken.None))
+            {
+                schema = source.Schema;
+                await using VortexFileWriter writer = VortexFileWriter.Create(written, schema);
+
+                await foreach (RecordBatch batch in source.Scan().WithMaxBatchRows(BatchRows)
+                    .ExecuteAsync().WithCancellation(CancellationToken.None))
+                {
+                    batches++;
+                    Describe(batch, original);
+                    await writer.WriteAsync(batch, CancellationToken.None);
+                }
+
+                await writer.CompleteAsync(CancellationToken.None);
+            }
+
+            Assert.True(batches > 1, $"{id} must be written from more than one batch to mean anything");
+
+            List<string> readBack = [];
+            await using (VortexFile target = await VortexFile.OpenAsync(written, CancellationToken.None))
+            {
+                Assert.Equal(schema.ToString(), target.Schema.ToString());
+
+                await foreach (RecordBatch batch in target.Scan().ExecuteAsync()
+                    .WithCancellation(CancellationToken.None))
+                {
+                    Describe(batch, readBack);
+                }
+            }
+
+            Assert.Equal(original, readBack);
+            Assert.NotEmpty(original);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(written))
+            {
+                System.IO.File.Delete(written);
+            }
+        }
+    }
+
     [Fact]
     public async Task TheWrittenFileReportsTheRowCountItWasGiven()
     {
