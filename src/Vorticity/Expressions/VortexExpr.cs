@@ -42,6 +42,28 @@ public enum ExprKind : byte
 
     /// <summary><c>IN</c> over a literal set.</summary>
     In = 6,
+
+    /// <summary><c>StartsWith</c>, <c>Contains</c> or <c>Like</c> over bytes.</summary>
+    StringMatch = 7,
+}
+
+/// <summary>The three byte-pattern predicates of docs/12-index-reads.md §7.</summary>
+/// <remarks>
+/// BYTES, NOT TEXT, and the distinction is the whole contract: the comparison is bytewise, which for
+/// UTF-8 is code-point order, and <c>_</c> in a <see cref="Like"/> pattern matches one BYTE rather
+/// than one code point. Case folding needs a definition of "case" for UTF-8 that this iteration does
+/// not have (§13), so every operator here is case-sensitive.
+/// </remarks>
+public enum StringMatchOp : byte
+{
+    /// <summary>The value's bytes begin with the pattern; every value begins with an empty one.</summary>
+    StartsWith = 0,
+
+    /// <summary>The pattern occurs somewhere in the value; an empty pattern always does.</summary>
+    Contains = 1,
+
+    /// <summary>SQL <c>LIKE</c>: <c>%</c> any run, <c>_</c> any one byte, the escape quotes either.</summary>
+    Like = 2,
 }
 
 /// <summary>The comparison operators F7 admits.</summary>
@@ -283,6 +305,40 @@ public sealed class InExpr : VortexExpr
     public override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
 }
 
+/// <summary>A field matched against a byte pattern.</summary>
+/// <remarks>
+/// docs/12-index-reads.md §7. Null yields <c>unknown</c>, as a comparison does (08 §3), so a null
+/// row never satisfies one of these and never satisfies its negation either.
+/// </remarks>
+public sealed class StringMatchExpr : VortexExpr
+{
+    internal StringMatchExpr(FieldExpr field, StringMatchOp op, FilterLiteral pattern, byte escape)
+    {
+        Field = field;
+        Op = op;
+        Pattern = pattern;
+        Escape = escape;
+    }
+
+    /// <summary>The column; it must be utf8 or binary, or an extension over one.</summary>
+    public FieldExpr Field { get; }
+
+    /// <summary>Which of the three predicates.</summary>
+    public StringMatchOp Op { get; }
+
+    /// <summary>The pattern, always a <see cref="FilterLiteralKind.Bytes"/> literal.</summary>
+    public FilterLiteral Pattern { get; }
+
+    /// <summary>The byte that quotes a wildcard, for <see cref="StringMatchOp.Like"/>.</summary>
+    public byte Escape { get; }
+
+    /// <inheritdoc/>
+    public override ExprKind Kind => ExprKind.StringMatch;
+
+    /// <inheritdoc/>
+    public override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
+}
+
 /// <summary>Builds filter expressions.</summary>
 public static class Expr
 {
@@ -388,6 +444,52 @@ public static class Expr
         }
 
         return new InExpr(field, (FilterLiteral[])values.Clone());
+    }
+
+    /// <summary><c>field</c> begins with <paramref name="pattern"/>.</summary>
+    /// <param name="field">The column; utf8 or binary, or an extension over one.</param>
+    /// <param name="pattern">The prefix, as bytes.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="field"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="pattern"/> is not a bytes literal.</exception>
+    public static StringMatchExpr StartsWith(FieldExpr field, FilterLiteral pattern) =>
+        Match(field, StringMatchOp.StartsWith, pattern, (byte)'\\');
+
+    /// <summary><paramref name="pattern"/> occurs somewhere in <c>field</c>.</summary>
+    /// <param name="field">The column; utf8 or binary, or an extension over one.</param>
+    /// <param name="pattern">The needle, as bytes.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="field"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="pattern"/> is not a bytes literal.</exception>
+    public static StringMatchExpr Contains(FieldExpr field, FilterLiteral pattern) =>
+        Match(field, StringMatchOp.Contains, pattern, (byte)'\\');
+
+    /// <summary>SQL <c>field LIKE pattern</c>.</summary>
+    /// <param name="field">The column; utf8 or binary, or an extension over one.</param>
+    /// <param name="pattern">The pattern: <c>%</c> any run, <c>_</c> any one byte.</param>
+    /// <param name="escape">The byte that quotes a wildcard or itself. Default <c>\</c>.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="field"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="pattern"/> is not a bytes literal.</exception>
+    public static StringMatchExpr Like(
+        FieldExpr field, FilterLiteral pattern, byte escape = (byte)'\\') =>
+        Match(field, StringMatchOp.Like, pattern, escape);
+
+    /// <summary>
+    /// Rejects the one shape these predicates cannot evaluate, at CONSTRUCTION rather than during a
+    /// scan — the same rule <see cref="Compare"/> applies to a column-to-column comparison.
+    /// </summary>
+    private static StringMatchExpr Match(
+        FieldExpr field, StringMatchOp op, FilterLiteral pattern, byte escape)
+    {
+        ArgumentNullException.ThrowIfNull(field);
+        if (pattern.Kind != FilterLiteralKind.Bytes)
+        {
+            throw new ArgumentException(
+                $"{op} matches BYTES, so its pattern must be a bytes literal; this one is " +
+                $"{pattern.Kind}. A column of any other type has no byte pattern to match " +
+                "(docs/12-index-reads.md §7).",
+                nameof(pattern));
+        }
+
+        return new StringMatchExpr(field, op, pattern, escape);
     }
 
     private static LogicalExpr Logical(bool isAnd, VortexExpr left, VortexExpr right)

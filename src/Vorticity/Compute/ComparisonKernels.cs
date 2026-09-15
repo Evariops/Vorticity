@@ -86,6 +86,106 @@ internal static class ComparisonKernels
         }
     }
 
+    /// <summary>Evaluates <c>StartsWith</c>, <c>Contains</c> or <c>Like</c> over a byte column.</summary>
+    /// <param name="arena">The arena.</param>
+    /// <param name="nodeIndex">The column.</param>
+    /// <param name="op">Which predicate.</param>
+    /// <param name="pattern">The pattern, a bytes literal.</param>
+    /// <param name="escape">The byte that quotes a wildcard, for <c>Like</c>.</param>
+    /// <param name="destination">One state per row.</param>
+    /// <exception cref="NotSupportedException">The column is not utf8 or binary.</exception>
+    internal static void StringMatch(
+        CanonicalArena arena, int nodeIndex, StringMatchOp op, FilterLiteral pattern, byte escape,
+        Span<byte> destination)
+    {
+        int storage = Unwrap(arena, nodeIndex);
+        CanonicalNode node = arena.GetNode(storage);
+
+        if (node.Kind == CanonicalKind.Null)
+        {
+            Trilean.Fill(destination, Trilean.Unknown);
+            return;
+        }
+
+        if (node.Kind != CanonicalKind.VarBinView)
+        {
+            throw new NotSupportedException(
+                $"{op} matches bytes, so it evaluates utf8 and binary columns and extensions over " +
+                $"those; this one is {node.Kind} (docs/12-index-reads.md §7).");
+        }
+
+        ValidityMask mask = ValidityMask.From(arena, node.Validity);
+        if (mask.AllInvalid)
+        {
+            Trilean.Fill(destination, Trilean.Unknown);
+            return;
+        }
+
+        // The operator becomes a TYPE, as F-4c made it for the comparisons: the switch is asked once
+        // per column instead of once per row, and the BCL's vectorised search is what runs inside.
+        ReadOnlySpan<byte> needle = pattern.BytesValue;
+        switch (op)
+        {
+            case StringMatchOp.StartsWith:
+                MatchCore<StartsWithMatch>(node, mask, needle, escape, destination);
+                return;
+            case StringMatchOp.Contains:
+                MatchCore<ContainsMatch>(node, mask, needle, escape, destination);
+                return;
+            default:
+                MatchCore<LikeMatch>(node, mask, needle, escape, destination);
+                return;
+        }
+    }
+
+    /// <summary>One byte-pattern predicate, with the operator and the validity resolved.</summary>
+    private static void MatchCore<TMatch>(
+        CanonicalNode node, ValidityMask mask, ReadOnlySpan<byte> pattern, byte escape,
+        Span<byte> destination)
+        where TMatch : struct, IBytesMatch
+    {
+        ReadOnlySpan<byte> views = node.Views.Span;
+        bool allValid = mask.AllValid;
+        for (int i = 0; i < destination.Length; i++)
+        {
+            if (!allValid && !mask.IsValid(i))
+            {
+                // A null matches nothing and fails to match nothing: `unknown`, exactly as a
+                // comparison against it is (docs/08-semantics.md §3).
+                destination[i] = Trilean.Unknown;
+                continue;
+            }
+
+            destination[i] = TMatch.Holds(Value(node, views, i), pattern, escape)
+                ? Trilean.True
+                : Trilean.False;
+        }
+    }
+
+    /// <summary>One byte-pattern predicate as a type, so the dispatch leaves the loop.</summary>
+    private interface IBytesMatch
+    {
+        static abstract bool Holds(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape);
+    }
+
+    private readonly struct StartsWithMatch : IBytesMatch
+    {
+        public static bool Holds(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape) =>
+            BytePattern.StartsWith(value, pattern);
+    }
+
+    private readonly struct ContainsMatch : IBytesMatch
+    {
+        public static bool Holds(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape) =>
+            BytePattern.Contains(value, pattern);
+    }
+
+    private readonly struct LikeMatch : IBytesMatch
+    {
+        public static bool Holds(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape) =>
+            BytePattern.Like(value, pattern, escape);
+    }
+
     /// <summary>Evaluates <c>column IN (literals)</c>, which is an OR of equalities.</summary>
     /// <param name="arena">The arena.</param>
     /// <param name="nodeIndex">The column.</param>

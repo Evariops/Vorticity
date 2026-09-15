@@ -64,6 +64,15 @@ internal static class FilterEvaluator
                 return;
             }
 
+            case ExprKind.StringMatch:
+            {
+                StringMatchExpr match = (StringMatchExpr)filter;
+                int column = Resolve(arena, rootIndex, match.Field, rows);
+                ComparisonKernels.StringMatch(
+                    arena, column, match.Op, match.Pattern, match.Escape, destination);
+                return;
+            }
+
             case ExprKind.NullCheck:
             {
                 NullCheckExpr check = (NullCheckExpr)filter;

@@ -31,6 +31,9 @@ namespace Vorticity.Compute;
 /// <summary>Zone-map pruning for one scan's filter.</summary>
 internal sealed class ZonePruner
 {
+    /// <summary>Stack bytes a pattern's prefix and its successor each get before the heap.</summary>
+    private const int Scratch = 256;
+
     private readonly VortexExpr _filter;
     private readonly ZoneColumn[] _columns;
 
@@ -100,6 +103,9 @@ internal sealed class ZonePruner
                 return false;
             }
 
+            case ExprKind.StringMatch:
+                return MayMatchStringMatch((StringMatchExpr)expr, rows, negated);
+
             case ExprKind.Not:
                 return MayMatch(((NotExpr)expr).Operand, rows, !negated);
 
@@ -121,6 +127,65 @@ internal sealed class ZonePruner
             default:
                 return true;
         }
+    }
+
+    /// <summary>
+    /// A byte-pattern predicate, pruned through the one of the three that is a RANGE.
+    /// </summary>
+    /// <remarks>
+    /// <c>StartsWith(p)</c> is exactly <c>x ≥ p AND x &lt; succ(p)</c> over the bytewise order a
+    /// zone map's string bounds already use, so it prunes with no machinery of its own — and a
+    /// <c>LIKE</c> whose pattern does not begin with a wildcard claims that same prefix
+    /// (docs/12-index-reads.md §7). <c>Contains</c> claims nothing until the n-gram structures of
+    /// docs/10-indexes.md §5.2 exist.
+    /// <para>
+    /// UNDER A NEGATION NOTHING IS CLAIMED, which is the same answer <c>NOT</c> gets from a
+    /// comparison: "this zone may hold a value that does NOT begin with p" is almost always true and
+    /// is not the question the bounds answer.
+    /// </para>
+    /// </remarks>
+    private bool MayMatchStringMatch(StringMatchExpr match, RowRange rows, bool negated)
+    {
+        if (negated || match.Op == StringMatchOp.Contains)
+        {
+            return true;
+        }
+
+        ReadOnlySpan<byte> pattern = match.Pattern.BytesValue;
+        if (match.Op != StringMatchOp.Like)
+        {
+            return pattern.IsEmpty || PrefixMayMatch(match.Field, pattern, rows);
+        }
+
+        // A LIKE claims only what it says before its first wildcard, and the escapes have to come
+        // out of it first, so it needs a buffer of its own. The prefix never leaves this frame: it
+        // goes straight into the comparison below.
+        Span<byte> literal = pattern.Length <= Scratch
+            ? stackalloc byte[Scratch]
+            : new byte[pattern.Length];
+        int taken = BytePattern.LeadingLiteral(pattern, match.Escape, literal);
+        return taken == 0 || PrefixMayMatch(match.Field, literal[..taken], rows);
+    }
+
+    /// <summary>
+    /// Whether any zone of <paramref name="rows"/> may hold a value beginning with
+    /// <paramref name="prefix"/>, through the range that prefix is.
+    /// </summary>
+    private bool PrefixMayMatch(FieldExpr field, ReadOnlySpan<byte> prefix, RowRange rows)
+    {
+        if (!MayMatchComparison(
+                field, ComparisonOp.GreaterOrEqual, FilterLiteral.From(prefix), rows))
+        {
+            return false;
+        }
+
+        Span<byte> upper = prefix.Length <= Scratch ? stackalloc byte[Scratch] : new byte[prefix.Length];
+        int length = BytePattern.Successor(prefix, upper);
+
+        // An all-0xFF prefix has no successor: nothing sorts above every string that begins with
+        // it, so the lower bound is the whole claim.
+        return length == 0
+            || MayMatchComparison(field, ComparisonOp.Less, FilterLiteral.From(upper[..length]), rows);
     }
 
     private bool MayMatchComparison(
