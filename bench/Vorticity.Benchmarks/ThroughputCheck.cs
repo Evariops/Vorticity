@@ -717,62 +717,62 @@ internal static class ThroughputCheck
     /// </remarks>
     private static readonly (string Encoding, double Reference)[] WriteReferences =
     [
-        ("alp", 0.69),   // 3 passes, spread 0.67-0.69; was 0.76, -9.7%
-        ("alp_no_patches", 1.37),   // 3 passes, spread 1.30-1.37; was 1.42, -3.5%
-        ("alp_patched_no_chunk_offsets", 1.23),   // 3 passes, spread 1.18-1.23; was 1.31, -6.0%
-        ("alprd", 1.10),   // 3 passes, spread 1.07-1.11; HELD at 1.10: 2 of 3 passes above, peak 1.11, no loosening
-        ("bool", 0.32),   // 3 passes, spread 0.31-0.32; was 0.33, -4.1%
-        ("bool_bit_offset3", 0.42),   // 3 passes, spread 0.41-0.42; was 0.45, -6.7%
-        ("bool_bit_offset7", 0.43),   // 3 passes, spread 0.40-0.43; was 0.44, -2.2%
-        ("bool_bit_offset_straddle", 0.43),   // 3 passes, spread 0.41-0.43; was 0.45, -4.9%
-        ("bytebool", 0.34),   // 3 passes, spread 0.32-0.34; was 0.35, -4.2%
-        ("chunked", 0.31),   // 3 passes, spread 0.29-0.31; was 0.34, -9.7%
-        ("chunked_bool", 0.27),   // 3 passes, spread 0.25-0.27; was 0.28, -2.0%
-        ("chunked_decimal", 0.45),   // 3 passes, spread 0.41-0.45; was 0.45, -0.4%
-        ("chunked_empty_chunks", 0.21),   // 3 passes, spread 0.19-0.21; was 0.22, -4.4%
-        ("chunked_mixed_validity", 0.69),   // 3 passes, spread 0.64-0.69; was 0.79, -12.7%
-        ("chunked_one_chunk", 0.14),   // 3 passes, spread 0.14-0.14; HELD at 0.14: 2 of 3 passes above, peak 0.14, no loosening
-        ("chunked_varbinview", 0.47),   // 3 passes, spread 0.46-0.47; was 0.50, -6.5%
-        ("constant", 0.34),   // 3 passes, spread 0.33-0.34; HELD at 0.34: 1 of 3 passes above, peak 0.34, no loosening
-        ("datetimeparts", 0.32),   // 3 passes, spread 0.30-0.32; was 0.37, -14.5%
-        ("decimal", 0.49),   // 3 passes, spread 0.45-0.49; HELD at 0.49: 1 of 3 passes above, peak 0.49, no loosening
-        ("decimal_byte_parts", 0.49),   // 3 passes, spread 0.43-0.49; was 0.49, -1.0%
-        ("dict", 1.63),   // 3 passes, spread 1.61-1.63; was 1.83, -10.9%
-        ("dict_nullable_codes", 1.85),   // 3 passes, spread 1.82-1.85; was 2.01, -7.8%
-        ("dict_nullable_values_nonnull_codes", 1.92),   // 3 passes, spread 1.88-1.92; was 2.13, -9.8%
-        ("dict_u64_codes", 1.68),   // 3 passes, spread 1.64-1.68; was 1.82, -7.5%
-        ("dict_u8_codes", 1.75),   // 3 passes, spread 1.85-1.91; HELD at 1.75: 3 of 3 passes above, peak 1.91, no loosening
-        ("ext", 0.072),   // 3 passes, spread 0.071-0.076; HELD at 0.072: 2 of 3 passes above, peak 0.076, no loosening
-        ("fastlanes_bitpacked", 1.37),   // 3 passes, spread 1.35-1.37; was 1.89, -27.4%
-        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.57),   // 3 passes, spread 1.50-1.57; was 1.92, -18.2%
-        ("fastlanes_delta", 0.19),   // 3 passes, spread 0.20-0.21; HELD at 0.19: 3 of 3 passes above, peak 0.21, no loosening
-        ("fastlanes_for", 0.94),   // 3 passes, spread 0.93-0.94; was 1.19, -20.8%
-        ("fastlanes_rle", 0.93),   // 3 passes, spread 0.88-0.93; HELD at 0.93: 1 of 3 passes above, peak 0.93, no loosening
-        ("fixed_size_list", 0.12),   // 3 passes, spread 0.12-0.13; HELD at 0.12: 3 of 3 passes above, peak 0.13, no loosening
-        ("fsst", 0.59),   // 3 passes, spread 0.60-0.62; HELD at 0.59: 3 of 3 passes above, peak 0.62, no loosening
-        ("masked", 0.76),   // 3 passes, spread 0.73-0.76; was 1.01, -24.4%
-        ("masked_all_invalid", 0.38),   // 3 passes; TENU à la main : --rebase proposait +6.1 %, et une référence ne monte jamais
-        ("masked_all_valid", 0.11),   // 3 passes, spread 0.11-0.12; HELD at 0.11: 1 of 3 passes above, peak 0.12, no loosening
-        ("null", 0.21),   // 3 passes; TENU à la main : --rebase proposait +19.3 %, et une référence ne monte jamais
-        ("onpair", 2.26),   // 3 passes, spread 2.12-2.35; HELD at 2.26: 2 of 3 passes above, peak 2.35, no loosening
-        ("parquet_variant", 0.99),   // 3 passes, spread 0.97-0.99; was 1.03, -3.8%
-        ("pco", 0.13),   // 3 passes, spread 0.12-0.14; HELD at 0.13: 2 of 3 passes above, peak 0.14, no loosening
-        ("primitive", 0.14),   // 3 passes, spread 0.14-0.15; HELD at 0.14: 2 of 3 passes above, peak 0.15, no loosening
-        ("runend", 0.74),   // 3 passes, spread 0.72-0.75; HELD at 0.74: 1 of 3 passes above, peak 0.75, no loosening
-        ("sequence", 0.11),   // 3 passes, spread 0.10-0.11; was 0.11, -1.1%
-        ("sparse", 1.48),   // 3 passes, spread 1.40-1.48; was 1.50, -1.5%
-        ("struct", 0.52),   // 3 passes, spread 0.52-0.53; HELD at 0.52: 3 of 3 passes above, peak 0.53, no loosening
-        ("table_mixed", 0.45),   // 3 passes, spread 0.44-0.45; was 0.47, -3.3%
-        ("table_wide", 0.45),   // 3 passes, spread 0.45-0.45; was 0.55, -17.6%
-        ("varbin", 0.38),   // 3 passes, spread 0.38-0.39; HELD at 0.38: 2 of 3 passes above, peak 0.39, no loosening
-        ("varbinview", 0.46),   // 3 passes, spread 0.45-0.46; was 0.50, -7.4%
-        ("variant", 3.48),   // 3 passes, spread 3.24-3.48; was 3.83, -9.0%
-        ("zigzag", 0.74),   // 3 passes, spread 0.72-0.74; was 0.98, -24.8%
-        ("zstd", 1.79),   // 3 passes, spread 1.54-1.79; was 1.79, -0.2%
-        ("zstd_buffers", 0.087),   // 3 passes, spread 0.085-0.087; was 0.11, -20.6%
-        ("list", 1.63),   // 3 passes, spread 1.51-1.63; was 1.94, -16.2%
-        ("listview", 0.96),   // 3 passes, spread 0.92-0.96; was 1.15, -16.9%
-        ("map", 0.56),   // 3 passes, spread 0.55-0.56; was 0.63, -11.1%
+        ("alp", 0.69),   // 3 passes, spread 0.68-0.69; HELD at 0.69: 1 of 3 passes above, peak 0.69, no loosening
+        ("alp_no_patches", 1.37),   // 3 passes, spread 1.33-1.37; was 1.37, -0.3%
+        ("alp_patched_no_chunk_offsets", 1.23),   // 3 passes, spread 1.21-1.23; was 1.23, -0.2%
+        ("alprd", 1.10),   // 3 passes, spread 1.10-1.10; HELD at 1.10: 2 of 3 passes above, peak 1.10, no loosening
+        ("bool", 0.32),   // 3 passes; TENU à la main : --rebase proposait +9.4 %, et une référence ne monte jamais
+        ("bool_bit_offset3", 0.42),   // 3 passes; TENU à la main : --rebase proposait +6.9 %, et une référence ne monte jamais
+        ("bool_bit_offset7", 0.43),   // 3 passes; TENU à la main : --rebase proposait +5.0 %, et une référence ne monte jamais
+        ("bool_bit_offset_straddle", 0.43),   // 3 passes; TENU à la main : --rebase proposait +4.6 %, et une référence ne monte jamais
+        ("bytebool", 0.34),   // 3 passes; TENU à la main : --rebase proposait +4.8 %, et une référence ne monte jamais
+        ("chunked", 0.29),   // 3 passes, spread 0.27-0.29; was 0.31, -6.6%
+        ("chunked_bool", 0.27),   // 3 passes; TENU à la main : --rebase proposait +7.1 %, et une référence ne monte jamais
+        ("chunked_decimal", 0.45),   // 3 passes, spread 0.45-0.46; HELD at 0.45: 3 of 3 passes above, peak 0.46, no loosening
+        ("chunked_empty_chunks", 0.20),   // 3 passes, spread 0.17-0.20; was 0.21, -5.6%
+        ("chunked_mixed_validity", 0.62),   // 3 passes, spread 0.61-0.62; was 0.69, -9.7%
+        ("chunked_one_chunk", 0.14),   // 3 passes, spread 0.13-0.14; HELD at 0.14: 1 of 3 passes above, peak 0.14, no loosening
+        ("chunked_varbinview", 0.41),   // 3 passes, spread 0.40-0.41; was 0.47, -12.2%
+        ("constant", 0.34),   // 3 passes, spread 0.34-0.34; HELD at 0.34: 1 of 3 passes above, peak 0.34, no loosening
+        ("datetimeparts", 0.30),   // 3 passes, spread 0.29-0.30; was 0.32, -5.7%
+        ("decimal", 0.49),   // 3 passes, spread 0.48-0.49; HELD at 0.49: 1 of 3 passes above, peak 0.49, no loosening
+        ("decimal_byte_parts", 0.49),   // 3 passes, spread 0.48-0.49; was 0.49, -0.9%
+        ("dict", 1.52),   // 3 passes, spread 1.49-1.52; was 1.63, -6.5%
+        ("dict_nullable_codes", 1.73),   // 3 passes, spread 1.71-1.73; was 1.85, -6.6%
+        ("dict_nullable_values_nonnull_codes", 1.83),   // 3 passes, spread 1.80-1.83; was 1.92, -4.8%
+        ("dict_u64_codes", 1.50),   // 3 passes, spread 1.48-1.50; was 1.68, -10.7%
+        ("dict_u8_codes", 1.72),   // 3 passes, spread 1.67-1.72; was 1.75, -1.5%
+        ("ext", 0.070),   // 3 passes, spread 0.069-0.070; was 0.072, -2.1%
+        ("fastlanes_bitpacked", 1.33),   // 3 passes, spread 1.25-1.33; was 1.37, -3.1%
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.57),   // 3 passes, spread 1.44-1.58; HELD at 1.57: 1 of 3 passes above, peak 1.58, no loosening
+        ("fastlanes_delta", 0.19),   // 3 passes, spread 0.19-0.19; HELD at 0.19: 2 of 3 passes above, peak 0.19, no loosening
+        ("fastlanes_for", 0.88),   // 3 passes, spread 0.84-0.88; was 0.94, -5.9%
+        ("fastlanes_rle", 0.93),   // 3 passes, spread 0.95-1.06; HELD at 0.93: 3 of 3 passes above, peak 1.06, no loosening
+        ("fixed_size_list", 0.12),   // 3 passes, spread 0.12-0.12; HELD at 0.12: 3 of 3 passes above, peak 0.12, no loosening
+        ("fsst", 0.53),   // 3 passes, spread 0.52-0.53; was 0.59, -10.8%
+        ("masked", 0.67),   // 3 passes, spread 0.65-0.67; was 0.76, -12.4%
+        ("masked_all_invalid", 0.38),   // 3 passes; TENU à la main : --rebase proposait +3.4 %, et une référence ne monte jamais
+        ("masked_all_valid", 0.10),   // 3 passes, spread 0.093-0.10; was 0.11, -4.9%
+        ("null", 0.21),   // 3 passes; TENU à la main : --rebase proposait +5.3 %, et une référence ne monte jamais
+        ("onpair", 1.92),   // 3 passes, spread 1.89-1.92; was 2.26, -14.9%
+        ("parquet_variant", 0.99),   // 3 passes, spread 0.98-0.99; HELD at 0.99: 1 of 3 passes above, peak 0.99, no loosening
+        ("pco", 0.13),   // 3 passes, spread 0.13-0.13; HELD at 0.13: 1 of 3 passes above, peak 0.13, no loosening
+        ("primitive", 0.14),   // 3 passes, spread 0.13-0.14; HELD at 0.14: 1 of 3 passes above, peak 0.14, no loosening
+        ("runend", 0.74),   // 3 passes, spread 0.74-0.86; HELD at 0.74: 3 of 3 passes above, peak 0.86, no loosening
+        ("sequence", 0.11),   // 3 passes, spread 0.10-0.11; was 0.11, -3.6%
+        ("sparse", 1.48),   // 3 passes, spread 1.39-1.71; HELD at 1.48: 2 of 3 passes above, peak 1.71, no loosening
+        ("struct", 0.52),   // 3 passes, spread 0.55-0.56; HELD at 0.52: 3 of 3 passes above, peak 0.56, no loosening. XxHash3 (2026-09-15) vaut 3 a 6 % ici et -25 % sur `zstd` : troc pris, cf. RowComparer.Hash
+        ("table_mixed", 0.44),   // 3 passes, spread 0.43-0.44; was 0.45, -3.1%
+        ("table_wide", 0.43),   // 3 passes, spread 0.43-0.43; was 0.45, -3.9%
+        ("varbin", 0.38),   // 3 passes, spread 0.40-0.41; HELD at 0.38: 3 of 3 passes above, peak 0.41, no loosening. Meme troc que `struct`
+        ("varbinview", 0.40),   // 3 passes, spread 0.40-0.40; was 0.46, -13.0%
+        ("variant", 3.48),   // 3 passes, spread 3.47-3.63; HELD at 3.48: 2 of 3 passes above, peak 3.63, no loosening
+        ("zigzag", 0.67),   // 3 passes, spread 0.64-0.67; was 0.74, -9.7%
+        ("zstd", 1.33),   // 3 passes, spread 1.12-1.33; was 1.79, -25.5%
+        ("zstd_buffers", 0.076),   // 3 passes, spread 0.075-0.076; was 0.087, -12.5%
+        ("list", 1.61),   // 3 passes, spread 1.58-1.61; was 1.63, -1.1%
+        ("listview", 0.96),   // 3 passes, spread 0.95-0.96; HELD at 0.96: 1 of 3 passes above, peak 0.96, no loosening
+        ("map", 0.54),   // 3 passes, spread 0.52-0.54; was 0.56, -3.4%
     ];
 
     private static readonly (string Encoding, double Reference)[] TakeReferences =
