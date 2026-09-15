@@ -466,11 +466,83 @@ internal static class ComparisonKernels
             return;
         }
 
-        for (int i = 0; i < destination.Length; i++)
+        NullableCore<TValue, TWide, TOp>(values, mask, wanted, destination);
+    }
+
+    /// <summary>The nullable half of <see cref="CompareOp{TValue,TWide}"/>, eight rows per byte.</summary>
+    /// <param name="values">The column's values, already cast and trimmed to the row count.</param>
+    /// <param name="mask">Per-row validity; the caller has ruled out all-valid and all-invalid.</param>
+    /// <param name="wanted">The literal, widened once by the caller.</param>
+    /// <param name="destination">One <see cref="Trilean"/> per row.</param>
+    /// <remarks>
+    /// PERF-AUDIT-v2.md F12, and the number that opened it is BENCH-AUDIT.md B27: the same column,
+    /// operator and literal cost **48,30 µs nullable against 15,48 all-valid** -- 3,11x -- and F11's
+    /// disassembly says where it goes. The all-valid loop is already seven instructions and a `cset`
+    /// with no jump but its own back-edge, so ALL of that 3,11x is validity resolution:
+    /// `mask.IsValid(i)` recomputed the byte index, the mask and the bounds check for every row,
+    /// then branched on the bit.
+    /// <para>
+    /// This reads the byte ONCE for eight rows, exactly as <c>ExpandBits</c> has done for
+    /// <c>CompareBool</c> since F-4c. The inner eight are straight-line: shift, test, select. The
+    /// comparison itself is untouched -- it was never the cost.
+    /// </para>
+    /// <para>
+    /// The lead-in walks single rows until the bit cursor is byte-aligned, because a mask carries a
+    /// bit offset below 8 that the column's first row need not start on.
+    /// </para>
+    /// </remarks>
+    private static void NullableCore<TValue, TWide, TOp>(
+        ReadOnlySpan<TValue> values, ValidityMask mask, TWide wanted, Span<byte> destination)
+        where TValue : unmanaged, INumberBase<TValue>
+        where TWide : unmanaged, INumberBase<TWide>, IComparisonOperators<TWide, TWide, bool>
+        where TOp : struct, IOrderOp
+    {
+        ReadOnlySpan<byte> bits = mask.Bits;
+        int bit = mask.BitOffset;
+        int i = 0;
+
+        for (; i < destination.Length && (bit & 7) != 0; i++, bit++)
         {
-            destination[i] = !mask.IsValid(i)
-                ? Trilean.Unknown
-                : TOp.Holds(TWide.CreateTruncating(values[i]), wanted) ? Trilean.True : Trilean.False;
+            destination[i] = CanonicalSupport.BitAt(bits, bit)
+                ? (TOp.Holds(TWide.CreateTruncating(values[i]), wanted) ? Trilean.True : Trilean.False)
+                : Trilean.Unknown;
+        }
+
+        for (; i + 8 <= destination.Length; i += 8, bit += 8)
+        {
+            int block = bits[bit >> 3];
+            if (block == 0)
+            {
+                // Eight nulls in a row: the comparison is not merely unnecessary, it is the branch
+                // this kernel is paying for. Scattered validity still hits this on a quarter of its
+                // bytes, and a run of nulls hits it on all of them.
+                destination.Slice(i, 8).Fill(Trilean.Unknown);
+                continue;
+            }
+
+            for (int k = 0; k < 8; k++)
+            {
+                // THE COMPARISON STAYS INSIDE THE VALIDITY TEST, and that is a measured decision.
+                // Hoisting it out -- computing the result for every row and selecting afterwards --
+                // is the branchless form F11 went looking for, and it is the one site in these
+                // kernels where it applies: the index is in range whatever the bit says, since
+                // validity governs a value's MEANING and not its existence. Measured: **63,75 µs
+                // against 42,41**, +50 %. Running the comparison for the quarter of rows that are
+                // null costs more than the jump it removes, and R28 learned the same shape on
+                // `Utf8.IsValid`. The remedy for a branch must be cheaper than the branch.
+                destination[i + k] = (block & (1 << k)) != 0
+                    ? (TOp.Holds(TWide.CreateTruncating(values[i + k]), wanted)
+                        ? Trilean.True
+                        : Trilean.False)
+                    : Trilean.Unknown;
+            }
+        }
+
+        for (; i < destination.Length; i++, bit++)
+        {
+            destination[i] = CanonicalSupport.BitAt(bits, bit)
+                ? (TOp.Holds(TWide.CreateTruncating(values[i]), wanted) ? Trilean.True : Trilean.False)
+                : Trilean.Unknown;
         }
     }
 
