@@ -1,4 +1,8 @@
-// Turning a column's per-chunk summaries into the zones array a `vortex.zoned` layout carries.
+// Turning a column's per-BLOCK summaries into the zones array a `vortex.zoned` layout carries.
+//
+// Per block, not per chunk, since docs/11-write-strategy.md §8 stage 1: a zone is a block of
+// `RowBlockSize` rows counted from row 0 of the file, which is the only granularity a zone map can
+// declare, and the summaries arrive already in that shape from the ingest pass.
 //
 // The zones child is an ordinary array: a struct with one column per aggregate and one ROW per
 // zone. Its dtype is never written -- the reader DERIVES it from the aggregate spec list in the
@@ -7,7 +11,7 @@
 // warning; it is a decode of the wrong bytes.
 //
 // The spec list is written with the reference's own default options. `NumericalAggregateOpts` has
-// IMPLICIT presence, so `skip_nans = true` -- the default, and what ZoneStatistics computes -- is
+// IMPLICIT presence, so `skip_nans = true` -- the default, and what BlockStatsPass computes -- is
 // the two bytes `08 01`, while an EMPTY payload would decode to `skip_nans = false` and claim
 // bounds that include NaN. The most dangerous encoding here is the one that looks like "no options".
 using System;
@@ -40,7 +44,7 @@ internal static class ZoneMapWriter
     /// <returns><see langword="false"/> when this column gets no zone map.</returns>
     internal static bool TryBuild(
         DType column,
-        IReadOnlyList<ZoneStatistics> zones,
+        IReadOnlyList<BlockStats> zones,
         EncodingDictionary encodings,
         uint zoneLength,
         out byte[] metadata,
@@ -122,7 +126,7 @@ internal static class ZoneMapWriter
                   $"contain it; it was introduced in {EditionRegistry.Name(introduced.Value)}.");
     }
 
-    private static bool AnyBounds(IReadOnlyList<ZoneStatistics> zones)
+    private static bool AnyBounds(IReadOnlyList<BlockStats> zones)
     {
         for (int i = 0; i < zones.Count; i++)
         {
@@ -138,7 +142,7 @@ internal static class ZoneMapWriter
     /// <summary>The min or max column: the column's own dtype, made nullable.</summary>
     private static int Bounds(
         CanonicalArena arena, DTypeArena types, DType column,
-        IReadOnlyList<ZoneStatistics> zones, bool wantMin)
+        IReadOnlyList<BlockStats> zones, bool wantMin)
     {
         PType ptype = column.PType;
         int width = ptype.ByteWidth();
@@ -163,7 +167,7 @@ internal static class ZoneMapWriter
     }
 
     private static int NullCounts(
-        CanonicalArena arena, DTypeArena types, IReadOnlyList<ZoneStatistics> zones)
+        CanonicalArena arena, DTypeArena types, IReadOnlyList<BlockStats> zones)
     {
         int count = zones.Count;
         VortexBuffer values = arena.Allocate(count * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
@@ -178,7 +182,7 @@ internal static class ZoneMapWriter
     }
 
     private static Validity Validity(
-        CanonicalArena arena, DTypeArena types, IReadOnlyList<ZoneStatistics> zones,
+        CanonicalArena arena, DTypeArena types, IReadOnlyList<BlockStats> zones,
         int valid, int count)
     {
         if (valid == count)

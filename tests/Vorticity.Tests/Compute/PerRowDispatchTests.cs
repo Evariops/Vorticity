@@ -95,7 +95,6 @@ public sealed partial class PerRowDispatchTests
         ("Types/Variant/ParquetVariant.cs", 2, 0, "a local method of the same name, not these"),
         ("Writing/ArrayBlobWriter.cs", 1, 1, "W-13"),
         ("Writing/BitPackPlan.cs", 5, 5, "W-11"),
-        ("Writing/ZoneStatistics.cs", 2, 2, "W-12"),
     ];
 
     /// <summary>The grand totals, which are annexe A's two headline numbers.</summary>
@@ -106,8 +105,14 @@ public sealed partial class PerRowDispatchTests
     ///
     /// **62 since W-9**, which did the same to <c>SequencePlan</c>: its `Read` helper was the two
     /// calls, and typing the walk removed the helper.
+    ///
+    /// **60 since stage 1 of docs/11-write-strategy.md §8**, which deleted <c>ZoneStatistics</c>
+    /// outright. Its replacement, <c>BlockStatsPass</c>, resolves the physical type once into a
+    /// generic instantiation and reads the constant form's single element through
+    /// <c>BinaryPrimitives</c>, so the file does not appear in this table at all — the shape W-12
+    /// asked for.
     /// </remarks>
-    private const int TotalCalls = 62;
+    private const int TotalCalls = 60;
 
     /// <summary>Calls annexe A classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
@@ -122,8 +127,11 @@ public sealed partial class PerRowDispatchTests
     /// **22 since W-9**: `SequencePlan.TryBuild` resolves its physical type before the walk, and
     /// its two calls went the same way. This is the first WRITE-side site the ratchet has seen
     /// leave.
+    ///
+    /// **20 since stage 1 of docs/11-write-strategy.md §8**: `ZoneStatistics` was two per-row calls
+    /// in a two-pass summariser, and the whole file is gone. W-12 is closed.
     /// </remarks>
-    private const int TotalPerRow = 22;
+    private const int TotalPerRow = 20;
 
     [Fact]
     public void NoFileDispatchesPerRowMoreOftenThanItsCeiling()

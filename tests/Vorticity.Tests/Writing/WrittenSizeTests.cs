@@ -85,17 +85,32 @@ public sealed class WrittenSizeTests
     /// to the multi-chunk path MOVES A NUMBER. A ceiling with slack would reintroduce the blindness
     /// it exists to remove.
     /// </remarks>
+    /// <remarks>
+    /// THE FOUR NUMBERS ROSE ON 2026-09-15, by 128, 128, 56 and 56 bytes, and the cause is the one
+    /// thing on this axis that is supposed to grow: docs/11-write-strategy.md §8 stage 1 made a zone
+    /// a BLOCK of <c>RowBlockSize</c> rows counted from row 0 instead of a chunk. These four write
+    /// one chunk (the 1 MiB byte target is never reached at 512 rows a batch) and therefore carried
+    /// ONE zone for the whole file; they now carry 17, 17, 8 and 8, which is <c>ceil(rows / 512)</c>
+    /// -- the granularity the caller asked for when it set <c>RowBlockSize = 512</c> and did not get.
+    /// Eight bytes a zone per column for the two utf8 files (null count only, no bounds on a string
+    /// column) and seven bytes a zone for the other two.
+    /// <para>
+    /// It is a size increase that buys pruning, which is the only kind this table accepts; the
+    /// whole-corpus ratio above did not move, because the default 8192-row block leaves every corpus
+    /// file at one or two zones.
+    /// </para>
+    /// </remarks>
     private static readonly (string Id, long Bytes)[] Chunked =
     [
-        ("types/utf8_nonnull_r8193", 16_460),    // 17 chunks
-        ("types/utf8_nullable_r8193", 16_940),   // 17 chunks
+        ("types/utf8_nonnull_r8193", 16_588),    // 17 chunks in, 17 zones
+        ("types/utf8_nullable_r8193", 17_068),   // 17 chunks in, 17 zones
         // 4 700 -> 3 756 (-20,1 %) le 2026-09-15, WRITE-AUDIT.md W-31 : la copie du reste reporte
         // ne materialise plus que les octets que les vues nomment, donc le tas ecrit ne porte plus
         // les chaines des blocs deja emis. Verifie par bench/crosscheck.sh : 854 fichiers relus par
         // Vortex Rust, scalaire par scalaire. C'est le seul des quatre qui bouge -- les trois autres
         // n'ont pas de VarBinView dans leur chemin d'ecriture.
-        ("encodings/fsst", 3_756),               // 8 chunks
-        ("encodings/dict", 2_764),               // 8 chunks
+        ("encodings/fsst", 3_812),               // 8 chunks in, 8 zones
+        ("encodings/dict", 2_820),               // 8 chunks in, 8 zones
     ];
 
     [Fact]

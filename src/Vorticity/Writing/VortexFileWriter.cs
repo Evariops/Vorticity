@@ -60,8 +60,11 @@ public sealed class VortexFileWriter : IAsyncDisposable
     /// <summary>Per batch, its row count; every field's chunk list has the same shape.</summary>
     private readonly List<long> _chunkRows = [];
 
-    /// <summary>Per root field, one summary per written batch, for the zone map.</summary>
-    private readonly List<ZoneStatistics>[] _columnZones;
+    /// <summary>Per root field, the state machine that summarizes it block by block.</summary>
+    private readonly ColumnWriter[] _columns;
+
+    /// <summary>Scratch for one batch's field nodes, so the ingest loop allocates none.</summary>
+    private readonly int[] _fieldNodes;
 
     private readonly bool _isTabular;
     private readonly bool _compress;
@@ -69,6 +72,27 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
     /// <summary>Rows a chunk is a multiple of, or 0 when one call is one chunk.</summary>
     private readonly int _rowBlock;
+
+    /// <summary>
+    /// Rows per BLOCK, which is the zone length - docs/11-write-strategy.md §3.1.
+    /// </summary>
+    /// <remarks>
+    /// A block is counted from row 0 of the file and owes nothing to the caller's batching or to the
+    /// chunk the rows land in, which is the whole reason the zone map is no longer hostage to a
+    /// uniform chunking. It is <see cref="VortexWriteOptions.RowBlockSize"/> -- upstream's
+    /// <c>row_block_size</c>, the same quantity under the same name.
+    /// <para>
+    /// ZERO MEANS "THE BATCH IS THE BLOCK", which is what <c>RowBlockSize = null</c> asks for: that
+    /// caller has taken the file's shape into its own hands and said its batches are its pruning
+    /// unit. The zone map then needs the uniformity check <see cref="TryZoneLength"/> makes, because
+    /// a ragged batching has no single zone length to declare -- the one case where that is still
+    /// true.
+    /// </para>
+    /// </remarks>
+    private readonly int _blockRows;
+
+    /// <summary>Rows already folded into the open block, below <see cref="_blockRows"/>.</summary>
+    private int _blockFilled;
 
     /// <summary>Canonical bytes to accumulate before emitting, or 0 for no byte threshold.</summary>
     private readonly long _blockBytes;
@@ -114,17 +138,20 @@ public sealed class VortexFileWriter : IAsyncDisposable
         _arrayEncodings = new EncodingDictionary(ComponentKind.Array, target);
         _layoutEncodings = new EncodingDictionary(ComponentKind.Layout, target);
         _isTabular = schema.Kind == DTypeKind.Struct;
+        _blockRows = rowBlock;
 
         // A non-struct root is one column whose layout IS the root, with no struct level above it.
         _fieldCount = _isTabular ? schema.FieldCount : 1;
         _columnSegments = new List<int>[Math.Max(_fieldCount, 1)];
-        _columnZones = new List<ZoneStatistics>[Math.Max(_fieldCount, 1)];
+        _columns = new ColumnWriter[Math.Max(_fieldCount, 1)];
+        _fieldNodes = new int[Math.Max(_fieldCount, 1)];
         for (int i = 0; i < _columnSegments.Length; i++)
         {
             _columnSegments[i] = [];
-            _columnZones[i] = [];
+            _columns[i] = new ColumnWriter();
         }
     }
+
 
     /// <summary>How many rows have been written.</summary>
     public long RowCount => _rowCount;
@@ -260,6 +287,13 @@ public sealed class VortexFileWriter : IAsyncDisposable
         RequireMatchingSchema(batch);
         await StartAsync(cancellationToken).ConfigureAwait(false);
 
+        // THE STATISTICS PASS RUNS HERE, BEFORE ANY COPY OR EMISSION - docs/11-write-strategy.md
+        // §2. The batch is on the caller's own arena and the decode that produced it has just
+        // touched every byte, so this is the one moment the column is in cache for free. It also
+        // makes the summary independent of what happens next: whether these rows go out where they
+        // lie, wait in transit, or straddle two chunks, their block is the same block.
+        Ingest(batch);
+
         if (_rowBlock == 0)
         {
             // One call, one chunk: the shape before repartitioning existed, kept as an explicit
@@ -304,6 +338,73 @@ public sealed class VortexFileWriter : IAsyncDisposable
         {
             await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Folds one batch into the open block of every column, closing blocks as it crosses them.
+    /// </summary>
+    /// <remarks>
+    /// A batch straddles blocks - 8 131 rows never line up with 8 192 - so the range handed to a
+    /// column is cut at the boundary and the leftover continues the next block. Nothing here reads a
+    /// row twice and nothing allocates: the field nodes go into the writer's own scratch.
+    /// </remarks>
+    private void Ingest(RecordBatch batch)
+    {
+        CanonicalArena arena = batch.Arena;
+        if (_isTabular)
+        {
+            CanonicalNode root = arena.GetNode(batch.RootIndex);
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                _fieldNodes[field] = root.GetFieldIndex(field);
+            }
+        }
+        else
+        {
+            _fieldNodes[0] = batch.RootIndex;
+        }
+
+        int rows = batch.RowCount;
+        if (_blockRows == 0)
+        {
+            // The batch IS the block: the caller turned repartitioning off and its batches are its
+            // own pruning unit.
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                _columns[field].Accumulate(arena, _fieldNodes[field], 0, rows);
+            }
+
+            CloseBlock();
+            return;
+        }
+
+        int offset = 0;
+        while (offset < rows)
+        {
+            int take = Math.Min(_blockRows - _blockFilled, rows - offset);
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                _columns[field].Accumulate(arena, _fieldNodes[field], offset, take);
+            }
+
+            offset += take;
+            _blockFilled += take;
+            if (_blockFilled == _blockRows)
+            {
+                CloseBlock();
+            }
+        }
+    }
+
+    /// <summary>Seals the open block of every column.</summary>
+    private void CloseBlock()
+    {
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            _columns[field].CloseBlock();
+        }
+
+        _blockFilled = 0;
     }
 
     /// <summary>The arena the pending rows live in, created on first use.</summary>
@@ -448,10 +549,6 @@ public sealed class VortexFileWriter : IAsyncDisposable
                 ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress);
             _columnSegments[field].Add(
                 await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false));
-
-            // Summarized from the canonical column before the arena is reused, which is the only
-            // moment the values are in hand.
-            _columnZones[field].Add(ZoneStatistics.Compute(arena, node));
         }
 
         _chunkRows.Add(rows);
@@ -485,6 +582,14 @@ public sealed class VortexFileWriter : IAsyncDisposable
                     System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending));
             await EmitChunkAsync(from.Canonical, whole, total, cancellationToken).ConfigureAwait(false);
             ResetTransit();
+        }
+
+        // The file's last block is short unless the row count is a multiple of the block length,
+        // and a short LAST zone is exactly what the format allows. Closing it here rather than at
+        // ingest is what makes "short" mean "the file ended", never "the batch ended".
+        if (_blockFilled > 0)
+        {
+            CloseBlock();
         }
 
         // The zones arrays are segments like any other and must be written BEFORE the footer that
@@ -556,11 +661,15 @@ public sealed class VortexFileWriter : IAsyncDisposable
     /// Builds and writes one zones segment per column, when the chunking allows a zone map at all.
     /// </summary>
     /// <remarks>
-    /// The uniformity rule is the format's, not a simplification: ZoneMap documents zone z as
-    /// covering [z * ZoneLength, (z + 1) * ZoneLength) with only the last zone short, so a ragged
-    /// chunking cannot be described by any single zone length. A writer that declared one anyway
-    /// would hand every reader bounds attached to the wrong rows -- the one failure mode
-    /// docs/08-semantics.md §1 says must never happen.
+    /// ZoneMap documents zone z as covering [z * ZoneLength, (z + 1) * ZoneLength) with only the
+    /// last zone short. A CHUNK cannot honour that -- its size is the caller's batching and the byte
+    /// target together, so a ragged chunking has no zone length to declare and five corpus files
+    /// lost their zone map for it (WRITE-ARCHITECTURE.md §3.7). A BLOCK honours it by construction:
+    /// it is counted from row 0 of the file, so zone z is [z * _blockRows, (z+1) * _blockRows)
+    /// whatever the chunks did, and the last one is short exactly when the file's row count is not a
+    /// multiple. Zones therefore no longer line up with segments, which costs nothing: pruning a
+    /// zone inside a live segment saves decode rather than bytes read, and
+    /// docs/11-write-strategy.md §6.2 is that trade written down.
     /// </remarks>
     private async ValueTask WriteZoneMapsAsync(CancellationToken cancellationToken)
     {
@@ -586,7 +695,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
             DType column = _isTabular ? _schema.GetField(field) : _schema;
 
             if (!ZoneMapWriter.TryBuild(
-                    column, _columnZones[field], _arrayEncodings, zoneLength,
+                    column, _columns[field].Blocks, _arrayEncodings, zoneLength,
                     out byte[] metadata, out ArrayBlobWriter.BlobLease blob))
             {
                 continue;
@@ -601,33 +710,40 @@ public sealed class VortexFileWriter : IAsyncDisposable
         }
     }
 
-    /// <summary>
-    /// The one zone length the written chunks can be described by, if there is one.
-    /// </summary>
+    /// <summary>The one zone length the closed blocks can be described by, if there is one.</summary>
+    /// <remarks>
+    /// With repartitioning on -- the default -- this is a formality: every block but the last is
+    /// <see cref="_blockRows"/> rows by construction, so the answer is always yes and always that.
+    /// It can still say no for a caller who set <c>RowBlockSize = null</c> and then handed over
+    /// batches of 700 and 1024: those blocks have no single length, and a zone map that declared one
+    /// anyway would attach every bound to the wrong rows -- the one failure docs/08-semantics.md §1
+    /// says must never happen. Such a file gets a plain chunked layout, which every reader handles.
+    /// </remarks>
     private bool TryZoneLength(out uint zoneLength)
     {
         zoneLength = 0;
-        if (_chunkRows.Count == 0)
+        IReadOnlyList<BlockStats> blocks = _columns[0].Blocks;
+        if (blocks.Count == 0)
         {
             return false;
         }
 
-        long first = _chunkRows[0];
+        long first = blocks[0].Rows;
         if (first <= 0 || first > uint.MaxValue)
         {
             return false;
         }
 
-        // Every chunk but the last must be exactly the zone length; the last may be short.
-        for (int i = 0; i < _chunkRows.Count - 1; i++)
+        // Every block but the last must be exactly the zone length; the last may be short.
+        for (int i = 0; i < blocks.Count - 1; i++)
         {
-            if (_chunkRows[i] != first)
+            if (blocks[i].Rows != first)
             {
                 return false;
             }
         }
 
-        if (_chunkRows[^1] > first)
+        if (blocks[^1].Rows > first)
         {
             return false;
         }
@@ -751,7 +867,9 @@ public sealed class VortexFileWriter : IAsyncDisposable
         Span<uint> segment = stackalloc uint[1];
         segment[0] = (uint)_zoneSegments[field];
 
-        int zoneCount = _chunkRows.Count;
+        // The zones child's row count IS the zone count, and it is the closed blocks' count -- which
+        // is ceil(_rowCount / _blockRows) by construction, the shape ZoneMap documents.
+        int zoneCount = _columns[field].Blocks.Count;
         int zones = LayoutWriter.Write(builder, flat, (ulong)zoneCount, default, [], segment);
 
         Span<int> children = stackalloc int[2];

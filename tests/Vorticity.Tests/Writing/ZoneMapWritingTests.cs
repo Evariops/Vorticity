@@ -42,10 +42,17 @@ public sealed class ZoneMapWritingTests
     /// <remarks>
     /// THE ZONE LENGTH IS THE WRITER'S NOW, not the caller's, and that is the change
     /// `VortexWriteOptions.RowBlockSize` makes. This file arrives as 64 batches of 1024 and used to
-    /// leave as 64 zones of 1024; it now leaves as three zones of 24 576, because a chunk carries
-    /// about 26 kB of fixed cost and paying it 64 times for a 65 536-row file is the caller's
-    /// batching leaking into the file. The pruning is correspondingly coarser, which is the trade
-    /// upstream makes by default too.
+    /// leave as 64 zones of 1024: a chunk carries about 26 kB of fixed cost, and paying it 64 times
+    /// for a 65 536-row file is the caller's batching leaking into the file.
+    /// <para>
+    /// A ZONE IS A BLOCK, NOT A CHUNK, since docs/11-write-strategy.md §8 stage 1, and that is what
+    /// 8192 x 8 says here. It was 24 576 x 3 while the zone length was the chunk's, which is where
+    /// this file's five columns first reach the 1 MiB byte target -- a pruning granularity decided
+    /// by a byte threshold, for no reason anyone chose. The block is counted from row 0 of the file
+    /// and the chunks are free to be as large as the byte target wants them: pruning a block inside
+    /// a live segment saves decode rather than bytes read (§6.2), so the two quantities stop having
+    /// to agree.
+    /// </para>
     /// </remarks>
     [Fact]
     public async Task AWrittenFileCarriesAUsableZoneMapPerColumn()
@@ -71,11 +78,10 @@ public sealed class ZoneMapWritingTests
             // Usable, not merely present: an unresolvable aggregate would parse and prune nothing.
             Assert.True(map.IsPruningAvailable);
 
-            // 24 576 = three row blocks, which is where this file's five columns first reach the
-            // 1 MiB byte target. Both conditions are load-bearing and the number is the proof: the
-            // row block alone would have given 8192.
-            Assert.Equal(24576, map.ZoneLength);
-            Assert.Equal(3, map.ZoneCount);
+            // 8192 is RowBlockSize, and 8 x 8192 = 65 536 is the file. The chunks are still cut at
+            // the 1 MiB byte target and are three times this size; the zone map no longer cares.
+            Assert.Equal(8192, map.ZoneLength);
+            Assert.Equal(8, map.ZoneCount);
             zoned++;
         }
 
