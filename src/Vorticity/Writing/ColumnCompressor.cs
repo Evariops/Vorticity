@@ -134,6 +134,23 @@ internal readonly struct ColumnPlan
     internal bool FromMemory { get; init; }
 
     /// <summary>
+    /// For a dictionary the ingest-time table priced: the table itself, which owns the codes and
+    /// the entries the encoder reads directly (docs/11-write-strategy.md §3.5) — nothing is copied
+    /// into <see cref="Codes"/> or <see cref="Gather"/>, which are then empty.
+    /// </summary>
+    /// <remarks>
+    /// Valid until the chunk is released: the plan is consumed inside the same emission that chose
+    /// it, and the table is reset only after the segment is written.
+    /// </remarks>
+    internal DistinctTable? Table { get; init; }
+
+    /// <summary>With <see cref="Table"/>, how many codes are the chunk's entries.</summary>
+    internal int Entries { get; init; }
+
+    /// <summary>With <see cref="Table"/>, how many rows the chunk has.</summary>
+    internal int Rows { get; init; }
+
+    /// <summary>
     /// The rows to gather as the values child: one per run for <see cref="ColumnScheme.RunEnd"/>,
     /// one per distinct value for <see cref="ColumnScheme.Dict"/>.
     /// </summary>
@@ -183,6 +200,9 @@ internal readonly struct ColumnPlan
         ColumnScheme.None => "canonical",
         ColumnScheme.RunEnd =>
             $"runend runs={Codes.Length} ends={Fingerprint(Codes):x} starts={Fingerprint(Gather):x}",
+        ColumnScheme.Dict when Table is not null =>
+            $"dict entries={Entries} rows={Rows} codes={Fingerprint(Table.Codes[..Rows]):x} " +
+            $"first={Fingerprint(Table.FirstRows[..Entries]):x}",
         ColumnScheme.Dict =>
             $"dict entries={Gather.Length} rows={Codes.Length} codes={Fingerprint(Codes):x} " +
             $"first={Fingerprint(Gather):x}",
@@ -199,7 +219,7 @@ internal readonly struct ColumnPlan
     };
 
     /// <summary>An order-sensitive 64-bit hash of an index array.</summary>
-    private static ulong Fingerprint(int[] values)
+    private static ulong Fingerprint(ReadOnlySpan<int> values)
     {
         ulong hash = 0x9E3779B97F4A7C15UL;
         for (int i = 0; i < values.Length; i++)
@@ -646,7 +666,7 @@ internal static class ColumnCompressor
             return ColumnPlan.ForBitPacking(packed);
         }
 
-        return Trials(arena, nodeIndex, node, target, plain);
+        return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild);
     }
 
     /// <summary>
@@ -664,8 +684,14 @@ internal static class ColumnCompressor
     /// <param name="node">The same chunk, resolved.</param>
     /// <param name="target">The edition being written.</param>
     /// <param name="budget">The bytes the trial has to beat: the best exact plan's, or the plain column's.</param>
+    /// <param name="gatesOff">
+    /// Whether the size gate in front of zstd is lifted — the values child of a scheme is small by
+    /// construction and its trial cheap, so the guard has nothing to guard
+    /// (<see cref="Cascade.IsValuesChild"/>).
+    /// </param>
     private static ColumnPlan Trials(
-        CanonicalArena arena, int nodeIndex, CanonicalNode node, VortexEdition target, long budget)
+        CanonicalArena arena, int nodeIndex, CanonicalNode node, VortexEdition target, long budget,
+        bool gatesOff = false)
     {
         // Named as the body has always named it: every ceiling below is derived from this one.
         long plain = budget;
@@ -704,7 +730,7 @@ internal static class ColumnCompressor
         ZstdPlan? zstd = null;
         if (node.Kind is CanonicalKind.VarBinView or CanonicalKind.Primitive
             && Allows(target, "vortex.zstd")
-            && DataBytes(node) >= ZstdMinimumBytes)
+            && (gatesOff || DataBytes(node) >= ZstdMinimumBytes))
         {
             zstd = ZstdPlan.TryBuild(arena, nodeIndex, plain);
         }
@@ -1184,7 +1210,7 @@ internal static class ColumnCompressor
                 return ColumnPlan.ForBitPacking(packed!) with { PredictedBytes = packed!.Cost };
 
             default:
-                return Trials(arena, nodeIndex, node, target, plain);
+                return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild);
         }
     }
 
@@ -1390,11 +1416,16 @@ internal static class ColumnCompressor
             return ColumnPlan.Canonical;
         }
 
-        // Copies, as the walk made: the plan owns its arrays and the table is about to be reset
-        // for the next chunk. Stage R5 hands the table's buffers to the encoder directly.
-        return ColumnPlan.Dictionary(
-                table.FirstRows[..entries].ToArray(), table.Codes[..length].ToArray())
-            with { PredictedBytes = encoded + DictionaryOverhead };
+        // NO COPY: the plan points at the table, and the encoder reads the codes and lays out the
+        // entries from it directly (§3.5). The table lives until the segment is written, which is
+        // after the plan has been consumed.
+        return ColumnPlan.Dictionary([], []) with
+        {
+            Table = table,
+            Entries = entries,
+            Rows = length,
+            PredictedBytes = encoded + DictionaryOverhead,
+        };
     }
 
     /// <summary>

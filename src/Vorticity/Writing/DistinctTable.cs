@@ -15,10 +15,11 @@
 // IT OWNS ITS KEYS AND NEVER REFERENCES A ROW OF THE BATCH, because a chunk straddles batches and
 // the previous batch's arena is recycled the moment the next one is decoded. A string's bytes are
 // copied into the key heap the first time the value is seen, one copy per DISTINCT value, and the
-// heap in code order is what the dictionary's values child will become (§3.5). What the table does
-// keep per row is the row's chunk-relative POSITION: `FirstRows[code]` is where a code first
-// occurred, and those positions are valid in the chunk the emitter assembles because it assembles
-// the same rows in the same order.
+// heap in code order is what the dictionary's values child becomes (§3.5): `BuildValues` lays the
+// entries out as a canonical column straight from the table, and the gather over the chunk's rows
+// that used to produce that child is not made. What the table does keep per row is the row's
+// chunk-relative POSITION: `FirstRows[code]` is where a code first occurred, kept for the reference
+// chooser and the differential that compares the two.
 //
 // THE LIFETIME IS THE CHUNK'S, AND THE CHUNK IS DECIDED LATE. The writer emits all the WHOLE blocks
 // pending when the byte threshold is crossed and carries the partial tail into the next chunk
@@ -35,11 +36,11 @@
 // more than `MaxEntries` distinct values loses its dictionary candidate here where the old walk
 // would have priced it. On this corpus it does not happen, and `WrittenSizeTests` is what says so.
 //
-// EVERY BUFFER IS RENTED, as the walk's were, and grown by renting the next size up: the old form
-// rented three `int[rows]` per chunk and returned them, so a column that never keeps a dictionary
-// allocated nothing, and `WriteAllocationTests` holds the writer to that. A first version allocated
-// the slot arrays with `new` and doubled them in place, and a high-cardinality column of 8 193 rows
-// cost a megabyte of garbage against a 70 kB ceiling.
+// EVERY BUFFER IS RENTED PER CHUNK AND RETURNED AT RESET, as the walk's were: the old form rented
+// three `int[rows]` per chunk and returned them, so a thousand columns shared one pool, and
+// `WriteAllocationTests` holds the writer to that. A first version allocated the slot arrays with
+// `new` and held them per column, and a high-cardinality column of 8 193 rows cost a megabyte of
+// garbage against a 70 kB ceiling.
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -47,6 +48,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 
@@ -68,6 +70,9 @@ internal sealed class DistinctTable
     /// pricing rule, and the pricing rule -- the exact size formula -- is the chooser's.
     /// </remarks>
     private const int MaxEntries = 1 << 20;
+
+    /// <summary>A view is sixteen bytes: length, then twelve of value inline or a buffer and an offset.</summary>
+    private const int ViewSize = 16;
 
     private enum Shape : byte
     {
@@ -104,7 +109,14 @@ internal sealed class DistinctTable
     private byte[]? _heap;
     private int _heapUsed;
 
+    // PER CODE, what the values child needs: the row of first occurrence, and the key itself --
+    // the word for a fixed-width kind, the heap span for a byte kind -- in code order, which is
+    // the order the entries are written in.
     private int[] _firstRows;
+    private ulong[] _codeKey;
+    private int[]? _codeOffset;
+    private int[]? _codeLength;
+
     private int[] _codes;
     private int _rows;
     private int _distinct;
@@ -124,37 +136,9 @@ internal sealed class DistinctTable
         _slotCode = [];
         _slotKey = [];
         _firstRows = [];
+        _codeKey = [];
         _codes = [];
         _mask = -1;
-    }
-
-    /// <summary>
-    /// Rents the chunk's buffers on its first probe, sized by the previous chunk's needs.
-    /// </summary>
-    /// <remarks>
-    /// RENTED PER CHUNK AND RETURNED AT RESET, not held per column for the writer's lifetime -- the
-    /// discipline the walk this replaces had, and the one docs/11-write-strategy.md §3.7 asks for:
-    /// a thousand columns share one pool, not a thousand tables. Sized from the last chunk so that
-    /// a steady column rents once and grows never; the very first chunk of a column starts small
-    /// and doubles, which is the price of not knowing.
-    /// </remarks>
-    /// <param name="rows">Rows the first range brings, a floor for the codes buffer.</param>
-    private void Open(int rows)
-    {
-        int capacity = Math.Max(InitialCapacity, (int)BitOperations.RoundUpToPowerOf2((uint)(_lastDistinct * 2 + 1)));
-        _slotCode = ArrayPool<int>.Shared.Rent(capacity);
-        _slotKey = ArrayPool<ulong>.Shared.Rent(capacity);
-        _mask = capacity - 1;
-        Array.Clear(_slotCode, 0, capacity);
-        if (_shape == Shape.Bytes)
-        {
-            _slotOffset = ArrayPool<int>.Shared.Rent(capacity);
-            _slotLength = ArrayPool<int>.Shared.Rent(capacity);
-            _heap = ArrayPool<byte>.Shared.Rent(Math.Max(1024, _lastHeap));
-        }
-
-        _firstRows = ArrayPool<int>.Shared.Rent(capacity);
-        _codes = ArrayPool<int>.Shared.Rent(Math.Max(Math.Max(256, rows), _lastRows));
     }
 
     /// <summary>Rows probed since the last <see cref="Reset"/>, i.e. the chunk so far.</summary>
@@ -210,6 +194,39 @@ internal sealed class DistinctTable
         or CanonicalKind.VarBinView;
 
     /// <summary>
+    /// Rents the chunk's buffers on its first probe, sized by the previous chunk's needs.
+    /// </summary>
+    /// <remarks>
+    /// RENTED PER CHUNK AND RETURNED AT RESET, not held per column for the writer's lifetime -- the
+    /// discipline the walk this replaces had, and the one docs/11-write-strategy.md §3.7 asks for:
+    /// a thousand columns share one pool, not a thousand tables. Sized from the last chunk so that
+    /// a steady column rents once and grows never; the very first chunk of a column starts small
+    /// and doubles, which is the price of not knowing.
+    /// </remarks>
+    /// <param name="rows">Rows the first range brings, a floor for the codes buffer.</param>
+    private void Open(int rows)
+    {
+        int capacity = Math.Max(
+            InitialCapacity, (int)BitOperations.RoundUpToPowerOf2((uint)((_lastDistinct * 2) + 1)));
+        _slotCode = ArrayPool<int>.Shared.Rent(capacity);
+        _slotKey = ArrayPool<ulong>.Shared.Rent(capacity);
+        _mask = capacity - 1;
+        Array.Clear(_slotCode, 0, capacity);
+        if (_shape == Shape.Bytes)
+        {
+            _slotOffset = ArrayPool<int>.Shared.Rent(capacity);
+            _slotLength = ArrayPool<int>.Shared.Rent(capacity);
+            _codeOffset = ArrayPool<int>.Shared.Rent(capacity);
+            _codeLength = ArrayPool<int>.Shared.Rent(capacity);
+            _heap = ArrayPool<byte>.Shared.Rent(Math.Max(1024, _lastHeap));
+        }
+
+        _firstRows = ArrayPool<int>.Shared.Rent(capacity);
+        _codeKey = ArrayPool<ulong>.Shared.Rent(capacity);
+        _codes = ArrayPool<int>.Shared.Rent(Math.Max(Math.Max(256, rows), _lastRows));
+    }
+
+    /// <summary>
     /// Forgets the chunk: every buffer back to the pool, its size remembered for the next one.
     /// </summary>
     internal void Reset()
@@ -223,11 +240,14 @@ internal sealed class DistinctTable
             ArrayPool<int>.Shared.Return(_slotCode);
             ArrayPool<ulong>.Shared.Return(_slotKey);
             ArrayPool<int>.Shared.Return(_firstRows);
+            ArrayPool<ulong>.Shared.Return(_codeKey);
             ArrayPool<int>.Shared.Return(_codes);
             if (_slotOffset is not null)
             {
                 ArrayPool<int>.Shared.Return(_slotOffset);
                 ArrayPool<int>.Shared.Return(_slotLength!);
+                ArrayPool<int>.Shared.Return(_codeOffset!);
+                ArrayPool<int>.Shared.Return(_codeLength!);
                 ArrayPool<byte>.Shared.Return(_heap!);
             }
         }
@@ -236,8 +256,11 @@ internal sealed class DistinctTable
         _slotKey = [];
         _slotOffset = null;
         _slotLength = null;
+        _codeOffset = null;
+        _codeLength = null;
         _heap = null;
         _firstRows = [];
+        _codeKey = [];
         _codes = [];
         _mask = -1;
         _rows = 0;
@@ -312,6 +335,183 @@ internal sealed class DistinctTable
 
                 return;
         }
+    }
+
+    /// <summary>
+    /// The dictionary's values child, laid out in code order straight from what the table owns:
+    /// the entries <c>[0, entries)</c> as a canonical column of <paramref name="column"/>'s kind,
+    /// with the null entry null.
+    /// </summary>
+    /// <remarks>
+    /// THE SAME COLUMN THE GATHER USED TO PRODUCE, without the gather. `CanonicalFilter.Apply` over
+    /// the first rows of each code read every entry back out of the chunk and, for strings, copied
+    /// its view while sharing the chunk's whole heap; this writes the entry from the key the table
+    /// already owns, and for strings the data buffer is the key heap itself -- exactly the entries'
+    /// bytes, in code order, which is what the varbin form of the child writes either way.
+    /// <para>
+    /// THE VALIDITY IS THE FILTER'S, RULE FOR RULE: a column whose validity is not a bitmap keeps
+    /// it; a bitmap column whose entries hold no null becomes all-valid, one whose only entry is
+    /// the null all-invalid, and any other gets a bitmap with one bit clear. The wire form of the
+    /// child depends on which of the three it is, so the choice has to be the same choice.
+    /// </para>
+    /// <para>
+    /// A NULL ENTRY'S PAYLOAD IS ZERO. The gather copied whatever bytes the null row happened to
+    /// hold; the format says nothing about them and nothing reads them. Sizes are identical.
+    /// </para>
+    /// </remarks>
+    /// <param name="arena">The arena the child is built in — the chunk's.</param>
+    /// <param name="column">The chunk's own node, for its dtype, width and validity.</param>
+    /// <param name="entries">How many codes are the chunk's: the count at its last block's close.</param>
+    /// <returns>The child's node index.</returns>
+    internal int BuildValues(CanonicalArena arena, in CanonicalNode column, int entries)
+    {
+        Validity validity = ValuesValidity(arena, column.Validity, entries);
+        switch (_shape)
+        {
+            case Shape.Bits:
+            {
+                int bytes = CanonicalSupport.BitmapByteCount(entries);
+                VortexBuffer bits = arena.Allocate(Math.Max(bytes, 1), 1, out Span<byte> destination);
+                for (int code = 0; code < entries; code++)
+                {
+                    if (_codeKey[code] != 0)
+                    {
+                        CanonicalSupport.SetBit(destination, code);
+                    }
+                }
+
+                return arena.AddBool(column.DType, entries, validity, bits, 0);
+            }
+
+            case Shape.Fixed:
+            {
+                VortexBuffer values = arena.Allocate(entries * _width, _width, out Span<byte> destination);
+                for (int code = 0; code < entries; code++)
+                {
+                    Span<byte> slot = destination.Slice(code * _width, _width);
+                    switch (_width)
+                    {
+                        case 1: slot[0] = (byte)_codeKey[code]; break;
+                        case 2: BinaryPrimitives.WriteUInt16LittleEndian(slot, (ushort)_codeKey[code]); break;
+                        case 4: BinaryPrimitives.WriteUInt32LittleEndian(slot, (uint)_codeKey[code]); break;
+                        default: BinaryPrimitives.WriteUInt64LittleEndian(slot, _codeKey[code]); break;
+                    }
+                }
+
+                return column.Kind == CanonicalKind.Decimal
+                    ? arena.AddDecimal(
+                        column.DType, entries, validity, column.Storage, column.Precision,
+                        column.Scale, values)
+                    : arena.AddPrimitive(column.DType, entries, validity, column.PType, values);
+            }
+
+            default:
+            {
+                int[] offsets = _codeOffset!;
+                int[] lengths = _codeLength!;
+                if (_width > 0)
+                {
+                    // A wide decimal: the key heap holds each value at its full width, so the
+                    // child's buffer is the entries gathered from it by code.
+                    VortexBuffer values = arena.Allocate(entries * _width, _width, out Span<byte> wide);
+                    for (int code = 0; code < entries; code++)
+                    {
+                        Span<byte> slot = wide.Slice(code * _width, _width);
+                        if (lengths[code] == _width)
+                        {
+                            _heap.AsSpan(offsets[code], _width).CopyTo(slot);
+                        }
+                        else
+                        {
+                            slot.Clear();
+                        }
+                    }
+
+                    return arena.AddDecimal(
+                        column.DType, entries, validity, column.Storage, column.Precision,
+                        column.Scale, values);
+                }
+
+                // Strings: the heap is the data buffer, the views point into it. The heap is copied
+                // into the arena once -- it is a rented buffer that goes back to the pool at reset,
+                // and the child has to outlive that.
+                int heapBytes = 0;
+                for (int code = 0; code < entries; code++)
+                {
+                    heapBytes += lengths[code] > 12 ? lengths[code] : 0;
+                }
+
+                VortexBuffer heap = VortexBuffer.Empty;
+                Span<byte> data = default;
+                if (heapBytes > 0)
+                {
+                    heap = arena.Allocate(heapBytes, 1, out data);
+                }
+
+                VortexBuffer views = arena.Allocate(entries * ViewSize, ViewSize, out Span<byte> viewBytes);
+                viewBytes.Clear();
+                int written = 0;
+                for (int code = 0; code < entries; code++)
+                {
+                    Span<byte> view = viewBytes.Slice(code * ViewSize, ViewSize);
+                    int length = lengths[code];
+                    BinaryPrimitives.WriteInt32LittleEndian(view, length);
+                    ReadOnlySpan<byte> value = _heap.AsSpan(offsets[code], length);
+                    if (length <= 12)
+                    {
+                        value.CopyTo(view.Slice(4, length));
+                        continue;
+                    }
+
+                    value[..4].CopyTo(view.Slice(4, 4));
+                    BinaryPrimitives.WriteInt32LittleEndian(view[8..12], 0);
+                    BinaryPrimitives.WriteInt32LittleEndian(view[12..16], written);
+                    value.CopyTo(data.Slice(written, length));
+                    written += length;
+                }
+
+                return heapBytes > 0
+                    ? arena.AddVarBinView(column.DType, entries, validity, views, [heap])
+                    : arena.AddVarBinView(column.DType, entries, validity, views, default);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The values child's validity, chosen as <c>CanonicalFilter.FilterValidity</c> chooses it.
+    /// </summary>
+    private Validity ValuesValidity(CanonicalArena arena, Validity validity, int entries)
+    {
+        if (validity.Kind != ValidityKind.Bitmap)
+        {
+            return validity;
+        }
+
+        // A null whose first occurrence is in the carried tail has a code at or above `entries`
+        // and is not among the chunk's entries at all.
+        if (_nullCode < 0 || _nullCode >= entries)
+        {
+            return Validity.AllValid;
+        }
+
+        if (entries == 1)
+        {
+            return Validity.AllInvalid;
+        }
+
+        int bytes = CanonicalSupport.BitmapByteCount(entries);
+        VortexBuffer bits = arena.Allocate(Math.Max(bytes, 1), 1, out Span<byte> destination);
+        for (int code = 0; code < entries; code++)
+        {
+            if (code != _nullCode)
+            {
+                CanonicalSupport.SetBit(destination, code);
+            }
+        }
+
+        int node = arena.AddBool(
+            arena.GetNode(validity.CanonicalNodeIndex).DType, entries, Validity.NonNullable, bits, 0);
+        return Validity.Bitmap(node);
     }
 
     /// <summary>
@@ -433,7 +633,7 @@ internal sealed class DistinctTable
 
             // The same resolution `RowComparer.Bytes` makes: a view is the length, then either the
             // value inline or a (buffer, offset) pair into the column's data buffers.
-            ReadOnlySpan<byte> view = views.Slice((start + i) * 16, 16);
+            ReadOnlySpan<byte> view = views.Slice((start + i) * ViewSize, ViewSize);
             int size = BinaryPrimitives.ReadInt32LittleEndian(view);
             if (size <= 12)
             {
@@ -460,6 +660,13 @@ internal sealed class DistinctTable
             {
                 return;
             }
+
+            _codeKey[_nullCode] = 0;
+            if (_codeOffset is not null)
+            {
+                _codeOffset[_nullCode] = 0;
+                _codeLength![_nullCode] = 0;
+            }
         }
 
         _codes[_rows++] = _nullCode;
@@ -481,6 +688,7 @@ internal sealed class DistinctTable
 
                 _slotCode[slot] = code + 1;
                 _slotKey[slot] = key;
+                _codeKey[code] = key;
                 _codes[_rows++] = code;
                 GrowIfLoaded();
                 return;
@@ -521,6 +729,8 @@ internal sealed class DistinctTable
                 _slotKey[slot] = hash;
                 offsets[slot] = offset;
                 lengths[slot] = bytes.Length;
+                _codeOffset![code] = offset;
+                _codeLength![code] = bytes.Length;
                 _codes[_rows++] = code;
                 GrowIfLoaded();
                 return;
@@ -551,7 +761,14 @@ internal sealed class DistinctTable
         int code = _distinct++;
         if (code == _firstRows.Length)
         {
-            Grow(ref _firstRows, _firstRows.Length * 2, code);
+            int grown = _firstRows.Length * 2;
+            Grow(ref _firstRows, grown, code);
+            Grow(ref _codeKey, grown, code);
+            if (_codeOffset is not null)
+            {
+                Grow(ref _codeOffset, grown, code);
+                Grow(ref _codeLength!, grown, code);
+            }
         }
 
         _firstRows[code] = _rows;
@@ -598,11 +815,11 @@ internal sealed class DistinctTable
     }
 
     /// <summary>Rents the next size up, keeps the first <paramref name="used"/>, returns the old.</summary>
-    private static void Grow(ref int[] array, int length, int used)
+    private static void Grow<T>(ref T[] array, int length, int used)
     {
-        int[] larger = ArrayPool<int>.Shared.Rent(length);
+        T[] larger = ArrayPool<T>.Shared.Rent(length);
         array.AsSpan(0, used).CopyTo(larger);
-        ArrayPool<int>.Shared.Return(array);
+        ArrayPool<T>.Shared.Return(array);
         array = larger;
     }
 

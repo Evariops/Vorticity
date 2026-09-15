@@ -245,11 +245,16 @@ internal static class ArrayBlobWriter
             return WriteSequence(builder, arena, nodeIndex, plan.Sequence!, encodings);
         }
 
-        // The values child of both remaining schemes is the original column gathered down to its
-        // representative rows, so a dictionary of strings shares the data buffers it came from.
-        // The gathered values child is itself a column, and a dictionary of long strings is
-        // exactly the shape FSST wants underneath: compressed rather than written flat.
-        int values = CanonicalFilter.Apply(arena, nodeIndex, plan.Gather);
+        // THE VALUES CHILD COMES FROM THE TABLE WHEN THE TABLE CHOSE THE PLAN (docs/11 §3.5): the
+        // entries laid out in code order from the keys it owns, no gather over the chunk, and for
+        // strings the key heap as the data buffer. A run-end, or a dictionary the reference chooser
+        // walked for, is still the original column gathered down to its representative rows -- a
+        // dictionary of strings then shares the data buffers it came from. Either way the child is
+        // itself a column, and a dictionary of long strings is exactly the shape FSST wants
+        // underneath: compressed rather than written flat.
+        int values = plan.Table is not null
+            ? plan.Table.BuildValues(arena, arena.GetNode(nodeIndex), plan.Entries)
+            : CanonicalFilter.Apply(arena, nodeIndex, plan.Gather);
 
         return plan.Scheme == ColumnScheme.RunEnd
             ? WriteRunEnd(builder, arena, nodeIndex, values, plan, buffers, encodings)
@@ -865,7 +870,8 @@ internal static class ArrayBlobWriter
         int ends = WriteIndexColumn(
             builder, arena, nodeIndex, plan.Codes, endsPType, buffers, encodings,
             Cascade.RunEndEnds());
-        int valuesNode = WriteCompressed(builder, arena, values, buffers, encodings);
+        int valuesNode = WriteCompressed(
+            builder, arena, values, buffers, encodings, cascade: Cascade.ValuesChild());
 
         Span<int> children = stackalloc int[2];
         children[0] = ends;
@@ -889,10 +895,16 @@ internal static class ArrayBlobWriter
         // a null code. Nullness is part of the value the compressor deduplicated, so at most one
         // entry is null and every row still has a code.
         byte[] metadata = DictBytes((uint)entries, codesPType);
+
+        // The codes are the table's own buffer when the table chose the plan -- one code per row,
+        // written by the probe as the rows arrived, never copied (docs/11 §3.5) -- and the plan's
+        // array when the reference chooser walked for them.
+        ReadOnlySpan<int> codeOfRow = plan.Table is not null ? plan.Table.Codes[..plan.Rows] : plan.Codes;
         int codes = WriteIndexColumn(
-            builder, arena, nodeIndex, plan.Codes, codesPType, buffers, encodings,
+            builder, arena, nodeIndex, codeOfRow, codesPType, buffers, encodings,
             Cascade.DictionaryCodes(entries));
-        int valuesNode = WriteCompressed(builder, arena, values, buffers, encodings);
+        int valuesNode = WriteCompressed(
+            builder, arena, values, buffers, encodings, cascade: Cascade.ValuesChild());
 
         Span<int> children = stackalloc int[2];
         children[0] = codes;
@@ -928,8 +940,9 @@ internal static class ArrayBlobWriter
     /// bit-packing - so the sizes strictly decrease.
     /// </remarks>
     private static int WriteIndexColumn(
-        FlatBufferBuilder builder, CanonicalArena arena, int parentIndex, int[] values, PType ptype,
-        List<PendingBuffer> buffers, EncodingDictionary encodings, Cascade cascade = default)
+        FlatBufferBuilder builder, CanonicalArena arena, int parentIndex, ReadOnlySpan<int> values,
+        PType ptype, List<PendingBuffer> buffers, EncodingDictionary encodings,
+        Cascade cascade = default)
     {
         int width = ptype.ByteWidth();
 
@@ -982,7 +995,7 @@ internal static class ArrayBlobWriter
     /// an eight-byte slot would put pooled bytes from another file into a column the day a caller
     /// passes <c>u64</c>, and the only oracle for that is the Rust cross-check.
     /// </remarks>
-    private static void WriteIndices(int[] values, int width, Span<byte> destination)
+    private static void WriteIndices(ReadOnlySpan<int> values, int width, Span<byte> destination)
     {
         for (int i = 0; i < values.Length; i++)
         {

@@ -17,13 +17,44 @@ namespace Vorticity.Writing;
 /// <summary>What the parent knows about a child column, so the chooser need not rediscover it.</summary>
 internal readonly struct Cascade
 {
-    private Cascade(bool runs, bool dictionary, bool sequence, ulong? reference)
+    private Cascade(bool runs, bool dictionary, bool sequence, ulong? reference, bool valuesChild = false)
     {
         RunsAreDead = runs;
         DictionaryIsDead = dictionary;
         SequenceIsDead = sequence;
         Reference = reference;
+        IsValuesChild = valuesChild;
     }
+
+    /// <summary>
+    /// Whether this column is the values child of a dictionary or a run-end, so that zstd's size
+    /// gate — a cost guard for whole columns — does not close on it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY THE GATE IS LIFTED. <c>ZstdMinimumBytes</c> exists so that a zstd pass is not paid on a
+    /// column too small to repay it. Until stage R5 it could not close on a values child at all: the
+    /// child was the chunk gathered down to its first rows, SHARING the chunk's whole heap, and
+    /// <c>DataBytes</c> reported that heap as the child's size. Laying the entries out from the key
+    /// heap told the truth about the size, the gate closed on `onpair`, `zstd` and every struct of
+    /// strings, and the corpus grew by 27 072 bytes. Lifted for children, the corpus is 23 592 bytes
+    /// SMALLER than before — the gate had also been closing on children of tiny parents, where zstd
+    /// wins — and the lift allocates nothing, which was measured by closing it again: the
+    /// allocation ratchet did not move.
+    /// </para>
+    /// <para>
+    /// WHY THE MINIMUM-BYTES GUARD IS NOT. Lifting it too let FSST train on children of a few
+    /// dozen entries, and the trainer allocates its tables per call whatever the input: `variant`
+    /// went from 65 280 to 338 656 bytes of allocation for a file of 4 096 rows, `map` from 99 536
+    /// to 236 424, for about 1 200 bytes of output. That guard now reads the child's true size, and
+    /// on this corpus it cuts exactly what it should.
+    /// </para>
+    /// </remarks>
+    internal bool IsValuesChild { get; }
+
+    /// <summary>The values child of a dictionary or a run-end: a column like any other, ungated.</summary>
+    internal static Cascade ValuesChild() =>
+        new Cascade(runs: false, dictionary: false, sequence: false, reference: null, valuesChild: true);
 
     /// <summary>
     /// Whether run-end is provably declined, so the scan that would decline it need not run.
