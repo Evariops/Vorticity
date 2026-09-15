@@ -416,27 +416,33 @@ internal static class ColumnCompressor
         CanonicalArena arena, int nodeIndex, VortexEdition target = EditionRegistry.Newest,
         in BlockStats stats = default, Cascade cascade = default, ChunkStats chunk = default)
     {
-        ColumnPlan plan = ChooseToday(arena, nodeIndex, target, in stats, cascade, chunk);
-
-        // STAGE R3'S ORACLE (IMPL-PLAN.md §1.2): when a test has installed a probe, the chooser by
-        // formulas runs on the same chunk with the same inputs and the two decisions are compared
-        // plan against plan. The probe flows with the async write and nowhere else, so two tests
-        // writing at once cannot see each other's chunks.
+        // STAGE R4: THE CHOOSER BY FORMULAS IS THE CHOOSER. It decides under today's run-end rule
+        // -- run-end wins outright inside its ratio -- because that is the rule the differential
+        // proved byte-identical on 856 files; the spec's rule changes three chunks and is measured
+        // separately before it is taken.
         DifferentialProbe? probe = Differential.Value;
+        ColumnPlan plan = ChooseByFormula(
+            arena, nodeIndex, target, in stats, cascade, chunk,
+            runEndCompetes: probe is not null && probe.RunEndCompetes);
+
+        // STAGE R3'S ORACLE, ROLES SWAPPED: when a test has installed a probe, the chooser this one
+        // replaced runs on the same chunk with the same inputs and the two decisions are compared
+        // plan against plan. It stays as the reference until stage R5 makes its walks unreachable.
+        // The probe flows with the async write and nowhere else, so two tests writing at once
+        // cannot see each other's chunks.
         if (probe is not null)
         {
-            ColumnPlan other = ChooseByFormula(
-                arena, nodeIndex, target, in stats, cascade, chunk, probe.RunEndCompetes);
-            string today = plan.Describe();
-            string formula = other.Describe();
-            if (today != formula)
+            ColumnPlan reference = ChooseToday(arena, nodeIndex, target, in stats, cascade, chunk);
+            string chosen = plan.Describe();
+            string expected = reference.Describe();
+            if (chosen != expected)
             {
-                probe.Report(nodeIndex, today, formula);
+                probe.Report(nodeIndex, chosen, expected);
             }
 
-            // The second plan is thrown away, and a zstd frame among its candidates is holding a
-            // pooled buffer that nothing will write.
-            other.Zstd?.Release();
+            // The reference plan is thrown away, and a zstd frame among its candidates is holding
+            // a pooled buffer that nothing will write.
+            reference.Zstd?.Release();
         }
 
         return plan;

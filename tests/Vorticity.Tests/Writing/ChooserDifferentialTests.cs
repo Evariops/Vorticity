@@ -62,7 +62,10 @@ public sealed class ChooserDifferentialTests
 
         Console.Out.Write(report.ToString());
 
-        List<string> foreign = disagreements.FindAll(static line => !line.Contains(": runend ", StringComparison.Ordinal));
+        // Since stage R4 the chooser by formulas is the one that decides and today's is the
+        // reference, so a line reads `chosen => reference`, and run-end competing shows as a
+        // reference plan that was run-end: the marker is on the right-hand side.
+        List<string> foreign = disagreements.FindAll(static line => !line.Contains("=> runend ", StringComparison.Ordinal));
         Assert.True(
             foreign.Count == 0,
             $"{foreign.Count} disagreement(s) that are not run-end competing, which is the only " +
@@ -71,7 +74,8 @@ public sealed class ChooserDifferentialTests
 
     /// <summary>
     /// Writes every in-scope corpus file with the probe installed and collects one line per
-    /// disagreeing chunk: <c>file: today =&gt; formula</c>.
+    /// disagreeing chunk: <c>file: chosen =&gt; reference</c>, the chooser by formulas on the left
+    /// and the one it replaced on the right.
     /// </summary>
     private static async Task<List<string>> Sweep(bool runEndCompetes)
     {
