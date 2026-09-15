@@ -119,6 +119,21 @@ internal readonly struct ColumnPlan
     internal ColumnScheme Scheme { get; }
 
     /// <summary>
+    /// The bytes the chooser priced this plan at — docs/11-write-strategy.md §3.4.3's prediction,
+    /// which the encoder's actual output is checked against before the plan is reused.
+    /// </summary>
+    /// <remarks>
+    /// For an exact scheme it is the formula's number; for a trial it is the encoded size the trial
+    /// measured; for the plain column it is the plain column's bytes. Zero means "not priced" — a
+    /// plan the reference chooser produced, or a child a scheme invented — and a memory is never
+    /// formed from it.
+    /// </remarks>
+    internal long PredictedBytes { get; init; }
+
+    /// <summary>Whether plan memory produced this plan without pricing the alternatives.</summary>
+    internal bool FromMemory { get; init; }
+
+    /// <summary>
     /// The rows to gather as the values child: one per run for <see cref="ColumnScheme.RunEnd"/>,
     /// one per distinct value for <see cref="ColumnScheme.Dict"/>.
     /// </summary>
@@ -346,6 +361,12 @@ internal static class ColumnCompressor
     /// squeeze the last byte. <see cref="BitPackPlan"/> carries its own for the same reason.
     /// </summary>
     private const int DictionaryOverhead = 512;
+
+    /// <summary>
+    /// What a progression costs on the wire: one node and its metadata, no buffer
+    /// (docs/11-write-strategy.md §3.4.2, "~32 bytes").
+    /// </summary>
+    private const int SequenceBytes = 32;
 
     /// <summary>Below this many rows, a column is a candidate only if it is big in BYTES.</summary>
     private const int MinimumRows = 64;
@@ -658,7 +679,7 @@ internal static class ColumnCompressor
             AlpPlan? alp = AlpPlan.TryBuild(arena, nodeIndex, plain);
             if (alp is not null)
             {
-                return ColumnPlan.ForAlp(alp);
+                return ColumnPlan.ForAlp(alp) with { PredictedBytes = alp.EncodedSize };
             }
         }
 
@@ -716,15 +737,15 @@ internal static class ColumnCompressor
         {
             // The zstd plan lost, and it is holding a pooled buffer that nothing will write.
             zstd?.Release();
-            return ColumnPlan.ForFsst(fsst);
+            return ColumnPlan.ForFsst(fsst) with { PredictedBytes = fsst.EncodedSize };
         }
 
         if (zstd is not null)
         {
-            return ColumnPlan.ForZstd(zstd);
+            return ColumnPlan.ForZstd(zstd) with { PredictedBytes = zstd.FrameLength };
         }
 
-        return ColumnPlan.Canonical;
+        return ColumnPlan.Canonical with { PredictedBytes = plain };
     }
 
     /// <summary>
@@ -835,7 +856,8 @@ internal static class ColumnCompressor
 
             // Only here, where the plan is kept, does anything become a real array.
             return ColumnPlan.Dictionary(
-                firstRows.AsSpan(0, distinct).ToArray(), codes.AsSpan(0, length).ToArray());
+                    firstRows.AsSpan(0, distinct).ToArray(), codes.AsSpan(0, length).ToArray())
+                with { PredictedBytes = encoded + DictionaryOverhead };
         }
         finally
         {
@@ -1037,7 +1059,7 @@ internal static class ColumnCompressor
                 SequencePlan? sequence = SequencePlan.TryBuild(arena, node, stepsAreConstant: knownSteps);
                 if (sequence is not null)
                 {
-                    return ColumnPlan.ForSequence(sequence);
+                    return ColumnPlan.ForSequence(sequence) with { PredictedBytes = SequenceBytes };
                 }
             }
         }
@@ -1083,7 +1105,7 @@ internal static class ColumnCompressor
             if (!runEndCompetes && runEndCost != long.MaxValue)
             {
                 // Today's rule: inside the ratio, run-end wins before anything else is priced.
-                return MaterializeRuns(arena, in node, in comparer, length, runs, in walkedRuns);
+                return MaterializeRuns(arena, in node, in comparer, length, runs, in walkedRuns, runEndCost);
             }
         }
 
@@ -1143,10 +1165,10 @@ internal static class ColumnCompressor
         switch (bestScheme)
         {
             case ColumnScheme.RunEnd:
-                return MaterializeRuns(arena, in node, in comparer, length, runs, in walkedRuns);
+                return MaterializeRuns(arena, in node, in comparer, length, runs, in walkedRuns, runEndCost);
 
             case ColumnScheme.BitPacked:
-                return ColumnPlan.ForBitPacking(packed!);
+                return ColumnPlan.ForBitPacking(packed!) with { PredictedBytes = packed!.Cost };
 
             default:
                 return Trials(arena, nodeIndex, node, target, plain);
@@ -1156,16 +1178,14 @@ internal static class ColumnCompressor
     /// <summary>The run-end plan for a winner: one run needs no gather, a walked count already has it.</summary>
     private static ColumnPlan MaterializeRuns(
         CanonicalArena arena, in CanonicalNode node, in RowComparer comparer, int length, long runs,
-        in ColumnPlan walked)
+        in ColumnPlan walked, long cost)
     {
-        if (walked.Scheme != ColumnScheme.None)
-        {
-            return walked;
-        }
-
-        return runs == 1
-            ? ColumnPlan.Runs([0], [length])
-            : TryRuns(arena, in node, in comparer, length);
+        ColumnPlan plan = walked.Scheme != ColumnScheme.None
+            ? walked
+            : runs == 1
+                ? ColumnPlan.Runs([0], [length])
+                : TryRuns(arena, in node, in comparer, length);
+        return plan with { PredictedBytes = cost };
     }
 
     /// <summary>
@@ -1205,7 +1225,8 @@ internal static class ColumnCompressor
         // Copies, as the walk made: the plan owns its arrays and the table is about to be reset
         // for the next chunk. Stage R5 hands the table's buffers to the encoder directly.
         return ColumnPlan.Dictionary(
-            table.FirstRows[..entries].ToArray(), table.Codes[..length].ToArray());
+                table.FirstRows[..entries].ToArray(), table.Codes[..length].ToArray())
+            with { PredictedBytes = encoded + DictionaryOverhead };
     }
 
     /// <summary>

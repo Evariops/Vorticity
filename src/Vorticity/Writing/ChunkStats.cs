@@ -77,6 +77,18 @@ internal readonly struct ChunkStats
             && distinct > 0 && distinct <= table.Distinct;
     }
 
+    /// <summary>The column's memory of its last chunk (docs/11 §3.4.3), or none.</summary>
+    internal ColumnWriter.PlanMemory? Memory => _column?.Memory;
+
+    /// <summary>
+    /// Hands the column what its chunk was encoded as and what that produced, for the next chunk's
+    /// memory. An absent cursor remembers nothing, which is what a child a scheme invented gets.
+    /// </summary>
+    /// <param name="plan">The plan the encoder just wrote.</param>
+    /// <param name="actualBytes">The buffer bytes it produced.</param>
+    internal void Remember(in ColumnPlan plan, long actualBytes) =>
+        _column?.Remember(in plan, actualBytes);
+
     /// <summary>
     /// The cursor for field <paramref name="index"/>, which covers the same blocks because a
     /// struct's fields and an extension's storage are row-aligned with their parent.

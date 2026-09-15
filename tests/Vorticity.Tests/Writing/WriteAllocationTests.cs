@@ -154,7 +154,7 @@ public sealed class WriteAllocationTests
         ("encodings/pco", 64_400),
         ("encodings/zstd", 223_400),
         ("encodings/map", 100_200),
-        ("encodings/variant", 65_200),   // 65 136 mesurés (R2, 2026-09-15) : +436 B pour trois DistinctTable, un par ColumnWriter -- par colonne, pas par ligne (0,1 o/ligne), contre une passe entiere supprimee par chunk. Etait 64 700 (63 920 mesures : +320 B pour deux ColumnWriter de plus)
+        ("encodings/variant", 65_300),   // 65 232 mesurés (R5a, 2026-09-15) : +32 B pour le champ PlanMemory? de trois ColumnWriter -- par colonne, pas par ligne (0,008 o/ligne). Etait 65 200 (65 136 mesures, R2 : +436 B pour trois DistinctTable), et avant 64 700 (63 920 : +320 B pour deux ColumnWriter de plus)
 
         // THE TWO ALP SHAPES, added with W-6 because that point moved them and nothing watched it:
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a

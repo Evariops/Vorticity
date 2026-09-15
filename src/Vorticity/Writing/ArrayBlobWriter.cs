@@ -185,6 +185,34 @@ internal static class ArrayBlobWriter
         BlockStats summary = stats.Stats;
         ColumnPlan plan = ColumnCompressor.Choose(
             arena, nodeIndex, encodings.Target, in summary, cascade, stats);
+
+        // THE BYTES THE PLAN ACTUALLY PRODUCED, handed back to the column for docs/11 §3.4.3's plan
+        // memory: every buffer this node and its subtree appended, measured against what the chooser
+        // priced the plan at. Buffer bytes rather than the blob's, because the blob is one per root
+        // field and a struct's children are priced one by one; the framing they leave out is the
+        // same framing chunk after chunk, which is all a tolerance needs.
+        int firstBuffer = buffers.Count;
+        int written = WriteChosen(builder, arena, nodeIndex, in plan, buffers, encodings, stats);
+        long produced = 0;
+        for (int i = firstBuffer; i < buffers.Count; i++)
+        {
+            produced += buffers[i].Length;
+        }
+
+        stats.Remember(in plan, produced);
+        return written;
+    }
+
+    /// <summary>Writes the node the way <paramref name="plan"/> says to.</summary>
+    private static int WriteChosen(
+        FlatBufferBuilder builder,
+        CanonicalArena arena,
+        int nodeIndex,
+        in ColumnPlan plan,
+        List<PendingBuffer> buffers,
+        EncodingDictionary encodings,
+        ChunkStats stats)
+    {
         if (plan.Scheme == ColumnScheme.None)
         {
             // Not the end of it: the column itself resisted every scheme, but a struct field or a

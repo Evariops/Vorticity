@@ -287,6 +287,47 @@ internal sealed class ColumnWriter
     internal DistinctTable? Table => _table;
 
     /// <summary>
+    /// What the last chunk of this column was encoded as, what the chooser predicted it would cost,
+    /// and what the encoder actually produced — docs/11-write-strategy.md §3.4.3.
+    /// </summary>
+    /// <param name="Scheme">The plan's scheme.</param>
+    /// <param name="Predicted">The chooser's bytes for it.</param>
+    /// <param name="Actual">The buffer bytes the encoder wrote for it.</param>
+    internal readonly record struct PlanMemory(ColumnScheme Scheme, long Predicted, long Actual)
+    {
+        /// <summary>§3.4.3's <c>plan_tolerance</c>: five per cent, as a ratio of the prediction.</summary>
+        private const long TolerancePercent = 5;
+
+        /// <summary>
+        /// Whether the prediction held: the actual bytes are within the tolerance of it, so the
+        /// next chunk may reuse the plan without pricing the alternatives.
+        /// </summary>
+        internal bool WithinTolerance =>
+            Predicted > 0 && Math.Abs(Actual - Predicted) * 100 <= Predicted * TolerancePercent;
+    }
+
+    /// <summary>The memory of the last chunk written, or none for the first.</summary>
+    internal PlanMemory? Memory { get; private set; }
+
+    /// <summary>
+    /// Records what the chunk just written was encoded as, against what it was priced at.
+    /// </summary>
+    /// <remarks>
+    /// STORED, NOT YET CONSULTED: this commit lays the accounting down and proves it costs nothing
+    /// — every byte identical — before the next one lets the chooser short-circuit on it and the
+    /// table go dead on it. A plan that was never priced (a child a scheme invented, the reference
+    /// chooser's) leaves no memory, because a memory whose prediction is zero can never hold.
+    /// </remarks>
+    /// <param name="plan">The plan the encoder just wrote.</param>
+    /// <param name="actualBytes">The buffer bytes it produced, this column's subtree included.</param>
+    internal void Remember(in ColumnPlan plan, long actualBytes)
+    {
+        Memory = plan.PredictedBytes > 0
+            ? new PlanMemory(plan.Scheme, plan.PredictedBytes, actualBytes)
+            : null;
+    }
+
+    /// <summary>
     /// What the table held when block <paramref name="block"/> closed: the distinct count and the
     /// heap bytes, which bound a chunk ending at that block. <c>(-1, 0)</c> when unknown.
     /// </summary>
