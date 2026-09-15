@@ -37,17 +37,36 @@ public class RowEncodingBenchmarks
     private IAsyncEnumerator<RecordBatch>? _batches;
     private RecordBatch? _batch;
     private RowSortField[] _fields = [];
+    private int[] _order = [];
 
     /// <summary>
     /// The file whose first batch is encoded.
     /// </summary>
     /// <remarks>
-    /// A struct root is required - row encoding is about ordering tuples. `struct_root_all_dtypes`
-    /// would have been the interesting one and cannot be used: it carries a `vortex.map`, which this
-    /// build does not decode, so the batch never arrives. These two differ in width and nullability
-    /// instead.
+    /// A struct root is required - row encoding is about ordering tuples. The first two differ in
+    /// width and nullability; neither has a decimal column or a nested field, so `EncodeDecimal` and
+    /// the per-nested-field `ArrayPool.Rent` made ZERO calls and nothing measured them
+    /// (BENCH-AUDIT.md B20).
+    /// <para>
+    /// `chunked_decimal_r1025` is the third case, and ONE file covers both missing sites: four
+    /// Decimal(18,4) chunks carried as a struct field, so `EncodeDecimal` runs 368 108 times and the
+    /// per-nested-field `ArrayPool.Rent` runs twice, where both were at zero.
+    /// </para>
+    /// <para>
+    /// THREE OTHER CANDIDATES WERE TRIED AND ARE OUT OF REACH, which is worth writing down so the
+    /// next person does not try them again. `struct_root_all_dtypes` was the obvious one and the
+    /// remark here used to exclude it for a reason that has since expired -- "carries a
+    /// `vortex.map`, which this build does not decode" -- but it fails for a real one:
+    /// <c>dtype 'decimal256'. Row encoding is not defined for 256-bit decimals</c>.
+    /// `fixed_size_list_r1025` has no struct root, so there are no columns to encode.
+    /// `struct_nested_deep_nonnull_r8193` carries a `list`, and row encoding refuses it by contract:
+    /// the format defines no ordering for variable-size lists.
+    /// </para>
     /// </remarks>
-    [Params("containers/zoned_many_zones_nulls", "containers/uncompressed_canonical")]
+    [Params(
+        "containers/zoned_many_zones_nulls",
+        "containers/uncompressed_canonical",
+        "encodings/chunked_decimal_r1025")]
     public string Entry { get; set; } = "containers/zoned_many_zones_nulls";
 
     /// <summary>Rows in the batch under test, for the ns/row figure.</summary>
@@ -69,7 +88,7 @@ public class RowEncodingBenchmarks
         _batch = _batches.Current;
         _fields = new RowSortField[_batch.FieldCount];
         Array.Fill(_fields, RowSortField.Ascending);
-
+        _order = new int[_batch.RowCount];
     }
 
     /// <summary>
@@ -133,5 +152,32 @@ public class RowEncodingBenchmarks
     {
         using RowKeys keys = RowEncoder.Encode(_batch!, _fields);
         return keys.TotalBytes;
+    }
+
+    /// <summary>Encode, then order the rows through <see cref="RowKeys.Compare"/>.</summary>
+    /// <returns>The first row of the ordering, so the sort is not elided.</returns>
+    /// <remarks>
+    /// THE ONLY CALLER OF `Compare` IN THE REPOSITORY, outside its own `IComparer` (BENCH-AUDIT.md
+    /// B20). Encoding to comparable bytes is worth exactly what comparing them is worth, and that
+    /// half had never been timed.
+    /// <para>
+    /// The encode is INSIDE the arm rather than hoisted into setup, because `RowKeys` owns pooled
+    /// arrays it returns on Dispose: holding one across iterations would measure a sort over a
+    /// pool that the encode arm keeps churning. The difference between the two arms is therefore
+    /// the sort, and the encode is the control.
+    /// </para>
+    /// </remarks>
+    [Benchmark(Description = "encode, then sort rows by key")]
+    public int EncodeAndSort()
+    {
+        using RowKeys keys = RowEncoder.Encode(_batch!, _fields);
+        Span<int> order = _order;
+        for (int i = 0; i < order.Length; i++)
+        {
+            order[i] = i;
+        }
+
+        keys.SortIndices(order);
+        return order.Length == 0 ? 0 : order[0];
     }
 }
