@@ -38,7 +38,18 @@ public sealed class WrittenSizeTests
     /// failing number and become a guard on a passing one: the target itself would no longer
     /// notice a regression.
     /// </summary>
-    private const double CorpusCeiling = 0.67;
+    /// <remarks>
+    /// 0.67 -> 0.65 on 2026-09-15 (BENCH-AUDIT.md B18). Measured that day: 856 files, 10 254 248
+    /// bytes against the reference's 15 984 453, ratio **0.641514**. At 0.67 that was **4,44 % of
+    /// slack** -- the improvements had landed and the hand had not followed, which is the same
+    /// species as B13 and B14: a reference that does not come down stops guarding.
+    /// <para>
+    /// 0.65 leaves **1,32 %**, so a 1,5 % size regression is red. Not tighter on purpose: 0.645
+    /// would leave 0,54 % and would trip on a corpus addition rather than on a regression, and
+    /// 0.651 would sit exactly on the criterion with nothing in hand.
+    /// </para>
+    /// </remarks>
+    private const double CorpusCeiling = 0.65;
 
     /// <summary>How many of the worst offenders to name, so the number is actionable.</summary>
     private const int Worst = 12;
