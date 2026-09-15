@@ -78,13 +78,57 @@ internal static class BlockStatsPass
 
                 return;
 
+            case CanonicalKind.VarBinView:
+                // No bounds: utf8 and binary have a perfectly good lexicographic min/max and no
+                // place to put it without a second varbinview per zone. Their BYTES, on the other
+                // hand, are what `ColumnCompressor.PlainBinarySize` walked the views to add up, once
+                // per column, to price the varbin form against the view form -- so the sum is taken
+                // here, where the views are in cache and the pass is already reading them.
+                if (valid > 0)
+                {
+                    stats.TotalBytes += ViewBytes(node, in mask, start, count, valid);
+                }
+
+                return;
+
             default:
-                // Utf8 and binary have a perfectly good lexicographic min/max and no place to put it
-                // without a second varbinview per zone; every other kind has no scalar bound at all.
-                // Such a column still gets a zone map, with the null count alone, which is what
-                // IS NULL pruning runs on.
+                // Every other kind has no scalar bound at all, and still gets a zone map with the
+                // null count alone, which is what IS NULL pruning runs on.
                 return;
         }
+    }
+
+    /// <summary>The bytes of the valid values in the range: what a <c>vortex.varbin</c> heap holds.</summary>
+    /// <remarks>
+    /// The size is the view's first four bytes whatever the value's form, inline or out of line, so
+    /// this reads one field per row and never follows a view to its data buffer.
+    /// </remarks>
+    private static long ViewBytes(
+        CanonicalNode node, in ValidityMask mask, int start, int count, int valid)
+    {
+        ReadOnlySpan<byte> views = node.Views.Span;
+        long total = 0;
+
+        if (valid == count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                total += BinaryPrimitives.ReadUInt32LittleEndian(views.Slice((start + i) * 16, 4));
+            }
+
+            return total;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            int row = start + i;
+            if (mask.IsValid(row))
+            {
+                total += BinaryPrimitives.ReadUInt32LittleEndian(views.Slice(row * 16, 4));
+            }
+        }
+
+        return total;
     }
 
     /// <summary>Adds the range's nulls to <paramref name="stats"/> and returns its valid rows.</summary>

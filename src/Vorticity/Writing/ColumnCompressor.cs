@@ -367,12 +367,25 @@ internal static class ColumnCompressor
     /// write then fails at serialization because the target does not contain its id. Failing the
     /// write is the right last-resort assertion; it must never be the nominal path.
     /// </param>
+    /// <param name="stats">
+    /// What the ingest pass already measured over exactly these rows
+    /// (docs/11-write-strategy.md §8 stage 2). A candidate that can be priced from them is priced
+    /// from them and runs no pass of its own.
+    /// <para>
+    /// IT IS CHECKED AGAINST THE NODE rather than trusted. A summary whose row count disagrees with
+    /// the column is not this column's, and the only honest answer is to measure — which is what
+    /// every candidate did before this parameter existed, so a plumbing slip costs a pass and can
+    /// never produce a wrong plan. A child of a cascade passes none, and takes that path.
+    /// </para>
+    /// </param>
     /// <returns>The plan; <see cref="ColumnPlan.Canonical"/> when nothing wins.</returns>
     internal static ColumnPlan Choose(
-        CanonicalArena arena, int nodeIndex, VortexEdition target = EditionRegistry.Newest)
+        CanonicalArena arena, int nodeIndex, VortexEdition target = EditionRegistry.Newest,
+        in BlockStats stats = default)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         int length = node.Length;
+        bool measured = stats.IsPresent && stats.Rows == length;
         if (!IsComparable(node.Kind) || (length < MinimumRows && DataBytes(node) < MinimumBytes))
         {
             return ColumnPlan.Canonical;
@@ -423,9 +436,19 @@ internal static class ColumnCompressor
 
         // Dense integers: a column of a million distinct measurements has no dictionary worth
         // building and a very good bit width.
-        BitPackPlan? packed = Allows(target, "fastlanes.bitpacked")
-            ? BitPackPlan.TryBuild(arena, node, zigzag: Allows(target, "vortex.zigzag"))
-            : null;
+        // THE FRAME OF REFERENCE IS THE COLUMN'S MINIMUM, which the ingest pass already has: a whole
+        // pass over every row of every integer column, deleted. An all-null column is decided here
+        // too -- `BitPackPlan` has nothing to measure a width against and says so -- so that case
+        // does not walk the rows to rediscover it either.
+        bool integers = node.Kind == CanonicalKind.Primitive && node.PType.IsInteger();
+        BitPackPlan? packed = null;
+        if (Allows(target, "fastlanes.bitpacked") && !(measured && integers && !stats.HasBounds))
+        {
+            packed = BitPackPlan.TryBuild(
+                arena, node, zigzag: Allows(target, "vortex.zigzag"),
+                reference: measured && integers ? Reference(node, in stats) : null);
+        }
+
         if (packed is not null && packed.Transform == BitPackTransform.Frame
             && !Allows(target, "fastlanes.for"))
         {
@@ -439,7 +462,7 @@ internal static class ColumnCompressor
         // nullable integer column a dictionary was already handling better. Both are priced in
         // bytes; whichever is cheaper wins.
         long plain = node.Kind == CanonicalKind.VarBinView
-            ? PlainBinarySize(arena, node)
+            ? PlainBinarySize(arena, node, measured ? stats.TotalBytes : -1)
             : DataBytes(node);
 
         // A second pass for distinct values, over a column the runs did not capture. The run count
@@ -729,25 +752,52 @@ internal static class ColumnCompressor
     /// (16 bytes of view per row plus its data buffers) and <c>vortex.varbin</c> (one offset per
     /// row plus a contiguous heap).
     /// </summary>
-    private static long PlainBinarySize(CanonicalArena arena, CanonicalNode node)
+    /// <remarks>
+    /// <c>heapBytes</c> is the valid values' bytes when the ingest pass already added them up
+    /// (<see cref="BlockStats.TotalBytes"/>), or <c>-1</c> to walk the views here. The walk is one
+    /// pass over every row of every string column of the file, run once per chunk to answer a
+    /// question the pass that already read those views could answer for free.
+    /// </remarks>
+    private static long PlainBinarySize(CanonicalArena arena, CanonicalNode node, long heapBytes)
     {
         long viewForm = DataBytes(node);
+        long heap = heapBytes;
 
-        long heap = 0;
-        ValidityMask mask = ValidityMask.From(arena, node.Validity);
-        ReadOnlySpan<byte> views = node.Views.Span;
-        for (int i = 0; i < node.Length; i++)
+        if (heap < 0)
         {
-            if (mask.IsValid(i))
+            heap = 0;
+            ValidityMask mask = ValidityMask.From(arena, node.Validity);
+            ReadOnlySpan<byte> views = node.Views.Span;
+            for (int i = 0; i < node.Length; i++)
             {
-                heap += System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
-                    views.Slice(i * 16, 4));
+                if (mask.IsValid(i))
+                {
+                    heap += System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                        views.Slice(i * 16, 4));
+                }
             }
         }
 
         long varbinForm = (((long)node.Length + 1) * FsstPlan.IndexPType(heap).ByteWidth()) + heap;
         return Math.Min(viewForm, varbinForm);
     }
+
+    /// <summary>
+    /// The frame of reference the ingest pass already found: the column's minimum, as the raw bits
+    /// <see cref="BitPackPlan"/> subtracts.
+    /// </summary>
+    /// <remarks>
+    /// Two's complement for a signed column, the value itself for an unsigned one — which is exactly
+    /// what <c>BitPackPlan.Minimum</c> produced from its own pass over every row.
+    /// <see langword="null"/> when no row is valid, which is that pass's "nothing to measure a width
+    /// against".
+    /// </remarks>
+    private static ulong? Reference(CanonicalNode node, in BlockStats stats) =>
+        !stats.HasBounds
+            ? null
+            : node.PType.IsSignedInteger()
+                ? unchecked((ulong)stats.Min.SignedValue)
+                : stats.Min.UnsignedValue;
 
     /// <summary>Whether the target edition carries the array id a scheme would emit.</summary>
     private static bool Allows(VortexEdition target, string id) =>

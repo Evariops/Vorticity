@@ -94,6 +94,25 @@ public sealed class VortexFileWriter : IAsyncDisposable
     /// <summary>Rows already folded into the open block, below <see cref="_blockRows"/>.</summary>
     private int _blockFilled;
 
+    /// <summary>Blocks the chunks emitted so far have consumed; the next chunk starts here.</summary>
+    private int _emittedBlocks;
+
+    /// <summary>
+    /// (Column chunk, field) pairs the chooser had to measure itself because the block range handed
+    /// to it did not cover them.
+    /// </summary>
+    /// <remarks>
+    /// THE FALLBACK IS SILENT BY DESIGN AND THAT IS EXACTLY WHY THIS EXISTS. `Choose` checks the row
+    /// count and measures the column when it disagrees, so a wrong block range costs a pass and
+    /// never a wrong plan -- which means `WrittenSizeTests` would stay byte-exact while every
+    /// candidate quietly went back to walking the rows, and the whole of stage 2 would be undone by
+    /// an off-by-one nobody could see. `StatisticsTests` holds this at zero over a range of batch
+    /// shapes; it is the only thing that can.
+    /// </remarks>
+    internal long ChunksWithoutStatistics => _chunksWithoutStatistics;
+
+    private long _chunksWithoutStatistics;
+
     /// <summary>Canonical bytes to accumulate before emitting, or 0 for no byte threshold.</summary>
     private readonly long _blockBytes;
 
@@ -525,6 +544,15 @@ public sealed class VortexFileWriter : IAsyncDisposable
     private async ValueTask EmitChunkAsync(
         CanonicalArena arena, int rootIndex, long rows, CancellationToken cancellationToken)
     {
+        // WHICH BLOCKS THIS CHUNK COVERS. A chunk is emitted in whole multiples of the block length
+        // and chunks start at row 0, so a chunk is a contiguous, block-aligned range and its
+        // statistics are the sum of its blocks' -- docs/11-write-strategy.md §3.3. The last chunk of
+        // the file may end inside a block, which is why the count rounds up. With repartitioning off
+        // the batch is both the chunk and the block, so the range is one.
+        int blocks = _blockRows > 0
+            ? checked((int)((rows + _blockRows - 1) / _blockRows))
+            : 1;
+
         for (int field = 0; field < _fieldCount; field++)
         {
             int node = _isTabular ? arena.GetNode(rootIndex).GetFieldIndex(field) : rootIndex;
@@ -545,12 +573,23 @@ public sealed class VortexFileWriter : IAsyncDisposable
                 node = ChunkCompactor.Compact(arena, node);
             }
 
+            // THE CHUNK'S STATISTICS, HANDED TO THE CHOOSER. They were computed at ingest over
+            // exactly these rows, so every candidate that used to measure the column again reads
+            // them instead. `Choose` checks the row count against the node it is given and falls
+            // back to measuring when they disagree, so this can only ever cost a pass.
+            BlockStats stats = _columns[field].Chunk(_emittedBlocks, blocks);
+            if (stats.Rows != rows)
+            {
+                _chunksWithoutStatistics++;
+            }
+
             using ArrayBlobWriter.BlobLease blob =
-                ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress);
+                ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress, in stats);
             _columnSegments[field].Add(
                 await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false));
         }
 
+        _emittedBlocks += blocks;
         _chunkRows.Add(rows);
         _rowCount += rows;
     }
@@ -569,8 +608,21 @@ public sealed class VortexFileWriter : IAsyncDisposable
         // A file with no batches still has to start with the magic.
         await StartAsync(cancellationToken).ConfigureAwait(false);
 
-        // The last block goes out whatever its size: the row-block multiple and the byte target are
-        // conditions on the blocks BEFORE the last one, exactly as upstream has it.
+        // THE TRAILING BLOCK IS CLOSED BEFORE THE LAST CHUNK GOES OUT, and the order is
+        // load-bearing: the chunk emitted below covers this block, and `EmitChunkAsync` reads the
+        // CLOSED blocks to hand the chooser its statistics. Closing afterwards would hand it an
+        // absent summary for the one chunk most files have.
+        //
+        // The file's last block is short unless the row count is a multiple of the block length, and
+        // a short LAST zone is exactly what the format allows. Closing it here rather than at ingest
+        // is what makes "short" mean "the file ended", never "the batch ended".
+        if (_blockFilled > 0)
+        {
+            CloseBlock();
+        }
+
+        // The last chunk goes out whatever its size: the row-block multiple and the byte target are
+        // conditions on the chunks BEFORE the last one, exactly as upstream has it.
         if (_pendingRows > 0)
         {
             ScanContext from = _transit![_current]!;
@@ -582,14 +634,6 @@ public sealed class VortexFileWriter : IAsyncDisposable
                     System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending));
             await EmitChunkAsync(from.Canonical, whole, total, cancellationToken).ConfigureAwait(false);
             ResetTransit();
-        }
-
-        // The file's last block is short unless the row count is a multiple of the block length,
-        // and a short LAST zone is exactly what the format allows. Closing it here rather than at
-        // ingest is what makes "short" mean "the file ended", never "the batch ended".
-        if (_blockFilled > 0)
-        {
-            CloseBlock();
         }
 
         // The zones arrays are segments like any other and must be written BEFORE the footer that

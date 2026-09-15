@@ -52,10 +52,21 @@ internal struct BlockStats
     private double _maxFloat;
 
     /// <summary>Rows accumulated into this block so far.</summary>
+    /// <remarks>
+    /// ALSO THE PRESENCE TEST. A block or a chunk always has rows, so <c>Rows == 0</c> means "no
+    /// statistics were computed for this node" -- which is what a child of a cascade gets, since the
+    /// ingest pass summarizes the file's columns and not the arrays a scheme invents beneath them.
+    /// </remarks>
     internal long Rows;
 
     /// <summary>How many of them are null.</summary>
     internal long NullCount;
+
+    /// <summary>
+    /// For utf8 and binary: the bytes of the valid values, which is the heap a <c>vortex.varbin</c>
+    /// form would carry. Zero for every other kind.
+    /// </summary>
+    internal long TotalBytes;
 
     /// <summary>
     /// Whether this column's canonical form has a min/max a zone map can carry at all.
@@ -94,6 +105,50 @@ internal struct BlockStats
         BoundDomain.Float => FilterLiteral.From(_maxFloat),
         _ => default,
     };
+
+    /// <summary>Whether anything was computed for this node.</summary>
+    internal readonly bool IsPresent => Rows > 0;
+
+    /// <summary>
+    /// Folds a whole summary in, which is how a chunk is made from the blocks it covers.
+    /// </summary>
+    /// <remarks>
+    /// Exact, and that is the property stage 1 built the accumulators for: counts add, bounds take
+    /// the extreme of the two, and the domain comes from whichever side has one. A chunk is a whole
+    /// number of blocks by construction (docs/11-write-strategy.md §3.1), so this is the only merge
+    /// the chooser ever needs.
+    /// </remarks>
+    /// <param name="other">The summary to fold in; a default one is a no-op.</param>
+    internal void Merge(in BlockStats other)
+    {
+        if (!other.IsPresent)
+        {
+            return;
+        }
+
+        Rows += other.Rows;
+        NullCount += other.NullCount;
+        TotalBytes += other.TotalBytes;
+        IsSummarizable |= other.IsSummarizable;
+
+        if (!other.HasBounds)
+        {
+            return;
+        }
+
+        switch (other.Domain)
+        {
+            case BoundDomain.Signed:
+                MergeSigned(other._minSigned, other._maxSigned);
+                return;
+            case BoundDomain.Unsigned:
+                MergeUnsigned(other._minUnsigned, other._maxUnsigned);
+                return;
+            default:
+                MergeFloat(other._minFloat, other._maxFloat);
+                return;
+        }
+    }
 
     /// <summary>Folds one signed bound pair in, widening to the accumulator's domain.</summary>
     /// <param name="min">The smallest value the caller saw.</param>

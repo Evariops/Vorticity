@@ -110,8 +110,15 @@ internal sealed class BitPackPlan
     /// Whether <c>vortex.zigzag</c> may be emitted. A candidate the target edition does not carry
     /// is not weighed and then discarded; it is never weighed, so the frame's own answer stands.
     /// </param>
+    /// <param name="reference">
+    /// The column's minimum in raw bits, when the ingest pass has already found it
+    /// (docs/11-write-strategy.md §8 stage 2); <see langword="null"/> to measure it here.
+    /// <see cref="Minimum"/> is a whole pass over every row, run on every integer column of every
+    /// file to recompute a number the zone map's own pass produced.
+    /// </param>
     /// <returns>The plan, or <see langword="null"/> when packing does not pay.</returns>
-    internal static BitPackPlan? TryBuild(CanonicalArena arena, CanonicalNode node, bool zigzag = true)
+    internal static BitPackPlan? TryBuild(
+        CanonicalArena arena, CanonicalNode node, bool zigzag = true, ulong? reference = null)
     {
         if (node.Kind != CanonicalKind.Primitive || !node.PType.IsInteger())
         {
@@ -125,7 +132,12 @@ internal sealed class BitPackPlan
         ReadOnlySpan<byte> values = node.Values.Span;
         PType raw = ToUnsigned(ptype);
 
-        if (!Minimum(length, mask, values, ptype, out ulong reference))
+        ulong minimum;
+        if (reference is ulong known)
+        {
+            minimum = known;
+        }
+        else if (!Minimum(length, mask, values, ptype, out minimum))
         {
             // Every row is null, or there are no rows: nothing to measure a width against.
             return null;
@@ -156,7 +168,7 @@ internal sealed class BitPackPlan
             }
 
             ulong bits = CompressedValues.ReadUnsigned(values, raw, row);
-            frames[BitLength(Frame(bits, reference, elementBits))]++;
+            frames[BitLength(Frame(bits, minimum, elementBits))]++;
             if (signed)
             {
                 zigzags[BitLength(ZigZag(bits, elementBits))]++;
@@ -184,7 +196,7 @@ internal sealed class BitPackPlan
             return null;
         }
 
-        ulong transformReference = best.Transform == BitPackTransform.Frame ? reference : 0;
+        ulong transformReference = best.Transform == BitPackTransform.Frame ? minimum : 0;
         (int[] indices, ulong[] patched) = Collect(
             length, mask, values, raw, best, transformReference, elementBits);
 

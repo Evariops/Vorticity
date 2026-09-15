@@ -55,10 +55,16 @@ internal static class ArrayBlobWriter
     /// <param name="nodeIndex">The node to write.</param>
     /// <param name="encodings">The file's array-encoding dictionary, extended as needed.</param>
     /// <param name="compress">Whether to let ColumnCompressor pick an encoding for the column.</param>
+    /// <param name="stats">
+    /// What the ingest pass measured over this chunk's rows, when the caller has it; a default
+    /// summary makes every candidate measure the column itself, as it did before stage 2 of
+    /// docs/11-write-strategy.md §8.
+    /// </param>
     /// <returns>The blob.</returns>
     /// <exception cref="NotSupportedException">The canonical form has no writer.</exception>
     internal static BlobLease Write(
-        CanonicalArena arena, int nodeIndex, EncodingDictionary encodings, bool compress = false)
+        CanonicalArena arena, int nodeIndex, EncodingDictionary encodings, bool compress = false,
+        in BlockStats stats = default)
     {
         List<PendingBuffer> buffers = [];
         using FlatBufferBuilder builder = new FlatBufferBuilder();
@@ -68,7 +74,7 @@ internal static class ArrayBlobWriter
         // of them add canonical nodes to the arena -- the gathered values child -- and a
         // FlatBuffers table cannot be open while that happens.
         int root = compress
-            ? WriteCompressed(builder, arena, nodeIndex, buffers, encodings)
+            ? WriteCompressed(builder, arena, nodeIndex, buffers, encodings, in stats)
             : WriteNode(builder, arena, nodeIndex, buffers, encodings, compress: false);
 
         // The Buffer vector records what the layout below will actually write, so the paddings have
@@ -153,13 +159,20 @@ internal static class ArrayBlobWriter
     /// needs the integer kernels this build does not have yet, and applying a scheme inside a
     /// struct or a list would change shapes the reader derives top-down. One level is what can be
     /// done correctly today (docs/90-registry.md).
+    /// <para>
+    /// <c>stats</c> is the chunk's ingest statistics when this node is one of the file's own
+    /// columns, and a default summary for a child a scheme invented — which the chooser then
+    /// measures itself (docs/11-write-strategy.md §3.4.4 turns those into cascade context in a later
+    /// stage).
+    /// </para>
     /// </remarks>
     private static int WriteCompressed(
         FlatBufferBuilder builder,
         CanonicalArena arena,
         int nodeIndex,
         List<PendingBuffer> buffers,
-        EncodingDictionary encodings)
+        EncodingDictionary encodings,
+        in BlockStats stats = default)
     {
         // Z1b-c2b: a constant node is materialized HERE, before the compressor looks at it, and the
         // first attempt did it lower down -- inside WriteNode -- which produced a file of 33 676
@@ -168,7 +181,7 @@ internal static class ArrayBlobWriter
         // `Choose` puts the writer back on exactly the path it took before the switch existed, which
         // is what makes the bytes identical rather than merely close.
         nodeIndex = Materialize(arena, nodeIndex);
-        ColumnPlan plan = ColumnCompressor.Choose(arena, nodeIndex, encodings.Target);
+        ColumnPlan plan = ColumnCompressor.Choose(arena, nodeIndex, encodings.Target, in stats);
         if (plan.Scheme == ColumnScheme.None)
         {
             // Not the end of it: the column itself resisted every scheme, but a struct field or a

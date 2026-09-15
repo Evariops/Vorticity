@@ -29,6 +29,35 @@ internal sealed class ColumnWriter
     internal IReadOnlyList<BlockStats> Blocks => _closed;
 
     /// <summary>
+    /// The statistics of <paramref name="count"/> blocks starting at <paramref name="first"/>: what
+    /// a chunk covering them is, for the chooser.
+    /// </summary>
+    /// <remarks>
+    /// A chunk is a whole number of blocks (docs/11-write-strategy.md §3.1), so this is a sum and
+    /// never an approximation. An out-of-range request returns an absent summary rather than
+    /// throwing: a chooser with no statistics measures the column itself, which is exactly what it
+    /// did before this existed, so a plumbing slip costs a pass and never a wrong plan.
+    /// </remarks>
+    /// <param name="first">The first block of the chunk.</param>
+    /// <param name="count">How many blocks it covers.</param>
+    /// <returns>The merged summary, or a default one when the range is not fully closed.</returns>
+    internal BlockStats Chunk(int first, int count)
+    {
+        if (first < 0 || count <= 0 || first + count > _closed.Count)
+        {
+            return default;
+        }
+
+        BlockStats merged = default;
+        for (int i = 0; i < count; i++)
+        {
+            merged.Merge(_closed[first + i]);
+        }
+
+        return merged;
+    }
+
+    /// <summary>
     /// Folds rows <c>[start, start + count)</c> of <paramref name="nodeIndex"/> into the open block.
     /// </summary>
     /// <param name="arena">The arena holding the batch.</param>
