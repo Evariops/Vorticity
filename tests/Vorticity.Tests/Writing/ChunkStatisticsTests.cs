@@ -66,6 +66,7 @@ public sealed class ChunkStatisticsTests
         try
         {
             long missing;
+            long noTable;
             long rows;
             await using (VortexFile source = await VortexFile.OpenAsync(
                 Corpus.Path(id), CancellationToken.None))
@@ -82,6 +83,7 @@ public sealed class ChunkStatisticsTests
 
                 await writer.CompleteAsync(CancellationToken.None);
                 missing = writer.ChunksWithoutStatistics;
+                noTable = writer.ChunksWithoutTable;
                 rows = writer.RowCount;
             }
 
@@ -90,6 +92,18 @@ public sealed class ChunkStatisticsTests
                 missing == 0,
                 $"{id} at batch {batchRows}, block {rowBlock?.ToString() ?? "null"}: {missing} " +
                 "column chunk(s) fell back to measuring themselves, so stage 2 did nothing for them");
+
+            // THE SAME RATCHET FOR THE DISTINCT TABLE (docs/11 §3.2.2, stage R2): the walk it
+            // replaces is byte-identical to it by construction, so a table that quietly stopped
+            // serving -- a chunk whose last block never recorded its count, a tail re-probed in the
+            // wrong order -- would keep every byte-exact test green while the chooser walked every
+            // chunk again. Held at zero over the same batch shapes, straddling and carried tails
+            // included, because those are exactly the shapes that decide the table's lifetime.
+            Assert.True(
+                noTable == 0,
+                $"{id} at batch {batchRows}, block {rowBlock?.ToString() ?? "null"}: {noTable} " +
+                "column chunk(s) of a comparable kind were walked for their dictionary because the " +
+                "distinct table could not serve them");
         }
         finally
         {

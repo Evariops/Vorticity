@@ -78,6 +78,32 @@ internal sealed class ColumnWriter
     private int[]? _openWidths;
 
     /// <summary>
+    /// The chunk's running distinct table (docs/11-write-strategy.md §3.2.2), created on the first
+    /// range of a comparable column and reused, reset, for every chunk after.
+    /// </summary>
+    private DistinctTable? _table;
+
+    /// <summary>
+    /// Whether a dictionary has a consumer, so the table should run at all. The writer sets it from
+    /// the edition; §3.2.2's plan memory will narrow it per chunk.
+    /// </summary>
+    internal bool DictionaryLive { get; set; } = true;
+
+    /// <summary>
+    /// Per closed block, in block order: how many distinct values and how many heap bytes the table
+    /// held when that block closed — the two numbers that bound a chunk ending there.
+    /// </summary>
+    /// <remarks>
+    /// THIS IS WHAT MAKES THE TAIL HARMLESS. A chunk closes at a block boundary, and the table has
+    /// by then probed rows beyond it. Because codes are handed out in order of first appearance,
+    /// the codes used by the chunk's rows are exactly <c>[0, distinct-at-close)</c>, and the heap
+    /// bytes those entries own are exactly <c>heap-at-close</c>: the entries above are the tail's
+    /// and are not part of this chunk. Recorded at every close so that whichever block ends the
+    /// chunk, the answer is one lookup.
+    /// </remarks>
+    private readonly List<(int Distinct, long Heap)> _tableAtClose = [];
+
+    /// <summary>
     /// The column's last row, which outlives both the batch it came in and the block it fell in.
     /// </summary>
     /// <remarks>
@@ -141,6 +167,15 @@ internal sealed class ColumnWriter
         Span<int> widths =
             _openWidths is null ? default : _openWidths.AsSpan(0, BitPackWidths.Length);
         BlockStatsPass.Accumulate(arena, nodeIndex, start, count, ref _open, _previous, widths);
+
+        // THE DISTINCT TABLE RUNS ON THE SAME ROWS, RIGHT AFTER: the statistics pass has just loaded
+        // them, so the probe pays its hash and its compare and none of its loads. Created on the
+        // first range of a comparable column, and only while a dictionary has a consumer.
+        if (DictionaryLive)
+        {
+            _table ??= DistinctTable.For(node);
+            _table?.Probe(arena, node, start, count);
+        }
 
         switch (node.Kind)
         {
@@ -230,6 +265,12 @@ internal sealed class ColumnWriter
             }
         }
 
+        // THE TABLE FORGETS THE CHUNK HERE, AND THE TAIL COMES BACK THROUGH `Reprobe`. Every entry
+        // it held is either emitted -- and an emitted value is new again in the next chunk -- or
+        // belongs to rows the writer is about to carry over and hand back. Nothing survives a chunk
+        // except the buffers.
+        _table?.Reset();
+
         ColumnWriter[]? children = _children;
         if (children is null)
         {
@@ -239,6 +280,59 @@ internal sealed class ColumnWriter
         for (int i = 0; i < children.Length; i++)
         {
             children[i].ReleaseChunk(first, count);
+        }
+    }
+
+    /// <summary>The chunk's distinct table, or <see langword="null"/> when none runs here.</summary>
+    internal DistinctTable? Table => _table;
+
+    /// <summary>
+    /// What the table held when block <paramref name="block"/> closed: the distinct count and the
+    /// heap bytes, which bound a chunk ending at that block. <c>(-1, 0)</c> when unknown.
+    /// </summary>
+    /// <param name="block">The block, counted from row 0 of the file.</param>
+    internal (int Distinct, long Heap) TableAtClose(int block) =>
+        (uint)block < (uint)_tableAtClose.Count ? _tableAtClose[block] : (-1, 0);
+
+    /// <summary>
+    /// Probes rows <c>[start, start + count)</c> into the table only — the statistics already hold
+    /// them — all the way down the tree.
+    /// </summary>
+    /// <remarks>
+    /// FOR THE CARRIED TAIL, AND FOR NOTHING ELSE. After a chunk is emitted, the rows the writer
+    /// carries into the next one were probed under the OLD chunk's codes, some of them against
+    /// entries that have just been written out; in the new chunk those values are new. Their block
+    /// statistics are untouched — the open block is still the open block — so only the table sees
+    /// them again, in the order the next chunk will hold them, which is first.
+    /// </remarks>
+    /// <param name="arena">The arena holding the carried rows.</param>
+    /// <param name="nodeIndex">This column inside them.</param>
+    /// <param name="start">First row of the range, inside the node.</param>
+    /// <param name="count">How many rows.</param>
+    internal void Reprobe(CanonicalArena arena, int nodeIndex, int start, int count)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        _table?.Probe(arena, node, start, count);
+
+        switch (node.Kind)
+        {
+            case CanonicalKind.Struct:
+            {
+                ColumnWriter[] children = Children(node.FieldCount);
+                for (int i = 0; i < children.Length; i++)
+                {
+                    children[i].Reprobe(arena, node.GetFieldIndex(i), start, count);
+                }
+
+                return;
+            }
+
+            case CanonicalKind.Extension:
+                Children(1)[0].Reprobe(arena, node.StorageIndex, start, count);
+                return;
+
+            default:
+                return;
         }
     }
 
@@ -272,6 +366,7 @@ internal sealed class ColumnWriter
 
         _closed.Add(_open);
         _widths.Add(_openWidths);
+        _tableAtClose.Add(_table is null ? (-1, 0) : (_table.Distinct, _table.HeapBytes));
         _open = default;
         _openWidths = null;
 

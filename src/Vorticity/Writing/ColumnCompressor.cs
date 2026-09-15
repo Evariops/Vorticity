@@ -502,10 +502,20 @@ internal static class ColumnCompressor
         // bounds the distinct count from above, so this only runs when the data is genuinely
         // interleaved rather than merely repetitive -- and the budget is what the BEST plan so far
         // costs, so a dictionary that cannot beat the bit-packing abandons that much sooner.
+        // THE TABLE FIRST, THE WALK ONLY WHEN IT CANNOT ANSWER (docs/11-write-strategy.md §3.2.2).
+        // The ingest pass has already handed every row of this chunk its code, in first-seen order,
+        // and owns the distinct values; pricing is arithmetic on its counts and the plan is a copy
+        // of its buffers. The walk stays as the fallback for a cursor that cannot serve -- a child a
+        // scheme produced, a chunk the table abandoned -- and the writer counts every such fallback
+        // through the same predicate, so it cannot go quiet.
         long budget = packed is null ? plain : Math.Min(plain, packed.Cost);
-        ColumnPlan dictionary = Allows(target, "vortex.dict") && !cascade.DictionaryIsDead
-            ? Dictionary(arena, node, comparer, length, budget)
-            : ColumnPlan.Canonical;
+        ColumnPlan dictionary = ColumnPlan.Canonical;
+        if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
+        {
+            dictionary = chunk.TableServes(length)
+                ? TabledDictionary(node, in chunk, length, budget)
+                : Dictionary(arena, node, comparer, length, budget);
+        }
         if (dictionary.Scheme != ColumnScheme.None)
         {
             return dictionary;
@@ -849,10 +859,78 @@ internal static class ColumnCompressor
                 : stats.Min.UnsignedValue;
 
     /// <summary>Whether the target edition carries the array id a scheme would emit.</summary>
-    private static bool Allows(VortexEdition target, string id) =>
+    internal static bool Allows(VortexEdition target, string id) =>
         EditionRegistry.Contains(target, ComponentKind.Array, id);
 
     /// <summary>Whether a canonical form has a row equality this compressor can compute.</summary>
+    /// <summary>
+    /// The dictionary plan from the ingest-time table: the same verdict <see cref="Dictionary"/>
+    /// reaches by walking the chunk, reached by arithmetic on what the table already holds.
+    /// </summary>
+    /// <remarks>
+    /// THE FINAL TEST IS THE SAME EXPRESSION, on the same numbers. The walk prices
+    /// <c>rows × codeWidth(entries) + EntriesSize(entries)</c> against the budget once it has seen
+    /// every row; its early abandonment is a lower bound of that test and never fires on a plan the
+    /// test would have kept. So the plan here is the plan there — <c>WrittenSizeTests</c> is the
+    /// proof — and what changes is that no row is read to reach it.
+    /// <para>
+    /// THE ENTRIES ARE THE COUNT AT THE LAST BLOCK'S CLOSE, not the table's current count: the table
+    /// has since probed the tail the writer will carry into the next chunk, and codes are handed out
+    /// in first-seen order, so the chunk's rows use exactly the codes below that count and its heap
+    /// bytes are exactly the heap at that moment.
+    /// </para>
+    /// </remarks>
+    /// <param name="node">The column chunk.</param>
+    /// <param name="chunk">The cursor whose table serves this chunk.</param>
+    /// <param name="length">The chunk's row count.</param>
+    /// <param name="budget">The cheapest plan so far, in bytes.</param>
+    private static ColumnPlan TabledDictionary(
+        CanonicalNode node, in ChunkStats chunk, int length, long budget)
+    {
+        DistinctTable table = chunk.Table!;
+        (int entries, long heap) = chunk.TableAtClose;
+
+        long encoded = ((long)length * FsstPlan.IndexPType(entries).ByteWidth())
+            + EntriesSizeOf(node, entries, heap);
+        if (encoded + DictionaryOverhead >= budget)
+        {
+            return ColumnPlan.Canonical;
+        }
+
+        // Copies, as the walk made: the plan owns its arrays and the table is about to be reset
+        // for the next chunk. Stage R5 hands the table's buffers to the encoder directly.
+        return ColumnPlan.Dictionary(
+            table.FirstRows[..entries].ToArray(), table.Codes[..length].ToArray());
+    }
+
+    /// <summary>
+    /// <see cref="EntriesSize"/> from counts instead of rows: what <paramref name="entries"/>
+    /// distinct values holding <paramref name="heap"/> bytes cost as a values child.
+    /// </summary>
+    /// <param name="node">The column chunk, for its kind and widths.</param>
+    /// <param name="entries">Distinct values, the null counted as one.</param>
+    /// <param name="heap">For a view column, the bytes of the non-null distinct values.</param>
+    private static long EntriesSizeOf(CanonicalNode node, int entries, long heap)
+    {
+        switch (node.Kind)
+        {
+            case CanonicalKind.Bool:
+                return (entries + 7) / 8;
+
+            case CanonicalKind.Primitive:
+                return (long)entries * node.PType.ByteWidth();
+
+            case CanonicalKind.Decimal:
+                return (long)entries * DecimalStorage.ByteWidth(node.Storage);
+
+            default:
+            {
+                long varbin = (((long)entries + 1) * FsstPlan.IndexPType(heap).ByteWidth()) + heap;
+                return Math.Min(((long)entries * 16) + heap, varbin);
+            }
+        }
+    }
+
     private static bool IsComparable(CanonicalKind kind) =>
         kind is CanonicalKind.Primitive or CanonicalKind.Bool or CanonicalKind.VarBinView
             or CanonicalKind.Decimal;
@@ -981,14 +1059,7 @@ internal static class ColumnCompressor
         /// out by order of first appearance -- so the FILE's bytes do not depend on it at all.
         /// `WrittenSizeTests` is the proof and it is byte-exact.
         /// </remarks>
-        private static int Mix(ulong value)
-        {
-            ulong hash = value * 0x9E3779B97F4A7C15UL;
-            hash ^= hash >> 29;
-            hash *= 0xBF58476D1CE4E5B9UL;
-            hash ^= hash >> 32;
-            return (int)hash;
-        }
+        private static int Mix(ulong value) => (int)KeyHash.Mix(value);
 
         private ReadOnlySpan<byte> Fixed(int row) =>
             _node.Values.Span.Slice(row * _width, _width);
@@ -1007,85 +1078,14 @@ internal static class ColumnCompressor
             return _node.GetDataBuffer(buffer).Span.Slice(offset, size);
         }
 
-        /// <summary>XxHash3-64. A hash, not a checksum: collisions are resolved by comparing.</summary>
-        /// <remarks>
-        /// THIS WAS FNV-1a, ONE BYTE AT A TIME, and it was worth measuring rather than assuming: the
-        /// probe loop it serves is 21 % to 57 % of the write on every string-bearing encoding of the
-        /// axis — 57 % of `dict`, 50 % of `onpair`, 43 % of `varbinview`, 38 % of `fsst` — measured
-        /// by running that loop twice and reading the difference. FNV-1a is a dependent
-        /// multiply-and-xor per byte, so a ten-byte value is ten serialized steps; XxHash3 has
-        /// dedicated paths under 16, 128 and 240 bytes and reads the ten bytes in two loads.
-        /// <para>
-        /// IT CANNOT MOVE A BYTE OF THE FILE, for the reason <see cref="Mix"/> already states: the
-        /// hash picks a bucket, <see cref="Equal"/> settles every collision exactly, and a
-        /// dictionary code is handed out by order of first appearance, which is row order. Changing
-        /// the hash changes which chain a value lands in and nothing else — and since the values in
-        /// one chain are distinct, at most one of them can compare equal whatever the order.
-        /// `WrittenSizeTests` is the proof and it is byte-exact.
-        /// </para>
-        /// <para>
-        /// It is also the hash docs/11-write-strategy.md §3.2.1 requires, so that when the block
-        /// hash buffer arrives the same word can serve this table and the Bloom filters of
-        /// docs/10-indexes.md §5.1 without any value being hashed twice. A Bloom filter needs
-        /// XxHash3 on EVERY value, short ones included, so the short arm below will have to be
-        /// conditioned on whether a filter is live rather than on the length alone — which is
-        /// exactly the shape §3.2.1 describes, and a reason to keep the arms in one method.
-        /// </para>
-        /// <para>
-        /// SHORT VALUES DO NOT TAKE IT, and the corpus is the reason: this hash is called with
-        /// **3,9 bytes on average** (464 MB over 120 M calls), and a value that fits a view fits
-        /// sixteen. Up to sixteen bytes fold into one word with two overlapping loads — the trick
-        /// xxhash itself uses for its short inputs — and take the same single multiply-xorshift a
-        /// fixed-width value takes. THE BRANCH IS ON THE LENGTH, so two equal values always take the
-        /// same arm, which is the only property a bucket hash has to have here.
-        /// </para>
-        /// <para>
-        /// WHAT THE SHORT ARM DOES NOT FIX, stated because it was measured twice and guessed wrong
-        /// twice: `struct` and `varbin` are 3 % to 6 % slower under XxHash3 than under FNV-1a
-        /// (isolated on a restricted axis, 0,47 → 0,50 and 0,35 → 0,36), and widening this arm from
-        /// eight bytes to sixteen moved neither — their values are longer than a view, so they take
-        /// the XxHash3 arm whatever the threshold. The trade is taken with its eyes open: the same
-        /// isolation puts `zstd` at 1,25 under FNV-1a and 1,05 under XxHash3, and on the whole axis
-        /// `fsst`, `dict`, `onpair`, `varbinview` and `map` move the same way. Roughly fifty
-        /// milliseconds bought for seven.
-        /// </para>
-        /// </remarks>
+        /// <summary>
+        /// The write path's one byte-string hash, <see cref="KeyHash.Bytes"/>: it lives there so
+        /// that this comparer and the ingest-time <see cref="DistinctTable"/> cannot disagree on
+        /// what a value hashes to. Its history — FNV-1a measured at 21 % to 57 % of a string
+        /// column's write, XxHash3 with a folded short arm, and the 3 % to 6 % it costs `struct`
+        /// and `varbin` — is written at the top of that file.
+        /// </summary>
         /// <param name="bytes">The value's bytes.</param>
-        private static int Hash(ReadOnlySpan<byte> bytes)
-        {
-            if (bytes.Length > 16)
-            {
-                return (int)XxHash3.HashToUInt64(bytes);
-            }
-
-            ref byte first = ref MemoryMarshal.GetReference(bytes);
-            ulong word;
-            if (bytes.Length >= 8)
-            {
-                ulong low = Unsafe.ReadUnaligned<ulong>(ref first);
-                ulong high = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref first, bytes.Length - 8));
-                word = low ^ (high * 0xBF58476D1CE4E5B9UL);
-            }
-            else if (bytes.Length >= 4)
-            {
-                // The two reads OVERLAP for the lengths between the powers, which is what keeps
-                // both arms branchless -- the same trick xxhash itself uses for its short inputs.
-                ulong low = Unsafe.ReadUnaligned<uint>(ref first);
-                ulong high = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref first, bytes.Length - 4));
-                word = (high << 32) | low;
-            }
-            else
-            {
-                word = 0;
-                for (int i = 0; i < bytes.Length; i++)
-                {
-                    word |= (ulong)Unsafe.Add(ref first, i) << (i * 8);
-                }
-            }
-
-            // The length is mixed in rather than concatenated: "a" and "a\0" hold the same word and
-            // would otherwise share a bucket for no reason.
-            return Mix(word ^ ((ulong)bytes.Length * 0x9E3779B97F4A7C15UL));
-        }
+        private static int Hash(ReadOnlySpan<byte> bytes) => (int)KeyHash.Bytes(bytes);
     }
 }

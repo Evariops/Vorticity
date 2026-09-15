@@ -48,6 +48,35 @@ internal readonly struct ChunkStats
     internal bool Widths(Span<int> destination) =>
         _column is not null && _column.Widths(_firstBlock, _blockCount, destination);
 
+    /// <summary>The column's running distinct table, or <see langword="null"/>.</summary>
+    internal DistinctTable? Table => _column?.Table;
+
+    /// <summary>
+    /// The table's distinct count and heap bytes when the chunk's last block closed — the entries
+    /// that are this chunk's, as opposed to the carried tail's.
+    /// </summary>
+    internal (int Distinct, long Heap) TableAtClose =>
+        _column is null ? (-1, 0) : _column.TableAtClose(_firstBlock + _blockCount - 1);
+
+    /// <summary>
+    /// Whether the table can answer for a chunk of <paramref name="rows"/> rows: it exists, it
+    /// was not abandoned, it has probed at least those rows, and the count at the last block's
+    /// close is a prefix of what it holds.
+    /// </summary>
+    /// <remarks>
+    /// THE ONE PREDICATE, used by the chooser to decide and by the writer to count: a fallback the
+    /// writer could not see would be a fallback nobody measures, which is how
+    /// <c>ChunksWithoutStatistics</c> came to exist.
+    /// </remarks>
+    /// <param name="rows">The chunk's row count.</param>
+    internal bool TableServes(int rows)
+    {
+        DistinctTable? table = Table;
+        (int distinct, _) = TableAtClose;
+        return table is { Abandoned: false } && table.Rows >= rows
+            && distinct > 0 && distinct <= table.Distinct;
+    }
+
     /// <summary>
     /// The cursor for field <paramref name="index"/>, which covers the same blocks because a
     /// struct's fields and an extension's storage are row-aligned with their parent.

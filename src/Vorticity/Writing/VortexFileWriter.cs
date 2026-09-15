@@ -113,6 +113,20 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
     private long _chunksWithoutStatistics;
 
+    /// <summary>
+    /// (Column chunk, field) pairs of a comparable kind whose distinct table could not answer, so the
+    /// chooser walked the chunk to build the dictionary it would otherwise have read off the table.
+    /// </summary>
+    /// <remarks>
+    /// The same argument as <see cref="ChunksWithoutStatistics"/>, for docs/11 §3.2.2's table: the
+    /// walk is byte-identical to the table by construction, so a table that quietly stopped serving
+    /// would keep every byte-exact test green while every chunk paid the second pass again. Decided
+    /// by <see cref="ChunkStats.TableServes"/>, the one predicate the chooser also uses.
+    /// </remarks>
+    internal long ChunksWithoutTable => _chunksWithoutTable;
+
+    private long _chunksWithoutTable;
+
     /// <summary>Canonical bytes to accumulate before emitting, or 0 for no byte threshold.</summary>
     private readonly long _blockBytes;
 
@@ -167,7 +181,12 @@ public sealed class VortexFileWriter : IAsyncDisposable
         for (int i = 0; i < _columnSegments.Length; i++)
         {
             _columnSegments[i] = [];
-            _columns[i] = new ColumnWriter();
+            // THE TABLE HAS A CONSUMER ONLY IF THE EDITION CAN WRITE A DICTIONARY: docs/11 §3.2.2's
+            // first liveness rule, the one the edition decides; plan memory adds the per-chunk one.
+            _columns[i] = new ColumnWriter
+            {
+                DictionaryLive = ColumnCompressor.Allows(target, "vortex.dict"),
+            };
         }
     }
 
@@ -415,6 +434,23 @@ public sealed class VortexFileWriter : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Feeds the rows of <paramref name="rootIndex"/> to every column's distinct table only, with
+    /// the field resolution <see cref="Ingest"/> makes.
+    /// </summary>
+    /// <param name="arena">The arena holding the carried rows.</param>
+    /// <param name="rootIndex">A carried node: a whole batch, or the cut tail of one.</param>
+    private void Reprobe(CanonicalArena arena, int rootIndex)
+    {
+        CanonicalNode root = arena.GetNode(rootIndex);
+        int rows = root.Length;
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            int node = _isTabular ? root.GetFieldIndex(field) : rootIndex;
+            _columns[field].Reprobe(arena, node, 0, rows);
+        }
+    }
+
     /// <summary>Seals the open block of every column.</summary>
     private void CloseBlock()
     {
@@ -523,6 +559,16 @@ public sealed class VortexFileWriter : IAsyncDisposable
             carriedBytes += to.Canonical.ByteSize(_carry[i]);
         }
 
+        // THE TAIL IS PROBED AGAIN, INTO THE TABLES THE EMISSION JUST RESET. These rows were probed
+        // under the chunk that has just gone out, some against entries that are now written; in
+        // the chunk they will open they are new, and their codes must say so. Their statistics are
+        // not touched -- the open block is still the open block -- only the tables see them again,
+        // in the order the next chunk will hold them, which is first. Less than a block.
+        for (int i = 0; i < _carry.Count; i++)
+        {
+            Reprobe(to.Canonical, _carry[i]);
+        }
+
         from.Canonical.Reset();
         _pending.Clear();
         _pending.AddRange(_carry);
@@ -581,6 +627,12 @@ public sealed class VortexFileWriter : IAsyncDisposable
             if (stats.Stats.Rows != rows)
             {
                 _chunksWithoutStatistics++;
+            }
+
+            if (DistinctTable.Serves(arena.GetNode(node).Kind)
+                && !stats.TableServes(checked((int)rows)))
+            {
+                _chunksWithoutTable++;
             }
 
             using ArrayBlobWriter.BlobLease blob =
