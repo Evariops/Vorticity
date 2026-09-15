@@ -25,6 +25,17 @@ internal sealed class ColumnWriter
     /// <summary>The block in progress; every batch that covers part of it folds into this one.</summary>
     private BlockStats _open;
 
+    /// <summary>
+    /// The column's last row, which outlives both the batch it came in and the block it fell in.
+    /// </summary>
+    /// <remarks>
+    /// Run continuity is the reason: whether row 8 192 starts a run is a question about row 8 191,
+    /// and that row's arena was recycled the moment the next batch was decoded
+    /// (docs/11-write-strategy.md §3.1). It survives <see cref="CloseBlock"/> for the same reason —
+    /// a block boundary is not a run boundary.
+    /// </remarks>
+    private readonly PreviousRow _previous = new PreviousRow();
+
     /// <summary>The closed blocks, in order. Zone <c>z</c> is entry <c>z</c>.</summary>
     internal IReadOnlyList<BlockStats> Blocks => _closed;
 
@@ -65,7 +76,7 @@ internal sealed class ColumnWriter
     /// <param name="start">First row of the range, inside the batch.</param>
     /// <param name="count">How many rows; the caller has cut the range at the block boundary.</param>
     internal void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count) =>
-        BlockStatsPass.Accumulate(arena, nodeIndex, start, count, ref _open);
+        BlockStatsPass.Accumulate(arena, nodeIndex, start, count, ref _open, _previous);
 
     /// <summary>Seals the open block and starts the next one.</summary>
     /// <remarks>

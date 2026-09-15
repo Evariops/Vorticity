@@ -259,11 +259,21 @@ internal static class ColumnCompressor
         for (int row = 0; row < length; row += 64)
         {
             int take = Math.Min(64, length - row);
-            ulong word = Load(bits, firstByte + (row >> 3), shift) & Mask(take);
+            ulong word = BitWords.Load(bits, firstByte + (row >> 3), shift) & BitWords.Mask(take);
+
+            // ROW 0 HAS NO PREDECESSOR, and seeding `previous` with a zero said otherwise: a column
+            // whose first row is `true` was charged a boundary at row 0 and got an EMPTY leading
+            // run. It decoded correctly -- `starts[0]` and `starts[1]` were both 0, so the run's
+            // value was right and only its extent was empty -- which is why nothing caught it; it
+            // cost one run entry and made the count disagree with the ingest pass's, which is exact.
+            if (row == 0)
+            {
+                previous = word & 1;
+            }
 
             // Bit j is set where row j differs from row j-1, the first taking its predecessor from
             // the previous word.
-            ulong diff = (word ^ ((word << 1) | previous)) & Mask(take);
+            ulong diff = (word ^ ((word << 1) | previous)) & BitWords.Mask(take);
             previous = (word >> (take - 1)) & 1;
 
             while (diff != 0)
@@ -283,41 +293,6 @@ internal static class ColumnCompressor
 
         return runCount;
     }
-
-    /// <summary>The low <paramref name="count"/> bits, with 64 meaning all of them.</summary>
-    private static ulong Mask(int count) => count == 64 ? ulong.MaxValue : (1UL << count) - 1;
-
-    /// <summary>
-    /// Sixty-four bits starting <paramref name="shift"/> bits into
-    /// <paramref name="index"/>, reading past the end as zeroes.
-    /// </summary>
-    private static ulong Load(ReadOnlySpan<byte> bits, int index, int shift)
-    {
-        ulong low = Eight(bits, index);
-        return shift == 0 ? low : (low >> shift) | ((ulong)Byte(bits, index + 8) << (64 - shift));
-    }
-
-    private static ulong Eight(ReadOnlySpan<byte> bits, int index)
-    {
-        if ((uint)index + 8 <= (uint)bits.Length)
-        {
-            return BinaryPrimitives.ReadUInt64LittleEndian(bits.Slice(index, 8));
-        }
-
-        // THE TAIL IS READ BYTE BY BYTE rather than over-read: the bitmap's last word is a partial
-        // one whenever the row count is not a multiple of 64, and the buffer is a window into a
-        // segment that owes nothing past its own length.
-        ulong value = 0;
-        for (int i = 0; i < 8; i++)
-        {
-            value |= (ulong)Byte(bits, index + i) << (i * 8);
-        }
-
-        return value;
-    }
-
-    private static byte Byte(ReadOnlySpan<byte> bits, int index) =>
-        (uint)index < (uint)bits.Length ? bits[index] : (byte)0;
 
     /// <summary>
     /// What a dictionary costs beyond its codes and entries: two more array nodes and their
@@ -425,12 +400,34 @@ internal static class ColumnCompressor
         // `vortex.runend` paid for a count it then threw away; and the pass ran to the last row even
         // once the run count had passed the point where run-end can win, which on an interleaved
         // column is most of it.
+        //
+        // AND SINCE STAGE 2b IT DOES NOT RUN AT ALL WHEN THE ANSWER IS ALREADY KNOWN. The ingest
+        // pass counts run boundaries as it reads the rows for the zone map, so the verdict is one
+        // comparison. What that saves is not only the quarter of a pass W-33 left -- the scan RENTS
+        // TWO `int[length]` ARRAYS before it starts, on every comparable column of every chunk,
+        // and throws them away whenever run-end loses, which is most of the time. They are now
+        // rented only when the plan is going to be kept.
         if (Allows(target, "vortex.runend"))
         {
-            ColumnPlan runs = TryRuns(arena, in node, in comparer, length);
-            if (runs.Scheme != ColumnScheme.None)
+            bool known = measured && stats.HasRunBoundaries;
+
+            // ONE RUN NEEDS NO SCAN AT ALL, and this is the 62 % WRITE-ARCHITECTURE.md §1 charges
+            // `variant` for "discovering a constant row by row" -- plus the 56 % it charges
+            // `masked_all_invalid` for "discovering all-null bit by bit". A column whose every row
+            // is equal has exactly one run, its boundaries are [0, length), and the scan that
+            // produced that answer read every row to do it. The count already says so.
+            if (known && stats.RunCount == 1 && length / RunEndRatio >= 1)
             {
-                return runs;
+                return ColumnPlan.Runs([0], [length]);
+            }
+
+            if (!known || stats.RunCount <= length / RunEndRatio)
+            {
+                ColumnPlan runs = TryRuns(arena, in node, in comparer, length);
+                if (runs.Scheme != ColumnScheme.None)
+                {
+                    return runs;
+                }
             }
         }
 

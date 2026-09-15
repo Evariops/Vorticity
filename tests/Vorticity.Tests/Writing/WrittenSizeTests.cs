@@ -48,8 +48,16 @@ public sealed class WrittenSizeTests
     /// would leave 0,54 % and would trip on a corpus addition rather than on a regression, and
     /// 0.651 would sit exactly on the criterion with nothing in hand.
     /// </para>
+    /// <para>
+    /// 0.65 -> **0.64 on 2026-09-15**, during stage 2b of docs/11-write-strategy.md §8. Measured that
+    /// day: 856 files, **10 084 008** bytes against 15 984 453, ratio **0,631**. The gain is not
+    /// stage 2b's — it was already there when the stage started, earned by W-31, W-33 and W-35 — and
+    /// that is exactly the complaint B18 makes: a reference that does not come down stops guarding.
+    /// 0.65 had grown back to **2,9 %** of slack. 0.64 leaves **1,43 %**, the same margin the
+    /// paragraph above argues for.
+    /// </para>
     /// </remarks>
-    private const double CorpusCeiling = 0.65;
+    private const double CorpusCeiling = 0.64;
 
     /// <summary>How many of the worst offenders to name, so the number is actionable.</summary>
     private const int Worst = 12;

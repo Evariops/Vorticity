@@ -69,6 +69,31 @@ internal struct BlockStats
     internal long TotalBytes;
 
     /// <summary>
+    /// Rows of this block that differ from the row before them IN THE FILE, the block's own first
+    /// row included; row 0 of the file has no predecessor and is never counted.
+    /// </summary>
+    /// <remarks>
+    /// Counting the first row here rather than separately is what makes a merge a plain sum: a
+    /// boundary belongs to the row that starts the new run, and that row is in exactly one block.
+    /// <see cref="RunCount"/> turns the sum back into runs.
+    /// </remarks>
+    internal long RunBoundaries;
+
+    /// <summary>
+    /// Whether this summary's first row differs from the row before it, so that a range starting
+    /// here knows not to count that boundary.
+    /// </summary>
+    internal bool FirstRowStartsRun;
+
+    /// <summary>Whether the physical kind has a row equality, so the boundaries mean anything.</summary>
+    /// <remarks>
+    /// The four <c>IsComparable</c> kinds of <see cref="ColumnCompressor"/>, which are the only ones
+    /// run-end is ever offered. A struct or a list leaves this false and the chooser measures
+    /// nothing, exactly as it declines to.
+    /// </remarks>
+    internal bool HasRunBoundaries;
+
+    /// <summary>
     /// Whether this column's canonical form has a min/max a zone map can carry at all.
     /// </summary>
     /// <remarks>
@@ -110,6 +135,17 @@ internal struct BlockStats
     internal readonly bool IsPresent => Rows > 0;
 
     /// <summary>
+    /// Runs over the rows this summary covers, exactly as <c>ColumnCompressor</c> would have counted
+    /// them by comparing adjacent rows.
+    /// </summary>
+    /// <remarks>
+    /// One run, plus one for every row that starts a new one — minus the summary's own first row,
+    /// whose boundary belongs to the range before this one and not to this one. A range that starts
+    /// the file has <see cref="FirstRowStartsRun"/> false and loses nothing.
+    /// </remarks>
+    internal readonly long RunCount => Rows == 0 ? 0 : 1 + RunBoundaries - (FirstRowStartsRun ? 1 : 0);
+
+    /// <summary>
     /// Folds a whole summary in, which is how a chunk is made from the blocks it covers.
     /// </summary>
     /// <remarks>
@@ -126,9 +162,23 @@ internal struct BlockStats
             return;
         }
 
+        // The first block folded in decides where the range starts, so its own leading boundary is
+        // the one `RunCount` discounts. Every later block's leading boundary is interior to the
+        // range and counts.
+        if (!IsPresent)
+        {
+            FirstRowStartsRun = other.FirstRowStartsRun;
+            HasRunBoundaries = other.HasRunBoundaries;
+        }
+        else
+        {
+            HasRunBoundaries &= other.HasRunBoundaries;
+        }
+
         Rows += other.Rows;
         NullCount += other.NullCount;
         TotalBytes += other.TotalBytes;
+        RunBoundaries += other.RunBoundaries;
         IsSummarizable |= other.IsSummarizable;
 
         if (!other.HasBounds)
