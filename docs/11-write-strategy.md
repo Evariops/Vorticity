@@ -616,6 +616,10 @@ holds exceptions and limits), and without it nobody can tell whether an index ea
   `WithIndexes(false)` and `WithPruning(false)` exist for debugging and for the equivalence tests.
 - `VortexFile.MayMatch(expr)`, `VortexFile.Indexes` (an enumeration for tooling), `Explain()`,
   `ScanMetrics`.
+- The order-shaped operations — `file.Keys(path)` cursors (seek, next, prev, rank, distinct), the
+  terminals `AnyAsync`, `CountAsync`, `MinAsync`, `MaxAsync`, `InKeyOrder`, and `StartsWith` /
+  `Contains` / `Like` in the expression model — are [12-index-reads.md](12-index-reads.md) §8,
+  which also adds `MustMatch` and a count-only path beside the contract of §6.1.
 
 ### 7.3 Observability
 

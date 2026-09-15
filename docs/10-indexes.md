@@ -4,7 +4,9 @@ A Vorticity specification, written 2026-09-15 and revised the same day with the 
 iteration of [11-write-strategy.md](11-write-strategy.md), which owns the pass that builds these
 structures (§3.2, §3.3), the scan contract that consults them (§6) and the surface that exposes
 them (§7). This document owns what an index **is**: its kinds, its payload, where it lives in a
-file, how it survives an append, and how it stays readable by everyone else.
+file, how it survives an append, and how it stays readable by everyone else. What a consumer can
+**ask** of an index on the read path — cursors, probes, key-ordered delivery — is
+[12-index-reads.md](12-index-reads.md), which also amends §4.1 and §6.2 (its §14).
 
 It is deliberately **ahead of upstream**: Vortex 0.86.1 ships a Bloom filter whose wire format its
 own authors call unstable, and two index epics whose status is *Proposed* (§1). It takes the best
@@ -454,8 +456,11 @@ migration changes a payload byte.
   capability explicit; the derivation needs no writer support.
 - Multi-column skipping (a Bloom over `(a, b)` pairs) via the row encoding, as §6.5 does for
   locating: cheap to add, unclear demand.
-- Whether to expose probes as a public API (`VortexFile.Probe(column, value)`) for engines that
-  plan their own I/O, or keep them inside the scan.
+- ~~Whether to expose probes as a public API (`VortexFile.Probe(column, value)`) for engines that
+  plan their own I/O, or keep them inside the scan.~~ Answered by
+  [12-index-reads.md](12-index-reads.md) §5.1: the probe is `Scan().Where(x = v).AnyAsync()`, the
+  same chain with one fewer type on the surface, and the cursor of its §4 is the surface for an
+  engine that plans its own I/O.
 - The default `k` of a generation (16) and whether `Auto` builds one at all without a policy.
 
 Decided (2026-09-15): XxHash3-64 is `System.IO.Hashing.XxHash3` taken as the **package** — the
