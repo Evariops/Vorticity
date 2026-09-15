@@ -646,6 +646,20 @@ internal static class ThroughputCheck
     /// owes a gate it has never run.
     /// </para>
     /// <para>
+    /// RECALIBRATED THE SAME DAY, and the table is unrecognisable: WRITE-AUDIT.md W-31a, W-31b and
+    /// W-35 took a quadratic copy out of the writer's transit. `zstd` 245.61 -&gt; 1.79, `onpair`
+    /// 204.19 -&gt; 2.54, `parquet_variant` 85.58 -&gt; 2.06, `fsst` 81.66 -&gt; 0.63, `varbin`
+    /// 25.36 -&gt; 0.41, `table_mixed` 9.46 -&gt; 0.53. The median went 1.96 -&gt; 1.17 and the count
+    /// above x10 went 13 -&gt; 1. Three encodings enter the table at all for the first time --
+    /// `list`, `listview`, `map` -- because until W-31b the writer could not finish them.
+    /// </para>
+    /// <para>
+    /// WHAT IS LEFT ABOVE x2 is the work list, and it is short: the `bool` family (`bool` 11.91,
+    /// `bool_bit_offset_straddle` 11.27, `bool_bit_offset7` 10.66, `bool_bit_offset3` 10.63,
+    /// `bytebool` 8.66, `chunked_bool` 8.66 -- W-33), `variant` 8.85 (W-34), `fastlanes_bitpacked`
+    /// 4.20 (W-11), then a tail between x2 and x3.
+    /// </para>
+    /// <para>
     /// THREE AXES ARE NOISIER THAN THE MARGIN, measured here and not assumed: between processes,
     /// `onpair` spreads 169.37-204.19 (+20,6 %), `sparse` 1.75-2.06 (+17,7 %) and `constant`
     /// 0.86-1.00 (+16,3 %), against a <see cref="Margin"/> of 15 %. That is B19's finding on a
@@ -653,67 +667,76 @@ internal static class ThroughputCheck
     /// returning 1. Until then these three are the ones to re-run before believing a red.
     /// </para>
     /// <para>
-    /// The ratios here are not a ranking of this library against the reference so much as a map of
-    /// where the writer has never been looked at: `zstd` 245, `onpair` 204, `parquet_variant` 85,
-    /// `fsst` 81, `varbin` 25. Those are v2 W-22b's territory, and the point of writing them down
-    /// is that the next person to touch the writer sees them move.
+    /// The ratios were, on the morning of the first calibration, a map of where the writer had never
+    /// been looked at rather than a ranking: `zstd` 245, `onpair` 204, `parquet_variant` 85, `fsst`
+    /// 81, `varbin` 25. Writing them down was the point, and they moved the same day.
     /// </para>
     /// </remarks>
     private static readonly (string Encoding, double Reference)[] WriteReferences =
     [
-        ("alp", 1.22),   // 3 passes, spread 1.19-1.22; first calibration
-        ("alp_no_patches", 2.66),   // 3 passes, spread 2.58-2.66; first calibration
-        ("alp_patched_no_chunk_offsets", 2.41),   // 3 passes, spread 2.36-2.41; first calibration
-        ("alprd", 1.60),   // 3 passes, spread 1.55-1.60; first calibration
-        ("bool", 13.52),   // 3 passes, spread 11.97-13.52; first calibration
-        ("bool_bit_offset3", 12.37),   // 3 passes, spread 11.87-12.37; first calibration
-        ("bool_bit_offset7", 13.02),   // 3 passes, spread 11.74-13.02; first calibration
-        ("bool_bit_offset_straddle", 12.89),   // 3 passes, spread 12.71-12.89; first calibration
-        ("bytebool", 10.97),   // 3 passes, spread 10.36-10.97; first calibration
-        ("chunked", 0.63),   // 3 passes, spread 0.61-0.63; first calibration
-        ("chunked_bool", 10.53),   // 3 passes, spread 9.48-10.53; first calibration
-        ("chunked_decimal", 1.12),   // 3 passes, spread 1.10-1.12; first calibration
-        ("chunked_empty_chunks", 0.41),   // 3 passes, spread 0.39-0.41; first calibration
-        ("chunked_mixed_validity", 1.47),   // 3 passes, spread 1.46-1.47; first calibration
-        ("chunked_one_chunk", 0.29),   // 3 passes, spread 0.27-0.29; first calibration
-        ("chunked_varbinview", 13.44),   // 3 passes, spread 12.99-13.44; first calibration
-        ("constant", 1.00),   // 3 passes, spread 0.86-1.00; first calibration -- +16,3 %, au-dessus de la marge (B19)
-        ("datetimeparts", 0.53),   // 3 passes, spread 0.51-0.53; first calibration
-        ("decimal", 1.21),   // 3 passes, spread 1.17-1.21; first calibration
-        ("decimal_byte_parts", 1.20),   // 3 passes, spread 1.18-1.20; first calibration
-        ("dict", 2.26),   // 3 passes, spread 2.21-2.26; first calibration
-        ("dict_nullable_codes", 2.50),   // 3 passes, spread 2.39-2.50; first calibration
-        ("dict_nullable_values_nonnull_codes", 2.61),   // 3 passes, spread 2.54-2.61; first calibration
-        ("dict_u64_codes", 2.28),   // 3 passes, spread 2.22-2.28; first calibration
-        ("dict_u8_codes", 2.20),   // 3 passes, spread 2.17-2.20; first calibration
-        ("ext", 0.073),   // 3 passes, spread 0.069-0.073; first calibration
-        ("fastlanes_bitpacked", 4.69),   // 3 passes, spread 4.10-4.69; first calibration
-        ("fastlanes_bitpacked_patched_no_chunk_offsets", 4.17),   // 3 passes, spread 3.87-4.17; first calibration
-        ("fastlanes_delta", 0.31),   // 3 passes, spread 0.30-0.31; first calibration
-        ("fastlanes_for", 1.96),   // 3 passes, spread 1.83-1.96; first calibration
-        ("fastlanes_rle", 1.20),   // 3 passes, spread 1.12-1.20; first calibration
-        ("fixed_size_list", 0.12),   // 3 passes, spread 0.12-0.12; first calibration
-        ("fsst", 81.66),   // 3 passes, spread 80.10-81.66; first calibration
-        ("masked", 1.89),   // 3 passes, spread 1.79-1.89; first calibration
-        ("masked_all_invalid", 3.76),   // 3 passes, spread 3.56-3.76; first calibration
-        ("masked_all_valid", 0.37),   // 3 passes, spread 0.33-0.37; first calibration
-        ("null", 0.21),   // 3 passes, spread 0.20-0.21; first calibration
-        ("onpair", 204.19),   // 3 passes, spread 169.37-204.19; first calibration -- +20,6 %, le plus bruyant des 53 (B19)
-        ("parquet_variant", 85.58),   // 3 passes, spread 76.82-85.58; first calibration
-        ("pco", 0.21),   // 3 passes, spread 0.20-0.21; first calibration
-        ("primitive", 0.29),   // 3 passes, spread 0.28-0.29; first calibration
-        ("runend", 0.98),   // 3 passes, spread 0.94-0.98; first calibration
-        ("sequence", 0.25),   // 3 passes, spread 0.24-0.25; first calibration
-        ("sparse", 2.06),   // 3 passes, spread 1.75-2.06; first calibration -- +17,7 %, au-dessus de la marge (B19)
-        ("struct", 0.59),   // 3 passes, spread 0.58-0.59; first calibration
-        ("table_mixed", 9.46),   // 3 passes, spread 9.03-9.46; first calibration
-        ("table_wide", 0.91),   // 3 passes, spread 0.87-0.91; first calibration
-        ("varbin", 25.36),   // 3 passes, spread 24.23-25.36; first calibration
-        ("varbinview", 12.33),   // 3 passes, spread 11.45-12.33; first calibration
-        ("variant", 8.85),   // 3 passes, spread 8.61-8.85; first calibration
-        ("zigzag", 1.84),   // 3 passes, spread 1.81-1.84; first calibration
-        ("zstd", 245.61),   // 3 passes, spread 225.45-245.61; first calibration
-        ("zstd_buffers", 0.18),   // 3 passes, spread 0.17-0.18; first calibration
+        ("alp", 1.18),   // 3 passes, spread 1.16-1.18; was 1.22, -2.9%
+        ("alp_no_patches", 2.62),   // 3 passes, spread 2.54-2.62; was 2.66, -1.4%
+        ("alp_patched_no_chunk_offsets", 2.40),   // 3 passes, spread 2.36-2.40; was 2.41, -0.6%
+        ("alprd", 1.58),   // 3 passes, spread 1.57-1.58; was 1.60, -1.3%
+        ("bool", 11.91),   // 3 passes, spread 10.09-11.91; was 13.52, -11.9%
+        ("bool_bit_offset3", 10.63),   // 3 passes, spread 10.24-10.63; was 12.37, -14.1%
+        ("bool_bit_offset7", 10.66),   // 3 passes, spread 10.11-10.66; was 13.02, -18.1%
+        ("bool_bit_offset_straddle", 11.27),   // 3 passes, spread 9.86-11.27; was 12.89, -12.6%
+        ("bytebool", 8.66),   // 3 passes, spread 7.97-8.66; was 10.97, -21.0%
+        ("chunked", 0.62),   // 3 passes, spread 0.60-0.62; was 0.63, -2.3%
+        ("chunked_bool", 8.66),   // 3 passes, spread 8.58-8.66; was 10.53, -17.8%
+        ("chunked_decimal", 1.10),   // 3 passes, spread 1.10-1.10; was 1.12, -1.4%
+        ("chunked_empty_chunks", 0.41),   // 3 passes, spread 0.40-0.42; HELD at 0.41: 2 of 3 passes above, peak 0.42, no loosening
+        ("chunked_mixed_validity", 1.43),   // 3 passes, spread 1.40-1.43; was 1.47, -2.4%
+        ("chunked_one_chunk", 0.29),   // 3 passes, spread 0.28-0.29; was 0.29, -0.2%
+        ("chunked_varbinview", 0.61),   // 3 passes, spread 0.58-0.61; was 13.44, -95.5%
+        ("constant", 0.90),   // 3 passes, spread 0.83-0.90; was 1.00, -10.3%
+        ("datetimeparts", 0.52),   // 3 passes, spread 0.50-0.52; was 0.53, -1.0%
+        ("decimal", 1.20),   // 3 passes, spread 1.18-1.20; was 1.21, -0.8%
+        ("decimal_byte_parts", 1.18),   // 3 passes, spread 1.13-1.18; was 1.20, -1.3%
+        ("dict", 2.26),   // 3 passes, spread 2.22-2.28; HELD at 2.26: 2 of 3 passes above, peak 2.28, no loosening
+        ("dict_nullable_codes", 2.45),   // 3 passes, spread 2.38-2.45; was 2.50, -1.8%
+        ("dict_nullable_values_nonnull_codes", 2.60),   // 3 passes, spread 2.55-2.60; was 2.61, -0.4%
+        ("dict_u64_codes", 2.24),   // 3 passes, spread 2.23-2.24; was 2.28, -1.7%
+        ("dict_u8_codes", 2.19),   // 3 passes, spread 2.16-2.19; was 2.20, -0.6%
+        ("ext", 0.073),   // 3 passes, spread 0.076-0.076; HELD at 0.073: 3 of 3 passes above, peak 0.076, no loosening
+        ("fastlanes_bitpacked", 4.20),   // 3 passes, spread 4.17-4.20; was 4.69, -10.4%
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 3.91),   // 3 passes, spread 3.79-3.91; was 4.17, -6.3%
+        ("fastlanes_delta", 0.31),   // 3 passes, spread 0.31-0.33; HELD at 0.31: 1 of 3 passes above, peak 0.33, no loosening
+        ("fastlanes_for", 1.84),   // 3 passes, spread 1.78-1.84; was 1.96, -5.9%
+        ("fastlanes_rle", 1.15),   // 3 passes, spread 1.08-1.15; was 1.20, -4.4%
+        ("fixed_size_list", 0.12),   // 3 passes, spread 0.13-0.13; HELD at 0.12: 3 of 3 passes above, peak 0.13, no loosening
+        ("fsst", 0.63),   // 3 passes, spread 0.62-0.63; was 81.66, -99.2%
+        ("masked", 1.89),   // 3 passes, spread 1.78-1.89; HELD at 1.89: 1 of 3 passes above, peak 1.89, no loosening
+        ("masked_all_invalid", 3.31),   // 3 passes, spread 2.94-3.31; was 3.76, -11.9%
+        ("masked_all_valid", 0.37),   // 3 passes, spread 0.32-0.37; HELD at 0.37: 1 of 3 passes above, peak 0.37, no loosening
+        // TENU A 0,21 CONTRE L'AVIS DE `--rebase`, qui proposait 0.23 « REBASED UP (k>1) ». Une
+        // référence ne monte pas : le regroupement des rounds a changé, la mesure n'a pas dit que
+        // l'écriture d'une colonne nulle coûtait plus cher. 0,23 tient sous la marge de x1,15, donc
+        // le gate passe ; s'il rougit un jour, ce sera à instruire et non à desserrer.
+        ("null", 0.21),   // 3 passes, spread 0.22-0.23; HELD at 0.21, see above
+        ("onpair", 2.54),   // 3 passes, spread 2.34-2.54; was 204.19, -98.8%
+        ("parquet_variant", 2.06),   // 3 passes, spread 1.99-2.06; was 85.58, -97.6%
+        ("pco", 0.21),   // 3 passes, spread 0.21-0.21; HELD at 0.21: 2 of 3 passes above, peak 0.21, no loosening
+        ("primitive", 0.29),   // 3 passes, spread 0.29-0.31; HELD at 0.29: 3 of 3 passes above, peak 0.31, no loosening
+        ("runend", 0.94),   // 3 passes, spread 0.92-0.94; was 0.98, -4.2%
+        ("sequence", 0.25),   // 3 passes, spread 0.25-0.27; HELD at 0.25: 2 of 3 passes above, peak 0.27, no loosening
+        ("sparse", 1.90),   // 3 passes, spread 1.69-1.90; was 2.06, -7.8%
+        ("struct", 0.59),   // 3 passes, spread 0.55-0.59; HELD at 0.59: 1 of 3 passes above, peak 0.59, no loosening
+        ("table_mixed", 0.53),   // 3 passes, spread 0.51-0.53; was 9.46, -94.4%
+        ("table_wide", 0.90),   // 3 passes, spread 0.88-0.90; was 0.91, -1.6%
+        ("varbin", 0.41),   // 3 passes, spread 0.40-0.41; was 25.36, -98.4%
+        ("varbinview", 0.61),   // 3 passes, spread 0.60-0.61; was 12.33, -95.0%
+        ("variant", 8.85),   // 3 passes, spread 8.88-9.29; HELD at 8.85: 3 of 3 passes above, peak 9.29, no loosening
+        ("zigzag", 1.77),   // 3 passes, spread 1.72-1.77; was 1.84, -3.6%
+        ("zstd", 1.79),   // 3 passes, spread 1.70-1.79; was 245.61, -99.3%
+        ("zstd_buffers", 0.17),   // 3 passes, spread 0.17-0.17; was 0.18, -3.2%
+
+        // LES TROIS QUE W-31b ET W-35 ONT RENDUS MESURABLES, première calibration : avant le
+        // 2026-09-15 l'écrivain s'arrêtait dessus sur le plafond de 256 Mio (WRITE-AUDIT.md §2.1).
+        ("list", 2.59),   // 3 passes, spread 2.54-2.59; first calibration
+        ("listview", 1.52),   // 3 passes, spread 1.50-1.52; first calibration
+        ("map", 0.76),   // 3 passes, spread 0.75-0.76; first calibration
     ];
 
     private static readonly (string Encoding, double Reference)[] TakeReferences =
