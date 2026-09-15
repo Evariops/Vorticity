@@ -136,6 +136,21 @@ internal struct BlockStats
     /// </remarks>
     internal bool HasBounds;
 
+    /// <summary>
+    /// Whether some rows of this block never reached the width histograms, so the block's pair of
+    /// them is a partial count and not a summary.
+    /// </summary>
+    /// <remarks>
+    /// A BLOCK IS FED BY AS MANY RANGES AS THE CALLER'S BATCHING GIVES IT, and two of those ranges
+    /// can take different paths through the pass: a range whose steps all agree is answered from
+    /// its endpoints without a value being read (§3.2's progression short-circuit), and a later
+    /// range of the same block may break the progression and read every value. The histogram would
+    /// then hold the second range and not the first. Merging is an AND over the blocks, so one
+    /// partial block disqualifies the chunk, and the chooser measures the column itself — the same
+    /// safe fallback every other absent statistic takes.
+    /// </remarks>
+    internal bool WidthsBroken;
+
     /// <summary>Which accumulator <see cref="Min"/> and <see cref="Max"/> read.</summary>
     internal BoundDomain Domain;
 
@@ -206,6 +221,7 @@ internal struct BlockStats
         TotalBytes += other.TotalBytes;
         RunBoundaries += other.RunBoundaries;
         IsSummarizable |= other.IsSummarizable;
+        WidthsBroken |= other.WidthsBroken;
 
         // A progression survives a merge only if both halves are one AND they climb by the same
         // step -- the step across the seam is already in `other`, which saw the row before it.

@@ -14,6 +14,8 @@
 // invented (a dictionary's values, ALP's integers), a list's elements, a shape that disagrees with
 // the first batch's. `Choose` then measures the column itself, which is what it did before any of
 // this existed.
+using System;
+
 namespace Vorticity.Writing;
 
 /// <summary>A position in the ingest statistics, for one chunk, that can descend to a child.</summary>
@@ -37,6 +39,14 @@ internal readonly struct ChunkStats
     /// <summary>This column's summary over the chunk, or an absent one.</summary>
     internal BlockStats Stats =>
         _column is null ? default : _column.Chunk(_firstBlock, _blockCount);
+
+    /// <summary>
+    /// The chunk's pair of bit-width histograms, when every block of it carries them.
+    /// </summary>
+    /// <param name="destination">Receives the sum; must hold <see cref="BitPackWidths.Length"/>.</param>
+    /// <returns>Whether the histograms were available.</returns>
+    internal bool Widths(Span<int> destination) =>
+        _column is not null && _column.Widths(_firstBlock, _blockCount, destination);
 
     /// <summary>
     /// The cursor for field <paramref name="index"/>, which covers the same blocks because a

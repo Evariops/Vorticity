@@ -361,10 +361,15 @@ internal static class ColumnCompressor
     /// declined anyway: the plan is the same plan and not a byte moves. An absent cascade — the
     /// default, and what every top-level column passes — claims nothing.
     /// </param>
+    /// <param name="chunk">
+    /// The cursor the summary came from, for the statistics that are too big to travel inside it —
+    /// today the pair of bit-width histograms, tomorrow the distinct table and its codes buffer.
+    /// Absent means the same thing it means everywhere else here: measure it yourself.
+    /// </param>
     /// <returns>The plan; <see cref="ColumnPlan.Canonical"/> when nothing wins.</returns>
     internal static ColumnPlan Choose(
         CanonicalArena arena, int nodeIndex, VortexEdition target = EditionRegistry.Newest,
-        in BlockStats stats = default, Cascade cascade = default)
+        in BlockStats stats = default, Cascade cascade = default, ChunkStats chunk = default)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         int length = node.Length;
@@ -464,10 +469,17 @@ internal static class ColumnCompressor
         BitPackPlan? packed = null;
         if (Allows(target, "fastlanes.bitpacked") && !(measured && integers && !stats.HasBounds))
         {
+            // THE WIDTHS COME FROM THE INGEST PASS WHEN IT HAS THEM (11 §3.2), and this is the only
+            // place that asks. The buffer is a stack one because the answer is 130 counters and its
+            // consumer returns before this frame does.
+            Span<int> ingested = stackalloc int[BitPackWidths.Length];
+            bool haveWidths = measured && integers && !stats.WidthsBroken && chunk.Widths(ingested);
+
             packed = BitPackPlan.TryBuild(
                 arena, node, zigzag: Allows(target, "vortex.zigzag"),
                 reference: cascade.Reference
-                    ?? (measured && integers ? Reference(node, in stats) : null));
+                    ?? (measured && integers ? Reference(node, in stats) : null),
+                ingested: haveWidths ? ingested : default);
         }
 
         if (packed is not null && packed.Transform == BitPackTransform.Frame

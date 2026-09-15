@@ -117,9 +117,15 @@ internal sealed class BitPackPlan
     /// <see cref="Minimum"/> is a whole pass over every row, run on every integer column of every
     /// file to recompute a number the zone map's own pass produced.
     /// </param>
+    /// <param name="ingested">
+    /// The chunk's pair of bit-width histograms from the ingest pass (<see cref="BitPackWidths"/>),
+    /// or empty. The zigzag half is always usable; the raw half IS the framed histogram exactly when
+    /// <paramref name="reference"/> is zero, and only then (docs/11-write-strategy.md §3.2.3).
+    /// </param>
     /// <returns>The plan, or <see langword="null"/> when packing does not pay.</returns>
     internal static BitPackPlan? TryBuild(
-        CanonicalArena arena, CanonicalNode node, bool zigzag = true, ulong? reference = null)
+        CanonicalArena arena, CanonicalNode node, bool zigzag = true, ulong? reference = null,
+        ReadOnlySpan<int> ingested = default)
     {
         if (node.Kind != CanonicalKind.Primitive || !node.PType.IsInteger())
         {
@@ -152,7 +158,34 @@ internal sealed class BitPackPlan
         frames.Clear();
         zigzags.Clear();
         bool signed = ptype.IsSignedInteger();
-        Histogram(values, raw, in mask, length, minimum, signed, frames, zigzags);
+
+        // WHAT THE INGEST PASS CAN ANSWER AND WHAT IT CANNOT, and the difference is the minimum.
+        // docs/11-write-strategy.md §3.2 counts the RAW and ZIGZAG widths while the rows arrive,
+        // because neither depends on a quantity the chunk only has once it is whole. The FRAMED
+        // histogram does — it is the widths of `v - min` — so §3.2.3 gives frame of reference a
+        // bound and a conditional sweep instead, which is stage R5's work. Until then:
+        //
+        //   * zigzag is taken from the pass whenever the pass ran, always;
+        //   * raw IS the framed histogram when the reference is zero, which is every unsigned
+        //     column that starts at zero, every dictionary's codes, and every offsets column --
+        //     so those walk nothing at all;
+        //   * a non-zero reference still walks, and skips the zigzag half it no longer needs.
+        bool ingestedWidths = ingested.Length == BitPackWidths.Length;
+        bool framedFromIngest = ingestedWidths && minimum == 0;
+        if (ingestedWidths)
+        {
+            ingested[BitPackWidths.ZigZagOffset..].CopyTo(zigzags);
+            if (framedFromIngest)
+            {
+                ingested[..BitPackWidths.Domain].CopyTo(frames);
+            }
+        }
+
+        if (!framedFromIngest)
+        {
+            Histogram(
+                values, raw, in mask, length, minimum, signed && !ingestedWidths, frames, zigzags);
+        }
 
         long blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
         long perException = ptype.ByteWidth() + FsstPlan.IndexPType(length).ByteWidth();
@@ -335,8 +368,16 @@ internal sealed class BitPackPlan
                 // it as a raw zero here and letting the transform run cost 37 kB on
                 // `containers/zoned_many_zones_nulls` before the histogram was read against what
                 // Pack actually writes.
+                //
+                // THE ZIGZAG SIDE IS GUARDED like the value path below it, because the caller may
+                // already hold that half from the ingest pass and be here only for the framed one;
+                // an unconditional increment would count every null twice.
                 frames[0]++;
-                zigzags[0]++;
+                if (signed)
+                {
+                    zigzags[0]++;
+                }
+
                 continue;
             }
 

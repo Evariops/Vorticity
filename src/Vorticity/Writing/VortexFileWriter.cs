@@ -587,6 +587,11 @@ public sealed class VortexFileWriter : IAsyncDisposable
                 ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress, stats);
             _columnSegments[field].Add(
                 await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false));
+
+            // The chunk is written, so the per-block scratch behind it has no further reader. The
+            // compact summaries stay — the zone map wants them at `CompleteAsync` — and only the
+            // sized buffers go back to the pool.
+            _columns[field].ReleaseChunk(_emittedBlocks, blocks);
         }
 
         _emittedBlocks += blocks;

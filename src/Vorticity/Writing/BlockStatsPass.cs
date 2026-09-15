@@ -22,6 +22,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -46,9 +47,15 @@ internal static class BlockStatsPass
     /// The column's last row, so that a boundary at the range's first row is decided rather than
     /// guessed. Updated to this range's last row before returning.
     /// </param>
+    /// <param name="widths">
+    /// The block's pair of bit-width histograms (<see cref="BitPackWidths"/>) when the caller keeps
+    /// them, empty otherwise. Filled for an integer primitive whose values this range actually
+    /// reads; every other path sets <see cref="BlockStats.WidthsBroken"/> instead, because a
+    /// histogram missing some of its rows is worse than no histogram at all.
+    /// </param>
     internal static void Accumulate(
         CanonicalArena arena, int nodeIndex, int start, int count, ref BlockStats stats,
-        PreviousRow? previous = null)
+        PreviousRow? previous = null, Span<int> widths = default)
     {
         if (count <= 0)
         {
@@ -61,6 +68,13 @@ internal static class BlockStatsPass
         bool startsBlock = !stats.IsPresent;
         stats.Rows += count;
         int valid = Nulls(in mask, start, count, ref stats);
+
+        // BROKEN UNTIL THIS RANGE PROVES OTHERWISE. Every kind but an integer primitive contributes
+        // nothing to the width histograms, and so does an integer range the progression
+        // short-circuit answers without reading a value; the one path that does contribute restores
+        // the flag to what the ranges before it had left it.
+        bool widthsBefore = stats.WidthsBroken;
+        stats.WidthsBroken = true;
 
         switch (node.Kind)
         {
@@ -109,11 +123,28 @@ internal static class BlockStatsPass
                     }
                 }
 
+                // THE WIDTHS ARE COUNTED HERE OR NOWHERE. A progression is answered from its
+                // endpoints, so its values are never loaded and there is nothing to histogram --
+                // and nothing that needs one either, since `vortex.sequence` claims the column
+                // before bit-packing is offered it. What matters is that the block SAYS so, because
+                // a later range may break the progression and fill half a histogram.
+                Span<int> counts = !progression && node.PType.IsInteger() ? widths : default;
+                if (!counts.IsEmpty)
+                {
+                    stats.WidthsBroken = widthsBefore;
+
+                    // A null row PACKS as zero, which is width zero in both domains. Counting it
+                    // here rather than in the loops keeps the typed walk free of the branch, and it
+                    // is the rule `BitPackPlan` has always applied.
+                    counts[0] += count - valid;
+                    counts[BitPackWidths.ZigZagOffset] += count - valid;
+                }
+
                 if (!progression)
                 {
                     if (valid > 0)
                     {
-                        Values(node, in mask, start, count, ref stats);
+                        Values(node, in mask, start, count, ref stats, counts);
                     }
 
                     FixedRuns(
@@ -909,33 +940,66 @@ internal static class BlockStatsPass
     }
 
     /// <summary>Dispatches on the physical type ONCE, then runs a monomorphic loop.</summary>
+    /// <remarks>
+    /// <paramref name="widths"/> is the pair of histograms of <see cref="BitPackWidths"/> when the
+    /// caller wants them and empty otherwise, and the integer loops branch on it ONCE rather than
+    /// per row: docs/11-write-strategy.md §3.2 puts the widths in this walk precisely because the
+    /// value is already in a register here, so counting it costs a leading-zero count and an
+    /// increment instead of the whole second walk `BitPackPlan` used to make.
+    /// </remarks>
     private static void Values(
-        CanonicalNode node, in ValidityMask mask, int start, int count, ref BlockStats stats)
+        CanonicalNode node, in ValidityMask mask, int start, int count, ref BlockStats stats,
+        Span<int> widths = default)
     {
         ReadOnlySpan<byte> values = node.Values.Span;
         switch (node.PType)
         {
-            case PType.I8: Signed<sbyte>(values, in mask, start, count, ref stats); return;
-            case PType.I16: Signed<short>(values, in mask, start, count, ref stats); return;
-            case PType.I32: Signed<int>(values, in mask, start, count, ref stats); return;
-            case PType.I64: Signed<long>(values, in mask, start, count, ref stats); return;
-            case PType.U8: Unsigned<byte>(values, in mask, start, count, ref stats); return;
-            case PType.U16: Unsigned<ushort>(values, in mask, start, count, ref stats); return;
-            case PType.U32: Unsigned<uint>(values, in mask, start, count, ref stats); return;
-            case PType.U64: Unsigned<ulong>(values, in mask, start, count, ref stats); return;
+            case PType.I8: Signed<sbyte>(values, in mask, start, count, ref stats, widths); return;
+            case PType.I16: Signed<short>(values, in mask, start, count, ref stats, widths); return;
+            case PType.I32: Signed<int>(values, in mask, start, count, ref stats, widths); return;
+            case PType.I64: Signed<long>(values, in mask, start, count, ref stats, widths); return;
+            case PType.U8: Unsigned<byte>(values, in mask, start, count, ref stats, widths); return;
+            case PType.U16: Unsigned<ushort>(values, in mask, start, count, ref stats, widths); return;
+            case PType.U32: Unsigned<uint>(values, in mask, start, count, ref stats, widths); return;
+            case PType.U64: Unsigned<ulong>(values, in mask, start, count, ref stats, widths); return;
             case PType.F16: Halves(values, in mask, start, count, ref stats); return;
             case PType.F32: Floats<float>(values, in mask, start, count, ref stats); return;
             default: Floats<double>(values, in mask, start, count, ref stats); return;
         }
     }
 
+    /// <summary>The raw and zigzag widths of one value, counted into the pair of histograms.</summary>
+    /// <remarks>
+    /// THE RAW WIDTH IS TAKEN ON THE UNSIGNED READING of the bits, which is what the packer writes:
+    /// a signed <c>-1</c> is an <c>sbyte</c> of eight set bits, so its raw width is eight and not
+    /// sixty-four. The zigzag form interleaves the sign so that magnitude rather than position
+    /// decides the width, and the mask keeps it inside the element — the same two expressions
+    /// <c>BitPackPlan</c> prices with, which is why the histograms this produces are the ones it
+    /// used to walk the column for.
+    /// </remarks>
+    /// <param name="bits">The row's value, masked to the element width.</param>
+    /// <param name="elementBits">8, 16, 32 or 64.</param>
+    /// <param name="widths">The pair of histograms.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Widths(ulong bits, int elementBits, Span<int> widths)
+    {
+        widths[64 - BitOperations.LeadingZeroCount(bits)]++;
+        ulong sign = 0UL - ((bits >> (elementBits - 1)) & 1);
+        ulong zigzag = ((bits << 1) ^ sign) & BitWords.Mask(elementBits);
+        widths[BitPackWidths.ZigZagOffset + 64 - BitOperations.LeadingZeroCount(zigzag)]++;
+    }
+
     private static void Signed<T>(
-        ReadOnlySpan<byte> bytes, in ValidityMask mask, int start, int count, ref BlockStats stats)
+        ReadOnlySpan<byte> bytes, in ValidityMask mask, int start, int count, ref BlockStats stats,
+        Span<int> widths)
         where T : unmanaged, IBinaryInteger<T>, ISignedNumber<T>, IMinMaxValue<T>
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes).Slice(start, count);
         T min = T.MaxValue;
         T max = T.MinValue;
+        bool counting = !widths.IsEmpty;
+        int elementBits = Unsafe.SizeOf<T>() * 8;
+        ulong mask64 = BitWords.Mask(elementBits);
 
         if (mask.AllValid)
         {
@@ -950,6 +1014,11 @@ internal static class BlockStatsPass
                 if (value > max)
                 {
                     max = value;
+                }
+
+                if (counting)
+                {
+                    Widths(ulong.CreateTruncating(value) & mask64, elementBits, widths);
                 }
             }
 
@@ -976,6 +1045,11 @@ internal static class BlockStatsPass
             {
                 max = value;
             }
+
+            if (counting)
+            {
+                Widths(ulong.CreateTruncating(value) & mask64, elementBits, widths);
+            }
         }
 
         if (any)
@@ -984,13 +1058,17 @@ internal static class BlockStatsPass
         }
     }
 
+
     private static void Unsigned<T>(
-        ReadOnlySpan<byte> bytes, in ValidityMask mask, int start, int count, ref BlockStats stats)
+        ReadOnlySpan<byte> bytes, in ValidityMask mask, int start, int count, ref BlockStats stats,
+        Span<int> widths)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>, IMinMaxValue<T>
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes).Slice(start, count);
         T min = T.MaxValue;
         T max = T.MinValue;
+        bool counting = !widths.IsEmpty;
+        int elementBits = Unsafe.SizeOf<T>() * 8;
 
         if (mask.AllValid)
         {
@@ -1005,6 +1083,11 @@ internal static class BlockStatsPass
                 if (value > max)
                 {
                     max = value;
+                }
+
+                if (counting)
+                {
+                    Widths(ulong.CreateTruncating(value), elementBits, widths);
                 }
             }
 
@@ -1030,6 +1113,11 @@ internal static class BlockStatsPass
             if (value > max)
             {
                 max = value;
+            }
+
+            if (counting)
+            {
+                Widths(ulong.CreateTruncating(value), elementBits, widths);
             }
         }
 

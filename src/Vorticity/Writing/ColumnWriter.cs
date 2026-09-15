@@ -11,6 +11,8 @@
 // chooser's plan memory (§3.4.3), the running distinct table (§3.2.2) and the index builders
 // (docs/10-indexes.md §7) to the same object, which is why it is a class with a growing state and
 // not a tuple.
+using System;
+using System.Buffers;
 using System.Collections.Generic;
 using Vorticity.Arrays;
 using Vorticity.Types;
@@ -38,6 +40,27 @@ internal sealed class ColumnWriter
     private readonly List<BlockStats> _closed = [];
 
     /// <summary>
+    /// One pair of width histograms per closed block, parallel to <see cref="_closed"/>, held only
+    /// until the chunk covering the block has been emitted.
+    /// </summary>
+    /// <remarks>
+    /// WHY PER BLOCK AND NOT A RUNNING TOTAL, which is what this looked like it should be: a block
+    /// closes when its last row is INGESTED, and the chunk that carries it is emitted when enough
+    /// rows are PENDING — two different moments. A batch can close several blocks that the writer
+    /// then holds in transit, so a single running accumulator would already be mixing the next
+    /// chunk's blocks into this one's by the time the chooser asked.
+    /// <para>
+    /// The list stays index-aligned with <see cref="_closed"/> forever, but an entry is nulled and
+    /// its buffer returned the moment <see cref="ReleaseChunk"/> says the chunk is written, so what
+    /// is actually held is one buffer per block IN TRANSIT — bounded by
+    /// <c>DataBlockTargetBytes</c>, which is one chunk. That is the "block scratch" row of
+    /// docs/11-write-strategy.md §3.7 and not the "~200 B per closed block" one, which is what the
+    /// 520 bytes of a histogram pair would have blown through by a factor of nine.
+    /// </para>
+    /// </remarks>
+    private readonly List<int[]?> _widths = [];
+
+    /// <summary>
     /// The row-aligned children, created the first time a batch shows them; never reordered.
     /// </summary>
     /// <remarks>
@@ -50,6 +73,9 @@ internal sealed class ColumnWriter
 
     /// <summary>The block in progress; every batch that covers part of it folds into this one.</summary>
     private BlockStats _open;
+
+    /// <summary>The open block's width histograms, rented on its first integer range.</summary>
+    private int[]? _openWidths;
 
     /// <summary>
     /// The column's last row, which outlives both the batch it came in and the block it fell in.
@@ -103,9 +129,19 @@ internal sealed class ColumnWriter
     /// <param name="count">How many rows; the caller has cut the range at the block boundary.</param>
     internal void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
     {
-        BlockStatsPass.Accumulate(arena, nodeIndex, start, count, ref _open, _previous);
-
         CanonicalNode node = arena.GetNode(nodeIndex);
+        if (_openWidths is null && node.Kind == CanonicalKind.Primitive && node.PType.IsInteger())
+        {
+            // Rented on the first integer range of the block and not before: a schema of a thousand
+            // string columns rents nothing, which is what keeps this out of the per-column budget.
+            _openWidths = ArrayPool<int>.Shared.Rent(BitPackWidths.Length);
+            _openWidths.AsSpan(0, BitPackWidths.Length).Clear();
+        }
+
+        Span<int> widths =
+            _openWidths is null ? default : _openWidths.AsSpan(0, BitPackWidths.Length);
+        BlockStatsPass.Accumulate(arena, nodeIndex, start, count, ref _open, _previous, widths);
+
         switch (node.Kind)
         {
             case CanonicalKind.Struct:
@@ -131,6 +167,82 @@ internal sealed class ColumnWriter
     }
 
     /// <summary>
+    /// Sums the width histograms of <paramref name="count"/> blocks from <paramref name="first"/>
+    /// into <paramref name="destination"/>.
+    /// </summary>
+    /// <remarks>
+    /// ALL OR NOTHING, because a partial histogram is a wrong one: a chunk whose blocks do not every
+    /// one carry their widths — a range the progression short-circuit answered, a block already
+    /// released, a column that is not an integer primitive — answers false, and the chooser walks
+    /// the column as it did before this existed.
+    /// </remarks>
+    /// <param name="first">The chunk's first block.</param>
+    /// <param name="count">How many blocks it covers.</param>
+    /// <param name="destination">Receives the sum; must hold <see cref="BitPackWidths.Length"/>.</param>
+    /// <returns>Whether every block in the range had its widths.</returns>
+    internal bool Widths(int first, int count, Span<int> destination)
+    {
+        if (first < 0 || count <= 0 || first + count > _widths.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            if (_widths[first + i] is null)
+            {
+                return false;
+            }
+        }
+
+        destination.Clear();
+        for (int i = 0; i < count; i++)
+        {
+            ReadOnlySpan<int> block = _widths[first + i].AsSpan(0, BitPackWidths.Length);
+            for (int w = 0; w < BitPackWidths.Length; w++)
+            {
+                destination[w] += block[w];
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Gives back the per-block scratch of a chunk that has been written, all the way down.
+    /// </summary>
+    /// <remarks>
+    /// This is the other half of the lifetime <see cref="_widths"/> documents. The entries are
+    /// nulled rather than removed so that a block's index stays its index; what is freed is the
+    /// buffer, which is the part that has a size.
+    /// </remarks>
+    /// <param name="first">The chunk's first block.</param>
+    /// <param name="count">How many blocks it covers.</param>
+    internal void ReleaseChunk(int first, int count)
+    {
+        for (int i = first; i < first + count && i < _widths.Count; i++)
+        {
+            int[]? widths = _widths[i];
+            if (widths is not null)
+            {
+                ArrayPool<int>.Shared.Return(widths);
+                _widths[i] = null;
+            }
+        }
+
+        ColumnWriter[]? children = _children;
+        if (children is null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < children.Length; i++)
+        {
+            children[i].ReleaseChunk(first, count);
+        }
+    }
+
+    /// <summary>
     /// Child <paramref name="index"/>, or <see langword="null"/> when this column has no children —
     /// which the caller reads as "measure it yourself".
     /// </summary>
@@ -150,8 +262,18 @@ internal sealed class ColumnWriter
     /// </remarks>
     internal void CloseBlock()
     {
+        // A block whose widths are partial is stored as ABSENT rather than as a wrong count: the
+        // buffer goes straight back to the pool and the chooser measures the column itself.
+        if (_open.WidthsBroken && _openWidths is not null)
+        {
+            ArrayPool<int>.Shared.Return(_openWidths);
+            _openWidths = null;
+        }
+
         _closed.Add(_open);
+        _widths.Add(_openWidths);
         _open = default;
+        _openWidths = null;
 
         ColumnWriter[]? children = _children;
         if (children is null)

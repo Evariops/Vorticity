@@ -184,7 +184,7 @@ internal static class ArrayBlobWriter
         nodeIndex = Materialize(arena, nodeIndex);
         BlockStats summary = stats.Stats;
         ColumnPlan plan = ColumnCompressor.Choose(
-            arena, nodeIndex, encodings.Target, in summary, cascade);
+            arena, nodeIndex, encodings.Target, in summary, cascade, stats);
         if (plan.Scheme == ColumnScheme.None)
         {
             // Not the end of it: the column itself resisted every scheme, but a struct field or a
