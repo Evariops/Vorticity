@@ -91,6 +91,12 @@ internal sealed class BitPackPlan
     internal long Cost { get; }
 
     /// <summary>
+    /// The same estimate without the wrapper node: the bytes the packed and patch buffers will
+    /// hold, which is what plan memory compares against the bytes the encoder produced.
+    /// </summary>
+    internal long BufferBytes => Cost - NodeOverhead;
+
+    /// <summary>
     /// How many rows' encoded value needs more than <see cref="BitWidth"/> bits — the patches the
     /// pack will find and write, counted here from the histogram so the pack can size them.
     /// </summary>

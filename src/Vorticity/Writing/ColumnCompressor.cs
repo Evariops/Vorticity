@@ -382,12 +382,6 @@ internal static class ColumnCompressor
     /// </summary>
     private const int DictionaryOverhead = 512;
 
-    /// <summary>
-    /// What a progression costs on the wire: one node and its metadata, no buffer
-    /// (docs/11-write-strategy.md §3.4.2, "~32 bytes").
-    /// </summary>
-    private const int SequenceBytes = 32;
-
     /// <summary>Below this many rows, a column is a candidate only if it is big in BYTES.</summary>
     private const int MinimumRows = 64;
 
@@ -886,7 +880,7 @@ internal static class ColumnCompressor
             // Only here, where the plan is kept, does anything become a real array.
             return ColumnPlan.Dictionary(
                     firstRows.AsSpan(0, distinct).ToArray(), codes.AsSpan(0, length).ToArray())
-                with { PredictedBytes = encoded + DictionaryOverhead };
+                with { PredictedBytes = encoded };
         }
         finally
         {
@@ -1207,7 +1201,7 @@ internal static class ColumnCompressor
                 return MaterializeRuns(arena, in node, in comparer, length, runs, in walkedRuns, runEndCost);
 
             case ColumnScheme.BitPacked:
-                return ColumnPlan.ForBitPacking(packed!) with { PredictedBytes = packed!.Cost };
+                return ColumnPlan.ForBitPacking(packed!) with { PredictedBytes = packed!.BufferBytes };
 
             default:
                 return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild);
@@ -1231,9 +1225,11 @@ internal static class ColumnCompressor
         }
 
         SequencePlan? sequence = SequencePlan.TryBuild(arena, node, stepsAreConstant: knownSteps);
+        // A progression writes no buffer -- the base and the step go in the metadata -- so the
+        // prediction plan memory checks is zero, and holds exactly when the encoder wrote none.
         return sequence is null
             ? ColumnPlan.Canonical
-            : ColumnPlan.ForSequence(sequence) with { PredictedBytes = SequenceBytes };
+            : ColumnPlan.ForSequence(sequence) with { PredictedBytes = 0 };
     }
 
     /// <summary>
@@ -1302,7 +1298,7 @@ internal static class ColumnCompressor
                     return ColumnPlan.Canonical;
                 }
 
-                return ColumnPlan.ForBitPacking(packed) with { PredictedBytes = packed.Cost };
+                return ColumnPlan.ForBitPacking(packed) with { PredictedBytes = packed.BufferBytes };
             }
 
             case ColumnScheme.Dict:
@@ -1379,7 +1375,9 @@ internal static class ColumnCompressor
             : runs == 1
                 ? ColumnPlan.Runs([0], [length])
                 : TryRuns(arena, in node, in comparer, length);
-        return plan with { PredictedBytes = cost };
+        // The 256 is framing, which the encoder's buffers do not hold; the prediction plan memory
+        // checks is the ends and the values alone.
+        return plan with { PredictedBytes = Math.Max(0, cost - 256) };
     }
 
     /// <summary>
@@ -1424,7 +1422,7 @@ internal static class ColumnCompressor
             Table = table,
             Entries = entries,
             Rows = length,
-            PredictedBytes = encoded + DictionaryOverhead,
+            PredictedBytes = encoded,
         };
     }
 

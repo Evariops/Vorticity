@@ -91,14 +91,17 @@ internal sealed class ColumnWriter
     /// docs/11-write-strategy.md §3.2.2's liveness rule.
     /// </summary>
     /// <remarks>
-    /// Live on a column's first chunk and on every chunk plan memory sends back to full pricing,
-    /// live on a chunk whose remembered plan is a dictionary, DEAD on a chunk whose remembered plan
-    /// is another scheme within tolerance: a high-cardinality string column without an index is
-    /// probed on its first chunk and never again. Index builders will add their own consumers.
+    /// LIVE ONLY ON A CHUNK WHOSE REMEMBERED PLAN IS A DICTIONARY THAT HELD. The spec's first reading
+    /// had the table live on a column's first chunk too, and the end-of-refactor measurement said
+    /// what that costs: a hash and a probe per row of every comparable column, on columns whose
+    /// whole write was a few hundred microseconds — `bool` ×9,5, `primitive` ×10, `sequence` ×13.
+    /// The walk it was meant to replace abandons early on exactly those columns; the table cannot,
+    /// because it does not know the budget. So the first chunk walks, and the table takes over
+    /// from the chunk after a dictionary won. Index builders will add their own consumers.
     /// </remarks>
     internal bool DictionaryLive => EditionAllowsDictionary && _live;
 
-    private bool _live = true;
+    private bool _live;
 
     /// <summary>
     /// Per closed block, in block order: how many distinct values and how many heap bytes the table
@@ -313,8 +316,18 @@ internal sealed class ColumnWriter
         /// Whether the prediction held: the actual bytes are within the tolerance of it, so the
         /// next chunk may reuse the plan without pricing the alternatives.
         /// </summary>
+        /// <remarks>
+        /// BUFFER BYTES AGAINST BUFFER BYTES. The end-of-refactor measurement found the table
+        /// alive on every chunk of every progression: the plan predicted the ~32 bytes of framing a
+        /// sequence costs and the encoder produced no buffer at all, so the prediction never held,
+        /// the column never left full pricing, and a million rows were probed for a plan decided
+        /// before the table was ever asked. A prediction is now the bytes the encoder's buffers
+        /// will hold, framing excluded on both sides, and a scheme with no buffer holds trivially.
+        /// </remarks>
         internal bool WithinTolerance =>
-            Predicted > 0 && Math.Abs(Actual - Predicted) * 100 <= Predicted * TolerancePercent;
+            Predicted == 0
+                ? Actual == 0
+                : Math.Abs(Actual - Predicted) * 100 <= Predicted * TolerancePercent;
     }
 
     /// <summary>The memory of the last chunk written, or none for the first.</summary>
@@ -333,14 +346,19 @@ internal sealed class ColumnWriter
     /// <param name="actualBytes">The buffer bytes it produced, this column's subtree included.</param>
     internal void Remember(in ColumnPlan plan, long actualBytes)
     {
-        Memory = plan.PredictedBytes > 0
-            ? new PlanMemory(plan.Scheme, plan.PredictedBytes, actualBytes)
-            : null;
+        // A progression predicts zero buffer bytes and is priced all the same; every other priced
+        // plan predicts more than zero. What predicts zero without being a progression was never
+        // priced -- a child a scheme invented -- and leaves no memory.
+        bool priced = plan.PredictedBytes > 0 || plan.Scheme == ColumnScheme.Sequence;
+        Memory = priced ? new PlanMemory(plan.Scheme, plan.PredictedBytes, actualBytes) : null;
 
-        // THE TABLE'S CONSUMER FOR THE NEXT CHUNK, decided here and nowhere else: a memory that
-        // holds and is not a dictionary means the next chunk is priced from memory alone, and a
-        // table nobody will read is a table that does not run.
-        _live = Memory is not { WithinTolerance: true } held || held.Scheme == ColumnScheme.Dict;
+        // THE TABLE'S CONSUMER FOR THE NEXT CHUNK, decided here and nowhere else. The end-of-refactor
+        // measurement settled the rule the other way round from the spec's first reading: the table
+        // runs ONLY on a chunk whose remembered plan is a dictionary that held. A column's first
+        // chunk, and every chunk sent back to full pricing, walks as it did before -- the walk
+        // abandons early on the columns where a dictionary loses, and the table cannot -- so the
+        // probe is paid exactly where its answer is used.
+        _live = Memory is { WithinTolerance: true, Scheme: ColumnScheme.Dict };
     }
 
     /// <summary>

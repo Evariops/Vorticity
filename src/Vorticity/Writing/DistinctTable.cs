@@ -168,17 +168,26 @@ internal sealed class DistinctTable
     /// <param name="node">Any node of the column; only its kind and width are read.</param>
     internal static DistinctTable? For(CanonicalNode node) => node.Kind switch
     {
-        CanonicalKind.Bool => new DistinctTable(Shape.Bits, node.Kind, 0),
-        CanonicalKind.Primitive => new DistinctTable(Shape.Fixed, node.Kind, node.PType.ByteWidth()),
+        // NO TABLE BELOW THREE BYTES OF WIDTH, and it is arithmetic, not policy: a column of `w`
+        // bytes has at most 2^(8w) distinct values, so its codes are `w` bytes wide too -- as wide
+        // as the values they replace -- and the entries and the framing come on top. A dictionary
+        // of a bool, a byte or a short can never be smaller than the column, so a table over one
+        // is a hash and a probe per row for a verdict the chooser reaches without it. The end-of-
+        // refactor measurement priced that at ×6 to ×9,5 on the bool family.
+        CanonicalKind.Bool => null,
+        CanonicalKind.Primitive => node.PType.ByteWidth() <= 2
+            ? null
+            : new DistinctTable(Shape.Fixed, node.Kind, node.PType.ByteWidth()),
 
         // A constant batch wears the canonical constant form, whose dtype is Primitive by
         // construction (ConstantCanonicalizer builds it for no other kind); the next batch of the
         // same column may well be an ordinary primitive, so the table is the PRIMITIVE one and the
         // constant is a way of feeding it, not a kind of its own.
-        CanonicalKind.Constant => new DistinctTable(
-            Shape.Fixed, CanonicalKind.Primitive, node.DType.PType.ByteWidth()),
+        CanonicalKind.Constant => node.DType.PType.ByteWidth() <= 2
+            ? null
+            : new DistinctTable(Shape.Fixed, CanonicalKind.Primitive, node.DType.PType.ByteWidth()),
         CanonicalKind.Decimal => DecimalStorage.ByteWidth(node.Storage) is int w && w <= 8
-            ? new DistinctTable(Shape.Fixed, node.Kind, w)
+            ? (w <= 2 ? null : new DistinctTable(Shape.Fixed, node.Kind, w))
             : new DistinctTable(Shape.Bytes, node.Kind, w),
         CanonicalKind.VarBinView => new DistinctTable(Shape.Bytes, node.Kind, 0),
         _ => null,
