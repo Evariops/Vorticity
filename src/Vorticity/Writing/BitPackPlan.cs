@@ -63,15 +63,13 @@ internal sealed class BitPackPlan
     private const long PatchOverhead = 256;
 
     private BitPackPlan(
-        BitPackTransform transform, ulong reference, int bitWidth, long cost, int[] indices,
-        ulong[] values)
+        BitPackTransform transform, ulong reference, int bitWidth, long cost, long exceptions)
     {
         Transform = transform;
         Reference = reference;
         BitWidth = bitWidth;
         Cost = cost;
-        PatchIndices = indices;
-        PatchValues = values;
+        Exceptions = exceptions;
     }
 
     /// <summary>Which map was chosen.</summary>
@@ -92,15 +90,20 @@ internal sealed class BitPackPlan
     /// </summary>
     internal long Cost { get; }
 
-    /// <summary>The rows whose encoded value needs more than <see cref="BitWidth"/> bits.</summary>
-    internal int[] PatchIndices { get; }
-
     /// <summary>
-    /// Those rows' values, in the ENCODED domain - after the transform, before the packing. That
-    /// is the domain the decoder patches in: it overwrites the unpacked buffer and only then hands
-    /// the result to <c>fastlanes.for</c> or <c>vortex.zigzag</c>.
+    /// How many rows' encoded value needs more than <see cref="BitWidth"/> bits — the patches the
+    /// pack will find and write, counted here from the histogram so the pack can size them.
     /// </summary>
-    internal ulong[] PatchValues { get; }
+    /// <remarks>
+    /// THE PATCHES THEMSELVES ARE GATHERED INSIDE THE PACK (docs/11-write-strategy.md §3.5), which
+    /// encodes every row anyway and sees each exception as it goes: <c>v ≥ 2^b</c> on the value it
+    /// has just transformed. Until stage R5b this plan carried the patch arrays, produced by a walk
+    /// of its own over the column -- the same transform, applied a second time, to find the same
+    /// rows. The count is all the pack needs from the chooser, and the pack checks it: the
+    /// histogram and the encode read the same rows under the same transform, so they agree or one
+    /// of the two is wrong, and a mismatch is an exception rather than a short array.
+    /// </remarks>
+    internal long Exceptions { get; }
 
     /// <summary>
     /// Measures the column and decides whether bit-packing it pays, and how.
@@ -209,12 +212,9 @@ internal sealed class BitPackPlan
         }
 
         ulong transformReference = best.Transform == BitPackTransform.Frame ? minimum : 0;
-        (int[] indices, ulong[] patched) = Collect(
-            length, mask, values, raw, best, transformReference, elementBits);
-
         return new BitPackPlan(
             best.Transform, transformReference, best.BitWidth, best.Cost + NodeOverhead,
-            indices, patched);
+            best.Exceptions);
     }
 
     /// <summary>The encoded, unsigned form of one row's raw bits.</summary>
@@ -448,60 +448,6 @@ internal sealed class BitPackPlan
         return best;
     }
 
-    /// <summary>Gathers the rows the chosen width cannot hold.</summary>
-    /// <remarks>
-    /// ONE PASS, AND OFTEN NONE. The count came from a first identical walk over every row of the
-    /// column, recomputing what <see cref="Cheapest"/> had already accumulated to price the width
-    /// it returned. <see cref="Best.Exceptions"/> is that number, so the arrays are sized from it
-    /// and the walk that sized them is gone; when it is zero — the width holds every row, which is
-    /// what a column of dictionary codes, run-end ends or varbin offsets looks like — this method
-    /// returns before touching the column at all.
-    /// </remarks>
-    private static (int[] Indices, ulong[] Values) Collect(
-        int length, ValidityMask mask, ReadOnlySpan<byte> values, PType raw, in Best best,
-        ulong reference, int elementBits)
-    {
-        if (best.BitWidth >= elementBits || best.Exceptions == 0)
-        {
-            return ([], []);
-        }
-
-        ulong limit = 1UL << best.BitWidth;
-        int count = (int)best.Exceptions;
-        int[] indices = new int[count];
-        ulong[] patched = new ulong[count];
-        int at = 0;
-        for (int row = 0; row < length && at < count; row++)
-        {
-            if (!mask.IsValid(row))
-            {
-                continue;
-            }
-
-            ulong encoded = Encode(
-                CompressedValues.ReadUnsigned(values, raw, row), best.Transform, reference, elementBits);
-            if (encoded >= limit)
-            {
-                indices[at] = row;
-                patched[at] = encoded;
-                at++;
-            }
-        }
-
-        if (at != count)
-        {
-            // The count comes from the histogram and the gather from the values; they are the same
-            // rows under the same transform, so they agree or one of the two is wrong. Saying so
-            // here is what makes it safe to stop the walk at the last exception instead of at the
-            // last row -- a short array would otherwise be padded with row 0 in silence.
-            throw new InvalidOperationException(
-                $"The width histogram counted {count} values above {best.BitWidth} bits and the " +
-                $"column holds {at}.");
-        }
-
-        return (indices, patched);
-    }
-
     /// <summary>The minimum over the valid rows, as the element width's unsigned bits.</summary>
     /// <remarks>
     /// Read as SIGNED when the column is signed and unsigned otherwise, because the minimum of
@@ -578,10 +524,11 @@ internal sealed class BitPackPlan
         /// </summary>
         /// <remarks>
         /// It is carried rather than recounted: <see cref="Cheapest"/> accumulates it to price the
-        /// width, and <see cref="Collect"/> used to walk the whole column again to find the same
-        /// number before it could size its arrays. Carrying it deletes that pass outright, and
-        /// deletes <see cref="Collect"/> entirely on the common case of a width that holds every
-        /// row — dictionary codes, run-end ends and varbin offsets are all of that shape.
+        /// width, and the pack that writes the column sizes its patch arrays from it and finds the
+        /// rows as it transforms them (<c>ArrayBlobWriter.Pack</c>). A gather of its own used to
+        /// walk the whole column twice — once to count, once to fill — to reach the same rows under
+        /// the same transform; both walks are gone, and a width that holds every row — dictionary
+        /// codes, run-end ends, varbin offsets — costs the pack nothing beyond the pack.
         /// </remarks>
         internal long Exceptions { get; }
     }

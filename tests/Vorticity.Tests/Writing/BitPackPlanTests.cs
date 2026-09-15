@@ -51,8 +51,12 @@ public sealed class BitPackPlanTests
         BitPackPlan? plan = Plan(fixture, node);
         Assert.NotNull(plan);
         Assert.Equal(BitPackTransform.ZigZag, plan.Transform);
-        Assert.Equal(2, plan.PatchIndices.Length);
-        Assert.Equal([1, 2], plan.PatchIndices);
+        Assert.Equal(2L, plan.Exceptions);
+
+        // The rows themselves are the pack's to find, since stage R5b-2: the plan carries the
+        // count, the pack sizes its patch arrays from it and fills them as it transforms.
+        (int[] indices, _) = ArrayBlobWriter.Patches(fixture.Arena, fixture.Arena.GetNode(node), plan);
+        Assert.Equal([1, 2], indices);
 
         // 8192 * 7 is under 2^16, so zigzag needs one more bit than that and nothing near 64.
         Assert.InRange(plan.BitWidth, 1, 20);
@@ -85,7 +89,7 @@ public sealed class BitPackPlanTests
 
         BitPackPlan? plan = Plan(fixture, node);
         Assert.NotNull(plan);
-        Assert.Empty(plan.PatchIndices);
+        Assert.Equal(0L, plan.Exceptions);
         Assert.Equal(BitPackTransform.Frame, plan.Transform);
         Assert.InRange(plan.BitWidth, 1, 8);
     }
@@ -115,7 +119,7 @@ public sealed class BitPackPlanTests
         BitPackPlan? plan = Plan(fixture, node);
         Assert.NotNull(plan);
         Assert.Equal(BitPackTransform.Frame, plan.Transform);
-        Assert.Empty(plan.PatchIndices);
+        Assert.Equal(0L, plan.Exceptions);
         Assert.Equal(12, plan.BitWidth);
     }
 
@@ -143,8 +147,8 @@ public sealed class BitPackPlanTests
         if (plan is not null)
         {
             Assert.True(
-                plan.PatchIndices.Length * 10 < values.Length,
-                $"{plan.PatchIndices.Length} patches over {values.Length} rows at width {plan.BitWidth}");
+                plan.Exceptions * 10 < values.Length,
+                $"{plan.Exceptions} patches over {values.Length} rows at width {plan.BitWidth}");
         }
     }
 
@@ -174,10 +178,13 @@ public sealed class BitPackPlanTests
         BitPackPlan? plan = Plan(fixture, node);
         Assert.NotNull(plan);
         Assert.Equal(BitPackTransform.Frame, plan.Transform);
-        Assert.Equal([7], plan.PatchIndices);
+        Assert.Equal(1L, plan.Exceptions);
+        (int[] indices, ulong[] patched) =
+            ArrayBlobWriter.Patches(fixture.Arena, fixture.Arena.GetNode(node), plan);
+        Assert.Equal([7], indices);
 
         // Frame of reference over a minimum of 1000: the stored value is the offset, not 2^40.
-        Assert.Equal((ulong)((1L << 40) - 1000), plan.PatchValues[0]);
+        Assert.Equal((ulong)((1L << 40) - 1000), patched[0]);
     }
 
     private static BitPackPlan? Plan(ColumnFixture fixture, int node)

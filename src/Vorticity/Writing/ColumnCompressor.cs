@@ -208,7 +208,7 @@ internal readonly struct ColumnPlan
             $"first={Fingerprint(Gather):x}",
         ColumnScheme.BitPacked =>
             $"bitpacked {BitPack!.Transform} reference={BitPack.Reference} width={BitPack.BitWidth} " +
-            $"patches={BitPack.PatchIndices.Length} cost={BitPack.Cost}",
+            $"patches={BitPack.Exceptions} cost={BitPack.Cost}",
         ColumnScheme.Sequence => $"sequence base={Sequence!.BaseBits} step={Sequence.Step}",
         ColumnScheme.Fsst => $"fsst size={Fsst!.EncodedSize}",
         ColumnScheme.Zstd => $"zstd frame={Zstd!.FrameLength}",

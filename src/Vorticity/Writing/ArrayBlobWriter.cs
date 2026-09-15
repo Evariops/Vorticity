@@ -294,7 +294,8 @@ internal static class ArrayBlobWriter
         int width = ptype.ByteWidth();
         int length = node.Length;
 
-        byte[] packed = Pack(arena, node, plan, ptype, length);
+        byte[] packed = Pack(
+            arena, node, plan, ptype, length, out int[] patchIndices, out ulong[] patchValues);
         buffers.Add(new PendingBuffer(packed, Exponent(width)));
         Span<ushort> packedBuffer = stackalloc ushort[1];
         packedBuffer[0] = (ushort)(buffers.Count - 1);
@@ -302,14 +303,14 @@ internal static class ArrayBlobWriter
         Span<int> children = stackalloc int[3];
         int childCount = 0;
         PatchesMetadata patches = default;
-        bool patched = plan.PatchIndices.Length > 0;
+        bool patched = patchIndices.Length > 0;
         if (patched)
         {
             PType indicesPType = FsstPlan.IndexPType(length);
-            patches = PatchesMetadata.Create((ulong)plan.PatchIndices.Length, 0, indicesPType);
-            children[0] = WriteIndexArray(builder, buffers, encodings, plan.PatchIndices, indicesPType);
+            patches = PatchesMetadata.Create((ulong)patchIndices.Length, 0, indicesPType);
+            children[0] = WriteIndexArray(builder, buffers, encodings, patchIndices, indicesPType);
             children[1] = WriteRawPrimitive(
-                builder, buffers, encodings, LittleEndian(plan.PatchValues, width), ToUnsigned(ptype));
+                builder, buffers, encodings, LittleEndian(patchValues, width), ToUnsigned(ptype));
             childCount = 2;
         }
 
@@ -362,9 +363,41 @@ internal static class ArrayBlobWriter
     /// patch child puts the value back. Writing a zero there instead would cost a branch per row
     /// to produce bytes nothing reads.
     /// </remarks>
-    private static byte[] Pack(
-        CanonicalArena arena, CanonicalNode node, BitPackPlan plan, PType ptype, int length)
+    /// <summary>
+    /// The patches the pack finds for <paramref name="plan"/> over <paramref name="node"/>: the rows
+    /// whose transformed value does not fit the width, and those values in the encoded domain.
+    /// </summary>
+    /// <remarks>
+    /// FOR THE TESTS THAT USED TO READ THEM OFF THE PLAN. The gather moved from the chooser into the
+    /// pack (docs/11-write-strategy.md §3.5), and the assertions that pin its positions and its
+    /// domain — a patch value is the offset from the reference, not the raw value; a null row is
+    /// never a patch — moved with it rather than being dropped. The packed bytes are computed and
+    /// discarded, which is what the assertions cost.
+    /// </remarks>
+    /// <param name="arena">The arena holding the node.</param>
+    /// <param name="node">The integer column chunk.</param>
+    /// <param name="plan">Its bit-packing plan.</param>
+    internal static (int[] Indices, ulong[] Values) Patches(
+        CanonicalArena arena, CanonicalNode node, BitPackPlan plan)
     {
+        Pack(arena, node, plan, node.PType, node.Length, out int[] indices, out ulong[] values);
+        return (indices, values);
+    }
+
+    private static byte[] Pack(
+        CanonicalArena arena, CanonicalNode node, BitPackPlan plan, PType ptype, int length,
+        out int[] patchIndices, out ulong[] patchValues)
+    {
+        // THE PATCHES ARE FOUND HERE, NOT BY A WALK OF THEIR OWN (docs/11-write-strategy.md §3.5):
+        // every row is transformed below anyway, and an exception is a transformed value that does
+        // not fit the width. The chooser counted them from its histogram, which sizes the arrays;
+        // the loop fills them; a count that disagrees is an exception rather than a short array
+        // padded with row 0 in silence.
+        int exceptions = checked((int)plan.Exceptions);
+        patchIndices = exceptions == 0 ? [] : new int[exceptions];
+        patchValues = exceptions == 0 ? [] : new ulong[exceptions];
+        int found = 0;
+
         int bitWidth = plan.BitWidth;
         int blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
 
@@ -376,7 +409,11 @@ internal static class ArrayBlobWriter
         // `length == 0` gives no blocks -- so nothing is ever returned unwritten.
         byte[] destination = GC.AllocateUninitializedArray<byte>(
             checked((int)((long)blocks * FastLanes.BlockByteLength(bitWidth))));
-        if (bitWidth == 0 || length == 0)
+        // WIDTH ZERO STILL WALKS: a column packed at zero bits is a constant with exceptions, and the
+        // exceptions are exactly what the loop below has to find. Only an empty column has nothing
+        // to look at. The packed bytes are empty either way -- `BlockByteLength(0)` is 0 -- and the
+        // pack itself is skipped block by block below.
+        if (length == 0)
         {
             return destination;
         }
@@ -391,6 +428,11 @@ internal static class ArrayBlobWriter
         // `byte[1024]`, `ushort[1024]` or `uint[1024]` for every block of every bit-packed column
         // in the file. The narrow buffer is sized in BYTES here so one rental serves whichever
         // width the column turns out to be.
+        // An exception is a transformed value at or above 2^width; at the element's own width
+        // nothing can be one, and the chooser then counted none.
+        ulong limit = bitWidth >= 64 ? ulong.MaxValue : 1UL << bitWidth;
+        bool patching = exceptions > 0;
+
         ulong[] block = ArrayPool<ulong>.Shared.Rent(FastLanes.BlockSize);
         byte[] narrow = ArrayPool<byte>.Shared.Rent(FastLanes.BlockSize * sizeof(uint));
         try
@@ -417,20 +459,43 @@ internal static class ArrayBlobWriter
 
                     // A null row encodes as zero under either transform: its value is never read
                     // back and a stable zero compresses better than whatever the buffer held.
-                    wide[i] = mask.IsValid(row)
+                    ulong encoded = mask.IsValid(row)
                         ? BitPackPlan.Encode(
                             CompressedValues.ReadUnsigned(values, ToUnsigned(ptype), row),
                             plan.Transform, plan.Reference, elementBits)
                         : 0;
+                    wide[i] = encoded;
+
+                    // And zero always fits, so only a valid row can be an exception -- tested on
+                    // the value just transformed, not on a second read of the column.
+                    if (patching && encoded >= limit)
+                    {
+                        patchIndices[found] = row;
+                        patchValues[found] = encoded;
+                        found++;
+                    }
                 }
 
-                PackInto(wide, narrow, bitWidth, ptype, destination.AsSpan(b * blockBytes, blockBytes));
+                if (blockBytes > 0)
+                {
+                    PackInto(wide, narrow, bitWidth, ptype, destination.AsSpan(b * blockBytes, blockBytes));
+                }
             }
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(narrow);
             ArrayPool<ulong>.Shared.Return(block);
+        }
+
+        if (found != exceptions)
+        {
+            // The count came from the histogram and the gather from the transform; they read the
+            // same rows under the same map, so they agree or one of the two is wrong -- and a
+            // short array of patches would otherwise put row 0 back into the file in silence.
+            throw new InvalidOperationException(
+                $"The width histogram counted {exceptions} values above {bitWidth} bits and the " +
+                $"pack found {found}.");
         }
 
         return destination;

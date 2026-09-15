@@ -94,7 +94,7 @@ public sealed partial class PerRowDispatchTests
         ("Layouts/DictLayoutReader.cs", 1, 0, "R6 done: the one left is an error path"),
         ("Types/Variant/ParquetVariant.cs", 2, 0, "a local method of the same name, not these"),
         ("Writing/ArrayBlobWriter.cs", 1, 1, "W-13"),
-        ("Writing/BitPackPlan.cs", 3, 3, "W-11"),
+        ("Writing/BitPackPlan.cs", 2, 2, "W-11"),
     ];
 
     /// <summary>The grand totals, which are annexe A's two headline numbers.</summary>
@@ -121,8 +121,14 @@ public sealed partial class PerRowDispatchTests
     /// that reads every row of every integer column of every chunk, resolves the physical type
     /// before it starts instead of switching on it per value. Same shape as R7, W-9 and W-33, and
     /// the last dispatching site in `BitPackPlan` that is not `Minimum` or the patch gather.
+    ///
+    /// **57 since stage R5b-2**: the patch gather is gone from `BitPackPlan` altogether. The pack
+    /// transforms every row anyway and sees each exception as it goes, so the plan carries the
+    /// count and the pack finds the rows — one walk where there were two, and the same transform
+    /// applied once instead of twice. What is left in the file is `Minimum`, already skipped
+    /// whenever the ingest pass has the reference.
     /// </remarks>
-    private const int TotalCalls = 58;
+    private const int TotalCalls = 57;
 
     /// <summary>Calls annexe A classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
@@ -145,8 +151,12 @@ public sealed partial class PerRowDispatchTests
     ///
     /// **18 with the same stage's second commit**: the width histogram is typed, so its read is
     /// resolved once per column and not once per row.
+    ///
+    /// **17 since stage R5b-2**: the patch gather's read went with the gather. The pack's own
+    /// per-row read (`Writing/ArrayBlobWriter.cs`, W-13) now finds the patches too, so the count
+    /// of walks over a bit-packed column dropped without a new site appearing.
     /// </remarks>
-    private const int TotalPerRow = 18;
+    private const int TotalPerRow = 17;
 
     [Fact]
     public void NoFileDispatchesPerRowMoreOftenThanItsCeiling()
