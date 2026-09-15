@@ -29,8 +29,8 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
-using System.IO.Hashing;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -150,6 +150,51 @@ internal readonly struct ColumnPlan
 
     internal static ColumnPlan ForSequence(SequencePlan plan) =>
         new ColumnPlan(ColumnScheme.Sequence, [], []) { Sequence = plan };
+
+    /// <summary>
+    /// One line that says what this plan would write: the scheme, its parameters, and a fingerprint
+    /// of the arrays it carries. Two plans with the same description write the same bytes.
+    /// </summary>
+    /// <remarks>
+    /// THE ORACLE OF STAGE R3 (IMPL-PLAN.md §1.2): the chooser by formulas is built beside the one
+    /// it replaces and the two are compared PLAN AGAINST PLAN over the whole corpus, which catches
+    /// what byte identity alone would let through — two divergences that compensate. The arrays are
+    /// fingerprinted rather than printed because a codes buffer is a million entries, and an
+    /// order-sensitive hash of them is as good a witness as the entries themselves for the
+    /// question being asked, which is "did the two choosers decide the same thing".
+    /// </remarks>
+    internal string Describe() => Scheme switch
+    {
+        ColumnScheme.None => "canonical",
+        ColumnScheme.RunEnd =>
+            $"runend runs={Codes.Length} ends={Fingerprint(Codes):x} starts={Fingerprint(Gather):x}",
+        ColumnScheme.Dict =>
+            $"dict entries={Gather.Length} rows={Codes.Length} codes={Fingerprint(Codes):x} " +
+            $"first={Fingerprint(Gather):x}",
+        ColumnScheme.BitPacked =>
+            $"bitpacked {BitPack!.Transform} reference={BitPack.Reference} width={BitPack.BitWidth} " +
+            $"patches={BitPack.PatchIndices.Length} cost={BitPack.Cost}",
+        ColumnScheme.Sequence => $"sequence base={Sequence!.BaseBits} step={Sequence.Step}",
+        ColumnScheme.Fsst => $"fsst size={Fsst!.EncodedSize}",
+        ColumnScheme.Zstd => $"zstd frame={Zstd!.FrameLength}",
+        ColumnScheme.Alp =>
+            $"alp e={Alp!.ExponentE} f={Alp.ExponentF} size={Alp.EncodedSize} " +
+            $"patches={Alp.PatchIndices.Length}",
+        _ => Scheme.ToString(),
+    };
+
+    /// <summary>An order-sensitive 64-bit hash of an index array.</summary>
+    private static ulong Fingerprint(int[] values)
+    {
+        ulong hash = 0x9E3779B97F4A7C15UL;
+        for (int i = 0; i < values.Length; i++)
+        {
+            hash = (hash ^ (uint)values[i]) * 0xBF58476D1CE4E5B9UL;
+            hash ^= hash >> 31;
+        }
+
+        return hash;
+    }
 }
 
 /// <summary>Decides how to encode one column chunk.</summary>
@@ -371,6 +416,51 @@ internal static class ColumnCompressor
         CanonicalArena arena, int nodeIndex, VortexEdition target = EditionRegistry.Newest,
         in BlockStats stats = default, Cascade cascade = default, ChunkStats chunk = default)
     {
+        ColumnPlan plan = ChooseToday(arena, nodeIndex, target, in stats, cascade, chunk);
+
+        // STAGE R3'S ORACLE (IMPL-PLAN.md §1.2): when a test has installed a probe, the chooser by
+        // formulas runs on the same chunk with the same inputs and the two decisions are compared
+        // plan against plan. The probe flows with the async write and nowhere else, so two tests
+        // writing at once cannot see each other's chunks.
+        DifferentialProbe? probe = Differential.Value;
+        if (probe is not null)
+        {
+            ColumnPlan other = ChooseByFormula(
+                arena, nodeIndex, target, in stats, cascade, chunk, probe.RunEndCompetes);
+            string today = plan.Describe();
+            string formula = other.Describe();
+            if (today != formula)
+            {
+                probe.Report(nodeIndex, today, formula);
+            }
+
+            // The second plan is thrown away, and a zstd frame among its candidates is holding a
+            // pooled buffer that nothing will write.
+            other.Zstd?.Release();
+        }
+
+        return plan;
+    }
+
+    /// <summary>What a test installs to compare the two choosers, and which rule to compare under.</summary>
+    /// <param name="RunEndCompetes">
+    /// <see langword="false"/> holds the formula chooser to today's rule — run-end wins outright
+    /// once inside its ratio — and the two must then agree on every chunk of the corpus, which is
+    /// the test of the harness itself. <see langword="true"/> lets run-end compete in bytes as
+    /// docs/11-write-strategy.md §3.4.2 prices it, and every disagreement is a plan the spec's rule
+    /// would change, with its cost on both sides.
+    /// </param>
+    /// <param name="Report">Called per disagreeing chunk with the node and the two descriptions.</param>
+    internal sealed record DifferentialProbe(bool RunEndCompetes, Action<int, string, string> Report);
+
+    /// <summary>The probe in force for the current async flow, or none.</summary>
+    internal static readonly AsyncLocal<DifferentialProbe?> Differential = new AsyncLocal<DifferentialProbe?>();
+
+    /// <summary>The chooser as it stands: candidates in a fixed order, the first that wins returns.</summary>
+    private static ColumnPlan ChooseToday(
+        CanonicalArena arena, int nodeIndex, VortexEdition target, in BlockStats stats,
+        Cascade cascade, ChunkStats chunk)
+    {
         CanonicalNode node = arena.GetNode(nodeIndex);
         int length = node.Length;
         bool measured = stats.IsPresent && stats.Rows == length;
@@ -525,6 +615,30 @@ internal static class ColumnCompressor
         {
             return ColumnPlan.ForBitPacking(packed);
         }
+
+        return Trials(arena, nodeIndex, node, target, plain);
+    }
+
+    /// <summary>
+    /// The three schemes whose cost is not a function of the statistics — ALP, zstd, FSST — each
+    /// tried under <paramref name="budget"/> as its abort bound (docs/11-write-strategy.md §3.4.1,
+    /// step 3).
+    /// </summary>
+    /// <remarks>
+    /// SHARED BY BOTH CHOOSERS, which is what makes their comparison a comparison of the EXACT
+    /// tier alone: whatever the formulas decide, the trials that follow are the same code under
+    /// the same ceiling, so a disagreement between the two can only come from the arithmetic.
+    /// </remarks>
+    /// <param name="arena">The arena holding the node.</param>
+    /// <param name="nodeIndex">The column chunk.</param>
+    /// <param name="node">The same chunk, resolved.</param>
+    /// <param name="target">The edition being written.</param>
+    /// <param name="budget">The bytes the trial has to beat: the best exact plan's, or the plain column's.</param>
+    private static ColumnPlan Trials(
+        CanonicalArena arena, int nodeIndex, CanonicalNode node, VortexEdition target, long budget)
+    {
+        // Named as the body has always named it: every ceiling below is derived from this one.
+        long plain = budget;
 
         // LAST, and only for text: a high-cardinality string column defeats runs, defeats
         // dictionaries and has no frame of reference, which is precisely the case the reference
@@ -863,6 +977,191 @@ internal static class ColumnCompressor
         EditionRegistry.Contains(target, ComponentKind.Array, id);
 
     /// <summary>Whether a canonical form has a row equality this compressor can compute.</summary>
+    /// <summary>
+    /// The chooser of docs/11-write-strategy.md §3.4.1: degenerate cases from the statistics, then
+    /// every exact-cost candidate priced by formula and the cheapest kept, then the trials under
+    /// that cost. Built beside <see cref="ChooseToday"/> and compared with it plan against plan.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHAT DIFFERS FROM TODAY IS THE SHAPE, NOT THE ARITHMETIC. Today's chooser returns the first
+    /// candidate that wins, in a fixed order; this one prices them all and compares. On every
+    /// candidate but one the two coincide: bit-packing's cost is the same <see cref="BitPackPlan"/>,
+    /// the dictionary's is the same table or walk against the same budget, the trials are the same
+    /// <see cref="Trials"/>. The one that does not is RUN-END, which today wins outright once
+    /// inside its ratio and here is priced at §3.4.2's <c>ends + values + 256</c> — and only when
+    /// <paramref name="runEndCompetes"/> says so. Under <see langword="false"/> it keeps today's
+    /// rule and the two choosers must agree on every chunk; under <see langword="true"/> every
+    /// disagreement is a chunk the spec's rule would encode differently, reported with both costs.
+    /// </para>
+    /// <para>
+    /// RUN-END IS MATERIALIZED ONLY IF IT WINS. Today the scan gathers the runs before anything else
+    /// has been priced, on every column inside the ratio; here the count from the ingest pass
+    /// prices the candidate and the gather runs once, on the winner. The values child is priced as
+    /// the runs' share of the plain column, which is exact for a fixed-width kind and an estimate
+    /// for strings — the exact bound §3.4.2 gives is per fixed width, and a string run-end's values
+    /// are a gather nobody has made yet.
+    /// </para>
+    /// </remarks>
+    /// <param name="arena">The arena holding the node.</param>
+    /// <param name="nodeIndex">The column chunk.</param>
+    /// <param name="target">The edition being written.</param>
+    /// <param name="stats">The ingest statistics over exactly these rows, or absent.</param>
+    /// <param name="cascade">What the parent knows about this child.</param>
+    /// <param name="chunk">The cursor the statistics came from.</param>
+    /// <param name="runEndCompetes">Whether run-end is priced against the others or wins outright.</param>
+    private static ColumnPlan ChooseByFormula(
+        CanonicalArena arena, int nodeIndex, VortexEdition target, in BlockStats stats,
+        Cascade cascade, ChunkStats chunk, bool runEndCompetes)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        int length = node.Length;
+        bool measured = stats.IsPresent && stats.Rows == length;
+        if (!IsComparable(node.Kind) || (length < MinimumRows && DataBytes(node) < MinimumBytes))
+        {
+            return ColumnPlan.Canonical;
+        }
+
+        // 1. DEGENERATE FIRST: a progression costs nothing per row and nothing can beat it.
+        if (Allows(target, "vortex.sequence") && !cascade.SequenceIsDead)
+        {
+            bool knownSteps = measured && stats.DeltaKnown;
+            if (!knownSteps || !stats.DeltaBroken)
+            {
+                SequencePlan? sequence = SequencePlan.TryBuild(arena, node, stepsAreConstant: knownSteps);
+                if (sequence is not null)
+                {
+                    return ColumnPlan.ForSequence(sequence);
+                }
+            }
+        }
+
+        RowComparer comparer = cascade.RunsAreDead && cascade.DictionaryIsDead
+            ? default
+            : new RowComparer(arena, nodeIndex);
+
+        // 2. EXACT CANDIDATES, each priced, the cheapest kept as `best`.
+        long plain = node.Kind == CanonicalKind.VarBinView
+            ? PlainBinarySize(arena, node, measured ? stats.TotalBytes : -1)
+            : DataBytes(node);
+        long best = plain;
+        ColumnScheme bestScheme = ColumnScheme.None;
+
+        // Run-end: the count from the pass prices it; the gather waits for the verdict. A count the
+        // pass did not take is walked now, as today, because nothing else can price it.
+        ColumnPlan walkedRuns = ColumnPlan.Canonical;
+        long runEndCost = long.MaxValue;
+        long runs = 0;
+        if (Allows(target, "vortex.runend") && !cascade.RunsAreDead && length / RunEndRatio >= 1)
+        {
+            if (measured && stats.HasRunBoundaries)
+            {
+                runs = stats.RunCount;
+            }
+            else
+            {
+                walkedRuns = TryRuns(arena, in node, in comparer, length);
+                runs = walkedRuns.Scheme == ColumnScheme.None ? long.MaxValue : walkedRuns.Codes.Length;
+            }
+
+            if (runs == 1)
+            {
+                runEndCost = 32;
+            }
+            else if (runs <= length / RunEndRatio)
+            {
+                long ends = runs * FsstPlan.IndexPType(length).ByteWidth();
+                runEndCost = ends + (plain * runs / length) + 256;
+            }
+
+            if (!runEndCompetes && runEndCost != long.MaxValue)
+            {
+                // Today's rule: inside the ratio, run-end wins before anything else is priced.
+                return MaterializeRuns(arena, in node, in comparer, length, runs, in walkedRuns);
+            }
+        }
+
+        // Bit-packing: exact, patches included. Frame of reference's histogram is its own sweep
+        // until stage R5 fuses it into the pack (§3.2.3).
+        bool integers = node.Kind == CanonicalKind.Primitive && node.PType.IsInteger();
+        BitPackPlan? packed = null;
+        if (Allows(target, "fastlanes.bitpacked") && !(measured && integers && !stats.HasBounds))
+        {
+            Span<int> ingested = stackalloc int[BitPackWidths.Length];
+            bool haveWidths = measured && integers && !stats.WidthsBroken && chunk.Widths(ingested);
+            packed = BitPackPlan.TryBuild(
+                arena, node, zigzag: Allows(target, "vortex.zigzag"),
+                reference: cascade.Reference
+                    ?? (measured && integers ? Reference(node, in stats) : null),
+                ingested: haveWidths ? ingested : default);
+        }
+
+        if (packed is not null && packed.Transform == BitPackTransform.Frame
+            && !Allows(target, "fastlanes.for"))
+        {
+            packed = null;
+        }
+
+        if (packed is not null && packed.Cost < best)
+        {
+            best = packed.Cost;
+            bestScheme = ColumnScheme.BitPacked;
+        }
+
+        if (runEndCompetes && runEndCost < best)
+        {
+            best = runEndCost;
+            bestScheme = ColumnScheme.RunEnd;
+        }
+
+        // The dictionary, against the best so far: it returns a plan only when it beats it.
+        if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
+        {
+            ColumnPlan dictionary = chunk.TableServes(length)
+                ? TabledDictionary(node, in chunk, length, best)
+                : Dictionary(arena, node, comparer, length, best);
+            if (dictionary.Scheme != ColumnScheme.None)
+            {
+                return dictionary;
+            }
+        }
+
+        // AN EXACT WINNER STANDS, AND THE TRIALS ARE NOT OFFERED THE COLUMN. This is where §3.4.1's
+        // "trials under the best cost in hand" met §2's "bytes identical" and lost: read literally,
+        // a zstd frame is allowed to beat a bit-packing, and on this corpus it does -- 149 chunks in
+        // the first differential run, `fastlanes_bitpacked` among them at 1 961 bytes of zstd
+        // against 5 376 of packing. Smaller on disk, slower to decode, and not what the reference
+        // writes. The reading that keeps the guarantee is today's: a trial is tried on the columns
+        // no exact scheme took, under the plain column's bytes as its ceiling. The number is kept
+        // in IMPL-PLAN.md as an open question for a later stage, not decided here by accident.
+        switch (bestScheme)
+        {
+            case ColumnScheme.RunEnd:
+                return MaterializeRuns(arena, in node, in comparer, length, runs, in walkedRuns);
+
+            case ColumnScheme.BitPacked:
+                return ColumnPlan.ForBitPacking(packed!);
+
+            default:
+                return Trials(arena, nodeIndex, node, target, plain);
+        }
+    }
+
+    /// <summary>The run-end plan for a winner: one run needs no gather, a walked count already has it.</summary>
+    private static ColumnPlan MaterializeRuns(
+        CanonicalArena arena, in CanonicalNode node, in RowComparer comparer, int length, long runs,
+        in ColumnPlan walked)
+    {
+        if (walked.Scheme != ColumnScheme.None)
+        {
+            return walked;
+        }
+
+        return runs == 1
+            ? ColumnPlan.Runs([0], [length])
+            : TryRuns(arena, in node, in comparer, length);
+    }
+
     /// <summary>
     /// The dictionary plan from the ingest-time table: the same verdict <see cref="Dictionary"/>
     /// reaches by walking the chunk, reached by arithmetic on what the table already holds.
