@@ -63,6 +63,17 @@ public class FilterKernelBenchmarks
     private CanonicalArena? _arena;
     private int _node;
 
+    /// <summary>The same i64 column under a scattered validity bitmap. BENCH-AUDIT.md B27.</summary>
+    /// <remarks>
+    /// EVERY OTHER NODE IN THIS CLASS IS NonNullable, so the four arms all take the `AllValid` fast
+    /// path -- and v2 F11 disassembled that path: seven instructions, one `cset`, and the only jump
+    /// is the loop's own back-edge. There is nothing there to make branchless. The loop that DOES
+    /// branch is the nullable fallback, one `cbz` on the validity bit per row plus an unconditional
+    /// `b`, because the JIT will not speculate the load of `values[i]` for an invalid row. It had no
+    /// number because nothing reached it.
+    /// </remarks>
+    private int _nullableNode;
+
     // PERF-AUDIT-v2.md F-10. The four columns below exist so that the four kernels F-4 names are
     // REACHED by something. Counted on the two `--ratio-check` filter axes, which are F-4's own
     // closing criterion: 58 904 calls and 60,3 M rows, ALL of them through `CompareSigned`. `In`,
@@ -111,6 +122,31 @@ public class FilterKernelBenchmarks
             types.Primitive(PType.I64, Nullability.NonNullable),
             Count,
             Validity.NonNullable,
+            PType.I64,
+            buffer);
+
+        // B27: the same values under a SCATTERED bitmap -- pseudo-random, not a run and not
+        // all-valid. The distribution is the measurement: a branch the predictor gets right is free,
+        // so a tidy pattern would report that the nullable path costs nothing, which is the lie in
+        // the other direction. One row in four is null, drawn from the same seeded generator.
+        VortexBuffer validityBits =
+            _arena.AllocateUninitialized((Count + 7) / 8, 1, out Span<byte> bitsInto);
+        bitsInto.Clear();
+        Random validity = new Random(20260915);
+        for (int i = 0; i < Count; i++)
+        {
+            if (validity.Next(4) != 0)
+            {
+                bitsInto[i >> 3] |= (byte)(1 << (i & 7));
+            }
+        }
+
+        int bitmap = _arena.AddBool(
+            types.Bool(Nullability.NonNullable), Count, Validity.NonNullable, validityBits, 0);
+        _nullableNode = _arena.AddPrimitive(
+            types.Primitive(PType.I64, Nullability.Nullable),
+            Count,
+            Validity.Bitmap(bitmap),
             PType.I64,
             buffer);
 
@@ -182,6 +218,20 @@ public class FilterKernelBenchmarks
     {
         ComparisonKernels.Compare(
             _arena!, _node, ComparisonOp.Less, FilterLiteral.From(_wanted), _destination);
+        return _destination.Length;
+    }
+
+    /// <summary>The same comparison on a nullable column: the branchy half. BENCH-AUDIT.md B27.</summary>
+    /// <remarks>
+    /// Its only difference from <see cref="Library"/> is the validity, so the distance between the
+    /// two arms IS what the per-row branch and the bit test cost -- the values, the operator and the
+    /// literal are the same array and the same constants.
+    /// </remarks>
+    [Benchmark(Description = "i64 < literal, nullable, library")]
+    public int LibraryNullable()
+    {
+        ComparisonKernels.Compare(
+            _arena!, _nullableNode, ComparisonOp.Less, FilterLiteral.From(_wanted), _destination);
         return _destination.Length;
     }
 
