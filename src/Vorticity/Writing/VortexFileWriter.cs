@@ -85,6 +85,9 @@ public sealed class VortexFileWriter : IAsyncDisposable
     private ScanContext?[]? _transit;
     private int _current;
     private readonly List<int> _pending = [];
+
+    /// <summary>Scratch for the nodes a block carries forward; reused so a block allocates none.</summary>
+    private readonly List<int> _carry = [];
     private long _pendingRows;
     private long _pendingBytes;
     private int[]? _zoneSegments;
@@ -310,29 +313,85 @@ public sealed class VortexFileWriter : IAsyncDisposable
         int emit = checked((int)(blocks * _rowBlock));
         int total = checked((int)_pendingRows);
 
-        int whole = _pending.Count == 1
-            ? _pending[0]
-            : CanonicalConcat.Concat(from.Decode, _schema, total, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending));
-
         if (emit == total)
         {
-            await EmitChunkAsync(from.Canonical, whole, emit, cancellationToken).ConfigureAwait(false);
+            int all = _pending.Count == 1
+                ? _pending[0]
+                : CanonicalConcat.Concat(
+                    from.Decode, _schema, total,
+                    System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending));
+            await EmitChunkAsync(from.Canonical, all, emit, cancellationToken).ConfigureAwait(false);
             ResetTransit();
             return;
         }
 
-        int head = CanonicalSlice.Slice(from.Decode, whole, 0, emit);
-        int tail = CanonicalSlice.Slice(from.Decode, whole, emit, total - emit);
+        // WHAT IS CARRIED IS CUT FROM ONE BATCH, NEVER FROM THE CONCATENATION -- WRITE-AUDIT.md
+        // W-31b. Slicing the concatenated block and carrying that was the shape before, and it made
+        // the remainder grow without bound: a slice keeps the whole of what it was cut from for the
+        // forms that share storage (`ListView`'s elements child, a `VarBinView`'s data buffers), so
+        // the carry dragged every byte of every block already emitted and the next copy paid for all
+        // of it again. `list`, `listview` and `map` did not merely slow down, they stopped: 270 MB
+        // asked for in one buffer, above the 256 MiB ceiling.
+        //
+        // The boundary falls inside at most ONE pending batch. Everything before it goes out whole,
+        // that one is cut in two, and what is carried is its tail plus whatever whole batches follow
+        // -- each of them bounded by its own batch, whatever the file's length.
+        int consumed = 0;
+        int split = 0;
+        while (split < _pending.Count)
+        {
+            int rows = from.Canonical.GetNode(_pending[split]).Length;
+            if (consumed + rows > emit)
+            {
+                break;
+            }
+
+            consumed += rows;
+            split++;
+        }
+
+        int straddleTail = -1;
+        int going = split;
+        if (consumed < emit)
+        {
+            int straddle = _pending[split];
+            int take = emit - consumed;
+            int rows = from.Canonical.GetNode(straddle).Length;
+            _pending[split] = CanonicalSlice.Slice(from.Decode, straddle, 0, take);
+            straddleTail = CanonicalSlice.Slice(from.Decode, straddle, take, rows - take);
+            going = split + 1;
+        }
+
+        int head = going == 1
+            ? _pending[0]
+            : CanonicalConcat.Concat(
+                from.Decode, _schema, emit,
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending)[..going]);
         await EmitChunkAsync(from.Canonical, head, emit, cancellationToken).ConfigureAwait(false);
 
         // The remainder moves to the other arena BEFORE this one is reset, because a slice is a
         // view onto the storage the reset would hand back.
         ScanContext to = _transit[_current ^ 1] ??= new ScanContext([]);
-        int carried = to.Canonical.CopyFrom(from.Canonical, tail);
-        long carriedBytes = to.Canonical.ByteSize(carried);
+        _carry.Clear();
+        if (straddleTail >= 0)
+        {
+            _carry.Add(to.Canonical.CopyFrom(from.Canonical, straddleTail));
+        }
+
+        for (int i = going; i < _pending.Count; i++)
+        {
+            _carry.Add(to.Canonical.CopyFrom(from.Canonical, _pending[i]));
+        }
+
+        long carriedBytes = 0;
+        for (int i = 0; i < _carry.Count; i++)
+        {
+            carriedBytes += to.Canonical.ByteSize(_carry[i]);
+        }
+
         from.Canonical.Reset();
         _pending.Clear();
-        _pending.Add(carried);
+        _pending.AddRange(_carry);
         _pendingRows = total - emit;
         _pendingBytes = carriedBytes;
         _current ^= 1;
