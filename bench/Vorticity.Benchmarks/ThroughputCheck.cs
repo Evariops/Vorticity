@@ -79,6 +79,12 @@ internal static class ThroughputCheck
     /// <summary>The prefix a recalibration pass prints its measurements under.</summary>
     private const string PassPrefix = "PASS\t";
 
+    /// <summary>The prefix one over-ceiling encoding is printed under, for the confirming run.</summary>
+    private const string FailPrefix = "FAIL\t";
+
+    /// <summary>Set on the confirming child so it does not spawn one of its own.</summary>
+    private const string ConfirmVariable = "VORTICITY_BENCH_CONFIRM";
+
     /// <summary>What the axis times on each side.</summary>
     internal enum Workload
     {
@@ -911,6 +917,9 @@ internal static class ThroughputCheck
 
         // Files whose real row count is not the manifest's gauge. BENCH-AUDIT.md B16.
         List<string> offGauge = [];
+
+        // The names behind `failures`, for the confirming run. BENCH-AUDIT.md B19.
+        List<string> over = [];
         // A PASS IS A PROCESS when recalibrating, and B2.5 is why: measured over twenty runs of one
         // axis each, between-run variance is two to three times the within-run variance, and a 95%
         // within-run interval contains the grand median 11 or 12 times out of 20 rather than 19.
@@ -1031,6 +1040,7 @@ internal static class ThroughputCheck
                             failures.Add(string.Create(
                                 CultureInfo.InvariantCulture,
                                 $"  {name}: {Ref(ratio.Median)} {ratio} entirely over the {Ref(ceiling)} ceiling."));
+                            over.Add(name);
                         }
                         else if (ratio.High < reference.Value * StaleBelow)
                         {
@@ -1127,12 +1137,118 @@ internal static class ThroughputCheck
             return 0;
         }
 
+        // A CONFIRMING CHILD ONLY REPORTS; the parent decides. These lines are what it parses.
+        if (IsConfirming)
+        {
+            foreach (string name in over)
+            {
+                Console.Out.WriteLine($"{FailPrefix}{name}");
+            }
+
+            return 0;
+        }
+
+        if (over.Count > 0)
+        {
+            over = await ConfirmAsync(over, failures).ConfigureAwait(false);
+        }
+
         Console.Out.WriteLine(
-            failures.Count == 0
+            over.Count == 0
                 ? "Every encoding is inside its ceiling."
-                : $"{failures.Count} encoding(s) above ceiling. A ratio only moves when the code " +
-                  "moves: find the change, do not raise the ceiling.");
-        return failures.Count == 0 ? 0 : 1;
+                : $"{over.Count} encoding(s) above ceiling in TWO processes. A ratio only moves " +
+                  "when the code moves: find the change, do not raise the ceiling.");
+        return over.Count == 0 ? 0 : 1;
+    }
+
+    /// <summary>True when this process is the second opinion, not the one that decides.</summary>
+    private static bool IsConfirming =>
+        Environment.GetEnvironmentVariable(ConfirmVariable) == "1";
+
+    /// <summary>
+    /// Re-measures the whole axis in a FRESH PROCESS and keeps only the encodings over the ceiling
+    /// in both. BENCH-AUDIT.md B19.
+    /// </summary>
+    /// <param name="over">What this process found over the ceiling.</param>
+    /// <param name="failures">The prose lines for those, printed when they are confirmed.</param>
+    /// <returns>The encodings over in both processes.</returns>
+    /// <remarks>
+    /// THE DRIFT THIS DEFEATS IS BETWEEN PROCESSES, not inside one. Three consecutive runs put three
+    /// DIFFERENT axes over the ceiling with no code change between them, and the axis of the second
+    /// came back on its own: `fastlanes_bitpacked` 1.30 -> 1.64 -> 1.24. The mechanism is visible in
+    /// the columns -- ours rose 9 % while the reference's fell 12 %, and a ratio takes both drifts
+    /// the same way -- so a margin of 15 % cannot separate it from a regression. Two further pairs
+    /// were measured on 2026-09-15 while closing B16, minutes apart.
+    /// <para>
+    /// WHY THE WHOLE AXIS AND NOT THE OFFENDING FILES. Narrowing changes the number: B8 measured the
+    /// same bytes +32 % on our side when one file is run alone. A confirmation on a narrowed run
+    /// would be a different measurement wearing the same name.
+    /// </para>
+    /// <para>
+    /// The cost is paid only when something fails, and it is the only honest way to keep the gate:
+    /// a verdict that depends on a draw is not a verdict.
+    /// </para>
+    /// </remarks>
+    private static async Task<List<string>> ConfirmAsync(List<string> over, List<string> failures)
+    {
+        Console.Out.WriteLine(
+            $"\n{over.Count} encoding(s) over the ceiling. Confirming in a second process, because " +
+            "between-run drift on the short axes is larger than the x1.15 margin (BENCH-AUDIT.md " +
+            "B19):");
+        failures.ForEach(Console.Out.WriteLine);
+
+        string? self = Environment.ProcessPath;
+        if (self is null)
+        {
+            Console.Error.WriteLine(
+                "No process path; cannot confirm, so the first reading stands.");
+            return over;
+        }
+
+        ProcessStartInfo start = new ProcessStartInfo(self)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        start.ArgumentList.Add("--throughput");
+        if (Axis != Workload.Scan)
+        {
+            start.ArgumentList.Add(Axis == Workload.Take ? "--take" : "--write");
+        }
+
+        start.ArgumentList.Add("--check");
+        start.Environment[ConfirmVariable] = "1";
+
+        using Process child = Process.Start(start)
+            ?? throw new InvalidOperationException("Could not start the confirming run.");
+        string output = await child.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
+        string errors = await child.StandardError.ReadToEndAsync().ConfigureAwait(false);
+        await child.WaitForExitAsync().ConfigureAwait(false);
+        if (child.ExitCode != 0)
+        {
+            Console.Error.WriteLine(
+                $"The confirming run failed ({child.ExitCode}), so the first reading stands:\n{errors}");
+            return over;
+        }
+
+        HashSet<string> again = [];
+        foreach (string line in output.Split('\n'))
+        {
+            if (line.StartsWith(FailPrefix, StringComparison.Ordinal))
+            {
+                again.Add(line[FailPrefix.Length..].Trim());
+            }
+        }
+
+        List<string> both = [.. over.Where(again.Contains)];
+        List<string> once = [.. over.Where(name => !again.Contains(name))];
+        if (once.Count > 0)
+        {
+            Console.Out.WriteLine(
+                $"  not reproduced in the second process, so not a failure: {string.Join(", ", once)}");
+        }
+
+        return both;
     }
 
     /// <summary>The reference ratio for one encoding, or null when it has none yet.</summary>
