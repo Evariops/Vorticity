@@ -185,7 +185,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
             // first liveness rule, the one the edition decides; plan memory adds the per-chunk one.
             _columns[i] = new ColumnWriter
             {
-                DictionaryLive = ColumnCompressor.Allows(target, "vortex.dict"),
+                EditionAllowsDictionary = ColumnCompressor.Allows(target, "vortex.dict"),
             };
         }
     }
@@ -629,7 +629,10 @@ public sealed class VortexFileWriter : IAsyncDisposable
                 _chunksWithoutStatistics++;
             }
 
+            // A table plan memory turned off (docs/11 §3.2.2) was never expected to serve, and is
+            // not a fallback; a table that was running and cannot answer is.
             if (DistinctTable.Serves(arena.GetNode(node).Kind)
+                && stats.TableExpected
                 && !stats.TableServes(checked((int)rows)))
             {
                 _chunksWithoutTable++;

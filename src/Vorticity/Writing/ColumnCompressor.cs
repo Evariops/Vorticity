@@ -454,11 +454,14 @@ internal static class ColumnCompressor
         if (probe is not null)
         {
             ColumnPlan reference = ChooseToday(arena, nodeIndex, target, in stats, cascade, chunk);
+            // A plan memory produced is marked as such: the reference prices every candidate on
+            // every chunk, so where memory skipped that and reached another verdict the two differ
+            // by design (§3.4.3), and the test counts those apart from real disagreements.
             string chosen = plan.Describe();
             string expected = reference.Describe();
             if (chosen != expected)
             {
-                probe.Report(nodeIndex, chosen, expected);
+                probe.Report(nodeIndex, (plan.FromMemory ? "memory " : "") + chosen, expected);
             }
 
             // The reference plan is thrown away, and a zstd frame among its candidates is holding
@@ -1050,18 +1053,31 @@ internal static class ColumnCompressor
             return ColumnPlan.Canonical;
         }
 
-        // 1. DEGENERATE FIRST: a progression costs nothing per row and nothing can beat it.
-        if (Allows(target, "vortex.sequence") && !cascade.SequenceIsDead)
+        long plain = node.Kind == CanonicalKind.VarBinView
+            ? PlainBinarySize(arena, node, measured ? stats.TotalBytes : -1)
+            : DataBytes(node);
+
+        // 0. PLAN MEMORY (§3.4.3): a column whose last plan produced the bytes it was priced at, to
+        // five per cent, is offered that plan again -- re-priced on this chunk's own statistics,
+        // which is arithmetic -- and nothing else is priced. Only a plan that still wins on its
+        // own terms is reused; one that no longer does sends the column back to full pricing, and
+        // so does a column with no memory yet. A child a scheme invented has no cursor and so no
+        // memory, and a chunk the pass did not measure is not trusted with one.
+        if (measured && chunk.Memory is { WithinTolerance: true } memory)
         {
-            bool knownSteps = measured && stats.DeltaKnown;
-            if (!knownSteps || !stats.DeltaBroken)
+            ColumnPlan remembered = Reprice(
+                memory.Scheme, arena, nodeIndex, node, target, in stats, cascade, chunk, plain);
+            if (remembered.Scheme == memory.Scheme)
             {
-                SequencePlan? sequence = SequencePlan.TryBuild(arena, node, stepsAreConstant: knownSteps);
-                if (sequence is not null)
-                {
-                    return ColumnPlan.ForSequence(sequence) with { PredictedBytes = SequenceBytes };
-                }
+                return remembered with { FromMemory = true };
             }
+        }
+
+        // 1. DEGENERATE FIRST: a progression costs nothing per row and nothing can beat it.
+        ColumnPlan progression = SequenceOf(arena, node, target, in stats, cascade, measured);
+        if (progression.Scheme != ColumnScheme.None)
+        {
+            return progression;
         }
 
         RowComparer comparer = cascade.RunsAreDead && cascade.DictionaryIsDead
@@ -1069,9 +1085,6 @@ internal static class ColumnCompressor
             : new RowComparer(arena, nodeIndex);
 
         // 2. EXACT CANDIDATES, each priced, the cheapest kept as `best`.
-        long plain = node.Kind == CanonicalKind.VarBinView
-            ? PlainBinarySize(arena, node, measured ? stats.TotalBytes : -1)
-            : DataBytes(node);
         long best = plain;
         ColumnScheme bestScheme = ColumnScheme.None;
 
@@ -1172,6 +1185,161 @@ internal static class ColumnCompressor
 
             default:
                 return Trials(arena, nodeIndex, node, target, plain);
+        }
+    }
+
+    /// <summary>The progression plan when the column is one, priced; canonical otherwise.</summary>
+    private static ColumnPlan SequenceOf(
+        CanonicalArena arena, CanonicalNode node, VortexEdition target, in BlockStats stats,
+        Cascade cascade, bool measured)
+    {
+        if (!Allows(target, "vortex.sequence") || cascade.SequenceIsDead)
+        {
+            return ColumnPlan.Canonical;
+        }
+
+        bool knownSteps = measured && stats.DeltaKnown;
+        if (knownSteps && stats.DeltaBroken)
+        {
+            return ColumnPlan.Canonical;
+        }
+
+        SequencePlan? sequence = SequencePlan.TryBuild(arena, node, stepsAreConstant: knownSteps);
+        return sequence is null
+            ? ColumnPlan.Canonical
+            : ColumnPlan.ForSequence(sequence) with { PredictedBytes = SequenceBytes };
+    }
+
+    /// <summary>
+    /// Prices ONE remembered scheme on this chunk, and nothing else: the plan when it still wins on
+    /// its own terms, canonical (with the plain bytes) when it no longer does or never applied.
+    /// </summary>
+    /// <remarks>
+    /// The verdict is "still wins" against the plain column alone, not against the field, because
+    /// the field is exactly what memory exists to not price. A remembered scheme that has stopped
+    /// winning returns a plan of another scheme, which the caller reads as "back to full pricing";
+    /// a remembered CANONICAL is the cheapest case of all, and the one docs/11 §3.2.2 turns the
+    /// distinct table off for.
+    /// </remarks>
+    private static ColumnPlan Reprice(
+        ColumnScheme scheme, CanonicalArena arena, int nodeIndex, CanonicalNode node,
+        VortexEdition target, in BlockStats stats, Cascade cascade, ChunkStats chunk, long plain)
+    {
+        int length = node.Length;
+        switch (scheme)
+        {
+            case ColumnScheme.None:
+                return ColumnPlan.Canonical with { PredictedBytes = plain };
+
+            case ColumnScheme.Sequence:
+                return SequenceOf(arena, node, target, in stats, cascade, measured: true);
+
+            case ColumnScheme.RunEnd:
+            {
+                if (!Allows(target, "vortex.runend") || cascade.RunsAreDead
+                    || !stats.HasRunBoundaries || length / RunEndRatio < 1)
+                {
+                    return ColumnPlan.Canonical;
+                }
+
+                long runs = stats.RunCount;
+                if (runs != 1 && runs > length / RunEndRatio)
+                {
+                    return ColumnPlan.Canonical;
+                }
+
+                long cost = runs == 1
+                    ? 32
+                    : (runs * FsstPlan.IndexPType(length).ByteWidth()) + (plain * runs / length) + 256;
+                RowComparer comparer = new RowComparer(arena, nodeIndex);
+                ColumnPlan none = ColumnPlan.Canonical;
+                return MaterializeRuns(arena, in node, in comparer, length, runs, in none, cost);
+            }
+
+            case ColumnScheme.BitPacked:
+            {
+                bool integers = node.Kind == CanonicalKind.Primitive && node.PType.IsInteger();
+                if (!Allows(target, "fastlanes.bitpacked") || !integers || !stats.HasBounds)
+                {
+                    return ColumnPlan.Canonical;
+                }
+
+                Span<int> ingested = stackalloc int[BitPackWidths.Length];
+                bool haveWidths = !stats.WidthsBroken && chunk.Widths(ingested);
+                BitPackPlan? packed = BitPackPlan.TryBuild(
+                    arena, node, zigzag: Allows(target, "vortex.zigzag"),
+                    reference: cascade.Reference ?? Reference(node, in stats),
+                    ingested: haveWidths ? ingested : default);
+                if (packed is null
+                    || (packed.Transform == BitPackTransform.Frame && !Allows(target, "fastlanes.for")))
+                {
+                    return ColumnPlan.Canonical;
+                }
+
+                return ColumnPlan.ForBitPacking(packed) with { PredictedBytes = packed.Cost };
+            }
+
+            case ColumnScheme.Dict:
+                return Allows(target, "vortex.dict") && !cascade.DictionaryIsDead
+                    && chunk.TableServes(length)
+                    ? TabledDictionary(node, in chunk, length, plain)
+                    : ColumnPlan.Canonical;
+
+            default:
+                return TrialOf(scheme, arena, nodeIndex, node, target, plain);
+        }
+    }
+
+    /// <summary>One of the three trials alone, under the plain column's bytes.</summary>
+    private static ColumnPlan TrialOf(
+        ColumnScheme scheme, CanonicalArena arena, int nodeIndex, CanonicalNode node,
+        VortexEdition target, long plain)
+    {
+        switch (scheme)
+        {
+            case ColumnScheme.Alp:
+            {
+                if (node.Kind != CanonicalKind.Primitive || !node.PType.IsFloat()
+                    || !Allows(target, "vortex.alp"))
+                {
+                    return ColumnPlan.Canonical;
+                }
+
+                AlpPlan? alp = AlpPlan.TryBuild(arena, nodeIndex, plain);
+                return alp is null
+                    ? ColumnPlan.Canonical
+                    : ColumnPlan.ForAlp(alp) with { PredictedBytes = alp.EncodedSize };
+            }
+
+            case ColumnScheme.Zstd:
+            {
+                if (node.Kind is not (CanonicalKind.VarBinView or CanonicalKind.Primitive)
+                    || !Allows(target, "vortex.zstd") || DataBytes(node) < ZstdMinimumBytes)
+                {
+                    return ColumnPlan.Canonical;
+                }
+
+                ZstdPlan? zstd = ZstdPlan.TryBuild(arena, nodeIndex, plain);
+                return zstd is null
+                    ? ColumnPlan.Canonical
+                    : ColumnPlan.ForZstd(zstd) with { PredictedBytes = zstd.FrameLength };
+            }
+
+            case ColumnScheme.Fsst:
+            {
+                if (node.Kind != CanonicalKind.VarBinView || !Allows(target, "vortex.fsst"))
+                {
+                    return ColumnPlan.Canonical;
+                }
+
+                FsstPlan? fsst = FsstPlan.TryBuild(arena, nodeIndex, plain * 9 / 10);
+                return fsst is null
+                    ? ColumnPlan.Canonical
+                    : ColumnPlan.ForFsst(fsst) with { PredictedBytes = fsst.EncodedSize };
+            }
+
+            default:
+                return ColumnPlan.Canonical;
         }
     }
 

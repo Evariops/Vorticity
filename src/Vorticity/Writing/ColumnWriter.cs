@@ -83,11 +83,22 @@ internal sealed class ColumnWriter
     /// </summary>
     private DistinctTable? _table;
 
+    /// <summary>Whether the edition being written can carry <c>vortex.dict</c> at all.</summary>
+    internal bool EditionAllowsDictionary { get; init; } = true;
+
     /// <summary>
-    /// Whether a dictionary has a consumer, so the table should run at all. The writer sets it from
-    /// the edition; §3.2.2's plan memory will narrow it per chunk.
+    /// Whether the table has a consumer on the chunk being ingested, so it should run at all —
+    /// docs/11-write-strategy.md §3.2.2's liveness rule.
     /// </summary>
-    internal bool DictionaryLive { get; set; } = true;
+    /// <remarks>
+    /// Live on a column's first chunk and on every chunk plan memory sends back to full pricing,
+    /// live on a chunk whose remembered plan is a dictionary, DEAD on a chunk whose remembered plan
+    /// is another scheme within tolerance: a high-cardinality string column without an index is
+    /// probed on its first chunk and never again. Index builders will add their own consumers.
+    /// </remarks>
+    internal bool DictionaryLive => EditionAllowsDictionary && _live;
+
+    private bool _live = true;
 
     /// <summary>
     /// Per closed block, in block order: how many distinct values and how many heap bytes the table
@@ -325,6 +336,11 @@ internal sealed class ColumnWriter
         Memory = plan.PredictedBytes > 0
             ? new PlanMemory(plan.Scheme, plan.PredictedBytes, actualBytes)
             : null;
+
+        // THE TABLE'S CONSUMER FOR THE NEXT CHUNK, decided here and nowhere else: a memory that
+        // holds and is not a dictionary means the next chunk is priced from memory alone, and a
+        // table nobody will read is a table that does not run.
+        _live = Memory is not { WithinTolerance: true } held || held.Scheme == ColumnScheme.Dict;
     }
 
     /// <summary>
@@ -353,7 +369,13 @@ internal sealed class ColumnWriter
     internal void Reprobe(CanonicalArena arena, int nodeIndex, int start, int count)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
-        _table?.Probe(arena, node, start, count);
+        if (DictionaryLive)
+        {
+            // A table plan memory has just turned back on has no table yet for this column; the
+            // carried tail is the first thing it must see, so it is created here as well.
+            _table ??= DistinctTable.For(node);
+            _table?.Probe(arena, node, start, count);
+        }
 
         switch (node.Kind)
         {
@@ -407,7 +429,10 @@ internal sealed class ColumnWriter
 
         _closed.Add(_open);
         _widths.Add(_openWidths);
-        _tableAtClose.Add(_table is null ? (-1, 0) : (_table.Distinct, _table.HeapBytes));
+        // A DEAD TABLE RECORDS NOTHING, so that the chooser reads "no table" rather than a stale
+        // count and the writer's fallback counter knows the table was never expected to serve.
+        _tableAtClose.Add(
+            _table is null || !DictionaryLive ? (-1, 0) : (_table.Distinct, _table.HeapBytes));
         _open = default;
         _openWidths = null;
 

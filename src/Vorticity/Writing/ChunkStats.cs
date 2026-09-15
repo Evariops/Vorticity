@@ -59,6 +59,12 @@ internal readonly struct ChunkStats
         _column is null ? (-1, 0) : _column.TableAtClose(_firstBlock + _blockCount - 1);
 
     /// <summary>
+    /// Whether a table was running when the chunk's last block closed — so a table that cannot
+    /// serve is a fallback to count, and not a table plan memory deliberately turned off.
+    /// </summary>
+    internal bool TableExpected => TableAtClose.Distinct >= 0;
+
+    /// <summary>
     /// Whether the table can answer for a chunk of <paramref name="rows"/> rows: it exists, it
     /// was not abandoned, it has probed at least those rows, and the count at the last block's
     /// close is a prefix of what it holds.

@@ -38,11 +38,24 @@ public sealed class ChooserDifferentialTests
     public async Task UnderTodaysRuleTheFormulaChooserAgreesOnEveryChunk()
     {
         List<string> disagreements = await Sweep(runEndCompetes: false);
+
+        // SINCE R5a-2, PLAN MEMORY IS A THIRD PARTY TO THIS COMPARISON: the chooser that decides may
+        // reuse a column's last plan without pricing the field, while the reference prices every
+        // candidate on every chunk. Where the two then differ, that is docs/11 §3.4.3 doing what it
+        // says ("bytes identical on stable columns", not on every column) and not a wrong formula;
+        // the chooser marks such plans, they are counted here and reported, and only the rest is
+        // held to zero. What memory costs on the wire is `WrittenSizeTests`' question.
+        List<string> fromMemory = disagreements.FindAll(static line => line.Contains(": memory ", StringComparison.Ordinal));
+        List<string> real = disagreements.FindAll(static line => !line.Contains(": memory ", StringComparison.Ordinal));
+        Console.Out.Write(
+            "CHOOSER MEMORY: " + fromMemory.Count.ToString(CultureInfo.InvariantCulture) +
+            " chunk(s) decided from plan memory differently from a full pricing\n" +
+            string.Join("", fromMemory.ConvertAll(static line => "  " + line + "\n")));
         Assert.True(
-            disagreements.Count == 0,
-            $"{disagreements.Count} chunk(s) where the chooser by formulas disagrees with today's " +
+            real.Count == 0,
+            $"{real.Count} chunk(s) where the chooser by formulas disagrees with today's " +
             "under today's own rule, so the formulas are wrong somewhere:\n" +
-            string.Join("\n", disagreements));
+            string.Join("\n", real));
     }
 
     [Fact]
