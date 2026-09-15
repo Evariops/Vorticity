@@ -103,4 +103,50 @@ public sealed class ConstantFormTests
             }
         }
     }
+
+    /// <summary>
+    /// Both forms hand the caller the same values, row for row, on every constant entry.
+    /// </summary>
+    /// <remarks>
+    /// THE ASSERTION THAT WOULD CATCH A WRONG WINDOW, and nothing else would: a constant resolved to
+    /// the wrong element, or to a stale one, differs here while the kind, the row count, the dtype
+    /// and the validity all still agree. The six entries cover the row counts the corpus varies --
+    /// 0, 1, 1023, 1025 and 4096 -- donc le cas vide, le cas a une ligne et les tailles qui ne
+    /// tombent pas sur un octet sont tous lus.
+    /// </remarks>
+    [Theory]
+    [InlineData("encodings/constant")]
+    [InlineData("encodings/constant_r0")]
+    [InlineData("encodings/constant_r1")]
+    [InlineData("encodings/constant_r1023")]
+    [InlineData("encodings/constant_r1025")]
+    public async Task BothFormsReadTheSameValues(string entry)
+    {
+        Vorticity.Tests.Scan.Decoders.EnsureRegistered();
+
+        List<string> tiled = await ValuesOf(entry, constantForm: false);
+        List<string> constant = await ValuesOf(entry, constantForm: true);
+
+        Assert.Equal(tiled, constant);
+    }
+
+    private static async Task<List<string>> ValuesOf(string entry, bool constantForm)
+    {
+        List<string> values = [];
+        await using VortexFile file = await VortexFile.OpenAsync(
+            CorpusManifest.Get(entry).Path, With(constantForm), CancellationToken.None);
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            VortexColumn column = batch.Root;
+            for (int i = 0; i < batch.RowCount; i++)
+            {
+                values.Add(column.IsValid(i)
+                    ? column.AsPrimitive<long>()[i].ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    : "null");
+            }
+        }
+
+        return values;
+    }
 }

@@ -128,6 +128,23 @@ public readonly ref struct CanonicalNode
         get
         {
             ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
+
+            // THE CONSTANT FORM MATERIALIZES HERE, AND ONLY HERE (PERF-AUDIT-v2.md Z1b-c2b2). This
+            // property promises a CONTIGUOUS span of `Length` values, and one element plus a count
+            // cannot honour that without expanding. Doing it at this one boundary is what spares the
+            // 171 local guards §2.4bis counted: every consumer that reads values -- the columns, the
+            // comparison kernels, the literal reader, row encoding, the zone summariser -- goes
+            // through here and needs no case of its own.
+            //
+            // The gain survives for everyone who never asks: a scan that filters, takes, prunes or
+            // writes back never materializes, and those are the paths the column was tiled for. The
+            // cost falls exactly on the caller who demands a contiguous span, which is what such a
+            // caller is asking for. And it is paid ONCE -- the twin is memoized on the record.
+            if (r.Kind == CanonicalKind.Constant)
+            {
+                return _arena.RecordRef(_arena.MaterializeConstant(_index)).BufferA;
+            }
+
             if (r.Kind is not (CanonicalKind.Primitive or CanonicalKind.Decimal))
             {
                 ArraysThrow.Kind(r.Kind, "Primitive or Decimal");
@@ -496,6 +513,48 @@ public sealed class CanonicalArena
         return Commit(ref r);
     }
 
+    /// <summary>Expands a constant node into a materialized twin, once. PERF-AUDIT-v2.md Z1b-c2b2.</summary>
+    /// <param name="nodeIndex">A node of kind <see cref="CanonicalKind.Constant"/>.</param>
+    /// <returns>The twin's index: a Primitive or Decimal node holding `Length` copies.</returns>
+    /// <remarks>
+    /// Memoized on the record, so a caller that walks a column row by row through
+    /// <c>PrimitiveColumn.this[int]</c> pays the expansion once rather than per access. The twin is
+    /// a NEW node: records are referenced by index all over the arena, and rewriting this one in
+    /// place would change what every holder of that index sees.
+    /// </remarks>
+    internal int MaterializeConstant(int nodeIndex)
+    {
+        ref CanonicalRecord source = ref RecordRefMutable(nodeIndex);
+        if (source.Kind != CanonicalKind.Constant)
+        {
+            ArraysThrow.Kind(source.Kind, "Constant");
+        }
+
+        if (source.Materialized >= 0)
+        {
+            return source.Materialized;
+        }
+
+        int width = (int)source.FixedSize;
+        ReadOnlySpan<byte> element = source.BufferA.Span[..width];
+        DType dtype = source.DType;
+        int rows = source.Length;
+        Validity validity = source.Validity;
+
+        VortexBuffer values = AllocateUninitialized(
+            checked(rows * width), width, out Span<byte> writable);
+        Decoders.Compressed.RowKernels.Tile(writable, element);
+
+        int twin = dtype.Kind == DTypeKind.Decimal
+            ? AddDecimal(dtype, rows, validity, source.Storage, source.Precision, source.Scale, values)
+            : AddPrimitive(dtype, rows, validity, dtype.PType, values);
+
+        // Re-taken after the Add: committing a record may have grown the backing array, so the
+        // earlier `ref` can be pointing at a block nobody reads any more.
+        RecordRefMutable(nodeIndex).Materialized = twin;
+        return twin;
+    }
+
     /// <summary>Adds a decimal node.</summary>
     /// <param name="dtype">The dtype this node produces.</param>
     /// <param name="length">Row count.</param>
@@ -775,6 +834,20 @@ public sealed class CanonicalArena
         return ref _records[index];
     }
 
+    /// <summary>The same record, writable: only the constant memo uses it. Z1b-c2b2.</summary>
+    /// <param name="index">The node's index.</param>
+    /// <returns>A mutable reference into the record array.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ref CanonicalRecord RecordRefMutable(int index)
+    {
+        if ((uint)index >= (uint)_recordCount)
+        {
+            ArraysThrow.CanonicalIndex(index, _recordCount);
+        }
+
+        return ref _records[index];
+    }
+
     internal int ChildAt(int slot)
     {
         if ((uint)slot >= (uint)_childCount)
@@ -808,6 +881,7 @@ public sealed class CanonicalArena
             DType = dtype,
             Length = length,
             Validity = validity,
+            Materialized = -1,
             ChildStart = -1,
             DataBufferStart = -1,
         };
@@ -1138,6 +1212,13 @@ internal struct CanonicalRecord
     internal int DataBufferStart;
     internal int DataBufferCount;
     internal uint FixedSize;
+
+    /// <summary>
+    /// For a <see cref="CanonicalKind.Constant"/> node: the materialized twin, once someone has
+    /// asked for a contiguous span. -1 until then. PERF-AUDIT-v2.md Z1b-c2b2.
+    /// </summary>
+    internal int Materialized;
+
     internal CanonicalKind Kind;
     internal PType PType;
     internal PType SizePType;

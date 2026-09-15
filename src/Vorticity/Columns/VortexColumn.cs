@@ -97,14 +97,19 @@ public readonly ref struct VortexColumn
     public PrimitiveColumn<T> AsPrimitive<T>()
         where T : unmanaged
     {
-        CanonicalNode node = Require(CanonicalKind.Primitive);
+        int index = Resolve(CanonicalKind.Primitive, out CanonicalNode node);
+        if (node.Kind != CanonicalKind.Primitive)
+        {
+            ColumnsThrow.WrongKind(node.Kind.ToString(), nameof(CanonicalKind.Primitive));
+        }
+
         PType ptype = node.PType;
         if (!PrimitiveColumn<T>.Matches(ptype))
         {
             ColumnsThrow.WrongElementType(ptype, typeof(T));
         }
 
-        return new PrimitiveColumn<T>(_batch, _node);
+        return new PrimitiveColumn<T>(_batch, index);
     }
 
     /// <summary>The decimal column view.</summary>
@@ -160,6 +165,33 @@ public readonly ref struct VortexColumn
 
     /// <summary>The canonical form this column decoded to.</summary>
     public CanonicalKind Kind => _batch.Node(_node).Kind;
+
+    /// <summary>
+    /// Resolves the node this accessor should read, materializing a constant when the caller asks
+    /// for a form only the expanded column can give. PERF-AUDIT-v2.md Z1b-c2b2.
+    /// </summary>
+    /// <param name="kind">The kind the typed accessor needs.</param>
+    /// <param name="node">The resolved node.</param>
+    /// <returns>The node index to hand the typed view -- the twin's, for a materialized constant.</returns>
+    /// <remarks>
+    /// A typed view hands out a CONTIGUOUS span, which one element and a count cannot be. So the
+    /// constant form ends where a caller asks for one, and it ends ONCE: the twin is memoized on the
+    /// record. Every path that never asks -- filter, take, prune, write back -- keeps the form, and
+    /// those are the paths the column was tiled for.
+    /// </remarks>
+    private int Resolve(CanonicalKind kind, out CanonicalNode node)
+    {
+        node = _batch.Node(_node);
+        if (node.Kind == CanonicalKind.Constant &&
+            kind is CanonicalKind.Primitive or CanonicalKind.Decimal)
+        {
+            int twin = _batch.Arena.MaterializeConstant(_node);
+            node = _batch.Node(twin);
+            return twin;
+        }
+
+        return _node;
+    }
 
     private CanonicalNode Require(CanonicalKind kind)
     {
