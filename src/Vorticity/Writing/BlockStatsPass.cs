@@ -997,10 +997,14 @@ internal static class BlockStatsPass
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes).Slice(start, count);
         T min = T.MaxValue;
         T max = T.MinValue;
-        bool counting = !widths.IsEmpty;
-        int elementBits = Unsafe.SizeOf<T>() * 8;
-        ulong mask64 = BitWords.Mask(elementBits);
 
+        // THE BOUNDS LOOP STAYS AS IT WAS: two compares per value and nothing else, which is the
+        // shape the JIT vectorises. Stage R1 put an `if (counting)` inside it, and the fourth
+        // end-of-refactor measurement found `chunked` -- a column that takes this loop on every
+        // row, where `primitive` is a progression and never does -- at +52 % with the count
+        // switched OFF: a branch that is never taken still costs the loop its vectorisation. The
+        // widths are counted in a second walk over the same range, which is a block or less and
+        // already in L1, and only while a plan will read them.
         if (mask.AllValid)
         {
             for (int i = 0; i < values.Length; i++)
@@ -1015,14 +1019,14 @@ internal static class BlockStatsPass
                 {
                     max = value;
                 }
-
-                if (counting)
-                {
-                    Widths(ulong.CreateTruncating(value) & mask64, elementBits, widths);
-                }
             }
 
             stats.MergeSigned(long.CreateTruncating(min), long.CreateTruncating(max));
+            if (!widths.IsEmpty)
+            {
+                CountWidths<T>(values, in mask, start, widths);
+            }
+
             return;
         }
 
@@ -1045,16 +1049,45 @@ internal static class BlockStatsPass
             {
                 max = value;
             }
-
-            if (counting)
-            {
-                Widths(ulong.CreateTruncating(value) & mask64, elementBits, widths);
-            }
         }
 
         if (any)
         {
             stats.MergeSigned(long.CreateTruncating(min), long.CreateTruncating(max));
+        }
+
+        if (!widths.IsEmpty)
+        {
+            CountWidths<T>(values, in mask, start, widths);
+        }
+    }
+
+    /// <summary>
+    /// The width histograms over a range the bounds loop has just read, valid rows only, the
+    /// element's bits masked to its width so a signed value is measured as the packer sees it.
+    /// </summary>
+    private static void CountWidths<T>(
+        ReadOnlySpan<T> values, in ValidityMask mask, int start, Span<int> widths)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        int elementBits = Unsafe.SizeOf<T>() * 8;
+        ulong mask64 = BitWords.Mask(elementBits);
+        if (mask.AllValid)
+        {
+            for (int i = 0; i < values.Length; i++)
+            {
+                Widths(ulong.CreateTruncating(values[i]) & mask64, elementBits, widths);
+            }
+
+            return;
+        }
+
+        for (int i = 0; i < values.Length; i++)
+        {
+            if (mask.IsValid(start + i))
+            {
+                Widths(ulong.CreateTruncating(values[i]) & mask64, elementBits, widths);
+            }
         }
     }
 
@@ -1067,9 +1100,9 @@ internal static class BlockStatsPass
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes).Slice(start, count);
         T min = T.MaxValue;
         T max = T.MinValue;
-        bool counting = !widths.IsEmpty;
-        int elementBits = Unsafe.SizeOf<T>() * 8;
 
+        // Same discipline as the signed loop: bounds alone in the hot loop, widths in a second walk
+        // over the range already in L1, and only when a plan will read them.
         if (mask.AllValid)
         {
             for (int i = 0; i < values.Length; i++)
@@ -1084,14 +1117,14 @@ internal static class BlockStatsPass
                 {
                     max = value;
                 }
-
-                if (counting)
-                {
-                    Widths(ulong.CreateTruncating(value), elementBits, widths);
-                }
             }
 
             stats.MergeUnsigned(ulong.CreateTruncating(min), ulong.CreateTruncating(max));
+            if (!widths.IsEmpty)
+            {
+                CountWidths<T>(values, in mask, start, widths);
+            }
+
             return;
         }
 
@@ -1114,16 +1147,16 @@ internal static class BlockStatsPass
             {
                 max = value;
             }
-
-            if (counting)
-            {
-                Widths(ulong.CreateTruncating(value), elementBits, widths);
-            }
         }
 
         if (any)
         {
             stats.MergeUnsigned(ulong.CreateTruncating(min), ulong.CreateTruncating(max));
+        }
+
+        if (!widths.IsEmpty)
+        {
+            CountWidths<T>(values, in mask, start, widths);
         }
     }
 
