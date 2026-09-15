@@ -42,6 +42,23 @@ public enum CanonicalKind : byte
 
     /// <summary>An extension dtype wrapping a canonical storage child.</summary>
     Extension = 8,
+
+    /// <summary>One element and a row count: every row resolves to the same window.</summary>
+    /// <remarks>
+    /// PERF-AUDIT-v2.md Z1b-c2a. `ConstantCanonicalizer` tiles today -- it writes the element once
+    /// and doubles it over the whole column, so a million rows of eight bytes cost eight megabytes
+    /// to say one number. `ConstantFormBenchmarks` priced the three arms: build **~3 900x** at eight
+    /// bytes and **~8 400x** at sixteen, a scattered take **60x**, and the consumer -- the arm that
+    /// could have said no -- reads **6,5 % FASTER**, because one cache line is re-read where 512 KiB
+    /// were walked.
+    /// <para>
+    /// NOTHING PRODUCES THIS YET. Z1b-c2a adds the storage so that the shape exists and the five
+    /// exhaustive switches are forced to name it; Z1b-c2b makes the canonicalizer emit it behind an
+    /// internal switch. The five arms therefore throw, and the throw is unreachable by construction
+    /// rather than by argument -- no code path can build one.
+    /// </para>
+    /// </remarks>
+    Constant = 9,
 }
 
 /// <summary>
@@ -224,6 +241,17 @@ public readonly ref struct CanonicalNode
     // ----------------------------------------------------------------------------- Extension
 
     /// <summary>The canonical storage child; the extension's validity is the storage's.</summary>
+    /// <summary>The one element a <see cref="CanonicalKind.Constant"/> node repeats.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Constant"/>.</exception>
+    public ReadOnlySpan<byte> ConstantElement
+    {
+        get
+        {
+            ref readonly CanonicalRecord r = ref Require(CanonicalKind.Constant);
+            return r.BufferA.Span[..(int)r.FixedSize];
+        }
+    }
+
     /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Extension"/>.</exception>
     public int StorageIndex
     {
@@ -440,6 +468,34 @@ public sealed class CanonicalArena
         return Commit(ref r);
     }
 
+    /// <summary>Adds a constant node: one element, repeated <paramref name="length"/> times.</summary>
+    /// <param name="dtype">The dtype this node produces, which is the ELEMENT's dtype.</param>
+    /// <param name="length">Row count.</param>
+    /// <param name="validity">Per-row validity, as for any other node.</param>
+    /// <param name="element">The one value's bytes, in the canonical form its dtype implies.</param>
+    /// <returns>The new node's index.</returns>
+    /// <remarks>
+    /// The element's WIDTH is kept in <c>FixedSize</c> rather than derived from the dtype, so that
+    /// one record shape serves a primitive (8 bytes), a decimal (16) and a view (16) without this
+    /// method having to know the table of widths. PERF-AUDIT-v2.md Z1b-c2a.
+    /// </remarks>
+    /// <exception cref="VortexFormatException"><paramref name="element"/> is empty.</exception>
+    public int AddConstant(DType dtype, int length, Validity validity, ReadOnlySpan<byte> element)
+    {
+        if (element.IsEmpty)
+        {
+            ArraysThrow.Format("A constant node needs an element; none was given.");
+        }
+
+        VortexBuffer stored = AllocateUninitialized(element.Length, 1, out Span<byte> into);
+        element.CopyTo(into);
+
+        CanonicalRecord r = New(CanonicalKind.Constant, dtype, length, validity);
+        r.BufferA = stored;
+        r.FixedSize = (uint)element.Length;
+        return Commit(ref r);
+    }
+
     /// <summary>Adds a decimal node.</summary>
     /// <param name="dtype">The dtype this node produces.</param>
     /// <param name="length">Row count.</param>
@@ -608,9 +664,9 @@ public sealed class CanonicalArena
     /// <exception cref="VortexFormatException"><paramref name="kind"/> is not a defined value.</exception>
     public int AddBare(CanonicalKind kind, DType dtype, int length, Validity validity)
     {
-        if ((uint)kind > (uint)CanonicalKind.Extension)
+        if ((uint)kind > (uint)CanonicalKind.Constant)
         {
-            ArraysThrow.Format($"CanonicalKind {(byte)kind} is not defined; 0..8 are.");
+            ArraysThrow.Format($"CanonicalKind {(byte)kind} is not defined; 0..9 are.");
         }
 
         CanonicalRecord r = New(kind, dtype, length, validity);

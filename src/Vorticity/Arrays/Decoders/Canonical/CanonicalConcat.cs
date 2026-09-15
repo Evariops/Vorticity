@@ -146,6 +146,12 @@ internal static class CanonicalConcat
             CanonicalKind.Struct => ConcatStruct(context, dtype, length, chunks, validity, depth),
             CanonicalKind.Null or CanonicalKind.Extension => throw new UnreachableException(
                 $"{kind} returns above, before ConcatValidity."),
+            // Z1b-c2a : le kind existe, rien ne le produit encore. Le bras est nomme parce que
+            // IDE0072 l'exige, et il leve parce qu'aucun chemin ne peut construire un tel noeud --
+            // inatteignable par construction, pas par argument. Z1b-c2b lui donnera son comportement
+            // (convertit : deux constantes egales restent constantes, deux differentes materialisent), quand le canonicalizer l'emettra derriere son commutateur.
+            CanonicalKind.Constant => throw new UnreachableException(
+                "CanonicalKind.Constant is not produced yet; see PERF-AUDIT-v2.md Z1b-c2b."),
             _ => throw new UnreachableException($"CanonicalKind {(byte)kind} is not defined."),
         };
     }

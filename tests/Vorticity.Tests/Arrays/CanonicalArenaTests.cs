@@ -315,12 +315,19 @@ public sealed class CanonicalArenaTests
             () => arena.AddNull(_types.Null(Nullability.Nullable), -1));
     }
 
+    /// <summary>The bound moves with the enum: 9 is `Constant` since Z1b-c2a, 10 is still nothing.</summary>
     [Fact]
     public void AnUndefinedCanonicalKindIsMalformed()
     {
         CanonicalArena arena = new CanonicalArena();
         Assert.Throws<VortexFormatException>(
-            () => arena.AddBare((CanonicalKind)9, _types.Bool(Nullability.NonNullable), 0, Validity.NonNullable));
+            () => arena.AddBare((CanonicalKind)10, _types.Bool(Nullability.NonNullable), 0, Validity.NonNullable));
+
+        // And the one just added is accepted, so the test says where the bound IS and not only where
+        // it is not -- it read as "9 is malformed" for as long as that was true by accident.
+        int bare = arena.AddBare(
+            CanonicalKind.Constant, _types.Bool(Nullability.NonNullable), 0, Validity.NonNullable);
+        Assert.Equal(CanonicalKind.Constant, arena.GetNode(bare).Kind);
     }
 
     [Fact]
@@ -426,4 +433,42 @@ public sealed class CanonicalArenaTests
         Assert.Throws<ArgumentNullException>(() => new CanonicalArena(4, null!));
         Assert.Throws<ArgumentOutOfRangeException>(() => new ArrayNodeArena(0));
     }
+
+    /// <summary>
+    /// A constant node stores its element once and reports the row count it stands for.
+    /// PERF-AUDIT-v2.md Z1b-c2a.
+    /// </summary>
+    /// <remarks>
+    /// THE WHOLE CLAIM OF THE FORM IS THE ASYMMETRY between the two numbers below: eight bytes held
+    /// against a million rows. Nothing produces this kind yet -- Z1b-c2b does -- so this is what
+    /// makes the storage exercised rather than merely compiled, which is the difference between a
+    /// step that can be marked done and one that cannot.
+    /// </remarks>
+    [Fact]
+    public void AConstantNodeHoldsOneElementForAnyNumberOfRows()
+    {
+        DTypeArena types = new DTypeArena();
+        CanonicalArena arena = new CanonicalArena();
+        ReadOnlySpan<byte> element = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        int node = arena.AddConstant(
+            types.Primitive(PType.I64, Nullability.NonNullable), 1_000_000, Validity.NonNullable, element);
+
+        CanonicalNode read = arena.GetNode(node);
+        Assert.Equal(CanonicalKind.Constant, read.Kind);
+        Assert.Equal(1_000_000, read.Length);
+        Assert.True(element.SequenceEqual(read.ConstantElement));
+        Assert.Equal(8, read.ConstantElement.Length);
+    }
+
+    /// <summary>An element is required: a constant with nothing to repeat is malformed.</summary>
+    [Fact]
+    public void AConstantNodeWithoutAnElementIsRejected()
+    {
+        DTypeArena types = new DTypeArena();
+        CanonicalArena arena = new CanonicalArena();
+        Assert.Throws<VortexFormatException>(() => arena.AddConstant(
+            types.Primitive(PType.I64, Nullability.NonNullable), 4, Validity.NonNullable, default));
+    }
+
 }

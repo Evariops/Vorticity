@@ -1026,6 +1026,12 @@ internal static class ArrayBlobWriter
                 : WriteStruct(builder, arena, node, buffers, encodings, compress),
 
             CanonicalKind.Extension => WriteExtension(builder, arena, node, buffers, encodings, compress),
+            // Z1b-c2a : le kind existe, rien ne le produit encore. Le bras est nomme parce que
+            // IDE0072 l'exige, et il leve parce qu'aucun chemin ne peut construire un tel noeud --
+            // inatteignable par construction, pas par argument. Z1b-c2b lui donnera son comportement
+            // (convertit : la constante redevient vortex.constant sur le fil, seul site ou une erreur change les octets du fichier), quand le canonicalizer l'emettra derriere son commutateur.
+            CanonicalKind.Constant => throw new UnreachableException(
+                "CanonicalKind.Constant is not produced yet; see PERF-AUDIT-v2.md Z1b-c2b."),
             _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
         };
     }
