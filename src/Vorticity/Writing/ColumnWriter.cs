@@ -372,7 +372,15 @@ internal sealed class ColumnWriter
         // abandons early on the columns where a dictionary loses, and the table cannot -- so the
         // probe is paid exactly where its answer is used.
         _live = Memory is { WithinTolerance: true, Scheme: ColumnScheme.Dict };
-        _widthsLive = Memory is { WithinTolerance: true, Scheme: ColumnScheme.BitPacked };
+        // AND ONLY IF THE PACK WOULD READ THEM. The ingest histograms are the raw and the zigzag
+        // widths; a frame of reference wants the FRAMED widths, which are the raw ones exactly when
+        // the reference is zero and something the pack has to walk for otherwise. The third
+        // end-of-refactor measurement found `chunked` — `fastlanes.for` over a non-zero reference —
+        // paying the count on every row and the walk on top: +55 %. So the widths are counted for a
+        // zigzag plan, or a frame anchored at zero, and for nothing else.
+        _widthsLive = Memory is { WithinTolerance: true, Scheme: ColumnScheme.BitPacked }
+            && plan.BitPack is { } packed
+            && (packed.Transform == BitPackTransform.ZigZag || packed.Reference == 0);
     }
 
     /// <summary>
