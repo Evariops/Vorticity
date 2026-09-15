@@ -73,6 +73,9 @@ public sealed class VortexFileWriter : IAsyncDisposable
     /// <summary>Canonical bytes to accumulate before emitting, or 0 for no byte threshold.</summary>
     private readonly long _blockBytes;
 
+    /// <summary>Whether the schema holds a list or a map, so W-35's narrowing has anything to do.</summary>
+    private readonly bool _mayShareChildren;
+
     /// <summary>
     /// The two arenas the accumulation ping-pongs between.
     /// </summary>
@@ -107,6 +110,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
         _target = target;
         _rowBlock = rowBlock;
         _blockBytes = blockBytes;
+        _mayShareChildren = ChunkCompactor.MayShareChildren(schema);
         _arrayEncodings = new EncodingDictionary(ComponentKind.Array, target);
         _layoutEncodings = new EncodingDictionary(ComponentKind.Layout, target);
         _isTabular = schema.Kind == DTypeKind.Struct;
@@ -281,8 +285,18 @@ public sealed class VortexFileWriter : IAsyncDisposable
         // MATERIALIZED, not borrowed. The batch's arena is the scan's and is reset the moment the
         // caller asks for the next batch, so rows that are going to be held have to own their
         // bytes -- which is exactly what CopyFrom is for.
+        // NARROWED BEFORE IT IS OWNED, in three steps that copy nothing until the last -- W-35. A
+        // batch cut from a large list chunk shares that chunk's elements WHOLE, so copying it as it
+        // comes materializes the column to hold one batch of it (measured: 6 065 048 bytes for the
+        // 48 KB the rows name, on the 1M-row `list` file). Referencing first costs records only,
+        // compacting then works on views, and the copy pays for the window alone. Doing it here
+        // rather than after the copy also makes the concatenation tight: `ConcatListView` rebases by
+        // each chunk's WHOLE child length, so a wide child poisons every offset downstream of it.
         CanonicalArena transit = Transit();
-        _pending.Add(transit.CopyFrom(batch.Arena, batch.RootIndex));
+        _pending.Add(_mayShareChildren
+            ? transit.CopyFrom(
+                transit, ChunkCompactor.Compact(transit, transit.ReferenceFrom(batch.Arena, batch.RootIndex)))
+            : transit.CopyFrom(batch.Arena, batch.RootIndex));
         _pendingRows += batch.RowCount;
         _pendingBytes += transit.ByteSize(_pending[^1]);
 
@@ -420,6 +434,16 @@ public sealed class VortexFileWriter : IAsyncDisposable
             // inside the blob writer alone left the zone map out and the file 112 bytes short of the
             // bytes the corpus was written with -- close enough to pass a ratio and wrong.
             node = ArrayBlobWriter.Materialize(arena, node);
+
+            // W-35, and it is at the boundary for Z1b-c2b's reason above: a chunk cut from a batch
+            // shares that batch's list elements whole, and what the blob writer is handed is what
+            // lands in the file. Both calls below must see the narrowed node or the zone map would
+            // summarise rows the segment no longer holds.
+            if (_mayShareChildren)
+            {
+                node = ChunkCompactor.Compact(arena, node);
+            }
+
             using ArrayBlobWriter.BlobLease blob =
                 ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress);
             _columnSegments[field].Add(

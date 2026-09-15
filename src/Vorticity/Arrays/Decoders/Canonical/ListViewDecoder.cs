@@ -189,7 +189,7 @@ public sealed class ListViewDecoder : ArrayDecoder
     /// the JIT folds away per instantiation — <c>RowKernels.WidenCode</c> is the same shape, for
     /// the same reason.
     /// </remarks>
-    private static long Widen<T>(T value)
+    internal static long Widen<T>(T value)
         where T : unmanaged
     {
         if (typeof(T) == typeof(byte))
