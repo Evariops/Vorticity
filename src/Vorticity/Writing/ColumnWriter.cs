@@ -104,6 +104,12 @@ internal sealed class ColumnWriter
     private bool _live;
 
     /// <summary>
+    /// Whether the width histograms are counted on the chunk being ingested — the same rule as the
+    /// table's, for the same reason: only while bit-packing is the remembered plan that held.
+    /// </summary>
+    private bool _widthsLive;
+
+    /// <summary>
     /// Per closed block, in block order: how many distinct values and how many heap bytes the table
     /// held when that block closed — the two numbers that bound a chunk ending there.
     /// </summary>
@@ -170,10 +176,17 @@ internal sealed class ColumnWriter
     internal void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
-        if (_openWidths is null && node.Kind == CanonicalKind.Primitive && node.PType.IsInteger())
+        if (_openWidths is null && _widthsLive
+            && node.Kind == CanonicalKind.Primitive && node.PType.IsInteger())
         {
             // Rented on the first integer range of the block and not before: a schema of a thousand
             // string columns rents nothing, which is what keeps this out of the per-column budget.
+            // And only while bit-packing is the remembered plan (`_widthsLive`): the second
+            // end-of-refactor measurement priced the histograms counted for nobody at +25 % on
+            // `runend`, +24 % on `constant`, +59 % on `chunked` -- integer columns whose plan is
+            // never a bit-packing, paying a leading-zero count and two increments per row for a
+            // candidate the chooser never prices. A column's first chunk walks for its histogram,
+            // as it did before stage R1, and only if bit-packing is priced at all.
             _openWidths = ArrayPool<int>.Shared.Rent(BitPackWidths.Length);
             _openWidths.AsSpan(0, BitPackWidths.Length).Clear();
         }
@@ -359,6 +372,7 @@ internal sealed class ColumnWriter
         // abandons early on the columns where a dictionary loses, and the table cannot -- so the
         // probe is paid exactly where its answer is used.
         _live = Memory is { WithinTolerance: true, Scheme: ColumnScheme.Dict };
+        _widthsLive = Memory is { WithinTolerance: true, Scheme: ColumnScheme.BitPacked };
     }
 
     /// <summary>
