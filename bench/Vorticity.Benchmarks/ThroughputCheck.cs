@@ -255,10 +255,15 @@ internal static class ThroughputCheck
             held += loosens ? 1 : 0;
             double value = loosens ? current : max;
             rebased += !loosens && max > current ? 1 : 0;
+            // HOW MANY PASSES WERE ABOVE, not just the peak (BENCH-AUDIT.md B23). One pass above out
+            // of three is drift; three out of three is a reference the axis cannot reach, and only
+            // the second is worth a deliberate edit. HELD used to print the peak alone, which reads
+            // the same in both cases.
+            int above = seen.Count(value => value > current);
             string note = loosens
                 ? string.Create(
                     CultureInfo.InvariantCulture,
-                    $"HELD at {Ref(current)}: {passes} passes peaked at {Ref(max)}, no loosening")
+                    $"HELD at {Ref(current)}: {above} of {passes} passes above, peak {Ref(max)}, no loosening")
                 : max > current
                     ? string.Create(
                         CultureInfo.InvariantCulture,
@@ -920,6 +925,9 @@ internal static class ThroughputCheck
 
         // The names behind `failures`, for the confirming run. BENCH-AUDIT.md B19.
         List<string> over = [];
+
+        // Axes whose interval never reaches their reference. BENCH-AUDIT.md B23.
+        List<string> pinned = [];
         // A PASS IS A PROCESS when recalibrating, and B2.5 is why: measured over twenty runs of one
         // axis each, between-run variance is two to three times the within-run variance, and a 95%
         // within-run interval contains the grand median 11 or 12 times out of 20 rather than 19.
@@ -1056,6 +1064,19 @@ internal static class ThroughputCheck
                                 CultureInfo.InvariantCulture,
                                 $"  {name}: {Ref(ratio.Median)} is over {Ref(ceiling)} but {ratio} straddles it."));
                         }
+                        else if (ratio.Low > reference.Value)
+                        {
+                            // PINNED is STALE's mirror (BENCH-AUDIT.md B23). STALE says an axis has
+                            // too much headroom; PINNED says it has none, because even the BEST
+                            // reading of the run does not reach the reference. The axis then lives
+                            // entirely inside the x1.15 margin and passes only on that, which is
+                            // not the same thing as passing.
+                            suffix += "   PINNED";
+                            pinned.Add(string.Create(
+                                CultureInfo.InvariantCulture,
+                                $"  {name}: {ratio} never reaches its {Ref(reference.Value)} reference " +
+                                $"-- unreachable, not a target."));
+                        }
                     }
                 }
 
@@ -1125,6 +1146,15 @@ internal static class ThroughputCheck
         foreach (string line in stale)
         {
             Console.Out.WriteLine(line);
+        }
+
+        if (pinned.Count > 0)
+        {
+            Console.Out.WriteLine(
+                $"\n{pinned.Count} reference(s) the axis never reaches. `--recalibrate` cannot fix " +
+                "these: it refuses to loosen, so it reprints the old value and says HELD forever " +
+                "(BENCH-AUDIT.md B23). Raising one is a deliberate, dated, justified edit:");
+            pinned.ForEach(Console.Out.WriteLine);
         }
 
         foreach (string failure in failures)
