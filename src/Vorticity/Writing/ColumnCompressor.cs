@@ -630,10 +630,26 @@ internal static class ColumnCompressor
                     chain[code] = buckets[bucket];
                     buckets[bucket] = code;
 
-                    // Give up as soon as the dictionary provably cannot win, rather than building
-                    // one and then discarding it: every row needs at least a one-byte code, and
-                    // every entry costs at least `minimumEntry` bytes however it is written.
-                    if (length + ((long)distinct * minimumEntry) >= budget)
+                    // GIVE UP AS SOON AS THE DICTIONARY PROVABLY CANNOT WIN, and the bound is the
+                    // price the plan will actually be charged rather than a weaker stand-in for it.
+                    //
+                    // The old bound assumed a ONE-BYTE code per row. That is true only while there
+                    // are at most 256 distinct values, and it is what made this loop read every row
+                    // of a column it was going to refuse: `fastlanes_bitpacked` has 1 024 distinct
+                    // values in a 262 144-row chunk, so its codes are two bytes and the dictionary
+                    // costs half a megabyte against a bit-packing that costs 320 kB -- decided at
+                    // the 257th distinct value, and discovered at the 262 144th row.
+                    // WRITE-ARCHITECTURE.md §1 charges that loop **34 %** of that file's write,
+                    // **63 %** of `alp_no_patches`, and 37 to 47 % of `onpair` and `zstd`, in every
+                    // case with the note "cannot win".
+                    //
+                    // IT IS STILL A LOWER BOUND, so nothing that would have been kept is now
+                    // refused and not a byte moves: `distinct` only grows, so the code width only
+                    // grows; and `EntriesSize` is at least `distinct * minimumEntry` for every kind
+                    // that reaches this line. The final test below is this same expression with the
+                    // entries priced exactly.
+                    long codeBytes = (long)length * FsstPlan.IndexPType(distinct).ByteWidth();
+                    if (codeBytes + ((long)distinct * minimumEntry) + DictionaryOverhead >= budget)
                     {
                         return ColumnPlan.Canonical;
                     }
