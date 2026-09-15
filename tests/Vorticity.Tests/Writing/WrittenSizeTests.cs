@@ -89,7 +89,12 @@ public sealed class WrittenSizeTests
     [
         ("types/utf8_nonnull_r8193", 16_460),    // 17 chunks
         ("types/utf8_nullable_r8193", 16_940),   // 17 chunks
-        ("encodings/fsst", 4_700),               // 8 chunks
+        // 4 700 -> 3 756 (-20,1 %) le 2026-09-15, WRITE-AUDIT.md W-31 : la copie du reste reporte
+        // ne materialise plus que les octets que les vues nomment, donc le tas ecrit ne porte plus
+        // les chaines des blocs deja emis. Verifie par bench/crosscheck.sh : 854 fichiers relus par
+        // Vortex Rust, scalaire par scalaire. C'est le seul des quatre qui bouge -- les trois autres
+        // n'ont pas de VarBinView dans leur chemin d'ecriture.
+        ("encodings/fsst", 3_756),               // 8 chunks
         ("encodings/dict", 2_764),               // 8 chunks
     ];
 

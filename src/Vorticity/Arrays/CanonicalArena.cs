@@ -1116,6 +1116,18 @@ public sealed class CanonicalArena
             validity = Validity.Bitmap(CopyFrom(source, validity.CanonicalNodeIndex));
         }
 
+        // A VARBINVIEW IS COPIED COMPACT, and that is not an optimization but the difference between
+        // linear and quadratic. WRITE-AUDIT.md §3.3: a slice of a VarBinView keeps its data buffers
+        // WHOLE -- rightly, because a slice is a view and that is what makes the string encodings
+        // reach their scan ceiling (CanonicalSlice.cs:50-57). Copying such a slice buffer by buffer
+        // therefore materializes every byte of the array it was cut from, and the writer's carried
+        // remainder, re-copied once per block, dragged the whole heap of every block already
+        // emitted: `fsst` copied 384 255 MB to write 929 140 bytes at a million rows.
+        if (src.Kind == CanonicalKind.VarBinView)
+        {
+            return CompactVarBinView(source, in src, validity);
+        }
+
         // Children next, gathered before anything is committed so the block stays contiguous: a
         // child's own copy appends records, and interleaving those with this node's child slots
         // would scatter them.
@@ -1149,6 +1161,106 @@ public sealed class CanonicalArena
         }
 
         return index;
+    }
+
+    /// <summary>
+    /// The <see cref="CanonicalKind.VarBinView"/> arm of <see cref="CopyFrom"/>: the views travel,
+    /// and of the data buffers only the bytes those views actually name.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The result holds ONE data buffer, in row order, and every buffered view points at it. That
+    /// is a gather -- one memcpy per non-inline row -- against a copy of whole buffers, so it is
+    /// cheaper exactly when the node is a window and never more than a constant factor dearer when
+    /// it is not. Inline views (65 % of them on `chunked_varbinview`) carry their bytes inside the
+    /// view and cost nothing here.
+    /// </para>
+    /// <para>
+    /// THE BOUNDS ARE CHECKED ON EVERY BUFFERED VIEW, Class I, for
+    /// <see cref="Decoders.Canonical.CanonicalConcat"/>'s reason: these views may have been rebased
+    /// by a concat since the decoder validated them, and a copy is not a place to start trusting
+    /// them.
+    /// </para>
+    /// </remarks>
+    private int CompactVarBinView(CanonicalArena source, in CanonicalRecord src, Validity validity)
+    {
+        const int ViewSize = Decoders.Canonical.CanonicalSupport.ViewSize;
+        const uint MaxInline = Decoders.Canonical.CanonicalSupport.MaxInlineViewLength;
+
+        int rows = src.Length;
+        int viewBytes = rows * ViewSize;
+        ReadOnlySpan<uint> incoming = MemoryMarshal.Cast<byte, uint>(src.BufferA.Span[..viewBytes]);
+
+        // Sized before anything is written: one pass to learn how many bytes the rows name, so the
+        // gather below writes into a buffer it never has to grow.
+        long referenced = 0;
+        for (int j = 0; j < rows; j++)
+        {
+            uint size = incoming[j * 4];
+            if (size > MaxInline)
+            {
+                referenced += size;
+            }
+        }
+
+        VortexBuffer views = VortexBuffer.Empty;
+        Span<byte> writable = default;
+        if (rows > 0)
+        {
+            views = AllocateUninitialized(viewBytes, 1, out writable);
+            src.BufferA.Span[..viewBytes].CopyTo(writable);
+        }
+
+        Span<byte> into = default;
+        VortexBuffer data = referenced == 0
+            ? VortexBuffer.Empty
+            : AllocateUninitialized(checked((int)referenced), 1, out into);
+
+        Span<uint> words = MemoryMarshal.Cast<byte, uint>(writable);
+        int at = 0;
+        for (int j = 0; j < rows; j++)
+        {
+            int w = j * 4;
+            uint size = words[w];
+            if (size <= MaxInline)
+            {
+                continue;
+            }
+
+            uint index = words[w + 2];
+            if (index >= (uint)src.DataBufferCount)
+            {
+                ArraysThrow.Format(
+                    $"Row {j} references data buffer {index}; the node has {src.DataBufferCount}.");
+            }
+
+            ReadOnlySpan<byte> from = source._dataBuffers[src.DataBufferStart + (int)index].Span;
+            uint offset = words[w + 3];
+            if ((ulong)offset + size > (ulong)from.Length)
+            {
+                ArraysThrow.Format(
+                    $"Row {j} names bytes {offset}..{offset + size} of a {from.Length}-byte buffer.");
+            }
+
+            from.Slice((int)offset, (int)size).CopyTo(into[at..]);
+            words[w + 2] = 0;
+            words[w + 3] = (uint)at;
+            at += (int)size;
+        }
+
+        System.Threading.Interlocked.Add(ref BytesMaterialized, viewBytes + at);
+
+        CanonicalRecord copy = New(CanonicalKind.VarBinView, src.DType, rows, validity);
+        copy.BufferA = views;
+        int index2 = Commit(ref copy);
+        if (at > 0)
+        {
+            _records[index2].DataBufferStart = _dataBufferCount;
+            _records[index2].DataBufferCount = 1;
+            AddDataBuffer(data);
+        }
+
+        return index2;
     }
 
     /// <summary>
