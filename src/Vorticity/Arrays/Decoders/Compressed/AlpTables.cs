@@ -69,7 +69,7 @@ internal static class AlpTables
         float inverse = If10Single[exponentE];
 
         int i = 0;
-        if (Vector<int>.IsSupported && destination.Length >= Vector<int>.Count)
+        if (Vector.IsHardwareAccelerated && destination.Length >= Vector<int>.Count)
         {
             Vector<float> scaleVector = new Vector<float>(scale);
             Vector<float> inverseVector = new Vector<float>(inverse);
@@ -102,7 +102,7 @@ internal static class AlpTables
         double inverse = If10Double[exponentE];
 
         int i = 0;
-        if (Vector<long>.IsSupported && destination.Length >= Vector<long>.Count)
+        if (Vector.IsHardwareAccelerated && destination.Length >= Vector<long>.Count)
         {
             Vector<double> scaleVector = new Vector<double>(scale);
             Vector<double> inverseVector = new Vector<double>(inverse);

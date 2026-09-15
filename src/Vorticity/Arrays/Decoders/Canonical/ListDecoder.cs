@@ -143,7 +143,7 @@ public sealed class ListDecoder : ArrayDecoder
         Span<T> destination = MemoryMarshal.Cast<byte, T>(sizes)[..count];
 
         int i = 0;
-        if (Vector<T>.IsSupported)
+        if (Vector.IsHardwareAccelerated)
         {
             int lanes = Vector<T>.Count;
             for (; i <= count - lanes; i += lanes)

@@ -362,7 +362,7 @@ internal sealed class PcoLatentState
         // The 2^63 bias is pointwise and contiguous, so it is one vector add per lane group.
         Span<ulong> values = scratchBuffers.Values[..batch];
         int biased = 0;
-        if (Vector<ulong>.IsSupported && batch >= Vector<ulong>.Count)
+        if (Vector.IsHardwareAccelerated && batch >= Vector<ulong>.Count)
         {
             Vector<ulong> bias = new Vector<ulong>(1UL << 63);
             int lanes = Vector<ulong>.Count;

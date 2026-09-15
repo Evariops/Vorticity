@@ -86,8 +86,11 @@ internal static class IntegerKernels
     // not vectorize a generic loop over `IBinaryInteger<T>` -- verified by the scalar and
     // DOTNET_EnableHWIntrinsic=0 runs reading the same time -- so it is written out. `Vector<T>`
     // rather than a fixed width, so the same source is 128-bit here and wider on a machine that has
-    // it, and so the `Vector<T>.IsSupported` guard leaves a complete scalar implementation behind
-    // for the no-intrinsics run to exercise.
+    // it, and the guard leaves a complete scalar implementation behind for the no-intrinsics run to
+    // exercise. That guard USED TO BE `Vector<T>.IsSupported`, which is a question about the TYPE
+    // and is true everywhere, so the no-intrinsics run walked an EMULATED vector path instead of
+    // this scalar one -- it exercised the opposite of what it was there to exercise. Now
+    // `Vector.IsHardwareAccelerated`, a question about the machine (BENCH-AUDIT.md B21).
     private static void AddWrapping<T>(ReadOnlySpan<byte> source, Span<byte> destination, T reference)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
@@ -95,7 +98,7 @@ internal static class IntegerKernels
         Span<T> dst = MemoryMarshal.Cast<byte, T>(destination);
 
         int i = 0;
-        if (Vector<T>.IsSupported && src.Length >= Vector<T>.Count)
+        if (Vector.IsHardwareAccelerated && src.Length >= Vector<T>.Count)
         {
             Vector<T> offset = new Vector<T>(reference);
             int lanes = Vector<T>.Count;
@@ -118,7 +121,7 @@ internal static class IntegerKernels
         Span<T> dst = MemoryMarshal.Cast<byte, T>(destination);
 
         int i = 0;
-        if (Vector<T>.IsSupported && src.Length >= Vector<T>.Count)
+        if (Vector.IsHardwareAccelerated && src.Length >= Vector<T>.Count)
         {
             Vector<T> ones = new Vector<T>(T.One);
             int lanes = Vector<T>.Count;

@@ -173,7 +173,7 @@ public sealed class SequenceDecoder : ArrayDecoder
         // two's-complement addition is associative.
         int index = 0;
         T accumulator = start;
-        if (Vector<T>.IsSupported && values.Length >= Vector<T>.Count)
+        if (Vector.IsHardwareAccelerated && values.Length >= Vector<T>.Count)
         {
             int lanes = Vector<T>.Count;
             Span<T> seed = stackalloc T[lanes];

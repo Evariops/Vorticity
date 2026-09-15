@@ -81,7 +81,7 @@ internal static class BitmapKernels
         ref byte source = ref MemoryMarshal.GetReference(middle);
         int i = 0;
 
-        if (Vector<byte>.IsSupported && count >= Vector<byte>.Count)
+        if (Vector.IsHardwareAccelerated && count >= Vector<byte>.Count)
         {
             int width = Vector<byte>.Count;
             Vector<byte> ors = Vector<byte>.Zero;

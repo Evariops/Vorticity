@@ -153,7 +153,7 @@ public sealed class PcoDecoder : ArrayDecoder
     private static void Bias(ReadOnlySpan<ulong> latents, Span<ulong> destination)
     {
         int i = 0;
-        if (Vector<ulong>.IsSupported && latents.Length >= Vector<ulong>.Count)
+        if (Vector.IsHardwareAccelerated && latents.Length >= Vector<ulong>.Count)
         {
             Vector<ulong> mid = new Vector<ulong>(1UL << 63);
             int lanes = Vector<ulong>.Count;

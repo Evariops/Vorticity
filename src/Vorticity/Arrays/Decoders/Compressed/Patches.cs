@@ -440,7 +440,7 @@ public readonly ref struct Patches
         ReadOnlySpan<T> typed = MemoryMarshal.Cast<byte, T>(indices)[..count];
 
         int i = 1;
-        if (Vector<T>.IsSupported && count > Vector<T>.Count)
+        if (Vector.IsHardwareAccelerated && count > Vector<T>.Count)
         {
             int lanes = Vector<T>.Count;
             for (; i <= count - lanes; i += lanes)

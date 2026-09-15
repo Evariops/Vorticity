@@ -260,7 +260,7 @@ public sealed class DeltaDecoder : ArrayDecoder
         ref T intoRef = ref MemoryMarshal.GetReference(into);
 
         int i = 0;
-        if (Vector<T>.IsSupported && count >= Vector<T>.Count)
+        if (Vector.IsHardwareAccelerated && count >= Vector<T>.Count)
         {
             int width = Vector<T>.Count;
             for (; i <= count - width; i += width)

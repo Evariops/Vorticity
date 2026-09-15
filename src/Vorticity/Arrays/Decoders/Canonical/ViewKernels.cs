@@ -187,10 +187,17 @@ internal static class ViewKernels
     /// <b>3.06x slower than what it was written to beat</b> - and it is a widening ladder, so the
     /// emulation pays for three splits and four adds where the scalar loop pays one add.
     ///
-    /// The other two kernels in this file are NOT in that position and were left alone: measured in
-    /// the same run, `require ascending` reads 0.70 and `build views` 0.39 without SIMD, because a
-    /// compare or a byte move survives emulation where a widening ladder does not. A guard is not a
-    /// style rule; each of these was measured (v2 R19).
+    /// The other two kernels in this file were NOT in that position when R19 measured them:
+    /// `require ascending` read 0.70 and `build views` 0.39 without SIMD, because a compare or a
+    /// byte move survives emulation where a widening ladder does not. A guard is not a style rule;
+    /// each of these was measured (v2 R19).
+    /// <para>
+    /// SINCE B21 (2026-09-15) NO TYPE GUARD REMAINS IN THE REPOSITORY. Surviving emulation is not
+    /// the same as being unharmed by it, and the twelve sites were measured together: with the type
+    /// guard, the no-intrinsics leg cost up to <b>four times</b> what the scalar fallback costs --
+    /// `alp_no_patches` 2 208 against 548 µs, `zigzag` 1 405 against 464. `require ascending` was
+    /// among the twelve and is now on the hardware question like its neighbour.
+    /// </para>
     /// </remarks>
     private static long SumWidening(ReadOnlySpan<uint> values)
     {
@@ -401,7 +408,7 @@ internal static class ViewKernels
         ReadOnlySpan<T> typed = MemoryMarshal.Cast<byte, T>(offsets)[..count];
 
         int i = 1;
-        if (Vector<T>.IsSupported && count > Vector<T>.Count)
+        if (Vector.IsHardwareAccelerated && count > Vector<T>.Count)
         {
             // The base reference is taken once. `LoadUnsafe(in typed[i])` bounds-checks the
             // INDEXER before handing over a reference the load then treats as unchecked anyway, so
