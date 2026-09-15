@@ -269,7 +269,7 @@ internal sealed class BitPackPlan
         // At the element's own width nothing can fail to fit, whatever the histogram says.
         long exceptions = 0;
         long cost = blocks * FastLanes.BlockByteLength(elementBits);
-        Best best = new Best(transform, elementBits, cost);
+        Best best = new Best(transform, elementBits, cost, 0);
 
         for (int width = elementBits - 1; width >= 0; width--)
         {
@@ -278,7 +278,7 @@ internal sealed class BitPackPlan
                 + (exceptions == 0 ? 0 : PatchOverhead + (exceptions * perException));
             if (candidate < best.Cost)
             {
-                best = new Best(transform, width, candidate);
+                best = new Best(transform, width, candidate, exceptions);
             }
         }
 
@@ -286,35 +286,29 @@ internal sealed class BitPackPlan
     }
 
     /// <summary>Gathers the rows the chosen width cannot hold.</summary>
+    /// <remarks>
+    /// ONE PASS, AND OFTEN NONE. The count came from a first identical walk over every row of the
+    /// column, recomputing what <see cref="Cheapest"/> had already accumulated to price the width
+    /// it returned. <see cref="Best.Exceptions"/> is that number, so the arrays are sized from it
+    /// and the walk that sized them is gone; when it is zero — the width holds every row, which is
+    /// what a column of dictionary codes, run-end ends or varbin offsets looks like — this method
+    /// returns before touching the column at all.
+    /// </remarks>
     private static (int[] Indices, ulong[] Values) Collect(
         int length, ValidityMask mask, ReadOnlySpan<byte> values, PType raw, in Best best,
         ulong reference, int elementBits)
     {
-        if (best.BitWidth >= elementBits)
+        if (best.BitWidth >= elementBits || best.Exceptions == 0)
         {
             return ([], []);
         }
 
         ulong limit = 1UL << best.BitWidth;
-        int count = 0;
-        for (int row = 0; row < length; row++)
-        {
-            if (mask.IsValid(row)
-                && Encode(CompressedValues.ReadUnsigned(values, raw, row), best.Transform, reference, elementBits) >= limit)
-            {
-                count++;
-            }
-        }
-
-        if (count == 0)
-        {
-            return ([], []);
-        }
-
+        int count = (int)best.Exceptions;
         int[] indices = new int[count];
         ulong[] patched = new ulong[count];
         int at = 0;
-        for (int row = 0; row < length; row++)
+        for (int row = 0; row < length && at < count; row++)
         {
             if (!mask.IsValid(row))
             {
@@ -329,6 +323,17 @@ internal sealed class BitPackPlan
                 patched[at] = encoded;
                 at++;
             }
+        }
+
+        if (at != count)
+        {
+            // The count comes from the histogram and the gather from the values; they are the same
+            // rows under the same transform, so they agree or one of the two is wrong. Saying so
+            // here is what makes it safe to stop the walk at the last exception instead of at the
+            // last row -- a short array would otherwise be padded with row 0 in silence.
+            throw new InvalidOperationException(
+                $"The width histogram counted {count} values above {best.BitWidth} bits and the " +
+                $"column holds {at}.");
         }
 
         return (indices, patched);
@@ -391,11 +396,12 @@ internal sealed class BitPackPlan
 
     private readonly struct Best
     {
-        internal Best(BitPackTransform transform, int bitWidth, long cost)
+        internal Best(BitPackTransform transform, int bitWidth, long cost, long exceptions)
         {
             Transform = transform;
             BitWidth = bitWidth;
             Cost = cost;
+            Exceptions = exceptions;
         }
 
         internal BitPackTransform Transform { get; }
@@ -403,5 +409,17 @@ internal sealed class BitPackPlan
         internal int BitWidth { get; }
 
         internal long Cost { get; }
+
+        /// <summary>
+        /// How many valid rows this width cannot hold — the number the cost was charged for.
+        /// </summary>
+        /// <remarks>
+        /// It is carried rather than recounted: <see cref="Cheapest"/> accumulates it to price the
+        /// width, and <see cref="Collect"/> used to walk the whole column again to find the same
+        /// number before it could size its arrays. Carrying it deletes that pass outright, and
+        /// deletes <see cref="Collect"/> entirely on the common case of a width that holds every
+        /// row — dictionary codes, run-end ends and varbin offsets are all of that shape.
+        /// </remarks>
+        internal long Exceptions { get; }
     }
 }

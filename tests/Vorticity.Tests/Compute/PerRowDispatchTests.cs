@@ -94,7 +94,7 @@ public sealed partial class PerRowDispatchTests
         ("Layouts/DictLayoutReader.cs", 1, 0, "R6 done: the one left is an error path"),
         ("Types/Variant/ParquetVariant.cs", 2, 0, "a local method of the same name, not these"),
         ("Writing/ArrayBlobWriter.cs", 1, 1, "W-13"),
-        ("Writing/BitPackPlan.cs", 5, 5, "W-11"),
+        ("Writing/BitPackPlan.cs", 4, 4, "W-11"),
     ];
 
     /// <summary>The grand totals, which are annexe A's two headline numbers.</summary>
@@ -111,8 +111,13 @@ public sealed partial class PerRowDispatchTests
     /// generic instantiation and reads the constant form's single element through
     /// <c>BinaryPrimitives</c>, so the file does not appear in this table at all — the shape W-12
     /// asked for.
+    ///
+    /// **59 since stage 2g**: <c>BitPackPlan.Collect</c> counted the values a width cannot hold by
+    /// walking the column, to size the arrays it was about to fill by walking it again. The count
+    /// was already in the histogram the chooser had just priced the width from, so the first walk
+    /// went — and with it the last site in this file that was not the encode itself.
     /// </remarks>
-    private const int TotalCalls = 60;
+    private const int TotalCalls = 59;
 
     /// <summary>Calls annexe A classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
@@ -130,8 +135,10 @@ public sealed partial class PerRowDispatchTests
     ///
     /// **20 since stage 1 of docs/11-write-strategy.md §8**: `ZoneStatistics` was two per-row calls
     /// in a two-pass summariser, and the whole file is gone. W-12 is closed.
+    ///
+    /// **19 since stage 2g**: the counting walk of `BitPackPlan.Collect` was one of them.
     /// </remarks>
-    private const int TotalPerRow = 20;
+    private const int TotalPerRow = 19;
 
     [Fact]
     public void NoFileDispatchesPerRowMoreOftenThanItsCeiling()
