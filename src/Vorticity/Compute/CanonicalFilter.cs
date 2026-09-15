@@ -82,12 +82,14 @@ internal static class CanonicalFilter
             CanonicalKind.FixedSizeList => FilterFixedSizeList(arena, node, nodeIndex, indices),
             CanonicalKind.Struct => FilterStruct(arena, node, indices),
             CanonicalKind.Extension => FilterExtension(arena, node, indices),
-            // Z1b-c2a : le kind existe, rien ne le produit encore. Le bras est nomme parce que
-            // IDE0072 l'exige, et il leve parce qu'aucun chemin ne peut construire un tel noeud --
-            // inatteignable par construction, pas par argument. Z1b-c2b lui donnera son comportement
-            // (emprunte : filtrer une constante donne une constante, longueur changee), quand le canonicalizer l'emettra derriere son commutateur.
-            CanonicalKind.Constant => throw new UnreachableException(
-                "CanonicalKind.Constant is not produced yet; see PERF-AUDIT-v2.md Z1b-c2b."),
+            // EMPRUNTE (Z1b-c2b) : filtrer une constante donne une constante. Seules la longueur
+            // et la validite changent ; l'element est le meme, et c'est tout l'interet de la
+            // forme -- un gather de N lignes d'une seule valeur ne rassemble rien.
+            CanonicalKind.Constant => arena.AddConstant(
+                node.DType,
+                count,
+                FilterValidity(arena, node.Validity, indices),
+                node.ConstantElement),
             _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
         };
     }

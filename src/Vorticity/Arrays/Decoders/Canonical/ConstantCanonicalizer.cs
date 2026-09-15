@@ -92,6 +92,20 @@ internal static class ConstantCanonicalizer
             case DTypeKind.Primitive:
             {
                 PType ptype = dtype.PType;
+
+                // PERF-AUDIT-v2.md Z1b-c2b, behind `VortexReadOptions.ConstantForm`. The element is
+                // written ONCE instead of `length` times: at a million rows of eight bytes that is
+                // eight bytes rather than eight megabytes, and `ConstantFormBenchmarks` priced the
+                // build at ~3 900x. The primitive path first, because it is the one `vortex.constant`
+                // takes for the scalar columns the corpus actually carries.
+                if (context.Options.ConstantForm)
+                {
+                    int width = ptype.ByteWidth();
+                    Span<byte> element = stackalloc byte[width];
+                    scalar.WriteTo(element, ptype);
+                    return arena.AddConstant(dtype, length, validity, element);
+                }
+
                 int bytes = ArrayDecodeContext.CheckedMultiply(
                     length, ptype.ByteWidth(), "constant values");
 

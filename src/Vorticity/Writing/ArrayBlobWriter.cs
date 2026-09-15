@@ -161,6 +161,13 @@ internal static class ArrayBlobWriter
         List<PendingBuffer> buffers,
         EncodingDictionary encodings)
     {
+        // Z1b-c2b: a constant node is materialized HERE, before the compressor looks at it, and the
+        // first attempt did it lower down -- inside WriteNode -- which produced a file of 33 676
+        // bytes against 996. The compressor never saw the column, so the encoding that made a
+        // constant 4 096-row i64 cost under a kilobyte was simply not chosen. Materializing above
+        // `Choose` puts the writer back on exactly the path it took before the switch existed, which
+        // is what makes the bytes identical rather than merely close.
+        nodeIndex = Materialize(arena, nodeIndex);
         ColumnPlan plan = ColumnCompressor.Choose(arena, nodeIndex, encodings.Target);
         if (plan.Scheme == ColumnScheme.None)
         {
@@ -1026,14 +1033,49 @@ internal static class ArrayBlobWriter
                 : WriteStruct(builder, arena, node, buffers, encodings, compress),
 
             CanonicalKind.Extension => WriteExtension(builder, arena, node, buffers, encodings, compress),
-            // Z1b-c2a : le kind existe, rien ne le produit encore. Le bras est nomme parce que
-            // IDE0072 l'exige, et il leve parce qu'aucun chemin ne peut construire un tel noeud --
-            // inatteignable par construction, pas par argument. Z1b-c2b lui donnera son comportement
-            // (convertit : la constante redevient vortex.constant sur le fil, seul site ou une erreur change les octets du fichier), quand le canonicalizer l'emettra derriere son commutateur.
+            // Materialized above, before the compressor (see WriteCompressed). Reaching it here
+            // would mean a constant arrived by a path that skips `Choose`, and the bytes would not
+            // be the ones the corpus was written with.
             CanonicalKind.Constant => throw new UnreachableException(
-                "CanonicalKind.Constant is not produced yet; see PERF-AUDIT-v2.md Z1b-c2b."),
+                "A constant node reached WriteNode; it is materialized in WriteCompressed."),
             _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
         };
+    }
+
+
+    /// <summary>Expands a constant node back to its materialized form; anything else unchanged.</summary>
+    /// <param name="arena">The arena holding the node.</param>
+    /// <param name="nodeIndex">The node about to be compressed and written.</param>
+    /// <returns>A node index the rest of the writer already knows how to handle.</returns>
+    /// <remarks>
+    /// PERF-AUDIT-v2.md Z1b-c2b, AND THE CHOICE IS THE POINT. The design note says the writer
+    /// "converts"; converting to WHAT was the ambiguity. Emitting `vortex.constant` on the wire
+    /// would make the file smaller -- a real gain, and a different one: Z1b's claim is the memory a
+    /// reader holds, not the size of a file. It would also move `WrittenSizeTests`, whose whole
+    /// value is being byte-exact, and folding a size change into a memory refactor is how a
+    /// regression hides behind an improvement.
+    /// <para>
+    /// So the element is expanded back to the form the writer already emits, and the bytes are
+    /// identical by construction: with the switch off the canonicalizer tiles and the writer sees a
+    /// primitive; with it on the canonicalizer does not, and the writer tiles to the same buffer.
+    /// `ConstantFormTests.WritingBackIsByteIdenticalEitherWay` is what makes "by construction" a
+    /// measured fact rather than a claim.
+    /// </para>
+    /// </remarks>
+    internal static int Materialize(CanonicalArena arena, int nodeIndex)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        if (node.Kind != CanonicalKind.Constant)
+        {
+            return nodeIndex;
+        }
+
+        ReadOnlySpan<byte> element = node.ConstantElement;
+        int rows = node.Length;
+        VortexBuffer values = arena.AllocateUninitialized(
+            checked(rows * element.Length), element.Length, out Span<byte> writable);
+        RowKernels.Tile(writable, element);
+        return arena.AddPrimitive(node.DType, rows, node.Validity, node.DType.PType, values);
     }
 
     /// <remarks>Writes a child that is a column in its own right, compressing it when asked.</remarks>

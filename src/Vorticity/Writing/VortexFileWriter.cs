@@ -354,6 +354,13 @@ public sealed class VortexFileWriter : IAsyncDisposable
         for (int field = 0; field < _fieldCount; field++)
         {
             int node = _isTabular ? arena.GetNode(rootIndex).GetFieldIndex(field) : rootIndex;
+
+            // Z1b-c2b: the constant form stops here. The writer has no `vortex.constant` on the wire
+            // and the zone summariser has no case for the kind, so the element is expanded ONCE, at
+            // the boundary, and both of the calls below see what they have always seen. Doing it
+            // inside the blob writer alone left the zone map out and the file 112 bytes short of the
+            // bytes the corpus was written with -- close enough to pass a ratio and wrong.
+            node = ArrayBlobWriter.Materialize(arena, node);
             using ArrayBlobWriter.BlobLease blob =
                 ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress);
             _columnSegments[field].Add(

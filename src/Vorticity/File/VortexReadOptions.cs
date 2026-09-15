@@ -40,4 +40,26 @@ public sealed class VortexReadOptions
     /// is unconditional (docs/08-semantics.md §4). Default <see langword="false"/>.
     /// </summary>
     public bool AllowUnknownComponents { get; init; }
+
+    /// <summary>
+    /// THE INTERNAL SWITCH OF PERF-AUDIT-v2.md Z1b. Default <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// A constant column canonicalizes today by TILING: the element is written once and doubled over
+    /// the whole column, so a million rows of eight bytes cost eight megabytes to say one number.
+    /// With this on, `ConstantCanonicalizer` emits <see cref="Arrays.CanonicalKind.Constant"/>
+    /// instead -- the element and a length -- and every consumer resolves each row to the same
+    /// window.
+    /// <para>
+    /// IT IS A PER-SCAN OPTION AND NOT A STATIC FLAG, deliberately: the two forms have to coexist in
+    /// ONE process until the refactor reaches its exit (§3.7 condition 5), and a mutable global
+    /// would make any test that flips it poison every test running beside it.
+    /// </para>
+    /// <para>
+    /// It is not a supported knob and it will go away: §3.7 requires the switch to be REMOVED at the
+    /// exit, the old shape carried by the benchmark instead. A refactor that does not reach its exit
+    /// closes with its measurement rather than living here forever.
+    /// </para>
+    /// </remarks>
+    internal bool ConstantForm { get; init; }
 }

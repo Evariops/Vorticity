@@ -146,14 +146,56 @@ internal static class CanonicalConcat
             CanonicalKind.Struct => ConcatStruct(context, dtype, length, chunks, validity, depth),
             CanonicalKind.Null or CanonicalKind.Extension => throw new UnreachableException(
                 $"{kind} returns above, before ConcatValidity."),
-            // Z1b-c2a : le kind existe, rien ne le produit encore. Le bras est nomme parce que
-            // IDE0072 l'exige, et il leve parce qu'aucun chemin ne peut construire un tel noeud --
-            // inatteignable par construction, pas par argument. Z1b-c2b lui donnera son comportement
-            // (convertit : deux constantes egales restent constantes, deux differentes materialisent), quand le canonicalizer l'emettra derriere son commutateur.
-            CanonicalKind.Constant => throw new UnreachableException(
-                "CanonicalKind.Constant is not produced yet; see PERF-AUDIT-v2.md Z1b-c2b."),
+            // CONVERTIT (Z1b-c2b) : deux constantes EGALES restent une constante, deux
+            // differentes materialisent. C'est la seule regle du §2.4 qui ne se derive pas
+            // de la forme mais des donnees, et elle decide a la concat plutot qu'au decode
+            // parce que c'est la seule qui voit les chunks ensemble.
+            CanonicalKind.Constant =>
+                ConcatConstant(context, dtype, length, chunks, validity, depth),
             _ => throw new UnreachableException($"CanonicalKind {(byte)kind} is not defined."),
         };
+    }
+
+
+    /// <summary>Concatenating constants: equal ones stay constant, different ones materialize.</summary>
+    /// <param name="context">The decode context owning the arena.</param>
+    /// <param name="dtype">The chunked array's dtype.</param>
+    /// <param name="length">Total row count across the chunks.</param>
+    /// <param name="chunks">The chunk node indices, all of kind Constant.</param>
+    /// <param name="validity">The concatenated validity, already built by the caller.</param>
+    /// <param name="depth">Recursion depth, for the materializing path.</param>
+    /// <returns>The concatenated node's index.</returns>
+    /// <remarks>
+    /// PERF-AUDIT-v2.md §2.4's rule, and Z1b-c2b implements it. The comparison is over the ELEMENTS,
+    /// which are one value each, so deciding costs a memcmp per chunk rather than a pass over the
+    /// rows. When they differ there is nothing to be saved: the column really does hold more than
+    /// one value, and the materialized form is the honest one.
+    /// </remarks>
+    private static int ConcatConstant(
+        ArrayDecodeContext context, DType dtype, int length, ReadOnlySpan<int> chunks,
+        Validity validity, int depth)
+    {
+        CanonicalArena arena = context.Canonical;
+        ReadOnlySpan<byte> first = arena.GetNode(chunks[0]).ConstantElement;
+        bool same = true;
+        for (int i = 1; i < chunks.Length && same; i++)
+        {
+            same = first.SequenceEqual(arena.GetNode(chunks[i]).ConstantElement);
+        }
+
+        if (same)
+        {
+            return arena.AddConstant(dtype, length, validity, first);
+        }
+
+        // Different values: fall back by materializing each chunk and concatenating as primitives.
+        // Not written yet -- no corpus file chunks a constant column with differing values, and
+        // §1.6 says not to write a path no measurement reaches. Z1b-c2c re-checks it against the
+        // corpus before the switch comes out.
+        throw new VortexUnsupportedException(
+            "component",
+            "Concatenating constant chunks with different values is not implemented; "
+                + "see PERF-AUDIT-v2.md Z1b-c2c.");
     }
 
     // ------------------------------------------------------------------------------- validity

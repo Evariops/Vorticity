@@ -132,12 +132,10 @@ internal static class CanonicalSlice
                 SliceStruct(source, destination, nodeIndex, dtype, validity, start, length, depth),
             CanonicalKind.Null or CanonicalKind.Extension => throw new UnreachableException(
                 $"{node.Kind} returns above, before SliceValidity."),
-            // Z1b-c2a : le kind existe, rien ne le produit encore. Le bras est nomme parce que
-            // IDE0072 l'exige, et il leve parce qu'aucun chemin ne peut construire un tel noeud --
-            // inatteignable par construction, pas par argument. Z1b-c2b lui donnera son comportement
-            // (emprunte : meme valeur, longueur changee), quand le canonicalizer l'emettra derriere son commutateur.
-            CanonicalKind.Constant => throw new UnreachableException(
-                "CanonicalKind.Constant is not produced yet; see PERF-AUDIT-v2.md Z1b-c2b."),
+            // EMPRUNTE (Z1b-c2b) : une fenetre sur une constante est la meme constante, plus
+            // courte. `start` ne sert a rien : toutes les lignes portent la meme valeur.
+            CanonicalKind.Constant =>
+                destination.AddConstant(dtype, length, validity, node.ConstantElement),
             _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
         };
     }
