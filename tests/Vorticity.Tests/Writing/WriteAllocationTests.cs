@@ -111,14 +111,23 @@ public sealed class WriteAllocationTests
     /// only to copy it into the `byte[]` the plan carries, and by renting the patch buffers instead
     /// of growing two `List`s. It is the only one of the original ten with an f64 column, which is
     /// why `alp` and `alprd` are now axes of their own.
+    /// <para>
+    /// STAGE 4 OF docs/11-write-strategy.md §8 TOOK FIVE MORE DOWN, on 2026-09-15, by not allocating
+    /// what is immediately overwritten and not copying what already exists: a canonical buffer is
+    /// recorded as a VIEW instead of a <c>ToArray()</c>, and the packed output, the varbin heap, its
+    /// offsets and the three arena index buffers are allocated uninitialized.
+    /// `high_cardinality_i64_r8193` **135 104 -&gt; 69 736 B** (-48 %), `alprd` 128 536 -&gt; 95 968
+    /// (-25 %), `onpair` 223 880 -&gt; 220 048, `utf8_nullable_r1025` 216 632 -&gt; 214 752,
+    /// `zoned_many_zones_nulls` 2 105 848 -&gt; 2 100 400.
+    /// </para>
     /// </remarks>
     private static readonly (string Id, long Ceiling)[] Files =
     [
-        ("containers/zoned_many_zones_nulls", 2_133_000),
-        ("distributions/high_cardinality_i64_r8193", 136_900),
+        ("containers/zoned_many_zones_nulls", 2_132_000),   // 2 100 400 mesurés
+        ("distributions/high_cardinality_i64_r8193", 70_800),   // 69 736 mesurés, -48 %
         ("encodings/fsst", 235_100),
-        ("encodings/onpair", 227_000),
-        ("types/utf8_nullable_r1025", 219_700),
+        ("encodings/onpair", 223_400),   // 220 048 mesurés
+        ("types/utf8_nullable_r1025", 218_000),   // 214 752 mesurés
 
         // THE LATE COMPONENTS, on the write side, for PERF-AUDIT-v2.md F2's reason: `fastlanes.delta`,
         // `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant` were watched by no
@@ -138,7 +147,7 @@ public sealed class WriteAllocationTests
         // patch. The second is the case that made the patch buffers worth renting, and a ratchet
         // that only held the easy shape would have said nothing about it.
         ("encodings/alp", 119_600),
-        ("encodings/alprd", 130_300),
+        ("encodings/alprd", 97_400),   // 95 968 mesurés, -25 %
     ];
 
     // FOUR OF THESE FIVE CAME DOWN AGAIN WHEN FSST STOPPED ALLOCATING WHAT IT THROWS AWAY.

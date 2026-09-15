@@ -118,7 +118,7 @@ internal static class ArrayBlobWriter
                 cursor += padding;
             }
 
-            buffers[i].Bytes.AsSpan(0, buffers[i].Length).CopyTo(blob.AsSpan((int)cursor));
+            buffers[i].Span.CopyTo(blob.AsSpan((int)cursor));
             cursor += buffers[i].Length;
         }
 
@@ -142,9 +142,9 @@ internal static class ArrayBlobWriter
             // between the rent and the copy does not quietly drain the pool either.
             foreach (PendingBuffer pending in buffers)
             {
-                if (pending.Rented)
+                if (pending.Rented && pending.Bytes is byte[] rented)
                 {
-                    ArrayPool<byte>.Shared.Return(pending.Bytes);
+                    ArrayPool<byte>.Shared.Return(rented);
                 }
             }
         }
@@ -331,7 +331,15 @@ internal static class ArrayBlobWriter
     {
         int bitWidth = plan.BitWidth;
         int blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
-        byte[] destination = new byte[(long)blocks * FastLanes.BlockByteLength(bitWidth)];
+
+        // UNINITIALIZED, because `PackBlock` clears its own destination before it ORs into it, so
+        // every byte returned here is written twice and zeroed once for nothing. WRITE-ARCHITECTURE
+        // §3.6 charges `ZeroMemoryNative` **17,0 %** of a `fastlanes_bitpacked` write and **17,6 %**
+        // of a `dict_nullable_codes` one, and this array is the first of its two sources. The two
+        // early returns below are the empty array in both cases -- `BlockByteLength(0)` is 0, and
+        // `length == 0` gives no blocks -- so nothing is ever returned unwritten.
+        byte[] destination = GC.AllocateUninitializedArray<byte>(
+            checked((int)((long)blocks * FastLanes.BlockByteLength(bitWidth))));
         if (bitWidth == 0 || length == 0)
         {
             return destination;
@@ -356,7 +364,16 @@ internal static class ArrayBlobWriter
             {
                 int start = b * FastLanes.BlockSize;
                 int count = Math.Min(FastLanes.BlockSize, length - start);
-                wide.Clear();
+
+                // ONLY THE TAIL OF THE LAST BLOCK NEEDS CLEARING. The loop below writes every one
+                // of the block's 1 024 slots when the block is full, which is every block but the
+                // last; clearing the whole 8 KiB each time was zeroing bytes that were about to be
+                // overwritten -- a megabyte of `wide` cleared per 128 blocks, for one partial block
+                // at the end of the column.
+                if (count < FastLanes.BlockSize)
+                {
+                    wide[count..].Clear();
+                }
 
                 for (int i = 0; i < count; i++)
                 {
@@ -682,7 +699,8 @@ internal static class ArrayBlobWriter
         // The dtype arena is the column's own: a DType carries the arena it belongs to, and a
         // node whose dtype came from a different one would not compare equal downstream.
         DType encodedType = node.DType.Arena.Primitive(plan.EncodedPType, node.DType.Nullability);
-        VortexBuffer encodedBuffer = arena.Allocate(
+        // Uninitialized: the CopyTo on the next line fills it whole (WRITE-ARCHITECTURE.md §3.6).
+        VortexBuffer encodedBuffer = arena.AllocateUninitialized(
             plan.Encoded.Length, plan.EncodedPType.ByteWidth(), out Span<byte> destination);
         plan.Encoded.CopyTo(destination);
         int encodedNode = arena.AddPrimitive(
@@ -881,7 +899,9 @@ internal static class ArrayBlobWriter
         List<PendingBuffer> buffers, EncodingDictionary encodings)
     {
         int width = ptype.ByteWidth();
-        VortexBuffer buffer = arena.Allocate(
+
+        // Uninitialized: `WriteIndices` writes every byte of it (WRITE-ARCHITECTURE.md §3.6).
+        VortexBuffer buffer = arena.AllocateUninitialized(
             values.Length * width, width, out Span<byte> destination);
         WriteIndices(values, width, destination);
 
@@ -918,6 +938,16 @@ internal static class ArrayBlobWriter
         return WriteCompressed(builder, arena, node, buffers, encodings);
     }
 
+    /// <summary>Writes an index per element, filling EVERY byte of <paramref name="destination"/>.</summary>
+    /// <remarks>
+    /// THE 8-BYTE CASE IS NOT DEAD CODE, it is the eligibility argument. Its callers hand widths of
+    /// 1, 2 or 4 today -- <c>IndexPType</c> tops out at <c>u32</c>, and the varbin path refuses a
+    /// heap above <c>int.MaxValue</c> before it picks a type -- but this function now writes into
+    /// buffers from <c>CanonicalArena.AllocateUninitialized</c>, whose contract is "provably writes
+    /// every byte, not probably" (its own docstring). A <c>default</c> arm writing four bytes into
+    /// an eight-byte slot would put pooled bytes from another file into a column the day a caller
+    /// passes <c>u64</c>, and the only oracle for that is the Rust cross-check.
+    /// </remarks>
     private static void WriteIndices(int[] values, int width, Span<byte> destination)
     {
         for (int i = 0; i < values.Length; i++)
@@ -930,6 +960,9 @@ internal static class ArrayBlobWriter
                     break;
                 case 2:
                     BinaryPrimitives.WriteUInt16LittleEndian(at, (ushort)values[i]);
+                    break;
+                case 8:
+                    BinaryPrimitives.WriteUInt64LittleEndian(at, (ulong)(uint)values[i]);
                     break;
                 default:
                     BinaryPrimitives.WriteUInt32LittleEndian(at, (uint)values[i]);
@@ -1231,8 +1264,12 @@ internal static class ArrayBlobWriter
             return false;
         }
 
-        byte[] heap = new byte[Math.Max((int)heapBytes, 1)];
-        int[] offsets = new int[rows + 1];
+        // Uninitialized and written ONCE. `heapBytes` is the sum of the valid values' lengths, so
+        // the loop below fills exactly this array; it was allocated zeroed and then copied whole a
+        // second time by a `ToArray()` that served nothing -- WRITE-ARCHITECTURE.md §3.6 measures
+        // that pair at `fsst` allocating 103 MB to write 52.
+        byte[] heap = GC.AllocateUninitializedArray<byte>(Math.Max((int)heapBytes, 1));
+        int[] offsets = GC.AllocateUninitializedArray<int>(rows + 1);
         int written = 0;
         for (int i = 0; i < rows; i++)
         {
@@ -1252,11 +1289,11 @@ internal static class ArrayBlobWriter
         offsets[rows] = written;
 
         int heapBuffer = buffers.Count;
-        buffers.Add(new PendingBuffer(heap.AsSpan(0, written).ToArray(), 0));
+        buffers.Add(new PendingBuffer(heap, written, 0, rented: false));
 
         Span<int> children = stackalloc int[2];
         int width = offsetsPType.ByteWidth();
-        VortexBuffer offsetBuffer = arena.Allocate(
+        VortexBuffer offsetBuffer = arena.AllocateUninitialized(
             offsets.Length * width, width, out Span<byte> offsetBytes);
         WriteIndices(offsets, width, offsetBytes);
         children[0] = WriteIndexBuffer(
@@ -1527,9 +1564,12 @@ internal static class ArrayBlobWriter
         ArrayWriter.WriteNode(
             builder, encodings.Intern(idUtf8), metadata, children, bufferIndices, statsOffset: 0);
 
+    /// <summary>
+    /// Records a buffer the arena already owns, as a VIEW: the blob copies it once, not twice.
+    /// </summary>
     private static int Buffer(List<PendingBuffer> buffers, VortexBuffer buffer, int alignmentExponent)
     {
-        buffers.Add(new PendingBuffer(buffer.Span.ToArray(), alignmentExponent));
+        buffers.Add(new PendingBuffer(buffer, alignmentExponent));
         return buffers.Count - 1;
     }
 
@@ -1637,8 +1677,24 @@ internal static class ArrayBlobWriter
     /// being the number of bytes that belong in the file the moment one of these is pooled.
     /// PERF-AUDIT-v2.md W-5.
     /// </remarks>
+    /// <summary>One buffer waiting to be placed in the blob: either bytes, or a view onto them.</summary>
+    /// <remarks>
+    /// A VIEW, WHEREVER THE BYTES ALREADY EXIST — docs/11-write-strategy.md §3.5, and
+    /// WRITE-ARCHITECTURE.md §3.6 is the measurement that asks for it. A canonical column's values,
+    /// views, data buffers and validity bits are all already in the arena, correctly laid out, and
+    /// they were being copied into a fresh <c>byte[]</c> with <c>ToArray()</c> and then copied AGAIN
+    /// into the blob. The array served nothing: the blob is assembled before <c>Write</c> returns,
+    /// while the arena that owns the bytes is still alive by construction.
+    /// <para>
+    /// The bytes form stays for the buffers a scheme actually PRODUCES — a packed block, an FSST
+    /// symbol table, a zstd frame — which have no home but their own array.
+    /// </para>
+    /// </remarks>
     private readonly struct PendingBuffer
     {
+        private readonly byte[]? _bytes;
+        private readonly VortexBuffer _view;
+
         internal PendingBuffer(byte[] bytes, int alignmentExponent)
             : this(bytes, bytes.Length, alignmentExponent, rented: false)
         {
@@ -1646,20 +1702,34 @@ internal static class ArrayBlobWriter
 
         internal PendingBuffer(byte[] bytes, int length, int alignmentExponent, bool rented)
         {
-            Bytes = bytes;
+            _bytes = bytes;
             Length = length;
             AlignmentExponent = alignmentExponent;
             Rented = rented;
         }
 
-        internal byte[] Bytes { get; }
+        internal PendingBuffer(VortexBuffer view, int alignmentExponent)
+        {
+            _bytes = null;
+            _view = view;
+            Length = view.Length;
+            AlignmentExponent = alignmentExponent;
+            Rented = false;
+        }
 
-        /// <summary>Bytes of <see cref="Bytes"/> that belong in the blob.</summary>
+        /// <summary>The pooled array to hand back, or <see langword="null"/> for a view.</summary>
+        internal byte[]? Bytes => _bytes;
+
+        /// <summary>Bytes that belong in the blob.</summary>
         internal int Length { get; }
 
         internal int AlignmentExponent { get; }
 
         /// <summary>Whether <c>Write</c> must hand <see cref="Bytes"/> back to the pool.</summary>
         internal bool Rented { get; }
+
+        /// <summary>What goes into the blob, whichever form it is in.</summary>
+        internal ReadOnlySpan<byte> Span =>
+            _bytes is not null ? _bytes.AsSpan(0, Length) : _view.Span[..Length];
     }
 }
