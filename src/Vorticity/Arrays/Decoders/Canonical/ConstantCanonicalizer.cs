@@ -93,11 +93,13 @@ internal static class ConstantCanonicalizer
             {
                 PType ptype = dtype.PType;
 
-                // PERF-AUDIT-v2.md Z1b-c2b, behind `VortexReadOptions.ConstantForm`. The element is
+                // PERF-AUDIT-v2.md Z1b, behind `VortexReadOptions.ConstantForm`. The element is
                 // written ONCE instead of `length` times: at a million rows of eight bytes that is
-                // eight bytes rather than eight megabytes, and `ConstantFormBenchmarks` priced the
-                // build at ~3 900x. The primitive path first, because it is the one `vortex.constant`
-                // takes for the scalar columns the corpus actually carries.
+                // eight bytes rather than eight megabytes. Measured on the 1M `constant` file, a
+                // full scan goes from 201 us to 144 -- a ratio of 0,716, so 28,4 % of that scan was
+                // tiling a value that never changes. R22 had predicted it: on that axis `Tile` is
+                // ENTIRELY bytes, +44,6 % when the work is doubled and nothing when only the calls
+                // are.
                 if (context.Options.ConstantForm)
                 {
                     int width = ptype.ByteWidth();
@@ -108,9 +110,6 @@ internal static class ConstantCanonicalizer
 
                 int bytes = ArrayDecodeContext.CheckedMultiply(
                     length, ptype.ByteWidth(), "constant values");
-
-                // Uninitialized: `WriteTo` tiles the whole span, so every byte is written and the
-                // zero-fill was a second full pass over the buffer for nothing.
                 VortexBuffer values = CanonicalSupport.AllocateUninitialized(
                     context, bytes, Align, out Span<byte> writable);
                 scalar.WriteTo(writable, ptype);
@@ -118,6 +117,7 @@ internal static class ConstantCanonicalizer
             }
 
             case DTypeKind.Decimal:
+
                 return BuildDecimal(context, dtype, length, in scalar, validity);
 
             case DTypeKind.Utf8:

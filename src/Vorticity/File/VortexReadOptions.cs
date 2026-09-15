@@ -45,20 +45,21 @@ public sealed class VortexReadOptions
     /// THE INTERNAL SWITCH OF PERF-AUDIT-v2.md Z1b. Default <see langword="false"/>.
     /// </summary>
     /// <remarks>
-    /// A constant column canonicalizes today by TILING: the element is written once and doubled over
-    /// the whole column, so a million rows of eight bytes cost eight megabytes to say one number.
-    /// With this on, `ConstantCanonicalizer` emits <see cref="Arrays.CanonicalKind.Constant"/>
-    /// instead -- the element and a length -- and every consumer resolves each row to the same
-    /// window.
+    /// With this on, `ConstantCanonicalizer` emits <see cref="Arrays.CanonicalKind.Constant"/> -- the
+    /// element and a length -- instead of tiling the element over every row. Measured on the 1M
+    /// `constant` file, a full scan goes from **201 us to 144**, a ratio of **0,716**: 28,4 % of that
+    /// scan was tiling a value that never changes.
     /// <para>
-    /// IT IS A PER-SCAN OPTION AND NOT A STATIC FLAG, deliberately: the two forms have to coexist in
-    /// ONE process until the refactor reaches its exit (§3.7 condition 5), and a mutable global
-    /// would make any test that flips it poison every test running beside it.
+    /// IT IS A PER-SCAN OPTION AND NOT A STATIC FLAG: the two forms coexist in ONE process until the
+    /// refactor reaches its exit (§3.7 condition 5), and a mutable global would poison every test
+    /// running beside the one that flips it.
     /// </para>
     /// <para>
-    /// It is not a supported knob and it will go away: §3.7 requires the switch to be REMOVED at the
-    /// exit, the old shape carried by the benchmark instead. A refactor that does not reach its exit
-    /// closes with its measurement rather than living here forever.
+    /// WHY IT IS STILL HERE, stated rather than left to be discovered: Z1b-c2c tried to take it out
+    /// and **89 tests went red**. `VortexColumn.Resolve` and `CanonicalNode.Values` cover the typed
+    /// primitive path, which is what Z1b-c2b2 measured; `AsExtension`, `AsFixedSizeList` and the
+    /// layout split paths do not have their case yet. The remaining work is counted, not guessed --
+    /// see Z1b-c2c2.
     /// </para>
     /// </remarks>
     internal bool ConstantForm { get; init; }
