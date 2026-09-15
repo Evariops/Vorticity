@@ -28,6 +28,7 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -151,29 +152,7 @@ internal sealed class BitPackPlan
         frames.Clear();
         zigzags.Clear();
         bool signed = ptype.IsSignedInteger();
-
-        for (int row = 0; row < length; row++)
-        {
-            if (!mask.IsValid(row))
-            {
-                // A null row is PACKED as zero, and that is a different statement from "its value
-                // is zero": under a frame of reference the raw zero would encode as `-reference`,
-                // 64 bits wide, and every null in the column would count as an exception. Writing
-                // it as a raw zero here and letting the transform run cost 37 kB on
-                // `containers/zoned_many_zones_nulls` before the histogram was read against what
-                // Pack actually writes.
-                frames[0]++;
-                zigzags[0]++;
-                continue;
-            }
-
-            ulong bits = CompressedValues.ReadUnsigned(values, raw, row);
-            frames[BitLength(Frame(bits, minimum, elementBits))]++;
-            if (signed)
-            {
-                zigzags[BitLength(ZigZag(bits, elementBits))]++;
-            }
-        }
+        Histogram(values, raw, in mask, length, minimum, signed, frames, zigzags);
 
         long blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
         long perException = ptype.ByteWidth() + FsstPlan.IndexPType(length).ByteWidth();
@@ -252,6 +231,149 @@ internal sealed class BitPackPlan
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int BitLength(ulong value) => 64 - BitOperations.LeadingZeroCount(value);
+
+    /// <summary>
+    /// Both width histograms in one walk, with the physical type resolved before the walk starts.
+    /// </summary>
+    /// <remarks>
+    /// THE SHAPE OF W-9 AND W-33, APPLIED TO THE LAST WRITE-SIDE LOOP THAT STILL DISPATCHED PER ROW.
+    /// The walk called <c>CompressedValues.ReadUnsigned(values, raw, row)</c> on every row of every
+    /// integer column of every chunk: a switch on the physical type, per value, to reach a load the
+    /// type decides once. Measured by doubling this very loop and reading the axis, it was worth
+    /// 18 % to 44 % of the write on twelve encodings — 34 % of <c>fastlanes_bitpacked</c>, 44 % of
+    /// <c>fastlanes_for</c>, 38 % of <c>table_wide</c>.
+    /// <para>
+    /// Resolved into <see cref="Histogram{T}"/> the arithmetic is the element's own: subtracting the
+    /// reference in <c>T</c> WRAPS at the element width, which is exactly what the
+    /// 64-bit form's mask was doing by hand, and <c>LeadingZeroCount</c> counts inside that width,
+    /// so the bit length is the same number. The histograms are therefore identical to the ones this
+    /// replaces, and so is every plan and every byte.
+    /// </para>
+    /// <para>
+    /// Where it will go next: docs/11-write-strategy.md §3.2 puts <c>bits_raw</c> and
+    /// <c>bits_zigzag</c> in the ingest pass, so this walk disappears rather than merely becoming
+    /// cheap. That move also restructures the candidate set — frame of reference cannot be
+    /// histogrammed before the minimum is known, so §3.2.3 prices it by bound and sweeps only the
+    /// contested blocks — which is stage 3's work, and it can move bytes. Typing the walk cannot.
+    /// </para>
+    /// </remarks>
+    /// <param name="values">The column's value buffer.</param>
+    /// <param name="raw">The element's type read as unsigned.</param>
+    /// <param name="mask">The column's validity.</param>
+    /// <param name="length">How many rows.</param>
+    /// <param name="minimum">The frame of reference, as the element width's raw bits.</param>
+    /// <param name="signed">Whether the zigzag histogram is wanted.</param>
+    /// <param name="frames">Receives the widths of <c>v - minimum</c>.</param>
+    /// <param name="zigzags">Receives the widths of <c>zigzag(v)</c>.</param>
+    private static void Histogram(
+        ReadOnlySpan<byte> values, PType raw, in ValidityMask mask, int length, ulong minimum,
+        bool signed, Span<int> frames, Span<int> zigzags)
+    {
+        switch (raw)
+        {
+            case PType.U8:
+                Histogram<byte>(values, in mask, length, minimum, signed, frames, zigzags);
+                return;
+            case PType.U16:
+                Histogram<ushort>(values, in mask, length, minimum, signed, frames, zigzags);
+                return;
+            case PType.U32:
+                Histogram<uint>(values, in mask, length, minimum, signed, frames, zigzags);
+                return;
+            default:
+                Histogram<ulong>(values, in mask, length, minimum, signed, frames, zigzags);
+                return;
+        }
+    }
+
+    /// <summary>One element width's histograms.</summary>
+    /// <remarks>
+    /// The all-valid case is a separate loop rather than a test inside one, because a validity test
+    /// per row is the other half of what W-33 measured: the branch is the same shape as the load it
+    /// guards, and hoisting it is what lets the tight loop stay tight.
+    /// </remarks>
+    /// <typeparam name="T">The element read as an unsigned word.</typeparam>
+    /// <param name="bytes">The column's value buffer.</param>
+    /// <param name="mask">The column's validity.</param>
+    /// <param name="length">How many rows.</param>
+    /// <param name="minimum">The frame of reference, as the element width's raw bits.</param>
+    /// <param name="signed">Whether the zigzag histogram is wanted.</param>
+    /// <param name="frames">Receives the widths of <c>v - minimum</c>.</param>
+    /// <param name="zigzags">Receives the widths of <c>zigzag(v)</c>.</param>
+    private static void Histogram<T>(
+        ReadOnlySpan<byte> bytes, in ValidityMask mask, int length, ulong minimum, bool signed,
+        Span<int> frames, Span<int> zigzags)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes).Slice(0, length);
+        T reference = T.CreateTruncating(minimum);
+        int elementBits = Unsafe.SizeOf<T>() * 8;
+        int shift = elementBits - 1;
+
+        if (mask.AllValid)
+        {
+            for (int row = 0; row < values.Length; row++)
+            {
+                T value = values[row];
+                frames[Width(unchecked(value - reference), elementBits)]++;
+                if (signed)
+                {
+                    zigzags[Width(ZigZag(value, shift), elementBits)]++;
+                }
+            }
+
+            return;
+        }
+
+        for (int row = 0; row < values.Length; row++)
+        {
+            if (!mask.IsValid(row))
+            {
+                // A null row is PACKED as zero, and that is a different statement from "its value
+                // is zero": under a frame of reference the raw zero would encode as `-reference`,
+                // 64 bits wide, and every null in the column would count as an exception. Writing
+                // it as a raw zero here and letting the transform run cost 37 kB on
+                // `containers/zoned_many_zones_nulls` before the histogram was read against what
+                // Pack actually writes.
+                frames[0]++;
+                zigzags[0]++;
+                continue;
+            }
+
+            T value = values[row];
+            frames[Width(unchecked(value - reference), elementBits)]++;
+            if (signed)
+            {
+                zigzags[Width(ZigZag(value, shift), elementBits)]++;
+            }
+        }
+    }
+
+    /// <summary>How many bits <paramref name="value"/> needs, inside its own element width.</summary>
+    /// <typeparam name="T">The element read as an unsigned word.</typeparam>
+    /// <param name="value">The encoded value.</param>
+    /// <param name="elementBits">8, 16, 32 or 64.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int Width<T>(T value, int elementBits)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T> =>
+        elementBits - int.CreateTruncating(T.LeadingZeroCount(value));
+
+    /// <summary>
+    /// <c>(v &lt;&lt; 1) ^ (v &gt;&gt; (bits - 1))</c> in the element's own arithmetic.
+    /// </summary>
+    /// <remarks>
+    /// The same map as the 64-bit <see cref="ZigZag(ulong, int)"/>, with the width mask left to
+    /// <typeparamref name="T"/>: shifting left in <typeparamref name="T"/> drops the bit the mask
+    /// would have cleared, and <c>T.Zero - (v >> (bits - 1))</c> is all ones or none for the same
+    /// reason the unsigned form's <c>0UL - ...</c> is.
+    /// </remarks>
+    /// <typeparam name="T">The element read as an unsigned word.</typeparam>
+    /// <param name="value">The row's value.</param>
+    /// <param name="shift">The element width less one.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static T ZigZag<T>(T value, int shift)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T> =>
+        unchecked((value << 1) ^ (T.Zero - (value >> shift)));
 
     /// <summary>
     /// The cheapest width for one histogram: <c>packed(w) + exceptions(w) * perException</c>.

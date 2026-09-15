@@ -94,7 +94,7 @@ public sealed partial class PerRowDispatchTests
         ("Layouts/DictLayoutReader.cs", 1, 0, "R6 done: the one left is an error path"),
         ("Types/Variant/ParquetVariant.cs", 2, 0, "a local method of the same name, not these"),
         ("Writing/ArrayBlobWriter.cs", 1, 1, "W-13"),
-        ("Writing/BitPackPlan.cs", 4, 4, "W-11"),
+        ("Writing/BitPackPlan.cs", 3, 3, "W-11"),
     ];
 
     /// <summary>The grand totals, which are annexe A's two headline numbers.</summary>
@@ -116,8 +116,13 @@ public sealed partial class PerRowDispatchTests
     /// walking the column, to size the arrays it was about to fill by walking it again. The count
     /// was already in the histogram the chooser had just priced the width from, so the first walk
     /// went — and with it the last site in this file that was not the encode itself.
+    ///
+    /// **58 with the same stage's second commit**: the width histogram, the one walk of that file
+    /// that reads every row of every integer column of every chunk, resolves the physical type
+    /// before it starts instead of switching on it per value. Same shape as R7, W-9 and W-33, and
+    /// the last dispatching site in `BitPackPlan` that is not `Minimum` or the patch gather.
     /// </remarks>
-    private const int TotalCalls = 59;
+    private const int TotalCalls = 58;
 
     /// <summary>Calls annexe A classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
@@ -137,8 +142,11 @@ public sealed partial class PerRowDispatchTests
     /// in a two-pass summariser, and the whole file is gone. W-12 is closed.
     ///
     /// **19 since stage 2g**: the counting walk of `BitPackPlan.Collect` was one of them.
+    ///
+    /// **18 with the same stage's second commit**: the width histogram is typed, so its read is
+    /// resolved once per column and not once per row.
     /// </remarks>
-    private const int TotalPerRow = 19;
+    private const int TotalPerRow = 18;
 
     [Fact]
     public void NoFileDispatchesPerRowMoreOftenThanItsCeiling()
