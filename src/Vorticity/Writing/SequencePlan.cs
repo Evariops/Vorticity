@@ -57,7 +57,13 @@ internal sealed class SequencePlan
     /// Two rows are enough to define a step and the check is O(n) with no allocation, so this runs
     /// before the run and distinct passes rather than after: when it applies it ends the search.
     /// </remarks>
-    internal static SequencePlan? TryBuild(CanonicalArena arena, CanonicalNode node)
+    /// <param name="stepsAreConstant">
+    /// Whether the ingest pass has already established that every consecutive pair of rows climbs
+    /// by the same step (docs/11-write-strategy.md §3.4.1). The walk below is then skipped: the step
+    /// is <c>v[1] - v[0]</c> and there is nothing left to verify.
+    /// </param>
+    internal static SequencePlan? TryBuild(
+        CanonicalArena arena, CanonicalNode node, bool stepsAreConstant = false)
     {
         if (node.Kind != CanonicalKind.Primitive || !node.PType.IsInteger() || node.Length < 2)
         {
@@ -83,14 +89,14 @@ internal sealed class SequencePlan
         // in general, which is the whole reason this class holds one.
         return node.PType switch
         {
-            PType.U8 => Build<byte>(values, length),
-            PType.U16 => Build<ushort>(values, length),
-            PType.U32 => Build<uint>(values, length),
-            PType.U64 => Build<ulong>(values, length),
-            PType.I8 => Build<sbyte>(values, length),
-            PType.I16 => Build<short>(values, length),
-            PType.I32 => Build<int>(values, length),
-            _ => Build<long>(values, length),
+            PType.U8 => Build<byte>(values, length, stepsAreConstant),
+            PType.U16 => Build<ushort>(values, length, stepsAreConstant),
+            PType.U32 => Build<uint>(values, length, stepsAreConstant),
+            PType.U64 => Build<ulong>(values, length, stepsAreConstant),
+            PType.I8 => Build<sbyte>(values, length, stepsAreConstant),
+            PType.I16 => Build<short>(values, length, stepsAreConstant),
+            PType.I32 => Build<int>(values, length, stepsAreConstant),
+            _ => Build<long>(values, length, stepsAreConstant),
         };
     }
 
@@ -118,7 +124,7 @@ internal sealed class SequencePlan
     /// pattern, for an unsigned one the value itself.
     /// </para>
     /// </remarks>
-    private static SequencePlan? Build<T>(ReadOnlySpan<byte> raw, int length)
+    private static SequencePlan? Build<T>(ReadOnlySpan<byte> raw, int length, bool stepsAreConstant)
         where T : unmanaged, IBinaryInteger<T>
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(raw)[..length];
@@ -127,7 +133,11 @@ internal sealed class SequencePlan
         Int128 step = Int128.CreateTruncating(values[1]) - first;
         Int128 previous = first + step;
 
-        for (int row = 2; row < values.Length; row++)
+        // WHEN THE INGEST PASS HAS ALREADY WALKED THE ROWS, this is the whole of the work: the step
+        // is the first difference and every other one equals it by hypothesis. The walk below is the
+        // 78 % of offered rows W-9 measured -- and the 25 to 26 % of a `primitive` or `sequence`
+        // write it costs -- now paid once, in the pass that was reading the values anyway.
+        for (int row = 2; !stepsAreConstant && row < values.Length; row++)
         {
             Int128 value = Int128.CreateTruncating(values[row]);
             if (value - previous != step)

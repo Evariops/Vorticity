@@ -80,16 +80,49 @@ internal static class BlockStatsPass
                 return;
 
             case CanonicalKind.Primitive:
+            {
                 stats.IsSummarizable = true;
-                if (valid > 0)
+
+                // THE STEPS ARE TAKEN FIRST, and while `previous` still holds the row before this
+                // range: `FixedRuns` overwrites it with the range's last row.
+                //
+                // A PROGRESSION ANSWERS THE OTHER TWO WITHOUT READING A VALUE. If every pair in this
+                // range climbs by the same step, the range is monotone -- a wrap would have made one
+                // step differ from the others -- so its extremes are its ENDPOINTS, and its runs are
+                // one if the step is zero and one per row otherwise. That leaves a progression
+                // costing ONE walk instead of three, which is what `ext` -- a column of timestamps,
+                // ten times faster than the reference -- was paying the tree for.
+                bool progression = false;
+                if (node.PType.IsInteger())
                 {
-                    Values(node, in mask, start, count, ref stats);
+                    bool wasProgression = !stats.DeltaBroken;
+                    bool hadPrevious = previous is not null && previous.HasValue;
+                    Deltas(node, in mask, start, count, valid, ref stats, previous);
+
+                    if (wasProgression && stats.DeltaKnown && !stats.DeltaBroken)
+                    {
+                        progression = true;
+                        ProgressionBounds(node, stats.Delta, start, count, ref stats);
+                        ProgressionRuns(
+                            node, stats.Delta, start, count, hadPrevious, startsBlock, ref stats,
+                            previous);
+                    }
                 }
 
-                FixedRuns(
-                    node.Values.Span, node.PType.ByteWidth(), in mask, start, count, startsBlock,
-                    ref stats, previous);
+                if (!progression)
+                {
+                    if (valid > 0)
+                    {
+                        Values(node, in mask, start, count, ref stats);
+                    }
+
+                    FixedRuns(
+                        node.Values.Span, node.PType.ByteWidth(), in mask, start, count, startsBlock,
+                        ref stats, previous);
+                }
+
                 return;
+            }
 
             case CanonicalKind.Decimal:
                 // No bounds: a decimal's comparison domain is outside this iteration's kernels. Its
@@ -121,6 +154,237 @@ internal static class BlockStatsPass
                 // Every other kind has no scalar bound at all, and still gets a zone map with the
                 // null count alone, which is what IS NULL pruning runs on.
                 return;
+        }
+    }
+
+    // -------------------------------------------------------------------------------------- steps
+    //
+    // `vortex.sequence` is the one encoding that costs NOTHING per row: a column that is an
+    // arithmetic progression becomes one node and about thirty bytes. `SequencePlan` found out by
+    // walking the rows, and W-9 measured that walk reading **78 % of the rows it is offered** --
+    // 1 352 columns of 1 728 really are sequences, so it runs to the end rather than bailing at row
+    // three -- for 26 % of a `sequence` write and 25 % of a `primitive` one.
+    //
+    // The walk is here now, folded into the pass that was already reading the values. It stops the
+    // moment two steps disagree, so a column that is not a progression pays a compare per row until
+    // row three and nothing after: a branch the predictor gets right every time.
+    //
+    // ONLY THE FACT IS KEPT, NOT THE PLAN. When the steps agree, the step itself is `v[1] - v[0]`,
+    // which `SequencePlan` reads from the node in constant time; there is nothing to carry.
+
+    /// <summary>The bounds of a progression: its first and last rows, in step order.</summary>
+    /// <remarks>
+    /// Exact because a range whose steps all agree is MONOTONE. It cannot wrap: a wrap would make
+    /// one step differ from the others in the widened arithmetic <see cref="Deltas"/> uses, and the
+    /// range would not be a progression at all.
+    /// </remarks>
+    private static void ProgressionBounds(
+        CanonicalNode node, long step, int start, int count, ref BlockStats stats)
+    {
+        PType ptype = node.PType;
+        int width = ptype.ByteWidth();
+        ReadOnlySpan<byte> values = node.Values.Span;
+        ReadOnlySpan<byte> first = values.Slice(start * width, width);
+        ReadOnlySpan<byte> last = values.Slice((start + count - 1) * width, width);
+        ReadOnlySpan<byte> low = step < 0 ? last : first;
+        ReadOnlySpan<byte> high = step < 0 ? first : last;
+
+        if (ptype.IsSignedInteger())
+        {
+            stats.MergeSigned(ElementSigned(low, ptype), ElementSigned(high, ptype));
+            return;
+        }
+
+        stats.MergeUnsigned(ElementUnsigned(low, ptype), ElementUnsigned(high, ptype));
+    }
+
+    /// <summary>
+    /// The run boundaries of a range that is an arithmetic progression, without reading a value.
+    /// </summary>
+    /// <remarks>
+    /// A step of zero makes every row equal — one run, no boundary. Any other step makes every row
+    /// differ from the one before it, so every row of the range starts a run, the first one included
+    /// when there is a row before it to differ from. Both are exactly what a walk would have
+    /// counted, and neither needs one.
+    /// </remarks>
+    private static void ProgressionRuns(
+        CanonicalNode node, long step, int start, int count, bool hadPrevious, bool startsBlock,
+        ref BlockStats stats, PreviousRow? previous)
+    {
+        stats.HasRunBoundaries = true;
+
+        if (step != 0)
+        {
+            stats.RunBoundaries += (count - 1) + (hadPrevious ? 1 : 0);
+            if (startsBlock && hadPrevious)
+            {
+                stats.FirstRowStartsRun = true;
+            }
+        }
+
+        int width = node.PType.ByteWidth();
+        Store(previous, valid: true, node.Values.Span.Slice((start + count - 1) * width, width));
+    }
+
+    /// <summary>Folds this range's steps into <paramref name="stats"/>.</summary>
+    private static void Deltas(
+        CanonicalNode node, in ValidityMask mask, int start, int count, int valid,
+        ref BlockStats stats, PreviousRow? previous)
+    {
+        if (stats.DeltaBroken)
+        {
+            return;
+        }
+
+        // A null has no value to step from or to, and `vortex.sequence` has no children to put a
+        // validity bitmap in -- one null row disqualifies the whole column.
+        if (valid != count)
+        {
+            stats.BreakDelta();
+            return;
+        }
+
+        if (previous is not null && previous.HasValue && previous.IsNull)
+        {
+            stats.BreakDelta();
+            return;
+        }
+
+        // The physical type is resolved ONCE, into a generic instantiation, exactly as W-9 resolved
+        // `SequencePlan`'s own walk: the alternative is two switches per row for a property of the
+        // call. Narrow types step in `long` because the difference of two 32-bit values always fits
+        // in one; only 64-bit columns need the wider arithmetic, and they get their own loop.
+        ReadOnlySpan<byte> values = node.Values.Span;
+        ReadOnlySpan<byte> seed = previous is not null && previous.HasValue ? previous.Bytes : default;
+        switch (node.PType)
+        {
+            case PType.I8: Narrow<sbyte>(values, seed, start, count, ref stats); return;
+            case PType.I16: Narrow<short>(values, seed, start, count, ref stats); return;
+            case PType.I32: Narrow<int>(values, seed, start, count, ref stats); return;
+            case PType.U8: Narrow<byte>(values, seed, start, count, ref stats); return;
+            case PType.U16: Narrow<ushort>(values, seed, start, count, ref stats); return;
+            case PType.U32: Narrow<uint>(values, seed, start, count, ref stats); return;
+            case PType.I64: Wide<long>(values, seed, start, count, ref stats); return;
+            default: Wide<ulong>(values, seed, start, count, ref stats); return;
+        }
+    }
+
+    /// <summary>Steps of a column narrower than 64 bits, where a difference always fits a long.</summary>
+    /// <remarks>
+    /// THE STATE IS IN LOCALS AND WRITTEN BACK ONCE. The first version called a method on the
+    /// accumulator and re-read one of its fields for every row, which put a call and two branches
+    /// inside the hot loop and made this pass MORE expensive than the `SequencePlan` walk it
+    /// replaces: `sequence` 0,16 -&gt; 0,22 and `ext` 0,098 -&gt; 0,12, measured. In this shape the
+    /// steady state is one subtract and one compare, which is what the walk it replaces costs.
+    /// </remarks>
+    private static void Narrow<T>(
+        ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> seed, int start, int count, ref BlockStats stats)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes);
+        long step = stats.Delta;
+        bool known = stats.DeltaKnown;
+        long last;
+        int first;
+
+        if (seed.IsEmpty)
+        {
+            last = long.CreateTruncating(values[start]);
+            first = 1;
+        }
+        else
+        {
+            last = long.CreateTruncating(MemoryMarshal.Read<T>(seed));
+            first = 0;
+        }
+
+        for (int i = first; i < count; i++)
+        {
+            long value = long.CreateTruncating(values[start + i]);
+            long delta = value - last;
+            if (known)
+            {
+                if (delta != step)
+                {
+                    stats.BreakDelta();
+                    return;
+                }
+            }
+            else
+            {
+                step = delta;
+                known = true;
+            }
+
+            last = value;
+        }
+
+        if (known)
+        {
+            stats.SetDelta(step);
+        }
+    }
+
+    /// <summary>
+    /// Steps of a 64-bit column, subtracted in <see cref="Int128"/> because the difference of two
+    /// 64-bit values does not fit in 64 bits in general — the reason `SequencePlan` holds one.
+    /// </summary>
+    /// <remarks>
+    /// A step outside <see cref="long"/> is not a step a constant progression can have over three
+    /// rows or more: the values would have to wrap, and a wrapped difference is a different number.
+    /// It ends the progression rather than being carried.
+    /// </remarks>
+    private static void Wide<T>(
+        ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> seed, int start, int count, ref BlockStats stats)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes);
+        Int128 step = stats.Delta;
+        bool known = stats.DeltaKnown;
+        Int128 last;
+        int first;
+
+        if (seed.IsEmpty)
+        {
+            last = Int128.CreateTruncating(values[start]);
+            first = 1;
+        }
+        else
+        {
+            last = Int128.CreateTruncating(MemoryMarshal.Read<T>(seed));
+            first = 0;
+        }
+
+        for (int i = first; i < count; i++)
+        {
+            Int128 value = Int128.CreateTruncating(values[start + i]);
+            Int128 delta = value - last;
+            if (known)
+            {
+                if (delta != step)
+                {
+                    stats.BreakDelta();
+                    return;
+                }
+            }
+            else
+            {
+                if (delta < long.MinValue || delta > long.MaxValue)
+                {
+                    stats.BreakDelta();
+                    return;
+                }
+
+                step = delta;
+                known = true;
+            }
+
+            last = value;
+        }
+
+        if (known)
+        {
+            stats.SetDelta((long)step);
         }
     }
 

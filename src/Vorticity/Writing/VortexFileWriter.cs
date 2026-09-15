@@ -577,14 +577,14 @@ public sealed class VortexFileWriter : IAsyncDisposable
             // exactly these rows, so every candidate that used to measure the column again reads
             // them instead. `Choose` checks the row count against the node it is given and falls
             // back to measuring when they disagree, so this can only ever cost a pass.
-            BlockStats stats = _columns[field].Chunk(_emittedBlocks, blocks);
-            if (stats.Rows != rows)
+            ChunkStats stats = new ChunkStats(_columns[field], _emittedBlocks, blocks);
+            if (stats.Stats.Rows != rows)
             {
                 _chunksWithoutStatistics++;
             }
 
             using ArrayBlobWriter.BlobLease blob =
-                ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress, in stats);
+                ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress, stats);
             _columnSegments[field].Add(
                 await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false));
         }

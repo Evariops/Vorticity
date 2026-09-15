@@ -120,10 +120,24 @@ public sealed class WriteAllocationTests
     /// (-25 %), `onpair` 223 880 -&gt; 220 048, `utf8_nullable_r1025` 216 632 -&gt; 214 752,
     /// `zoned_many_zones_nulls` 2 105 848 -&gt; 2 100 400.
     /// </para>
+    /// <para>
+    /// ONE CEILING WENT UP, and it is the only one in this file's history. `encodings/variant`
+    /// 63 600 -&gt; **64 700**, because the column writers became a TREE (§3.0): a variant's canonical
+    /// form is a two-field struct, so that file now keeps three summarizing nodes where it kept one,
+    /// at **+320 B** of fixed per-column state. What it buys is on the same file: `variant` **9,24
+    /// -&gt; 3,58** and `parquet_variant` **2,06 -&gt; 0,94** on the write axis, because the leaves
+    /// were the columns and nothing had ever measured them. The cost is per COLUMN and not per row —
+    /// 15,4 to 15,6 B/row — which is the distinction this file exists to make.
+    /// </para>
+    /// <para>
+    /// The same change took the others DOWN, by shrinking <c>BlockStats</c> from 88 bytes to 56: its
+    /// three bound domains are mutually exclusive, so they share two words. `zoned_many_zones_nulls`
+    /// 2 100 400 -&gt; 2 098 360, and every file a little.
+    /// </para>
     /// </remarks>
     private static readonly (string Id, long Ceiling)[] Files =
     [
-        ("containers/zoned_many_zones_nulls", 2_132_000),   // 2 100 400 mesurés
+        ("containers/zoned_many_zones_nulls", 2_130_000),   // 2 098 360 mesurés
         ("distributions/high_cardinality_i64_r8193", 70_800),   // 69 736 mesurés, -48 %
         ("encodings/fsst", 235_100),
         ("encodings/onpair", 223_400),   // 220 048 mesurés
@@ -140,7 +154,7 @@ public sealed class WriteAllocationTests
         ("encodings/pco", 64_400),
         ("encodings/zstd", 223_400),
         ("encodings/map", 100_200),
-        ("encodings/variant", 63_600),
+        ("encodings/variant", 64_700),   // 63 920 mesurés : +320 B pour deux ColumnWriter de plus
 
         // THE TWO ALP SHAPES, added with W-6 because that point moved them and nothing watched it:
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a

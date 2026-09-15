@@ -370,12 +370,22 @@ internal static class ColumnCompressor
         // entirely into the metadata, so a `vortex.primitive` node and its whole buffer become one
         // node and about thirty bytes. There is no byte comparison to make - every other scheme
         // costs something per row and this one costs nothing.
+        //
+        // AND SINCE STAGE 2e THE INGEST PASS HAS ALREADY ANSWERED IT. Its steps are exact, so a
+        // column it disqualified is not offered the walk at all, and one it confirmed is built in
+        // constant time from `v[1] - v[0]`. W-9 measured that walk reading **78 % of the rows it is
+        // offered** -- most columns that reach it really are progressions, so it runs to the end
+        // rather than bailing at row three.
         if (Allows(target, "vortex.sequence"))
         {
-            SequencePlan? sequence = SequencePlan.TryBuild(arena, node);
-            if (sequence is not null)
+            bool knownSteps = measured && stats.DeltaKnown;
+            if (!knownSteps || !stats.DeltaBroken)
             {
-                return ColumnPlan.ForSequence(sequence);
+                SequencePlan? sequence = SequencePlan.TryBuild(arena, node, stepsAreConstant: knownSteps);
+                if (sequence is not null)
+                {
+                    return ColumnPlan.ForSequence(sequence);
+                }
             }
         }
 

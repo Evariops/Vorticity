@@ -64,7 +64,7 @@ internal static class ArrayBlobWriter
     /// <exception cref="NotSupportedException">The canonical form has no writer.</exception>
     internal static BlobLease Write(
         CanonicalArena arena, int nodeIndex, EncodingDictionary encodings, bool compress = false,
-        in BlockStats stats = default)
+        ChunkStats stats = default)
     {
         List<PendingBuffer> buffers = [];
         using FlatBufferBuilder builder = new FlatBufferBuilder();
@@ -74,8 +74,8 @@ internal static class ArrayBlobWriter
         // of them add canonical nodes to the arena -- the gathered values child -- and a
         // FlatBuffers table cannot be open while that happens.
         int root = compress
-            ? WriteCompressed(builder, arena, nodeIndex, buffers, encodings, in stats)
-            : WriteNode(builder, arena, nodeIndex, buffers, encodings, compress: false);
+            ? WriteCompressed(builder, arena, nodeIndex, buffers, encodings, stats)
+            : WriteNode(builder, arena, nodeIndex, buffers, encodings, compress: false, stats);
 
         // The Buffer vector records what the layout below will actually write, so the paddings have
         // to be settled before the table that carries them is built.
@@ -172,7 +172,7 @@ internal static class ArrayBlobWriter
         int nodeIndex,
         List<PendingBuffer> buffers,
         EncodingDictionary encodings,
-        in BlockStats stats = default)
+        ChunkStats stats = default)
     {
         // Z1b-c2b: a constant node is materialized HERE, before the compressor looks at it, and the
         // first attempt did it lower down -- inside WriteNode -- which produced a file of 33 676
@@ -181,12 +181,13 @@ internal static class ArrayBlobWriter
         // `Choose` puts the writer back on exactly the path it took before the switch existed, which
         // is what makes the bytes identical rather than merely close.
         nodeIndex = Materialize(arena, nodeIndex);
-        ColumnPlan plan = ColumnCompressor.Choose(arena, nodeIndex, encodings.Target, in stats);
+        BlockStats summary = stats.Stats;
+        ColumnPlan plan = ColumnCompressor.Choose(arena, nodeIndex, encodings.Target, in summary);
         if (plan.Scheme == ColumnScheme.None)
         {
             // Not the end of it: the column itself resisted every scheme, but a struct field or a
             // list's elements underneath it may not.
-            return WriteNode(builder, arena, nodeIndex, buffers, encodings, compress: true);
+            return WriteNode(builder, arena, nodeIndex, buffers, encodings, compress: true, stats);
         }
 
         if (plan.Scheme == ColumnScheme.BitPacked)
@@ -1041,7 +1042,8 @@ internal static class ArrayBlobWriter
         int nodeIndex,
         List<PendingBuffer> buffers,
         EncodingDictionary encodings,
-        bool compress)
+        bool compress,
+        ChunkStats stats = default)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
 
@@ -1075,10 +1077,11 @@ internal static class ArrayBlobWriter
             // would produce a file whose array says "two fields" and whose schema says "variant" --
             // which every reader, this one included, refuses.
             CanonicalKind.Struct => node.DType.Kind == DTypeKind.Variant
-                ? WriteParquetVariant(builder, arena, node, buffers, encodings, compress)
-                : WriteStruct(builder, arena, node, buffers, encodings, compress),
+                ? WriteParquetVariant(builder, arena, node, buffers, encodings, compress, stats)
+                : WriteStruct(builder, arena, node, buffers, encodings, compress, stats),
 
-            CanonicalKind.Extension => WriteExtension(builder, arena, node, buffers, encodings, compress),
+            CanonicalKind.Extension =>
+                WriteExtension(builder, arena, node, buffers, encodings, compress, stats),
             // Materialized above, before the compressor (see WriteCompressed). Reaching it here
             // would mean a constant arrived by a path that skips `Choose`, and the bytes would not
             // be the ones the corpus was written with.
@@ -1131,10 +1134,11 @@ internal static class ArrayBlobWriter
         int nodeIndex,
         List<PendingBuffer> buffers,
         EncodingDictionary encodings,
-        bool compress) =>
+        bool compress,
+        ChunkStats stats = default) =>
         compress
-            ? WriteCompressed(builder, arena, nodeIndex, buffers, encodings)
-            : WriteNode(builder, arena, nodeIndex, buffers, encodings, compress: false);
+            ? WriteCompressed(builder, arena, nodeIndex, buffers, encodings, stats)
+            : WriteNode(builder, arena, nodeIndex, buffers, encodings, compress: false, stats);
 
     private static int WriteBool(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
@@ -1408,7 +1412,8 @@ internal static class ArrayBlobWriter
     /// </remarks>
     private static int WriteParquetVariant(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
-        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress)
+        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress,
+        ChunkStats stats = default)
     {
         if (node.FieldCount != 2)
         {
@@ -1431,9 +1436,11 @@ internal static class ArrayBlobWriter
         }
 
         children[validityCount] = WriteChild(
-            builder, arena, arena.GetNode(node.Index).GetFieldIndex(0), buffers, encodings, compress);
+            builder, arena, arena.GetNode(node.Index).GetFieldIndex(0), buffers, encodings, compress,
+            stats.Field(0));
         children[validityCount + 1] = WriteChild(
-            builder, arena, arena.GetNode(node.Index).GetFieldIndex(1), buffers, encodings, compress);
+            builder, arena, arena.GetNode(node.Index).GetFieldIndex(1), buffers, encodings, compress,
+            stats.Field(1));
 
         byte[] metadata = ParquetVariantBytes(valueNullable);
         return Node(
@@ -1459,7 +1466,8 @@ internal static class ArrayBlobWriter
 
     private static int WriteStruct(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
-        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress)
+        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress,
+        ChunkStats stats = default)
     {
         // A struct puts its validity FIRST, unlike every other canonical kind
         // (vortex-array's slot_to_child: `nullable.then_some(0)`).
@@ -1471,7 +1479,8 @@ internal static class ArrayBlobWriter
         for (int i = 0; i < fields; i++)
         {
             children[validityCount + i] = WriteChild(
-                builder, arena, arena.GetNode(node.Index).GetFieldIndex(i), buffers, encodings, compress);
+                builder, arena, arena.GetNode(node.Index).GetFieldIndex(i), buffers, encodings,
+                compress, stats.Field(i));
         }
 
         if (validityCount == 1)
@@ -1486,7 +1495,8 @@ internal static class ArrayBlobWriter
 
     private static int WriteExtension(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
-        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress)
+        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress,
+        ChunkStats stats = default)
     {
         if (node.Kind != CanonicalKind.Extension)
         {
@@ -1494,7 +1504,8 @@ internal static class ArrayBlobWriter
         }
 
         Span<int> children = stackalloc int[1];
-        children[0] = WriteChild(builder, arena, node.StorageIndex, buffers, encodings, compress);
+        children[0] = WriteChild(
+            builder, arena, node.StorageIndex, buffers, encodings, compress, stats.Field(0));
         return Node(builder, encodings, "vortex.ext"u8, default, children, []);
     }
 

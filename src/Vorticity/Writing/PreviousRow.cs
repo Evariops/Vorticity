@@ -19,7 +19,16 @@ internal sealed class PreviousRow
     /// <summary>Fixed-width values up to a 256-bit decimal fit without ever growing.</summary>
     private const int Inline = 32;
 
-    private byte[] _bytes = new byte[Inline];
+    /// <summary>
+    /// Allocated on the first value, not in the field initializer.
+    /// </summary>
+    /// <remarks>
+    /// The writer keeps one <see cref="ColumnWriter"/> per node of the schema tree, and the interior
+    /// nodes -- a struct, an extension, a variant -- never hold a value: their kind has no row
+    /// equality, so nothing ever calls <see cref="Set"/>. Allocating eagerly charged every one of
+    /// them 32 bytes and an object header for a buffer they would never write into.
+    /// </remarks>
+    private byte[]? _bytes;
     private int _length;
 
     /// <summary>Whether a row has been seen at all; false before the file's first row.</summary>
@@ -29,7 +38,7 @@ internal sealed class PreviousRow
     internal bool IsNull { get; private set; }
 
     /// <summary>The row's bytes, empty when it was null.</summary>
-    internal ReadOnlySpan<byte> Bytes => _bytes.AsSpan(0, _length);
+    internal ReadOnlySpan<byte> Bytes => _bytes is null ? default : _bytes.AsSpan(0, _length);
 
     /// <summary>Records a null row.</summary>
     internal void SetNull()
@@ -43,11 +52,12 @@ internal sealed class PreviousRow
     /// <param name="value">The row's value; copied, never retained.</param>
     internal void Set(ReadOnlySpan<byte> value)
     {
-        if (value.Length > _bytes.Length)
+        if (_bytes is null || value.Length > _bytes.Length)
         {
             // Grown to the value, not doubled: a column's widest value is usually its first long
-            // one, and a growth here is paid once for the file.
-            _bytes = new byte[value.Length];
+            // one, and a growth here is paid once for the file. The first allocation takes the
+            // inline size so a fixed-width column never grows at all.
+            _bytes = new byte[Math.Max(value.Length, Inline)];
         }
 
         value.CopyTo(_bytes);

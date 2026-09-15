@@ -44,12 +44,13 @@ internal enum BoundDomain : byte
 /// </remarks>
 internal struct BlockStats
 {
-    private long _minSigned;
-    private long _maxSigned;
-    private ulong _minUnsigned;
-    private ulong _maxUnsigned;
-    private double _minFloat;
-    private double _maxFloat;
+    // ONE PAIR OF WORDS, NOT THREE. The three domains are mutually exclusive -- `Domain` says which
+    // one a summary is in -- so they share the storage and `BlockStats` goes from 88 bytes to 56.
+    // That is not tidiness: the writer keeps one of these per (column, closed block) until the zone
+    // map is written, which at a million rows is 123 per column, and one per NODE of the schema tree
+    // since the column writers became a tree.
+    private ulong _minBits;
+    private ulong _maxBits;
 
     /// <summary>Rows accumulated into this block so far.</summary>
     /// <remarks>
@@ -85,6 +86,31 @@ internal struct BlockStats
     /// </summary>
     internal bool FirstRowStartsRun;
 
+    /// <summary>
+    /// The step between consecutive rows, when every pair in this summary has the same one.
+    /// </summary>
+    /// <remarks>
+    /// A `long` and not an `Int128`: the difference of two w-bit values lies in (-2^w, 2^w), so for
+    /// a column narrower than 64 bits it always fits, and for a 64-bit one a step outside `long`
+    /// cannot be CONSTANT over three rows -- the values would have to wrap, and a wrapped difference
+    /// is not the same number. `ColumnCompressor` never offers a sequence to a column of fewer than
+    /// 64 rows, so the two-row case `SequencePlan` guards against is unreachable from here.
+    /// </remarks>
+    private long _delta;
+
+    /// <summary>Whether a step exists at all: two consecutive values have been seen.</summary>
+    internal bool DeltaKnown;
+
+    /// <summary>
+    /// Whether something disqualifies the rows from being an arithmetic progression: two different
+    /// steps, a null, or a step no wire field can hold.
+    /// </summary>
+    /// <remarks>
+    /// Stated in the NEGATIVE so that a default summary -- which knows nothing -- is not already
+    /// claiming to be a sequence. <see cref="DeltaKnown"/> is what says the claim was ever made.
+    /// </remarks>
+    internal bool DeltaBroken;
+
     /// <summary>Whether the physical kind has a row equality, so the boundaries mean anything.</summary>
     /// <remarks>
     /// The four <c>IsComparable</c> kinds of <see cref="ColumnCompressor"/>, which are the only ones
@@ -116,18 +142,18 @@ internal struct BlockStats
     /// <summary>The smallest non-null, non-NaN value.</summary>
     internal FilterLiteral Min => Domain switch
     {
-        BoundDomain.Signed => FilterLiteral.From(_minSigned),
-        BoundDomain.Unsigned => FilterLiteral.From(_minUnsigned),
-        BoundDomain.Float => FilterLiteral.From(_minFloat),
+        BoundDomain.Signed => FilterLiteral.From(unchecked((long)_minBits)),
+        BoundDomain.Unsigned => FilterLiteral.From(_minBits),
+        BoundDomain.Float => FilterLiteral.From(BitConverter.UInt64BitsToDouble(_minBits)),
         _ => default,
     };
 
     /// <summary>The largest non-null, non-NaN value.</summary>
     internal FilterLiteral Max => Domain switch
     {
-        BoundDomain.Signed => FilterLiteral.From(_maxSigned),
-        BoundDomain.Unsigned => FilterLiteral.From(_maxUnsigned),
-        BoundDomain.Float => FilterLiteral.From(_maxFloat),
+        BoundDomain.Signed => FilterLiteral.From(unchecked((long)_maxBits)),
+        BoundDomain.Unsigned => FilterLiteral.From(_maxBits),
+        BoundDomain.Float => FilterLiteral.From(BitConverter.UInt64BitsToDouble(_maxBits)),
         _ => default,
     };
 
@@ -181,6 +207,20 @@ internal struct BlockStats
         RunBoundaries += other.RunBoundaries;
         IsSummarizable |= other.IsSummarizable;
 
+        // A progression survives a merge only if both halves are one AND they climb by the same
+        // step -- the step across the seam is already in `other`, which saw the row before it.
+        DeltaBroken |= other.DeltaBroken;
+        if (other.DeltaKnown)
+        {
+            if (DeltaKnown && _delta != other._delta)
+            {
+                DeltaBroken = true;
+            }
+
+            _delta = other._delta;
+            DeltaKnown = true;
+        }
+
         if (!other.HasBounds)
         {
             return;
@@ -189,16 +229,45 @@ internal struct BlockStats
         switch (other.Domain)
         {
             case BoundDomain.Signed:
-                MergeSigned(other._minSigned, other._maxSigned);
+                MergeSigned(unchecked((long)other._minBits), unchecked((long)other._maxBits));
                 return;
             case BoundDomain.Unsigned:
-                MergeUnsigned(other._minUnsigned, other._maxUnsigned);
+                MergeUnsigned(other._minBits, other._maxBits);
                 return;
             default:
-                MergeFloat(other._minFloat, other._maxFloat);
+                MergeFloat(
+                    BitConverter.UInt64BitsToDouble(other._minBits),
+                    BitConverter.UInt64BitsToDouble(other._maxBits));
                 return;
         }
     }
+
+    /// <summary>The step seen so far; meaningless unless <see cref="DeltaKnown"/>.</summary>
+    internal readonly long Delta => _delta;
+
+    /// <summary>
+    /// Records the step a range walked, the range having already checked that every pair agrees.
+    /// </summary>
+    /// <remarks>
+    /// The check belongs in the caller's loop, on LOCALS: a method call and a field read per row was
+    /// measurably more expensive than the walk this replaces (`sequence` 0,16 -&gt; 0,22 before it
+    /// was moved out).
+    /// </remarks>
+    /// <param name="delta">The difference between a row and the row before it.</param>
+    internal void SetDelta(long delta)
+    {
+        if (DeltaKnown && _delta != delta)
+        {
+            DeltaBroken = true;
+            return;
+        }
+
+        _delta = delta;
+        DeltaKnown = true;
+    }
+
+    /// <summary>Marks the rows as no progression, whatever the steps so far said.</summary>
+    internal void BreakDelta() => DeltaBroken = true;
 
     /// <summary>Folds one signed bound pair in, widening to the accumulator's domain.</summary>
     /// <param name="min">The smallest value the caller saw.</param>
@@ -209,19 +278,19 @@ internal struct BlockStats
         {
             Domain = BoundDomain.Signed;
             HasBounds = true;
-            _minSigned = min;
-            _maxSigned = max;
+            _minBits = unchecked((ulong)min);
+            _maxBits = unchecked((ulong)max);
             return;
         }
 
-        if (min < _minSigned)
+        if (min < unchecked((long)_minBits))
         {
-            _minSigned = min;
+            _minBits = unchecked((ulong)min);
         }
 
-        if (max > _maxSigned)
+        if (max > unchecked((long)_maxBits))
         {
-            _maxSigned = max;
+            _maxBits = unchecked((ulong)max);
         }
     }
 
@@ -234,19 +303,19 @@ internal struct BlockStats
         {
             Domain = BoundDomain.Unsigned;
             HasBounds = true;
-            _minUnsigned = min;
-            _maxUnsigned = max;
+            _minBits = min;
+            _maxBits = max;
             return;
         }
 
-        if (min < _minUnsigned)
+        if (min < _minBits)
         {
-            _minUnsigned = min;
+            _minBits = min;
         }
 
-        if (max > _maxUnsigned)
+        if (max > _maxBits)
         {
-            _maxUnsigned = max;
+            _maxBits = max;
         }
     }
 
@@ -265,12 +334,14 @@ internal struct BlockStats
         {
             Domain = BoundDomain.Float;
             HasBounds = true;
-            _minFloat = min;
-            _maxFloat = max;
+            _minBits = BitConverter.DoubleToUInt64Bits(min);
+            _maxBits = BitConverter.DoubleToUInt64Bits(max);
             return;
         }
 
-        _minFloat = Math.Min(_minFloat, min);
-        _maxFloat = Math.Max(_maxFloat, max);
+        _minBits = BitConverter.DoubleToUInt64Bits(
+            Math.Min(BitConverter.UInt64BitsToDouble(_minBits), min));
+        _maxBits = BitConverter.DoubleToUInt64Bits(
+            Math.Max(BitConverter.UInt64BitsToDouble(_maxBits), max));
     }
 }

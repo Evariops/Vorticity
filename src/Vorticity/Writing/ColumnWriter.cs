@@ -13,14 +13,40 @@
 // not a tuple.
 using System.Collections.Generic;
 using Vorticity.Arrays;
+using Vorticity.Types;
 
 namespace Vorticity.Writing;
 
 /// <summary>The per-column state the writer carries from the first batch to the footer.</summary>
+/// <remarks>
+/// A TREE, ONE NODE PER PHYSICAL COLUMN — docs/11-write-strategy.md §3.0, "one per physical leaf (a
+/// struct field, a list's elements child, an extension's storage)". A file's root field is very
+/// often not a column at all: `encodings/variant` is one `variant` dtype whose canonical form is a
+/// two-field struct of varbinviews, and `table_wide` is a struct of structs. Summarizing only the
+/// root fields left every one of those leaves unmeasured, so the chooser fell back to walking them —
+/// which is what WRITE-ARCHITECTURE.md §1 charges `variant` 62 % for.
+/// <para>
+/// A STRUCT'S FIELDS AND AN EXTENSION'S STORAGE ARE ROW-ALIGNED with their parent, so a child's
+/// blocks are the parent's blocks and the row range passes straight down. A LIST'S ELEMENTS ARE NOT:
+/// §3.2.4 defines their blocks as the parent's ROWS, found through the offsets, and that is a later
+/// stage — until then a list's elements child has no node here and the chooser measures it itself.
+/// </para>
+/// </remarks>
 internal sealed class ColumnWriter
 {
     /// <summary>One summary per closed block, in block order, until the zone map is written.</summary>
     private readonly List<BlockStats> _closed = [];
+
+    /// <summary>
+    /// The row-aligned children, created the first time a batch shows them; never reordered.
+    /// </summary>
+    /// <remarks>
+    /// Created on the first <see cref="Accumulate"/> and therefore always before the first
+    /// <see cref="CloseBlock"/>, which is what keeps every node's closed-block list the same length
+    /// as its parent's. The shape cannot change between batches: it is the schema's, and the schema
+    /// is fixed for the file.
+    /// </remarks>
+    private ColumnWriter[]? _children;
 
     /// <summary>The block in progress; every batch that covers part of it folds into this one.</summary>
     private BlockStats _open;
@@ -75,10 +101,47 @@ internal sealed class ColumnWriter
     /// <param name="nodeIndex">This column inside the batch.</param>
     /// <param name="start">First row of the range, inside the batch.</param>
     /// <param name="count">How many rows; the caller has cut the range at the block boundary.</param>
-    internal void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count) =>
+    internal void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
+    {
         BlockStatsPass.Accumulate(arena, nodeIndex, start, count, ref _open, _previous);
 
-    /// <summary>Seals the open block and starts the next one.</summary>
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        switch (node.Kind)
+        {
+            case CanonicalKind.Struct:
+            {
+                // A variant wears a struct's canonical form and is descended for the same reason:
+                // its two fields are the columns, and they are row-aligned with it.
+                ColumnWriter[] children = Children(node.FieldCount);
+                for (int i = 0; i < children.Length; i++)
+                {
+                    children[i].Accumulate(arena, node.GetFieldIndex(i), start, count);
+                }
+
+                return;
+            }
+
+            case CanonicalKind.Extension:
+                Children(1)[0].Accumulate(arena, node.StorageIndex, start, count);
+                return;
+
+            default:
+                return;
+        }
+    }
+
+    /// <summary>
+    /// Child <paramref name="index"/>, or <see langword="null"/> when this column has no children —
+    /// which the caller reads as "measure it yourself".
+    /// </summary>
+    /// <param name="index">The field index, in the writer's own order.</param>
+    internal ColumnWriter? Field(int index)
+    {
+        ColumnWriter[]? children = _children;
+        return children is not null && (uint)index < (uint)children.Length ? children[index] : null;
+    }
+
+    /// <summary>Seals the open block and starts the next one, all the way down.</summary>
     /// <remarks>
     /// Called when the block's last row has been seen, which is the moment its statistics are final
     /// - and, from stage 9 on, the moment its Bloom filter is built from the hash buffer
@@ -89,5 +152,38 @@ internal sealed class ColumnWriter
     {
         _closed.Add(_open);
         _open = default;
+
+        ColumnWriter[]? children = _children;
+        if (children is null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < children.Length; i++)
+        {
+            children[i].CloseBlock();
+        }
+    }
+
+    private ColumnWriter[] Children(int count)
+    {
+        ColumnWriter[]? children = _children;
+        if (children is not null && children.Length == count)
+        {
+            return children;
+        }
+
+        // A shape that disagrees with the first batch's is not a state this can be in -- the schema
+        // is the file's -- but growing rather than throwing keeps a surprise costing a pass instead
+        // of a write: the nodes created late have fewer closed blocks than their parent, `Chunk`
+        // sees the range is not covered, and the chooser measures the column itself.
+        ColumnWriter[] grown = new ColumnWriter[count];
+        for (int i = 0; i < count; i++)
+        {
+            grown[i] = children is not null && i < children.Length ? children[i] : new ColumnWriter();
+        }
+
+        _children = grown;
+        return grown;
     }
 }
