@@ -8,5 +8,9 @@
     <PackageVersion Include="BenchmarkDotNet" Version="0.16.0-preview.1" />
     <PackageVersion Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" Version="5.6.0" />
     <PackageVersion Include="Microsoft.VisualStudio.Threading.Analyzers" Version="17.14.15" />
+    <!-- The one first-party runtime dependency docs/03-architecture.md §1 admits: XxHash3-64 for
+         the write path's distinct table and, later, the Bloom filters. dotnet/runtime, MIT, not
+         carried by the shared framework. Decided 2026-09-15, docs/10-indexes.md §11. -->
+    <PackageVersion Include="System.IO.Hashing" Version="10.0.5" />
   </ItemGroup>
 </Project>

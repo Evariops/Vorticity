@@ -29,6 +29,7 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.IO.Hashing;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
@@ -994,16 +995,85 @@ internal static class ColumnCompressor
             return _node.GetDataBuffer(buffer).Span.Slice(offset, size);
         }
 
-        /// <summary>FNV-1a. A hash, not a checksum: collisions are resolved by comparing.</summary>
+        /// <summary>XxHash3-64. A hash, not a checksum: collisions are resolved by comparing.</summary>
+        /// <remarks>
+        /// THIS WAS FNV-1a, ONE BYTE AT A TIME, and it was worth measuring rather than assuming: the
+        /// probe loop it serves is 21 % to 57 % of the write on every string-bearing encoding of the
+        /// axis — 57 % of `dict`, 50 % of `onpair`, 43 % of `varbinview`, 38 % of `fsst` — measured
+        /// by running that loop twice and reading the difference. FNV-1a is a dependent
+        /// multiply-and-xor per byte, so a ten-byte value is ten serialized steps; XxHash3 has
+        /// dedicated paths under 16, 128 and 240 bytes and reads the ten bytes in two loads.
+        /// <para>
+        /// IT CANNOT MOVE A BYTE OF THE FILE, for the reason <see cref="Mix"/> already states: the
+        /// hash picks a bucket, <see cref="Equal"/> settles every collision exactly, and a
+        /// dictionary code is handed out by order of first appearance, which is row order. Changing
+        /// the hash changes which chain a value lands in and nothing else — and since the values in
+        /// one chain are distinct, at most one of them can compare equal whatever the order.
+        /// `WrittenSizeTests` is the proof and it is byte-exact.
+        /// </para>
+        /// <para>
+        /// It is also the hash docs/11-write-strategy.md §3.2.1 requires, so that when the block
+        /// hash buffer arrives the same word can serve this table and the Bloom filters of
+        /// docs/10-indexes.md §5.1 without any value being hashed twice. A Bloom filter needs
+        /// XxHash3 on EVERY value, short ones included, so the short arm below will have to be
+        /// conditioned on whether a filter is live rather than on the length alone — which is
+        /// exactly the shape §3.2.1 describes, and a reason to keep the arms in one method.
+        /// </para>
+        /// <para>
+        /// SHORT VALUES DO NOT TAKE IT, and the corpus is the reason: this hash is called with
+        /// **3,9 bytes on average** (464 MB over 120 M calls), and a value that fits a view fits
+        /// sixteen. Up to sixteen bytes fold into one word with two overlapping loads — the trick
+        /// xxhash itself uses for its short inputs — and take the same single multiply-xorshift a
+        /// fixed-width value takes. THE BRANCH IS ON THE LENGTH, so two equal values always take the
+        /// same arm, which is the only property a bucket hash has to have here.
+        /// </para>
+        /// <para>
+        /// WHAT THE SHORT ARM DOES NOT FIX, stated because it was measured twice and guessed wrong
+        /// twice: `struct` and `varbin` are 3 % to 6 % slower under XxHash3 than under FNV-1a
+        /// (isolated on a restricted axis, 0,47 → 0,50 and 0,35 → 0,36), and widening this arm from
+        /// eight bytes to sixteen moved neither — their values are longer than a view, so they take
+        /// the XxHash3 arm whatever the threshold. The trade is taken with its eyes open: the same
+        /// isolation puts `zstd` at 1,25 under FNV-1a and 1,05 under XxHash3, and on the whole axis
+        /// `fsst`, `dict`, `onpair`, `varbinview` and `map` move the same way. Roughly fifty
+        /// milliseconds bought for seven.
+        /// </para>
+        /// </remarks>
+        /// <param name="bytes">The value's bytes.</param>
         private static int Hash(ReadOnlySpan<byte> bytes)
         {
-            uint hash = 2166136261u;
-            for (int i = 0; i < bytes.Length; i++)
+            if (bytes.Length > 16)
             {
-                hash = (hash ^ bytes[i]) * 16777619u;
+                return (int)XxHash3.HashToUInt64(bytes);
             }
 
-            return (int)hash;
+            ref byte first = ref MemoryMarshal.GetReference(bytes);
+            ulong word;
+            if (bytes.Length >= 8)
+            {
+                ulong low = Unsafe.ReadUnaligned<ulong>(ref first);
+                ulong high = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref first, bytes.Length - 8));
+                word = low ^ (high * 0xBF58476D1CE4E5B9UL);
+            }
+            else if (bytes.Length >= 4)
+            {
+                // The two reads OVERLAP for the lengths between the powers, which is what keeps
+                // both arms branchless -- the same trick xxhash itself uses for its short inputs.
+                ulong low = Unsafe.ReadUnaligned<uint>(ref first);
+                ulong high = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref first, bytes.Length - 4));
+                word = (high << 32) | low;
+            }
+            else
+            {
+                word = 0;
+                for (int i = 0; i < bytes.Length; i++)
+                {
+                    word |= (ulong)Unsafe.Add(ref first, i) << (i * 8);
+                }
+            }
+
+            // The length is mixed in rather than concatenated: "a" and "a\0" hold the same word and
+            // would otherwise share a bucket for no reason.
+            return Mix(word ^ ((ulong)bytes.Length * 0x9E3779B97F4A7C15UL));
         }
     }
 }

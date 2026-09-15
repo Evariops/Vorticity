@@ -3,7 +3,7 @@
   <PropertyGroup>
     <RootNamespace>Vorticity</RootNamespace>
     <AssemblyName>Vorticity</AssemblyName>
-    <Description>Pure .NET, dependency-free implementation of the Vortex columnar file format.</Description>
+    <Description>Pure .NET implementation of the Vortex columnar file format, with no third-party dependency.</Description>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 
@@ -13,8 +13,18 @@
     <InternalsVisibleTo Include="Vorticity.Benchmarks" />
   </ItemGroup>
 
+  <!-- THE ONE RUNTIME DEPENDENCY, and docs/03-architecture.md §1 names it by name: XxHash3-64 for
+       the write path's distinct table and the Bloom filters of docs/10-indexes.md. It is
+       first-party (dotnet/runtime, MIT) but is not carried by the shared framework, so it has to
+       be referenced. The alternative was porting it, which would be our own hash to maintain
+       against upstream's; the alternative to THAT was keeping FNV-1a byte-at-a-time, which cost
+       a fifth to a half of every string column's write. Decided 2026-09-15. -->
+  <ItemGroup>
+    <PackageReference Include="System.IO.Hashing" />
+  </ItemGroup>
+
   <!-- Compile-time enforcement of the bans in BannedSymbols.txt. Build-time only: PrivateAssets
-       keeps it out of the package graph, so the library stays dependency-free at runtime, which
+       keeps these out of the package graph, so nothing THIRD-party ever reaches a consumer, which
        is the claim in Description above. -->
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" PrivateAssets="all" />
