@@ -174,6 +174,12 @@ internal sealed class DistinctTable
         // of a bool, a byte or a short can never be smaller than the column, so a table over one
         // is a hash and a probe per row for a verdict the chooser reaches without it. The end-of-
         // refactor measurement priced that at ×6 to ×9,5 on the bool family.
+        // NO TABLE BELOW THREE BYTES OF WIDTH, and it is arithmetic, not policy: a column of `w`
+        // bytes has at most 2^(8w) distinct values, so its codes are `w` bytes wide too -- as wide
+        // as the values they replace -- and the entries and the framing come on top. A dictionary
+        // of a bool, a byte or a short can never be smaller than the column, so a table over one
+        // is a hash and a probe per row for a verdict the chooser reaches without it. The end-of-
+        // refactor measurement priced that at ×6 to ×9,5 on the bool family.
         CanonicalKind.Bool => null,
         CanonicalKind.Primitive => node.PType.ByteWidth() <= 2
             ? null
@@ -394,7 +400,12 @@ internal sealed class DistinctTable
 
             case Shape.Fixed:
             {
-                VortexBuffer values = arena.Allocate(entries * _width, _width, out Span<byte> destination);
+                // UNINITIALIZED, AND EVERY BYTE WRITTEN BELOW: the trace of the write axis charged
+                // `ZeroMemoryNative` a third of a second per eight on a dictionary column, for
+                // buffers this method overwrites whole the moment it gets them. Only the bitmaps,
+                // where a clear bit is a value, are still zeroed.
+                VortexBuffer values = arena.AllocateUninitialized(
+                    entries * _width, _width, out Span<byte> destination);
                 for (int code = 0; code < entries; code++)
                 {
                     Span<byte> slot = destination.Slice(code * _width, _width);
@@ -421,8 +432,10 @@ internal sealed class DistinctTable
                 if (_width > 0)
                 {
                     // A wide decimal: the key heap holds each value at its full width, so the
-                    // child's buffer is the entries gathered from it by code.
-                    VortexBuffer values = arena.Allocate(entries * _width, _width, out Span<byte> wide);
+                    // child's buffer is the entries gathered from it by code. Every slot is written
+                    // -- copied, or cleared for the null entry -- so nothing is zeroed up front.
+                    VortexBuffer values = arena.AllocateUninitialized(
+                        entries * _width, _width, out Span<byte> wide);
                     for (int code = 0; code < entries; code++)
                     {
                         Span<byte> slot = wide.Slice(code * _width, _width);
@@ -450,15 +463,18 @@ internal sealed class DistinctTable
                     heapBytes += lengths[code] > 12 ? lengths[code] : 0;
                 }
 
+                // BOTH BUFFERS UNINITIALIZED: the heap is written end to end by the copies, and
+                // every one of a view's sixteen bytes is written below -- the inline padding
+                // included, explicitly, rather than by clearing the whole buffer first.
                 VortexBuffer heap = VortexBuffer.Empty;
                 Span<byte> data = default;
                 if (heapBytes > 0)
                 {
-                    heap = arena.Allocate(heapBytes, 1, out data);
+                    heap = arena.AllocateUninitialized(heapBytes, 1, out data);
                 }
 
-                VortexBuffer views = arena.Allocate(entries * ViewSize, ViewSize, out Span<byte> viewBytes);
-                viewBytes.Clear();
+                VortexBuffer views = arena.AllocateUninitialized(
+                    entries * ViewSize, ViewSize, out Span<byte> viewBytes);
                 int written = 0;
                 for (int code = 0; code < entries; code++)
                 {
@@ -469,6 +485,7 @@ internal sealed class DistinctTable
                     if (length <= 12)
                     {
                         value.CopyTo(view.Slice(4, length));
+                        view[(4 + length)..].Clear();
                         continue;
                     }
 

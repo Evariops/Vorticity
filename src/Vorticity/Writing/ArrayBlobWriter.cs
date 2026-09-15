@@ -459,20 +459,31 @@ internal static class ArrayBlobWriter
 
                     // A null row encodes as zero under either transform: its value is never read
                     // back and a stable zero compresses better than whatever the buffer held.
-                    ulong encoded = mask.IsValid(row)
+                    wide[i] = mask.IsValid(row)
                         ? BitPackPlan.Encode(
                             CompressedValues.ReadUnsigned(values, ToUnsigned(ptype), row),
                             plan.Transform, plan.Reference, elementBits)
                         : 0;
-                    wide[i] = encoded;
+                }
 
-                    // And zero always fits, so only a valid row can be an exception -- tested on
-                    // the value just transformed, not on a second read of the column.
-                    if (patching && encoded >= limit)
+                // THE PATCHES ARE GATHERED FROM `wide`, IN A LOOP OF THEIR OWN, and not from the
+                // transform loop above with a branch per row: stage R5b-2 put the test inside that
+                // loop and a trace of `chunked` showed `Pack` at four times its former share, the
+                // same effect a never-taken branch had on the bounds loop (R7c). The block's 1 024
+                // transformed values are in L1, a second walk over them costs their compares and
+                // nothing else, and it runs only when the chooser counted an exception at all. A
+                // null row is zero, zero always fits, so a null is never a patch.
+                if (patching)
+                {
+                    for (int i = 0; i < count; i++)
                     {
-                        patchIndices[found] = row;
-                        patchValues[found] = encoded;
-                        found++;
+                        ulong encoded = wide[i];
+                        if (encoded >= limit)
+                        {
+                            patchIndices[found] = start + i;
+                            patchValues[found] = encoded;
+                            found++;
+                        }
                     }
                 }
 
