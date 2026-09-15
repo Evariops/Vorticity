@@ -172,7 +172,8 @@ internal static class ArrayBlobWriter
         int nodeIndex,
         List<PendingBuffer> buffers,
         EncodingDictionary encodings,
-        ChunkStats stats = default)
+        ChunkStats stats = default,
+        Cascade cascade = default)
     {
         // Z1b-c2b: a constant node is materialized HERE, before the compressor looks at it, and the
         // first attempt did it lower down -- inside WriteNode -- which produced a file of 33 676
@@ -182,7 +183,8 @@ internal static class ArrayBlobWriter
         // is what makes the bytes identical rather than merely close.
         nodeIndex = Materialize(arena, nodeIndex);
         BlockStats summary = stats.Stats;
-        ColumnPlan plan = ColumnCompressor.Choose(arena, nodeIndex, encodings.Target, in summary);
+        ColumnPlan plan = ColumnCompressor.Choose(
+            arena, nodeIndex, encodings.Target, in summary, cascade);
         if (plan.Scheme == ColumnScheme.None)
         {
             // Not the end of it: the column itself resisted every scheme, but a struct field or a
@@ -833,7 +835,8 @@ internal static class ArrayBlobWriter
 
         byte[] metadata = RunEndBytes(endsPType, (ulong)plan.Codes.Length);
         int ends = WriteIndexColumn(
-            builder, arena, nodeIndex, plan.Codes, endsPType, buffers, encodings);
+            builder, arena, nodeIndex, plan.Codes, endsPType, buffers, encodings,
+            Cascade.RunEndEnds());
         int valuesNode = WriteCompressed(builder, arena, values, buffers, encodings);
 
         Span<int> children = stackalloc int[2];
@@ -859,7 +862,8 @@ internal static class ArrayBlobWriter
         // entry is null and every row still has a code.
         byte[] metadata = DictBytes((uint)entries, codesPType);
         int codes = WriteIndexColumn(
-            builder, arena, nodeIndex, plan.Codes, codesPType, buffers, encodings);
+            builder, arena, nodeIndex, plan.Codes, codesPType, buffers, encodings,
+            Cascade.DictionaryCodes(entries));
         int valuesNode = WriteCompressed(builder, arena, values, buffers, encodings);
 
         Span<int> children = stackalloc int[2];
@@ -897,7 +901,7 @@ internal static class ArrayBlobWriter
     /// </remarks>
     private static int WriteIndexColumn(
         FlatBufferBuilder builder, CanonicalArena arena, int parentIndex, int[] values, PType ptype,
-        List<PendingBuffer> buffers, EncodingDictionary encodings)
+        List<PendingBuffer> buffers, EncodingDictionary encodings, Cascade cascade = default)
     {
         int width = ptype.ByteWidth();
 
@@ -908,7 +912,7 @@ internal static class ArrayBlobWriter
 
         return WriteIndexBuffer(
             builder, arena, arena.GetNode(parentIndex).DType.Arena, buffer, ptype, values.Length,
-            buffers, encodings);
+            buffers, encodings, cascade);
     }
 
     /// <summary>
@@ -929,14 +933,15 @@ internal static class ArrayBlobWriter
     /// </remarks>
     private static int WriteIndexBuffer(
         FlatBufferBuilder builder, CanonicalArena arena, DTypeArena types, VortexBuffer values,
-        PType ptype, int count, List<PendingBuffer> buffers, EncodingDictionary encodings)
+        PType ptype, int count, List<PendingBuffer> buffers, EncodingDictionary encodings,
+        Cascade cascade = default)
     {
         // The dtype arena is the column's own: a DType carries the arena it belongs to, and a node
         // whose dtype came from a different one would not compare equal downstream.
         int node = arena.AddPrimitive(
             types.Primitive(ptype, Nullability.NonNullable), count, Arrays.Validity.NonNullable,
             ptype, values);
-        return WriteCompressed(builder, arena, node, buffers, encodings);
+        return WriteCompressed(builder, arena, node, buffers, encodings, cascade: cascade);
     }
 
     /// <summary>Writes an index per element, filling EVERY byte of <paramref name="destination"/>.</summary>

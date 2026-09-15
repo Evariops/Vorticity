@@ -353,10 +353,17 @@ internal static class ColumnCompressor
     /// never produce a wrong plan. A child of a cascade passes none, and takes that path.
     /// </para>
     /// </param>
+    /// <param name="cascade">
+    /// What the PARENT already knows about this column, when it is a child a scheme produced
+    /// (docs/11-write-strategy.md §3.4.4). Every claim it carries is a proof written out in
+    /// <see cref="Cascade"/>, so a candidate it declares dead is one this method would have
+    /// declined anyway: the plan is the same plan and not a byte moves. An absent cascade — the
+    /// default, and what every top-level column passes — claims nothing.
+    /// </param>
     /// <returns>The plan; <see cref="ColumnPlan.Canonical"/> when nothing wins.</returns>
     internal static ColumnPlan Choose(
         CanonicalArena arena, int nodeIndex, VortexEdition target = EditionRegistry.Newest,
-        in BlockStats stats = default)
+        in BlockStats stats = default, Cascade cascade = default)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         int length = node.Length;
@@ -376,7 +383,7 @@ internal static class ColumnCompressor
         // constant time from `v[1] - v[0]`. W-9 measured that walk reading **78 % of the rows it is
         // offered** -- most columns that reach it really are progressions, so it runs to the end
         // rather than bailing at row three.
-        if (Allows(target, "vortex.sequence"))
+        if (Allows(target, "vortex.sequence") && !cascade.SequenceIsDead)
         {
             bool knownSteps = measured && stats.DeltaKnown;
             if (!knownSteps || !stats.DeltaBroken)
@@ -389,7 +396,12 @@ internal static class ColumnCompressor
             }
         }
 
-        RowComparer comparer = new RowComparer(arena, nodeIndex);
+        // THE COMPARER IS BUILT ONLY IF SOMETHING WILL COMPARE. Its two consumers are the run scan
+        // and the dictionary probe, and a cascade that declares both dead -- a dictionary's codes,
+        // a run-end's ends -- leaves nothing to compare with.
+        RowComparer comparer = cascade.RunsAreDead && cascade.DictionaryIsDead
+            ? default
+            : new RowComparer(arena, nodeIndex);
 
         // One pass for runs. It is the cheaper of the two and wins outright when it wins.
         //
@@ -417,7 +429,7 @@ internal static class ColumnCompressor
         // TWO `int[length]` ARRAYS before it starts, on every comparable column of every chunk,
         // and throws them away whenever run-end loses, which is most of the time. They are now
         // rented only when the plan is going to be kept.
-        if (Allows(target, "vortex.runend"))
+        if (Allows(target, "vortex.runend") && !cascade.RunsAreDead)
         {
             bool known = measured && stats.HasRunBoundaries;
 
@@ -453,7 +465,8 @@ internal static class ColumnCompressor
         {
             packed = BitPackPlan.TryBuild(
                 arena, node, zigzag: Allows(target, "vortex.zigzag"),
-                reference: measured && integers ? Reference(node, in stats) : null);
+                reference: cascade.Reference
+                    ?? (measured && integers ? Reference(node, in stats) : null));
         }
 
         if (packed is not null && packed.Transform == BitPackTransform.Frame
@@ -477,7 +490,7 @@ internal static class ColumnCompressor
         // interleaved rather than merely repetitive -- and the budget is what the BEST plan so far
         // costs, so a dictionary that cannot beat the bit-packing abandons that much sooner.
         long budget = packed is null ? plain : Math.Min(plain, packed.Cost);
-        ColumnPlan dictionary = Allows(target, "vortex.dict")
+        ColumnPlan dictionary = Allows(target, "vortex.dict") && !cascade.DictionaryIsDead
             ? Dictionary(arena, node, comparer, length, budget)
             : ColumnPlan.Canonical;
         if (dictionary.Scheme != ColumnScheme.None)
