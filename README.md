@@ -22,6 +22,8 @@ file format (LF AI & Data, formerly SpiralDB).
 | [docs/07-dotnet-mapping.md](docs/07-dotnet-mapping.md) | DType → .NET type contract, and where naive mappings lose data |
 | [docs/08-semantics.md](docs/08-semantics.md) | Pruning algebra, predicate semantics, unknown components, untrusted hints, resource caps |
 | [docs/09-contracts.md](docs/09-contracts.md) | Thread-safety, parallelism, versioning, threat model, observability, licensing |
+| [docs/10-indexes.md](docs/10-indexes.md) | Skipping and locating indexes (Bloom, postings, sorted runs), out of tree, append-friendly runs, Rust-readable |
+| [docs/11-write-strategy.md](docs/11-write-strategy.md) | Write strategy: the fused block pipeline — `ColumnWriter`, exact block statistics, formula verdicts, one-pass encoding, SIMD kernel by kernel, the read contract, append, no sampling |
 | [docs/90-registry.md](docs/90-registry.md) | Full registry of encodings / layouts / dtypes and their status |
 | [docs/99-sources.md](docs/99-sources.md) | Primary sources and how to re-verify them |
 

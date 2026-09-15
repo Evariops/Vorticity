@@ -4,7 +4,7 @@
 
 | Constraint | Consequence |
 |---|---|
-| **Zero dependency** | FlatBuffers and Protobuf hand-written. No `Google.FlatBuffers`, no `protobuf-net`, no `Apache.Arrow`, no `System.IO.Hashing`. BCL only. |
+| **Zero third-party dependency** | FlatBuffers and Protobuf hand-written. No `Google.FlatBuffers`, no `protobuf-net`, no `Apache.Arrow`. BCL, plus **one first-party package**: `System.IO.Hashing` (`dotnet/runtime`, MIT, not carried by the shared framework), for the XxHash3-64 of the write path and the Bloom filters — decided 2026-09-15, [10-indexes.md](10-indexes.md) §11. Nothing else. |
 | **Zero allocation** | No LINQ, no `foreach` over interfaces, no capturing closures, no boxing, no `params`. Aligned native buffers, `ArrayPool` for transients, `ref struct` readers. |
 | **SIMD** | `System.Runtime.Intrinsics` with `Vector512`/`Vector256`/`Vector128` paths and a scalar fallback. `Vector<T>` only where width is irrelevant. |
 | **Async only** | `ValueTask<T>` throughout, `IAsyncEnumerable<T>` for scans, `ConfigureAwait(false)` systematically. No blocking public API. The rule governs the I/O and scan surface; pure in-memory CPU work with nothing to await (row encoding, decode kernels) stays synchronous rather than wrapping itself in a fake task. |
@@ -52,7 +52,7 @@ buys. Cancellation granularity is the batch, not the instruction.
 ```
 Vorticity.sln
 src/
-  Vorticity/                    # net11.0, zero dependency
+  Vorticity/                    # net11.0, no third-party dependency (System.IO.Hashing only)
     Buffers/                      # VortexBuffer, alignment, ref-counting, pooling
     Serialization/
       FlatBuffers/                # reader + builder runtime, hand-written accessors
