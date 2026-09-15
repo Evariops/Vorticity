@@ -27,6 +27,7 @@
 // asymmetry favours leaving data alone.
 using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -160,6 +161,165 @@ internal static class ColumnCompressor
     private const int RunEndRatio = 4;
 
     /// <summary>
+    /// The run-end plan for this column, or <see cref="ColumnPlan.Canonical"/> when runs do not pay.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WRITE-AUDIT.md W-33. The pass answers ONE question -- are there at most
+    /// <c>length / RunEndRatio</c> runs -- and the answer is settled the moment the count passes
+    /// that. Running on to the last row afterwards was the whole of the scan on an interleaved
+    /// column, which PERF-AUDIT-v2.md W-7a already names as the common case.
+    /// </para>
+    /// <para>
+    /// A BITMAP ANSWERS IT SIXTY-FOUR ROWS AT A TIME. <c>w ^ ((w &lt;&lt; 1) | previous)</c> has a
+    /// set bit exactly where a row differs from the one before it, so a whole word's boundaries are
+    /// one xor and a popcount, and the positions come out of the word by trailing-zero count --
+    /// which only runs as often as there are boundaries. Measured on the 1M `bool` file, the pass
+    /// was **88,9 % of the write** through <c>RowComparer.Equal</c>, two <c>BitAt</c> calls a row.
+    /// </para>
+    /// <para>
+    /// ALL-VALID ONLY, for the bitmap path: a null row is equal to another null row and unequal to a
+    /// valid one whatever the bits say, and folding the validity mask into the word walk would cost
+    /// a second bitmap and its own offset. The general path below is correct for those.
+    /// </para>
+    /// </remarks>
+    private static ColumnPlan TryRuns(
+        CanonicalArena arena, in CanonicalNode node, in RowComparer comparer, int length)
+    {
+        int ceiling = length / RunEndRatio;
+        if (ceiling < 1)
+        {
+            return ColumnPlan.Canonical;
+        }
+
+        int[] runStarts = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        int[] runEnds = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        try
+        {
+            int runCount = node.Kind == CanonicalKind.Bool && node.Validity.IsAllValid
+                ? BitmapRuns(node.Bits.Span, node.BitOffset, length, ceiling, runStarts, runEnds)
+                : ComparedRuns(in comparer, length, ceiling, runStarts, runEnds);
+
+            if (runCount > ceiling)
+            {
+                return ColumnPlan.Canonical;
+            }
+
+            runEnds[runCount - 1] = length;
+            return ColumnPlan.Runs(
+                runStarts.AsSpan(0, runCount).ToArray(), runEnds.AsSpan(0, runCount).ToArray());
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(runStarts);
+            ArrayPool<int>.Shared.Return(runEnds);
+        }
+    }
+
+    /// <summary>Runs by comparing adjacent rows, abandoning once run-end can no longer win.</summary>
+    /// <returns>The run count, or a value above <paramref name="ceiling"/> when it gave up.</returns>
+    private static int ComparedRuns(
+        in RowComparer comparer, int length, int ceiling, Span<int> starts, Span<int> ends)
+    {
+        int runCount = 1;
+        starts[0] = 0;
+        for (int i = 1; i < length; i++)
+        {
+            if (comparer.Equal(i - 1, i))
+            {
+                continue;
+            }
+
+            if (runCount > ceiling)
+            {
+                return runCount;
+            }
+
+            ends[runCount - 1] = i;
+            starts[runCount] = i;
+            runCount++;
+        }
+
+        return runCount;
+    }
+
+    /// <summary>The same count over an all-valid bitmap, a word at a time.</summary>
+    private static int BitmapRuns(
+        ReadOnlySpan<byte> bits, int bitOffset, int length, int ceiling, Span<int> starts, Span<int> ends)
+    {
+        int runCount = 1;
+        starts[0] = 0;
+
+        // The window slides by whole words, so the shift inside the byte is the same every step and
+        // is hoisted out of the loop with the base.
+        int shift = bitOffset & 7;
+        int firstByte = bitOffset >> 3;
+        ulong previous = 0;
+
+        for (int row = 0; row < length; row += 64)
+        {
+            int take = Math.Min(64, length - row);
+            ulong word = Load(bits, firstByte + (row >> 3), shift) & Mask(take);
+
+            // Bit j is set where row j differs from row j-1, the first taking its predecessor from
+            // the previous word.
+            ulong diff = (word ^ ((word << 1) | previous)) & Mask(take);
+            previous = (word >> (take - 1)) & 1;
+
+            while (diff != 0)
+            {
+                if (runCount > ceiling)
+                {
+                    return runCount;
+                }
+
+                int at = row + System.Numerics.BitOperations.TrailingZeroCount(diff);
+                ends[runCount - 1] = at;
+                starts[runCount] = at;
+                runCount++;
+                diff &= diff - 1;
+            }
+        }
+
+        return runCount;
+    }
+
+    /// <summary>The low <paramref name="count"/> bits, with 64 meaning all of them.</summary>
+    private static ulong Mask(int count) => count == 64 ? ulong.MaxValue : (1UL << count) - 1;
+
+    /// <summary>
+    /// Sixty-four bits starting <paramref name="shift"/> bits into
+    /// <paramref name="index"/>, reading past the end as zeroes.
+    /// </summary>
+    private static ulong Load(ReadOnlySpan<byte> bits, int index, int shift)
+    {
+        ulong low = Eight(bits, index);
+        return shift == 0 ? low : (low >> shift) | ((ulong)Byte(bits, index + 8) << (64 - shift));
+    }
+
+    private static ulong Eight(ReadOnlySpan<byte> bits, int index)
+    {
+        if ((uint)index + 8 <= (uint)bits.Length)
+        {
+            return BinaryPrimitives.ReadUInt64LittleEndian(bits.Slice(index, 8));
+        }
+
+        // THE TAIL IS READ BYTE BY BYTE rather than over-read: the bitmap's last word is a partial
+        // one whenever the row count is not a multiple of 64, and the buffer is a window into a
+        // segment that owes nothing past its own length.
+        ulong value = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            value |= (ulong)Byte(bits, index + i) << (i * 8);
+        }
+
+        return value;
+    }
+
+    private static byte Byte(ReadOnlySpan<byte> bits, int index) =>
+        (uint)index < (uint)bits.Length ? bits[index] : (byte)0;
+
+    /// <summary>
     /// What a dictionary costs beyond its codes and entries: two more array nodes and their
     /// metadata. Deliberately generous - the point is to refuse encodings that barely pay, not to
     /// squeeze the last byte. <see cref="BitPackPlan"/> carries its own for the same reason.
@@ -246,34 +406,19 @@ internal static class ColumnCompressor
         // The `finally` covers the scan and the verdict and nothing after: the arrays are dead the
         // moment the plan has copied the prefixes it keeps, and the schemes weighed below never see
         // them.
-        int[] runStarts = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
-        int[] runEnds = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
-        try
+        //
+        // IT DOES NOT RUN WHEN ITS ANSWER CANNOT BE USED, and it stops as soon as the answer is
+        // settled -- WRITE-AUDIT.md W-33. `Allows` was tested AFTER the pass, so an edition without
+        // `vortex.runend` paid for a count it then threw away; and the pass ran to the last row even
+        // once the run count had passed the point where run-end can win, which on an interleaved
+        // column is most of it.
+        if (Allows(target, "vortex.runend"))
         {
-            int runCount = 1;
-            runStarts[0] = 0;
-            for (int i = 1; i < length; i++)
+            ColumnPlan runs = TryRuns(arena, in node, in comparer, length);
+            if (runs.Scheme != ColumnScheme.None)
             {
-                if (!comparer.Equal(i - 1, i))
-                {
-                    runEnds[runCount - 1] = i;
-                    runStarts[runCount] = i;
-                    runCount++;
-                }
+                return runs;
             }
-
-            runEnds[runCount - 1] = length;
-
-            if (runCount * RunEndRatio <= length && Allows(target, "vortex.runend"))
-            {
-                return ColumnPlan.Runs(
-                    runStarts.AsSpan(0, runCount).ToArray(), runEnds.AsSpan(0, runCount).ToArray());
-            }
-        }
-        finally
-        {
-            ArrayPool<int>.Shared.Return(runStarts);
-            ArrayPool<int>.Shared.Return(runEnds);
         }
 
         // Dense integers: a column of a million distinct measurements has no dictionary worth
