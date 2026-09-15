@@ -19,6 +19,9 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// <summary>Concatenates canonical nodes that share a dtype into one canonical node.</summary>
 internal static class CanonicalConcat
 {
+    /// <summary>Chunk indices held on the stack before renting; Z1b-c2b.</summary>
+    private const int StackChunks = 32;
+
     private const int StackSmall = 32;
 
     /// <summary>Alignment every materialized buffer is given: the strictest we ever require.</summary>
@@ -188,14 +191,32 @@ internal static class CanonicalConcat
             return arena.AddConstant(dtype, length, validity, first);
         }
 
-        // Different values: fall back by materializing each chunk and concatenating as primitives.
-        // Not written yet -- no corpus file chunks a constant column with differing values, and
-        // §1.6 says not to write a path no measurement reaches. Z1b-c2c re-checks it against the
-        // corpus before the switch comes out.
-        throw new VortexUnsupportedException(
-            "component",
-            "Concatenating constant chunks with different values is not implemented; "
-                + "see PERF-AUDIT-v2.md Z1b-c2c.");
+        // DIFFERENT VALUES: the column really does hold more than one, so the materialized form is
+        // the honest one. Each chunk is expanded through the arena's memoized twin and handed to the
+        // concat the underlying kind already has.
+        //
+        // This path was deferred at Z1b-c2b on the grounds that no corpus file reaches it. That was
+        // WRONG, and the probe said so within a minute: `ChunkedConstantTests` builds exactly this,
+        // and the §1.6 rule -- do not write a path no measurement reaches -- only licenses skipping
+        // a path when you have LOOKED. Reading the corpus is not looking; running is.
+        Span<int> stack = stackalloc int[StackChunks];
+        Scratch<int> scratch = new Scratch<int>(chunks.Length, stack);
+        try
+        {
+            Span<int> expanded = scratch.Span;
+            for (int i = 0; i < chunks.Length; i++)
+            {
+                expanded[i] = arena.MaterializeConstant(chunks[i]);
+            }
+
+            return dtype.Kind == DTypeKind.Decimal
+                ? ConcatDecimal(context, dtype, length, expanded, validity)
+                : ConcatPrimitive(context, dtype, length, expanded, validity);
+        }
+        finally
+        {
+            scratch.Dispose();
+        }
     }
 
     // ------------------------------------------------------------------------------- validity
