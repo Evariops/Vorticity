@@ -127,6 +127,20 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
     private long _chunksWithoutTable;
 
+    /// <summary>
+    /// (Column chunk, field) pairs whose distinct table answered: the dictionary was read off the
+    /// table rather than walked for.
+    /// </summary>
+    /// <remarks>
+    /// The positive half of <see cref="ChunksWithoutTable"/>, and the one a test needs: a table
+    /// that is never expected to serve leaves the fallback counter at zero all the same. Whether a
+    /// dictionary column's memory holds -- and so whether its table runs at all -- is exactly what
+    /// `PlanMemoryTests` holds this counter to.
+    /// </remarks>
+    internal long ChunksFromTable => _chunksFromTable;
+
+    private long _chunksFromTable;
+
     /// <summary>Canonical bytes to accumulate before emitting, or 0 for no byte threshold.</summary>
     private readonly long _blockBytes;
 
@@ -631,11 +645,16 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
             // A table plan memory turned off (docs/11 §3.2.2) was never expected to serve, and is
             // not a fallback; a table that was running and cannot answer is.
-            if (DistinctTable.Serves(arena.GetNode(node).Kind)
-                && stats.TableExpected
-                && !stats.TableServes(checked((int)rows)))
+            if (DistinctTable.Serves(arena.GetNode(node).Kind) && stats.TableExpected)
             {
-                _chunksWithoutTable++;
+                if (stats.TableServes(checked((int)rows)))
+                {
+                    _chunksFromTable++;
+                }
+                else
+                {
+                    _chunksWithoutTable++;
+                }
             }
 
             using ArrayBlobWriter.BlobLease blob =

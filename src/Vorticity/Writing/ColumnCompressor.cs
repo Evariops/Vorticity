@@ -1458,8 +1458,70 @@ internal static class ColumnCompressor
     }
 
     /// <summary>
-    /// <see cref="EntriesSize"/> from counts instead of rows: what <paramref name="entries"/>
-    /// distinct values holding <paramref name="heap"/> bytes cost as a values child.
+    /// The bytes the dictionary LAYER was priced at, measured on what the encoder built: the codes
+    /// at the narrowest width that indexes <paramref name="values"/>, plus the entries in the form
+    /// <see cref="EntriesSize(CanonicalArena, CanonicalNode, ReadOnlySpan{int})"/> prices them.
+    /// </summary>
+    /// <remarks>
+    /// THIS IS WHAT PLAN MEMORY HOLDS A DICTIONARY TO, and not the bytes its subtree produced. The
+    /// prediction is codes plus entries; the children then take their own schemes -- the codes
+    /// zstd, the values FSST or zstd -- and the buffers they append are a fraction of that. On the
+    /// 1M-row `dict_u8_codes` every chunk predicted 66 738 bytes and produced 363: the memory
+    /// "broke" sixteen times out of sixteen, the distinct table was never expected to serve, and
+    /// every chunk walked for the dictionary the table had already built. What the children make
+    /// of the layer is theirs; the dictionary's own decision held exactly.
+    /// </remarks>
+    /// <param name="arena">The arena holding the values child.</param>
+    /// <param name="values">The values child as the encoder built it, one row per entry.</param>
+    /// <param name="rows">The rows of the column the codes index.</param>
+    internal static long DictionaryLayerBytes(CanonicalArena arena, CanonicalNode values, int rows)
+    {
+        int entries = values.Length;
+        return ((long)rows * FsstPlan.IndexPType(entries).ByteWidth()) + EntriesSize(arena, values, entries);
+    }
+
+    /// <summary>
+    /// <see cref="EntriesSize(CanonicalArena, CanonicalNode, ReadOnlySpan{int})"/> over the first
+    /// <paramref name="count"/> rows of <paramref name="node"/> in order -- a node that IS the
+    /// entries.
+    /// </summary>
+    private static long EntriesSize(CanonicalArena arena, CanonicalNode node, int count)
+    {
+        switch (node.Kind)
+        {
+            case CanonicalKind.Bool:
+                return (count + 7) / 8;
+
+            case CanonicalKind.Primitive:
+                return (long)count * node.PType.ByteWidth();
+
+            case CanonicalKind.Decimal:
+                return (long)count * DecimalStorage.ByteWidth(node.Storage);
+
+            default:
+            {
+                ValidityMask mask = ValidityMask.From(arena, node.Validity);
+                ReadOnlySpan<byte> views = node.Views.Span;
+                long heap = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    if (mask.IsValid(i))
+                    {
+                        heap += System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                            views.Slice(i * 16, 4));
+                    }
+                }
+
+                long varbin = (((long)count + 1) * FsstPlan.IndexPType(heap).ByteWidth()) + heap;
+                return Math.Min(((long)count * 16) + heap, varbin);
+            }
+        }
+    }
+
+    /// <summary>
+    /// <see cref="EntriesSize(CanonicalArena, CanonicalNode, ReadOnlySpan{int})"/> from counts
+    /// instead of rows: what <paramref name="entries"/> distinct values holding
+    /// <paramref name="heap"/> bytes cost as a values child.
     /// </summary>
     /// <param name="node">The column chunk, for its kind and widths.</param>
     /// <param name="entries">Distinct values, the null counted as one.</param>

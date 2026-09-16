@@ -1084,7 +1084,7 @@ internal static class BlockStatsPass
             stats.MergeSigned(long.CreateTruncating(min), long.CreateTruncating(max));
             if (!widths.IsEmpty)
             {
-                CountWidths<T>(values, in mask, start, widths);
+                CountWidths<T>(values, in mask, start, widths, zigzag: true);
             }
 
             return;
@@ -1118,7 +1118,7 @@ internal static class BlockStatsPass
 
         if (!widths.IsEmpty)
         {
-            CountWidths<T>(values, in mask, start, widths);
+            CountWidths<T>(values, in mask, start, widths, zigzag: true);
         }
     }
 
@@ -1126,17 +1126,53 @@ internal static class BlockStatsPass
     /// The width histograms over a range the bounds loop has just read, valid rows only, the
     /// element's bits masked to its width so a signed value is measured as the packer sees it.
     /// </summary>
+    /// <remarks>
+    /// ONLY THE DOMAINS A PLAN CAN READ. Zigzag is offered to signed columns alone
+    /// (<c>BitPackPlan.TryBuild</c> prices it under <c>signed &amp;&amp; zigzag</c>), so on an
+    /// unsigned column the zigzag half was a leading-zero count and an increment per row for
+    /// nobody: `fastlanes_bitpacked` -- a `u32` -- measured +13 % against the writer before the
+    /// pass counted anything, on identical bytes, with the count as the one difference on the
+    /// chunks whose plan came from memory.
+    /// </remarks>
+    /// <param name="values">The range's values, already sliced to it.</param>
+    /// <param name="mask">The column's validity.</param>
+    /// <param name="start">The range's first row inside the node, where <paramref name="mask"/> is read.</param>
+    /// <param name="widths">The pair of histograms.</param>
+    /// <param name="zigzag">Whether the zigzag half is counted at all: the column is signed.</param>
     private static void CountWidths<T>(
-        ReadOnlySpan<T> values, in ValidityMask mask, int start, Span<int> widths)
+        ReadOnlySpan<T> values, in ValidityMask mask, int start, Span<int> widths, bool zigzag)
         where T : unmanaged, IBinaryInteger<T>
     {
         int elementBits = Unsafe.SizeOf<T>() * 8;
         ulong mask64 = BitWords.Mask(elementBits);
         if (mask.AllValid)
         {
+            if (zigzag)
+            {
+                for (int i = 0; i < values.Length; i++)
+                {
+                    Widths(ulong.CreateTruncating(values[i]) & mask64, elementBits, widths);
+                }
+            }
+            else
+            {
+                for (int i = 0; i < values.Length; i++)
+                {
+                    RawWidth(ulong.CreateTruncating(values[i]) & mask64, widths);
+                }
+            }
+
+            return;
+        }
+
+        if (zigzag)
+        {
             for (int i = 0; i < values.Length; i++)
             {
-                Widths(ulong.CreateTruncating(values[i]) & mask64, elementBits, widths);
+                if (mask.IsValid(start + i))
+                {
+                    Widths(ulong.CreateTruncating(values[i]) & mask64, elementBits, widths);
+                }
             }
 
             return;
@@ -1146,10 +1182,17 @@ internal static class BlockStatsPass
         {
             if (mask.IsValid(start + i))
             {
-                Widths(ulong.CreateTruncating(values[i]) & mask64, elementBits, widths);
+                RawWidth(ulong.CreateTruncating(values[i]) & mask64, widths);
             }
         }
     }
+
+    /// <summary>The raw half of <see cref="Widths"/> alone, for a column zigzag is never offered.</summary>
+    /// <param name="bits">The row's value, masked to the element width.</param>
+    /// <param name="widths">The pair of histograms; only the raw one moves.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void RawWidth(ulong bits, Span<int> widths) =>
+        widths[64 - BitOperations.LeadingZeroCount(bits)]++;
 
 
     private static void Unsigned<T>(
@@ -1182,7 +1225,7 @@ internal static class BlockStatsPass
             stats.MergeUnsigned(ulong.CreateTruncating(min), ulong.CreateTruncating(max));
             if (!widths.IsEmpty)
             {
-                CountWidths<T>(values, in mask, start, widths);
+                CountWidths<T>(values, in mask, start, widths, zigzag: false);
             }
 
             return;
@@ -1216,7 +1259,7 @@ internal static class BlockStatsPass
 
         if (!widths.IsEmpty)
         {
-            CountWidths<T>(values, in mask, start, widths);
+            CountWidths<T>(values, in mask, start, widths, zigzag: false);
         }
     }
 

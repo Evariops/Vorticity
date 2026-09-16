@@ -26,6 +26,7 @@ using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.Scan;
 using Vorticity.Types;
+using Vorticity.Tests.Columns;
 using Vorticity.Tests.Scan;
 using Vorticity.Writing;
 using Xunit;
@@ -80,6 +81,88 @@ public sealed class PlanMemoryTests
             disagreements.Count == 0,
             "the chooser and the reference disagree on " + disagreements.Count + " chunk(s):\n  "
             + string.Join("\n  ", disagreements));
+    }
+
+    /// <summary>
+    /// A dictionary column across four chunks -- 200 distinct strings, 8 192 rows each: the plan
+    /// holds, the distinct table serves every chunk after the first, and the plans are the
+    /// reference chooser's on every chunk.
+    /// </summary>
+    /// <remarks>
+    /// Plan memory used to hold a dictionary to the bytes its SUBTREE produced -- the codes and the
+    /// values after their own schemes, 363 bytes on the 1M-row `dict_u8_codes` -- against a layer
+    /// priced at 66 738: it "broke" on every chunk, the table was never expected to serve, and each
+    /// chunk walked for a dictionary the table had already built. Held to its own layer, it holds.
+    /// </remarks>
+    [Fact]
+    public async Task AHeldDictionaryLetsTheTableServeTheChunksThatFollow()
+    {
+        Decoders.EnsureRegistered();
+
+        using ColumnFixture f = new ColumnFixture();
+        const int Chunks = 4;
+        int[] roots = new int[Chunks];
+        for (int c = 0; c < Chunks; c++)
+        {
+            byte[]?[] values = new byte[]?[Rows];
+            for (int i = 0; i < Rows; i++)
+            {
+                values[i] = System.Text.Encoding.UTF8.GetBytes("value-" + ((c * 7) + i) % 200);
+            }
+
+            roots[c] = f.Utf8Node(values, Nullability.NonNullable);
+        }
+
+        DType dtype = f.Arena.GetNode(roots[0]).DType;
+        VortexWriteOptions options = new VortexWriteOptions
+        {
+            RowBlockSize = Rows,
+            DataBlockTargetBytes = 1024,
+        };
+
+        string path = Path.Combine(Path.GetTempPath(), $"vorticity-memory-dict-{Guid.NewGuid():N}.vortex");
+        List<string> disagreements = [];
+        try
+        {
+            long fromTable;
+            long withoutTable;
+            ColumnCompressor.Differential.Value = new ColumnCompressor.DifferentialProbe(
+                false,
+                (node, chosen, reference) => disagreements.Add("node " + node + ": " + chosen + " => " + reference));
+            try
+            {
+                await using VortexFileWriter writer = VortexFileWriter.Create(path, dtype, options);
+                for (int c = 0; c < Chunks; c++)
+                {
+                    await writer.WriteAsync(f.Batch(roots[c], (long)c * Rows), CancellationToken.None);
+                }
+
+                await writer.CompleteAsync(CancellationToken.None);
+                fromTable = writer.ChunksFromTable;
+                withoutTable = writer.ChunksWithoutTable;
+            }
+            finally
+            {
+                ColumnCompressor.Differential.Value = null;
+            }
+
+            Assert.True(
+                disagreements.Count == 0,
+                "the chooser and the reference disagree on " + disagreements.Count + " chunk(s):\n  "
+                + string.Join("\n  ", disagreements));
+            Assert.Equal(Chunks - 1, fromTable);
+            Assert.Equal(0, withoutTable);
+            // The bytes the reference chooser's dictionaries make, whether the table or a walk built
+            // them: pinned so that a table that served a different dictionary would show here first.
+            Assert.Equal(35_540, new FileInfo(path).Length);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(path))
+            {
+                System.IO.File.Delete(path);
+            }
+        }
     }
 
     /// <summary>

@@ -191,12 +191,25 @@ internal static class ArrayBlobWriter
         // priced the plan at. Buffer bytes rather than the blob's, because the blob is one per root
         // field and a struct's children are priced one by one; the framing they leave out is the
         // same framing chunk after chunk, which is all a tolerance needs.
+        //
+        // A DICTIONARY IS HELD TO ITS OWN LAYER, not to its subtree: the plan priced codes plus
+        // entries, and the children then take schemes of their own -- on `dict_u8_codes` the codes
+        // zstd to 220 bytes and the values to 150, against a layer of 66 738. Measured by the
+        // subtree, the prediction "broke" on every chunk of every dictionary column, the distinct
+        // table was never expected to serve, and each chunk walked for the dictionary the table
+        // had already built. `WriteChosen` reports the layer as built; the children's bytes are
+        // the children's.
         int firstBuffer = buffers.Count;
-        int written = WriteChosen(builder, arena, nodeIndex, in plan, buffers, encodings, stats);
-        long produced = 0;
-        for (int i = firstBuffer; i < buffers.Count; i++)
+        int written = WriteChosen(
+            builder, arena, nodeIndex, in plan, buffers, encodings, stats, out long dictionaryLayer);
+        long produced = dictionaryLayer;
+        if (produced < 0)
         {
-            produced += buffers[i].Length;
+            produced = 0;
+            for (int i = firstBuffer; i < buffers.Count; i++)
+            {
+                produced += buffers[i].Length;
+            }
         }
 
         stats.Remember(in plan, produced);
@@ -204,6 +217,9 @@ internal static class ArrayBlobWriter
     }
 
     /// <summary>Writes the node the way <paramref name="plan"/> says to.</summary>
+    // `dictionaryLayer`: for a dictionary, the bytes of the layer the plan priced -- codes at width
+    // plus entries as built -- which is what plan memory holds it to; -1 for every other plan,
+    // whose buffers are their own measure.
     private static int WriteChosen(
         FlatBufferBuilder builder,
         CanonicalArena arena,
@@ -211,8 +227,10 @@ internal static class ArrayBlobWriter
         in ColumnPlan plan,
         List<PendingBuffer> buffers,
         EncodingDictionary encodings,
-        ChunkStats stats)
+        ChunkStats stats,
+        out long dictionaryLayer)
     {
+        dictionaryLayer = -1;
         if (plan.Scheme == ColumnScheme.None)
         {
             // Not the end of it: the column itself resisted every scheme, but a struct field or a
@@ -256,9 +274,16 @@ internal static class ArrayBlobWriter
             ? plan.Table.BuildValues(arena, arena.GetNode(nodeIndex), plan.Entries)
             : CanonicalFilter.Apply(arena, nodeIndex, plan.Gather);
 
-        return plan.Scheme == ColumnScheme.RunEnd
-            ? WriteRunEnd(builder, arena, nodeIndex, values, plan, buffers, encodings)
-            : WriteDict(builder, arena, nodeIndex, values, plan, buffers, encodings);
+        if (plan.Scheme == ColumnScheme.RunEnd)
+        {
+            return WriteRunEnd(builder, arena, nodeIndex, values, plan, buffers, encodings);
+        }
+
+        // Measured on the values child as built and the rows the codes index, with the formula the
+        // plan was priced by: the number plan memory compares the prediction to.
+        dictionaryLayer = ColumnCompressor.DictionaryLayerBytes(
+            arena, arena.GetNode(values), arena.GetNode(nodeIndex).Length);
+        return WriteDict(builder, arena, nodeIndex, values, plan, buffers, encodings);
     }
 
     /// <summary>

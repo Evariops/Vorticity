@@ -333,6 +333,14 @@ held to the byte on the one chunk with a jump in it is re-priced on every progre
 follows, holds again, and is written at 295 KB a chunk where 32 bytes are exact. Measured on the
 1M-row `chunked` file: 1 902 356 bytes against 890 004, and +70 % on the clock that the bytes,
 not the time, explained.
+
+**A dictionary is held to its own layer.** Its prediction is codes at width plus entries; the
+children then take schemes of their own (§3.4.4), and the buffers they append are a fraction of
+the layer — on `dict_u8_codes` 363 bytes against 66 738, chunk after chunk. Measured by the
+subtree, the prediction never held, the distinct table was never expected to serve (§3.2.2), and
+every chunk walked for the dictionary the table had already built. The encoder reports the layer
+as built — the same formula the plan was priced by — and that is what the tolerance compares.
+Measured: `dict` 15,7 → 11,3 ms per million rows, `table_mixed` 151 → 77.
 This replaces bucketed signatures and periodic re-pricing with a control that costs nothing and
 measures the one thing that matters. An FSST symbol table is still trained per chunk (sharing one
 was measured at 4,3 % of output size, `bench/PLAN.md:62`); what is remembered is the decision,
