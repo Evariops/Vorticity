@@ -38,6 +38,7 @@ using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.Indexes;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
@@ -193,12 +194,19 @@ public sealed class VortexFileWriter : IAsyncDisposable
     private long _rowCount;
     private bool _started;
     private bool _completed;
-    private byte[] _padding = new byte[VortexLimits.MaxAlignment];
+    // SHARED, BECAUSE NOTHING WRITES TO IT: the sink takes `ReadOnlyMemory<byte>`. One array per
+    // writer was 88 bytes on every file for 64 zeros, which is what pays for the report's fields.
+    private static readonly byte[] Padding = new byte[VortexLimits.MaxAlignment];
     private readonly bool _fileStatistics;
+    // NULL WHEN THE POLICY ASKS FOR NOTHING, which is the default: the index machinery then costs a
+    // write not one allocation, and the file is byte for byte what it was (docs/10-indexes.md §7.3).
+    private readonly IndexWriter? _indexes;
+    private WriteBytes _reportBytes;
+    private ColumnWriteReport[]? _reportColumns;
 
     private VortexFileWriter(
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
-        long blockBytes, bool fileStatistics)
+        long blockBytes, bool fileStatistics, WritePolicy indexes)
     {
         _sink = sink;
         _schema = schema;
@@ -228,6 +236,10 @@ public sealed class VortexFileWriter : IAsyncDisposable
                 EditionAllowsDictionary = ColumnCompressor.Allows(target, "vortex.dict"),
             };
         }
+
+        _indexes = IndexWriter.Asks(indexes)
+            ? new IndexWriter(indexes, schema, _isTabular, _fieldCount)
+            : null;
     }
 
 
@@ -283,9 +295,11 @@ public sealed class VortexFileWriter : IAsyncDisposable
                 nameof(options));
         }
 
+        ArgumentNullException.ThrowIfNull(options.Indexes, nameof(options));
+        WritePolicy indexes = options.Profile == WriteProfile.Fastest ? WritePolicy.None : options.Indexes;
         return new VortexFileWriter(
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
-            options.FileStatistics);
+            options.FileStatistics, indexes);
     }
 
     /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
@@ -627,18 +641,24 @@ public sealed class VortexFileWriter : IAsyncDisposable
         _pendingBytes = 0;
     }
 
+    /// <summary>How many blocks a chunk of <paramref name="rows"/> rows covers.</summary>
+    /// <remarks>
+    /// A chunk is emitted in whole multiples of the block length and chunks start at row 0, so a
+    /// chunk is a contiguous, block-aligned range and its statistics are the sum of its blocks' --
+    /// docs/11-write-strategy.md §3.3. The last chunk of the file may end inside a block, which is
+    /// why the count rounds up. With repartitioning off the batch is both the chunk and the block,
+    /// so the range is one. The index builders replay the chunk sizes through this same rule.
+    /// </remarks>
+    /// <param name="rows">The chunk's rows.</param>
+    /// <param name="blockRows">Rows per block, or 0 with repartitioning off.</param>
+    internal static int ChunkBlocks(long rows, int blockRows) =>
+        blockRows > 0 ? checked((int)((rows + blockRows - 1) / blockRows)) : 1;
+
     /// <summary>Writes one chunk of every column from <paramref name="arena"/>.</summary>
     private async ValueTask EmitChunkAsync(
         CanonicalArena arena, int rootIndex, long rows, CancellationToken cancellationToken)
     {
-        // WHICH BLOCKS THIS CHUNK COVERS. A chunk is emitted in whole multiples of the block length
-        // and chunks start at row 0, so a chunk is a contiguous, block-aligned range and its
-        // statistics are the sum of its blocks' -- docs/11-write-strategy.md §3.3. The last chunk of
-        // the file may end inside a block, which is why the count rounds up. With repartitioning off
-        // the batch is both the chunk and the block, so the range is one.
-        int blocks = _blockRows > 0
-            ? checked((int)((rows + _blockRows - 1) / _blockRows))
-            : 1;
+        int blocks = ChunkBlocks(rows, _blockRows);
 
         for (int field = 0; field < _fieldCount; field++)
         {
@@ -704,9 +724,12 @@ public sealed class VortexFileWriter : IAsyncDisposable
     /// Writes the layout, footer, postscript and EOF marker, and finishes the file.
     /// </summary>
     /// <param name="cancellationToken">Cancels the writes.</param>
-    /// <returns>A task that completes when the file is whole.</returns>
+    /// <returns>
+    /// What was written: bytes by kind, each column's encodings, and every index the policy asked
+    /// for, built or abandoned with its reason (docs/11-write-strategy.md §7.3).
+    /// </returns>
     /// <exception cref="InvalidOperationException">The file has already been completed.</exception>
-    public async ValueTask CompleteAsync(CancellationToken cancellationToken = default)
+    public async ValueTask<WriteReport> CompleteAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_completed, this);
         _completed = true;
@@ -742,9 +765,17 @@ public sealed class VortexFileWriter : IAsyncDisposable
             ResetTransit();
         }
 
+        // Index runs go after the last data segment and before the zone maps (docs/10-indexes.md
+        // §7.2): regions no layout references and no footer lists. None of the kinds built so far
+        // carries a payload, so today this only decides.
+        long dataEnd = _sink.Position;
+        _indexes?.Close(_columns, _chunkRows, _blockRows);
+        long indexStart = _sink.Position;
+
         // The zones arrays are segments like any other and must be written BEFORE the footer that
         // records them.
         await WriteZoneMapsAsync(cancellationToken).ConfigureAwait(false);
+        long zoneMapsEnd = _sink.Position;
 
         // The file statistics, after the zone maps and before the footer (docs/11 §3.6): the
         // merge of every closed block per top-level field, which is exact by construction.
@@ -756,6 +787,15 @@ public sealed class VortexFileWriter : IAsyncDisposable
             byte[] statistics = BuildFileStatistics();
             statisticsLength = statistics.Length;
             await _sink.WriteAsync(statistics, cancellationToken).ConfigureAwait(false);
+        }
+
+        // The index directory, last before the footer (§7.2): one postscript metadata entry, the
+        // only carrier a strict Rust 0.86.1 reader tolerates without being told (§3.2).
+        long directoryOffset = _sink.Position;
+        byte[]? directory = _indexes?.Directory(_rowCount);
+        if (directory is not null)
+        {
+            await _sink.WriteAsync(directory, cancellationToken).ConfigureAwait(false);
         }
 
         long dtypeOffset = _sink.Position;
@@ -772,7 +812,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
         byte[] postscript = BuildPostscript(
             dtypeOffset, dtype.Length, layoutOffset, layout.Length, footerOffset, footer.Length,
-            statisticsOffset, statisticsLength);
+            statisticsOffset, statisticsLength, directoryOffset, directory?.Length ?? 0);
         if (postscript.Length > VortexLimits.MaxPostscriptSize)
         {
             throw new InvalidOperationException(
@@ -790,6 +830,56 @@ public sealed class VortexFileWriter : IAsyncDisposable
         await _sink.WriteAsync(eof, cancellationToken).ConfigureAwait(false);
 
         await _sink.FlushAsync(cancellationToken).ConfigureAwait(false);
+
+        _reportBytes = new WriteBytes(
+            Data: dataEnd,
+            ZoneMaps: zoneMapsEnd - indexStart,
+            Statistics: statisticsLength,
+            Indexes: (indexStart - dataEnd) + (directory?.Length ?? 0),
+            Footer: _sink.Position - dtypeOffset);
+        return new WriteReport(this);
+    }
+
+    // ------------------------------------------------------------------------------------ report
+    //
+    // What `WriteReport` reads. Only the column list is built, and only on the first read; the rest
+    // is state the writer held anyway.
+
+    internal int ReportBlockRows => _blockRows;
+
+    internal IReadOnlyList<long> ReportChunkRows => _chunkRows;
+
+    internal WriteBytes ReportBytes => _reportBytes;
+
+    internal IReadOnlyList<IndexWriteReport> ReportIndexes =>
+        _indexes?.Reports ?? (IReadOnlyList<IndexWriteReport>)Array.Empty<IndexWriteReport>();
+
+    internal ColumnWriteReport[] ReportColumns()
+    {
+        if (_reportColumns is { } built)
+        {
+            return built;
+        }
+
+        ColumnWriteReport[] reports = new ColumnWriteReport[_fieldCount];
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            ColumnWriter column = _columns[field];
+            string[] encodings = new string[_chunkRows.Count];
+            int block = 0;
+            for (int chunk = 0; chunk < _chunkRows.Count; chunk++)
+            {
+                encodings[chunk] = column.SchemeAt(block)?.ToString() ?? string.Empty;
+                block += ChunkBlocks(_chunkRows[chunk], _blockRows);
+            }
+
+            reports[field] = new ColumnWriteReport(
+                _isTabular ? _schema.GetFieldName(field) : string.Empty,
+                encodings, column.PlansPriced, column.PlansHeld);
+        }
+
+        _reportColumns = reports;
+        return reports;
     }
 
     /// <summary>Completes the file if it is not complete, then releases the sink.</summary>
@@ -952,7 +1042,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
         int padding = (int)(aligned - position);
         if (padding > 0)
         {
-            await _sink.WriteAsync(_padding.AsMemory(0, padding), cancellationToken).ConfigureAwait(false);
+            await _sink.WriteAsync(Padding.AsMemory(0, padding), cancellationToken).ConfigureAwait(false);
         }
 
         await _sink.WriteAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
@@ -1062,9 +1152,20 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
     private byte[] BuildPostscript(
         long dtypeOffset, int dtypeLength, long layoutOffset, int layoutLength,
-        long footerOffset, int footerLength, long statisticsOffset, int statisticsLength)
+        long footerOffset, int footerLength, long statisticsOffset, int statisticsLength,
+        long directoryOffset, int directoryLength)
     {
         using FlatBufferBuilder builder = new FlatBufferBuilder();
+
+        // The metadata vector's entries must exist before the postscript table that lists them.
+        int[] metadata = [];
+        if (directoryLength > 0)
+        {
+            int segment = PostscriptWriter.WriteSegment(
+                builder, new SegmentSpec((ulong)directoryOffset, (uint)directoryLength, 0, 0, 0),
+                CompressionScheme.None);
+            metadata = [PostscriptWriter.WriteMetadata(builder, IndexDirectory.MetadataKeyUtf8, segment)];
+        }
 
         int dtype = PostscriptWriter.WriteSegment(
             builder, new SegmentSpec((ulong)dtypeOffset, (uint)dtypeLength, 0, 0, 0),
@@ -1081,7 +1182,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
                 builder, new SegmentSpec((ulong)statisticsOffset, (uint)statisticsLength, 0, 0, 0),
                 CompressionScheme.None);
 
-        int table = PostscriptWriter.Write(builder, dtype, layout, statistics, footer, []);
+        int table = PostscriptWriter.Write(builder, dtype, layout, statistics, footer, metadata);
         return builder.FinishToArray(table);
     }
 

@@ -14,6 +14,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Types;
 
@@ -346,6 +347,25 @@ internal sealed class ColumnWriter
     /// <summary>The memory of the last chunk written, or none for the first.</summary>
     internal PlanMemory? Memory { get; private set; }
 
+    private int _plansPriced;
+    private int _plansHeld;
+
+    /// <summary>
+    /// What the chunk covering <paramref name="block"/> was written as, or
+    /// <see langword="null"/> when that block's chunk is not out (or never reached this node).
+    /// </summary>
+    /// <param name="block">The block, counted from row 0 of the file.</param>
+    internal ColumnScheme? SchemeAt(int block) =>
+        (uint)block < (uint)_closed.Count && _closed[block].WrittenScheme != 0
+            ? (ColumnScheme)(_closed[block].WrittenScheme - 1)
+            : null;
+
+    /// <summary>Chunks that had a remembered plan to consult.</summary>
+    internal int PlansPriced => _plansPriced;
+
+    /// <summary>Of those, the ones whose remembered plan held and was kept.</summary>
+    internal int PlansHeld => _plansHeld;
+
     private long _widthsServed;
 
     /// <summary>Records that a chunk's bit-packing was priced from ingested widths, not a walk.</summary>
@@ -385,12 +405,34 @@ internal sealed class ColumnWriter
     /// </remarks>
     /// <param name="plan">The plan the encoder just wrote.</param>
     /// <param name="actualBytes">The buffer bytes it produced, this column's subtree included.</param>
-    internal void Remember(in ColumnPlan plan, long actualBytes)
+    /// <param name="firstBlock">The chunk's first block.</param>
+    /// <param name="blockCount">How many blocks the chunk covers.</param>
+    internal void Remember(in ColumnPlan plan, long actualBytes, int firstBlock, int blockCount)
     {
         // A progression predicts zero buffer bytes and is priced all the same; every other priced
         // plan predicts more than zero. What predicts zero without being a progression was never
         // priced -- a child a scheme invented -- and leaves no memory.
         bool priced = plan.PredictedBytes > 0 || plan.Scheme == ColumnScheme.Sequence;
+
+        // THE REPORT'S LEDGER, and the dictionary probe's (docs/10-indexes.md §5.3): what each
+        // block's chunk became, in a byte the closed block already had spare. The hit is counted
+        // against the memory the chunk was CHOSEN under, which is the one being replaced.
+        Span<BlockStats> closed = CollectionsMarshal.AsSpan(_closed);
+        byte written = (byte)(plan.Scheme + 1);
+        for (int block = Math.Max(firstBlock, 0); block < firstBlock + blockCount && block < closed.Length; block++)
+        {
+            closed[block].WrittenScheme = written;
+        }
+
+        if (Memory is { } previous)
+        {
+            _plansPriced++;
+            if (previous.WithinTolerance && previous.Scheme == plan.Scheme)
+            {
+                _plansHeld++;
+            }
+        }
+
         Memory = priced ? new PlanMemory(plan.Scheme, plan.PredictedBytes, actualBytes) : null;
 
         // THE TABLE'S CONSUMER FOR THE NEXT CHUNK, decided here and nowhere else. The end-of-refactor

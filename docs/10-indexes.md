@@ -136,6 +136,7 @@ message Run {
   uint32  block_count = 2;            // a generation: this run's filters or keys cover these blocks
   repeated Segment payload = 3;       // file regions, in kind-defined order
   repeated bytes payload_dtype = 4;   // serialized DType (dtype.fbs) of each payload array
+  uint64  entry_count = 5;            // entries of a locating run; 0 for a skipping kind (12 §14)
 }
 message Segment { uint64 offset = 1; uint32 length = 2; uint32 alignment_exponent = 3; }
 ```
@@ -150,6 +151,19 @@ Rules a reader enforces before using an entry (the three-class hint policy of
 - runs are disjoint and in order, and every segment lies inside the file and before the footer,
   or the **entry** is ignored — never the file. An index can only ever cost pruning, never
   correctness. A block that no run covers is simply live.
+
+**As delivered (step 12a).** `Indexes/IndexDirectory` is this message, with the policy of §5.5
+serialized as a nested message of our own (one `ColumnPolicy` per override, sorted by path so that
+one policy is one byte string). The reader rules are `IndexDirectory.TryParse`, which never
+throws: a malformed or stale directory returns `false` with its reason, which
+`VortexFile.IndexDirectoryRefusal` keeps for tooling. Beyond the list above it also drops an entry
+whose run is empty, whose payload is missing for a kind that needs one, whose `payload_dtype` count
+disagrees with its segments, or whose segment alignment exceeds 2¹⁶; and the bound "before the
+footer" is the directory's own offset, since runs are written before the zone maps and the
+directory after the statistics (§7.2). `VortexFile.ReadIndexDirectoryAsync` reads it once, lazily.
+A directory is written whenever the policy asked for anything, even if every builder was
+abandoned: it carries the policy an append will reuse, and "asked, nothing survived" must not
+read as "never asked".
 
 ### 4.2 Runs of ordinary arrays
 
@@ -360,6 +374,19 @@ unset — serialized into the directory so that `VortexFileWriter.Append(path)` 
 being told. `WriteProfile.Fastest` disables everything. `CompleteAsync` returns the `WriteReport`
 of [11-write-strategy.md](11-write-strategy.md) §7.3, which names every index built and every
 one abandoned with its reason.
+
+**As delivered (step 12a).** `Indexes/IndexPolicy` (`None`, `Auto`, `Bloom(...)`,
+`NgramBloom(...)`, `Postings`, `SortedRuns`) and `WritePolicy` (a default and overrides by column
+path, immutable, `For(path, policy)`); `VortexWriteOptions.Indexes`, `Profile` and
+`IndexBudgetPerMille` — a share of the data bytes rather than a byte count, because the right
+ceiling for a 10 MiB file and a 10 GiB one is not the same number. **The default is
+`WritePolicy.None` until step 12's measurement of `Auto` lands**, as §5.5 requires; until then
+every file written with the defaults is byte for byte what it was. `CompleteAsync` returns a
+`WriteReport` (bytes by kind, summing to the file's length; the chunk sizes; per column the scheme
+of every chunk and the plan-memory hit rate; per index built or abandoned with its reason). A kind
+this writer does not build yet is reported abandoned with that reason, never silently skipped.
+The first kind is `dict.probe` (§5.3), recorded under `Auto` as one payload-free run per maximal
+range of consecutive dictionary-encoded chunks.
 
 ### 7.2 Build
 

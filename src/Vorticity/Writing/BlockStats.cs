@@ -214,6 +214,18 @@ internal struct BlockStats
     internal BoundDomain Domain;
 
     /// <summary>
+    /// The scheme the chunk covering this block was written as, plus one; <c>0</c> until the chunk
+    /// is out. Not folded by <see cref="Merge"/>: it describes the block's chunk, not its rows.
+    /// </summary>
+    /// <remarks>
+    /// THE REPORT'S LEDGER, AND IT COSTS NO BYTE. The struct ends in thirteen one-byte fields after
+    /// its last word, so it is padded to 96 bytes with three to spare; this takes one of them.
+    /// A per-column list of chunks -- the first form -- put a list and its array on every write,
+    /// which the write allocation ceilings refused by 56 to 800 bytes a file.
+    /// </remarks>
+    internal byte WrittenScheme;
+
+    /// <summary>
     /// The <c>is_sorted</c> statistic: non-decreasing with the nulls first, or null when the
     /// order was not tracked.
     /// </summary>

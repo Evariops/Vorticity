@@ -10,14 +10,59 @@
 // version N onward can read this".
 using System;
 using Vorticity.Editions;
+using Vorticity.Indexes;
 
 namespace Vorticity.Writing;
+
+/// <summary>How much the writer does beyond the data (docs/11-write-strategy.md §7.1).</summary>
+public enum WriteProfile
+{
+    /// <summary>Everything the options ask for.</summary>
+    Default = 0,
+
+    /// <summary>
+    /// No index, whatever <see cref="VortexWriteOptions.Indexes"/> says: the file is the data, its
+    /// zone map and its statistics, byte for byte what this writer produced before indexes existed
+    /// (docs/10-indexes.md §7.3).
+    /// </summary>
+    Fastest = 1,
+}
 
 /// <summary>Policy for one written file.</summary>
 public sealed class VortexWriteOptions
 {
     /// <summary>The defaults: compression on.</summary>
     public static VortexWriteOptions Default { get; } = new VortexWriteOptions();
+
+    /// <summary>
+    /// The index policy: per column path an <see cref="IndexPolicy"/>. Default
+    /// <see cref="WritePolicy.None"/>, for now.
+    /// </summary>
+    /// <remarks>
+    /// THE TARGET DEFAULT IS <see cref="WritePolicy.Auto"/> (docs/10-indexes.md §5.5, docs/11 §7.1),
+    /// and it is not the default YET because the spec itself says its write cost is measured before
+    /// it becomes one. Until that measurement lands, a file carries an index only when the caller
+    /// asks, and every file written with the defaults is byte for byte what it was.
+    /// <para>
+    /// The policy is serialized into the index directory, so an append reuses it without being
+    /// told.
+    /// </para>
+    /// </remarks>
+    public WritePolicy Indexes { get; init; } = WritePolicy.None;
+
+    /// <summary>How much the writer does beyond the data. Default <see cref="WriteProfile.Default"/>.</summary>
+    public WriteProfile Profile { get; init; } = WriteProfile.Default;
+
+    /// <summary>
+    /// The bytes the file's indexes may occupy together, as a share of the data bytes, in parts per
+    /// thousand. Default 100 (10 %).
+    /// </summary>
+    /// <remarks>
+    /// A builder that would take the file's indexes past this is abandoned whole, with the reason
+    /// in the <see cref="WriteReport"/> (docs/10-indexes.md §7.2). A share rather than a byte count,
+    /// because the right ceiling for a 10 MiB file and for a 10 GiB one is not the same number.
+    /// </remarks>
+    public int IndexBudgetPerMille { get; init; } = 100;
 
     /// <summary>
     /// Whether the writer may pick an encoding per column chunk. Default <see langword="true"/>.

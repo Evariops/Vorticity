@@ -41,7 +41,7 @@ namespace Vorticity.File;
 /// and expected (docs/09-contracts.md §1). The file holds the tail buffer for its whole life
 /// because <see cref="SegmentSpecs"/> points into it.
 /// </remarks>
-public sealed class VortexFile : IAsyncDisposable
+public sealed partial class VortexFile : IAsyncDisposable
 {
     private readonly ISegmentSource _source;
     private readonly bool _ownsSource;

@@ -96,7 +96,7 @@ internal readonly struct ChunkStats
     /// <param name="plan">The plan the encoder just wrote.</param>
     /// <param name="actualBytes">The buffer bytes it produced.</param>
     internal void Remember(in ColumnPlan plan, long actualBytes) =>
-        _column?.Remember(in plan, actualBytes);
+        _column?.Remember(in plan, actualBytes, _firstBlock, _blockCount);
 
     /// <summary>
     /// The cursor for field <paramref name="index"/>, which covers the same blocks because a

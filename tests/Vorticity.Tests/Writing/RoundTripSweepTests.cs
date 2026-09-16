@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.File;
+using Vorticity.Indexes;
 using Vorticity.Scan;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
@@ -87,6 +88,7 @@ public sealed class RoundTripSweepTests
         Directory.CreateDirectory(root!);
 
         int written = 0;
+        int indexed = 0;
         foreach (CorpusEntry entry in CorpusManifest.InScope())
         {
             // NOT WRITTEN FOR THE CROSS-CHECK, and the reason is the verifier's, not ours. Our
@@ -105,20 +107,33 @@ public sealed class RoundTripSweepTests
 
             await using VortexFile source = await VortexFile.OpenAsync(
                 entry.Path, OpenOptionsFor(entry), CancellationToken.None);
-            await using VortexFileWriter writer = VortexFileWriter.Create(destination, source.Schema);
+            // WITH EVERY INDEX `Auto` BUILDS, so that the whole corpus crosses the rule of
+            // docs/10-indexes.md §3.1: a file with an index opens and scans in a strict Rust 0.86.1
+            // reader, without error and without configuration. The directory and its runs lie
+            // outside the layout, so the data the verifier compares is the default write's.
+            await using VortexFileWriter writer = VortexFileWriter.Create(
+                destination, source.Schema, new VortexWriteOptions { Indexes = WritePolicy.Auto });
             await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {
                 await writer.WriteAsync(batch, CancellationToken.None);
             }
 
-            await writer.CompleteAsync(CancellationToken.None);
+            // A struct with no field has no column to index, and so no directory.
+            WriteReport report = await writer.CompleteAsync(CancellationToken.None);
+            if (report.Indexes.Count > 0 || report.Columns.Count == 0)
+            {
+                indexed++;
+            }
+
             written++;
         }
 
         Console.Out.Write(
-            "WROTE " + written.ToString(CultureInfo.InvariantCulture) + " files to " + root + "\n");
+            "WROTE " + written.ToString(CultureInfo.InvariantCulture) + " files to " + root +
+            ", " + indexed.ToString(CultureInfo.InvariantCulture) + " of them with an index directory\n");
         Assert.True(written > 700);
+        Assert.Equal(written, indexed);
     }
 
     /// <summary>Writes one corpus file out and reads it back, comparing every value.</summary>
