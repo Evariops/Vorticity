@@ -239,6 +239,21 @@ source, and `Row` throws `InvalidOperationException` there.
 `Explain` has it without reading a payload) and `RowCount − null_count` for a `SortedColumn` whose
 null count is known; null when it is not known without a walk.
 
+**As delivered (step 11b, the `SortedColumn` source).** The entries are the rows
+`[null_count, RowCount)` — contiguous, because a sorted nullable column keeps its nulls at the
+front — so the cursor is written against entry INDICES and the merge is degenerate: a step is an
+addition, `rank` is `lower_bound`, `select` is the index itself, and `KeyCount` is the difference
+of the two bounds. The heap of run positions this document describes is what `SortedRuns` will
+need; the surface does not move when it slides underneath. A direction flip costs nothing on one
+contiguous run, so §4.2's re-seek charge stays owed by the source that will owe it. A seek walks
+the zone bounds in memory for the first zone that may hold the key, decodes that one zone and
+bisects inside it; an `Inexact` bound only widens, so a zone it over-includes yields nothing and
+the search moves on, which costs a decode and never an answer. The two orders of §4.4 are kept
+apart by making the comparator a property of the SOURCE: `KeyCursor.Compare` is the total order,
+and a sorted column is walked in the IEEE order its `is_sorted` was computed in, where `−0.0` and
+`+0.0` are one key and no NaN can occur, a float column holding one not being `is_sorted` at all.
+`Distinct()` is honoured by `NextKeyAsync` rather than by a source of its own until step 15.
+
 ### 4.4 Key order per dtype
 
 A cursor is an ordinal structure and needs a **total** order; a filter is a predicate structure and
