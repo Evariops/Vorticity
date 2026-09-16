@@ -297,11 +297,52 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
 public sealed class WritePolicy
 {
     private readonly Dictionary<string, IndexPolicy> _columns;
+    private readonly List<CompositeKeyPolicy> _keys;
 
-    private WritePolicy(IndexPolicy fallback, Dictionary<string, IndexPolicy> columns)
+    private WritePolicy(IndexPolicy fallback, Dictionary<string, IndexPolicy> columns, List<CompositeKeyPolicy>? keys = null)
     {
         Default = fallback;
         _columns = columns;
+        _keys = keys ?? [];
+    }
+
+    /// <summary>The composite keys, in the order they were added (docs/10-indexes.md §6.5).</summary>
+    public IReadOnlyList<CompositeKeyPolicy> Keys => _keys;
+
+    /// <summary>
+    /// The same policy with a locating index over the tuple of <paramref name="columnPaths"/>,
+    /// keyed by its row encoding (docs/10-indexes.md §6.5, docs/12-index-reads.md §4.6).
+    /// </summary>
+    /// <param name="columnPaths">Two or more top-level columns, in key order.</param>
+    /// <param name="policy"><see cref="IndexPolicy.SortedRuns"/>, with its options.</param>
+    /// <returns>A new policy.</returns>
+    /// <remarks>
+    /// The writer needs an encoder for it, <c>VortexWriteOptions.KeyEncoder</c>, which the
+    /// <c>Vorticity.RowEncoding</c> package provides; without one the index is abandoned and the
+    /// report says so. A row whose tuple holds a null is not an entry.
+    /// </remarks>
+    /// <exception cref="ArgumentException">Fewer than two paths, an empty one, or a policy that is not sorted runs.</exception>
+    public WritePolicy ForKey(IReadOnlyList<string> columnPaths, IndexPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(columnPaths);
+        if (columnPaths.Count < 2)
+        {
+            throw new ArgumentException("A composite key has at least two columns; use For for one.", nameof(columnPaths));
+        }
+
+        foreach (string path in columnPaths)
+        {
+            ArgumentException.ThrowIfNullOrEmpty(path, nameof(columnPaths));
+        }
+
+        if (policy.Kind != IndexPolicyKind.SortedRuns)
+        {
+            throw new ArgumentException(
+                "A composite key is a sorted-runs index (docs/10-indexes.md §6.5).", nameof(policy));
+        }
+
+        List<CompositeKeyPolicy> keys = [.. _keys, new CompositeKeyPolicy([.. columnPaths], policy)];
+        return new WritePolicy(Default, new Dictionary<string, IndexPolicy>(_columns, StringComparer.Ordinal), keys);
     }
 
     /// <summary>Every column indexed by <see cref="IndexPolicy.Auto"/>.</summary>
@@ -322,7 +363,7 @@ public sealed class WritePolicy
     /// <param name="fallback">What a column with no override gets.</param>
     /// <returns>A new policy.</returns>
     public WritePolicy WithDefault(IndexPolicy fallback) =>
-        new WritePolicy(fallback, new Dictionary<string, IndexPolicy>(_columns, StringComparer.Ordinal));
+        new WritePolicy(fallback, new Dictionary<string, IndexPolicy>(_columns, StringComparer.Ordinal), [.. _keys]);
 
     /// <summary>The same policy with one column overridden.</summary>
     /// <param name="columnPath">The column, as the scan spells it: <c>"a"</c> or <c>"a.b"</c>.</param>
@@ -337,7 +378,7 @@ public sealed class WritePolicy
             {
                 [columnPath] = policy,
             };
-        return new WritePolicy(Default, columns);
+        return new WritePolicy(Default, columns, [.. _keys]);
     }
 
     /// <summary>The policy that applies to one column.</summary>
@@ -351,8 +392,14 @@ public sealed class WritePolicy
     /// <summary>Rebuilds a policy read from a directory.</summary>
     /// <param name="fallback">The stored default.</param>
     /// <param name="columns">The stored overrides.</param>
+    /// <param name="keys">The stored composite keys.</param>
     /// <returns>The policy.</returns>
     internal static WritePolicy FromStored(
-        IndexPolicy fallback, Dictionary<string, IndexPolicy> columns) =>
-        new WritePolicy(fallback, columns);
+        IndexPolicy fallback, Dictionary<string, IndexPolicy> columns, List<CompositeKeyPolicy>? keys = null) =>
+        new WritePolicy(fallback, columns, keys);
 }
+
+/// <summary>A locating index over the tuple of several columns.</summary>
+/// <param name="Paths">The columns, in key order.</param>
+/// <param name="Policy">The index: sorted runs.</param>
+public sealed record CompositeKeyPolicy(IReadOnlyList<string> Paths, IndexPolicy Policy);

@@ -58,7 +58,14 @@ internal static class KeyRunOptions
     /// <summary>Serializes an entry's options.</summary>
     /// <param name="segmentEntries">The segment size the runs were cut at.</param>
     /// <param name="caseInsensitive">For trigram postings, whether trigrams were ASCII-lower-cased.</param>
-    internal static byte[] Entry(int segmentEntries, bool caseInsensitive = false)
+    /// <param name="keyColumns">
+    /// For a composite key (10 §6.5), each key column's field indices from the root, in key order;
+    /// the entry's own <c>column_path</c> is then empty, which a reader that does not know this field
+    /// resolves to the root struct and ignores.
+    /// </param>
+    /// <param name="keyFormat">For a composite key, what its bytes follow (<see cref="IKeyEncoder.Format"/>).</param>
+    internal static byte[] Entry(
+        int segmentEntries, bool caseInsensitive = false, IReadOnlyList<uint[]>? keyColumns = null, string? keyFormat = null)
     {
         ProtoWriter writer = new ProtoWriter();
         try
@@ -66,6 +73,20 @@ internal static class KeyRunOptions
             writer.WriteUInt32Always(1, Version);
             writer.WriteUInt32Always(2, (uint)segmentEntries);
             writer.WriteBool(3, caseInsensitive);
+            foreach (uint[] path in keyColumns ?? [])
+            {
+                using ProtoWriter.MessageScope column = writer.BeginMessage(4);
+                foreach (uint index in path)
+                {
+                    writer.WriteUInt32Always(1, index);
+                }
+            }
+
+            if (keyFormat is not null)
+            {
+                writer.WriteStringAlways(5, keyFormat);
+            }
+
             return writer.WrittenSpan.ToArray();
         }
         finally
@@ -79,17 +100,41 @@ internal static class KeyRunOptions
     /// <param name="segmentEntries">The segment size.</param>
     /// <returns>Whether they are usable.</returns>
     internal static bool TryParseEntry(ReadOnlySpan<byte> bytes, out int segmentEntries) =>
-        TryParseEntry(bytes, out segmentEntries, out _);
+        TryParseEntry(bytes, out segmentEntries, out _, out _);
 
     /// <summary>Parses an entry's options.</summary>
     /// <param name="bytes">The options.</param>
     /// <param name="segmentEntries">The segment size.</param>
     /// <param name="caseInsensitive">Whether trigrams were folded.</param>
     /// <returns>Whether they are usable.</returns>
-    internal static bool TryParseEntry(ReadOnlySpan<byte> bytes, out int segmentEntries, out bool caseInsensitive)
+    internal static bool TryParseEntry(ReadOnlySpan<byte> bytes, out int segmentEntries, out bool caseInsensitive) =>
+        TryParseEntry(bytes, out segmentEntries, out caseInsensitive, out _);
+
+    /// <summary>Parses an entry's options.</summary>
+    /// <param name="bytes">The options.</param>
+    /// <param name="segmentEntries">The segment size.</param>
+    /// <param name="caseInsensitive">Whether trigrams were folded.</param>
+    /// <param name="keyColumns">A composite key's columns, empty for a single column.</param>
+    /// <returns>Whether they are usable.</returns>
+    internal static bool TryParseEntry(
+        ReadOnlySpan<byte> bytes, out int segmentEntries, out bool caseInsensitive, out List<uint[]> keyColumns) =>
+        TryParseEntry(bytes, out segmentEntries, out caseInsensitive, out keyColumns, out _);
+
+    /// <summary>Parses an entry's options, a composite key's format included.</summary>
+    /// <param name="bytes">The options.</param>
+    /// <param name="segmentEntries">The segment size.</param>
+    /// <param name="caseInsensitive">Whether trigrams were folded.</param>
+    /// <param name="keyColumns">A composite key's columns, empty for a single column.</param>
+    /// <param name="keyFormat">What a composite key's bytes follow, or null.</param>
+    /// <returns>Whether they are usable.</returns>
+    internal static bool TryParseEntry(
+        ReadOnlySpan<byte> bytes, out int segmentEntries, out bool caseInsensitive, out List<uint[]> keyColumns,
+        out string? keyFormat)
     {
         segmentEntries = 0;
         caseInsensitive = false;
+        keyColumns = [];
+        keyFormat = null;
         try
         {
             ProtoReader reader = new ProtoReader(bytes);
@@ -107,6 +152,12 @@ internal static class KeyRunOptions
                         break;
                     case 3 when wire == ProtoWireType.Varint:
                         caseInsensitive = reader.ReadBool();
+                        break;
+                    case 4 when wire == ProtoWireType.LengthDelimited:
+                        keyColumns.Add(ReadPath(reader.ReadMessage()));
+                        break;
+                    case 5 when wire == ProtoWireType.LengthDelimited:
+                        keyFormat = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
                         break;
                     default:
                         reader.SkipField(wire);
@@ -126,6 +177,25 @@ internal static class KeyRunOptions
         {
             return false;
         }
+    }
+
+    /// <summary>One key column's field indices.</summary>
+    private static uint[] ReadPath(ProtoReader reader)
+    {
+        List<uint> path = [];
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            if (field == 1 && wire == ProtoWireType.Varint)
+            {
+                path.Add(reader.ReadVarint32());
+            }
+            else
+            {
+                reader.SkipField(wire);
+            }
+        }
+
+        return [.. path];
     }
 
     /// <summary>Serializes a run's segment table.</summary>

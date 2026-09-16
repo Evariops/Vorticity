@@ -26,6 +26,7 @@ public sealed class KeyCursorBuilder
 {
     private readonly VortexFile _file;
     private readonly string _path;
+    private readonly string[]? _composite;
     private bool _distinct;
     private KeySourceKind _forced;
 
@@ -35,6 +36,25 @@ public sealed class KeyCursorBuilder
         ArgumentNullException.ThrowIfNull(path);
         _file = file;
         _path = path;
+    }
+
+    internal KeyCursorBuilder(VortexFile file, string[] paths)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        ArgumentNullException.ThrowIfNull(paths);
+        if (paths.Length == 0)
+        {
+            throw new ArgumentException("A key has at least one column.", nameof(paths));
+        }
+
+        foreach (string path in paths)
+        {
+            ArgumentNullException.ThrowIfNull(path, nameof(paths));
+        }
+
+        _file = file;
+        _path = paths.Length == 1 ? paths[0] : "(" + string.Join(", ", paths) + ")";
+        _composite = paths.Length == 1 ? null : [.. paths];
     }
 
     /// <summary>
@@ -125,8 +145,10 @@ public sealed class KeyCursorBuilder
                 $"'{_path}' has no key source ({string.Join("; ", reasons)}). A cursor over an " +
                 "unindexed column would have to hold the column to sort it, which this library " +
                 "refuses. Write the file with " +
-                (_distinct ? "IndexPolicy.Postings" : "IndexPolicy.SortedRuns") +
-                " for that column, or add the index after the fact (docs/10-indexes.md §8).");
+                (_composite is not null
+                    ? "WritePolicy.ForKey over these columns and a VortexWriteOptions.KeyEncoder"
+                    : _distinct ? "IndexPolicy.Postings for that column" : "IndexPolicy.SortedRuns for that column") +
+                ", or add the index after the fact (docs/10-indexes.md §8).");
         }
 
         return new KeyCursor(choice.Source, _distinct);
@@ -214,6 +236,14 @@ public sealed class KeyCursorBuilder
                 continue;
             }
 
+            if (_composite is not null && candidate != KeySourceKind.SortedRuns)
+            {
+                rejected.Add(new KeySourceRejection(
+                    candidate,
+                    "a composite key is served only by the sorted runs of its row encoding (docs/12-index-reads.md §4.6)"));
+                continue;
+            }
+
             if (!_distinct && candidate is KeySourceKind.Postings or KeySourceKind.Dictionary)
             {
                 rejected.Add(new KeySourceRejection(
@@ -259,8 +289,9 @@ public sealed class KeyCursorBuilder
             return column is null ? (null, reason) : (new SortedColumnWalker(column), null);
         }
 
-        (SortedRunsSource? runs, string? why) =
-            await SortedRunsSource.OpenAsync(_file, _path, candidate, cancellationToken).ConfigureAwait(false);
+        (SortedRunsSource? runs, string? why) = _composite is not null
+            ? await SortedRunsSource.OpenCompositeAsync(_file, _composite, cancellationToken).ConfigureAwait(false)
+            : await SortedRunsSource.OpenAsync(_file, _path, candidate, cancellationToken).ConfigureAwait(false);
         return (runs, why);
     }
 
@@ -281,4 +312,22 @@ public static class VortexFileKeyExtensions
     /// <exception cref="ArgumentNullException"><paramref name="file"/> or <paramref name="path"/> is null.</exception>
     public static KeyCursorBuilder Keys(this VortexFile file, string path) =>
         new KeyCursorBuilder(file, path);
+
+    /// <summary>
+    /// Starts building a cursor over a composite key: the tuple of <paramref name="paths"/>, in key
+    /// order (docs/12-index-reads.md §4.6).
+    /// </summary>
+    /// <param name="file">An open file.</param>
+    /// <param name="paths">The key's top-level columns, in order; one path is <see cref="Keys(VortexFile, string)"/>.</param>
+    /// <returns>A fresh builder.</returns>
+    /// <remarks>
+    /// The keys are the row encoding of the tuple, so <see cref="KeyCursor.KeyKind"/> is bytes and
+    /// the order is bytewise; a seek key comes from <c>Vorticity.RowEncoding.RowEncoder.EncodeKey</c>,
+    /// and the encoding of the leading columns alone is a prefix of every key that starts with them.
+    /// Only a sorted-runs index written with <c>WritePolicy.ForKey</c> serves it.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="file"/>, <paramref name="paths"/> or a path is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="paths"/> is empty.</exception>
+    public static KeyCursorBuilder Keys(this VortexFile file, params string[] paths) =>
+        new KeyCursorBuilder(file, paths);
 }

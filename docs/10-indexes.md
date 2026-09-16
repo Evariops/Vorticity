@@ -461,6 +461,21 @@ column: no new comparator, no new key format, and prefix queries on `a` alone ar
 encoded keys. `column_path` then lists several paths, in key order. The price is the key size the
 row encoding produces, which the spec quantifies per type.
 
+**As delivered (step 16, amending the above).** `column_path` is one list of field indices, so
+`(a, b)` and `a.b` could not be told apart in it. A composite entry therefore keeps the kind
+`vorticity.sorted.runs.v1`, leaves `column_path` **empty**, and carries its key columns in its
+options: field 4, one message per column with its field indices (top-level columns only), and
+field 5, the encoder's `Format` (`vortex-row 0.86.1 asc-nf`) — the row format is experimental, so
+the bytes say what they follow. A reader that does not know these fields resolves the empty path to
+the root struct and ignores the entry, which is the hint rule of §4.1. The encoder lives where
+12 §13 proposed: `VortexWriteOptions.KeyEncoder`, an `IKeyEncoder` the core names and the
+`Vorticity.RowEncoding` package implements (`RowKeyEncoder`); the policy is
+`WritePolicy.ForKey(paths, IndexPolicy.SortedRuns)`, serialized in the directory's policy as field 3
+(a column policy plus its repeated key paths, field 10). A key asked for without an encoder is
+abandoned with that reason. The builder is the sorted-runs builder over binary keys: each fed range
+of the key columns is sliced (records, not bytes), encoded together, and a row whose tuple holds a
+null is not an entry, as a null is in no index.
+
 ### 6.6 Reading with a locating index
 
 The scan contract is [11-write-strategy.md](11-write-strategy.md) §6: every structure refines a

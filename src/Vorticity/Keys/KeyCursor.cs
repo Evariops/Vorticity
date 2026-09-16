@@ -45,6 +45,13 @@ public sealed class KeyCursor : IAsyncDisposable
     /// </summary>
     public bool IsDistinct => _distinct;
 
+    /// <summary>
+    /// For a composite key, what its bytes follow -- the writer's <c>IKeyEncoder.Format</c>, e.g.
+    /// <c>vortex-row 0.86.1 asc-nf,asc-nf</c>; a seek key is comparable only when built the same
+    /// way. Null for a single column.
+    /// </summary>
+    public string? KeyFormat => _source.KeyFormat;
+
     /// <summary>The column's comparison domain: what a seek key must be.</summary>
     public FilterLiteralKind KeyKind => _source.KeyKind;
 

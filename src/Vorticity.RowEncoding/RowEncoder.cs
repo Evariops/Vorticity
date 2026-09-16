@@ -48,7 +48,7 @@ namespace Vorticity.RowEncoding;
 /// payloads produce different keys.
 /// </para>
 /// </remarks>
-public static class RowEncoder
+public static partial class RowEncoder
 {
     /// <summary>
     /// The Vortex release whose <c>vortex-row</c> byte layout this encoder reproduces. The pair

@@ -226,6 +226,34 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         }
     }
 
+    /// <summary>
+    /// Feeds encoded keys, one per row, for a composite key (10 §6.5): the rows
+    /// <paramref name="include"/> leaves out -- a null in the tuple -- are counted and not entries.
+    /// </summary>
+    /// <param name="keys">The rows' keys.</param>
+    /// <param name="include">Per row, whether it is an entry.</param>
+    internal void AccumulateEncoded(IEncodedKeys keys, ReadOnlySpan<bool> include)
+    {
+        long first = _row;
+        _row += include.Length;
+        if (Abandoned is not null)
+        {
+            return;
+        }
+
+        for (int row = 0; row < include.Length; row++)
+        {
+            if (include[row])
+            {
+                Note(keys.Row(row), first + row);
+            }
+        }
+    }
+
+    /// <summary>Counts rows that feed nothing, so the next rows keep their numbers.</summary>
+    /// <param name="count">How many.</param>
+    internal void Skip(int count) => _row += count;
+
     private void Note(ReadOnlySpan<byte> key, long row) => NoteId(_table.Intern(key), row);
 
     private void NoteId(int id, long row)

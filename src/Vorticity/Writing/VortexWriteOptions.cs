@@ -67,6 +67,17 @@ public sealed class VortexWriteOptions
     public int IndexBudgetPerMille { get; init; } = 100;
 
     /// <summary>
+    /// The encoder of the composite keys <see cref="WritePolicy.ForKey"/> asks for; null by default.
+    /// </summary>
+    /// <remarks>
+    /// The core does not row-encode (docs/09-contracts.md §3): the <c>Vorticity.RowEncoding</c>
+    /// package's <c>RowKeyEncoder</c> is the encoder, and a composite key asked for without one is
+    /// abandoned, with that reason in the <see cref="WriteReport"/>. Its bytes are the index's keys,
+    /// so a reader seeks with the same package's <c>RowEncoder.EncodeKey</c>.
+    /// </remarks>
+    public IKeyEncoder? KeyEncoder { get; init; }
+
+    /// <summary>
     /// Whether the writer may pick an encoding per column chunk. Default <see langword="true"/>.
     /// </summary>
     /// <remarks>

@@ -28,6 +28,9 @@ internal abstract class KeySource : IAsyncDisposable
     /// <summary>Whether an entry can say which file row it came from (docs/12-index-reads.md §4.3).</summary>
     internal virtual bool HasRows => true;
 
+    /// <summary>What a composite key's bytes follow; null for a single column.</summary>
+    internal virtual string? KeyFormat => null;
+
     /// <summary>Whether the source is positioned on an entry.</summary>
     internal abstract bool IsValid { get; }
 

@@ -56,6 +56,7 @@ internal sealed partial class SortedRunsSource : KeySource
     private readonly Run[] _runs;
     private readonly int[] _heap;
     private readonly KeySourceKind _source;
+    private string? _keyFormat;
     private int _heapSize;
 
     /// <summary>+1 while the heap is a min-heap, -1 while it is a max-heap.</summary>
@@ -89,6 +90,8 @@ internal sealed partial class SortedRunsSource : KeySource
     internal override bool IsValid => _heapSize > 0;
 
     internal override bool HasRows => _source == KeySourceKind.SortedRuns;
+
+    internal override string? KeyFormat => _keyFormat;
 
     /// <summary>Which kind of run this source merges.</summary>
     internal KeySourceKind Kind => _source;
@@ -203,10 +206,79 @@ internal sealed partial class SortedRunsSource : KeySource
         return null;
     }
 
-    private static (SortedRunsSource? Source, string? Reason) TryOpen(
-        VortexFile file, IndexEntry entry, DType dtype, KeySourceKind source)
+    /// <summary>
+    /// Opens the sorted runs of a composite key (docs/12-index-reads.md §4.6): keys that are the
+    /// row encoding of the tuple, bytes ordered bytewise.
+    /// </summary>
+    /// <param name="file">The open file.</param>
+    /// <param name="paths">The key's top-level columns, in key order.</param>
+    /// <param name="cancellationToken">Cancels the directory read.</param>
+    /// <returns>The source, or null with the reason.</returns>
+    internal static async ValueTask<(SortedRunsSource? Source, string? Reason)> OpenCompositeAsync(
+        VortexFile file, IReadOnlyList<string> paths, CancellationToken cancellationToken)
     {
-        if (Shape(dtype, out FilterLiteralKind kind, out KeyLayout layout, out DType storage) is { } shape)
+        if (!file.HasIndexDirectory)
+        {
+            return (null, "the file carries no index directory");
+        }
+
+        IndexDirectory? directory = await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
+        if (directory is null)
+        {
+            return (null, $"the file's index directory was refused: {file.IndexDirectoryRefusal}");
+        }
+
+        DType schema = file.Schema;
+        string? reason = null;
+        foreach (IndexEntry entry in directory.Entries)
+        {
+            if (entry.Kind != IndexKinds.SortedRuns || entry.ColumnPath.Count != 0
+                || !KeyRunOptions.TryParseEntry(entry.Options, out _, out _, out List<uint[]> columns, out string? format)
+                || !Names(schema, columns, paths))
+            {
+                continue;
+            }
+
+            DType binary = new DTypeArena().Binary(Nullability.NonNullable);
+            SortedRunsSource? opened;
+            (opened, reason) = TryOpen(file, entry, binary, KeySourceKind.SortedRuns, composite: true);
+            if (opened is not null)
+            {
+                opened._keyFormat = format;
+                return (opened, null);
+            }
+        }
+
+        return (null, reason ?? $"the index directory has no {IndexKinds.SortedRuns} entry keyed by ({string.Join(", ", paths)})");
+    }
+
+    /// <summary>Whether an entry's key columns are exactly <paramref name="paths"/>, in order.</summary>
+    private static bool Names(DType schema, List<uint[]> columns, IReadOnlyList<string> paths)
+    {
+        if (columns.Count != paths.Count || schema.IsDefault || schema.Kind != DTypeKind.Struct)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < columns.Count; i++)
+        {
+            if (columns[i].Length != 1 || columns[i][0] >= (uint)schema.FieldCount
+                || !string.Equals(schema.GetFieldName((int)columns[i][0]), paths[i], StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static (SortedRunsSource? Source, string? Reason) TryOpen(
+        VortexFile file, IndexEntry entry, DType dtype, KeySourceKind source, bool composite = false)
+    {
+        FilterLiteralKind kind = FilterLiteralKind.Bytes;
+        KeyLayout layout = new KeyLayout(KeyShape.Bytes, 0, default);
+        DType storage = dtype;
+        if (!composite && Shape(dtype, out kind, out layout, out storage) is { } shape)
         {
             return (null, shape);
         }

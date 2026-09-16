@@ -206,7 +206,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
     private VortexFileWriter(
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
-        long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille)
+        long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder)
     {
         _sink = sink;
         _schema = schema;
@@ -238,7 +238,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
         }
 
         _indexes = IndexWriter.Asks(indexes)
-            ? new IndexWriter(indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows)
+            ? new IndexWriter(indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder)
             : null;
     }
 
@@ -300,7 +300,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
         ArgumentOutOfRangeException.ThrowIfNegative(options.IndexBudgetPerMille, nameof(options));
         return new VortexFileWriter(
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
-            options.FileStatistics, indexes, options.IndexBudgetPerMille);
+            options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder);
     }
 
     /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
@@ -521,6 +521,8 @@ public sealed class VortexFileWriter : IAsyncDisposable
         {
             indexes.Accumulate(field, arena, _fieldNodes[field], start, count);
         }
+
+        indexes.AccumulateKeys(arena, _fieldNodes, start, count);
     }
 
     /// <summary>Seals the open block of every column.</summary>

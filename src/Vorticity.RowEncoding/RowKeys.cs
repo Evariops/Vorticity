@@ -6,6 +6,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using Vorticity.Indexes;
 
 namespace Vorticity.RowEncoding;
 
@@ -26,7 +27,7 @@ namespace Vorticity.RowEncoding;
 /// every span this type hands out is invalid afterwards.
 /// </para>
 /// </remarks>
-public sealed class RowKeys : IDisposable
+public sealed class RowKeys : IEncodedKeys
 {
     private byte[]? _elements;
     private int[]? _offsets;

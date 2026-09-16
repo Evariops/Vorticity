@@ -127,6 +127,8 @@ public sealed record IndexDirectory(
     private const int SegAlignment = 3;
     private const int PolicyDefault = 1;
     private const int PolicyColumns = 2;
+    private const int PolicyKeys = 3;
+    private const int ColumnKeyPaths = 10;
     private const int ColumnPath = 1;
     private const int ColumnKind = 2;
     private const int ColumnFpp = 3;
@@ -184,6 +186,17 @@ public sealed record IndexDirectory(
         {
             using ProtoWriter.MessageScope column = writer.BeginMessage(PolicyColumns);
             WriteColumnPolicy(ref writer, path, policy.Columns[path]);
+        }
+
+        // Composite keys in the order they were declared: the order is part of the policy.
+        foreach (CompositeKeyPolicy key in policy.Keys)
+        {
+            using ProtoWriter.MessageScope scope = writer.BeginMessage(PolicyKeys);
+            WriteColumnPolicy(ref writer, string.Empty, key.Policy);
+            foreach (string path in key.Paths)
+            {
+                writer.WriteStringAlways(ColumnKeyPaths, path);
+            }
         }
     }
 
@@ -525,18 +538,27 @@ public sealed record IndexDirectory(
     {
         IndexPolicy fallback = IndexPolicy.None;
         Dictionary<string, IndexPolicy> columns = new Dictionary<string, IndexPolicy>(StringComparer.Ordinal);
+        List<CompositeKeyPolicy> keys = [];
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
             switch (field)
             {
                 case PolicyDefault when wire == ProtoWireType.LengthDelimited:
-                    fallback = ReadColumnPolicy(reader.ReadMessage(), out _);
+                    fallback = ReadColumnPolicy(reader.ReadMessage(), out _, out _);
                     break;
                 case PolicyColumns when wire == ProtoWireType.LengthDelimited:
-                    IndexPolicy column = ReadColumnPolicy(reader.ReadMessage(), out string path);
+                    IndexPolicy column = ReadColumnPolicy(reader.ReadMessage(), out string path, out _);
                     if (path.Length > 0)
                     {
                         columns[path] = column;
+                    }
+
+                    break;
+                case PolicyKeys when wire == ProtoWireType.LengthDelimited:
+                    IndexPolicy key = ReadColumnPolicy(reader.ReadMessage(), out _, out List<string> paths);
+                    if (paths.Count >= 2 && key.Kind == IndexPolicyKind.SortedRuns)
+                    {
+                        keys.Add(new CompositeKeyPolicy(paths, key));
                     }
 
                     break;
@@ -546,12 +568,13 @@ public sealed record IndexDirectory(
             }
         }
 
-        return WritePolicy.FromStored(fallback, columns);
+        return WritePolicy.FromStored(fallback, columns, keys);
     }
 
-    private static IndexPolicy ReadColumnPolicy(ProtoReader reader, out string path)
+    private static IndexPolicy ReadColumnPolicy(ProtoReader reader, out string path, out List<string> keyPaths)
     {
         path = string.Empty;
+        keyPaths = [];
         uint kind = 0;
         uint fpp = 0;
         uint resolutions = 0;
@@ -590,6 +613,9 @@ public sealed record IndexDirectory(
                     break;
                 case ColumnSegmentEntries when wire == ProtoWireType.Varint:
                     segmentEntries = reader.ReadVarint32();
+                    break;
+                case ColumnKeyPaths when wire == ProtoWireType.LengthDelimited:
+                    keyPaths.Add(Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
                     break;
                 default:
                     reader.SkipField(wire);

@@ -13,6 +13,7 @@
 using System;
 using System.Collections.Generic;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Indexes;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
@@ -30,6 +31,12 @@ internal sealed class IndexWriter : IDisposable
     private readonly List<IndexBuilder>[] _builders;
     private readonly string?[] _refusals;
     private readonly long[] _columnBytes;
+    private readonly int _fieldCount;
+    private readonly IKeyEncoder? _keyEncoder;
+
+    /// <summary>For a composite key's slot, the real fields it encodes, in key order.</summary>
+    private readonly int[]?[] _keyFields;
+    private CanonicalArena? _keySlices;
     private bool _firstBlockClosed;
 
     /// <summary>
@@ -52,17 +59,42 @@ internal sealed class IndexWriter : IDisposable
     /// <param name="fieldCount">How many columns.</param>
     /// <param name="budgetPerMille">The share of the data bytes all indexes together may take.</param>
     /// <param name="blockRows">Rows per block, 0 when the caller's batches are the blocks.</param>
+    /// <param name="keyEncoder">The encoder of the policy's composite keys, or null.</param>
     internal IndexWriter(
-        WritePolicy policy, DType schema, bool isTabular, int fieldCount, int budgetPerMille = 100, int blockRows = 0)
+        WritePolicy policy, DType schema, bool isTabular, int fieldCount, int budgetPerMille = 100, int blockRows = 0,
+        IKeyEncoder? keyEncoder = null)
     {
         _policy = policy;
         _isTabular = isTabular;
         _budgetPerMille = budgetPerMille;
-        _paths = new string[fieldCount];
-        _columns = new IndexPolicy[fieldCount];
-        _builders = new List<IndexBuilder>[fieldCount];
-        _refusals = new string?[fieldCount];
-        _columnBytes = new long[fieldCount];
+        _fieldCount = fieldCount;
+        _keyEncoder = keyEncoder;
+
+        // A COMPOSITE KEY IS ONE MORE COLUMN, after the real ones: every loop over the builders --
+        // blocks, chunks, the budget, the payloads, the close -- serves it with no second path, and
+        // only the feed differs, because its rows are several columns encoded together.
+        int total = fieldCount + policy.Keys.Count;
+        _paths = new string[total];
+        _columns = new IndexPolicy[total];
+        _builders = new List<IndexBuilder>[total];
+        _refusals = new string?[total];
+        _columnBytes = new long[total];
+        _keyFields = new int[]?[total];
+        for (int k = 0; k < policy.Keys.Count; k++)
+        {
+            int field = fieldCount + k;
+            CompositeKeyPolicy key = policy.Keys[k];
+            _paths[field] = "(" + string.Join(", ", key.Paths) + ")";
+            _columns[field] = key.Policy;
+            _builders[field] = [];
+            _refusals[field] = Composite(key, schema, isTabular, keyEncoder, out _keyFields[field]);
+            if (_refusals[field] is null)
+            {
+                _builders[field].Add(new KeyIndexBuilder(
+                    rows: true, new KeyLayout(KeyShape.Bytes, 0, default), utf8: false, key.Policy.SegmentEntries));
+            }
+        }
+
         for (int field = 0; field < fieldCount; field++)
         {
             _paths[field] = isTabular ? schema.GetFieldName(field) : string.Empty;
@@ -138,7 +170,93 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     /// <param name="policy">The policy.</param>
     internal static bool Asks(WritePolicy policy) =>
-        policy.Default.Kind != IndexPolicyKind.None || policy.Columns.Count > 0;
+        policy.Default.Kind != IndexPolicyKind.None || policy.Columns.Count > 0 || policy.Keys.Count > 0;
+
+    /// <summary>Why a composite key cannot be built, or null; and the fields it encodes.</summary>
+    private static string? Composite(
+        CompositeKeyPolicy key, DType schema, bool isTabular, IKeyEncoder? encoder, out int[]? fields)
+    {
+        fields = null;
+        if (!isTabular)
+        {
+            return "a composite key needs a file whose root is a struct of columns";
+        }
+
+        if (encoder is null)
+        {
+            return "no key encoder: set VortexWriteOptions.KeyEncoder, which the Vorticity.RowEncoding package provides (RowKeyEncoder)";
+        }
+
+        int[] resolved = new int[key.Paths.Count];
+        for (int i = 0; i < resolved.Length; i++)
+        {
+            resolved[i] = schema.IndexOfField(key.Paths[i]);
+            if (resolved[i] < 0)
+            {
+                return $"'{key.Paths[i]}' is not a top-level column of the schema";
+            }
+        }
+
+        fields = resolved;
+        return null;
+    }
+
+    /// <summary>
+    /// Feeds every composite key the same rows: the key columns cut to the range -- records, not
+    /// bytes -- encoded together, and every row whose tuple holds a null left out.
+    /// </summary>
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="fieldNodes">Every real column's node in it, in field order.</param>
+    /// <param name="start">The first row.</param>
+    /// <param name="count">How many rows.</param>
+    internal void AccumulateKeys(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int start, int count)
+    {
+        for (int field = _fieldCount; field < _builders.Length; field++)
+        {
+            if (_builders[field].Count == 0 || _builders[field][0] is not KeyIndexBuilder builder)
+            {
+                continue;
+            }
+
+            if (builder.Abandoned is not null || count <= 0)
+            {
+                builder.Skip(count);
+                continue;
+            }
+
+            int[] fields = _keyFields[field]!;
+            CanonicalArena slices = _keySlices ??= new CanonicalArena();
+            slices.Reset();
+            int[] columns = new int[fields.Length];
+            bool[] include = new bool[count];
+            include.AsSpan().Fill(true);
+            for (int c = 0; c < fields.Length; c++)
+            {
+                columns[c] = Layouts.CanonicalSlice.SliceAcross(arena, slices, fieldNodes[fields[c]], start, count);
+                ValidityMask validity = ValidityMask.From(slices, slices.GetNode(columns[c]).Validity);
+                if (validity.AllValid)
+                {
+                    continue;
+                }
+
+                for (int row = 0; row < count; row++)
+                {
+                    include[row] &= validity.IsValid(row);
+                }
+            }
+
+            try
+            {
+                using IEncodedKeys keys = _keyEncoder!.Encode(slices, columns);
+                builder.AccumulateEncoded(keys, include);
+            }
+            catch (Exception e) when (e is VortexUnsupportedException or ArgumentException)
+            {
+                builder.Abandon($"the key encoder refused the key: {e.Message}");
+                builder.Skip(count);
+            }
+        }
+    }
 
     /// <summary>Whether any column asked for anything: a file with no request carries no directory.</summary>
     internal bool Enabled
@@ -587,7 +705,10 @@ internal sealed class IndexWriter : IDisposable
 
         _entries.Add(new IndexEntry(
             kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1),
-            KeyRunOptions.Entry(keys.SegmentEntries, keys.CaseInsensitive), runs));
+            KeyRunOptions.Entry(
+                keys.SegmentEntries, keys.CaseInsensitive, KeyColumns(field),
+                _keyFields[field] is null ? null : _keyEncoder!.Format),
+            runs));
         _reports.Add(new IndexWriteReport(_paths[field], kind, IndexOutcome.Built, null, bytes, 0, runs.Count));
     }
 
@@ -650,7 +771,12 @@ internal sealed class IndexWriter : IDisposable
     private void NotYet(int field, string kind) =>
         Abandoned(field, kind, "this writer does not build this kind yet");
 
-    private uint[] ColumnPath(int field) => _isTabular ? [checked((uint)field)] : [];
+    /// <summary>A real column's path; empty for the root and for a composite key, whose columns are in its options.</summary>
+    private uint[] ColumnPath(int field) => _isTabular && field < _fieldCount ? [checked((uint)field)] : [];
+
+    /// <summary>A composite key's columns, as the entry options carry them; null for a real column.</summary>
+    private List<uint[]>? KeyColumns(int field) =>
+        _keyFields[field] is { } fields ? [.. Array.ConvertAll(fields, f => new[] { checked((uint)f) })] : null;
 
     /// <summary>The directory's bytes, or <see langword="null"/> when there is nothing to list.</summary>
     /// <param name="rowCount">The file's row count.</param>
@@ -691,5 +817,7 @@ internal sealed class IndexWriter : IDisposable
 
         _payloads?.Dispose();
         _payloads = null;
+        _keySlices?.Reset();
+        _keySlices = null;
     }
 }

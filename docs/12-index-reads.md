@@ -308,6 +308,17 @@ keeps the row encoding in its own `0.x` package — so a composite cursor in cor
 bytes and a row per entry, and the tuple's values come from the row, through a take. Where the
 *writer* of a composite index gets its encoder is 10's question, and §13 lists it.
 
+**As delivered (step 16).** `file.Keys("country", "city")` opens the sorted runs of an entry whose
+key columns are exactly those, in that order (10 §6.5 as amended); only that source serves, and a
+key without one is refused naming `WritePolicy.ForKey` and `VortexWriteOptions.KeyEncoder`.
+`KeyKind` is bytes, `KeyFormat` reports what the writer's encoder said its bytes follow, and every
+cursor operation — `Distinct()` included — works unchanged over the bytes. `RowEncoder.EncodeKey`
+has the spec's overload, which infers `i64`, `u64`, `f64`, `utf8` or `bool` from the literals, and one
+that takes the key columns' dtypes, since width and nullability shape the bytes; both build a
+one-row column per value and call the batch encoder, which is how the test proves the seek key and
+the index key are the same bytes. `RowKeyEncoder(params RowSortField[])` is the writer's encoder;
+one field applies to every column of every key. Only top-level columns can be key columns.
+
 ---
 
 ## 5. Probes: answers without rows
@@ -838,7 +849,8 @@ and its gate; the first four need no index and run on today's corpus.
   and the row encoding is a separate `0.x` package the core must not reference (09 §3). Proposed:
   an `IKeyEncoder` slot on `VortexWriteOptions` that the `Vorticity.RowEncoding` package fills,
   so the core writes what it is handed and depends on nothing. This is an amendment to 10 §6.5,
-  and the reader here needs none of it.
+  and the reader here needs none of it. **Decided and delivered at step 16** as proposed:
+  `VortexWriteOptions.KeyEncoder`, `IKeyEncoder`, `RowKeyEncoder`.
 - **Whether `InKeyOrder` should refuse above a splits-per-window ratio.** Recommended no: it is
   correct, the caller asked, `Explain` and `ScanMetrics` say what it cost. Reopen on the first
   report of a consumer who did not read §6.
