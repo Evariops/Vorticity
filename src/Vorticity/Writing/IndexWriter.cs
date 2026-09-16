@@ -258,6 +258,193 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
+    // ------------------------------------------------------------------------------ an append
+
+    // Both created by the call that fills them: a plain write allocates neither.
+    private List<IndexEntry>? _prior;
+    private ulong _previousEof;
+
+    /// <summary>
+    /// Continues an existing file's indexes (docs/11 §3.8, docs/10-indexes.md §8): every builder
+    /// starts at <paramref name="boundary"/>, and the old entries' runs that end at or before it
+    /// are listed again beside the new ones. A run reaching past it covered rows the append writes
+    /// again -- a re-opened chunk, a short last block -- and is dropped; a dictionary probe is
+    /// recomputed from the chunks' schemes.
+    /// </summary>
+    /// <param name="entries">The old directory's entries.</param>
+    /// <param name="boundary">The first block the append writes.</param>
+    /// <param name="row">Its first row.</param>
+    /// <param name="previousEof">The old file's length, which the new directory records.</param>
+    internal void Continue(IReadOnlyList<IndexEntry> entries, int boundary, long row, long previousEof)
+    {
+        _previousEof = (ulong)previousEof;
+        foreach (List<IndexBuilder> builders in _builders)
+        {
+            foreach (IndexBuilder builder in builders)
+            {
+                builder.Start(boundary, row);
+            }
+        }
+
+        foreach (IndexEntry entry in entries)
+        {
+            if (entry.Kind == IndexKinds.DictProbe || Kept(entry, boundary) is not { } kept)
+            {
+                continue;
+            }
+
+            (_prior ??= []).Add(kept);
+        }
+    }
+
+    /// <summary>An old entry restricted to the runs that end by <paramref name="boundary"/>, or null.</summary>
+    private static IndexEntry? Kept(IndexEntry entry, int boundary)
+    {
+        List<IndexRun> runs = [];
+        List<int> kept = [];
+        for (int i = 0; i < entry.Runs.Count; i++)
+        {
+            if (entry.Runs[i].EndBlock <= (ulong)boundary)
+            {
+                runs.Add(entry.Runs[i]);
+                kept.Add(i);
+            }
+        }
+
+        if (runs.Count == 0)
+        {
+            return null;
+        }
+
+        byte[] options = entry.Options;
+        if (IsBloom(entry.Kind))
+        {
+            if (!BloomIndexOptions.TryParse(options, out BloomIndexOptions? bloom))
+            {
+                return null;
+            }
+
+            int[] counts = bloom!.Level == BloomLevel.Block
+                ? bloom.FilterBlocks.AsSpan(0, Math.Min(boundary, bloom.FilterBlocks.Length)).ToArray()
+                : [.. kept.ConvertAll(i => i < bloom.FilterBlocks.Length ? bloom.FilterBlocks[i] : 0)];
+            options = (bloom with { FilterBlocks = counts }).ToBytes();
+        }
+
+        return entry with { Options = options, Runs = runs };
+    }
+
+    private static bool IsBloom(string kind) => kind is IndexKinds.BloomSbbf or IndexKinds.BloomNgram3;
+
+    private List<IndexEntry>? _preserved;
+
+    /// <summary>
+    /// For an index built after the fact (docs/10-indexes.md §8): the old directory's entries,
+    /// listed again unless a new entry indexes the same column with the same kind -- the new one
+    /// covers every block and replaces it.
+    /// </summary>
+    /// <param name="entries">The old entries.</param>
+    /// <param name="previousEof">The old file's length, when the new runs are appended to it; 0 for a sidecar.</param>
+    internal void Preserve(IReadOnlyList<IndexEntry> entries, long previousEof)
+    {
+        (_preserved ??= []).AddRange(entries);
+        _previousEof = (ulong)previousEof;
+    }
+
+    /// <summary>The new entries with the old ones laid before them, entry by entry.</summary>
+    private List<IndexEntry> Merged()
+    {
+        if (_preserved is { Count: > 0 } preserved)
+        {
+            List<IndexEntry> all = [.. _entries];
+            foreach (IndexEntry old in preserved)
+            {
+                if (!_entries.Exists(e => e.Kind == old.Kind && SamePath(e.ColumnPath, old.ColumnPath)))
+                {
+                    all.Add(old);
+                }
+            }
+
+            return all;
+        }
+
+        if (_prior is not { Count: > 0 } prior)
+        {
+            return _entries;
+        }
+
+        List<IndexEntry> merged = [.. _entries];
+        foreach (IndexEntry old in prior)
+        {
+            int match = merged.FindIndex(e => Continues(old, e));
+            if (match < 0)
+            {
+                merged.Add(old);
+                continue;
+            }
+
+            IndexEntry current = merged[match];
+            byte[] options = current.Options;
+            if (IsBloom(old.Kind))
+            {
+                BloomIndexOptions.TryParse(old.Options, out BloomIndexOptions? before);
+                BloomIndexOptions.TryParse(current.Options, out BloomIndexOptions? after);
+                int[] counts;
+                if (before!.Level == BloomLevel.Block)
+                {
+                    counts = (int[])after!.FilterBlocks.Clone();
+                    before.FilterBlocks.AsSpan(0, Math.Min(before.FilterBlocks.Length, counts.Length)).CopyTo(counts);
+                }
+                else
+                {
+                    counts = [.. before.FilterBlocks, .. after!.FilterBlocks];
+                }
+
+                options = (after with { FilterBlocks = counts }).ToBytes();
+            }
+
+            merged[match] = current with { Options = options, Runs = [.. old.Runs, .. current.Runs] };
+        }
+
+        return merged;
+    }
+
+    private static bool SamePath(IReadOnlyList<uint> a, IReadOnlyList<uint> b)
+    {
+        if (a.Count != b.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < a.Count; i++)
+        {
+            if (a[i] != b[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Whether a new entry continues an old one: same kind, column and options but for the counts.</summary>
+    private static bool Continues(IndexEntry old, IndexEntry current)
+    {
+        if (old.Kind != current.Kind || !SamePath(old.ColumnPath, current.ColumnPath))
+        {
+            return false;
+        }
+
+        if (!IsBloom(old.Kind))
+        {
+            return old.Options.AsSpan().SequenceEqual(current.Options);
+        }
+
+        return BloomIndexOptions.TryParse(old.Options, out BloomIndexOptions? a)
+            && BloomIndexOptions.TryParse(current.Options, out BloomIndexOptions? b)
+            && (a! with { FilterBlocks = Array.Empty<int>() }) == (b! with { FilterBlocks = Array.Empty<int>() })
+            && old.BlockLength == current.BlockLength;
+    }
+
     /// <summary>Whether any column asked for anything: a file with no request carries no directory.</summary>
     internal bool Enabled
     {
@@ -788,17 +975,25 @@ internal sealed class IndexWriter : IDisposable
     /// and since `Auto` became the default it would have cost every file of a sorted or numeric
     /// schema a hundred and fifty bytes for that nothing.
     /// </remarks>
-    internal byte[]? Directory(long rowCount)
+    /// <param name="sidecar">For a sidecar: the indexed file's length and hash, and the payloads' encoding table.</param>
+    internal byte[]? Directory(long rowCount, (long Length, byte[] Sha256, IReadOnlyList<string> Encodings)? sidecar = null)
     {
-        if (!Enabled)
+        if (!Enabled && _preserved is not { Count: > 0 })
         {
             return null;
         }
 
         bool defaultPolicy = _policy.Default == IndexPolicy.Auto && _policy.Columns.Count == 0;
-        return _entries.Count == 0 && defaultPolicy
+        List<IndexEntry> entries = Merged();
+        return entries.Count == 0 && defaultPolicy && _previousEof == 0 && sidecar is null
             ? null
-            : new IndexDirectory((ulong)rowCount, 0, _policy, _entries).ToBytes();
+            : new IndexDirectory((ulong)rowCount, _previousEof, _policy, entries)
+            {
+                BudgetPerMille = _budgetPerMille,
+                FileLength = (ulong)(sidecar?.Length ?? 0),
+                FileSha256 = sidecar?.Sha256,
+                ArrayEncodings = sidecar?.Encodings,
+            }.ToBytes();
     }
 
     /// <summary>What became of every index the policy asked for.</summary>

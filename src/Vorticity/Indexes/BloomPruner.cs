@@ -193,8 +193,8 @@ internal sealed class BloomPruner
                     Bytes += requests.GetSpec(i).Length;
                 }
 
-                await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-                using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
+                await file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+                using ScanContext context = file.CreateIndexContext();
                 foreach ((Level candidate, int run, int slot) in wanted)
                 {
                     candidate.Loaded[run] = Decode(context, requests.GetBuffer(slot), candidate, run);

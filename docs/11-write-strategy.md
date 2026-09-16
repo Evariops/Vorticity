@@ -454,6 +454,30 @@ truncates a torn file to the last valid postscript found by scanning back for th
 Object stores that cannot append (S3) take the sidecar path of [10-indexes.md](10-indexes.md) §8
 or a rewrite.
 
+**As delivered (step 17).** `VortexFileWriter.AppendAsync(path, options?)` continues a file of this
+writer's shape — a struct of columns, each a chunked layout of flat segments, zoned or not, chunked
+alike — and refuses any other with `VortexUnsupportedException` ("rewrite it instead"). The old
+segment specs and array-encoding indices are taken over as they are; the block length is the zone
+map's; the index policy and the index budget come from the directory when `options` is null (the
+budget is a directory field since this step, written only when it is not the default). When the
+old row count is not a whole number of blocks, the last chunk is read, copied out, dropped from the
+layout and written again as the first rows. Every block before the boundary becomes a summary taken
+from the old zone map — rows, null count, bounds when they are exact — so the zone map is written
+again over the whole file without reading those blocks; a column whose old part had no zone map
+gets none. The file statistics combine the old ones (bounds, which cover every old row, and the
+order flags) with the new blocks': the order across the seam is the two halves' own when a chunk was
+re-opened, and a comparison of the old maximum with the new minimum otherwise, a null after an old
+value unsorting the file. The index builders start at the boundary block and row; the old entries'
+runs that end by the boundary are listed again, merged into the new entry of the same kind, column
+and options (Bloom counts laid block by block, or run by run), and the dictionary probe is
+recomputed from the chunks' schemes. **Plan memory is not seeded** from the old encoding tree: the
+re-opened chunk is priced again, which costs one chunk's pricing. The repair is
+`VortexFileRepair.RepairAsync` (and `vxdump --repair`): it walks back from the end for an EOF record
+whose prefix opens as a file, and truncates to it. `vxdump --indexes` prints the directory and
+`--explain "expr"` the plan and the count of a filtered scan. The acceptance test writes the same
+rows once and in two, three and eleven pieces, cuts on and off a block, and compares values, zone
+maps, file statistics and index answers; the Rust cross-check reads 22 appended files among its 854.
+
 ---
 
 ## 4. SIMD, kernel by kernel

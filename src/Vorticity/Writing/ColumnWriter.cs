@@ -574,6 +574,26 @@ internal sealed class ColumnWriter
         }
     }
 
+    /// <summary>
+    /// Takes an existing file's blocks as closed, for an append (docs/11 §3.8): the zone map is
+    /// written again over them, and the chunks already out keep their block numbers.
+    /// </summary>
+    /// <param name="blocks">The summaries, in block order, before any block of this writer.</param>
+    internal void Seed(IReadOnlyList<BlockStats> blocks)
+    {
+        foreach (BlockStats block in blocks)
+        {
+            _closed.Add(block);
+            _widths.Add(null);
+            _tableAtClose.Add((-1, 0));
+        }
+
+        _seeded += blocks.Count;
+    }
+
+    /// <summary>Blocks taken from an existing file, which a child created later is given too.</summary>
+    private int _seeded;
+
     private ColumnWriter[] Children(int count)
     {
         ColumnWriter[]? children = _children;
@@ -589,7 +609,19 @@ internal sealed class ColumnWriter
         ColumnWriter[] grown = new ColumnWriter[count];
         for (int i = 0; i < count; i++)
         {
-            grown[i] = children is not null && i < children.Length ? children[i] : new ColumnWriter();
+            if (children is not null && i < children.Length)
+            {
+                grown[i] = children[i];
+                continue;
+            }
+
+            // A child of an appended column starts with its parent's old blocks, as absent
+            // summaries, so every node's closed list keeps the same length.
+            grown[i] = new ColumnWriter();
+            if (_seeded > 0)
+            {
+                grown[i].Seed(new BlockStats[_seeded]);
+            }
         }
 
         _children = grown;

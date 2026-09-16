@@ -105,12 +105,37 @@ public sealed record IndexDirectory(
     /// <summary>The one version this library writes and reads.</summary>
     internal const byte FormatVersion = 1;
 
+    /// <summary>The default index budget, which is not written.</summary>
+    internal const int DefaultBudgetPerMille = 100;
+
+    /// <summary>
+    /// The share of the data bytes the file's indexes were allowed, in parts per thousand, so that
+    /// an append without options builds under the same budget (field 6; absent means the default).
+    /// </summary>
+    public int BudgetPerMille { get; init; } = DefaultBudgetPerMille;
+
+    /// <summary>For a sidecar: the length of the file it indexes (field 7); 0 in a file's own directory.</summary>
+    public ulong FileLength { get; init; }
+
+    /// <summary>For a sidecar: the SHA-256 of the file it indexes (field 8); null in a file's own directory.</summary>
+    public byte[]? FileSha256 { get; init; }
+
+    /// <summary>
+    /// For a sidecar: the array encodings its payloads name, by index (field 9) -- a sidecar's
+    /// payloads cannot use the data file's footer, which it does not rewrite.
+    /// </summary>
+    public IReadOnlyList<string>? ArrayEncodings { get; init; }
+
     // Field numbers, spelled once.
     private const int DirVersion = 1;
     private const int DirRowCount = 2;
     private const int DirPreviousEof = 3;
     private const int DirPolicy = 4;
     private const int DirEntries = 5;
+    private const int DirBudget = 6;
+    private const int DirFileLength = 7;
+    private const int DirFileSha256 = 8;
+    private const int DirArrayEncodings = 9;
     private const int EntryKind = 1;
     private const int EntryColumnPath = 2;
     private const int EntryBlockLen = 3;
@@ -162,6 +187,22 @@ public sealed record IndexDirectory(
             {
                 using ProtoWriter.MessageScope scope = writer.BeginMessage(DirEntries);
                 WriteEntry(ref writer, entry);
+            }
+
+            if (BudgetPerMille != DefaultBudgetPerMille)
+            {
+                writer.WriteUInt32Always(DirBudget, (uint)Math.Max(BudgetPerMille, 0));
+            }
+
+            writer.WriteUInt64(DirFileLength, FileLength);
+            if (FileSha256 is { } sha)
+            {
+                writer.WriteBytes(DirFileSha256, sha);
+            }
+
+            foreach (string id in ArrayEncodings ?? [])
+            {
+                writer.WriteStringAlways(DirArrayEncodings, id);
             }
 
             return writer.WrittenSpan.ToArray();
@@ -317,10 +358,26 @@ public sealed record IndexDirectory(
         ulong previousEof = 0;
         WritePolicy policy = WritePolicy.None;
         List<IndexEntry> entries = [];
+        uint budget = DefaultBudgetPerMille;
+        ulong fileLength = 0;
+        byte[]? sha = null;
+        List<string>? encodings = null;
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
             switch (field)
             {
+                case DirBudget when wire == ProtoWireType.Varint:
+                    budget = reader.ReadVarint32();
+                    break;
+                case DirFileLength when wire == ProtoWireType.Varint:
+                    fileLength = reader.ReadVarint();
+                    break;
+                case DirFileSha256 when wire == ProtoWireType.LengthDelimited:
+                    sha = reader.ReadLengthDelimited().ToArray();
+                    break;
+                case DirArrayEncodings when wire == ProtoWireType.LengthDelimited:
+                    (encodings ??= []).Add(Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
+                    break;
                 case DirVersion when wire == ProtoWireType.Varint:
                     version = reader.ReadVarint32();
                     break;
@@ -368,7 +425,13 @@ public sealed record IndexDirectory(
             }
         }
 
-        directory = new IndexDirectory(rowCount, previousEof, policy, kept);
+        directory = new IndexDirectory(rowCount, previousEof, policy, kept)
+        {
+            BudgetPerMille = (int)Math.Min(budget, int.MaxValue),
+            FileLength = fileLength,
+            FileSha256 = sha,
+            ArrayEncodings = encodings,
+        };
         reason = null;
         return true;
     }

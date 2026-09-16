@@ -23,6 +23,15 @@ public sealed class StreamSegmentSink : ISegmentSink, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="stream"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="stream"/> is not writable.</exception>
     public StreamSegmentSink(Stream stream, bool ownsStream = false)
+        : this(stream, ownsStream, 0)
+    {
+    }
+
+    /// <summary>Wraps a stream already holding <paramref name="position"/> bytes of the file: an append.</summary>
+    /// <param name="stream">The destination, positioned at its end.</param>
+    /// <param name="ownsStream">Whether disposing this sink disposes the stream.</param>
+    /// <param name="position">The file offset the next byte lands at.</param>
+    internal StreamSegmentSink(Stream stream, bool ownsStream, long position)
     {
         ArgumentNullException.ThrowIfNull(stream);
         if (!stream.CanWrite)
@@ -32,6 +41,7 @@ public sealed class StreamSegmentSink : ISegmentSink, IAsyncDisposable
 
         _stream = stream;
         _ownsStream = ownsStream;
+        _position = position;
     }
 
     /// <inheritdoc/>

@@ -92,6 +92,26 @@ internal sealed class EncodingDictionary
         return Intern(Encoding.UTF8.GetString(idUtf8));
     }
 
+    /// <summary>
+    /// Takes over an existing file's ids at their indices, for an append (docs/11 §3.8): its
+    /// segments name encodings by index, and the file they stay in must keep the indices.
+    /// </summary>
+    /// <param name="ids">The file's ids, in index order.</param>
+    /// <remarks>Not checked against the target: the file already carries them.</remarks>
+    internal void Seed(IReadOnlyList<string> ids)
+    {
+        if (_ids.Count > 0)
+        {
+            throw new InvalidOperationException("A dictionary is seeded before its first id.");
+        }
+
+        foreach (string id in ids)
+        {
+            _indices.TryAdd(id, (ushort)_ids.Count);
+            _ids.Add(id);
+        }
+    }
+
     /// <summary>The index of <paramref name="id"/>, assigning one if it is new.</summary>
     /// <param name="id">The component id.</param>
     /// <exception cref="InvalidOperationException">The file uses more ids than a u16 can index.</exception>

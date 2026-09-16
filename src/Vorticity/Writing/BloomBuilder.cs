@@ -407,6 +407,24 @@ internal sealed class BloomBuilder : IndexBuilder
         return true;
     }
 
+    /// <summary>The first block this builder saw: 0, or an append's boundary.</summary>
+    private int _start;
+
+    /// <inheritdoc/>
+    internal override void Start(int block, long row)
+    {
+        _start = block;
+        _blocks = block;
+        _generationFirst = block;
+
+        // The block-level table is indexed by the file's block; the old blocks' counts are the old
+        // entry's, laid over these zeros when the directory merges the two.
+        for (int i = 0; i < block; i++)
+        {
+            BlockFilterBlocks.Add(0);
+        }
+    }
+
     /// <summary>Closes a partial generation at the end of the data, and builds the file-level filter.</summary>
     internal override void EndOfData()
     {
@@ -435,7 +453,8 @@ internal sealed class BloomBuilder : IndexBuilder
             int blocks = SplitBlockBloom.BlocksFor(distinct, _policy.FalsePositivePpm, FileMaxBlocks);
             uint[] words = new uint[blocks * SplitBlockBloom.WordsPerBlock];
             file.InsertInto(words);
-            File = new BloomRun(0, _blocks, null, PendingPayload.U32(words, compress: false), blocks);
+            // Over the blocks it hashed: after an append, those since the boundary.
+            File = new BloomRun(_start, _blocks - _start, null, PendingPayload.U32(words, compress: false), blocks);
             Enqueue(File.Generation!);
         }
     }

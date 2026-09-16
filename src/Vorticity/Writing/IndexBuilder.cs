@@ -68,6 +68,16 @@ internal abstract class IndexBuilder : IDisposable
     {
     }
 
+    /// <summary>
+    /// Numbers the builder's first block and row, for an append (docs/11 §3.8): its runs cover the
+    /// file's blocks from <paramref name="block"/>, the ones before being the old file's.
+    /// </summary>
+    /// <param name="block">The first block this builder sees.</param>
+    /// <param name="row">Its first row.</param>
+    internal virtual void Start(int block, long row)
+    {
+    }
+
     /// <summary>A chunk went out: its blocks and its rows.</summary>
     /// <param name="firstBlock">Its first block.</param>
     /// <param name="blocks">How many blocks it covers.</param>

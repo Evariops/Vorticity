@@ -89,6 +89,9 @@ public sealed class RoundTripSweepTests
 
         int written = 0;
         int indexed = 0;
+        int appended = 0;
+        int afterTheFact = 0;
+        int tables = 0;
         Dictionary<string, int> built = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (CorpusEntry entry in CorpusManifest.InScope())
         {
@@ -132,24 +135,66 @@ public sealed class RoundTripSweepTests
                 }
             }
 
-            await using VortexFileWriter writer = VortexFileWriter.Create(
-                destination, source.Schema,
-                new VortexWriteOptions { Indexes = policy, IndexBudgetPerMille = 1_000_000 });
-            await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
-                .WithCancellation(CancellationToken.None))
+            // ONE TABLE IN THREE IS APPENDED, AND ONE IN THREE INDEXED AFTER THE FACT (docs/11 §5.2,
+            // "read back by Rust ... plus appended files"): the first half written, closed, and the
+            // rest appended -- inside a block, so the last chunk is re-opened -- or the whole file
+            // written without indexes and the runs appended with a new directory and footer.
+            bool tabular = source.Schema.Kind == DTypeKind.Struct && source.Schema.FieldCount > 0 && source.RowCount > 1;
+            int mode = tabular ? (tables++ % 3) switch { 1 => 1, 2 => 3, _ => 0 } : 0;
+            VortexWriteOptions options = new VortexWriteOptions
             {
-                await writer.WriteAsync(batch, CancellationToken.None);
+                Indexes = mode == 3 ? WritePolicy.None : policy,
+                IndexBudgetPerMille = 1_000_000,
+            };
+            IReadOnlyList<IndexWriteReport> indexes;
+            int columns;
+            long split = mode == 1 ? (source.RowCount / 2) + 1 : long.MaxValue;
+            VortexFileWriter writer = VortexFileWriter.Create(destination, source.Schema, options);
+            try
+            {
+                long rows = 0;
+                await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+                    .WithCancellation(CancellationToken.None))
+                {
+                    if (rows >= split && split != long.MaxValue)
+                    {
+                        // The first piece is complete: close it and continue by an append.
+                        await writer.CompleteAsync(CancellationToken.None);
+                        await writer.DisposeAsync();
+                        writer = await VortexFileWriter.AppendAsync(destination, options, CancellationToken.None);
+                        split = long.MaxValue;
+                    }
+
+                    await writer.WriteAsync(batch, CancellationToken.None);
+                    rows += batch.RowCount;
+                }
+
+                WriteReport report = await writer.CompleteAsync(CancellationToken.None);
+                indexes = report.Indexes;
+                columns = report.Columns.Count;
+            }
+            finally
+            {
+                await writer.DisposeAsync();
             }
 
+            if (mode == 3)
+            {
+                indexes = await VortexFileIndexer.AppendIndexesAsync(
+                    destination, policy, new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 }, CancellationToken.None);
+            }
+
+            appended += mode == 1 ? 1 : 0;
+            afterTheFact += mode == 3 ? 1 : 0;
+
             // A struct with no field has no column to index, and so no directory.
-            WriteReport report = await writer.CompleteAsync(CancellationToken.None);
-            if (report.Indexes.Count > 0 || report.Columns.Count == 0)
+            if (indexes.Count > 0 || columns == 0)
             {
                 indexed++;
             }
 
             HashSet<string> kinds = [];
-            foreach (IndexWriteReport index in report.Indexes)
+            foreach (IndexWriteReport index in indexes)
             {
                 if (index.Outcome == IndexOutcome.Built && kinds.Add(index.Kind))
                 {
@@ -162,7 +207,9 @@ public sealed class RoundTripSweepTests
 
         StringBuilder line = new StringBuilder("WROTE ")
             .Append(written.ToString(CultureInfo.InvariantCulture)).Append(" files to ").Append(root)
-            .Append(", ").Append(indexed.ToString(CultureInfo.InvariantCulture)).Append(" of them with an index directory;");
+            .Append(", ").Append(indexed.ToString(CultureInfo.InvariantCulture)).Append(" of them with an index directory, ")
+            .Append(appended.ToString(CultureInfo.InvariantCulture)).Append(" appended, ")
+            .Append(afterTheFact.ToString(CultureInfo.InvariantCulture)).Append(" indexed after the fact;");
         foreach ((string kind, int files) in built)
         {
             line.Append(' ').Append(kind).Append(": ").Append(files.ToString(CultureInfo.InvariantCulture)).Append(';');
@@ -171,6 +218,7 @@ public sealed class RoundTripSweepTests
         Console.Out.Write(line.Append('\n').ToString());
         Assert.True(written > 700);
         Assert.Equal(written, indexed);
+        Assert.True(appended > 15 && afterTheFact > 15, $"{appended} appended, {afterTheFact} indexed after the fact");
 
         // Enough files with payload regions between their chunks that the rule is tested, not assumed.
         foreach (string kind in new[] { IndexKinds.BloomSbbf, IndexKinds.PostingsBlocks, IndexKinds.SortedRuns })

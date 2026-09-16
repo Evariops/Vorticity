@@ -1,0 +1,588 @@
+// Appending - docs/11-write-strategy.md §3.8 and §5.2's row: "write-then-append equals one write in
+// rows returned, zone map content and index answers; a torn append is repaired by `vxdump --repair`
+// and reads as the pre-append file".
+//
+// THE ORACLE IS THE SAME ROWS WRITTEN ONCE. Each case writes the rows in one file and, in another,
+// in pieces -- the first written, the others appended one at a time -- at boundaries that fall on a
+// block and inside one (the re-opened chunk), and compares what a reader sees: every value, the zone
+// map of every column, the file statistics, and the answers of every index kind.
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Vorticity.Arrays;
+using Vorticity.Buffers;
+using Vorticity.Columns;
+using Vorticity.Compute;
+using Vorticity.Expressions;
+using Vorticity.File;
+using Vorticity.Indexes;
+using Vorticity.Keys;
+using Vorticity.Layouts;
+using Vorticity.Scan;
+using Vorticity.Tests.Scan;
+using Vorticity.Types;
+using Vorticity.Writing;
+using Xunit;
+
+namespace Vorticity.Tests.Writing;
+
+public sealed class AppendTests
+{
+    private const int Rows = 20_000;
+    private const int Block = 1_024;
+
+    private static readonly string[] Names = ["id", "v", "s", "f"];
+
+    private static long Id(int row) => row;
+
+    private static int? V(int row) => row % 17 == 0 ? null : (int)((row * 7919L) % 1_000);
+
+    private static string S(int row) => "s" + ((row * 31) % 211).ToString(CultureInfo.InvariantCulture);
+
+    private static double F(int row) => ((row * 13) % 101) / 4.0;
+
+    private static WritePolicy Policy => WritePolicy.Auto
+        .For("v", IndexPolicy.SortedRuns.WithSegmentEntries(512))
+        .For("s", IndexPolicy.Postings)
+        .For("f", IndexPolicy.Bloom(resolutions: 3));
+
+    public static TheoryData<int[]> Splits() => new()
+    {
+        new[] { 8_192 },           // a whole number of blocks: nothing is read again
+        new[] { 5_000 },           // inside a block: the last chunk is re-opened
+        new[] { 3_000, 9_000 },    // two appends
+        new[] { 1_024, 2_048, 3_000, 4_096, 5_000, 6_500, 8_192, 10_000, 13_333, 17_000 }, // eleven pieces
+    };
+
+    [Theory]
+    [MemberData(nameof(Splits))]
+    public async Task AnAppendedFileReadsAsOneWrite(int[] cuts)
+    {
+        Decoders.EnsureRegistered();
+        string once = TempPath();
+        string pieces = TempPath();
+        try
+        {
+            await WriteAsync(once, 0, Rows);
+            int start = 0;
+            long length = 0;
+            foreach (int cut in (int[])[.. cuts, Rows])
+            {
+                if (start == 0)
+                {
+                    await WriteAsync(pieces, 0, cut);
+                }
+                else
+                {
+                    length = new FileInfo(pieces).Length;
+                    await using VortexFileWriter writer = await VortexFileWriter.AppendAsync(pieces);
+                    await FeedAsync(writer, start, cut);
+                    WriteReport report = await writer.CompleteAsync();
+                    Assert.All(report.Indexes, r => Assert.True(
+                        r.Outcome == IndexOutcome.Built || r.Kind == IndexKinds.DictProbe || r.Kind == IndexKinds.BloomSbbf && r.Path != "f",
+                        $"{r.Path} {r.Kind}: {r.Reason}"));
+                }
+
+                start = cut;
+            }
+
+            await using VortexFile expected = await VortexFile.OpenAsync(once);
+            await using VortexFile actual = await VortexFile.OpenAsync(pieces);
+            Assert.Equal(Rows, actual.RowCount);
+            Assert.Equal(await RowsOf(expected), await RowsOf(actual));
+            await AssertSameZones(expected, actual);
+            AssertSameStatistics(expected, actual);
+            await AssertSameAnswers(expected, actual);
+
+            IndexDirectory? directory = await actual.ReadIndexDirectoryAsync();
+            Assert.NotNull(directory);
+            Assert.Equal((ulong)length, directory.PreviousEof);
+            Assert.Equal(Policy.Columns.Count, directory.Policy.Columns.Count);
+        }
+        finally
+        {
+            System.IO.File.Delete(once);
+            System.IO.File.Delete(pieces);
+        }
+    }
+
+    [Fact]
+    public async Task AnIndexTheAppendAbandonedCoversPartOfTheFileAndNoWalkTrustsIt()
+    {
+        // Found by this file's first run: the append's builders were abandoned for the budget, the
+        // old runs stayed, and the exact cover counted the old rows only. A partial index still
+        // prunes; a key source over it is refused, and every answer falls back to the data.
+        Decoders.EnsureRegistered();
+        string path = TempPath();
+        try
+        {
+            await WriteAsync(path, 0, 8_192);
+            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(
+                path, new VortexWriteOptions { IndexBudgetPerMille = 1, Indexes = Policy }))
+            {
+                await FeedAsync(writer, 8_192, Rows);
+                WriteReport report = await writer.CompleteAsync();
+                Assert.Contains(report.Indexes, r => r.Path == "v" && r.Outcome == IndexOutcome.Abandoned);
+            }
+
+            await using VortexFile file = await VortexFile.OpenAsync(path);
+            KeyPlan plan = await file.Keys("v").ExplainAsync();
+            Assert.Equal(KeySourceKind.None, plan.Source);
+            Assert.Contains(plan.Rejected, r => r.Source == KeySourceKind.SortedRuns && r.Reason.Contains("cover", StringComparison.Ordinal));
+
+            VortexExpr filter = Expr.Eq(Expr.Field("v"), Expr.Literal(FilterLiteral.From(417L)));
+            int expected = 0;
+            for (int row = 0; row < Rows; row++)
+            {
+                expected += V(row) == 417 ? 1 : 0;
+            }
+
+            Assert.Equal(expected, await file.Scan().Where(filter).CountAsync());
+            List<string> rows = await FilteredRows(file, filter);
+            Assert.Equal(expected, rows.Count);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task ATornAppendIsRepairedToTheFileBeforeIt()
+    {
+        Decoders.EnsureRegistered();
+        string path = TempPath();
+        try
+        {
+            await WriteAsync(path, 0, 5_000);
+            long before = new FileInfo(path).Length;
+            List<string> rows;
+            await using (VortexFile file = await VortexFile.OpenAsync(path))
+            {
+                rows = await RowsOf(file);
+            }
+
+            // A valid file is left alone.
+            VortexRepairResult untouched = await VortexFileRepair.RepairAsync(path);
+            Assert.False(untouched.Truncated);
+            Assert.Equal(before, untouched.Length);
+
+            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path))
+            {
+                await FeedAsync(writer, 5_000, 12_000);
+                await writer.CompleteAsync();
+            }
+
+            // The tear: the append's last bytes never reached the disk.
+            long after = new FileInfo(path).Length;
+            await using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Write))
+            {
+                stream.SetLength(after - 37);
+            }
+
+            await Assert.ThrowsAnyAsync<Exception>(async () => await VortexFile.OpenAsync(path));
+            VortexRepairResult repaired = await VortexFileRepair.RepairAsync(path);
+            Assert.True(repaired.Truncated);
+            Assert.Equal(before, repaired.Length);
+            await using VortexFile back = await VortexFile.OpenAsync(path);
+            Assert.Equal(5_000, back.RowCount);
+            Assert.Equal(rows, await RowsOf(back));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task AFileOfAnotherShapeIsRefused()
+    {
+        Decoders.EnsureRegistered();
+
+        // A reference file whose column is a dictionary layout, not chunks of flat segments.
+        string path = TempPath();
+        try
+        {
+            System.IO.File.Copy(Corpus.Path("containers/dict_layout"), path);
+            VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
+                async () => await VortexFileWriter.AppendAsync(path));
+            Assert.Contains("Rewrite", refused.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task AFileIndexedAfterTheFactAnswersAsOneIndexedWriteAndKeepsItsData()
+    {
+        Decoders.EnsureRegistered();
+        string once = TempPath();
+        string later = TempPath();
+        try
+        {
+            await WriteAsync(once, 0, Rows);
+            await WriteAsync(later, 0, Rows, WritePolicy.None);
+            byte[] before = await System.IO.File.ReadAllBytesAsync(later);
+
+            IReadOnlyList<IndexWriteReport> reports = await VortexFileIndexer.AppendIndexesAsync(
+                later, Policy, new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 });
+            Assert.Contains(reports, r => r.Path == "v" && r.Kind == IndexKinds.SortedRuns && r.Outcome == IndexOutcome.Built);
+            Assert.Contains(reports, r => r.Path == "s" && r.Kind == IndexKinds.PostingsBlocks && r.Outcome == IndexOutcome.Built);
+            Assert.Contains(reports, r => r.Path == "f" && r.Kind == IndexKinds.BloomSbbf && r.Outcome == IndexOutcome.Built);
+
+            // Not a data byte moved: the old file is a prefix of the new one.
+            byte[] after = await System.IO.File.ReadAllBytesAsync(later);
+            Assert.True(after.Length > before.Length);
+            Assert.True(after.AsSpan(0, before.Length).SequenceEqual(before));
+
+            await using (VortexFile expected = await VortexFile.OpenAsync(once))
+            await using (VortexFile actual = await VortexFile.OpenAsync(later))
+            {
+                Assert.Equal(await RowsOf(expected), await RowsOf(actual));
+                await AssertSameAnswers(expected, actual);
+                IndexDirectory? directory = await actual.ReadIndexDirectoryAsync();
+                Assert.Equal((ulong)before.Length, directory!.PreviousEof);
+            }
+
+            // An append after the fact continues the indexes it added.
+            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(later))
+            {
+                await FeedAsync(writer, Rows, Rows + 3_000);
+                await writer.CompleteAsync();
+            }
+
+            await using VortexFile grown = await VortexFile.OpenAsync(later);
+            await using KeyCursor cursor = await grown.Keys("v").OpenAsync();
+            Assert.Equal(Rows + 3_000 - ((Rows + 3_000 + 16) / 17), cursor.EntryCount);
+        }
+        finally
+        {
+            System.IO.File.Delete(once);
+            System.IO.File.Delete(later);
+        }
+    }
+
+    [Fact]
+    public async Task ASidecarIndexesAFileItLeavesAloneAndIsRefusedOnceTheFileChanges()
+    {
+        Decoders.EnsureRegistered();
+        string once = TempPath();
+        string plain = TempPath();
+        string sidecar = plain + ".idx";
+        try
+        {
+            await WriteAsync(once, 0, Rows);
+            await WriteAsync(plain, 0, Rows, WritePolicy.None);
+            byte[] before = await System.IO.File.ReadAllBytesAsync(plain);
+            await VortexFileIndexer.WriteSidecarAsync(plain, Policy, options: new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 });
+            Assert.True((await System.IO.File.ReadAllBytesAsync(plain)).AsSpan().SequenceEqual(before));
+
+            VortexOpenOptions withSidecar = new VortexOpenOptions { Read = new VortexReadOptions { IndexSidecarPath = sidecar } };
+            await using (VortexFile expected = await VortexFile.OpenAsync(once))
+            await using (VortexFile actual = await VortexFile.OpenAsync(plain, withSidecar))
+            {
+                Assert.True(actual.HasIndexDirectory);
+                await AssertSameAnswers(expected, actual);
+                KeyPlan plan = await actual.Keys("v").ExplainAsync();
+                Assert.Equal(KeySourceKind.SortedRuns, plan.Source);
+            }
+
+            // Without the option, nothing is looked for.
+            await using (VortexFile bare = await VortexFile.OpenAsync(plain))
+            {
+                Assert.False(bare.HasIndexDirectory);
+            }
+
+            // The file changes under the sidecar -- an append that writes no directory of its own,
+            // so the sidecar is still the one looked at: refused as stale, and the scan still answers.
+            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(
+                plain, new VortexWriteOptions { Indexes = WritePolicy.None }))
+            {
+                await FeedAsync(writer, Rows, Rows + 100);
+                await writer.CompleteAsync();
+            }
+
+            await using VortexFile changed = await VortexFile.OpenAsync(plain, withSidecar);
+            Assert.Null(await changed.ReadIndexDirectoryAsync());
+            Assert.Contains("stale", changed.IndexDirectoryRefusal, StringComparison.Ordinal);
+            VortexExpr filter = Expr.Eq(Expr.Field("v"), Expr.Literal(FilterLiteral.From(417L)));
+            Assert.Equal(
+                await changed.Scan().Where(filter).WithIndexes(false).CountAsync(),
+                await changed.Scan().Where(filter).CountAsync());
+        }
+        finally
+        {
+            System.IO.File.Delete(once);
+            System.IO.File.Delete(plain);
+            System.IO.File.Delete(sidecar);
+        }
+    }
+
+    // ------------------------------------------------------------------------------ comparisons
+
+    private static async Task<List<string>> RowsOf(VortexFile file)
+    {
+        List<string> rows = [];
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+        {
+            Values.DescribeRows(batch, rows);
+        }
+
+        return rows;
+    }
+
+    private static async Task AssertSameZones(VortexFile expected, VortexFile actual)
+    {
+        foreach (string name in Names)
+        {
+            ZoneColumn? a = await ZonesOf(expected, name);
+            ZoneColumn? b = await ZonesOf(actual, name);
+            Assert.Equal(a is null, b is null);
+            if (a is null)
+            {
+                continue;
+            }
+
+            Assert.Equal(a.ZoneLength, b!.ZoneLength);
+            ZoneRange zones = a.Zones(new RowRange(0, Rows));
+            Assert.Equal(zones, b.Zones(new RowRange(0, Rows)));
+            for (int z = zones.Start; z < zones.End; z++)
+            {
+                ZoneBounds x = a.Bounds(z);
+                ZoneBounds y = b.Bounds(z);
+                Assert.True(
+                    x.HasMin == y.HasMin && x.HasMax == y.HasMax && x.NullCount == y.NullCount
+                    && (!x.HasMin || x.Min.Equals(y.Min)) && (!x.HasMax || x.Max.Equals(y.Max)),
+                    $"{name} zone {z}: {Describe(x)} against {Describe(y)}");
+            }
+        }
+    }
+
+    private static string Describe(ZoneBounds b) =>
+        $"[{(b.HasMin ? b.Min.ToString() : "-")}, {(b.HasMax ? b.Max.ToString() : "-")}] nulls {b.NullCount}";
+
+    private static async Task<ZoneColumn?> ZonesOf(VortexFile file, string name) =>
+        (await ZonePruningPlan.PlanAsync(file, file.LayoutTree, Expr.IsNotNull(Expr.Field(name)), CancellationToken.None))
+            .Zones?.Column(name);
+
+    private static void AssertSameStatistics(VortexFile expected, VortexFile actual)
+    {
+        Assert.True(expected.HasFileStatistics);
+        Assert.True(actual.HasFileStatistics);
+        for (int field = 0; field < Names.Length; field++)
+        {
+            FieldStatistics a = expected.Statistics.GetField(field);
+            FieldStatistics b = actual.Statistics.GetField(field);
+            string name = Names[field];
+            Assert.True(a.HasMin == b.HasMin && a.HasMax == b.HasMax, $"{name}: bounds present differ");
+            if (a.HasMin)
+            {
+                Assert.Equal(a.Min.ToString(), b.Min.ToString());
+                Assert.Equal(a.Max.ToString(), b.Max.ToString());
+            }
+
+            Assert.Equal(a.TryGetNullCount(out ulong na) ? na : ulong.MaxValue, b.TryGetNullCount(out ulong nb) ? nb : ulong.MaxValue);
+            bool hasA = a.TryGetIsSorted(out bool sa);
+            bool hasB = b.TryGetIsSorted(out bool sb);
+            Assert.True(!hasB || (hasA && sa == sb), $"{name}: is_sorted {hasB}/{sb} against {hasA}/{sa}");
+            bool hasSa = a.TryGetIsStrictSorted(out bool ta);
+            bool hasSb = b.TryGetIsStrictSorted(out bool tb);
+            Assert.True(!hasSb || (hasSa && ta == tb), $"{name}: is_strict_sorted {hasSb}/{tb} against {hasSa}/{ta}");
+        }
+
+        // The id column is what an append must keep stating: sorted across every seam.
+        Assert.True(actual.Statistics.GetField(0).TryGetIsSorted(out bool sorted) && sorted);
+        Assert.True(actual.Statistics.GetField(0).TryGetIsStrictSorted(out bool strict) && strict);
+    }
+
+    private static async Task AssertSameAnswers(VortexFile expected, VortexFile actual)
+    {
+        VortexExpr[] filters =
+        [
+            Expr.Eq(Expr.Field("v"), Expr.Literal(FilterLiteral.From(417L))),
+            Expr.Eq(Expr.Field("s"), Expr.Literal(FilterLiteral.From("s42"))),
+            Expr.Eq(Expr.Field("f"), Expr.Literal(FilterLiteral.From(12.5))),
+            Expr.Eq(Expr.Field("f"), Expr.Literal(FilterLiteral.From(99.75))),
+            Expr.And(
+                Expr.Ge(Expr.Field("id"), Expr.Literal(FilterLiteral.From(7_000L))),
+                Expr.Lt(Expr.Field("id"), Expr.Literal(FilterLiteral.From(9_000L)))),
+            Expr.In(Expr.Field("v"), [FilterLiteral.From(1L), FilterLiteral.From(999L)]),
+        ];
+
+        foreach (VortexExpr filter in filters)
+        {
+            long count = await expected.Scan().Where(filter).WithIndexes(false).CountAsync();
+            Assert.Equal(count, await actual.Scan().Where(filter).CountAsync());
+            Assert.Equal(count, await actual.Scan().Where(filter).WithTiers(TerminalTiers.Decode).CountAsync());
+            if (count > 0)
+            {
+                Assert.True(await actual.MayMatchAsync(filter), "a matching file said it cannot match");
+            }
+            List<string> a = await FilteredRows(expected, filter);
+            List<string> b = await FilteredRows(actual, filter);
+            Assert.Equal(a, b);
+        }
+
+        // The runs of every piece walk as one index.
+        await using KeyCursor x = await expected.Keys("v").OpenAsync();
+        await using KeyCursor y = await actual.Keys("v").OpenAsync();
+        Assert.Equal(x.EntryCount, y.EntryCount);
+        bool left = await x.SeekFirstAsync();
+        bool right = await y.SeekFirstAsync();
+        while (left && right)
+        {
+            Assert.Equal(x.Row, y.Row);
+            Assert.Equal(x.Key, y.Key);
+            left = await x.NextAsync();
+            right = await y.NextAsync();
+        }
+
+        Assert.Equal(left, right);
+
+        // The postings of every piece give the same distinct keys.
+        await using KeyCursor p = await actual.Keys("s").Distinct().OpenAsync();
+        HashSet<string> keys = [];
+        for (bool ok = await p.SeekFirstAsync(); ok; ok = await p.NextAsync())
+        {
+            Assert.True(keys.Add(Encoding.UTF8.GetString(p.KeyBytes)));
+        }
+
+        Assert.Equal(211, keys.Count);
+    }
+
+    private static async Task<List<string>> FilteredRows(VortexFile file, VortexExpr filter)
+    {
+        List<string> rows = [];
+        await foreach (RecordBatch batch in file.Scan().Where(filter).ExecuteAsync())
+        {
+            Values.DescribeRows(batch, rows);
+        }
+
+        return rows;
+    }
+
+    // ------------------------------------------------------------------------------ the files
+
+    private static string TempPath() =>
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vorticity-append-{Guid.NewGuid():N}.vortex");
+
+    private static readonly DTypeArena Types = new DTypeArena();
+
+    private static readonly DType Schema = Types.Struct(
+        Names,
+        [
+            Types.Primitive(PType.I64, Nullability.NonNullable),
+            Types.Primitive(PType.I32, Nullability.Nullable),
+            Types.Utf8(Nullability.NonNullable),
+            Types.Primitive(PType.F64, Nullability.NonNullable),
+        ],
+        Nullability.NonNullable);
+
+    private static async Task WriteAsync(string path, int start, int end, WritePolicy? policy = null)
+    {
+        VortexWriteOptions options = new VortexWriteOptions
+        {
+            RowBlockSize = Block,
+            DataBlockTargetBytes = 1L << 14,
+            IndexBudgetPerMille = 1_000_000,
+            Indexes = policy ?? Policy,
+        };
+        await using VortexFileWriter writer = VortexFileWriter.Create(path, Schema, options);
+        await FeedAsync(writer, start, end);
+        await writer.CompleteAsync();
+    }
+
+    /// <summary>Rows <c>[start, end)</c> in ragged batches, so pieces and blocks never line up by accident.</summary>
+    private static async Task FeedAsync(VortexFileWriter writer, int start, int end)
+    {
+        int row = start;
+        int size = 700;
+        while (row < end)
+        {
+            int count = Math.Min(size, end - row);
+            CanonicalArena arena = new CanonicalArena();
+            try
+            {
+                int root = arena.AddStruct(
+                    Schema,
+                    count,
+                    Validity.NonNullable,
+                    [Longs(arena, row, count), Ints(arena, row, count), Strings(arena, row, count), Doubles(arena, row, count)]);
+                using RecordBatch batch = new RecordBatch(arena, root, row);
+                await writer.WriteAsync(batch);
+            }
+            finally
+            {
+                arena.Reset();
+            }
+
+            row += count;
+            size = size == 700 ? 1_531 : 700;
+        }
+    }
+
+    private static int Longs(CanonicalArena arena, int start, int count)
+    {
+        VortexBuffer buffer = arena.Allocate(count * 8, 8, out Span<byte> bytes);
+        Span<long> values = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(bytes);
+        for (int i = 0; i < count; i++)
+        {
+            values[i] = Id(start + i);
+        }
+
+        return arena.AddPrimitive(Schema.GetField(0), count, Validity.NonNullable, PType.I64, buffer);
+    }
+
+    private static int Doubles(CanonicalArena arena, int start, int count)
+    {
+        VortexBuffer buffer = arena.Allocate(count * 8, 8, out Span<byte> bytes);
+        Span<double> values = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, double>(bytes);
+        for (int i = 0; i < count; i++)
+        {
+            values[i] = F(start + i);
+        }
+
+        return arena.AddPrimitive(Schema.GetField(3), count, Validity.NonNullable, PType.F64, buffer);
+    }
+
+    private static int Ints(CanonicalArena arena, int start, int count)
+    {
+        VortexBuffer buffer = arena.Allocate(count * 4, 4, out Span<byte> bytes);
+        Span<int> values = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, int>(bytes);
+        VortexBuffer bits = arena.Allocate(Math.Max((count + 7) / 8, 1), 8, out Span<byte> raw);
+        raw.Clear();
+        for (int i = 0; i < count; i++)
+        {
+            int? v = V(start + i);
+            values[i] = v ?? 0;
+            if (v is not null)
+            {
+                raw[i >> 3] |= (byte)(1 << (i & 7));
+            }
+        }
+
+        int mask = arena.AddBool(Types.Bool(Nullability.NonNullable), count, Validity.NonNullable, bits, 0);
+        return arena.AddPrimitive(Schema.GetField(1), count, Validity.Bitmap(mask), PType.I32, buffer);
+    }
+
+    private static int Strings(CanonicalArena arena, int start, int count)
+    {
+        VortexBuffer views = arena.Allocate(count * 16, 16, out Span<byte> bytes);
+        bytes.Clear();
+        for (int i = 0; i < count; i++)
+        {
+            byte[] utf8 = Encoding.UTF8.GetBytes(S(start + i));
+            Span<byte> view = bytes.Slice(i * 16, 16);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(view, (uint)utf8.Length);
+            utf8.CopyTo(view[4..]);
+        }
+
+        return arena.AddVarBinView(Schema.GetField(2), count, Validity.NonNullable, views, [VortexBuffer.Empty]);
+    }
+}

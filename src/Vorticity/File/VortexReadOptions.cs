@@ -67,6 +67,18 @@ public sealed class VortexReadOptions
     public bool AllowUnknownComponents { get; init; }
 
     /// <summary>
+    /// A sidecar index file (<c>file.vortex.idx</c>, docs/10-indexes.md §8) to read when the file
+    /// carries no index directory of its own; null by default, and nothing is looked for.
+    /// </summary>
+    /// <remarks>
+    /// Opt-in, so that a file without a directory costs nothing for being probed. A sidecar whose
+    /// recorded length or SHA-256 is not the file's is refused as stale, with the reason in
+    /// <see cref="VortexFile.IndexDirectoryRefusal"/>; checking the hash reads the whole file once,
+    /// on the first index read. <c>VortexFileIndexer.WriteSidecarAsync</c> writes one.
+    /// </remarks>
+    public string? IndexSidecarPath { get; init; }
+
+    /// <summary>
     /// THE INTERNAL SWITCH OF PERF-AUDIT-v2.md Z1b. Default <see langword="false"/>.
     /// </summary>
     /// <remarks>

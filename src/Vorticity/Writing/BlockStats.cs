@@ -279,6 +279,55 @@ internal struct BlockStats
     internal readonly bool IsPresent => Rows > 0;
 
     /// <summary>
+    /// A block an append does not read again (docs/11 §3.8): what its zone says -- rows, nulls, and
+    /// the bounds when they are exact -- and nothing else, so that the zone map can be written
+    /// again over it. The order is not tracked: the file statistics answer it for the old rows.
+    /// </summary>
+    /// <param name="rows">The block's rows.</param>
+    /// <param name="nulls">Its null count.</param>
+    /// <param name="summarizable">Whether the column carries bounds at all.</param>
+    /// <param name="min">The exact minimum, when there is one.</param>
+    /// <param name="max">The exact maximum, when there is one.</param>
+    /// <param name="scheme">What the block's chunk was written as, plus one; 0 when unknown.</param>
+    internal static BlockStats Summary(
+        long rows, long nulls, bool summarizable, FilterLiteral? min, FilterLiteral? max, byte scheme)
+    {
+        BlockStats block = default;
+        block.Rows = rows;
+        block.NullCount = nulls;
+        block.IsSummarizable = summarizable;
+        block.WidthsBroken = true;
+        block.OrderUntracked = true;
+        block.WrittenScheme = scheme;
+        if (min is { } low && max is { } high && low.Kind == high.Kind)
+        {
+            switch (low.Kind)
+            {
+                case FilterLiteralKind.Signed:
+                    block.Domain = BoundDomain.Signed;
+                    block._minBits = unchecked((ulong)low.SignedValue);
+                    block._maxBits = unchecked((ulong)high.SignedValue);
+                    block.HasBounds = true;
+                    break;
+                case FilterLiteralKind.Unsigned:
+                    block.Domain = BoundDomain.Unsigned;
+                    block._minBits = low.UnsignedValue;
+                    block._maxBits = high.UnsignedValue;
+                    block.HasBounds = true;
+                    break;
+                case FilterLiteralKind.Float:
+                    block.Domain = BoundDomain.Float;
+                    block._minBits = BitConverter.DoubleToUInt64Bits(low.FloatValue);
+                    block._maxBits = BitConverter.DoubleToUInt64Bits(high.FloatValue);
+                    block.HasBounds = true;
+                    break;
+            }
+        }
+
+        return block;
+    }
+
+    /// <summary>
     /// Runs over the rows this summary covers, exactly as <c>ColumnCompressor</c> would have counted
     /// them by comparing adjacent rows.
     /// </summary>

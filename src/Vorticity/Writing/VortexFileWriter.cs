@@ -47,7 +47,7 @@ using Vorticity.Types.Serialization;
 namespace Vorticity.Writing;
 
 /// <summary>Writes a Vortex file, one batch at a time, in a single forward pass.</summary>
-public sealed class VortexFileWriter : IAsyncDisposable
+public sealed partial class VortexFileWriter : IAsyncDisposable
 {
     private readonly ISegmentSink _sink;
     private readonly DType _schema;
@@ -879,11 +879,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
         await _sink.WriteAsync(postscript, cancellationToken).ConfigureAwait(false);
 
         // EOF: u16 version, u16 postscript length, then the magic. Read backwards by every reader.
-        byte[] eof = new byte[VortexFileFormat.EofSize];
-        BinaryPrimitives.WriteUInt16LittleEndian(eof, (ushort)VortexFileFormat.Version);
-        BinaryPrimitives.WriteUInt16LittleEndian(eof.AsSpan(2), (ushort)postscript.Length);
-        VortexFileFormat.MagicBytes.CopyTo(eof.AsSpan(VortexFileFormat.EofMagicOffset));
-        await _sink.WriteAsync(eof, cancellationToken).ConfigureAwait(false);
+        await _sink.WriteAsync(Eof(postscript.Length), cancellationToken).ConfigureAwait(false);
 
         await _sink.FlushAsync(cancellationToken).ConfigureAwait(false);
 
@@ -1007,6 +1003,12 @@ public sealed class VortexFileWriter : IAsyncDisposable
         {
             _zoneSegments[field] = -1;
             DType column = _isTabular ? _schema.GetField(field) : _schema;
+            if (_append is { } append && append.NoZoneMap[field])
+            {
+                // An appended column whose old part had no zones: a map over the new part alone
+                // would describe the old rows with invented counts.
+                continue;
+            }
 
             if (!ZoneMapWriter.TryBuild(
                     column, _columns[field].Blocks, _arrayEncodings, zoneLength,
@@ -1200,25 +1202,39 @@ public sealed class VortexFileWriter : IAsyncDisposable
             builder, zoned, (ulong)_rowCount, _zoneMetadata[field], children, []);
     }
 
-    private byte[] BuildFooter()
+    private byte[] BuildFooter() =>
+        Footer(_arrayEncodings.Ids, _layoutEncodings.Ids, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_segments));
+
+    /// <summary>A footer over these encoding tables and segments.</summary>
+    internal static byte[] Footer(IReadOnlyList<string> arrays, IReadOnlyList<string> layouts, ReadOnlySpan<SegmentSpec> segments)
     {
         using FlatBufferBuilder builder = new FlatBufferBuilder();
 
-        int[] arraySpecs = CreateStrings(builder, _arrayEncodings.Ids);
-        int[] layoutSpecs = CreateStrings(builder, _layoutEncodings.Ids);
+        int[] arraySpecs = CreateStrings(builder, arrays);
+        int[] layoutSpecs = CreateStrings(builder, layouts);
 
         int table = FooterWriter.Write(
             builder,
             arraySpecs,
             layoutSpecs,
-            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_segments),
+            segments,
             [],
             0);
 
         return builder.FinishToArray(table);
     }
 
-    private byte[] BuildPostscript(
+    /// <summary>The EOF record for a postscript of <paramref name="postscriptLength"/> bytes.</summary>
+    internal static byte[] Eof(int postscriptLength)
+    {
+        byte[] eof = new byte[VortexFileFormat.EofSize];
+        BinaryPrimitives.WriteUInt16LittleEndian(eof, (ushort)VortexFileFormat.Version);
+        BinaryPrimitives.WriteUInt16LittleEndian(eof.AsSpan(2), (ushort)postscriptLength);
+        VortexFileFormat.MagicBytes.CopyTo(eof.AsSpan(VortexFileFormat.EofMagicOffset));
+        return eof;
+    }
+
+    internal static byte[] BuildPostscript(
         long dtypeOffset, int dtypeLength, long layoutOffset, int layoutLength,
         long footerOffset, int footerLength, long statisticsOffset, int statisticsLength,
         long directoryOffset, int directoryLength)
@@ -1282,7 +1298,11 @@ public sealed class VortexFileWriter : IAsyncDisposable
             ArrayStatsValues values = default;
             values.MinPrecision = StatPrecision.Exact;
             values.MaxPrecision = StatPrecision.Exact;
-            if (merged.IsPresent)
+            if (_append is not null)
+            {
+                AppendStatistics(field, ref values);
+            }
+            else if (merged.IsPresent)
             {
                 values.NullCount = (ulong)merged.NullCount;
                 values.IsSorted = merged.IsSorted;

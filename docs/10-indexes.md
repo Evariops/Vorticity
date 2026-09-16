@@ -123,6 +123,10 @@ message IndexDirectory {
   uint64 previous_eof = 3;            // file length before the append that wrote this directory; 0 for a first write
   bytes  policy = 4;                  // the serialized WritePolicy, so an append needs no options
   repeated IndexEntry entries = 5;
+  uint32 budget_per_mille = 6;        // (step 17) absent means 100
+  uint64 file_length = 7;             // (step 17) a sidecar's indexed file
+  bytes  file_sha256 = 8;             // (step 17) a sidecar's indexed file
+  repeated string array_encodings = 9; // (step 17) the encoding table a sidecar's payloads name
 }
 message IndexEntry {
   string  kind = 1;                   // "vorticity.bloom.sbbf.v1", ... (§5, §6)
@@ -551,6 +555,34 @@ Three ways, none touching a data byte:
 
 A rewrite (read → write with `Indexes`) is always possible, always the slowest, and the only one
 that compacts runs.
+
+**As delivered (step 17).**
+- **Append**: 11 §3.8's as-delivered note. Runs that end before the append's first block are kept
+  and merged with the new ones; a run reaching into a re-opened chunk is dropped.
+- **Post-hoc indexing**: `VortexFileIndexer.AppendIndexesAsync(path, policy, options?)` reads the file
+  chunk by chunk, feeds every row to the builders block by block, and appends the runs, the
+  statistics bytes again, a new directory (an old entry of another kind or column is kept), the old
+  layout bytes, a footer rewritten only to extend the array-encoding table the payloads name, and a
+  postscript. The memory-mapped reader cannot share the file with a writer, so the tail is laid out
+  in a scratch file at its final offsets and copied behind the file once the reader is closed; the
+  old file is a byte prefix of the new one, which the test asserts.
+- **Sidecar**: `VortexFileIndexer.WriteSidecarAsync(path, policy)` writes `path + ".idx"`: `VXIX`, the
+  payloads, the directory, and a 20-byte trailer (directory offset and length, version, `VXIX`). The
+  directory gains three fields a file's own directory leaves empty: `file_length = 7`,
+  `file_sha256 = 8`, and `array_encodings = 9`, the table the sidecar's payloads name, since the data
+  file's footer is not the sidecar's to extend. The reader takes a sidecar only when
+  `VortexReadOptions.IndexSidecarPath` names one — opt-in, so that a file without a directory is not
+  probed for a second file on every scan — and only when the file has no directory of its own; a
+  length or SHA-256 mismatch refuses it as stale, and the hash costs one read of the file at the
+  first index read. Payloads are then read from the sidecar and decoded against its table
+  (`VortexFile.IndexSource`, `CreateIndexContext`).
+
+**A key source needs a complete index.** Found by the append tests: a pruner can use runs that cover
+part of the file (a block no run covers is live), but a cursor over them misses the other blocks'
+keys, and the exact cover counted the old rows only after an append whose builder the budget had
+abandoned. `SortedRunsSource` now refuses an entry whose runs do not cover every block, with the
+reason; the same rule refuses a dictionary probe over a column some of whose chunks are not
+dictionaries, which step 15's source had accepted.
 
 ---
 

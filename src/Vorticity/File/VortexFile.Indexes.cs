@@ -5,10 +5,13 @@
 // version reads as "no index" with its reason kept for tooling; the scan is then exactly the scan of
 // a file written without indexes. The only exceptions that escape are the caller's own
 // cancellation and a disposed file.
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Indexes;
+using Vorticity.IO;
 using Vorticity.Serialization.Schemas;
 
 namespace Vorticity.File;
@@ -18,7 +21,22 @@ public sealed partial class VortexFile
     // Benign race, as for the layout tree: two first readers may both parse, and the results are
     // equal. The pair is published as one object so a reader never sees a directory from one parse
     // and a refusal from another.
-    private sealed record IndexState(IndexDirectory? Directory, string? Refusal);
+    private sealed record IndexState(IndexDirectory? Directory, string? Refusal, ISegmentSource? Sidecar = null);
+
+    /// <summary>
+    /// Where the index payloads are read from: the file itself, or its sidecar once
+    /// <see cref="ReadIndexDirectoryAsync"/> took the directory from one.
+    /// </summary>
+    internal ISegmentSource IndexSource => _indexState?.Sidecar ?? _source;
+
+    /// <summary>
+    /// A context to decode index payloads in: over the file's encoding table, or over the sidecar's
+    /// own (docs/10-indexes.md §8).
+    /// </summary>
+    internal ScanContext CreateIndexContext() =>
+        _indexState is { Sidecar: not null, Directory.ArrayEncodings: { } ids }
+            ? new ScanContext(ids.ToArray(), ReadOptions)
+            : new ScanContext(this, ScanContext.MetadataCapacity);
 
     private IndexState? _indexState;
     private IndexRunCache? _runCache;
@@ -42,8 +60,12 @@ public sealed partial class VortexFile
         }
     }
 
-    /// <summary>Whether the postscript names an index directory at all.</summary>
-    public bool HasIndexDirectory => TryGetMetadataIndex(IndexDirectory.MetadataKeyUtf8, out _);
+    /// <summary>
+    /// Whether the postscript names an index directory at all, or the read options name a sidecar
+    /// to take one from (<see cref="VortexReadOptions.IndexSidecarPath"/>).
+    /// </summary>
+    public bool HasIndexDirectory =>
+        TryGetMetadataIndex(IndexDirectory.MetadataKeyUtf8, out _) || ReadOptions.IndexSidecarPath is not null;
 
     /// <summary>
     /// Why the file's index directory was not used, when it was present and refused; otherwise
@@ -73,8 +95,23 @@ public sealed partial class VortexFile
 
         if (!TryGetMetadataIndex(IndexDirectory.MetadataKeyUtf8, out int index))
         {
-            _indexState = new IndexState(null, null);
-            return null;
+            // No directory of its own: the sidecar, when the caller named one (§8).
+            if (ReadOptions.IndexSidecarPath is not { } sidecar)
+            {
+                _indexState = new IndexState(null, null);
+                return null;
+            }
+
+            (ISegmentSource? source, IndexDirectory? found, string? why) =
+                await IndexSidecar.OpenAsync(sidecar, this, cancellationToken).ConfigureAwait(false);
+            IndexState opened = new IndexState(found, why, source);
+            if (Interlocked.CompareExchange(ref _indexState, opened, null) is not null && source is not null)
+            {
+                // Another reader won the race; its sidecar is the one kept.
+                await source.DisposeAsync().ConfigureAwait(false);
+            }
+
+            return _indexState!.Directory;
         }
 
         // A run lies before the directory: runs go out before the zone maps, the directory after

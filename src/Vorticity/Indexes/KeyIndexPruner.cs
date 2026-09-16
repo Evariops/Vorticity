@@ -210,8 +210,8 @@ internal sealed class KeyIndexPruner
                 Bytes += requests.GetSpec(i).Length;
             }
 
-            await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
+            await file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            using ScanContext context = file.CreateIndexContext();
             foreach ((Column column, Run run, int segment, int[] slots) in wanted)
             {
                 context.ResetBatch();

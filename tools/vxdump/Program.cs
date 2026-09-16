@@ -12,6 +12,7 @@
 // number below is formatted with the invariant culture explicitly, because a build that lost the
 // property should still produce identical bytes on a French machine.
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 using System.Threading;
@@ -50,11 +51,19 @@ internal static class Program
                   --all         all of the above
                   --scan        read every batch and report rows, batches and null counts
                   --row-keys    row-encode every batch and report the keys (experimental format)
+                  --indexes     the index directory: policy, entries, runs and their bytes
+                  --explain E   the plan of a scan filtered by E, e.g. "id >= 10 and name = 'x'"
+                  --repair      truncate a torn append back to the last valid file
                 """);
             return args.Length == 0 ? 2 : 0;
         }
 
         string path = args[0];
+        if (args.AsSpan(1).Contains("--repair"))
+        {
+            return await Repair(path).ConfigureAwait(false);
+        }
+
         Sections sections = Sections.Parse(args.AsSpan(1));
 
         try
@@ -88,6 +97,16 @@ internal static class Program
                 Statistics(output, file);
             }
 
+            if (sections.Indexes)
+            {
+                await Indexes(output, file).ConfigureAwait(false);
+            }
+
+            if (sections.Explain is { } expression)
+            {
+                await Explain(output, file, expression).ConfigureAwait(false);
+            }
+
             Console.Out.Write(output.ToString());
 
             if (sections.Scan)
@@ -118,6 +137,11 @@ internal static class Program
         {
             Console.Error.WriteLine($"io: {error.Message}");
             return 5;
+        }
+        catch (Exception error) when (error is FormatException or ArgumentException)
+        {
+            Console.Error.WriteLine($"vxdump: {error.Message}");
+            return 2;
         }
     }
 
@@ -506,10 +530,139 @@ internal static class Program
 
     private static string Text(ulong value) => value.ToString(CultureInfo.InvariantCulture);
 
+    /// <summary>`--repair`: docs/11-write-strategy.md §3.8's tool for a torn append.</summary>
+    private static async Task<int> Repair(string path)
+    {
+        try
+        {
+            VortexRepairResult result = await VortexFileRepair.RepairAsync(path).ConfigureAwait(false);
+            Console.Out.WriteLine(result.Truncated
+                ? $"repaired  {path}: {Text(result.OriginalLength)} -> {Text(result.Length)} bytes ({Text(result.OriginalLength - result.Length)} torn bytes removed)"
+                : $"valid     {path}: {Text(result.Length)} bytes, nothing to repair");
+            return 0;
+        }
+        catch (VortexFormatException error)
+        {
+            Console.Error.WriteLine($"malformed: {error.Message}");
+            return 4;
+        }
+        catch (System.IO.IOException error)
+        {
+            Console.Error.WriteLine($"io: {error.Message}");
+            return 5;
+        }
+    }
+
+    /// <summary>`--indexes`: the directory of docs/10-indexes.md §4.1, as the reader kept it.</summary>
+    private static async Task Indexes(StringBuilder output, VortexFile file)
+    {
+        output.Append("\nindexes\n");
+        if (!file.HasIndexDirectory)
+        {
+            output.Append("  none\n");
+            return;
+        }
+
+        Vorticity.Indexes.IndexDirectory? directory = await file.ReadIndexDirectoryAsync().ConfigureAwait(false);
+        if (directory is null)
+        {
+            output.Append("  refused: ").Append(file.IndexDirectoryRefusal).Append('\n');
+            return;
+        }
+
+        Vorticity.Indexes.WritePolicy policy = directory.Policy;
+        output.Append("  rows          ").Append(Text(directory.RowCount)).Append('\n')
+            .Append("  previous eof  ").Append(Text(directory.PreviousEof)).Append('\n')
+            .Append("  budget        ").Append(Text(directory.BudgetPerMille)).Append("‰\n")
+            .Append("  policy        default ").Append(policy.Default.ToString());
+        foreach (var column in policy.Columns)
+        {
+            output.Append(", ").Append(column.Key).Append(' ').Append(column.Value.ToString());
+        }
+
+        foreach (Vorticity.Indexes.CompositeKeyPolicy key in policy.Keys)
+        {
+            output.Append(", (").Append(string.Join(", ", key.Paths)).Append(") ").Append(key.Policy.ToString());
+        }
+
+        output.Append('\n');
+        DType schema = file.Schema;
+        foreach (Vorticity.Indexes.IndexEntry entry in directory.Entries)
+        {
+            ulong bytes = 0;
+            ulong entries = 0;
+            foreach (Vorticity.Indexes.IndexRun run in entry.Runs)
+            {
+                entries += run.EntryCount;
+                foreach (Vorticity.Indexes.IndexSegment segment in run.Payload)
+                {
+                    bytes += segment.Length;
+                }
+            }
+
+            output.Append("  ").Append(entry.Kind)
+                .Append("  column=").Append(ColumnName(schema, entry.ColumnPath))
+                .Append("  block=").Append(Text(entry.BlockLength))
+                .Append("  runs=").Append(Text(entry.Runs.Count))
+                .Append("  blocks=").Append(entry.Runs.Count == 0 ? "-" : Text(entry.Runs[0].FirstBlock) + ".." + Text(entry.Runs[^1].EndBlock))
+                .Append("  entries=").Append(Text(entries))
+                .Append("  bytes=").Append(Text(bytes))
+                .Append('\n');
+        }
+    }
+
+    private static string ColumnName(DType schema, IReadOnlyList<uint> path)
+    {
+        if (path.Count == 0)
+        {
+            return "(root or composite)";
+        }
+
+        StringBuilder name = new StringBuilder();
+        DType node = schema;
+        foreach (uint index in path)
+        {
+            if (node.Kind != DTypeKind.Struct || index >= (uint)node.FieldCount)
+            {
+                return name.Append("?").ToString();
+            }
+
+            name.Append(name.Length == 0 ? string.Empty : ".").Append(node.GetFieldName((int)index));
+            node = node.GetField((int)index);
+        }
+
+        return name.ToString();
+    }
+
+    /// <summary>`--explain`: docs/11-write-strategy.md §7.3, the plan of a filtered scan.</summary>
+    private static async Task Explain(StringBuilder output, VortexFile file, string expression)
+    {
+        Vorticity.Expressions.VortexExpr filter = FilterText.Parse(expression);
+        ScanPlan plan = await file.Scan().Where(filter).ExplainAsync().ConfigureAwait(false);
+        output.Append("\nexplain   ").Append(expression).Append('\n')
+            .Append("  file may match   ").Append(plan.FileMayMatch ? "yes" : "no").Append('\n')
+            .Append("  rows             ").Append(Text(plan.RowCount)).Append('\n')
+            .Append("  blocks           ").Append(Text(plan.LiveBlocks)).Append(" live of ").Append(Text(plan.Blocks))
+            .Append(" (").Append(Text(plan.BlockRows)).Append(" rows each)\n");
+        foreach (PruningStep step in plan.Pruning)
+        {
+            output.Append("    ").Append(step.Structure).Append(": ").Append(Text(step.BlocksPruned))
+                .Append(" pruned, ").Append(Text(step.SegmentsRead)).Append(" segments / ")
+                .Append(Text(step.BytesRead)).Append(" bytes read\n");
+        }
+
+        output.Append("  splits           ").Append(Text(plan.LiveSplits)).Append(" live of ").Append(Text(plan.Splits)).Append('\n')
+            .Append("  to read          ").Append(Text(plan.SegmentsToRead)).Append(" segments, ")
+            .Append(Text(plan.BytesToRead)).Append(" bytes of ").Append(Text(plan.FileBytes)).Append('\n');
+        long count = await file.Scan().Where(filter).CountAsync().ConfigureAwait(false);
+        output.Append("  count            ").Append(Text(count)).Append('\n');
+    }
+
     private readonly struct Sections
     {
         private Sections(
-            bool schema, bool encodings, bool layout, bool segments, bool stats, bool scan, bool rowKeys)
+            bool schema, bool encodings, bool layout, bool segments, bool stats, bool scan, bool rowKeys,
+            bool indexes, string? explain)
         {
             Schema = schema;
             Encodings = encodings;
@@ -518,7 +671,13 @@ internal static class Program
             Stats = stats;
             Scan = scan;
             RowKeys = rowKeys;
+            Indexes = indexes;
+            Explain = explain;
         }
+
+        internal bool Indexes { get; }
+
+        internal string? Explain { get; }
 
         internal bool Schema { get; }
 
@@ -543,12 +702,20 @@ internal static class Program
             bool stats = false;
             bool scan = false;
             bool rowKeys = false;
+            bool indexes = false;
+            string? explain = null;
             bool any = false;
 
-            foreach (string arg in args)
+            for (int i = 0; i < args.Length; i++)
             {
+                string arg = args[i];
                 switch (arg)
                 {
+                    case "--indexes": indexes = any = true; break;
+                    case "--explain" when i + 1 < args.Length:
+                        explain = args[++i];
+                        any = true;
+                        break;
                     case "--schema": schema = any = true; break;
                     case "--encodings": encodings = any = true; break;
                     case "--layout": layout = any = true; break;
@@ -571,8 +738,8 @@ internal static class Program
 
             // No section asked for means the layout tree, which is what F12 names.
             return any
-                ? new Sections(schema, encodings, layout, segments, stats, scan, rowKeys)
-                : new Sections(false, false, true, false, false, false, false);
+                ? new Sections(schema, encodings, layout, segments, stats, scan, rowKeys, indexes, explain)
+                : new Sections(false, false, true, false, false, false, false, false, null);
         }
     }
 }

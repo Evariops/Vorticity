@@ -280,6 +280,13 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     internal override void CloseBlock() => _block++;
 
     /// <inheritdoc/>
+    internal override void Start(int block, long row)
+    {
+        _block = block;
+        _row = row;
+    }
+
+    /// <inheritdoc/>
     internal override void CloseChunk(int firstBlock, int blocks, long firstRow, long rows)
     {
         if (Abandoned is not null)

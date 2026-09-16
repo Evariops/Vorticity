@@ -1155,6 +1155,11 @@ public sealed partial class VortexFile : IAsyncDisposable
         }
 
         _tail.Release();
+        if (_indexState?.Sidecar is { } sidecar)
+        {
+            await sidecar.DisposeAsync().ConfigureAwait(false);
+        }
+
         if (_ownsSource)
         {
             await _source.DisposeAsync().ConfigureAwait(false);

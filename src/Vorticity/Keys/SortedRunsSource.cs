@@ -175,10 +175,15 @@ internal sealed partial class SortedRunsSource : KeySource
                 continue;
             }
 
-            SortedRunsSource? opened;
-            (opened, reason) = source == KeySourceKind.Dictionary
-                ? await OpenDictionaryAsync(file, entry, path, dtype, cancellationToken).ConfigureAwait(false)
-                : TryOpen(file, entry, dtype, source);
+            SortedRunsSource? opened = null;
+            reason = Uncovered(file, entry);
+            if (reason is null)
+            {
+                (opened, reason) = source == KeySourceKind.Dictionary
+                    ? await OpenDictionaryAsync(file, entry, path, dtype, cancellationToken).ConfigureAwait(false)
+                    : TryOpen(file, entry, dtype, source);
+            }
+
             if (opened is not null)
             {
                 return (opened, null);
@@ -186,6 +191,36 @@ internal sealed partial class SortedRunsSource : KeySource
         }
 
         return (null, reason ?? $"the index directory has no {kind} entry for this column");
+    }
+
+    /// <summary>
+    /// Why an entry's runs do not cover every block of the file, or null when they do.
+    /// </summary>
+    /// <remarks>
+    /// A PRUNER MAY USE A PARTIAL INDEX, A SOURCE MAY NOT: a block no run covers is simply live
+    /// (10 §4.1), but a walk that misses it misses its keys, and a count over the walk is wrong. An
+    /// append whose builder was abandoned, and a dictionary probe over a column some of whose chunks
+    /// are not dictionaries, both leave blocks uncovered.
+    /// </remarks>
+    internal static string? Uncovered(VortexFile file, IndexEntry entry)
+    {
+        ulong blocks = entry.BlockLength == 0
+            ? 0
+            : ((ulong)file.RowCount + entry.BlockLength - 1) / entry.BlockLength;
+        ulong next = 0;
+        foreach (IndexRun run in entry.Runs)
+        {
+            if (run.FirstBlock != next)
+            {
+                return $"its runs leave blocks {next} to {run.FirstBlock} uncovered, so a walk would miss their keys";
+            }
+
+            next = run.EndBlock;
+        }
+
+        return next < blocks
+            ? $"its runs cover {next} of the file's {blocks} blocks, so a walk would miss the others' keys"
+            : null;
     }
 
     /// <summary>The key domain and byte layout of a column, and its storage type.</summary>
@@ -240,8 +275,13 @@ internal sealed partial class SortedRunsSource : KeySource
             }
 
             DType binary = new DTypeArena().Binary(Nullability.NonNullable);
-            SortedRunsSource? opened;
-            (opened, reason) = TryOpen(file, entry, binary, KeySourceKind.SortedRuns, composite: true);
+            SortedRunsSource? opened = null;
+            reason = Uncovered(file, entry);
+            if (reason is null)
+            {
+                (opened, reason) = TryOpen(file, entry, binary, KeySourceKind.SortedRuns, composite: true);
+            }
+
             if (opened is not null)
             {
                 opened._keyFormat = format;
@@ -822,8 +862,8 @@ internal sealed partial class SortedRunsSource : KeySource
                 rowSlot = requests.Add(new SegmentSpec(rows.Offset, rows.Length, rows.AlignmentExponent, 0, 0));
             }
 
-            await _file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            using ScanContext context = new ScanContext(_file, ScanContext.MetadataCapacity);
+            await _file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            using ScanContext context = _file.CreateIndexContext();
             decoded = Decode(
                 context,
                 requests.GetBuffer(keySlot),

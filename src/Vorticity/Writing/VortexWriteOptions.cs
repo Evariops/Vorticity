@@ -77,6 +77,24 @@ public sealed class VortexWriteOptions
     /// </remarks>
     public IKeyEncoder? KeyEncoder { get; init; }
 
+    /// <summary>A copy with the three things an append decides from the file.</summary>
+    /// <param name="rowBlockSize">The file's block length.</param>
+    /// <param name="indexes">The policy the append writes under.</param>
+    /// <param name="fileStatistics">Whether the file keeps a statistics segment.</param>
+    /// <param name="budgetPerMille">The index budget.</param>
+    internal VortexWriteOptions ForAppend(int rowBlockSize, WritePolicy indexes, bool fileStatistics, int budgetPerMille) => new VortexWriteOptions
+    {
+        Indexes = indexes,
+        Profile = Profile,
+        IndexBudgetPerMille = budgetPerMille,
+        KeyEncoder = KeyEncoder,
+        Compress = Compress,
+        FileStatistics = fileStatistics,
+        TargetEdition = TargetEdition,
+        RowBlockSize = rowBlockSize,
+        DataBlockTargetBytes = DataBlockTargetBytes,
+    };
+
     /// <summary>
     /// Whether the writer may pick an encoding per column chunk. Default <see langword="true"/>.
     /// </summary>
