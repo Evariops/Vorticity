@@ -36,19 +36,21 @@ public sealed class VortexWriteOptions
 
     /// <summary>
     /// The index policy: per column path an <see cref="IndexPolicy"/>. Default
-    /// <see cref="WritePolicy.None"/>, for now.
+    /// <see cref="WritePolicy.Auto"/>.
     /// </summary>
     /// <remarks>
-    /// THE TARGET DEFAULT IS <see cref="WritePolicy.Auto"/> (docs/10-indexes.md §5.5, docs/11 §7.1),
-    /// and it is not the default YET because the spec itself says its write cost is measured before
-    /// it becomes one. Until that measurement lands, a file carries an index only when the caller
-    /// asks, and every file written with the defaults is byte for byte what it was.
+    /// `Auto` (docs/10-indexes.md §5.5) records the dictionary probe of every dictionary-encoded
+    /// column and keeps a Bloom filter where it pays -- under 2 % of the column -- giving it up
+    /// otherwise before a byte of it is written, and before it has hashed more than a generation of
+    /// a column it cannot serve. Measured at +0,6 % on the `table_mixed` write, inside the +10 %
+    /// docs/11 §5.3 allows, and inside every ceiling of the write axis. <see cref="WritePolicy.None"/> or
+    /// <see cref="WriteProfile.Fastest"/> write no index at all.
     /// <para>
     /// The policy is serialized into the index directory, so an append reuses it without being
     /// told.
     /// </para>
     /// </remarks>
-    public WritePolicy Indexes { get; init; } = WritePolicy.None;
+    public WritePolicy Indexes { get; init; } = WritePolicy.Auto;
 
     /// <summary>How much the writer does beyond the data. Default <see cref="WriteProfile.Default"/>.</summary>
     public WriteProfile Profile { get; init; } = WriteProfile.Default;

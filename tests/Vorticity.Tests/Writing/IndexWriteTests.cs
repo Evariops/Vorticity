@@ -228,7 +228,7 @@ public sealed class IndexWriteTests
         writer.Close([column], chunkRows, Block);
 
         Assert.True(IndexDirectory.TryParse(writer.Directory(10 * Block)!, 10UL * Block, ulong.MaxValue, out IndexDirectory? directory, out string? reason), reason);
-        IndexEntry entry = Assert.Single(directory!.Entries);
+        IndexEntry entry = Assert.Single(directory!.Entries, e => e.Kind == IndexKinds.DictProbe);
         List<(ulong, ulong)> runs = [];
         foreach (IndexRun run in entry.Runs)
         {
@@ -236,7 +236,7 @@ public sealed class IndexWriteTests
         }
 
         Assert.Equal(new List<(ulong, ulong)> { (0, 2), (3, 7), (9, 10) }, runs);
-        Assert.Equal(3, Assert.Single(writer.Reports).Runs);
+        Assert.Equal(3, Assert.Single(writer.Reports, r => r.Kind == IndexKinds.DictProbe).Runs);
     }
 
     /// <summary>

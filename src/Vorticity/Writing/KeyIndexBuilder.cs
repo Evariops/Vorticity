@@ -48,7 +48,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     private readonly int _segmentEntries;
     private readonly bool _trigrams;
     private readonly bool _fold;
-    private ChunkKeys _table = new ChunkKeys();
+    private ChunkKeys _table;
     private List<int> _lastBlock = [];
     private long _row;
     private int _block;
@@ -59,6 +59,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <param name="segmentEntries">The most entries a segment holds.</param>
     internal KeyIndexBuilder(bool rows, KeyLayout layout, bool utf8, int segmentEntries = KeyRunOptions.DefaultSegmentEntries)
     {
+        _table = new ChunkKeys();
         _rows = rows;
         _layout = layout;
         _utf8 = utf8;
@@ -76,6 +77,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
 
     private KeyIndexBuilder(bool fold, int segmentEntries)
     {
+        _table = new ChunkKeys();
         _rows = false;
         _layout = new KeyLayout(KeyShape.Bytes, 0, default);
         _utf8 = false;
@@ -97,9 +99,6 @@ internal sealed class KeyIndexBuilder : IndexBuilder
 
     /// <summary>The segment size the runs are cut at.</summary>
     internal int SegmentEntries => _segmentEntries;
-
-    /// <summary>What the open table holds, for the budget.</summary>
-    internal long OpenBytes => _table.Bytes;
 
     /// <summary>Whether the dtype can be keyed, and why not.</summary>
     /// <param name="dtype">The column's dtype.</param>
@@ -285,7 +284,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         Runs.Add(run);
         foreach (PendingPayload payload in run.Payloads)
         {
-            Pending.Enqueue(payload);
+            Enqueue(payload);
         }
     }
 
@@ -432,7 +431,8 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             (arena, types) => layout.Shape == KeyShape.Bytes
                 ? Views(arena, types, utf8, heap, offsets)
                 : Fixed(arena, types, layout, heap, count),
-            compress: true);
+            compress: true,
+            estimate: heap.Length + (layout.Shape == KeyShape.Bytes ? 16L * count : 0));
     }
 
     private static int Fixed(CanonicalArena arena, DTypeArena types, KeyLayout layout, byte[] heap, int count)

@@ -110,15 +110,19 @@ public sealed class WrittenSizeTests
     /// </remarks>
     private static readonly (string Id, long Bytes)[] Chunked =
     [
-        ("types/utf8_nonnull_r8193", 16_684),    // 17 chunks in, 17 zones; +96 B since the file statistics segment (11a)
-        ("types/utf8_nullable_r8193", 17_164),   // 17 chunks in, 17 zones; +96 B, same
+        // +138 B (12e) : Auto par défaut, et la colonne est encodée en dictionnaire -- son entrée
+        // dict.probe (10 §5.3), gratuite à l'écriture, et le répertoire d'index qui la porte avec
+        // son entrée de métadonnées au postscript. Un fichier dont Auto ne garde rien n'a pas de
+        // répertoire et ne bouge pas.
+        ("types/utf8_nonnull_r8193", 16_822),    // 17 chunks in, 17 zones; +96 B since the file statistics segment (11a); +138 B, the dictionary probe (12e)
+        ("types/utf8_nullable_r8193", 17_302),   // 17 chunks in, 17 zones; +96 B, same; +138 B, same
         // 4 700 -> 3 756 (-20,1 %) le 2026-09-15, WRITE-AUDIT.md W-31 : la copie du reste reporte
         // ne materialise plus que les octets que les vues nomment, donc le tas ecrit ne porte plus
         // les chaines des blocs deja emis. Verifie par bench/crosscheck.sh : 854 fichiers relus par
         // Vortex Rust, scalaire par scalaire. C'est le seul des quatre qui bouge -- les trois autres
         // n'ont pas de VarBinView dans leur chemin d'ecriture.
         ("encodings/fsst", 3_908),               // 8 chunks in, 8 zones; +96 B, same
-        ("encodings/dict", 2_916),               // 8 chunks in, 8 zones; +96 B, same
+        ("encodings/dict", 3_054),               // 8 chunks in, 8 zones; +96 B, same; +138 B, the dictionary probe (12e)
     ];
 
     [Fact]

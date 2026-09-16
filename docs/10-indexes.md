@@ -344,6 +344,37 @@ share for the column, a filter whose projected bytes exceed 2 % of the column's 
 every column to `None`. The write-cost of `Auto` is measured before it becomes the default
 ([11-write-strategy.md](11-write-strategy.md) §5.3).
 
+**As delivered (step 12e): `Auto` is the default, and it is `dict.probe` plus a Bloom filter.**
+Measured by `bench/ab.sh` in one process on the `table_mixed` write, against the same write
+without indexes: the directory and the dictionary probe alone cost nothing (0,992); a Bloom filter
+per column costs **+6,6 %** [5,6 ; 6,9]; postings on top cost another +7 %, which is past the
++10 % of 11 §5.3. Postings are cheap in this section's argument because they would come "from the
+tables we already build", and the writer's distinct table lives by plan memory and cannot feed
+them; so here they cost an intern per row of their own and are not `Auto`'s. They stay one
+`IndexPolicy.Postings` away. Sorted runs are never `Auto`'s either. With the verdicts below, the
+same write costs **+0,6 %** [−0,4 ; 0,8], and every file of the write axis stays inside its
+ceiling.
+
+A Bloom filter born of `Auto` is given up, whole and with its reason, at the earliest fact that
+condemns it, and always before its payloads are written, so an abandoned index leaves nothing in
+the file: when the column's first block climbs (the zone map prunes it); when its filters would
+exceed 2 % of the column's *raw* bytes, checked at every block before a filter is laid out (the
+column compresses to no more than those) and, for fixed-width values, every 256 rows inside a
+block — the distinct count so far only grows and a full block bounds the raw bytes, so the verdict
+is the block close's, reached a block earlier; when a full first generation holds fewer distinct
+values than the policy's floor (no filter of it was built, and the dictionary probe answers for
+such a column); when its first four blocks hold one and the same set of values (a block filter
+then answers "maybe" for every value the generation holds, and prunes nothing); and when they
+exceed 2 % of the column's *written* bytes, checked at every chunk. The hash per row is the whole
+cost of a live filter — +24 % on the corpus's `varbinview` write, +37 % on `zstd_buffers`, both
+seventeen-odd values cycling — so these verdicts are what keeps `Auto` inside the throughput
+ceilings; a memo of computed hashes was measured and saved nothing. A Bloom filter at 1 % costs about 1,2 bytes per distinct value
+before the power-of-two rounding, so under this rule it pays on wide values that do not compress
+and on medium-cardinality columns whose generations clear the floor, and nowhere near a column that
+bit-packs to a byte a row. A directory is written only when it lists something or the policy is
+the caller's own. The file budget counts the indexes still alive, never the dead weight of an
+abandoned one.
+
 ---
 
 ## 6. Locating indexes

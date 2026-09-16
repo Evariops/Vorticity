@@ -14,6 +14,12 @@
 // same union over the whole file, which is why that resolution is opt-in and gives up past a
 // ceiling.
 //
+// THE HASH PER ROW IS THE COST, and `Auto` stops paying it as early as a fact allows: +24 % on a
+// string column and +37 % on an i64 one whose filters were kept, +27 % on a dictionary column whose
+// filter was dropped only at the end. A memo of hashes already computed was measured and removed:
+// on those columns its lookup costs what the hash did. What pays is not hashing -- the verdicts
+// below come within the first block or the first generation.
+//
 // A RUN IS WRITTEN WHEN ITS GENERATION CLOSES, not at `CompleteAsync`. 10 §7.2 says both "nothing
 // is buffered across chunks" and "runs are written at CompleteAsync"; holding every filter to the
 // end is megabytes per column per million rows, so the streaming half wins and the run lands
@@ -43,12 +49,21 @@ internal sealed class BloomBuilder : IndexBuilder
     /// <summary>Distinct values the file-level resolution may hold before it gives up.</summary>
     internal const int FileHashCeiling = 1 << 22;
 
+    /// <summary>Rows between two of `Auto`'s checks inside a block.</summary>
+    private const int CheckStride = 256;
+
+    /// <summary>The blocks `Auto` watches for a column that repeats one set.</summary>
+    private const int RepeatBlocks = 4;
+
     private readonly IndexPolicy _policy;
+    private int _firstDistinct;
+    private long _blockRawStart;
     private readonly HashSet64 _block = new HashSet64();
     private readonly HashSet64? _generation;
     private HashSet64? _file;
 
     private int _generationFirst;
+    private long _rawBytes;
     private uint[]? _generationBlockWords;
     private int _generationBlockWordCount;
     private int _blocks;
@@ -66,6 +81,16 @@ internal sealed class BloomBuilder : IndexBuilder
 
     /// <summary>The kind this builder writes.</summary>
     internal string Kind => _trigrams ? IndexKinds.BloomNgram3 : IndexKinds.BloomSbbf;
+
+    /// <inheritdoc/>
+    /// <remarks>The open generation's block filters: uncompressed, so their size is their size.</remarks>
+    protected override long OpenBytes => (long)_generationBlockWordCount * sizeof(uint);
+
+    /// <summary>
+    /// Rows per block, which bounds a block's raw bytes before it closes, so that `Auto` can give up
+    /// inside the first block; 0 when blocks are the caller's batches and have no fixed length.
+    /// </summary>
+    internal int BlockRows { get; init; }
 
     /// <summary>Why the file-level filter was dropped, when it was asked for and could not be kept.</summary>
     internal string? FileAbandoned { get; private set; }
@@ -155,14 +180,15 @@ internal sealed class BloomBuilder : IndexBuilder
         switch (node.Kind)
         {
             case CanonicalKind.Primitive:
-                Fixed(block, node.Values.Span, node.PType.ByteWidth(), start, count, allValid, own, wrapper, hash);
+                Fixed(node.Values.Span, node.PType.ByteWidth(), start, count, allValid, own, wrapper, hash);
                 return;
 
             case CanonicalKind.Decimal:
-                Fixed(block, node.Values.Span, DecimalStorage.ByteWidth(node.Storage), start, count, allValid, own, wrapper, hash);
+                Fixed(node.Values.Span, DecimalStorage.ByteWidth(node.Storage), start, count, allValid, own, wrapper, hash);
                 return;
 
             case CanonicalKind.Constant:
+                _rawBytes += (long)count * node.ConstantElement.Length;
                 for (int row = start; row < start + count; row++)
                 {
                     if (own.IsValid(row) && wrapper.IsValid(row))
@@ -177,11 +203,13 @@ internal sealed class BloomBuilder : IndexBuilder
             case CanonicalKind.VarBinView when _trigrams:
                 Span<byte> trigram = stackalloc byte[Trigrams.Length];
                 bool fold = _policy.CaseInsensitive;
+                _rawBytes += 16L * count;
                 for (int row = start; row < start + count; row++)
                 {
                     if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
                     {
                         ReadOnlySpan<byte> value = LiteralReader.ViewAt(node, row);
+                        _rawBytes += value.Length;
                         for (int i = 0; i + Trigrams.Length <= value.Length; i++)
                         {
                             Trigrams.Copy(value.Slice(i, Trigrams.Length), fold, trigram);
@@ -193,11 +221,14 @@ internal sealed class BloomBuilder : IndexBuilder
                 return;
 
             case CanonicalKind.VarBinView:
+                _rawBytes += 16L * count;
                 for (int row = start; row < start + count; row++)
                 {
                     if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
                     {
-                        block.Add(SplitBlockBloom.Hash(LiteralReader.ViewAt(node, row), hash));
+                        ReadOnlySpan<byte> value = LiteralReader.ViewAt(node, row);
+                        _rawBytes += value.Length;
+                        block.Add(SplitBlockBloom.Hash(value, hash));
                     }
                 }
 
@@ -209,29 +240,67 @@ internal sealed class BloomBuilder : IndexBuilder
         }
     }
 
-    private static void Fixed(
-        HashSet64 block, ReadOnlySpan<byte> values, int width, int start, int count, bool allValid,
+    /// <summary>
+    /// Fixed-width values. `Auto` checks its share every <see cref="CheckStride"/> rows: the block's
+    /// distinct count so far can only grow, and a full block bounds its raw bytes, so a verdict
+    /// reached here is the one the block's close would reach, a block's hashing earlier.
+    /// </summary>
+    private void Fixed(
+        ReadOnlySpan<byte> values, int width, int start, int count, bool allValid,
         ValidityMask own, ValidityMask wrapper, BloomHash hash)
     {
-        if (allValid)
+        _rawBytes += (long)count * width;
+        HashSet64 block = _block;
+        bool checks = AutoShare > 0 && BlockRows > 0;
+        int end = start + count;
+        int row = start;
+        while (row < end)
         {
-            ReadOnlySpan<byte> window = values.Slice(start * width, count * width);
-            for (int offset = 0; offset < window.Length; offset += width)
+            int stop = Math.Min(end, row + CheckStride);
+            for (; row < stop; row++)
             {
-                block.Add(SplitBlockBloom.Hash(window.Slice(offset, width), hash));
+                if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
+                {
+                    block.Add(SplitBlockBloom.Hash(values.Slice(row * width, width), hash));
+                }
             }
 
-            return;
-        }
-
-        for (int row = start; row < start + count; row++)
-        {
-            if (own.IsValid(row) && wrapper.IsValid(row))
+            if (checks && GivesUpInBlock(_blockRawStart + ((long)BlockRows * width)))
             {
-                block.Add(SplitBlockBloom.Hash(values.Slice(row * width, width), hash));
+                return;
             }
         }
     }
+
+    /// <summary>
+    /// `Auto`'s check inside a block: the filter the distinct values seen so far need, against a
+    /// bound on the block's raw bytes at its close.
+    /// </summary>
+    /// <param name="rawBound">The column's raw bytes once the block is full.</param>
+    /// <returns>Whether the builder gave up.</returns>
+    private bool GivesUpInBlock(long rawBound)
+    {
+        int distinct = _block.Count;
+        if (distinct == 0 || distinct < _policy.MinDistinct)
+        {
+            return false;
+        }
+
+        long projected = Bytes + ((long)SplitBlockBloom.BlocksFor(
+            distinct, _policy.FalsePositivePpm, _policy.MaxBlocks) * SplitBlockBloom.WordsPerBlock * sizeof(uint));
+        if (projected * 1000 <= rawBound * AutoShare)
+        {
+            return false;
+        }
+
+        GiveUp(projected, rawBound);
+        return true;
+    }
+
+    private void GiveUp(long projected, long raw) =>
+        Abandon(
+            $"Auto gave it up: {projected} bytes of filters against {raw} raw bytes of column, " +
+            $"over its share of {AutoShare}‰ (docs/10-indexes.md §5.5)");
 
     /// <summary>
     /// Seals the open block: sizes and fills its filter, folds its values into the coarser sets,
@@ -240,6 +309,7 @@ internal sealed class BloomBuilder : IndexBuilder
     internal override void CloseBlock()
     {
         int block = _blocks++;
+        _blockRawStart = _rawBytes;
         if (Abandoned is not null)
         {
             BlockFilterBlocks.Add(0);
@@ -252,6 +322,18 @@ internal sealed class BloomBuilder : IndexBuilder
         {
             filterBlocks = SplitBlockBloom.BlocksFor(distinct, _policy.FalsePositivePpm, _policy.MaxBlocks);
             int words = filterBlocks * SplitBlockBloom.WordsPerBlock;
+
+            // `AUTO` GIVES UP BEFORE BUILDING when the filters would already outweigh their share of
+            // the column's RAW bytes: the column compresses to no more than those, so the verdict
+            // the chunk would reach is already known, and the filter is never laid out.
+            long projected = Bytes + ((long)words * sizeof(uint));
+            if (AutoShare > 0 && projected * 1000 > _rawBytes * AutoShare)
+            {
+                GiveUp(projected, _rawBytes);
+                BlockFilterBlocks.Add(0);
+                return;
+            }
+
             EnsureWords(ref _generationBlockWords, _generationBlockWordCount + words);
             Span<uint> filter = _generationBlockWords.AsSpan(_generationBlockWordCount, words);
             filter.Clear();
@@ -260,7 +342,15 @@ internal sealed class BloomBuilder : IndexBuilder
         }
 
         BlockFilterBlocks.Add(filterBlocks);
-        _generation?.AddAll(_block);
+        if (_generation is not null)
+        {
+            _generation.AddAll(_block);
+            if (AutoShare > 0 && block < RepeatBlocks && GivesUpOnRepeats(block, distinct))
+            {
+                return;
+            }
+        }
+
         if (_file is not null)
         {
             _file.AddAll(_block);
@@ -277,6 +367,44 @@ internal sealed class BloomBuilder : IndexBuilder
         {
             CloseGeneration();
         }
+    }
+
+    /// <summary>
+    /// `Auto`'s verdict on a column whose first blocks hold one and the same set: a block filter
+    /// then says "maybe" for every value the generation holds, and prunes nothing.
+    /// </summary>
+    /// <remarks>
+    /// The sets are equal exactly when, after each block's fold, the union is as large as the block
+    /// and as the first block: no block lacked a value another had. A cycle of seventeen values
+    /// over a million rows -- the corpus's `zstd_buffers` -- is this column, and its filter cost
+    /// the write +37 %.
+    /// </remarks>
+    /// <param name="block">The block just sealed.</param>
+    /// <param name="distinct">Its distinct count.</param>
+    /// <returns>Whether the builder gave up.</returns>
+    private bool GivesUpOnRepeats(int block, int distinct)
+    {
+        if (block == 0)
+        {
+            _firstDistinct = distinct;
+        }
+
+        if (distinct == 0 || distinct != _firstDistinct || _generation!.Count != distinct)
+        {
+            _firstDistinct = -1;
+            return false;
+        }
+
+        if (block + 1 < RepeatBlocks)
+        {
+            return false;
+        }
+
+        Abandon(
+            $"Auto gave it up: its first {RepeatBlocks} blocks hold the same {distinct} values, so a " +
+            "block filter prunes nothing (docs/10-indexes.md §5.5)");
+        _block.Clear();
+        return true;
     }
 
     /// <summary>Closes a partial generation at the end of the data, and builds the file-level filter.</summary>
@@ -308,7 +436,7 @@ internal sealed class BloomBuilder : IndexBuilder
             uint[] words = new uint[blocks * SplitBlockBloom.WordsPerBlock];
             file.InsertInto(words);
             File = new BloomRun(0, _blocks, null, PendingPayload.U32(words, compress: false), blocks);
-            Pending.Enqueue(File.Generation!);
+            Enqueue(File.Generation!);
         }
     }
 
@@ -321,6 +449,17 @@ internal sealed class BloomBuilder : IndexBuilder
             : _generationBlockWords.AsSpan(0, _generationBlockWordCount).ToArray();
         uint[] generationWords = [];
         int generationBlocks = 0;
+        if (Abandoned is null && _generation is not null && AutoShare > 0 && first == 0
+            && count == GenerationBlocks && _generation.Count < _policy.MinDistinct)
+        {
+            // A FULL FIRST GENERATION UNDER THE FLOOR IS A DICTIONARY'S COLUMN: no block and no
+            // generation of it got a filter, the dictionary probe answers its equalities, and
+            // hashing the rest of the file would buy nothing.
+            Abandon(
+                $"Auto gave it up: the first {count} blocks hold {_generation.Count} distinct values, " +
+                $"under the floor of {_policy.MinDistinct} (docs/10-indexes.md §5.5)");
+        }
+
         if (Abandoned is null && _generation is not null)
         {
             int distinct = _generation.Count;
@@ -347,12 +486,12 @@ internal sealed class BloomBuilder : IndexBuilder
             Runs.Add(run);
             if (run.Blocks is { } blocks)
             {
-                Pending.Enqueue(blocks);
+                Enqueue(blocks);
             }
 
             if (run.Generation is { } generation)
             {
-                Pending.Enqueue(generation);
+                Enqueue(generation);
             }
         }
 
@@ -361,9 +500,26 @@ internal sealed class BloomBuilder : IndexBuilder
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// A BLOOM ON A SORTED COLUMN IS WASTED (10 §5.5): the zone map already prunes every equality,
+    /// block by block, from bounds it holds anyway. The first block is the evidence -- a column whose
+    /// first block climbs is taken to be sorted -- because waiting for the file statistics would be
+    /// waiting for the end, after every filter had been paid for.
+    /// </remarks>
+    internal override void FirstBlock(bool? sorted)
+    {
+        if (AutoShare > 0 && Abandoned is null && sorted == true && !_trigrams)
+        {
+            Abandon("Auto gave it up: the column is sorted, so its zone map already prunes an equality (docs/10-indexes.md §5.5)");
+        }
+    }
+
+    /// <inheritdoc/>
     internal override void Abandon(string reason)
     {
         base.Abandon(reason);
+        _block.Clear();
+        _generationBlockWordCount = 0;
         _file?.Dispose();
         _file = null;
     }

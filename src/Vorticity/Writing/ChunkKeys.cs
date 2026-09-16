@@ -26,9 +26,9 @@ internal sealed class ChunkKeys : IDisposable
 {
     private byte[] _heap = ArrayPool<byte>.Shared.Rent(1 << 12);
     private int _heapUsed;
+    private List<(int Key, long Position)> _log = [];
     private List<(int Offset, int Length)> _keys = [];
     private int[] _slots = NewSlots(1 << 10);
-    private List<(int Key, long Position)> _log = [];
 
     /// <summary>The pairs, in ingest order.</summary>
     internal List<(int Key, long Position)> Log => _log;
@@ -46,11 +46,16 @@ internal sealed class ChunkKeys : IDisposable
 
     /// <summary>The id of <paramref name="bytes"/>, interning it on first sight.</summary>
     /// <param name="bytes">The key.</param>
+    /// <remarks>
+    /// THE SLOT HASH IS THE WRITE PATH'S SHORT ONE (<see cref="KeyHash.Bytes"/>): a key up to
+    /// sixteen bytes folds in one multiply, where XxHash3 would cost a call and three times the
+    /// time -- and the table only needs a bucket, since an exact comparison settles every collision.
+    /// </remarks>
     internal int Intern(ReadOnlySpan<byte> bytes)
     {
         int[] slots = _slots;
         int mask = slots.Length - 1;
-        int slot = (int)SplitBlockBloom.Hash(bytes, BloomHash.XxHash3) & mask;
+        int slot = (int)KeyHash.Bytes(bytes) & mask;
         while (true)
         {
             int held = slots[slot];
@@ -97,7 +102,7 @@ internal sealed class ChunkKeys : IDisposable
         int mask = slots.Length - 1;
         for (int id = 0; id < _keys.Count; id++)
         {
-            int slot = (int)SplitBlockBloom.Hash(KeyBytes(id), BloomHash.XxHash3) & mask;
+            int slot = (int)KeyHash.Bytes(KeyBytes(id)) & mask;
             while (slots[slot] >= 0)
             {
                 slot = (slot + 1) & mask;

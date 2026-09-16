@@ -5,6 +5,10 @@
 // can take it -- between two chunks -- and dropped from the arena as soon as its bytes are out. So a
 // builder holds its results in whatever shape it likes and hands over a delegate that lays them
 // into canonical nodes; the arena, the dtype arena and the compression decision stay in one place.
+//
+// AN ESTIMATE UNTIL IT IS WRITTEN. `Auto` judges a builder by its bytes before its payloads have
+// gone out (10 §5.5), so a payload carries its uncompressed size -- an upper bound, since the
+// compressor only shrinks it -- and the writer replaces it with the real length on placement.
 using System;
 using Vorticity.Arrays;
 using Vorticity.Indexes;
@@ -15,13 +19,20 @@ namespace Vorticity.Writing;
 /// <summary>One payload array of one run.</summary>
 /// <param name="build">Lays the array into the arena and returns its node.</param>
 /// <param name="compress">Whether the column compressor may choose its encoding.</param>
-internal sealed class PendingPayload(Func<CanonicalArena, DTypeArena, int> build, bool compress)
+/// <param name="estimate">Its uncompressed bytes, until the real length is known.</param>
+internal sealed class PendingPayload(Func<CanonicalArena, DTypeArena, int> build, bool compress, long estimate)
 {
     /// <summary>Lays the array into the arena and returns its node.</summary>
     internal Func<CanonicalArena, DTypeArena, int> Build { get; } = build;
 
     /// <summary>Whether the column compressor may choose its encoding.</summary>
     internal bool Compress { get; } = compress;
+
+    /// <summary>Its uncompressed bytes.</summary>
+    internal long Estimate { get; } = estimate;
+
+    /// <summary>The builder whose bytes it counts toward.</summary>
+    internal IndexBuilder? Owner { get; set; }
 
     /// <summary>Where the blob landed, once written.</summary>
     internal IndexSegment? Segment { get; set; }
@@ -43,5 +54,6 @@ internal sealed class PendingPayload(Func<CanonicalArena, DTypeArena, int> build
                     types.Primitive(PType.U32, Nullability.NonNullable), words.Length,
                     Validity.NonNullable, PType.U32, buffer);
             },
-            compress);
+            compress,
+            (long)words.Length * sizeof(uint));
 }

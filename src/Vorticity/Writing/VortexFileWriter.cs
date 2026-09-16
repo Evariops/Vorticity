@@ -238,7 +238,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
         }
 
         _indexes = IndexWriter.Asks(indexes)
-            ? new IndexWriter(indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille)
+            ? new IndexWriter(indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows)
             : null;
     }
 
@@ -531,7 +531,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
             _columns[field].CloseBlock();
         }
 
-        _indexes?.CloseBlock();
+        _indexes?.CloseBlock(_columns);
         _blockFilled = 0;
     }
 
@@ -749,8 +749,9 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
             using ArrayBlobWriter.BlobLease blob =
                 ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress, stats);
-            _columnSegments[field].Add(
-                await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false));
+            int segment = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
+            _columnSegments[field].Add(segment);
+            _indexes?.AddColumnBytes(field, _segments[segment].Length);
 
             // The chunk is written, so the per-block scratch behind it has no further reader. The
             // compact summaries stay — the zone map wants them at `CompleteAsync` — and only the
@@ -760,7 +761,9 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
         // The chunk's locating runs close with it; they and the generations its blocks closed go out
         // right behind it.
+        // JUDGED BEFORE ANYTHING IS WRITTEN: a builder `Auto` gives up on leaves no dead weight.
         _indexes?.CloseChunk(_emittedBlocks, blocks, _rowCount, rows);
+        _indexes?.Judge();
         _emittedBlocks += blocks;
         _chunkRows.Add(rows);
         _rowCount += rows;
@@ -818,6 +821,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
         long dataEnd = _sink.Position;
         long interleaved = _indexes?.FileBytes ?? 0;
         _indexes?.EndOfData();
+        _indexes?.Judge();
         await FlushIndexesAsync(cancellationToken).ConfigureAwait(false);
         long indexStart = _sink.Position;
         _indexes?.Close(_columns, _chunkRows, _blockRows, dataEnd - interleaved);

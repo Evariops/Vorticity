@@ -212,7 +212,7 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     /// <param name="fppPpm">The false-positive rate in ppm, clamped into range.</param>
     /// <param name="resolutions">The resolution count, clamped into <c>[1, 3]</c>.</param>
     /// <param name="maxBlocks">The block ceiling, clamped positive.</param>
-    /// <param name="minDistinct">The distinct floor, clamped non-negative.</param>
+    /// <param name="minDistinct">The distinct floor; a negative value, which a file cannot hold, means the default.</param>
     /// <param name="hash">The hash; an unknown value becomes <see cref="BloomHash.XxHash3"/>.</param>
     /// <param name="caseInsensitive">Whether trigrams are lower-cased.</param>
     /// <returns>A policy inside every range.</returns>
@@ -229,7 +229,7 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
             Math.Clamp(fppPpm == 0 ? DefaultFalsePositivePpm : fppPpm, 1, 500_000),
             Math.Clamp(resolutions == 0 ? DefaultResolutions : resolutions, 1, 3),
             Math.Max(maxBlocks == 0 ? DefaultMaxBlocks : maxBlocks, 1),
-            Math.Max(minDistinct, 0),
+            minDistinct,
             hash == (int)BloomHash.XxHash64 ? BloomHash.XxHash64 : BloomHash.XxHash3,
             caseInsensitive,
             Math.Max(segmentEntries, 0));

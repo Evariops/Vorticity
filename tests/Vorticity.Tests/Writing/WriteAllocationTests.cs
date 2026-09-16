@@ -135,13 +135,21 @@ public sealed class WriteAllocationTests
     /// 2 100 400 -&gt; 2 098 360, and every file a little.
     /// </para>
     /// </remarks>
+    // 12e (2026-09-16) : `Auto` PAR DÉFAUT (10 §5.5), et les plafonds ci-dessous qui bougent le
+    // portent : l'écrivain d'index et ses tableaux par colonne, un constructeur Bloom par colonne
+    // qu'il indexe (deux ensembles de hachages dont les tables viennent du pool, une file, deux
+    // listes), la raison d'un abandon, les entrées du rapport, et pour un fichier à dictionnaire le
+    // répertoire. Par fichier et par colonne, jamais par ligne : le garde-fou par ligne ne bouge
+    // pas. Les filtres eux-mêmes ne sont plus construits pour une colonne qu'`Auto` va abandonner --
+    // l'abandon se décide au premier bloc, sur les octets bruts -- sans quoi high_cardinality
+    // prenait 17 kB.
     private static readonly (string Id, long Ceiling)[] Files =
     [
         ("containers/zoned_many_zones_nulls", 2_130_000),   // 2 098 360 mesurés
-        ("distributions/high_cardinality_i64_r8193", 72_600),   // 71 936 mesurés (11a, 2026-09-16) : +2,2 kB par fichier pour le segment de statistiques de fichier -- un FlatBufferBuilder, un ScalarStore, les bornes en protobuf -- par fichier, pas par ligne. Était 70 800 (69 736 mesurés, -48 %)
-        ("encodings/fsst", 235_100),
-        ("encodings/onpair", 223_400),   // 220 048 mesurés
-        ("types/utf8_nullable_r1025", 218_000),   // 214 752 mesurés
+        ("distributions/high_cardinality_i64_r8193", 73_700),   // 73 256 mesurés (12e) : +1,3 kB, Auto. Était 72 600 : 71 936 mesurés (11a, 2026-09-16) : +2,2 kB par fichier pour le segment de statistiques de fichier -- un FlatBufferBuilder, un ScalarStore, les bornes en protobuf -- par fichier, pas par ligne. Était 70 800 (69 736 mesurés, -48 %)
+        ("encodings/fsst", 235_800),   // 235 320 mesurés (12e) : Auto ; était 235 100
+        ("encodings/onpair", 224_400),   // 223 904 mesurés (12e) : Auto ; était 223 400 (220 048 mesurés)
+        ("types/utf8_nullable_r1025", 219_200),   // 218 736 mesurés (12e) : Auto ; était 218 000 (214 752 mesurés)
 
         // THE LATE COMPONENTS, on the write side, for PERF-AUDIT-v2.md F2's reason: `fastlanes.delta`,
         // `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant` were watched by no
@@ -150,18 +158,18 @@ public sealed class WriteAllocationTests
         // so these axes measure "what does writing this SHAPE of data cost", which is the question
         // a ratchet can answer. Whether our writer re-elects the same encoding is a different
         // question and `bench/crosscheck.sh` is where it is asked.
-        ("encodings/fastlanes_delta", 64_700),   // 64 584 mesurés (11a) : +1,9 kB par fichier, le segment de statistiques ; était 62 900
-        ("encodings/pco", 66_200),   // 66 048 mesurés (11a) : idem ; était 64 400
-        ("encodings/zstd", 223_400),
-        ("encodings/map", 101_600),   // 101 368 mesurés (11a) : +1,2 kB par fichier, le segment de statistiques ; était 100 200
-        ("encodings/variant", 67_300),   // 67 128 mesurés (11a, 2026-09-16) : +1,8 kB par fichier, le segment de statistiques de fichier. Était 65 400 : 65 336 mesurés (étape 8d, 2026-09-16) : +32 B pour deux champs de référence par ScanContext -- le masque de blocs vivants et le puits de métriques du contrat de lecture (8b, 8d) -- sur les deux contextes de transit que l'écrivain instancie ; par fichier, pas par ligne, pour un état qu'il n'utilise pas (un contexte réduit à l'arène est le correctif si ça compte un jour). Était 65 300 (65 232 mesurés, R5a : +32 B pour le champ PlanMemory? de trois ColumnWriter), 65 200 (R2 : +436 B pour trois DistinctTable), 64 700 (63 920 : +320 B pour deux ColumnWriter de plus)
+        ("encodings/fastlanes_delta", 66_100),   // 65 632 mesurés (12e) : +1,0 kB, Auto. Était 64 700 : 64 584 mesurés (11a) : +1,9 kB par fichier, le segment de statistiques ; était 62 900
+        ("encodings/pco", 67_500),   // 67 096 mesurés (12e) : Auto. Était 66 200 : 66 048 mesurés (11a) : idem ; était 64 400
+        ("encodings/zstd", 225_000),   // 224 592 mesurés (12e) : Auto ; était 223 400
+        ("encodings/map", 102_500),   // 102 008 mesurés (12e) : Auto. Était 101 600 : 101 368 mesurés (11a) : +1,2 kB par fichier, le segment de statistiques ; était 100 200
+        ("encodings/variant", 68_200),   // 67 792 mesurés (12e) : Auto. Était 67 300 : 67 128 mesurés (11a, 2026-09-16) : +1,8 kB par fichier, le segment de statistiques de fichier. Était 65 400 : 65 336 mesurés (étape 8d, 2026-09-16) : +32 B pour deux champs de référence par ScanContext -- le masque de blocs vivants et le puits de métriques du contrat de lecture (8b, 8d) -- sur les deux contextes de transit que l'écrivain instancie ; par fichier, pas par ligne, pour un état qu'il n'utilise pas (un contexte réduit à l'arène est le correctif si ça compte un jour). Était 65 300 (65 232 mesurés, R5a : +32 B pour le champ PlanMemory? de trois ColumnWriter), 65 200 (R2 : +436 B pour trois DistinctTable), 64 700 (63 920 : +320 B pour deux ColumnWriter de plus)
 
         // THE TWO ALP SHAPES, added with W-6 because that point moved them and nothing watched it:
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a
         // patch. The second is the case that made the patch buffers worth renting, and a ratchet
         // that only held the easy shape would have said nothing about it.
-        ("encodings/alp", 120_600),   // 120 432 mesurés (11a) : +0,9 kB par fichier, le segment de statistiques ; était 119 600
-        ("encodings/alprd", 98_300),   // 98 120 mesurés (11a) : idem ; était 97 400 (95 968 mesurés, -25 %)
+        ("encodings/alp", 121_900),   // 121 480 mesurés (12e) : +1,0 kB, Auto. Était 120 600 : 120 432 mesurés (11a) : +0,9 kB par fichier, le segment de statistiques ; était 119 600
+        ("encodings/alprd", 99_900),   // 99 480 mesurés (12e) : Auto. Était 98 300 : 98 120 mesurés (11a) : idem ; était 97 400 (95 968 mesurés, -25 %)
     ];
 
     // FOUR OF THESE FIVE CAME DOWN AGAIN WHEN FSST STOPPED ALLOCATING WHAT IT THROWS AWAY.

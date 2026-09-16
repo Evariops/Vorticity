@@ -187,17 +187,35 @@ public sealed record IndexDirectory(
         }
     }
 
+    /// <remarks>
+    /// AN OPTION AT ITS DEFAULT IS NOT WRITTEN: every file carries its directory since `Auto` became
+    /// the default, and the defaults are the reader's as much as the writer's (a zero reads back as
+    /// the default). `min_distinct` is the one option whose zero is a request, so it goes out
+    /// whenever it differs from its default.
+    /// </remarks>
     private static void WriteColumnPolicy(ref ProtoWriter writer, string path, IndexPolicy policy)
     {
         writer.WriteString(ColumnPath, path);
-        writer.WriteUInt32Always(ColumnKind, (uint)policy.Kind);
-        writer.WriteUInt32Always(ColumnFpp, (uint)policy.FalsePositivePpm);
-        writer.WriteUInt32Always(ColumnResolutions, (uint)policy.Resolutions);
-        writer.WriteUInt32Always(ColumnMaxBlocks, (uint)policy.MaxBlocks);
-        writer.WriteUInt32Always(ColumnMinDistinct, (uint)policy.MinDistinct);
+        writer.WriteUInt32(ColumnKind, (uint)policy.Kind);
+        WriteIfNot(ref writer, ColumnFpp, policy.FalsePositivePpm, IndexPolicy.DefaultFalsePositivePpm);
+        WriteIfNot(ref writer, ColumnResolutions, policy.Resolutions, IndexPolicy.DefaultResolutions);
+        WriteIfNot(ref writer, ColumnMaxBlocks, policy.MaxBlocks, IndexPolicy.DefaultMaxBlocks);
+        if (policy.MinDistinct != IndexPolicy.DefaultMinDistinct)
+        {
+            writer.WriteUInt32Always(ColumnMinDistinct, (uint)policy.MinDistinct);
+        }
+
         writer.WriteUInt32(ColumnHash, (uint)policy.Hash);
         writer.WriteBool(ColumnCaseInsensitive, policy.CaseInsensitive);
-        writer.WriteUInt32Always(ColumnSegmentEntries, (uint)policy.SegmentEntries);
+        WriteIfNot(ref writer, ColumnSegmentEntries, policy.SegmentEntries, IndexPolicy.DefaultSegmentEntries);
+    }
+
+    private static void WriteIfNot(ref ProtoWriter writer, int field, int value, int fallback)
+    {
+        if (value != fallback)
+        {
+            writer.WriteUInt32Always(field, (uint)value);
+        }
     }
 
     private static void WriteEntry(ref ProtoWriter writer, IndexEntry entry)
@@ -538,7 +556,7 @@ public sealed record IndexDirectory(
         uint fpp = 0;
         uint resolutions = 0;
         uint maxBlocks = 0;
-        uint minDistinct = 0;
+        long minDistinct = -1;
         uint hash = 0;
         uint segmentEntries = 0;
         bool caseInsensitive = false;
