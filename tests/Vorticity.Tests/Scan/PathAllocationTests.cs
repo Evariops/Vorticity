@@ -195,7 +195,12 @@ public sealed class PathAllocationTests
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here
         // rather than adding columns to the file above.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_648, FullScan),
+        // 27 648 -> 27 712 at step 8 of docs/11 §8: the read contract carries per-scan state on the
+        // objects a plain scan allocates once -- the mask of live blocks and the metrics sink, a
+        // reference each on the enumerable, the enumerator and the lane's context, 32 B in all --
+        // and this axis had none of the headroom the others carry. Loosened by exactly that, plus
+        // the 32 B of headroom the neighbouring axes have.
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_712, FullScan),
         ("scan, vortex.pco", "encodings/pco", 29_184, FullScan),
         ("scan, vortex.zstd", "encodings/zstd", 27_648, FullScan),
         ("scan, vortex.map", "encodings/map", 28_160, FullScan),

@@ -614,6 +614,17 @@ by each structure, rows selected by exact indexes, bytes to read against the fil
 `ScanMetrics` reports the same after execution. Nothing of the kind exists today (`Diagnostics/`
 holds exceptions and limits), and without it nobody can tell whether an index earns its bytes.
 
+**As delivered (step 8d).** `ScanBuilder.ExplainAsync()` returns a `ScanPlan`: it is the same
+planning the scan does before its first batch — the split plan, the mask refined by every
+structure (the zone maps are read for that, as the scan reads them), the live splits registered
+into one request set so segments are distinct and bytes counted once — and nothing is decoded.
+Each `PruningStep` carries **what the structure pruned and what consulting it cost** (segments and
+bytes), the two numbers this section asks for; the plan's totals are the live splits' data plus
+that cost, and `FileMayMatch` is §6.3's answer. `WithMetrics(ScanMetrics)` hands the scan a sink
+the caller owns; the pruning pass, the flat reader and the enumerator add to it what they ask,
+materialize and produce, so that plan and measurement are one quantity: on the corpus's zoned file
+the sink's requests equal the segment source's, exactly.
+
 ---
 
 ## 7. The surface a caller sees

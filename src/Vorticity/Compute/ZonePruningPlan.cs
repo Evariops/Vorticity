@@ -38,6 +38,11 @@ internal static class ZonePruningPlan
     /// <param name="tree">Its parsed layout tree.</param>
     /// <param name="filter">The scan's predicate.</param>
     /// <param name="cancellationToken">Cancels the reads this makes.</param>
+    /// <param name="steps">
+    /// Receives what each structure pruned, in the order they ran, for <c>Explain</c>; null when
+    /// nobody asks.
+    /// </param>
+    /// <param name="metrics">The scan's sink, to which the reads made here are added; null when nobody asks.</param>
     /// <returns>
     /// The mask, or <see langword="null"/> when no structure can prune anything -- which a scan
     /// reads as "every split is live", the same object graph it has without a filter.
@@ -49,16 +54,27 @@ internal static class ZonePruningPlan
     /// still live, and the list stops at an empty mask.
     /// </remarks>
     internal static async ValueTask<BlockMask?> RefineAsync(
-        VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken)
+        VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
+        List<Scan.PruningStep>? steps = null, Scan.ScanMetrics? metrics = null)
     {
-        ZonePruner? zones = await BuildAsync(file, tree, filter, cancellationToken).ConfigureAwait(false);
+        (ZonePruner? zones, int segments, long bytes) =
+            await BuildCountedAsync(file, tree, filter, metrics, cancellationToken).ConfigureAwait(false);
+        // THE PRICE OF CONSULTING A STRUCTURE IS PART OF THE SCAN'S COST: the zone maps read here
+        // are bytes the scan asked its source for, and they go to the same sink the batches feed
+        // (docs/11 §6.4), so that the sink and the source agree to the request.
+        metrics?.AddRequests(segments, bytes);
         if (zones is null)
         {
             return null;
         }
 
         BlockMask live = new BlockMask(tree.Root.RowCount, Scan.SplitPlan.NaturalBatchRows(tree));
+        int before = live.LiveCount;
         zones.Refine(live);
+        // What each structure pruned, and what consulting it cost, for `Explain` (docs/11 §6.4):
+        // the blocks that were live when it ran and are not afterwards -- so a later structure is
+        // credited only with what the earlier ones left it -- against the segments read for it.
+        steps?.Add(new Scan.PruningStep("zone map", before - live.LiveCount, segments, bytes));
         return live;
     }
 
@@ -73,11 +89,24 @@ internal static class ZonePruningPlan
     internal static async ValueTask<ZonePruner?> BuildAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken)
     {
+        (ZonePruner? pruner, _, _) =
+            await BuildCountedAsync(file, tree, filter, metrics: null, cancellationToken).ConfigureAwait(false);
+        return pruner;
+    }
+
+    /// <summary>
+    /// <see cref="BuildAsync"/>, with the segments and bytes it read to build the pruner -- what
+    /// consulting the zone maps cost this scan.
+    /// </summary>
+    private static async ValueTask<(ZonePruner? Pruner, int Segments, long Bytes)> BuildCountedAsync(
+        VortexFile file, LayoutTree tree, VortexExpr filter, Scan.ScanMetrics? metrics,
+        CancellationToken cancellationToken)
+    {
         List<string> paths = [];
         filter.CollectFields(paths);
         if (paths.Count == 0)
         {
-            return null;
+            return (null, 0, 0);
         }
 
         List<Candidate> candidates = [];
@@ -97,7 +126,7 @@ internal static class ZonePruningPlan
 
         if (candidates.Count == 0)
         {
-            return null;
+            return (null, 0, 0);
         }
 
         // PERF-AUDIT-v2.md R30, and it is the whole cost of pruning. This context reads one zone
@@ -107,6 +136,9 @@ internal static class ZonePruningPlan
         // were dimensioned for millions of rows to hold sixty-four bounds.
         ZoneColumn[] columns = new ZoneColumn[candidates.Count];
         using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
+        // The zone maps' own rows are values the flat reader materializes, and the sink counts
+        // them like any other -- the same way `FlatLayoutReader.ValuesDecoded` always has.
+        context.Metrics = metrics;
 
         // One registration pass over every zones child, then ONE coalesced read for all of them:
         // the same register-then-execute split a batch uses (docs/03-architecture.md §3.6), which
@@ -118,6 +150,15 @@ internal static class ZonePruningPlan
             FieldMask all = FieldMask.All;
             LayoutReaderTable.Require(in zones)
                 .RegisterSegments(in zones, new RowRange(0, zones.RowCount), in all, context.Segments);
+        }
+
+        // Counted at the asking, like a batch's requests: the distinct zone-map segments and their
+        // bytes, whatever the source then does about them.
+        int segments = context.Segments.Count;
+        long bytes = 0;
+        for (int i = 0; i < segments; i++)
+        {
+            bytes += context.Segments.GetSpec(i).Length;
         }
 
         await file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
@@ -134,7 +175,7 @@ internal static class ZonePruningPlan
         }
 
         ZonePruner pruner = new ZonePruner(filter, columns);
-        return pruner.IsUseful ? pruner : null;
+        return (pruner.IsUseful ? pruner : null, segments, bytes);
     }
 
     /// <summary>

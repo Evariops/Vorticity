@@ -291,6 +291,13 @@ public sealed class ScanContext : IDisposable
     internal Compute.BlockMask? LiveBlocks { get; set; }
 
     /// <summary>
+    /// The scan's metrics sink (docs/11 §6.4), or <see langword="null"/> when nobody asked. Per
+    /// scan like <see cref="LiveBlocks"/>: set once per lane, never by <see cref="ResetBatch"/>,
+    /// and the readers add to it what they materialize.
+    /// </summary>
+    internal Scan.ScanMetrics? Metrics { get; set; }
+
+    /// <summary>
     /// Replaces the selection and returns what was there, for a reader that re-bases it per child.
     /// </summary>
     /// <param name="rows">The new selection, or <see langword="null"/> to clear it.</param>

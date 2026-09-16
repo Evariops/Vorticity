@@ -154,7 +154,7 @@ public sealed class WriteAllocationTests
         ("encodings/pco", 64_400),
         ("encodings/zstd", 223_400),
         ("encodings/map", 100_200),
-        ("encodings/variant", 65_300),   // 65 232 mesurés (R5a, 2026-09-15) : +32 B pour le champ PlanMemory? de trois ColumnWriter -- par colonne, pas par ligne (0,008 o/ligne). Etait 65 200 (65 136 mesures, R2 : +436 B pour trois DistinctTable), et avant 64 700 (63 920 : +320 B pour deux ColumnWriter de plus)
+        ("encodings/variant", 65_400),   // 65 336 mesurés (étape 8d, 2026-09-16) : +32 B pour deux champs de référence par ScanContext -- le masque de blocs vivants et le puits de métriques du contrat de lecture (8b, 8d) -- sur les deux contextes de transit que l'écrivain instancie ; par fichier, pas par ligne, pour un état qu'il n'utilise pas (un contexte réduit à l'arène est le correctif si ça compte un jour). Était 65 300 (65 232 mesurés, R5a : +32 B pour le champ PlanMemory? de trois ColumnWriter), 65 200 (R2 : +436 B pour trois DistinctTable), 64 700 (63 920 : +320 B pour deux ColumnWriter de plus)
 
         // THE TWO ALP SHAPES, added with W-6 because that point moved them and nothing watched it:
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a

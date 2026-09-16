@@ -62,6 +62,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     private readonly int _degree;
     private readonly VortexExpr? _filter;
     private readonly RowSelection? _take;
+    private readonly ScanMetrics? _metrics;
     private readonly DType _schema;
 
     /// <param name="file">The open file.</param>
@@ -72,6 +73,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// <param name="degree">How many splits may decode concurrently.</param>
     /// <param name="filter">The predicate, or null.</param>
     /// <param name="take">The row index list, or null.</param>
+    /// <param name="metrics">The caller's sink for what the scan does (docs/11 §6.4), or null.</param>
     internal BatchAsyncEnumerable(
         VortexFile file,
         LayoutTree tree,
@@ -80,10 +82,12 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         SplitPlan plan,
         int degree,
         VortexExpr? filter,
-        RowSelection? take)
+        RowSelection? take,
+        ScanMetrics? metrics)
     {
         _file = file;
         _take = take;
+        _metrics = metrics;
         _tree = tree;
         _read = read;
         _keep = keep;
@@ -132,7 +136,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </remarks>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new BatchAsyncEnumerator(
-            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, live: null,
+            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, live: null, _metrics,
             cancellationToken);
 
     /// <summary>Starts a scan that reads only the splits <paramref name="live"/> keeps.</summary>
@@ -141,7 +145,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         BlockMask? live, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
-            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, live,
+            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, live, _metrics,
             cancellationToken);
 
     /// <summary>The file this scan reads, for the pruning pass that runs before the first batch.</summary>
@@ -149,6 +153,9 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 
     /// <summary>The layout tree the pruning pass walks.</summary>
     internal LayoutTree Tree => _tree;
+
+    /// <summary>The caller's metrics sink, for the pruning pass to add its own reads to.</summary>
+    internal ScanMetrics? Metrics => _metrics;
 }
 
 /// <summary>The hand-written enumerator of docs/03-architecture.md §3.7.</summary>
@@ -174,6 +181,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly VortexExpr? _filter;
     private readonly RowSelection? _take;
     private readonly BlockMask? _live;
+    private readonly ScanMetrics? _metrics;
     private readonly int _maxBatchRows;
     private readonly CancellationToken _token;
     private readonly Lane[] _lanes;
@@ -199,11 +207,13 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         VortexExpr? filter,
         RowSelection? take,
         BlockMask? live,
+        ScanMetrics? metrics,
         CancellationToken cancellationToken)
     {
         _tree = tree;
         _take = take;
         _live = live;
+        _metrics = metrics;
         _source = file.Segments;
         _mask = read.RootMask;
         _keep = keep.RootMask;
@@ -217,9 +227,11 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         for (int i = 0; i < degree; i++)
         {
             _lanes[i] = new Lane(new ScanContext(file));
-            // The mask outlives every batch of the scan, so it is set once here and never by
-            // `ResetBatch`; the readers read it in file coordinates (docs/11 §6.1).
+            // The mask and the metrics sink outlive every batch of the scan, so they are set once
+            // here and never by `ResetBatch`; the readers read the mask in file coordinates
+            // (docs/11 §6.1) and add what they materialize to the sink (§6.4).
             _lanes[i].Context.LiveBlocks = live;
+            _lanes[i].Context.Metrics = metrics;
         }
 
         // Allocated once per scan, so the awaiter's continuation costs nothing per batch.
@@ -277,6 +289,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             // Phase 1: register. No I/O, no decoding, no allocation.
             Register(lane.Context, split);
+            NoteRequests(lane.Context);
 
             // Phase 2: exactly one coalesced read per batch.
 #pragma warning disable CA2012 // awaited by ReadAndCompleteAsync, on the next line, exactly once
@@ -404,6 +417,28 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         LayoutReaderTable.Require(in root).RegisterSegments(in root, rows, in _mask, context.Segments);
     }
 
+    /// <summary>
+    /// Adds what the batch just registered to the scan's sink: the distinct segments and their
+    /// bytes, counted at the asking (docs/11 §6.4) -- a caching source may serve some without a read.
+    /// </summary>
+    private void NoteRequests(ScanContext context)
+    {
+        ScanMetrics? metrics = _metrics;
+        if (metrics is null)
+        {
+            return;
+        }
+
+        SegmentRequestSet segments = context.Segments;
+        long bytes = 0;
+        for (int i = 0; i < segments.Count; i++)
+        {
+            bytes += segments.GetSpec(i).Length;
+        }
+
+        metrics.AddRequests(segments.Count, bytes);
+    }
+
     private int Execute(ScanContext context, RowRange rows)
     {
         LayoutNode root = _tree.Root;
@@ -421,6 +456,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             int root = ExecuteWithTake(lane.Context, _pending);
             root = ApplyFilter(lane.Context, root);
             _current = new RecordBatch(lane.Context, root, _pending.Start);
+            _metrics?.AddBatch(_current.RowCount);
             return true;
         }
         catch
@@ -570,6 +606,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             _token.ThrowIfCancellationRequested();
             _current = new RecordBatch(lane.Context, root, lane.Rows.Start);
+            _metrics?.AddBatch(_current.RowCount);
         }
         catch
         {
@@ -605,6 +642,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         try
         {
             Register(context, rows);
+            NoteRequests(context);
             await _source.ReadManyAsync(context.Segments, _token).ConfigureAwait(false);
             return Execute(context, rows);
         }

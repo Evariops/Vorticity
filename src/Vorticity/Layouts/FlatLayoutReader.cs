@@ -42,6 +42,16 @@ public sealed class FlatLayoutReader : LayoutReader
     /// </remarks>
     internal static long ValuesDecoded;
 
+    /// <summary>
+    /// Counts <paramref name="values"/> materialized: on the process-wide counter the decode-count
+    /// tests read, and on the scan's own sink when it has one (docs/11 §6.4).
+    /// </summary>
+    private static void Decoded(ScanContext context, long values)
+    {
+        System.Threading.Interlocked.Add(ref ValuesDecoded, values);
+        context.Metrics?.AddDecoded(values);
+    }
+
     /// <inheritdoc/>
     public override void RegisterSegments(
         in LayoutNode node, RowRange rows, in FieldMask fields, SegmentRequestSet segments)
@@ -98,7 +108,7 @@ public sealed class FlatLayoutReader : LayoutReader
         if (rows.Start == 0 && length == total)
         {
             ArrayNode wholeRoot = LoadRoot(in node, context);
-            System.Threading.Interlocked.Add(ref ValuesDecoded, total);
+            Decoded(context, total);
             int whole = context.Decode.DecodeRoot(in wholeRoot, node.DType, total);
             return MaskProjection.Apply(context.Decode, whole, in fields);
         }
@@ -119,7 +129,7 @@ public sealed class FlatLayoutReader : LayoutReader
         long key = ScanContext.SegmentKey(node.Segments[0]);
         if (!context.TryGetRetained(key, out CanonicalArena held, out int retained))
         {
-            System.Threading.Interlocked.Add(ref ValuesDecoded, total);
+            Decoded(context, total);
 
             // DECODED STRAIGHT INTO THE ARENA THAT RETAINS IT. The chunk used to be decoded into
             // the batch's arena and then deep-copied into one that outlives it -- a second full
@@ -192,7 +202,7 @@ public sealed class FlatLayoutReader : LayoutReader
                     .Require(context, chunkRoot.Encoding, chunkRoot.EncodingSpecIndex)
                     .SelectsWithoutFullDecode)
             {
-                System.Threading.Interlocked.Add(ref ValuesDecoded, total);
+                Decoded(context, total);
                 CanonicalArena held = context.BeginRetainedDecode();
                 int retained = -1;
                 try
@@ -235,7 +245,7 @@ public sealed class FlatLayoutReader : LayoutReader
     {
         // Counted like the whole-node decodes above: what a positional take materializes is its
         // selection, and a decode no instrument counts is a decode nobody sees.
-        System.Threading.Interlocked.Add(ref ValuesDecoded, context.Selection.Length);
+        Decoded(context, context.Selection.Length);
         int taken = context.Decode.DecodeRootSelected(in root, node.DType, total, context.Selection);
         return MaskProjection.Apply(context.Decode, taken, in fields);
     }

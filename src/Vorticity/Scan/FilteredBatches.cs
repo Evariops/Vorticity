@@ -76,7 +76,7 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
                 // the rest of the scan; every split asks the mask, never the zone maps.
                 BlockMask? live = _prune && _filter is not null
                     ? await ZonePruningPlan
-                        .RefineAsync(_source.File, _source.Tree, _filter, _token)
+                        .RefineAsync(_source.File, _source.Tree, _filter, _token, steps: null, _source.Metrics)
                         .ConfigureAwait(false)
                     : null;
 

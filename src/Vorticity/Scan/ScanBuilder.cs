@@ -35,6 +35,7 @@ public sealed class ScanBuilder
     private bool _rowsSet;
     private int _maxBatchRows;
     private int _degree = 1;
+    private ScanMetrics? _metrics;
 
     internal ScanBuilder(VortexFile file)
     {
@@ -309,7 +310,7 @@ public sealed class ScanBuilder
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
 
         BatchAsyncEnumerable batches = new BatchAsyncEnumerable(
-            _file, tree, read, keep, plan, _degree, _filter, _take);
+            _file, tree, read, keep, plan, _degree, _filter, _take, _metrics);
 
         // Only a filtered scan pays for the skip-empty wrapper; an unfiltered one is the same
         // object graph it has always been, which is what keeps the per-batch allocation figure
@@ -320,6 +321,126 @@ public sealed class ScanBuilder
         return _filter is null && _take is null
             ? batches
             : new FilteredBatches(batches, _filter, _prune);
+    }
+
+    /// <summary>Hands the scan a sink it adds its counters to as it runs (docs/11 §6.4).</summary>
+    /// <param name="metrics">The caller's sink; a fresh one per fresh count.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// Every enumerator started from this builder adds to the same object, so a scan run twice
+    /// reports the sum. What it counts is what <see cref="ExplainAsync"/> planned: the segments
+    /// and bytes asked of the source, the values the flat reader materialized, the batches and
+    /// rows produced -- the same quantities, measured.
+    /// </remarks>
+    public ScanBuilder WithMetrics(ScanMetrics metrics)
+    {
+        ArgumentNullException.ThrowIfNull(metrics);
+        _metrics = metrics;
+        return this;
+    }
+
+    /// <summary>
+    /// The plan of this scan without executing it (docs/11 §6.4): splits and blocks, what each
+    /// structure prunes, the segments and bytes the live splits would read, against the file.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the one read this makes.</param>
+    /// <returns>The plan.</returns>
+    /// <remarks>
+    /// THE SAME PLANNING THE SCAN DOES BEFORE ITS FIRST BATCH, stopped before any data segment
+    /// is read: the layout tree, the split plan under the read projection, the mask of live blocks
+    /// refined by every structure the file carries (the zone maps are read for that, one segment
+    /// per filtered column, as the scan itself reads them), then a walk of the splits the cursor
+    /// would produce, registering the live ones into one request set -- which is how the segments
+    /// come out distinct and their bytes summed once. Nothing is decoded. Whether an index earns
+    /// its bytes is answered by this and <see cref="WithMetrics"/> together: what it would cost,
+    /// and what it did.
+    /// </remarks>
+    public async System.Threading.Tasks.ValueTask<ScanPlan> ExplainAsync(
+        System.Threading.CancellationToken cancellationToken = default)
+    {
+        LayoutTree tree = _file.LayoutTree;
+
+        long rootRows = tree.Root.RowCount;
+        RowRange whole = new RowRange(0, rootRows);
+        RowRange rows = _rowsSet ? _rows.Intersect(whole) : whole;
+        if (_take is not null)
+        {
+            rows = _take.Bounds.Intersect(whole);
+        }
+
+        Projection keep = _fields is null ? Projection.All : Projection.Create(_fields.Build());
+        Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
+
+        long natural = SplitPlan.NaturalBatchRows(tree);
+        if (natural > int.MaxValue)
+        {
+            natural = int.MaxValue;
+        }
+
+        long cap = _maxBatchRows > 0 && _maxBatchRows < natural ? _maxBatchRows : natural;
+        SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
+
+        List<PruningStep> steps = [];
+        Compute.BlockMask? live = _filter is not null && _prune
+            ? await Compute.ZonePruningPlan
+                .RefineAsync(_file, tree, _filter, cancellationToken, steps)
+                .ConfigureAwait(false)
+            : null;
+
+        long blockRows = live?.BlockRows ?? natural;
+        int blocks = live?.BlockCount ?? checked((int)((rootRows + blockRows - 1) / blockRows));
+        int liveBlocks = live?.LiveCount ?? blocks;
+
+        int splits = 0;
+        int liveSplits = 0;
+        IO.SegmentRequestSet segments = new IO.SegmentRequestSet();
+        try
+        {
+            LayoutNode root = tree.Root;
+            LayoutReader reader = LayoutReaderTable.Require(in root);
+            FieldMask mask = read.RootMask;
+            SplitCursor cursor = plan.CreateCursor();
+            while (cursor.TryNext(out RowRange split))
+            {
+                splits++;
+                if (_take is not null && !_take.Touches(split))
+                {
+                    continue;
+                }
+
+                if (live is not null && !live.AnyLive(split))
+                {
+                    continue;
+                }
+
+                liveSplits++;
+                reader.RegisterSegments(in root, split, in mask, segments);
+            }
+
+            // The data segments of the live splits, plus what consulting each structure cost:
+            // the same asking the metrics count, so that plan and measurement are one quantity.
+            int toRead = segments.Count;
+            long bytes = 0;
+            for (int i = 0; i < segments.Count; i++)
+            {
+                bytes += segments.GetSpec(i).Length;
+            }
+
+            for (int i = 0; i < steps.Count; i++)
+            {
+                toRead += steps[i].SegmentsRead;
+                bytes += steps[i].BytesRead;
+            }
+
+            bool fileMayMatch = _filter is null || _file.MayMatch(_filter);
+            return new ScanPlan(
+                rows.Length, blockRows, blocks, liveBlocks, steps, splits, liveSplits,
+                RowsSelectedByIndex: 0, toRead, bytes, _file.FileLength, fileMayMatch);
+        }
+        finally
+        {
+            segments.Dispose();
+        }
     }
 
     /// <summary>The projection widened by every field a filter reads.</summary>
