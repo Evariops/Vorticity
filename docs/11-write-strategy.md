@@ -602,6 +602,12 @@ Nulls are never inserted in an index, so `x = v` and `x IN (...)` are safe; `NOT
 `IS NULL` is the zone map's null count. The combination across `AND` is per block, which is
 weaker than the truth and therefore safe, exactly `ZonePruner`'s rule.
 
+A key-ordered scan ([12-index-reads.md](12-index-reads.md) §6) replaces the split walk by a
+**window driver**: a key source walks a batch's worth of entries inside the slices the filter's
+conjuncts on the key allow, the mask skips the entries of dead blocks, and the survivors are the
+row selection above — registered, read and executed per split the window touches, then permuted
+into key order. The mask is built the same way and consulted per entry instead of per split.
+
 ### 6.2 Granularity, honestly
 
 I/O is per segment, and a segment is a chunk of 16 to 32 blocks in the default shape. A block

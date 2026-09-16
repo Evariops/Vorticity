@@ -365,6 +365,9 @@ internal static class RatioCheck
         ["rewritten high card, ours"] = new(0.915, 22),   // 5 passes, spread 0.897-0.915; was 0.920, -0.5%
         ["full scan, 1M table"] = new(0.068, 1),   // 5 passes, spread 0.066-0.069; HELD at 0.068: 5 passes peaked at 0.069, no loosening
         ["projected scan, 1 of 50 columns"] = new(0.096, 11),   // 5 passes, spread 0.092-0.096; was 0.124, -22.8%
+        ["key order, sorted column, 1% band"] = new(0.701, 12),   // 5 passes, spread 0.676-0.701; new
+        ["key order, uncorrelated, 64 rows"] = new(1.404, 7),   // 5 passes, spread 1.359-1.404; new
+        ["count, exact cover, 1% band"] = new(0.785, 6),   // 5 passes, spread 0.762-0.785; new
     };
 
     /// <summary>
@@ -501,6 +504,9 @@ internal static class RatioCheck
                 .. RewrittenNames().Any(Selected)
                     ? await RewrittenAxesAsync(temporary, Selected).ConfigureAwait(false)
                     : [],
+                .. KeyOrderNames.Any(Selected)
+                    ? await KeyOrderAxesAsync(temporary, Selected).ConfigureAwait(false)
+                    : [],
                 .. Lanes > 1 ? new[] { LaneAxis(Lanes) } : [],
                 .. TableAxes().Where(a => Selected(a.Name)),
             ];
@@ -508,7 +514,7 @@ internal static class RatioCheck
             {
                 Console.Error.WriteLine(
                     $"No axis matches {string.Join(", ", only)}. The axes are:\n  " +
-                    string.Join("\n  ", Axes.Select(a => a.Name).Concat(RewrittenNames())));
+                    string.Join("\n  ", Axes.Select(a => a.Name).Concat(RewrittenNames()).Concat(KeyOrderNames)));
                 return 2;
             }
 
@@ -933,6 +939,142 @@ internal static class RatioCheck
         }
 
         return axes;
+    }
+
+    /// <summary>The key-order group's axes, in the order they are reported.</summary>
+    /// <remarks>
+    /// docs/12-index-reads.md §11: `InKeyOrder` over a sorted column and over an uncorrelated one,
+    /// and a count answered by the exact cover. The Rust side has no key order and no index, so
+    /// each axis is held against the reference's answer to the same QUESTION of the file -- the
+    /// band scanned, the scattered rows taken -- which is the cost a caller would otherwise pay.
+    /// `full scan` stays the guard that the window driver slows nothing else.
+    /// </remarks>
+    private static readonly string[] KeyOrderNames =
+    [
+        "key order, sorted column, 1% band",
+        "key order, uncorrelated, 64 rows",
+        "count, exact cover, 1% band",
+    ];
+
+    /// <summary>Rows of the key-order file: 64 splits of 1 024, the scattered take's shape.</summary>
+    private const int KeyOrderRows = 65_536;
+
+    /// <summary>The key-order file's sorted column, its uncorrelated one, and a payload.</summary>
+    private const string SortedField = "sorted";
+
+    private const string ShuffledField = "shuffled";
+
+    /// <summary>
+    /// An odd multiplier, so `row * it mod 65 536` is a permutation: a band of 64 keys lands on 64
+    /// rows scattered over the file.
+    /// </summary>
+    private const long Shuffle = 40_503;
+
+    /// <summary>Writes the key-order file once, with our writer, and returns the group's axes.</summary>
+    /// <param name="temporary">Collects the file written, for the caller to delete.</param>
+    /// <param name="selected">Which axes the caller asked for.</param>
+    private static async Task<List<Axis>> KeyOrderAxesAsync(List<string> temporary, Func<string, bool> selected)
+    {
+        string path = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"vorticity-keyorder-{Guid.NewGuid():N}.vortex");
+        temporary.Add(path);
+        await WriteKeyOrderFileAsync(path).ConfigureAwait(false);
+
+        const long low = 20_000;
+        List<Axis> axes =
+        [
+            new Axis(
+                KeyOrderNames[0],
+                p => KeyOrderedBand(p, SortedField, low, NarrowBand),
+                p => RustReader.Require(RustReader.ScanFiltered(p, SortedField, low, NarrowBand), "filtered scan"),
+                path),
+            new Axis(
+                KeyOrderNames[1],
+                p => KeyOrderedBand(p, ShuffledField, low, TakeCount),
+                p => RustReader.Require(RustReader.Take(p, TakeCount, TakeStride), "take"),
+                path),
+            new Axis(
+                KeyOrderNames[2],
+                p => CoveredCount(p, ShuffledField, low, NarrowBand),
+                p => RustReader.Require(RustReader.ScanFiltered(p, ShuffledField, low, NarrowBand), "filtered scan"),
+                path),
+        ];
+        return axes.FindAll(a => selected(a.Name));
+    }
+
+    private static async Task WriteKeyOrderFileAsync(string path)
+    {
+        Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
+        Vorticity.Types.DType i64 = types.Primitive(Vorticity.Types.PType.I64, Vorticity.Types.Nullability.NonNullable);
+        Vorticity.Types.DType schema = types.Struct(
+            [SortedField, ShuffledField, "payload"], [i64, i64, i64], Vorticity.Types.Nullability.NonNullable);
+        Vorticity.Writing.VortexWriteOptions options = new Vorticity.Writing.VortexWriteOptions
+        {
+            RowBlockSize = (int)TakeStride,
+            DataBlockTargetBytes = null,
+
+            // Runs of a permutation are as large as the columns they index, which the default
+            // budget refuses; the axis is about reading the index, not about whether it pays.
+            IndexBudgetPerMille = 1_000_000,
+            Indexes = Vorticity.Indexes.WritePolicy.None.For(ShuffledField, Vorticity.Indexes.IndexPolicy.SortedRuns),
+        };
+
+        await using Vorticity.Writing.VortexFileWriter writer =
+            Vorticity.Writing.VortexFileWriter.Create(path, schema, options);
+        const int batch = 8_192;
+        for (int start = 0; start < KeyOrderRows; start += batch)
+        {
+            Vorticity.Arrays.CanonicalArena arena = new Vorticity.Arrays.CanonicalArena();
+            int[] columns =
+            [
+                Longs(arena, i64, start, batch, row => row),
+                Longs(arena, i64, start, batch, row => row * Shuffle % KeyOrderRows),
+                Longs(arena, i64, start, batch, row => row * 7),
+            ];
+            int root = arena.AddStruct(schema, batch, Vorticity.Arrays.Validity.NonNullable, columns);
+            using RecordBatch record = new RecordBatch(arena, root, start);
+            await writer.WriteAsync(record, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        await writer.CompleteAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private static int Longs(
+        Vorticity.Arrays.CanonicalArena arena, Vorticity.Types.DType dtype, int start, int count, Func<long, long> value)
+    {
+        Vorticity.Buffers.VortexBuffer buffer = arena.Allocate(count * sizeof(long), sizeof(long), out Span<byte> bytes);
+        Span<long> values = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(bytes);
+        for (int i = 0; i < count; i++)
+        {
+            values[i] = value(start + i);
+        }
+
+        return arena.AddPrimitive(dtype, count, Vorticity.Arrays.Validity.NonNullable, Vorticity.Types.PType.I64, buffer);
+    }
+
+    private static VortexExpr Band(string field, long low, long width) => Expr.And(
+        Expr.Ge(Expr.Field(field), Expr.Literal(FilterLiteral.From(low))),
+        Expr.Lt(Expr.Field(field), Expr.Literal(FilterLiteral.From(low + width))));
+
+    /// <summary>A band delivered in the key order of its own column.</summary>
+    private static async Task<long> KeyOrderedBand(string path, string field, long low, long width)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().InKeyOrder(field).Where(Band(field, low, width)).ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
+    /// <summary>A band counted: the runs answer it, and no data segment is read.</summary>
+    private static async Task<long> CoveredCount(string path, string field, long low, long width)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        return await file.Scan().Where(Band(field, low, width)).CountAsync().ConfigureAwait(false);
     }
 
     /// <summary>The two axis names of one rewritten entry.</summary>

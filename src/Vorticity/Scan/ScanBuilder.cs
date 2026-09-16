@@ -38,6 +38,8 @@ public sealed class ScanBuilder
     private int _degree = 1;
     private ScanMetrics? _metrics;
     private TerminalTiers _tiers = TerminalTiers.All;
+    private string? _orderPath;
+    private bool _descending;
 
     internal ScanBuilder(VortexFile file)
     {
@@ -126,6 +128,8 @@ public sealed class ScanBuilder
             throw new InvalidOperationException(
                 "A scan selects rows by range or by index list, not both.");
         }
+
+        ThrowIfOrdered(nameof(Rows));
 
         _rows = range;
         _rowsSet = true;
@@ -223,8 +227,63 @@ public sealed class ScanBuilder
                 "A scan selects rows by range or by index list, not both.");
         }
 
+        ThrowIfOrdered(nameof(Take));
         _take = RowSelection.Create(rowIndices, _file.RowCount);
         return this;
+    }
+
+    /// <summary>
+    /// Delivers the rows in the key order of <paramref name="path"/> instead of file order
+    /// (docs/12-index-reads.md §6).
+    /// </summary>
+    /// <param name="path">The key column, <c>.</c>-separated for a nested field.</param>
+    /// <param name="descending">Whether the order is reversed, ties included.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// <para>
+    /// The scan is driven by the column's key source -- the column itself when the file
+    /// statistics say it is sorted, its <c>sorted.runs</c> index otherwise -- one window of
+    /// <see cref="WithMaxBatchRows"/> entries at a time: each batch is in key order, consecutive
+    /// batches are, and equal keys come in row order. The filter's conjuncts on the key column
+    /// narrow the walk; the others prune as they always do. <b>A row whose key is null is in no
+    /// source and is not delivered.</b> A source-less column is refused at the first
+    /// <c>MoveNextAsync</c>, with a <see cref="VortexUnsupportedException"/> that names the policy
+    /// that would have served.
+    /// </para>
+    /// <para>
+    /// <b>What it costs</b> is the key's correlation with file order: a window of a sorted column
+    /// is one contiguous read, while a window of runs over an uncorrelated column can touch a
+    /// split per row. <see cref="ScanMetrics.WindowSplits"/> reports which. It is the tool for a
+    /// selective range or a top-k, not for ordering a whole uncorrelated column.
+    /// </para>
+    /// <para>
+    /// Mutually exclusive with <see cref="Rows(RowRange)"/> and <see cref="Take"/>.
+    /// <see cref="WithDegreeOfParallelism"/> applies within a window; windows are sequential.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentException"><paramref name="path"/> does not resolve against the file's schema.</exception>
+    /// <exception cref="InvalidOperationException"><see cref="Rows(RowRange)"/> or <see cref="Take"/> was already set.</exception>
+    public ScanBuilder InKeyOrder(string path, bool descending = false)
+    {
+        Resolved(path);
+        if (_rowsSet || _take is not null)
+        {
+            throw new InvalidOperationException(
+                "A key-ordered scan walks its key source; it cannot also select rows by range or by index list.");
+        }
+
+        _orderPath = path;
+        _descending = descending;
+        return this;
+    }
+
+    private void ThrowIfOrdered(string method)
+    {
+        if (_orderPath is not null)
+        {
+            throw new InvalidOperationException(
+                $"A key-ordered scan walks its key source; {method} cannot also select its rows.");
+        }
     }
 
     /// <summary>
@@ -311,6 +370,11 @@ public sealed class ScanBuilder
 
         BatchAsyncEnumerable batches = new BatchAsyncEnumerable(
             _file, tree, read, keep, plan, _degree, _filter, _take, _metrics);
+
+        if (_orderPath is not null)
+        {
+            return new KeyOrderedBatches(batches, _filter, _orderPath, _descending, _prune, _indexes, (int)cap);
+        }
 
         // Only a filtered scan pays for the skip-empty wrapper; an unfiltered one is the same
         // object graph it has always been, which is what keeps the per-batch allocation figure

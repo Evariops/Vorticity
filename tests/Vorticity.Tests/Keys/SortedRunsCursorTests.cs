@@ -400,6 +400,179 @@ public sealed class SortedRunsCursorTests
         Assert.Equal(expected, on);
     }
 
+    // ------------------------------------------------------------------ key-ordered delivery (§6)
+
+    public static TheoryData<string, string, bool, int, int> OrderedScans() => new()
+    {
+        { "i64", string.Empty, false, 1, 0 },
+        { "i64", string.Empty, true, 3, 700 },
+        { "i64", string.Empty, false, 1, 1 },
+        { "i64", "i64 < -2000", true, 2, 1 },
+        { "u8", string.Empty, true, 1, 7 },
+        { "text", "text > k9", false, 3, 7 },
+        { "f32", string.Empty, false, 2, 1_024 },
+        { "i64", "i64 in", false, 1, 0 },
+        { "i64", "i64 > 100 or i64 < -2400", true, 2, 90 },
+        { "u8", string.Empty, false, 2, 100 },
+        { "u8", "u8 >= 7", true, 1, 0 },
+        { "f32", string.Empty, false, 1, 300 },
+        { "f32", string.Empty, true, 1, 0 },
+        { "f32", "f32 > -1.5", true, 4, 0 },
+        { "f32", "f32 = 0", false, 1, 0 },
+        { "text", string.Empty, true, 1, 0 },
+        { "text", "text starts k1", false, 2, 50 },
+        { "nullable", string.Empty, false, 1, 0 },
+        { "nullable", "nullable >= 50", true, 2, 128 },
+        { "nullable", "nullable = 1000", false, 1, 0 },
+    };
+
+    [Theory]
+    [MemberData(nameof(OrderedScans))]
+    public async Task AKeyOrderedScanIsTheOracleWindowByWindow(string column, string text, bool descending, int degree, int window)
+    {
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync();
+        List<Entry> oracle = Oracle(column);
+        ScanMetrics metrics = new ScanMetrics();
+        Vorticity.Scan.ScanBuilder scan = written.File.Scan()
+            .InKeyOrder(column, descending)
+            .WithDegreeOfParallelism(degree)
+            .WithMetrics(metrics);
+        if (text.Length > 0)
+        {
+            (_, VortexExpr filter, Func<FilterLiteral, bool> matches) = Parse(text);
+            oracle = oracle.FindAll(e => matches(e.Key));
+            scan.Where(filter);
+        }
+
+        if (window > 0)
+        {
+            scan.WithMaxBatchRows(window);
+        }
+
+        if (descending)
+        {
+            oracle.Reverse();
+        }
+
+        (List<long> rows, int largest, int empty) = await OrderedRowsOf(scan);
+        Assert.Equal(oracle.ConvertAll(e => e.Row), rows);
+        Assert.Equal(0, empty);
+        Assert.True(largest <= (window > 0 ? window : Block), $"a batch of {largest} rows");
+        Assert.Equal(oracle.Count, metrics.Rows);
+        Assert.True(metrics.WindowSplits >= metrics.Windows, $"{metrics.WindowSplits} splits over {metrics.Windows} windows");
+        Assert.Equal(oracle.Count == 0 ? 0 : 1, Math.Sign(metrics.Windows));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    public async Task AKeyOrderedScanGathersEveryColumnInTheWindowsOrder(int degree)
+    {
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync();
+        int batches = 0;
+        await foreach (RecordBatch batch in written.File.Scan()
+            .InKeyOrder("i64")
+            .WithMaxBatchRows(200)
+            .WithDegreeOfParallelism(degree)
+            .Where(Expr.And(
+                Expr.Ge(Expr.Field("i64"), Expr.Literal(FilterLiteral.From(-1_000L))),
+                Expr.Eq(Expr.Field("u8"), Expr.Literal(FilterLiteral.From(3UL)))))
+            .Project("text", "nullable", "row")
+            .ExecuteAsync())
+        {
+            batches++;
+            Assert.Equal(3, batch.FieldCount);
+            BinaryColumn texts = batch.Column(0).AsBinary();
+            VortexColumn nullables = batch.Column(1);
+            ReadOnlySpan<long> rows = batch.Column(2).AsPrimitive<long>().Values;
+            ReadOnlySpan<int> values = nullables.AsPrimitive<int>().Values;
+            long previous = long.MinValue;
+            for (int i = 0; i < rows.Length; i++)
+            {
+                int row = (int)rows[i];
+                Assert.True(I64(row) >= -1_000 && U8(row) == 3, $"row {row} does not match");
+                Assert.True(I64(row) >= previous, $"row {row} is out of key order");
+                previous = I64(row);
+                Assert.Equal(Text(row), texts.GetString(i));
+                Assert.Equal(Nullable(row) is not null, nullables.IsValid(i));
+                if (Nullable(row) is int v)
+                {
+                    Assert.Equal(v, values[i]);
+                }
+            }
+        }
+
+        Assert.True(batches > 1, $"{batches} batches");
+    }
+
+    [Fact]
+    public async Task AConsumerThatStopsNeverReadsThePastWindows()
+    {
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync();
+        ScanMetrics first = new ScanMetrics();
+        await foreach (RecordBatch batch in written.File.Scan().InKeyOrder("text").WithMaxBatchRows(10).WithMetrics(first).ExecuteAsync())
+        {
+            Assert.Equal(10, batch.RowCount);
+            break;
+        }
+
+        ScanMetrics all = new ScanMetrics();
+        await foreach (RecordBatch batch in written.File.Scan().InKeyOrder("text").WithMaxBatchRows(10).WithMetrics(all).ExecuteAsync())
+        {
+            Assert.True(batch.RowCount <= 10);
+        }
+
+        Assert.Equal(1, first.Windows);
+        Assert.Equal(Rows / 10, all.Windows);
+        Assert.True(first.SegmentRequests * 10 < all.SegmentRequests, $"{first.SegmentRequests} against {all.SegmentRequests}");
+    }
+
+    [Fact]
+    public async Task AKeyOrderIsRefusedWithoutASourceAndBesideARowSelection()
+    {
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync();
+        VortexFile file = written.File;
+
+        VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(async () =>
+        {
+            await foreach (RecordBatch batch in file.Scan().InKeyOrder("i64").WithIndexes(false).ExecuteAsync())
+            {
+                Assert.Fail("a batch without a key source");
+            }
+        });
+        Assert.Contains("SortedRuns", refused.Message, StringComparison.Ordinal);
+
+        Assert.Throws<InvalidOperationException>(() => file.Scan().Rows(new RowRange(0, 10)).InKeyOrder("i64"));
+        Assert.Throws<InvalidOperationException>(() => file.Scan().Take([1, 2]).InKeyOrder("i64"));
+        Assert.Throws<InvalidOperationException>(() => file.Scan().InKeyOrder("i64").Rows(new RowRange(0, 10)));
+        Assert.Throws<InvalidOperationException>(() => file.Scan().InKeyOrder("i64").Take([1, 2]));
+        Assert.Throws<ArgumentException>(() => file.Scan().InKeyOrder("missing"));
+    }
+
+    /// <summary>The rows a key-ordered scan delivers in its order, its largest batch, and how many were empty.</summary>
+    private static async Task<(List<long> Rows, int Largest, int Empty)> OrderedRowsOf(Vorticity.Scan.ScanBuilder scan)
+    {
+        List<long> rows = [];
+        int largest = 0;
+        int empty = 0;
+        await foreach (RecordBatch batch in scan.Project("row").ExecuteAsync())
+        {
+            largest = Math.Max(largest, batch.RowCount);
+            empty += batch.RowCount == 0 ? 1 : 0;
+            ReadOnlySpan<long> values = batch.Column(0).AsPrimitive<long>().Values;
+            for (int i = 0; i < values.Length; i++)
+            {
+                rows.Add(values[i]);
+            }
+        }
+
+        return (rows, largest, empty);
+    }
+
     private static bool SameExtreme(FilterLiteral expected, FilterLiteral actual) =>
         expected.Kind == actual.Kind
         && (expected.Kind == FilterLiteralKind.Null

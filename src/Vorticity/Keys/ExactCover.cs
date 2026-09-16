@@ -103,6 +103,48 @@ internal sealed class ExactCover : IAsyncDisposable
     }
 
     /// <summary>
+    /// The slices of <paramref name="source"/> a key-ordered scan walks (docs/12-index-reads.md §6):
+    /// every entry, narrowed by each top-level <c>AND</c> conjunct that tests
+    /// <paramref name="path"/> alone. The other conjuncts are the filter's to evaluate on the rows;
+    /// the slices only have to contain every row the filter keeps, and they contain exactly the
+    /// ones the narrowing conjuncts keep.
+    /// </summary>
+    /// <param name="filter">The scan's predicate, or null.</param>
+    /// <param name="source">The key source of <paramref name="path"/>.</param>
+    /// <param name="path">The column the scan is ordered by.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    internal static async ValueTask<List<(long Low, long High)>> RangeAsync(
+        VortexExpr? filter, KeySource source, string path, CancellationToken cancellationToken)
+    {
+        List<(long, long)> slices = Slice(0, source.EntryCount!.Value);
+        if (filter is not null)
+        {
+            slices = await NarrowAsync(filter, source, path, slices, cancellationToken).ConfigureAwait(false);
+        }
+
+        return slices;
+    }
+
+    private static async ValueTask<List<(long, long)>> NarrowAsync(
+        VortexExpr conjunct, KeySource source, string path, List<(long, long)> slices, CancellationToken cancellationToken)
+    {
+        if (conjunct is LogicalExpr { IsAnd: true } and)
+        {
+            slices = await NarrowAsync(and.Left, source, path, slices, cancellationToken).ConfigureAwait(false);
+            return await NarrowAsync(and.Right, source, path, slices, cancellationToken).ConfigureAwait(false);
+        }
+
+        string? leaf = path;
+        if (slices.Count == 0 || !OneColumn(conjunct, ref leaf))
+        {
+            return slices;
+        }
+
+        List<(long, long)>? own = await SlicesAsync(conjunct, source, cancellationToken).ConfigureAwait(false);
+        return own is null ? slices : Intersect(slices, own);
+    }
+
+    /// <summary>
     /// The smallest or largest key the predicate selects -- §5.3's third resolution, a seek inside
     /// the range -- <see cref="FilterLiteral.Null"/> when it selects nothing; not answered when a
     /// run the seek reads does not decode.

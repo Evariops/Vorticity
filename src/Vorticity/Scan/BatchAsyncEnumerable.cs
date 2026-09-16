@@ -172,6 +172,12 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 
     /// <summary>The caller's metrics sink, for the pruning pass to add its own reads to.</summary>
     internal ScanMetrics? Metrics => _metrics;
+
+    /// <summary>The split plan, which a key-ordered scan asks for the split of a row.</summary>
+    internal SplitPlan Plan => _plan;
+
+    /// <summary>How many splits may decode concurrently.</summary>
+    internal int Degree => _degree;
 }
 
 /// <summary>The hand-written enumerator of docs/03-architecture.md §3.7.</summary>

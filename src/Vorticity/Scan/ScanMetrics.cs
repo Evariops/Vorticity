@@ -18,6 +18,8 @@ public sealed class ScanMetrics
     private long _valuesDecoded;
     private long _batches;
     private long _rows;
+    private long _windows;
+    private long _windowSplits;
 
     /// <summary>
     /// Segments the scan asked its source for, one per batch and per distinct segment the batch
@@ -42,6 +44,23 @@ public sealed class ScanMetrics
 
     /// <summary>Rows those batches held, after the filter: what the caller received.</summary>
     public long Rows => Interlocked.Read(ref _rows);
+
+    /// <summary>
+    /// Windows a key-ordered scan walked (docs/12-index-reads.md §6); zero for a scan in file order.
+    /// </summary>
+    public long Windows => Interlocked.Read(ref _windows);
+
+    /// <summary>
+    /// Splits those windows touched, summed: <see cref="Windows"/> when the key follows file order,
+    /// up to one per row when it does not -- the number that says what a key order cost.
+    /// </summary>
+    public long WindowSplits => Interlocked.Read(ref _windowSplits);
+
+    internal void AddWindow(int splits)
+    {
+        Interlocked.Increment(ref _windows);
+        Interlocked.Add(ref _windowSplits, splits);
+    }
 
     internal void AddRequests(long segments, long bytes)
     {

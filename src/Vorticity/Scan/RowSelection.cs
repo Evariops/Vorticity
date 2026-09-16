@@ -22,15 +22,31 @@ namespace Vorticity.Scan;
 internal sealed class RowSelection
 {
     private readonly long[] _rows;
+    private int _count;
 
-    private RowSelection(long[] rows) => _rows = rows;
+    private RowSelection(long[] rows)
+    {
+        _rows = rows;
+        _count = rows.Length;
+    }
 
     /// <summary>How many distinct rows were asked for.</summary>
-    internal int Count => _rows.Length;
+    internal int Count => _count;
 
     /// <summary>The range that covers every requested row.</summary>
     internal RowRange Bounds =>
-        _rows.Length == 0 ? RowRange.Empty : new RowRange(_rows[0], _rows[^1] + 1);
+        _count == 0 ? RowRange.Empty : new RowRange(_rows[0], _rows[_count - 1] + 1);
+
+    /// <summary>
+    /// A selection over <paramref name="buffer"/>, which its owner refills and hands back through
+    /// <see cref="Reset"/>: the key-ordered scan's one selection per scan rather than per window.
+    /// </summary>
+    /// <param name="buffer">The rows, owned by the caller.</param>
+    internal static RowSelection Over(long[] buffer) => new RowSelection(buffer) { _count = 0 };
+
+    /// <summary>Selects the first <paramref name="count"/> rows of the buffer.</summary>
+    /// <param name="count">How many; the caller has sorted, deduplicated and bounded them.</param>
+    internal void Reset(int count) => _count = count;
 
     /// <summary>Sorts and deduplicates <paramref name="rows"/>, rejecting anything out of range.</summary>
     /// <param name="rows">The wanted rows, in any order.</param>
@@ -71,7 +87,7 @@ internal sealed class RowSelection
     {
         int first = LowerBound(split.Start);
         int count = 0;
-        for (int i = first; i < _rows.Length && _rows[i] < split.End; i++)
+        for (int i = first; i < _count && _rows[i] < split.End; i++)
         {
             destination[count++] = (int)(_rows[i] - split.Start);
         }
@@ -84,7 +100,7 @@ internal sealed class RowSelection
     internal bool Touches(RowRange split)
     {
         int first = LowerBound(split.Start);
-        return first < _rows.Length && _rows[first] < split.End;
+        return first < _count && _rows[first] < split.End;
     }
 
     /// <summary>How many selected rows fall in <paramref name="split"/>: two binary searches.</summary>
@@ -95,7 +111,7 @@ internal sealed class RowSelection
     private int LowerBound(long row)
     {
         int low = 0;
-        int high = _rows.Length;
+        int high = _count;
         while (low < high)
         {
             int mid = (int)(((uint)low + (uint)high) >> 1);

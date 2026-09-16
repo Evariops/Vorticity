@@ -57,7 +57,11 @@ internal static class CanonicalFilter
     /// </summary>
     /// <param name="arena">The arena, which receives the new nodes and buffers.</param>
     /// <param name="nodeIndex">The node to filter.</param>
-    /// <param name="indices">The selected rows, ascending and within the node's length.</param>
+    /// <param name="indices">
+    /// The selected rows, within the node's length, in the order the result carries them: every
+    /// gather below is positional, so a permutation lays a batch out in another order
+    /// (docs/12-index-reads.md §6), and a filter's ascending selection is the special case.
+    /// </param>
     /// <returns>The new node's index.</returns>
     /// <exception cref="NotSupportedException">The node's canonical form has no gather.</exception>
     /// <remarks>

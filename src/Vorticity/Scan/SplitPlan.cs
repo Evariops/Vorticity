@@ -112,6 +112,36 @@ internal sealed class SplitPlan
     /// <summary>A fresh cursor over this plan's splits.</summary>
     internal SplitCursor CreateCursor() => new SplitCursor(this);
 
+    /// <summary>
+    /// The split holding <paramref name="row"/>, exactly as <see cref="SplitCursor"/> would cut it,
+    /// found without walking the splits before it.
+    /// </summary>
+    /// <param name="row">A row inside the plan's range.</param>
+    /// <returns>The split.</returns>
+    internal RowRange SplitOf(long row)
+    {
+        int low = 0;
+        int high = _count - 2;
+        while (low < high)
+        {
+            int mid = (low + high + 1) >>> 1;
+            if (_boundaries[mid] <= row)
+            {
+                low = mid;
+            }
+            else
+            {
+                high = mid - 1;
+            }
+        }
+
+        long start = _boundaries[low];
+        long end = _boundaries[low + 1];
+        long size = SplitCursor.SubSize(end - start, _maxRows);
+        long first = start + ((row - start) / size * size);
+        return new RowRange(first, Math.Min(first + size, end));
+    }
+
     private static void Walk(
         in LayoutNode node, RowRange local, long rowOffset, in FieldMask mask, BoundaryList list, int depth)
     {
@@ -351,7 +381,10 @@ internal struct SplitCursor
         }
     }
 
-    private static long SubSize(long span, long maxRows)
+    /// <summary>The even sub-division size of a span: what every split of it but the last holds.</summary>
+    /// <param name="span">The span's rows.</param>
+    /// <param name="maxRows">The cap.</param>
+    internal static long SubSize(long span, long maxRows)
     {
         if (span <= maxRows)
         {

@@ -11,7 +11,7 @@
 #
 #   1. the eight ratchet tests   counts and ceilings, deterministic, ~4 s
 #   2. --ffi-check               ours and the reference agree on row counts, < 1 s
-#   3. --ratio-check             thirteen ratios against the reference, ~30 s
+#   3. --ratio-check             every ratio against the reference, key order included, ~45 s
 #
 # WHAT IT DOES NOT RUN, and these are decisions rather than omissions:
 #

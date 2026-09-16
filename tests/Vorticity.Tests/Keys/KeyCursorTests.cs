@@ -294,6 +294,165 @@ public sealed class KeyCursorTests
     /// One step, taken synchronously: a step inside a loaded zone never suspends, which is the
     /// half of the zero-allocation claim the byte count cannot see.
     /// </summary>
+    [Theory]
+    [InlineData(false, 1)]
+    [InlineData(true, 1)]
+    [InlineData(false, 4)]
+    public async Task ASortedColumnDeliversItsKeyOrderAsAContiguousRead(bool descending, int degree)
+    {
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync();
+        ScanMetrics metrics = new ScanMetrics();
+        List<long> values = [];
+        await foreach (RecordBatch batch in written.File.Scan()
+            .InKeyOrder("strict_i64", descending)
+            .WithDegreeOfParallelism(degree)
+            .Where(Expr.And(
+                Expr.Ge(Expr.Field("strict_i64"), Expr.Literal(FilterLiteral.From(20_000L))),
+                Expr.Lt(Expr.Field("strict_i64"), Expr.Literal(FilterLiteral.From(40_000L)))))
+            .Project("strict_i64")
+            .WithMetrics(metrics)
+            .ExecuteAsync())
+        {
+            values.AddRange(batch.Column(0).AsPrimitive<long>().Values.ToArray());
+        }
+
+        List<long> expected = [];
+        for (int i = 0; i < Rows; i++)
+        {
+            long v = 1_000L + (3L * i);
+            if (v is >= 20_000 and < 40_000)
+            {
+                expected.Add(v);
+            }
+        }
+
+        if (descending)
+        {
+            expected.Reverse();
+        }
+
+        Assert.Equal(expected, values);
+
+        // Consecutive keys are consecutive rows: a window of a zone's rows spans two splits at most.
+        Assert.True(metrics.Windows > 1);
+        Assert.True(metrics.WindowSplits <= 2 * metrics.Windows, $"{metrics.WindowSplits} splits over {metrics.Windows} windows");
+    }
+
+    [Fact]
+    public async Task AKeyOrderedWindowAllocatesItsBatchAndNothingElse()
+    {
+        // docs/12-index-reads.md §11: "an InKeyOrder window at the filtered-batch figure plus its
+        // rented permutation" -- the permutation and the verdicts are rented, the selection is the
+        // scan's own, so a window in steady state costs its RecordBatch.
+        ReleaseOnlyCeilings.Require();
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync();
+        long batchObject = OneRecordBatch();
+
+        // Row 500 is key 2 500: the filtered windows start on a split boundary too.
+        VortexExpr filter = Expr.Ge(Expr.Field("strict_i64"), Expr.Literal(FilterLiteral.From(2_500L)));
+        for (int warm = 0; warm < 2; warm++)
+        {
+            await PerWindow(written.File.Scan().InKeyOrder("strict_i64").Where(filter).WithMaxBatchRows(500));
+            await PerWindow(written.File.Scan().InKeyOrder("strict_i64").WithMaxBatchRows(100));
+        }
+
+        Assert.Equal(batchObject, await PerWindow(written.File.Scan().InKeyOrder("strict_i64").WithMaxBatchRows(100)));
+        Assert.Equal(batchObject, await PerWindow(written.File.Scan().InKeyOrder("strict_i64").Where(filter).WithMaxBatchRows(500)));
+    }
+
+    /// <summary>
+    /// What a window allocates in steady state: the median, which a one-off tier-up cannot move.
+    /// </summary>
+    /// <remarks>
+    /// The windows are aligned with the splits, so each reads one split whole. A window across two
+    /// splits takes each in part, and pays what the take push-down pays on this column's encoding
+    /// -- 144 B per partial split, measured -- which is the take's figure and not the window's.
+    /// </remarks>
+    private static async Task<long> PerWindow(ScanBuilder builder)
+    {
+        IAsyncEnumerator<RecordBatch> enumerator = builder.ExecuteAsync().GetAsyncEnumerator();
+        List<long> perWindow = [];
+        try
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                Assert.True(Advance(enumerator));
+            }
+
+            while (true)
+            {
+                long before = GC.GetAllocatedBytesForCurrentThread();
+                bool more = Advance(enumerator);
+                long delta = GC.GetAllocatedBytesForCurrentThread() - before;
+                if (!more)
+                {
+                    break;
+                }
+
+                perWindow.Add(delta);
+            }
+        }
+        finally
+        {
+            await enumerator.DisposeAsync();
+        }
+
+        perWindow.Sort();
+        Assert.True(perWindow.Count > 20, $"{perWindow.Count} windows");
+        return perWindow[perWindow.Count / 2];
+    }
+
+    private static bool Advance(IAsyncEnumerator<RecordBatch> enumerator)
+    {
+        ValueTask<bool> move = enumerator.MoveNextAsync();
+        Assert.True(move.IsCompletedSuccessfully, "a memory-mapped window must complete synchronously");
+        return move.Result;
+    }
+
+    private static long OneRecordBatch()
+    {
+        CanonicalArena arena = new CanonicalArena();
+        int root = arena.AddNull(new DTypeArena().Null(Nullability.Nullable), 1);
+        for (int i = 0; i < 64; i++)
+        {
+            GC.KeepAlive(new RecordBatch(arena, root, 0));
+        }
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        RecordBatch probe = new RecordBatch(arena, root, 0);
+        long after = GC.GetAllocatedBytesForCurrentThread();
+        GC.KeepAlive(probe);
+        return after - before;
+    }
+
+    [Fact]
+    public async Task AKeyOrderedScanOfANullableColumnSkipsItsNulls()
+    {
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync();
+        List<int> values = [];
+        await foreach (RecordBatch batch in written.File.Scan().InKeyOrder("nulls_i32", descending: true).Project("nulls_i32").ExecuteAsync())
+        {
+            VortexColumn column = batch.Column(0);
+            for (int i = 0; i < batch.RowCount; i++)
+            {
+                Assert.True(column.IsValid(i));
+            }
+
+            values.AddRange(column.AsPrimitive<int>().Values.ToArray());
+        }
+
+        List<int> expected = [];
+        for (int i = Rows - 1; i >= Nulls; i--)
+        {
+            expected.Add((i - Nulls) / 3);
+        }
+
+        Assert.Equal(expected, values);
+    }
+
     private static bool Step(KeyCursor cursor)
     {
         ValueTask<bool> move = cursor.NextAsync();

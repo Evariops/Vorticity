@@ -496,6 +496,27 @@ reports the source, the runs the range overlaps and the entry-count bound before
 `ScanMetrics` reports the splits each window touched after it; neither refuses, because the
 operation is correct and the caller asked for it (§13 keeps a cap as an open question).
 
+**As delivered (step 14).** `ScanBuilder.InKeyOrder(path, descending)` compiles the scan as
+usual and hands it to `KeyOrderedBatches`, which opens the key source at the first
+`MoveNextAsync` (a source-less column throws `VortexUnsupportedException` there, naming
+`IndexPolicy.SortedRuns`). The range is `ExactCover.RangeAsync`: every entry, intersected with the
+slices of each top-level `AND` conjunct that tests the key alone — so an `OR` or an `IN` on the key
+narrows to its exact slices rather than to its min and max. The window is the batch cap; its rows
+are sorted and deduplicated into one `RowSelection` the scan reuses (`RowSelection.Over`), each
+touched split is found by `SplitPlan.SplitOf`, and the permutation is fed to `CanonicalFilter.Apply`,
+whose gathers are positional — and skipped when it is the identity, which is every ascending
+window of a sorted column with no row filtered out. With `WithDegreeOfParallelism(n)` the window's
+splits are cut into `n` contiguous groups decoded on their own contexts, and the lanes' roots are
+referenced (`CanonicalArena.ReferenceFrom`) into the scan's context for the concatenation; the lanes
+are reset with the batch that borrows from them. Rows with a null key are delivered by no source
+and so by no key-ordered scan. `ScanMetrics.Windows` and `WindowSplits` count the windows and the
+splits they touched. A window allocates its `RecordBatch` when it reads its splits whole; a window
+across a split boundary pays what the take push-down pays per partial split on that column's
+encoding. `Explain` does not yet report the source and the range (step 18). Measured on 65 536 rows
+in 64 splits (`--ratio-check`): a 1 % band of a sorted column in key order at **0,70×** the
+reference's filtered scan; 64 rows of an uncorrelated column at **1,40×** the reference's take of
+64 rows over 64 splits; the same band counted by the exact cover at **0,79×** the reference's scan.
+
 ---
 
 ## 7. The expression model gains three predicates
