@@ -1420,7 +1420,18 @@ internal static class BlockStatsPass
             return;
         }
 
-        for (int i = 1; i < values.Length; i++)
+        int i = 1;
+        if (Vector128.IsHardwareAccelerated && Vector128<T>.IsSupported && Vector128<T>.Count >= 4
+)
+        {
+            // The lanes clear every window in which nothing happens; the scalar loop takes over at
+            // the first one where something might -- a descent, a NaN -- and decides it row by row,
+            // in the order the scalar pass would have met it.
+            i = OrderLanes(values, ref repeats);
+            last = values[i - 1];
+        }
+
+        for (; i < values.Length; i++)
         {
             T value = values[i];
             if (value < last)
@@ -1444,6 +1455,45 @@ internal static class BlockStatsPass
         }
 
         stats.Repeats |= repeats;
+    }
+
+    /// <summary>
+    /// The pairs of an all-valid range, a register at a time (docs/11-write-strategy.md §4.1, the
+    /// sorted / strict row): each element against the one before it, by a second load one element
+    /// behind, so no lane crosses from one iteration to the next.
+    /// </summary>
+    /// <returns>
+    /// Where the scalar loop resumes: the end of the last whole window, or the start of the first
+    /// window where a lane fell or a NaN showed -- the scalar loop meets it there in row order.
+    /// </returns>
+    /// <remarks>
+    /// FOUR LANES OR MORE ONLY. Two-lane registers (64-bit values) measured slower than the
+    /// predicted scalar loop (the first version of this method), and are left to it.
+    /// </remarks>
+    private static int OrderLanes<T>(ReadOnlySpan<T> values, ref bool repeats)
+        where T : unmanaged, INumber<T>
+    {
+        int lanes = Vector128<T>.Count;
+        ref T head = ref MemoryMarshal.GetReference(values);
+        Vector128<T> equal = Vector128<T>.Zero;
+        int i = 1;
+        for (; i + lanes <= values.Length; i += lanes)
+        {
+            Vector128<T> current = Vector128.LoadUnsafe(ref head, (nuint)i);
+            Vector128<T> previous = Vector128.LoadUnsafe(ref head, (nuint)(i - 1));
+
+            // A NaN is unequal to itself; a descent is a lane below its predecessor. Either sends
+            // the window back to the scalar loop.
+            if (Vector128.LessThanAny(current, previous) || !Vector128.EqualsAll(current, current))
+            {
+                break;
+            }
+
+            equal |= Vector128.Equals(current, previous);
+        }
+
+        repeats |= equal != Vector128<T>.Zero;
+        return i;
     }
 
     /// <summary>

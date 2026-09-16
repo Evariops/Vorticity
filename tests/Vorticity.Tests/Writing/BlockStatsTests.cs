@@ -204,6 +204,124 @@ public sealed class BlockStatsTests
         Assert.Equal(rows, stats.Rows);
     }
 
+    /// <summary>
+    /// The order flags against the scalar rule, with the one event -- a descent, a NaN, nothing --
+    /// placed at every position of a sorted range: the lanes clear whole windows, and the window an
+    /// event falls in must be decided exactly as the row-by-row loop would (§4.1, sorted / strict).
+    /// </summary>
+    [Theory]
+    [InlineData(PType.I8)]
+    [InlineData(PType.U16)]
+    [InlineData(PType.I32)]
+    [InlineData(PType.U32)]
+    [InlineData(PType.I64)]
+    [InlineData(PType.F32)]
+    [InlineData(PType.F64)]
+    public void OrderFlagsMatchTheScalarRuleWhereverTheEventFalls(PType ptype)
+    {
+        const int length = 70;
+        string[] events = ptype.IsFloat() ? ["none", "descent", "nan", "nan-then-descent"] : ["none", "descent"];
+        foreach (bool repeats in new[] { false, true })
+        {
+            foreach (string kind in events)
+            {
+                for (int at = 1; at < length; at++)
+                {
+                    double[] values = new double[length];
+                    for (int i = 0; i < length; i++)
+                    {
+                        values[i] = 10 + (repeats ? i / 3 : i);
+                    }
+
+                    switch (kind)
+                    {
+                        case "descent":
+                            values[at] = values[at - 1] - 1;
+                            break;
+                        case "nan":
+                            values[at] = double.NaN;
+                            break;
+                        case "nan-then-descent":
+                            values[at] = double.NaN;
+                            values[Math.Min(at + 2, length - 1)] = 0;
+                            break;
+                    }
+
+                    if (kind == "none" && at > 1)
+                    {
+                        continue;
+                    }
+
+                    CanonicalArena arena = new CanonicalArena();
+                    DTypeArena types = new DTypeArena();
+                    int width = ptype.ByteWidth();
+                    VortexBuffer buffer = arena.Allocate(length * width, width, out Span<byte> bytes);
+                    for (int i = 0; i < length; i++)
+                    {
+                        Write(ptype, bytes.Slice(i * width, width), values[i]);
+                    }
+
+                    int node = arena.AddPrimitive(
+                        types.Primitive(ptype, Nullability.NonNullable), length, Validity.NonNullable, ptype, buffer);
+                    BlockStats stats = default;
+                    BlockStatsPass.Accumulate(arena, node, 0, length, ref stats);
+
+                    (bool? sorted, bool? strict) = ScalarOrder(values);
+                    string where = $"{ptype} {kind} at {at} repeats={repeats}";
+                    Assert.True(sorted == stats.IsSorted, $"{where}: is_sorted {stats.IsSorted} against {sorted}");
+                    Assert.True(strict == stats.IsStrictSorted, $"{where}: is_strict_sorted {stats.IsStrictSorted} against {strict}");
+                }
+            }
+        }
+    }
+
+    /// <summary>The row-by-row rule: the first event met decides, a NaN claims nothing.</summary>
+    private static (bool? Sorted, bool? Strict) ScalarOrder(double[] values)
+    {
+        if (double.IsNaN(values[0]))
+        {
+            return (null, null);
+        }
+
+        bool repeats = false;
+        double last = values[0];
+        for (int i = 1; i < values.Length; i++)
+        {
+            double value = values[i];
+            if (value < last)
+            {
+                return (false, false);
+            }
+
+            if (value == last)
+            {
+                repeats = true;
+            }
+            else if (double.IsNaN(value))
+            {
+                return (null, null);
+            }
+
+            last = value;
+        }
+
+        return (true, !repeats);
+    }
+
+    private static void Write(PType ptype, Span<byte> destination, double value)
+    {
+        switch (ptype)
+        {
+            case PType.I8: destination[0] = unchecked((byte)(sbyte)value); break;
+            case PType.U16: BinaryPrimitives.WriteUInt16LittleEndian(destination, (ushort)value); break;
+            case PType.I32: BinaryPrimitives.WriteInt32LittleEndian(destination, (int)value); break;
+            case PType.U32: BinaryPrimitives.WriteUInt32LittleEndian(destination, (uint)value); break;
+            case PType.I64: BinaryPrimitives.WriteInt64LittleEndian(destination, (long)value); break;
+            case PType.F32: BinaryPrimitives.WriteSingleLittleEndian(destination, (float)value); break;
+            default: BinaryPrimitives.WriteDoubleLittleEndian(destination, value); break;
+        }
+    }
+
     // ------------------------------------------------------------------- the property, and its oracle
 
     private static void Check(PType ptype, Shape shape, int[] cut, int seed)
