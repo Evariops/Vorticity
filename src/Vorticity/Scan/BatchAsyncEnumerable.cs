@@ -217,6 +217,9 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         for (int i = 0; i < degree; i++)
         {
             _lanes[i] = new Lane(new ScanContext(file));
+            // The mask outlives every batch of the scan, so it is set once here and never by
+            // `ResetBatch`; the readers read it in file coordinates (docs/11 §6.1).
+            _lanes[i].Context.LiveBlocks = live;
         }
 
         // Allocated once per scan, so the awaiter's continuation costs nothing per batch.

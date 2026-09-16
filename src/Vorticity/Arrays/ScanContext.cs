@@ -276,6 +276,21 @@ public sealed class ScanContext : IDisposable
     internal bool HasSelection => _selection is not null;
 
     /// <summary>
+    /// The scan's mask of live blocks (docs/11 §6.1), in the FILE's row coordinates, or
+    /// <see langword="null"/> when every block is live.
+    /// </summary>
+    /// <remarks>
+    /// PER SCAN, NOT PER BATCH: set once by the enumerator and never touched by
+    /// <see cref="ResetBatch"/>. Carried on the context for the same reason the selection is --
+    /// <c>LayoutReader.Execute</c> is a public extension point. Unlike the selection it is NOT
+    /// re-based: a reader that re-partitions rows (<c>vortex.chunked</c>) clears it for its
+    /// children and expresses what it means in the selection instead, so that a reader below it
+    /// never reads file coordinates as its own. A reader that sees it set may take its
+    /// <c>rows</c> to be file rows.
+    /// </remarks>
+    internal Compute.BlockMask? LiveBlocks { get; set; }
+
+    /// <summary>
     /// Replaces the selection and returns what was there, for a reader that re-bases it per child.
     /// </summary>
     /// <param name="rows">The new selection, or <see langword="null"/> to clear it.</param>

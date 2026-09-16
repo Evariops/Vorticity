@@ -104,6 +104,32 @@ internal sealed class BlockMask
     }
 
     /// <summary>
+    /// Whether some block overlapping <paramref name="rows"/> is dead -- the question a layout
+    /// reader asks of a chunk before deciding whether to decode it whole or block by block.
+    /// </summary>
+    /// <param name="rows">A row range in the file's coordinates; rows past the end are ignored.</param>
+    internal bool HasDeadBlocks(RowRange rows)
+    {
+        long end = Math.Min(rows.End, RowCount);
+        if (rows.Start >= end)
+        {
+            return false;
+        }
+
+        int first = (int)(rows.Start / BlockRows);
+        int last = (int)((end - 1) / BlockRows);
+        for (int block = first; block <= last; block++)
+        {
+            if (!IsLive(block))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Whether any block overlapping <paramref name="rows"/> is live -- the question a split asks
     /// before it is read.
     /// </summary>

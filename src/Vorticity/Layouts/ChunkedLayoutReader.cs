@@ -69,6 +69,15 @@ public sealed class ChunkedLayoutReader : LayoutReader
 
         Span<int> stack = stackalloc int[StackChunks];
         Scratch<int> scratch = new Scratch<int>(Math.Max(last - first, 0), stack);
+
+        // THE MASK OF LIVE BLOCKS IS IN FILE COORDINATES AND THE CHILDREN ARE NOT (docs/11 §6.1):
+        // it is cleared for them here and what it means for a chunk is said in the selection, the
+        // one currency that is re-based per child. A chunk with dead blocks inside it is decoded
+        // through the selection path -- this batch's rows and nothing else -- rather than whole
+        // and retained: sixteen blocks decoded for the one that lived was the whole cost this
+        // fixes. A chunk with no dead block keeps today's path, whole and retained.
+        Compute.BlockMask? live = context.LiveBlocks;
+        context.LiveBlocks = null;
         try
         {
             Span<int> chunks = scratch.Span;
@@ -82,9 +91,20 @@ public sealed class ChunkedLayoutReader : LayoutReader
                 }
 
                 LayoutNode chunk = node.GetChild(i);
-                chunks[count++] = context.HasSelection
-                    ? ExecuteChunkSelected(in chunk, local, in fields, context, offsets[i])
-                    : ExecuteChild(in chunk, local, in fields, context);
+                if (context.HasSelection)
+                {
+                    chunks[count++] = ExecuteChunkSelected(in chunk, local, in fields, context, offsets[i]);
+                }
+                else if (live is not null
+                    && local.Length < chunk.RowCount
+                    && live.HasDeadBlocks(new RowRange(offsets[i], offsets[i + 1])))
+                {
+                    chunks[count++] = ExecuteChunkLive(in chunk, local, in fields, context);
+                }
+                else
+                {
+                    chunks[count++] = ExecuteChild(in chunk, local, in fields, context);
+                }
             }
 
             if (count == 0)
@@ -108,7 +128,48 @@ public sealed class ChunkedLayoutReader : LayoutReader
         }
         finally
         {
+            context.LiveBlocks = live;
             scratch.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Executes one chunk that has dead blocks in it, through the selection path: this batch's
+    /// rows, as a chunk-local selection, and nothing else of the chunk is decoded.
+    /// </summary>
+    /// <remarks>
+    /// The rows are contiguous, so the selection is a counted range -- the price is one rented
+    /// array per batch of the chunk, against the whole chunk decoded and retained for the first
+    /// batch of it. An encoding that <c>SelectsWithoutFullDecode</c> then materializes these rows
+    /// alone; one that does not decodes the chunk once, retains it, and gathers, which is what the
+    /// whole-chunk path cost anyway.
+    /// </remarks>
+    private static int ExecuteChunkLive(
+        in LayoutNode chunk, RowRange local, in FieldMask fields, ScanContext context)
+    {
+        int length = BatchLength(local);
+        int[] range = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        try
+        {
+            int start = (int)local.Start;
+            for (int i = 0; i < length; i++)
+            {
+                range[i] = start + i;
+            }
+
+            (int[]? Buffer, int Count) saved = context.ExchangeSelection(range, length);
+            try
+            {
+                return ExecuteChild(in chunk, local, in fields, context);
+            }
+            finally
+            {
+                context.ExchangeSelection(saved.Buffer, saved.Count);
+            }
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(range);
         }
     }
 

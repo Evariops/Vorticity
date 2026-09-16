@@ -82,6 +82,21 @@ public sealed class BlockMaskTests
     }
 
     [Fact]
+    public void ARangeHasDeadBlocksWhenAnyBlockItOverlapsIsDead()
+    {
+        BlockMask mask = new BlockMask(65_536, 1024);
+        RowRange chunk = new RowRange(0, 16_384);
+
+        Assert.False(mask.HasDeadBlocks(chunk));
+
+        mask.Kill(3);
+        Assert.True(mask.HasDeadBlocks(chunk));
+        Assert.False(mask.HasDeadBlocks(new RowRange(16_384, 32_768)), "the dead block is in the first chunk");
+        Assert.True(mask.HasDeadBlocks(new RowRange(3_000, 3_100)), "a range inside the dead block");
+        Assert.False(mask.HasDeadBlocks(new RowRange(65_536, 70_000)), "past the file there are no blocks");
+    }
+
+    [Fact]
     public void EveryBlockCanBeKilledAndTheMaskIsThenEmpty()
     {
         BlockMask mask = new BlockMask(1_000_000, 8192);

@@ -80,6 +80,18 @@ public sealed class FlatLayoutReader : LayoutReader
             return ExecuteSelected(in node, in fields, context, total, length);
         }
 
+        // DEAD BLOCKS IN THIS NODE (docs/11 §6.1): the scan's mask says some of its blocks will
+        // never be asked for, so decoding it whole and retaining it would materialize rows no
+        // batch reads -- sixteen blocks for the one that lived, on a chunk of the default shape.
+        // This batch's rows go through the selection path instead, as a counted range. The mask
+        // reaching this reader means no chunked ancestor re-partitioned the rows, so `rows` ARE
+        // file rows and the node covers the file: a chunked reader clears the mask for its
+        // children and says the same thing in the selection.
+        if (length < total && context.LiveBlocks is { } live && live.HasDeadBlocks(new RowRange(0, total)))
+        {
+            return ExecuteRange(in node, rows, in fields, context, total, length);
+        }
+
         // WHOLE-NODE BATCH: nothing to retain, because there is no second batch to serve. This is
         // every file whose chunk is its batch, which is every conformance fixture and every file
         // this library writes at the default edition, so the common path is unchanged.
@@ -221,8 +233,43 @@ public sealed class FlatLayoutReader : LayoutReader
     private static int Push(
         in ArrayNode root, in LayoutNode node, in FieldMask fields, ScanContext context, int total)
     {
+        // Counted like the whole-node decodes above: what a positional take materializes is its
+        // selection, and a decode no instrument counts is a decode nobody sees.
+        System.Threading.Interlocked.Add(ref ValuesDecoded, context.Selection.Length);
         int taken = context.Decode.DecodeRootSelected(in root, node.DType, total, context.Selection);
         return MaskProjection.Apply(context.Decode, taken, in fields);
+    }
+
+    /// <summary>
+    /// This batch's rows through the selection path, as a counted range: the decode of a node
+    /// whose other blocks the scan's mask has killed.
+    /// </summary>
+    private int ExecuteRange(
+        in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, int total, int length)
+    {
+        int[] range = System.Buffers.ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        try
+        {
+            int start = (int)rows.Start;
+            for (int i = 0; i < length; i++)
+            {
+                range[i] = start + i;
+            }
+
+            (int[]? Buffer, int Count) saved = context.ExchangeSelection(range, length);
+            try
+            {
+                return ExecuteSelected(in node, in fields, context, total, length);
+            }
+            finally
+            {
+                context.ExchangeSelection(saved.Buffer, saved.Count);
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<int>.Shared.Return(range);
+        }
     }
 
     /// <summary>Gathers <see cref="ScanContext.Selection"/> out of a retained whole-node decode.</summary>
