@@ -137,6 +137,7 @@ message Run {
   repeated Segment payload = 3;       // file regions, in kind-defined order
   repeated bytes payload_dtype = 4;   // serialized DType (dtype.fbs) of each payload array
   uint64  entry_count = 5;            // entries of a locating run; 0 for a skipping kind (12 §14)
+  bytes   options = 6;                // kind-defined, per run: the segment table of §4.2 (step 12c)
 }
 message Segment { uint64 offset = 1; uint32 length = 2; uint32 alignment_exponent = 3; }
 ```
@@ -365,6 +366,30 @@ log-structured merge tree without the merge: runs are compacted only at rewrite,
 file is re-encoded anyway. A global sort at `CompleteAsync` — the first iteration of this
 document — would have buffered the whole column and is rejected for the reason
 [11-write-strategy.md](11-write-strategy.md) §9 gives.
+
+**As delivered (step 12c), for §6.1 and §6.2 together.** `Writing/KeyIndexBuilder` keeps its own
+per-chunk key table (`ChunkKeys`: interned bytes and a log of `(key, position)` pairs) rather than
+the writer's running table, whose life is governed by plan memory; the second hash per row is paid
+only by columns that ask. Ingest runs ahead of emission by the carried rows, so a chunk close
+**cuts** the log at the chunk's end: without a carry the whole table becomes the run, with one only
+the suffix is re-interned. The run's order is `Keys/KeyOrder.Total`'s, implemented on the key bytes
+by `Indexes/KeyLayout` (a test holds the two equal over every primitive type); sorted runs are a
+counting sort of the chunk's rows by the rank of their key, so one sort of the chunk's *distinct*
+keys orders everything. Payloads, `stride` arrays per segment, compressed like data: postings are
+`keys` (distinct, sorted), `offsets` (`u32`, one past each key's list) and `blocks` (`u32`, relative
+to the run's first block) — two flat arrays in place of a `List<u32>`; sorted runs are `keys` (one per
+entry) and `rows` (`u32`, relative to the run's first row, `first_block × block_len`). `Run` gains
+**`bytes options = 6`**, which §4.2 already assumes ("a per-segment min/max in the run's
+`options`") and §4.1's message lacked: the segment table, each segment's entry count and first and
+last key. `IndexPolicy.WithSegmentEntries` sets `payload_block_rows`. Decimals are refused: the
+kernels have no literal domain for one, so nothing could be looked up.
+
+The probe, `Indexes/KeyIndexPruner`, runs after the Bloom filters and reads only the segments whose
+range can hold a literal of the filter, in one coalesced read; a run's blocks start "absent" for
+every encodable literal and are lifted where a lookup places it, or wholesale when a lookup fails.
+Being exact at block granularity, it leaves live exactly the blocks that hold the value — the tests
+assert the equality, not a bound. The row-selection half of §6.6 (an exact index delivering its rows
+without re-evaluating the predicate) is the `SortedRuns` source's, step 13.
 
 ### 6.3 `vorticity.hash.rows.v1` — hash → rows, superset
 

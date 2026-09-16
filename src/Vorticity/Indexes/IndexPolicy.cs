@@ -78,10 +78,16 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     private readonly int _resolutions;
     private readonly int _maxBlocks;
     private readonly int _minDistinctPlusOne;
+    private readonly int _segmentEntries;
+
+    /// <summary>
+    /// 10 §4.2's `payload_block_rows`: the most entries one segment of a locating run holds.
+    /// </summary>
+    public const int DefaultSegmentEntries = 65_536;
 
     private IndexPolicy(
         IndexPolicyKind kind, int fppPpm, int resolutions, int maxBlocks, int minDistinct,
-        BloomHash hash, bool caseInsensitive)
+        BloomHash hash, bool caseInsensitive, int segmentEntries = 0)
     {
         Kind = kind;
         _fppPpm = fppPpm;
@@ -90,6 +96,21 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
         _minDistinctPlusOne = minDistinct < 0 ? 0 : minDistinct + 1;
         Hash = hash;
         CaseInsensitive = caseInsensitive;
+        _segmentEntries = segmentEntries;
+    }
+
+    /// <summary>The most entries one segment of a locating run holds.</summary>
+    public int SegmentEntries => _segmentEntries == 0 ? DefaultSegmentEntries : _segmentEntries;
+
+    /// <summary>The same policy with another segment size for its locating runs.</summary>
+    /// <param name="entries">The most entries a segment holds; at least 1.</param>
+    /// <returns>A new policy.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="entries"/> is not positive.</exception>
+    public IndexPolicy WithSegmentEntries(int entries)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(entries, 1);
+        return new IndexPolicy(
+            Kind, _fppPpm, _resolutions, _maxBlocks, _minDistinctPlusOne - 1, Hash, CaseInsensitive, entries);
     }
 
     /// <summary>What the column gets.</summary>
@@ -186,9 +207,10 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     /// <param name="hash">The hash; an unknown value becomes <see cref="BloomHash.XxHash3"/>.</param>
     /// <param name="caseInsensitive">Whether trigrams are lower-cased.</param>
     /// <returns>A policy inside every range.</returns>
+    /// <param name="segmentEntries">The locating segment size; 0 for the default.</param>
     internal static IndexPolicy FromStored(
         int kind, int fppPpm, int resolutions, int maxBlocks, int minDistinct, int hash,
-        bool caseInsensitive)
+        bool caseInsensitive, int segmentEntries = 0)
     {
         IndexPolicyKind policy = kind is >= (int)IndexPolicyKind.None and <= (int)IndexPolicyKind.SortedRuns
             ? (IndexPolicyKind)kind
@@ -200,7 +222,8 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
             Math.Max(maxBlocks == 0 ? DefaultMaxBlocks : maxBlocks, 1),
             Math.Max(minDistinct, 0),
             hash == (int)BloomHash.XxHash64 ? BloomHash.XxHash64 : BloomHash.XxHash3,
-            caseInsensitive);
+            caseInsensitive,
+            Math.Max(segmentEntries, 0));
     }
 
     private static void CheckBloom(int falsePositivePpm, int resolutions, int maxBlocks, int minDistinct)
@@ -221,7 +244,8 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
         && MaxBlocks == other.MaxBlocks
         && MinDistinct == other.MinDistinct
         && Hash == other.Hash
-        && CaseInsensitive == other.CaseInsensitive;
+        && CaseInsensitive == other.CaseInsensitive
+        && SegmentEntries == other.SegmentEntries;
 
     /// <inheritdoc/>
     public override bool Equals(object? obj) => obj is IndexPolicy other && Equals(other);
@@ -229,7 +253,7 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     /// <inheritdoc/>
     public override int GetHashCode() =>
         HashCode.Combine(
-            Kind, FalsePositivePpm, Resolutions, MaxBlocks, MinDistinct, Hash, CaseInsensitive);
+            Kind, FalsePositivePpm, Resolutions, MaxBlocks, MinDistinct, Hash, CaseInsensitive, SegmentEntries);
 
     /// <summary>Whether two policies ask for the same thing.</summary>
     /// <param name="left">One policy.</param>

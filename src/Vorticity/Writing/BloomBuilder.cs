@@ -32,7 +32,7 @@ using Vorticity.Types.Numerics;
 namespace Vorticity.Writing;
 
 /// <summary>Builds one column's split-block Bloom filters, block by block.</summary>
-internal sealed class BloomBuilder : IDisposable
+internal sealed class BloomBuilder : IndexBuilder
 {
     /// <summary>Blocks per generation: 10 §4.3's `k`.</summary>
     internal const int GenerationBlocks = 16;
@@ -61,17 +61,11 @@ internal sealed class BloomBuilder : IDisposable
         _file = policy.Resolutions >= 3 ? new HashSet64() : null;
     }
 
-    /// <summary>Why the whole index was dropped; <see langword="null"/> while it lives.</summary>
-    internal string? Abandoned { get; private set; }
-
     /// <summary>Why the file-level filter was dropped, when it was asked for and could not be kept.</summary>
     internal string? FileAbandoned { get; private set; }
 
     /// <summary>Filter blocks per closed block, in block order: 0 where a block got no filter.</summary>
     internal List<int> BlockFilterBlocks { get; } = [];
-
-    /// <summary>Generations closed and waiting for their payloads to be written.</summary>
-    internal Queue<BloomRun> Pending { get; } = new Queue<BloomRun>();
 
     /// <summary>Every generation closed, written or not, in block order.</summary>
     internal List<BloomRun> Runs { get; } = [];
@@ -107,7 +101,7 @@ internal sealed class BloomBuilder : IDisposable
     /// <param name="nodeIndex">The column in it.</param>
     /// <param name="start">The first row.</param>
     /// <param name="count">How many rows.</param>
-    internal void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
+    internal override void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
     {
         if (Abandoned is not null || count <= 0)
         {
@@ -198,7 +192,7 @@ internal sealed class BloomBuilder : IDisposable
     /// Seals the open block: sizes and fills its filter, folds its values into the coarser sets,
     /// and closes the generation on its k-th block.
     /// </summary>
-    internal void CloseBlock()
+    internal override void CloseBlock()
     {
         int block = _blocks++;
         if (Abandoned is not null)
@@ -241,7 +235,7 @@ internal sealed class BloomBuilder : IDisposable
     }
 
     /// <summary>Closes a partial generation at the end of the data, and builds the file-level filter.</summary>
-    internal void EndOfData()
+    internal override void EndOfData()
     {
         if (_blocks > _generationFirst)
         {
@@ -268,8 +262,8 @@ internal sealed class BloomBuilder : IDisposable
             int blocks = SplitBlockBloom.BlocksFor(distinct, _policy.FalsePositivePpm, FileMaxBlocks);
             uint[] words = new uint[blocks * SplitBlockBloom.WordsPerBlock];
             file.InsertInto(words);
-            File = new BloomRun(0, _blocks, [], words, blocks);
-            Pending.Enqueue(File);
+            File = new BloomRun(0, _blocks, null, PendingPayload.U32(words, compress: false), blocks);
+            Pending.Enqueue(File.Generation!);
         }
     }
 
@@ -298,21 +292,33 @@ internal sealed class BloomBuilder : IDisposable
 
         if (Abandoned is null)
         {
-            BloomRun run = new BloomRun(first, count, blockWords, generationWords, generationBlocks);
+            // NOT COMPRESSED: a filter is uniform bits by construction, and pricing the column's
+            // candidates over it is work whose answer is known.
+            BloomRun run = new BloomRun(
+                first, count,
+                blockWords.Length > 0 ? PendingPayload.U32(blockWords, compress: false) : null,
+                generationWords.Length > 0 ? PendingPayload.U32(generationWords, compress: false) : null,
+                generationBlocks);
             Runs.Add(run);
-            Pending.Enqueue(run);
+            if (run.Blocks is { } blocks)
+            {
+                Pending.Enqueue(blocks);
+            }
+
+            if (run.Generation is { } generation)
+            {
+                Pending.Enqueue(generation);
+            }
         }
 
         _generationFirst = _blocks;
         _generationBlockWordCount = 0;
     }
 
-    /// <summary>Drops the whole index, with its reason; what was written stays dead weight.</summary>
-    /// <param name="reason">Why.</param>
-    internal void Abandon(string reason)
+    /// <inheritdoc/>
+    internal override void Abandon(string reason)
     {
-        Abandoned ??= reason;
-        Pending.Clear();
+        base.Abandon(reason);
         _file?.Dispose();
         _file = null;
     }
@@ -335,7 +341,7 @@ internal sealed class BloomBuilder : IDisposable
     }
 
     /// <inheritdoc/>
-    public void Dispose()
+    public override void Dispose()
     {
         _block.Dispose();
         _generation?.Dispose();
@@ -349,18 +355,11 @@ internal sealed class BloomBuilder : IDisposable
     }
 }
 
-/// <summary>One generation's filters, and where their payloads landed.</summary>
+/// <summary>One generation's filters.</summary>
 /// <param name="FirstBlock">The generation's first block.</param>
 /// <param name="BlockCount">Its blocks.</param>
-/// <param name="BlockWords">The block filters of the generation, concatenated in block order.</param>
-/// <param name="GenerationWords">The generation's own filter; empty when it has none.</param>
+/// <param name="Blocks">The block filters of the generation, concatenated in block order; none when no block has one.</param>
+/// <param name="Generation">The generation's own filter, or the file's; none when there is none.</param>
 /// <param name="GenerationBlocks">That filter's 256-bit blocks.</param>
 internal sealed record BloomRun(
-    int FirstBlock, int BlockCount, uint[] BlockWords, uint[] GenerationWords, int GenerationBlocks)
-{
-    /// <summary>Where <see cref="BlockWords"/> was written.</summary>
-    internal IndexSegment? BlockSegment { get; set; }
-
-    /// <summary>Where <see cref="GenerationWords"/> was written.</summary>
-    internal IndexSegment? GenerationSegment { get; set; }
-}
+    int FirstBlock, int BlockCount, PendingPayload? Blocks, PendingPayload? Generation, int GenerationBlocks);

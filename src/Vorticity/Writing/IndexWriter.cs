@@ -3,8 +3,8 @@
 //
 // ONE OWNER, SO `VortexFileWriter` ONLY CALLS IT. The file writer knows segments and layouts; this
 // knows policies, kinds and runs. Every kind lands here with its builder, and the file writer's
-// part stays a handful of calls: feed the ingest, close the blocks, write what is pending between
-// chunks, and write the directory before the footer.
+// part stays a handful of calls: feed the ingest, close the blocks and the chunks, write what is
+// pending between chunks, and write the directory before the footer.
 //
 // WHAT A POLICY ASKS FOR IS ALWAYS IN THE REPORT. A kind this writer cannot build yet is reported
 // ABANDONED with that reason rather than silently skipped or thrown: a caller who asked for an
@@ -12,9 +12,7 @@
 // (docs/08-semantics.md §5).
 using System;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 using Vorticity.Arrays;
-using Vorticity.Buffers;
 using Vorticity.Indexes;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
@@ -29,17 +27,15 @@ internal sealed class IndexWriter : IDisposable
     private readonly int _budgetPerMille;
     private readonly string[] _paths;
     private readonly IndexPolicy[] _columns;
-    private readonly BloomBuilder?[] _blooms;
+    private readonly IndexBuilder?[] _builders;
     private readonly string?[] _refusals;
     private readonly List<IndexEntry> _entries = [];
     private readonly List<IndexWriteReport> _reports = [];
 
-    // The payloads' own arena and dtype, created on the first payload: a policy that builds only
+    // The payloads' own arena and dtypes, created on the first payload: a policy that builds only
     // payload-free kinds never makes one.
     private ScanContext? _payloads;
     private DTypeArena? _payloadTypes;
-    private DType _u32;
-    private byte[]? _u32Bytes;
     private long _payloadBytes;
 
     /// <param name="policy">The policy, already <see cref="WritePolicy.None"/> under <see cref="WriteProfile.Fastest"/>.</param>
@@ -54,25 +50,25 @@ internal sealed class IndexWriter : IDisposable
         _budgetPerMille = budgetPerMille;
         _paths = new string[fieldCount];
         _columns = new IndexPolicy[fieldCount];
-        _blooms = new BloomBuilder?[fieldCount];
+        _builders = new IndexBuilder?[fieldCount];
         _refusals = new string?[fieldCount];
         for (int field = 0; field < fieldCount; field++)
         {
             _paths[field] = isTabular ? schema.GetFieldName(field) : string.Empty;
             IndexPolicy column = policy.Of(_paths[field]);
             _columns[field] = column;
-            if (column.Kind == IndexPolicyKind.Bloom)
+            DType dtype = isTabular ? schema.GetField(field) : schema;
+            string? reason = null;
+            _builders[field] = column.Kind switch
             {
-                DType dtype = isTabular ? schema.GetField(field) : schema;
-                if (BloomBuilder.Supports(dtype, out string? reason))
-                {
-                    _blooms[field] = new BloomBuilder(column);
-                }
-                else
-                {
-                    _refusals[field] = reason;
-                }
-            }
+                IndexPolicyKind.Bloom => BloomBuilder.Supports(dtype, out reason) ? new BloomBuilder(column) : null,
+                IndexPolicyKind.Postings or IndexPolicyKind.SortedRuns =>
+                    KeyIndexBuilder.Supports(dtype, out KeyLayout layout, out bool utf8, out reason)
+                        ? new KeyIndexBuilder(column.Kind == IndexPolicyKind.SortedRuns, layout, utf8, column.SegmentEntries)
+                        : null,
+                _ => null,
+            };
+            _refusals[field] = reason;
         }
     }
 
@@ -106,9 +102,9 @@ internal sealed class IndexWriter : IDisposable
     {
         get
         {
-            foreach (BloomBuilder? bloom in _blooms)
+            foreach (IndexBuilder? builder in _builders)
             {
-                if (bloom is not null)
+                if (builder is not null)
                 {
                     return true;
                 }
@@ -120,30 +116,43 @@ internal sealed class IndexWriter : IDisposable
 
     // ------------------------------------------------------------------------------ the stream
 
-    /// <summary>Feeds one column's rows to its builders.</summary>
+    /// <summary>Feeds one column's rows to its builder.</summary>
     /// <param name="field">The column.</param>
     /// <param name="arena">The batch's arena.</param>
     /// <param name="nodeIndex">The column's node in it.</param>
     /// <param name="start">The first row.</param>
     /// <param name="count">How many rows.</param>
     internal void Accumulate(int field, CanonicalArena arena, int nodeIndex, int start, int count) =>
-        _blooms[field]?.Accumulate(arena, nodeIndex, start, count);
+        _builders[field]?.Accumulate(arena, nodeIndex, start, count);
 
     /// <summary>Seals the open block of every builder.</summary>
     internal void CloseBlock()
     {
-        foreach (BloomBuilder? bloom in _blooms)
+        foreach (IndexBuilder? builder in _builders)
         {
-            bloom?.CloseBlock();
+            builder?.CloseBlock();
+        }
+    }
+
+    /// <summary>A chunk went out.</summary>
+    /// <param name="firstBlock">Its first block.</param>
+    /// <param name="blocks">Its blocks.</param>
+    /// <param name="firstRow">Its first row.</param>
+    /// <param name="rows">Its rows.</param>
+    internal void CloseChunk(int firstBlock, int blocks, long firstRow, long rows)
+    {
+        foreach (IndexBuilder? builder in _builders)
+        {
+            builder?.CloseChunk(firstBlock, blocks, firstRow, rows);
         }
     }
 
     /// <summary>Closes what the end of the data closes: partial generations, file-level filters.</summary>
     internal void EndOfData()
     {
-        foreach (BloomBuilder? bloom in _blooms)
+        foreach (IndexBuilder? builder in _builders)
         {
-            bloom?.EndOfData();
+            builder?.EndOfData();
         }
     }
 
@@ -152,9 +161,9 @@ internal sealed class IndexWriter : IDisposable
     {
         get
         {
-            foreach (BloomBuilder? bloom in _blooms)
+            foreach (IndexBuilder? builder in _builders)
             {
-                if (bloom is { Pending.Count: > 0 })
+                if (builder is { Pending.Count: > 0 })
                 {
                     return true;
                 }
@@ -169,42 +178,33 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     /// <param name="encodings">The file's array-encoding dictionary.</param>
     /// <param name="blob">The blob to write; the caller disposes it.</param>
-    /// <param name="target">What to tell <see cref="Placed"/> once it is written.</param>
+    /// <param name="payload">What to tell <see cref="Placed"/> once it is written.</param>
     /// <returns>Whether a payload was produced.</returns>
     internal bool TryTakePayload(
-        EncodingDictionary encodings, out ArrayBlobWriter.BlobLease blob, out PayloadTarget target)
+        EncodingDictionary encodings, out ArrayBlobWriter.BlobLease blob, out PendingPayload? payload)
     {
-        for (int field = 0; field < _blooms.Length; field++)
+        foreach (IndexBuilder? builder in _builders)
         {
-            BloomBuilder? bloom = _blooms[field];
-            if (bloom is null)
+            if (builder is null || !builder.Pending.TryDequeue(out payload))
             {
                 continue;
             }
 
-            while (bloom.Pending.TryPeek(out BloomRun? run))
+            if (_payloads is null)
             {
-                // Block filters first, then the generation's; a run is dequeued once both are out.
-                if (run.BlockSegment is null && run.BlockWords.Length > 0)
-                {
-                    blob = Blob(run.BlockWords, encodings);
-                    target = new PayloadTarget(field, run, Generation: false);
-                    return true;
-                }
-
-                if (run.GenerationSegment is null && run.GenerationWords.Length > 0)
-                {
-                    blob = Blob(run.GenerationWords, encodings);
-                    target = new PayloadTarget(field, run, Generation: true);
-                    return true;
-                }
-
-                bloom.Pending.Dequeue();
+                _payloads = new ScanContext([]);
+                _payloadTypes = new DTypeArena();
             }
+
+            CanonicalArena arena = _payloads.Canonical;
+            int node = payload.Build(arena, _payloadTypes!);
+            payload.DType = DTypeFlatBuffers.Serialize(arena.GetNode(node).DType);
+            blob = ArrayBlobWriter.Write(arena, node, encodings, payload.Compress);
+            return true;
         }
 
         blob = default;
-        target = default;
+        payload = null;
         return false;
     }
 
@@ -212,29 +212,20 @@ internal sealed class IndexWriter : IDisposable
     internal long FileBytes { get; private set; }
 
     /// <summary>Records where a payload landed, and checks the file's index budget.</summary>
-    /// <param name="target">What <see cref="TryTakePayload"/> said.</param>
+    /// <param name="payload">What <see cref="TryTakePayload"/> said.</param>
     /// <param name="segment">Where it was written.</param>
     /// <param name="fileBytes">The bytes the write took, padding included.</param>
     /// <param name="position">The sink's position after the write.</param>
-    internal void Placed(PayloadTarget target, IndexSegment segment, long fileBytes, long position)
+    internal void Placed(PendingPayload payload, IndexSegment segment, long fileBytes, long position)
     {
-        if (target.Generation)
-        {
-            target.Run.GenerationSegment = segment;
-        }
-        else
-        {
-            target.Run.BlockSegment = segment;
-        }
-
+        payload.Segment = segment;
         _payloadBytes += segment.Length;
         FileBytes += fileBytes;
         _payloads!.Canonical.Reset();
 
-        long dataBytes = position - FileBytes;
-
         // THE BUDGET IS A SHARE OF THE DATA, and a share of a few kilobytes says nothing: it is
         // enforced once the data passes a mebibyte, and again at the end over the whole file.
+        long dataBytes = position - FileBytes;
         if (dataBytes >= 1L << 20 && OverBudget(dataBytes))
         {
             AbandonForBudget(dataBytes);
@@ -245,33 +236,12 @@ internal sealed class IndexWriter : IDisposable
 
     private void AbandonForBudget(long dataBytes)
     {
-        foreach (BloomBuilder? bloom in _blooms)
+        foreach (IndexBuilder? builder in _builders)
         {
-            bloom?.Abandon(
+            builder?.Abandon(
                 $"the file's indexes reached {_payloadBytes} bytes against {dataBytes} bytes of data, " +
                 $"over the budget of {_budgetPerMille}‰ (VortexWriteOptions.IndexBudgetPerMille)");
         }
-    }
-
-    private ArrayBlobWriter.BlobLease Blob(uint[] words, EncodingDictionary encodings)
-    {
-        if (_payloads is null)
-        {
-            _payloads = new ScanContext([]);
-            _payloadTypes = new DTypeArena();
-            _u32 = _payloadTypes.Primitive(PType.U32, Nullability.NonNullable);
-            _u32Bytes = DTypeFlatBuffers.Serialize(_u32);
-        }
-
-        CanonicalArena arena = _payloads.Canonical;
-        VortexBuffer buffer = arena.AllocateUninitialized(
-            words.Length * sizeof(uint), sizeof(uint), out Span<byte> bytes);
-        MemoryMarshal.AsBytes(words.AsSpan()).CopyTo(bytes);
-        int node = arena.AddPrimitive(_u32, words.Length, Validity.NonNullable, PType.U32, buffer);
-
-        // NOT COMPRESSED: a filter is uniform bits by construction, and pricing the column's
-        // candidates over it is work whose answer is known.
-        return ArrayBlobWriter.Write(arena, node, encodings, compress: false);
     }
 
     // ------------------------------------------------------------------------------ the close
@@ -308,10 +278,10 @@ internal sealed class IndexWriter : IDisposable
                     NotYet(field, IndexKinds.BloomNgram3);
                     break;
                 case IndexPolicyKind.Postings:
-                    NotYet(field, IndexKinds.PostingsBlocks);
+                    Locating(field, IndexKinds.PostingsBlocks, blockRows);
                     break;
                 case IndexPolicyKind.SortedRuns:
-                    NotYet(field, IndexKinds.SortedRuns);
+                    Locating(field, IndexKinds.SortedRuns, blockRows);
                     break;
                 default:
                     throw new InvalidOperationException($"Unhandled index policy {policy.Kind}.");
@@ -319,19 +289,20 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
+    private string? Refusal(int field) => _refusals[field] ?? _builders[field]?.Abandoned;
+
+    private void Abandoned(int field, string kind, string reason) =>
+        _reports.Add(new IndexWriteReport(_paths[field], kind, IndexOutcome.Abandoned, reason, 0, 0, 0));
+
     /// <summary>
     /// <c>vorticity.bloom.sbbf.v1</c>: one entry per resolution the builder kept, each listing the
     /// runs whose payload is written.
     /// </summary>
     private void Bloom(int field, int blockRows)
     {
-        BloomBuilder? bloom = _blooms[field];
-        string? reason = _refusals[field] ?? bloom?.Abandoned;
-        if (bloom is null || reason is not null)
+        if (Refusal(field) is not null || _builders[field] is not BloomBuilder bloom)
         {
-            _reports.Add(new IndexWriteReport(
-                _paths[field], IndexKinds.BloomSbbf, IndexOutcome.Abandoned,
-                reason ?? "no builder ran", 0, 0, 0));
+            Abandoned(field, IndexKinds.BloomSbbf, Refusal(field) ?? "no builder ran");
             return;
         }
 
@@ -343,9 +314,9 @@ internal sealed class IndexWriter : IDisposable
         List<IndexRun> blockRuns = [];
         foreach (BloomRun run in bloom.Runs)
         {
-            if (run.BlockSegment is { } segment)
+            if (run.Blocks is { Segment: { } segment } payload)
             {
-                blockRuns.Add(Run(run.FirstBlock, run.BlockCount, segment));
+                blockRuns.Add(Run(run.FirstBlock, run.BlockCount, payload));
                 bytes += segment.Length;
             }
         }
@@ -354,7 +325,7 @@ internal sealed class IndexWriter : IDisposable
         {
             _entries.Add(new IndexEntry(
                 IndexKinds.BloomSbbf, ColumnPath(field), blockLength,
-                Options(policy, BloomLevel.Block, [.. bloom.BlockFilterBlocks]), blockRuns));
+                BloomOptions(policy, BloomLevel.Block, [.. bloom.BlockFilterBlocks]), blockRuns));
         }
 
         // Generation level: one count per listed run.
@@ -362,9 +333,9 @@ internal sealed class IndexWriter : IDisposable
         List<int> generationCounts = [];
         foreach (BloomRun run in bloom.Runs)
         {
-            if (run.GenerationSegment is { } segment)
+            if (run.Generation is { Segment: { } segment } payload)
             {
-                generationRuns.Add(Run(run.FirstBlock, run.BlockCount, segment));
+                generationRuns.Add(Run(run.FirstBlock, run.BlockCount, payload));
                 generationCounts.Add(run.GenerationBlocks);
                 bytes += segment.Length;
             }
@@ -374,27 +345,26 @@ internal sealed class IndexWriter : IDisposable
         {
             _entries.Add(new IndexEntry(
                 IndexKinds.BloomSbbf, ColumnPath(field), blockLength,
-                Options(policy, BloomLevel.Generation, [.. generationCounts]), generationRuns));
+                BloomOptions(policy, BloomLevel.Generation, [.. generationCounts]), generationRuns));
         }
 
         // File level.
         int files = 0;
-        if (bloom.File is { GenerationSegment: { } fileSegment } file)
+        if (bloom.File is { Generation: { Segment: { } fileSegment } filePayload } file)
         {
             _entries.Add(new IndexEntry(
                 IndexKinds.BloomSbbf, ColumnPath(field), blockLength,
-                Options(policy, BloomLevel.File, [file.GenerationBlocks]),
-                [Run(file.FirstBlock, file.BlockCount, fileSegment)]));
+                BloomOptions(policy, BloomLevel.File, [file.GenerationBlocks]),
+                [Run(file.FirstBlock, file.BlockCount, filePayload)]));
             bytes += fileSegment.Length;
             files = 1;
         }
 
         if (blockRuns.Count == 0 && generationRuns.Count == 0 && files == 0)
         {
-            _reports.Add(new IndexWriteReport(
-                _paths[field], IndexKinds.BloomSbbf, IndexOutcome.Abandoned,
-                $"no block holds the {policy.MinDistinct} distinct values the policy asks before a filter pays",
-                0, 0, 0));
+            Abandoned(
+                field, IndexKinds.BloomSbbf,
+                $"no block holds the {policy.MinDistinct} distinct values the policy asks before a filter pays");
             return;
         }
 
@@ -405,14 +375,66 @@ internal sealed class IndexWriter : IDisposable
             bytes, generationRuns.Count + files, blockRuns.Count));
     }
 
-    private IndexRun Run(int firstBlock, int blockCount, IndexSegment segment) =>
-        new IndexRun((ulong)firstBlock, checked((uint)blockCount), [segment], [_u32Bytes!]);
+    private static IndexRun Run(int firstBlock, int blockCount, PendingPayload payload) =>
+        new IndexRun((ulong)firstBlock, checked((uint)blockCount), [payload.Segment!.Value], [payload.DType!]);
 
-    private static byte[] Options(IndexPolicy policy, BloomLevel level, int[] counts) =>
+    private static byte[] BloomOptions(IndexPolicy policy, BloomLevel level, int[] counts) =>
         new BloomIndexOptions(
             level, policy.FalsePositivePpm, policy.Hash,
             level == BloomLevel.File ? BloomBuilder.FileMaxBlocks : policy.MaxBlocks,
             counts, BloomBuilder.GenerationBlocks, policy.MinDistinct).ToBytes();
+
+    /// <summary>
+    /// <c>vorticity.postings.blocks.v1</c> and <c>vorticity.sorted.runs.v1</c>: one entry, one run
+    /// per chunk, its payloads `stride` per segment.
+    /// </summary>
+    private void Locating(int field, string kind, int blockRows)
+    {
+        if (Refusal(field) is not null || _builders[field] is not KeyIndexBuilder keys)
+        {
+            Abandoned(field, kind, Refusal(field) ?? "no builder ran");
+            return;
+        }
+
+        List<IndexRun> runs = [];
+        long bytes = 0;
+        foreach (KeyRun run in keys.Runs)
+        {
+            List<IndexSegment> segments = [];
+            List<byte[]> dtypes = [];
+            foreach (PendingPayload payload in run.Payloads)
+            {
+                if (payload.Segment is not { } segment)
+                {
+                    // A run whose payloads did not all go out is not listed.
+                    segments.Clear();
+                    break;
+                }
+
+                segments.Add(segment);
+                dtypes.Add(payload.DType!);
+                bytes += segment.Length;
+            }
+
+            if (segments.Count == run.Payloads.Count)
+            {
+                runs.Add(new IndexRun(
+                    (ulong)run.FirstBlock, checked((uint)run.BlockCount), segments, dtypes,
+                    (ulong)run.Entries, KeyRunOptions.Run(run.Segments)));
+            }
+        }
+
+        if (runs.Count == 0)
+        {
+            Abandoned(field, kind, "the column wrote no chunk");
+            return;
+        }
+
+        _entries.Add(new IndexEntry(
+            kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1),
+            KeyRunOptions.Entry(keys.SegmentEntries), runs));
+        _reports.Add(new IndexWriteReport(_paths[field], kind, IndexOutcome.Built, null, bytes, 0, runs.Count));
+    }
 
     /// <summary>
     /// <c>vorticity.dict.probe.v1</c> (docs/10-indexes.md §5.3): no payload, one run per
@@ -452,9 +474,7 @@ internal sealed class IndexWriter : IDisposable
         Flush(runs, first, end);
         if (runs.Count == 0)
         {
-            _reports.Add(new IndexWriteReport(
-                _paths[field], IndexKinds.DictProbe, IndexOutcome.Abandoned,
-                "no chunk of this column is dictionary-encoded", 0, 0, 0));
+            Abandoned(field, IndexKinds.DictProbe, "no chunk of this column is dictionary-encoded");
             return;
         }
 
@@ -473,9 +493,7 @@ internal sealed class IndexWriter : IDisposable
     }
 
     private void NotYet(int field, string kind) =>
-        _reports.Add(new IndexWriteReport(
-            _paths[field], kind, IndexOutcome.Abandoned,
-            "this writer does not build this kind yet", 0, 0, 0));
+        Abandoned(field, kind, "this writer does not build this kind yet");
 
     private uint[] ColumnPath(int field) => _isTabular ? [checked((uint)field)] : [];
 
@@ -498,18 +516,12 @@ internal sealed class IndexWriter : IDisposable
     /// <inheritdoc/>
     public void Dispose()
     {
-        foreach (BloomBuilder? bloom in _blooms)
+        foreach (IndexBuilder? builder in _builders)
         {
-            bloom?.Dispose();
+            builder?.Dispose();
         }
 
         _payloads?.Dispose();
         _payloads = null;
     }
 }
-
-/// <summary>Which payload a blob is, so the writer can say where it landed.</summary>
-/// <param name="Field">The column.</param>
-/// <param name="Run">The run it belongs to.</param>
-/// <param name="Generation">Whether it is the generation's filter rather than the block filters.</param>
-internal readonly record struct PayloadTarget(int Field, BloomRun Run, bool Generation);

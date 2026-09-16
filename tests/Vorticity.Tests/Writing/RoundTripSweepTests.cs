@@ -89,7 +89,7 @@ public sealed class RoundTripSweepTests
 
         int written = 0;
         int indexed = 0;
-        int blooms = 0;
+        Dictionary<string, int> built = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (CorpusEntry entry in CorpusManifest.InScope())
         {
             // NOT WRITTEN FOR THE CROSS-CHECK, and the reason is the verifier's, not ours. Our
@@ -110,14 +110,19 @@ public sealed class RoundTripSweepTests
                 entry.Path, OpenOptionsFor(entry), CancellationToken.None);
             // WITH INDEXES, so that the whole corpus crosses the rule of docs/10-indexes.md §3.1: a
             // file with an index opens and scans in a strict Rust 0.86.1 reader, without error and
-            // without configuration. Half the files index every column with a Bloom filter at all
-            // three resolutions, budget lifted -- which puts payload regions BETWEEN the data
-            // chunks, where no layout references them; the other half get what `Auto` builds, and
-            // a Bloom on every other field. The data the verifier compares is the default write's.
-            WritePolicy policy = written % 2 == 0
-                ? WritePolicy.None.WithDefault(IndexPolicy.Bloom(resolutions: 3))
-                : WritePolicy.Auto;
-            if (written % 2 == 1 && source.Schema.Kind == DTypeKind.Struct)
+            // without configuration. The files take four policies in turn, budget lifted: a Bloom
+            // filter at all three resolutions on every column, postings on every column, sorted
+            // runs cut into small segments on every column, and `Auto` with a Bloom on every other
+            // field -- which puts payload regions BETWEEN the data chunks, where no layout
+            // references them. The data the verifier compares is the default write's.
+            WritePolicy policy = (written % 4) switch
+            {
+                0 => WritePolicy.None.WithDefault(IndexPolicy.Bloom(resolutions: 3)),
+                1 => WritePolicy.None.WithDefault(IndexPolicy.Postings),
+                2 => WritePolicy.None.WithDefault(IndexPolicy.SortedRuns.WithSegmentEntries(500)),
+                _ => WritePolicy.Auto,
+            };
+            if (written % 4 == 3 && source.Schema.Kind == DTypeKind.Struct)
             {
                 for (int field = 1; field < source.Schema.FieldCount; field += 2)
                 {
@@ -141,27 +146,36 @@ public sealed class RoundTripSweepTests
                 indexed++;
             }
 
+            HashSet<string> kinds = [];
             foreach (IndexWriteReport index in report.Indexes)
             {
-                if (index.Kind == IndexKinds.BloomSbbf && index.Outcome == IndexOutcome.Built)
+                if (index.Outcome == IndexOutcome.Built && kinds.Add(index.Kind))
                 {
-                    blooms++;
-                    break;
+                    built[index.Kind] = built.GetValueOrDefault(index.Kind) + 1;
                 }
             }
 
             written++;
         }
 
-        Console.Out.Write(
-            "WROTE " + written.ToString(CultureInfo.InvariantCulture) + " files to " + root +
-            ", " + indexed.ToString(CultureInfo.InvariantCulture) + " of them with an index directory, " +
-            blooms.ToString(CultureInfo.InvariantCulture) + " with Bloom filter runs\n");
+        StringBuilder line = new StringBuilder("WROTE ")
+            .Append(written.ToString(CultureInfo.InvariantCulture)).Append(" files to ").Append(root)
+            .Append(", ").Append(indexed.ToString(CultureInfo.InvariantCulture)).Append(" of them with an index directory;");
+        foreach ((string kind, int files) in built)
+        {
+            line.Append(' ').Append(kind).Append(": ").Append(files.ToString(CultureInfo.InvariantCulture)).Append(';');
+        }
+
+        Console.Out.Write(line.Append('\n').ToString());
         Assert.True(written > 700);
         Assert.Equal(written, indexed);
 
         // Enough files with payload regions between their chunks that the rule is tested, not assumed.
-        Assert.True(blooms > 200, $"only {blooms} files carry a Bloom filter");
+        foreach (string kind in new[] { IndexKinds.BloomSbbf, IndexKinds.PostingsBlocks, IndexKinds.SortedRuns })
+        {
+            int files = built.GetValueOrDefault(kind);
+            Assert.True(files > 100, $"only {files} files carry {kind}");
+        }
     }
 
     /// <summary>Writes one corpus file out and reads it back, comparing every value.</summary>

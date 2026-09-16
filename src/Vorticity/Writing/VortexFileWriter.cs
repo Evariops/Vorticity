@@ -546,7 +546,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
             return;
         }
 
-        while (indexes.TryTakePayload(_arrayEncodings, out ArrayBlobWriter.BlobLease blob, out PayloadTarget target))
+        while (indexes.TryTakePayload(_arrayEncodings, out ArrayBlobWriter.BlobLease blob, out PendingPayload? payload))
         {
             using (blob)
             {
@@ -555,7 +555,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
                 await _sink.WriteAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
                 IndexSegment segment = new IndexSegment(
                     (ulong)aligned, (uint)blob.Length, (byte)VortexLimits.MaxAlignmentExponent);
-                indexes.Placed(target, segment, _sink.Position - before, _sink.Position);
+                indexes.Placed(payload!, segment, _sink.Position - before, _sink.Position);
             }
         }
     }
@@ -758,11 +758,12 @@ public sealed class VortexFileWriter : IAsyncDisposable
             _columns[field].ReleaseChunk(_emittedBlocks, blocks);
         }
 
+        // The chunk's locating runs close with it; they and the generations its blocks closed go out
+        // right behind it.
+        _indexes?.CloseChunk(_emittedBlocks, blocks, _rowCount, rows);
         _emittedBlocks += blocks;
         _chunkRows.Add(rows);
         _rowCount += rows;
-
-        // The generations the blocks of this chunk closed go out right behind it.
         await FlushIndexesAsync(cancellationToken).ConfigureAwait(false);
     }
 

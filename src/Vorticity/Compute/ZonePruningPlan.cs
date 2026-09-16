@@ -90,7 +90,10 @@ internal static class ZonePruningPlan
         Indexes.BloomPruner? blooms = indexes && blockRows > 0
             ? await Indexes.BloomPruner.BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false)
             : null;
-        if (zones is null && blooms is null)
+        Indexes.KeyIndexPruner? locating = indexes && blockRows > 0
+            ? await Indexes.KeyIndexPruner.BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false)
+            : null;
+        if (zones is null && blooms is null && locating is null)
         {
             return default;
         }
@@ -113,6 +116,15 @@ internal static class ZonePruningPlan
             await blooms.RefineAsync(file, live, cancellationToken).ConfigureAwait(false);
             metrics?.AddRequests(blooms.Segments, blooms.Bytes);
             steps?.Add(new Scan.PruningStep("bloom filter", before - live.LiveCount, blooms.Segments, blooms.Bytes));
+        }
+
+        // The locating indexes last: a positive answer, and the dearest to consult.
+        if (locating is not null && !live.IsEmpty)
+        {
+            before = live.LiveCount;
+            await locating.RefineAsync(file, live, cancellationToken).ConfigureAwait(false);
+            metrics?.AddRequests(locating.Segments, locating.Bytes);
+            steps?.Add(new Scan.PruningStep("locating index", before - live.LiveCount, locating.Segments, locating.Bytes));
         }
 
         return new PruningPlan(live, zones);

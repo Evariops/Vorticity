@@ -356,21 +356,18 @@ internal sealed class BloomPruner
     // ------------------------------------------------------------------------------ state
 
     /// <summary>One column's entries and how its values hash.</summary>
-    private sealed class Column(DType dtype)
+    /// <remarks>
+    /// The literal's bytes come from <see cref="KeyLayout.TryEncode"/>, the one conversion every
+    /// value index shares; a decimal has no layout, so a decimal filter claims nothing here.
+    /// </remarks>
+    private sealed class Column
     {
-        private readonly DType _storage = Storage(dtype);
+        private readonly bool _keyed;
+        private readonly KeyLayout _layout;
+
+        internal Column(DType dtype) => _keyed = KeyLayout.TryOf(dtype, out _layout);
 
         internal List<Level> Levels { get; } = [];
-
-        private static DType Storage(DType dtype)
-        {
-            while (dtype.Kind == DTypeKind.Extension)
-            {
-                dtype = dtype.StorageType;
-            }
-
-            return dtype;
-        }
 
         /// <summary>
         /// The hash (or the two, for a float zero) of <paramref name="value"/> as this column stores
@@ -381,146 +378,20 @@ internal sealed class BloomPruner
             first = 0;
             second = 0;
             two = false;
-            Span<byte> bytes = stackalloc byte[sizeof(ulong)];
-            switch (_storage.Kind)
-            {
-                case DTypeKind.Utf8 or DTypeKind.Binary when value.Kind == FilterLiteralKind.Bytes:
-                    first = SplitBlockBloom.Hash(value.BytesValue, hash);
-                    return true;
-
-                case DTypeKind.Primitive:
-                    PType ptype = _storage.PType;
-                    int width = ptype.ByteWidth();
-                    if (ptype.IsFloat())
-                    {
-                        if (!TryFloat(value, out double d) || double.IsNaN(d) || !TryNarrow(ptype, d, bytes))
-                        {
-                            return false;
-                        }
-
-                        first = SplitBlockBloom.Hash(bytes[..width], hash);
-                        if (d == 0)
-                        {
-                            // IEEE equality makes the two zeros one value; the filter holds bits.
-                            TryNarrow(ptype, double.IsNegative(d) ? 0.0 : -0.0, bytes);
-                            second = SplitBlockBloom.Hash(bytes[..width], hash);
-                            two = true;
-                        }
-
-                        return true;
-                    }
-
-                    if (!TryInteger(ptype, value, bytes))
-                    {
-                        return false;
-                    }
-
-                    first = SplitBlockBloom.Hash(bytes[..width], hash);
-                    return true;
-
-                default:
-                    return false;
-            }
-        }
-
-        private static bool TryFloat(FilterLiteral value, out double d)
-        {
-            switch (value.Kind)
-            {
-                case FilterLiteralKind.Float:
-                    d = value.FloatValue;
-                    return true;
-                case FilterLiteralKind.Signed:
-                    d = value.SignedValue;
-                    return true;
-                case FilterLiteralKind.Unsigned:
-                    d = value.UnsignedValue;
-                    return true;
-                default:
-                    d = 0;
-                    return false;
-            }
-        }
-
-        private static bool TryNarrow(PType ptype, double d, Span<byte> bytes)
-        {
-            switch (ptype)
-            {
-                case PType.F64:
-                    System.Buffers.Binary.BinaryPrimitives.WriteDoubleLittleEndian(bytes, d);
-                    return true;
-                case PType.F32:
-                    float f = (float)d;
-                    System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(bytes, f);
-                    return (double)f == d;
-                case PType.F16:
-                    Half h = (Half)d;
-                    System.Buffers.Binary.BinaryPrimitives.WriteHalfLittleEndian(bytes, h);
-                    return (double)h == d;
-                default:
-                    return false;
-            }
-        }
-
-        private static bool TryInteger(PType ptype, FilterLiteral value, Span<byte> bytes)
-        {
-            // Into the column's own domain first, exactly or not at all.
-            bool signed = ptype.IsSignedInteger();
-            long s = 0;
-            ulong u = 0;
-            switch (value.Kind)
-            {
-                case FilterLiteralKind.Signed:
-                    s = value.SignedValue;
-                    if (!signed && s < 0)
-                    {
-                        return false;
-                    }
-
-                    u = unchecked((ulong)s);
-                    break;
-                case FilterLiteralKind.Unsigned:
-                    u = value.UnsignedValue;
-                    if (signed && u > long.MaxValue)
-                    {
-                        return false;
-                    }
-
-                    s = unchecked((long)u);
-                    break;
-                case FilterLiteralKind.Float:
-                    double d = value.FloatValue;
-                    const double Exact = 9007199254740992.0; // 2^53
-                    if (double.IsNaN(d) || Math.Abs(d) >= Exact || d != Math.Floor(d) || (!signed && d < 0))
-                    {
-                        return false;
-                    }
-
-                    s = (long)d;
-                    u = unchecked((ulong)s);
-                    break;
-                default:
-                    return false;
-            }
-
-            (long min, ulong max) = ptype switch
-            {
-                PType.I8 => ((long)sbyte.MinValue, (ulong)sbyte.MaxValue),
-                PType.I16 => (short.MinValue, (ulong)short.MaxValue),
-                PType.I32 => (int.MinValue, (ulong)int.MaxValue),
-                PType.I64 => (long.MinValue, (ulong)long.MaxValue),
-                PType.U8 => (0L, byte.MaxValue),
-                PType.U16 => (0L, ushort.MaxValue),
-                PType.U32 => (0L, uint.MaxValue),
-                _ => (0L, ulong.MaxValue),
-            };
-
-            if (signed ? s < min || s > (long)max : u > max)
+            Span<byte> scratch = stackalloc byte[sizeof(ulong)];
+            Span<byte> zero = stackalloc byte[sizeof(ulong)];
+            if (!_keyed || !_layout.TryEncode(value, scratch, out ReadOnlySpan<byte> key, zero, out bool hasOtherZero))
             {
                 return false;
             }
 
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes, u);
+            first = SplitBlockBloom.Hash(key, hash);
+            if (hasOtherZero)
+            {
+                second = SplitBlockBloom.Hash(zero[.._layout.Width], hash);
+                two = true;
+            }
+
             return true;
         }
     }

@@ -25,6 +25,7 @@
 //     uint64 first_block = 1; uint32 block_count = 2; repeated Segment payload = 3;
 //     repeated bytes payload_dtype = 4;
 //     uint64 entry_count = 5;          // docs/12-index-reads.md §14's amendment
+//     bytes options = 6;               // the per-segment bounds 10 §4.2 puts "in the run's options"
 //   }
 //   message Segment { uint64 offset = 1; uint32 length = 2; uint32 alignment_exponent = 3; }
 using System;
@@ -55,13 +56,21 @@ public readonly record struct IndexSegment(ulong Offset, uint Length, byte Align
 /// The entries of a locating run, so that a cursor's <c>EntryCount</c> and <c>Explain</c> cost no
 /// payload read (docs/12-index-reads.md §14's amendment to §4.1); <c>0</c> for a skipping kind.
 /// </param>
+/// <param name="Options">
+/// Kind-defined bytes for this run alone: the per-segment bounds of a locating run's blocked
+/// payload (docs/10-indexes.md §4.2); empty otherwise.
+/// </param>
 public sealed record IndexRun(
     ulong FirstBlock,
     uint BlockCount,
     IReadOnlyList<IndexSegment> Payload,
     IReadOnlyList<byte[]> PayloadDTypes,
-    ulong EntryCount = 0)
+    ulong EntryCount = 0,
+    byte[]? Options = null)
 {
+    /// <summary>The run's options, never null.</summary>
+    public ReadOnlySpan<byte> OptionBytes => Options ?? [];
+
     /// <summary>One past the last block covered.</summary>
     public ulong EndBlock => FirstBlock + BlockCount;
 }
@@ -112,6 +121,7 @@ public sealed record IndexDirectory(
     private const int RunPayload = 3;
     private const int RunPayloadDType = 4;
     private const int RunEntryCount = 5;
+    private const int RunOptions = 6;
     private const int SegOffset = 1;
     private const int SegLength = 2;
     private const int SegAlignment = 3;
@@ -125,6 +135,7 @@ public sealed record IndexDirectory(
     private const int ColumnMinDistinct = 6;
     private const int ColumnHash = 7;
     private const int ColumnCaseInsensitive = 8;
+    private const int ColumnSegmentEntries = 9;
 
     /// <summary>The key as UTF-8, for <c>VortexFile.TryGetMetadataIndex</c>.</summary>
     internal static ReadOnlySpan<byte> MetadataKeyUtf8 => "vorticity.index"u8;
@@ -186,6 +197,7 @@ public sealed record IndexDirectory(
         writer.WriteUInt32Always(ColumnMinDistinct, (uint)policy.MinDistinct);
         writer.WriteUInt32(ColumnHash, (uint)policy.Hash);
         writer.WriteBool(ColumnCaseInsensitive, policy.CaseInsensitive);
+        writer.WriteUInt32Always(ColumnSegmentEntries, (uint)policy.SegmentEntries);
     }
 
     private static void WriteEntry(ref ProtoWriter writer, IndexEntry entry)
@@ -217,6 +229,7 @@ public sealed record IndexDirectory(
             }
 
             writer.WriteUInt64(RunEntryCount, run.EntryCount);
+            writer.WriteBytes(RunOptions, run.OptionBytes);
         }
     }
 
@@ -427,6 +440,7 @@ public sealed record IndexDirectory(
         ulong first = 0;
         uint count = 0;
         ulong entries = 0;
+        byte[]? options = null;
         List<IndexSegment> payload = [];
         List<byte[]> dtypes = [];
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
@@ -448,13 +462,16 @@ public sealed record IndexDirectory(
                 case RunEntryCount when wire == ProtoWireType.Varint:
                     entries = reader.ReadVarint();
                     break;
+                case RunOptions when wire == ProtoWireType.LengthDelimited:
+                    options = reader.ReadLengthDelimited().ToArray();
+                    break;
                 default:
                     reader.SkipField(wire);
                     break;
             }
         }
 
-        return new IndexRun(first, count, payload, dtypes, entries);
+        return new IndexRun(first, count, payload, dtypes, entries, options);
     }
 
     private static IndexSegment ReadSegment(ProtoReader reader)
@@ -523,6 +540,7 @@ public sealed record IndexDirectory(
         uint maxBlocks = 0;
         uint minDistinct = 0;
         uint hash = 0;
+        uint segmentEntries = 0;
         bool caseInsensitive = false;
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
@@ -552,6 +570,9 @@ public sealed record IndexDirectory(
                 case ColumnCaseInsensitive when wire == ProtoWireType.Varint:
                     caseInsensitive = reader.ReadBool();
                     break;
+                case ColumnSegmentEntries when wire == ProtoWireType.Varint:
+                    segmentEntries = reader.ReadVarint32();
+                    break;
                 default:
                     reader.SkipField(wire);
                     break;
@@ -565,6 +586,7 @@ public sealed record IndexDirectory(
             (int)Math.Min(maxBlocks, int.MaxValue),
             (int)Math.Min(minDistinct, int.MaxValue),
             (int)Math.Min(hash, int.MaxValue),
-            caseInsensitive);
+            caseInsensitive,
+            (int)Math.Min(segmentEntries, int.MaxValue));
     }
 }
