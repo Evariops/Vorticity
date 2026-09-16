@@ -87,6 +87,10 @@ internal sealed class RowSelection
         return first < _rows.Length && _rows[first] < split.End;
     }
 
+    /// <summary>How many selected rows fall in <paramref name="split"/>: two binary searches.</summary>
+    /// <param name="split">A row range, in file coordinates.</param>
+    internal int CountIn(RowRange split) => LowerBound(split.End) - LowerBound(split.Start);
+
     /// <summary>The first index whose row is at or after <paramref name="row"/>.</summary>
     private int LowerBound(long row)
     {

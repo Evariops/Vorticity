@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 
 using Vorticity.Arrays;
 using Vorticity.Columns;
+using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Scan;
 using Vorticity.Types;
@@ -30,6 +31,58 @@ public sealed class ScanAllocationTests
 {
     private const string Multi = "distributions/high_cardinality_i64_r8193";
     private const string Struct = "containers/uncompressed_canonical";
+
+    /// <summary>65536 rows in 64 zones of 1024.</summary>
+    private const string Zoned = "containers/zoned_many_zones_nulls";
+
+    [Fact]
+    public async Task ACountAllocatesNothingPerBlock()
+    {
+        // docs/12-index-reads.md §11: "a count at 0 B per block". The proof tier is off so that
+        // every LIVE block is decoded and the filter evaluated, and the two filters differ only in
+        // how many blocks the mask leaves live -- 17 against 64 -- over the same rows, the same
+        // plan, the same zone map, the same context and evaluation window. So the two figures
+        // differ by exactly what 47 decoded blocks cost, which has to be nothing. (The plan's
+        // own boundary array grows with the ROWS a scan covers, which is why the comparison is
+        // not between two ranges.)
+        ReleaseOnlyCeilings.Require();
+        Decoders.EnsureRegistered();
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
+        VortexExpr everything = Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(0L)));
+        VortexExpr seventeen = Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_000_000L + (3 * 17_408L))));
+
+        long few = await MeasureCount(file, seventeen, 17 * 1024L);
+        long all = await MeasureCount(file, everything, 64 * 1024L);
+
+        Assert.Equal(few, all);
+    }
+
+    private static async Task<long> MeasureCount(VortexFile file, VortexExpr filter, long expected)
+    {
+        for (int warm = 0; warm < 3; warm++)
+        {
+            Assert.Equal(expected, await Count(file, filter));
+        }
+
+        List<long> runs = [];
+        for (int i = 0; i < 5; i++)
+        {
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            long counted = await Count(file, filter);
+            long delta = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.Equal(expected, counted);
+            runs.Add(delta);
+        }
+
+        runs.Sort();
+        return runs[0];
+    }
+
+    private static ValueTask<long> Count(VortexFile file, VortexExpr filter) =>
+        file.Scan()
+            .Where(filter)
+            .WithCountTiers(CountTiers.All & ~CountTiers.FullBlock)
+            .CountAsync();
 
     [Fact]
     public async Task SteadyStateAllocatesNothingBeyondOneRecordBatch()

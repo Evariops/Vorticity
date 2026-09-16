@@ -55,6 +55,27 @@ internal static class ZonePruningPlan
     /// </remarks>
     internal static async ValueTask<BlockMask?> RefineAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
+        List<Scan.PruningStep>? steps = null, Scan.ScanMetrics? metrics = null) =>
+        (await PlanAsync(file, tree, filter, cancellationToken, steps, metrics).ConfigureAwait(false)).Live;
+
+    /// <summary>The mask, and the structures that refined it -- which a count asks again, per block.</summary>
+    /// <param name="Live">The mask of live blocks, or null when no structure can prune anything.</param>
+    /// <param name="Zones">The zone-map pruner, or null when no column has a usable map.</param>
+    internal readonly record struct PruningPlan(BlockMask? Live, ZonePruner? Zones);
+
+    /// <summary>
+    /// <see cref="RefineAsync"/>, keeping the structures beside the mask: a terminal
+    /// (docs/12-index-reads.md §5.2) asks the zone maps for a block's count after the mask has
+    /// said the block is live.
+    /// </summary>
+    /// <param name="file">The open file.</param>
+    /// <param name="tree">Its parsed layout tree.</param>
+    /// <param name="filter">The scan's predicate.</param>
+    /// <param name="cancellationToken">Cancels the reads this makes.</param>
+    /// <param name="steps">Receives what each structure pruned, for <c>Explain</c>; null when nobody asks.</param>
+    /// <param name="metrics">The scan's sink, to which the reads made here are added; null when nobody asks.</param>
+    internal static async ValueTask<PruningPlan> PlanAsync(
+        VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
         List<Scan.PruningStep>? steps = null, Scan.ScanMetrics? metrics = null)
     {
         (ZonePruner? zones, int segments, long bytes) =
@@ -65,7 +86,7 @@ internal static class ZonePruningPlan
         metrics?.AddRequests(segments, bytes);
         if (zones is null)
         {
-            return null;
+            return default;
         }
 
         BlockMask live = new BlockMask(tree.Root.RowCount, Scan.SplitPlan.NaturalBatchRows(tree));
@@ -75,7 +96,7 @@ internal static class ZonePruningPlan
         // the blocks that were live when it ran and are not afterwards -- so a later structure is
         // credited only with what the earlier ones left it -- against the segments read for it.
         steps?.Add(new Scan.PruningStep("zone map", before - live.LiveCount, segments, bytes));
-        return live;
+        return new PruningPlan(live, zones);
     }
 
     /// <summary>

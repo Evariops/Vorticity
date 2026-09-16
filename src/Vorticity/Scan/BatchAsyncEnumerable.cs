@@ -411,39 +411,14 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         return false;
     }
 
-    private void Register(ScanContext context, RowRange rows)
-    {
-        LayoutNode root = _tree.Root;
-        LayoutReaderTable.Require(in root).RegisterSegments(in root, rows, in _mask, context.Segments);
-    }
+    private void Register(ScanContext context, RowRange rows) =>
+        SplitExecution.Register(context, _tree, in _mask, rows);
 
     /// <summary>
     /// Adds what the batch just registered to the scan's sink: the distinct segments and their
     /// bytes, counted at the asking (docs/11 §6.4) -- a caching source may serve some without a read.
     /// </summary>
-    private void NoteRequests(ScanContext context)
-    {
-        ScanMetrics? metrics = _metrics;
-        if (metrics is null)
-        {
-            return;
-        }
-
-        SegmentRequestSet segments = context.Segments;
-        long bytes = 0;
-        for (int i = 0; i < segments.Count; i++)
-        {
-            bytes += segments.GetSpec(i).Length;
-        }
-
-        metrics.AddRequests(segments.Count, bytes);
-    }
-
-    private int Execute(ScanContext context, RowRange rows)
-    {
-        LayoutNode root = _tree.Root;
-        return LayoutReaderTable.Require(in root).Execute(in root, rows, in _mask, context);
-    }
+    private void NoteRequests(ScanContext context) => _metrics?.AddRequests(context.Segments);
 
     private bool CompleteBatch()
     {
@@ -468,62 +443,12 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
     /// <summary>
     /// Executes the split, PUSHING the take's rows down the layout tree rather than gathering them
-    /// back out afterwards.
+    /// back out afterwards -- <see cref="SplitExecution.Execute"/>, the one place that does it,
+    /// shared with the terminals of docs/12 §5 so that a count and a batch cannot disagree on
+    /// which rows a split yields.
     /// </summary>
-    /// <remarks>
-    /// The split itself was already chosen because it holds at least one wanted row - that is the
-    /// I/O half of F5 and it was always here. This is the other half: the selection travels down
-    /// the layout tree in the same coordinate space as the row range beside it, so a reader that
-    /// re-partitions rows re-partitions it too and one that does not passes it on by doing nothing.
-    /// At the flat leaf it reaches the array decoders, where an encoding that can honour it does
-    /// (`fastlanes.bitpacked` indexes positionally, `vortex.dict` takes on the codes) and every
-    /// other one falls back to decoding the node and gathering - which is exactly what this method
-    /// used to do for all of them.
-    ///
-    /// The selection is in the SPLIT's coordinate space, and `Execute` is called with the split as
-    /// its row range, so the two agree at the root by construction.
-    /// </remarks>
-    private int ExecuteWithTake(ScanContext context, RowRange split)
-    {
-        if (_take is null)
-        {
-            return Execute(context, split);
-        }
-
-        int rows = (int)(split.End - split.Start);
-        int[] indices = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
-        try
-        {
-            int count = _take.LocalIndices(split, indices);
-            if (count == rows)
-            {
-                // Every row of the split is wanted: there is nothing to push down, and pushing an
-                // identity selection would cost a gather for no reason.
-                return Execute(context, split);
-            }
-
-            // LocalIndices produces SPLIT-relative rows; the root's row space is the file's, which
-            // is what `split` is expressed in.
-            for (int i = 0; i < count; i++)
-            {
-                indices[i] += (int)split.Start;
-            }
-
-            (int[]? Buffer, int Count) saved = context.ExchangeSelection(indices, count);
-            try
-            {
-                return Execute(context, split);
-            }
-            finally
-            {
-                context.ExchangeSelection(saved.Buffer, saved.Count);
-            }
-        }
-        finally
-        {
-            ArrayPool<int>.Shared.Return(indices);
-        }
-    }
+    private int ExecuteWithTake(ScanContext context, RowRange split) =>
+        SplitExecution.Execute(context, _tree, in _mask, split, _take);
 
     /// <summary>
     /// Runs the filter over a decoded batch and drops both the rejected rows and the columns only
@@ -635,6 +560,13 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
     }
 
+    /// <summary>
+    /// One split on one lane, off the caller's thread: the same three phases and the same two
+    /// row-level operations as the sequential path -- the take pushed down, the filter applied --
+    /// so a batch is the same batch whatever the degree. The pipelined path once built its batch
+    /// straight from the decoded split, and a degree above one silently returned every row of a
+    /// filtered or taken scan; the terminals' refactoring of the split's execution found it.
+    /// </summary>
     private async Task<int> RunLaneAsync(Lane lane)
     {
         ScanContext context = lane.Context;
@@ -644,7 +576,8 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             Register(context, rows);
             NoteRequests(context);
             await _source.ReadManyAsync(context.Segments, _token).ConfigureAwait(false);
-            return Execute(context, rows);
+            int root = ExecuteWithTake(context, rows);
+            return ApplyFilter(context, root);
         }
         catch
         {

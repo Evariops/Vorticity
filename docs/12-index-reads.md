@@ -359,6 +359,23 @@ is ordered against a constant exactly as the kernels order a value — an intege
 `double`, monotone and therefore sound for the bound — with "not comparable" told apart from
 "equal", which a prune never needed and a proof does.
 
+**As delivered (step 10b).** `ScanBuilder.CountAsync` and `AnyAsync` are one walk
+(`TerminalScan`): the scan's own frame — `Rows`, or the span of a `Take` — the split plan under
+the projection of the filter's columns alone, the mask and the zone-map pruner of the pruning pass
+(`ZonePruningPlan.PlanAsync` returns both), then split by split, cheapest proof first: a split the
+mask killed counts nothing and reads nothing; a split the maps decide (`ZonePruner.TryCount`)
+counts from bounds already in memory; the rest are registered, read and decoded exactly as a
+batch is (`SplitExecution`, the one place the take is pushed down, shared with the batch
+enumerator), the filter evaluated and the trues counted, with no gather, no projection trim and no
+`RecordBatch`, one split of memory at a time whatever the degree. Under a `Take` the maps say how
+many rows match and never which, so only a whole answer serves: every row, hence every taken row,
+or none. `AnyAsync` is the same walk stopped at the first split that counts. Without a filter both
+are arithmetic and read nothing. The exact-cover tier waits for a source; `CountTiers`, internal,
+is the switch §11 asks for, and the tests hold every count against the materialized scan with
+pruning and the full-block proof each forced off in turn, a count at 0 B per block. Moving the
+split's execution to one place found that the batch enumerator's pipelined path (a degree above
+one) built its batch without the take and without the filter; it is fixed and tested with it.
+
 ### 5.3 `MinAsync` / `MaxAsync` — first and last
 
 `ValueTask<FilterLiteral> MinAsync(string path, ct)` and `MaxAsync`: the smallest and largest

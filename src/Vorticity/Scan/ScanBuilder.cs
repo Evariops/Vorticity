@@ -36,6 +36,7 @@ public sealed class ScanBuilder
     private int _maxBatchRows;
     private int _degree = 1;
     private ScanMetrics? _metrics;
+    private CountTiers _tiers = CountTiers.All;
 
     internal ScanBuilder(VortexFile file)
     {
@@ -282,31 +283,13 @@ public sealed class ScanBuilder
         // Parsed at most once per OPEN FILE rather than once per scan: the tree is a function of
         // the file's bytes and nothing else. See VortexFile.LayoutTree.
         LayoutTree tree = _file.LayoutTree;
-
-        long rootRows = tree.Root.RowCount;
-        RowRange whole = new RowRange(0, rootRows);
-        RowRange rows = _rowsSet ? _rows.Intersect(whole) : whole;
-
-        // A take narrows the planned range to the span its indices cover, which already skips every
-        // split outside it; the ones inside it that hold no wanted row are skipped per split.
-        if (_take is not null)
-        {
-            rows = _take.Bounds.Intersect(whole);
-        }
+        (RowRange rows, _, long cap) = Frame(tree);
 
         Projection keep = _fields is null ? Projection.All : Projection.Create(_fields.Build());
 
         // WHERE THEN PROJECT: the scan reads the union so the filter has its columns, and the
         // enumerator trims back down to `keep` once the filter has decided.
         Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
-
-        long natural = SplitPlan.NaturalBatchRows(tree);
-        if (natural > int.MaxValue)
-        {
-            natural = int.MaxValue;
-        }
-
-        long cap = _maxBatchRows > 0 && _maxBatchRows < natural ? _maxBatchRows : natural;
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
 
         BatchAsyncEnumerable batches = new BatchAsyncEnumerable(
@@ -359,25 +342,11 @@ public sealed class ScanBuilder
         System.Threading.CancellationToken cancellationToken = default)
     {
         LayoutTree tree = _file.LayoutTree;
-
+        (RowRange rows, long natural, long cap) = Frame(tree);
         long rootRows = tree.Root.RowCount;
-        RowRange whole = new RowRange(0, rootRows);
-        RowRange rows = _rowsSet ? _rows.Intersect(whole) : whole;
-        if (_take is not null)
-        {
-            rows = _take.Bounds.Intersect(whole);
-        }
 
         Projection keep = _fields is null ? Projection.All : Projection.Create(_fields.Build());
         Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
-
-        long natural = SplitPlan.NaturalBatchRows(tree);
-        if (natural > int.MaxValue)
-        {
-            natural = int.MaxValue;
-        }
-
-        long cap = _maxBatchRows > 0 && _maxBatchRows < natural ? _maxBatchRows : natural;
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
 
         List<PruningStep> steps = [];
@@ -441,6 +410,102 @@ public sealed class ScanBuilder
         {
             segments.Dispose();
         }
+    }
+
+    /// <summary>
+    /// How many rows the scan would return, exactly, without returning them
+    /// (docs/12-index-reads.md §5.2).
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The count.</returns>
+    /// <remarks>
+    /// The count is pushed into the structures, split by split, cheapest proof first: a split the
+    /// zone maps rule out counts nothing and reads nothing; one they decide whole counts from the
+    /// bounds already in memory; the rest are decoded and the filter evaluated, with no batch
+    /// built, no rows gathered, and one split of memory at a time. <see cref="Where"/>,
+    /// <see cref="Rows"/>, <see cref="Take"/> and <see cref="WithPruning"/> are honoured exactly
+    /// as <see cref="ExecuteAsync"/> honours them: a terminal is the scan with a different output,
+    /// never a different scan. Without a filter it is arithmetic and reads nothing.
+    /// </remarks>
+    public System.Threading.Tasks.ValueTask<long> CountAsync(
+        System.Threading.CancellationToken cancellationToken = default) =>
+        Terminal().CountAsync(cancellationToken);
+
+    /// <summary>
+    /// Whether the scan would return at least one row (docs/12-index-reads.md §5.1).
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>Whether some row matches.</returns>
+    /// <remarks>
+    /// <see cref="CountAsync"/> stopped at the first split that counts: an empty mask answers
+    /// without a read, a split the zone maps prove answers from memory, and the bad case reads
+    /// every live split once and materializes none. This is the membership probe of docs/12 §1,
+    /// exact where <see cref="VortexFilePruningExtensions.MayMatch"/> is a superset.
+    /// </remarks>
+    public System.Threading.Tasks.ValueTask<bool> AnyAsync(
+        System.Threading.CancellationToken cancellationToken = default) =>
+        Terminal().AnyAsync(cancellationToken);
+
+    /// <summary>Forces count tiers off, for the tests that hold every tier to the decode.</summary>
+    /// <param name="tiers">The tiers a count may take; <see cref="CountTiers.Decode"/> is always taken.</param>
+    /// <returns>This builder.</returns>
+    internal ScanBuilder WithCountTiers(CountTiers tiers)
+    {
+        _tiers = tiers;
+        return this;
+    }
+
+    /// <summary>
+    /// The rows the scan covers and the batch size it runs at -- the same frame for the scan,
+    /// its plan and its terminals.
+    /// </summary>
+    /// <param name="tree">The parsed layout tree.</param>
+    /// <returns>The row range, the file's natural batch size, and the cap the scan runs at.</returns>
+    /// <remarks>
+    /// A take narrows the planned range to the span its indices cover, which already skips every
+    /// split outside it; the ones inside it that hold no wanted row are skipped per split.
+    /// </remarks>
+    private (RowRange Rows, long Natural, long Cap) Frame(LayoutTree tree)
+    {
+        RowRange whole = new RowRange(0, tree.Root.RowCount);
+        RowRange rows = _rowsSet ? _rows.Intersect(whole) : whole;
+        if (_take is not null)
+        {
+            rows = _take.Bounds.Intersect(whole);
+        }
+
+        long natural = SplitPlan.NaturalBatchRows(tree);
+        if (natural > int.MaxValue)
+        {
+            natural = int.MaxValue;
+        }
+
+        long cap = _maxBatchRows > 0 && _maxBatchRows < natural ? _maxBatchRows : natural;
+        return (rows, natural, cap);
+    }
+
+    /// <summary>
+    /// The terminal form of this scan: it reads the filter's columns and nothing else, since it
+    /// has no batch to fill.
+    /// </summary>
+    private TerminalScan Terminal()
+    {
+        LayoutTree tree = _file.LayoutTree;
+        (RowRange rows, _, long cap) = Frame(tree);
+        Projection read = _filter is null ? Projection.All : Only(_filterPaths!);
+        return new TerminalScan(_file, tree, _filter, rows, cap, read, _take, _prune, _tiers, _metrics);
+    }
+
+    /// <summary>The projection of exactly the fields a filter reads.</summary>
+    private Projection Only(List<string> filterPaths)
+    {
+        FieldMaskBuilder builder = new FieldMaskBuilder();
+        for (int i = 0; i < filterPaths.Count; i++)
+        {
+            Projection.IncludePath(_file.Schema, filterPaths[i], builder, "filter");
+        }
+
+        return Projection.Create(builder.Build());
     }
 
     /// <summary>The projection widened by every field a filter reads.</summary>

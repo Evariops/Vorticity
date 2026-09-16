@@ -49,6 +49,22 @@ public sealed class ScanMetrics
         Interlocked.Add(ref _bytesRequested, bytes);
     }
 
+    /// <summary>
+    /// Adds what a split just registered: the distinct segments and their bytes, counted at the
+    /// asking (docs/11 §6.4) -- a caching source may serve some without a read.
+    /// </summary>
+    /// <param name="segments">The request set, after registration and before the read.</param>
+    internal void AddRequests(IO.SegmentRequestSet segments)
+    {
+        long bytes = 0;
+        for (int i = 0; i < segments.Count; i++)
+        {
+            bytes += segments.GetSpec(i).Length;
+        }
+
+        AddRequests(segments.Count, bytes);
+    }
+
     internal void AddDecoded(long values) => Interlocked.Add(ref _valuesDecoded, values);
 
     internal void AddBatch(long rows)
