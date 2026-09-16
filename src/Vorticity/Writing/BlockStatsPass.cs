@@ -627,12 +627,55 @@ internal static class BlockStatsPass
         };
     }
 
-    /// <summary>Adjacent rows that differ, with the element width resolved into the loop.</summary>
+    /// <summary>
+    /// Adjacent rows that differ, with the element width resolved into the loop
+    /// (docs/11-write-strategy.md §4.1, "run boundaries": <c>Equals(v, v_shifted_by_one)</c> then
+    /// <c>ExtractMostSignificantBits</c>, ×8 to ×16).
+    /// </summary>
+    /// <remarks>
+    /// THE SHIFT IS A SECOND LOAD, not a lane shuffle. Comparing a row against the row before it
+    /// means comparing the vector at <c>i</c> with the vector at <c>i - 1</c>, and an unaligned load
+    /// one element back is one instruction where shuffling a lane across the vector's own boundary
+    /// would need the previous iteration's last lane carried forward -- a dependency between
+    /// iterations, which is exactly what this kernel exists to remove. The two loads overlap in L1
+    /// and the second is free.
+    /// <para>
+    /// The mask is EQUALITY, so the boundaries are the lanes it does not set:
+    /// <c>lanes - PopCount</c>. Counting the zero bits directly would need the complement masked
+    /// back to the lane count, which is the same instruction with one more step.
+    /// </para>
+    /// <para>
+    /// T is always an unsigned integer here -- <see cref="Interior"/> casts the raw bytes at the
+    /// element's width -- so this is a bytewise comparison and no float's NaN or negative zero can
+    /// reach it. That is the rule <c>RowComparer.Equal</c> states and the one the count has to be
+    /// exact against, since <c>ColumnCompressor</c> declines run-end on <c>rows / 4</c>.
+    /// </para>
+    /// <para>
+    /// The tail is the scalar twin, and the whole method under
+    /// <c>DOTNET_EnableHWIntrinsic=0</c>, where <see cref="Vector128.IsHardwareAccelerated"/> is
+    /// false (11 §4, §5.2).
+    /// </para>
+    /// </remarks>
     private static long Differing<T>(ReadOnlySpan<T> values)
         where T : unmanaged, IEquatable<T>
     {
         long boundaries = 0;
-        for (int i = 1; i < values.Length; i++)
+        int i = 1;
+        int lanes = Vector128<T>.IsSupported ? Vector128<T>.Count : 0;
+        if (Vector128.IsHardwareAccelerated && lanes > 0 && values.Length > lanes)
+        {
+            ref T head = ref MemoryMarshal.GetReference(values);
+            int last = values.Length - lanes;
+            for (; i <= last; i += lanes)
+            {
+                Vector128<T> here = Vector128.LoadUnsafe(ref head, (nuint)i);
+                Vector128<T> before = Vector128.LoadUnsafe(ref head, (nuint)(i - 1));
+                uint equal = Vector128.Equals(here, before).ExtractMostSignificantBits();
+                boundaries += lanes - BitOperations.PopCount(equal);
+            }
+        }
+
+        for (; i < values.Length; i++)
         {
             if (!values[i].Equals(values[i - 1]))
             {
