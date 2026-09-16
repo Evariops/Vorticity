@@ -132,16 +132,16 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </remarks>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new BatchAsyncEnumerator(
-            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, pruner: null,
+            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, live: null,
             cancellationToken);
 
-    /// <summary>Starts a scan whose splits are pruned by <paramref name="pruner"/>.</summary>
-    /// <param name="pruner">The zone-map pruner, or null.</param>
+    /// <summary>Starts a scan that reads only the splits <paramref name="live"/> keeps.</summary>
+    /// <param name="live">The mask of live blocks the pruning pass refined, or null for every block.</param>
     /// <param name="cancellationToken">Cancels at batch boundaries.</param>
     internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
-        ZonePruner? pruner, CancellationToken cancellationToken) =>
+        BlockMask? live, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
-            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, pruner,
+            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, live,
             cancellationToken);
 
     /// <summary>The file this scan reads, for the pruning pass that runs before the first batch.</summary>
@@ -173,7 +173,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly DType _schema;
     private readonly VortexExpr? _filter;
     private readonly RowSelection? _take;
-    private readonly ZonePruner? _pruner;
+    private readonly BlockMask? _live;
     private readonly int _maxBatchRows;
     private readonly CancellationToken _token;
     private readonly Lane[] _lanes;
@@ -198,12 +198,12 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         int degree,
         VortexExpr? filter,
         RowSelection? take,
-        ZonePruner? pruner,
+        BlockMask? live,
         CancellationToken cancellationToken)
     {
         _tree = tree;
         _take = take;
-        _pruner = pruner;
+        _live = live;
         _source = file.Segments;
         _mask = read.RootMask;
         _keep = keep.RootMask;
@@ -366,26 +366,27 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     // ------------------------------------------------------------------------------ the two phases
 
     /// <summary>
-    /// Advances to the next split the zone maps do not rule out.
+    /// Advances to the next split the mask of live blocks does not rule out.
     /// </summary>
     /// <remarks>
-    /// The prune happens HERE, before RegisterSegments, which is the whole point: a split the zone
-    /// maps exclude costs no segment registration and therefore no bytes read. Skipping is a
-    /// synchronous loop over the cursor because a pruner answers from memory -- the zone maps were
-    /// read once, before the first batch (docs/01-scope.md F6).
+    /// The prune happens HERE, before RegisterSegments, which is the whole point: a split the mask
+    /// excludes costs no segment registration and therefore no bytes read. Skipping is a
+    /// synchronous loop over the cursor because the mask answers from memory -- it was refined
+    /// once, before the first batch, by every structure the file carries (docs/11 §6.1), and a
+    /// split asks it one question where it used to ask each pruner in turn.
     /// </remarks>
     private bool TryNextSplit(out RowRange split)
     {
         while (_cursor.TryNext(out split))
         {
-            // A take's own skip comes first: it is a binary search over the index list, while a
-            // pruner walks the zones overlapping the split.
+            // A take's own skip comes first: it is a binary search over the index list, while the
+            // mask reads the bit or two the split overlaps.
             if (_take is not null && !_take.Touches(split))
             {
                 continue;
             }
 
-            if (_pruner is null || _pruner.MayMatch(split))
+            if (_live is null || _live.AnyLive(split))
             {
                 return true;
             }

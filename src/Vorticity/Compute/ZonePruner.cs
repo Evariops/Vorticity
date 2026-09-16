@@ -29,7 +29,7 @@ using Vorticity.File;
 namespace Vorticity.Compute;
 
 /// <summary>Zone-map pruning for one scan's filter.</summary>
-internal sealed class ZonePruner
+internal sealed class ZonePruner : IBlockPruner
 {
     /// <summary>Stack bytes a pattern's prefix and its successor each get before the heap.</summary>
     private const int Scratch = 256;
@@ -63,6 +63,25 @@ internal sealed class ZonePruner
     /// <summary>Whether <paramref name="rows"/> may contain a row the filter selects.</summary>
     /// <param name="rows">The candidate range, in file row coordinates.</param>
     internal bool MayMatch(RowRange rows) => MayMatch(_filter, rows, negated: false);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// BLOCK BY BLOCK THROUGH THE RANGE QUESTION ABOVE, so that the mask says of every block
+    /// exactly what the per-split question said of the rows it covers -- the equivalence
+    /// `ZonePruningTests` holds is inherited rather than re-proven. A block that is already dead
+    /// is not asked again: another structure may have killed it, and the zones cannot revive it.
+    /// </remarks>
+    public void Refine(BlockMask live)
+    {
+        int blocks = live.BlockCount;
+        for (int block = 0; block < blocks; block++)
+        {
+            if (live.IsLive(block) && !MayMatch(live.BlockRange(block)))
+            {
+                live.Kill(block);
+            }
+        }
+    }
 
     private bool MayMatch(VortexExpr expr, RowRange rows, bool negated)
     {

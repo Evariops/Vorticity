@@ -31,6 +31,38 @@ namespace Vorticity.Compute;
 internal static class ZonePruningPlan
 {
     /// <summary>
+    /// The live blocks of one scan: every pruning structure the file carries, run over one mask,
+    /// cheapest first (docs/11-write-strategy.md §6.1).
+    /// </summary>
+    /// <param name="file">The open file.</param>
+    /// <param name="tree">Its parsed layout tree.</param>
+    /// <param name="filter">The scan's predicate.</param>
+    /// <param name="cancellationToken">Cancels the reads this makes.</param>
+    /// <returns>
+    /// The mask, or <see langword="null"/> when no structure can prune anything -- which a scan
+    /// reads as "every split is live", the same object graph it has without a filter.
+    /// </returns>
+    /// <remarks>
+    /// The zone map is the only pruner today and the first in line whenever there are more: it is
+    /// already loaded and answers from min/max and null counts. The Bloom generations, postings
+    /// and exact indexes of docs/10-indexes.md join this list in that order, each over the blocks
+    /// still live, and the list stops at an empty mask.
+    /// </remarks>
+    internal static async ValueTask<BlockMask?> RefineAsync(
+        VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken)
+    {
+        ZonePruner? zones = await BuildAsync(file, tree, filter, cancellationToken).ConfigureAwait(false);
+        if (zones is null)
+        {
+            return null;
+        }
+
+        BlockMask live = new BlockMask(tree.Root.RowCount, Scan.SplitPlan.NaturalBatchRows(tree));
+        zones.Refine(live);
+        return live;
+    }
+
+    /// <summary>
     /// Decodes the zone maps of every column <paramref name="filter"/> reads.
     /// </summary>
     /// <param name="file">The open file.</param>

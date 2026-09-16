@@ -71,15 +71,16 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         {
             if (_inner is null)
             {
-                // One read of every zone map the filter can use, before the first batch. Its
-                // result is memory-resident for the rest of the scan.
-                ZonePruner? pruner = _prune && _filter is not null
+                // One read of every zone map the filter can use, before the first batch, and one
+                // mask of live blocks refined from it (docs/11 §6.1). Both are memory-resident for
+                // the rest of the scan; every split asks the mask, never the zone maps.
+                BlockMask? live = _prune && _filter is not null
                     ? await ZonePruningPlan
-                        .BuildAsync(_source.File, _source.Tree, _filter, _token)
+                        .RefineAsync(_source.File, _source.Tree, _filter, _token)
                         .ConfigureAwait(false)
                     : null;
 
-                _inner = _source.GetAsyncEnumerator(pruner, _token);
+                _inner = _source.GetAsyncEnumerator(live, _token);
             }
 
             while (await _inner.MoveNextAsync().ConfigureAwait(false))
