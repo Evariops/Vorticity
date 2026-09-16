@@ -45,6 +45,11 @@ public sealed class ChooserDifferentialTests
         // says ("bytes identical on stable columns", not on every column) and not a wrong formula;
         // the chooser marks such plans, they are counted here and reported, and only the rest is
         // held to zero. What memory costs on the wire is `WrittenSizeTests`' question.
+        //
+        // AND ZERO HERE PROVED NOTHING ABOUT MEMORY: no file of this corpus has a bit-packed chunk
+        // followed by a progression, so the one place memory changed a plan -- and doubled a file
+        // -- was never in front of this probe. `PlanMemoryTests` puts that transition in front of
+        // it, on a file built for the purpose, and holds the memory count to zero as well.
         List<string> fromMemory = disagreements.FindAll(static line => line.Contains(": memory ", StringComparison.Ordinal));
         List<string> real = disagreements.FindAll(static line => !line.Contains(": memory ", StringComparison.Ordinal));
         Console.Out.Write(

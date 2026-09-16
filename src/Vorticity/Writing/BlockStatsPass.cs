@@ -111,7 +111,7 @@ internal static class BlockStatsPass
                 {
                     bool wasProgression = !stats.DeltaBroken;
                     bool hadPrevious = previous is not null && previous.HasValue;
-                    Deltas(node, in mask, start, count, valid, ref stats, previous);
+                    Deltas(node, in mask, start, count, valid, startsBlock, ref stats, previous);
 
                     if (wasProgression && stats.DeltaKnown && !stats.DeltaBroken)
                     {
@@ -234,9 +234,12 @@ internal static class BlockStatsPass
     /// </summary>
     /// <remarks>
     /// A step of zero makes every row equal — one run, no boundary. Any other step makes every row
-    /// differ from the one before it, so every row of the range starts a run, the first one included
-    /// when there is a row before it to differ from. Both are exactly what a walk would have
-    /// counted, and neither needs one.
+    /// differ from the one before it, so every row of the range starts a run. Both are exactly what
+    /// a walk would have counted, and neither needs one. THE FIRST ROW IS THE SEAM'S TO DECIDE:
+    /// inside a block the row before it stepped like every other, so it differs exactly when the
+    /// step is not zero; at a block's first row the row before belongs to the block before, and
+    /// whether the two differ is the seam <see cref="Deltas"/> recorded — a step of zero across it
+    /// is the same value, any other is a boundary, and a null before it is one too.
     /// </remarks>
     private static void ProgressionRuns(
         CanonicalNode node, long step, int start, int count, bool hadPrevious, bool startsBlock,
@@ -246,10 +249,21 @@ internal static class BlockStatsPass
 
         if (step != 0)
         {
-            stats.RunBoundaries += (count - 1) + (hadPrevious ? 1 : 0);
-            if (startsBlock && hadPrevious)
+            stats.RunBoundaries += count - 1;
+        }
+
+        if (hadPrevious)
+        {
+            bool boundary = startsBlock
+                ? stats.LeadingBroken || (stats.LeadingKnown && stats.Leading != 0)
+                : step != 0;
+            if (boundary)
             {
-                stats.FirstRowStartsRun = true;
+                stats.RunBoundaries++;
+                if (startsBlock)
+                {
+                    stats.FirstRowStartsRun = true;
+                }
             }
         }
 
@@ -258,8 +272,17 @@ internal static class BlockStatsPass
     }
 
     /// <summary>Folds this range's steps into <paramref name="stats"/>.</summary>
+    /// <remarks>
+    /// THE ROW BEFORE THE RANGE IS STEPPED FROM IN TWO DIFFERENT WAYS. Inside a block -- a range
+    /// that continues one -- that row is the block's own and its step is one of the block's. At a
+    /// block's first row it belongs to the block before, and the step into it is the SEAM: recorded
+    /// on its own (<see cref="BlockStats.SetLeading"/>) for the merge to read when the block is not
+    /// the first of a chunk, and ignored when it is. Folding it into the block's steps, which is
+    /// what this did, made the first block of every chunk carry the jump between it and the chunk
+    /// before as its own break.
+    /// </remarks>
     private static void Deltas(
-        CanonicalNode node, in ValidityMask mask, int start, int count, int valid,
+        CanonicalNode node, in ValidityMask mask, int start, int count, int valid, bool startsBlock,
         ref BlockStats stats, PreviousRow? previous)
     {
         if (stats.DeltaBroken)
@@ -275,10 +298,19 @@ internal static class BlockStatsPass
             return;
         }
 
-        if (previous is not null && previous.HasValue && previous.IsNull)
+        bool hadPrevious = previous is not null && previous.HasValue;
+        if (hadPrevious && previous!.IsNull)
         {
-            stats.BreakDelta();
-            return;
+            // A null before the range: inside the block it is the block's own break, and at the
+            // block's first row it is the seam's -- the block's own steps are still read.
+            if (!startsBlock)
+            {
+                stats.BreakDelta();
+                return;
+            }
+
+            stats.BreakLeading();
+            hadPrevious = false;
         }
 
         // The physical type is resolved ONCE, into a generic instantiation, exactly as W-9 resolved
@@ -286,17 +318,18 @@ internal static class BlockStatsPass
         // call. Narrow types step in `long` because the difference of two 32-bit values always fits
         // in one; only 64-bit columns need the wider arithmetic, and they get their own loop.
         ReadOnlySpan<byte> values = node.Values.Span;
-        ReadOnlySpan<byte> seed = previous is not null && previous.HasValue ? previous.Bytes : default;
+        ReadOnlySpan<byte> seed = hadPrevious ? previous!.Bytes : default;
+        bool seam = startsBlock && hadPrevious;
         switch (node.PType)
         {
-            case PType.I8: Narrow<sbyte>(values, seed, start, count, ref stats); return;
-            case PType.I16: Narrow<short>(values, seed, start, count, ref stats); return;
-            case PType.I32: Narrow<int>(values, seed, start, count, ref stats); return;
-            case PType.U8: Narrow<byte>(values, seed, start, count, ref stats); return;
-            case PType.U16: Narrow<ushort>(values, seed, start, count, ref stats); return;
-            case PType.U32: Narrow<uint>(values, seed, start, count, ref stats); return;
-            case PType.I64: Wide<long>(values, seed, start, count, ref stats); return;
-            default: Wide<ulong>(values, seed, start, count, ref stats); return;
+            case PType.I8: Narrow<sbyte>(values, seed, seam, start, count, ref stats); return;
+            case PType.I16: Narrow<short>(values, seed, seam, start, count, ref stats); return;
+            case PType.I32: Narrow<int>(values, seed, seam, start, count, ref stats); return;
+            case PType.U8: Narrow<byte>(values, seed, seam, start, count, ref stats); return;
+            case PType.U16: Narrow<ushort>(values, seed, seam, start, count, ref stats); return;
+            case PType.U32: Narrow<uint>(values, seed, seam, start, count, ref stats); return;
+            case PType.I64: Wide<long>(values, seed, seam, start, count, ref stats); return;
+            default: Wide<ulong>(values, seed, seam, start, count, ref stats); return;
         }
     }
 
@@ -309,7 +342,8 @@ internal static class BlockStatsPass
     /// steady state is one subtract and one compare, which is what the walk it replaces costs.
     /// </remarks>
     private static void Narrow<T>(
-        ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> seed, int start, int count, ref BlockStats stats)
+        ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> seed, bool seam, int start, int count,
+        ref BlockStats stats)
         where T : unmanaged, IBinaryInteger<T>
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes);
@@ -321,6 +355,14 @@ internal static class BlockStatsPass
         if (seed.IsEmpty)
         {
             last = long.CreateTruncating(values[start]);
+            first = 1;
+        }
+        else if (seam)
+        {
+            // The step across the block boundary is the seam's, recorded apart; the block's own
+            // steps start at its own first row.
+            last = long.CreateTruncating(values[start]);
+            stats.SetLeading(last - long.CreateTruncating(MemoryMarshal.Read<T>(seed)));
             first = 1;
         }
         else
@@ -366,7 +408,8 @@ internal static class BlockStatsPass
     /// It ends the progression rather than being carried.
     /// </remarks>
     private static void Wide<T>(
-        ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> seed, int start, int count, ref BlockStats stats)
+        ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> seed, bool seam, int start, int count,
+        ref BlockStats stats)
         where T : unmanaged, IBinaryInteger<T>
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes);
@@ -378,6 +421,23 @@ internal static class BlockStatsPass
         if (seed.IsEmpty)
         {
             last = Int128.CreateTruncating(values[start]);
+            first = 1;
+        }
+        else if (seam)
+        {
+            // The step across the block boundary is the seam's, recorded apart -- or no step at
+            // all when it does not fit the wire field; the block's own steps start at its own row.
+            last = Int128.CreateTruncating(values[start]);
+            Int128 lead = last - Int128.CreateTruncating(MemoryMarshal.Read<T>(seed));
+            if (lead < long.MinValue || lead > long.MaxValue)
+            {
+                stats.BreakLeading();
+            }
+            else
+            {
+                stats.SetLeading((long)lead);
+            }
+
             first = 1;
         }
         else

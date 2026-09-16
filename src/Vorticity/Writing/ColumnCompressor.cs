@@ -1077,23 +1077,13 @@ internal static class ColumnCompressor
             ? PlainBinarySize(arena, node, measured ? stats.TotalBytes : -1)
             : DataBytes(node);
 
-        // 0. PLAN MEMORY (§3.4.3): a column whose last plan produced the bytes it was priced at, to
-        // five per cent, is offered that plan again -- re-priced on this chunk's own statistics,
-        // which is arithmetic -- and nothing else is priced. Only a plan that still wins on its
-        // own terms is reused; one that no longer does sends the column back to full pricing, and
-        // so does a column with no memory yet. A child a scheme invented has no cursor and so no
-        // memory, and a chunk the pass did not measure is not trusted with one.
-        if (measured && chunk.Memory is { WithinTolerance: true } memory)
-        {
-            ColumnPlan remembered = Reprice(
-                memory.Scheme, arena, nodeIndex, node, target, in stats, cascade, chunk, plain);
-            if (remembered.Scheme == memory.Scheme)
-            {
-                return remembered with { FromMemory = true };
-            }
-        }
-
-        // 1. DEGENERATE FIRST: a progression costs nothing per row and nothing can beat it.
+        // 1. DEGENERATE FIRST, AND BEFORE MEMORY: a progression costs nothing per row and nothing
+        // can beat it -- and the statistics answer it without a walk, so there is nothing for plan
+        // memory to save by standing in front of it. It did stand there once: on the 1M-row
+        // `chunked` file a bit-packing that held to the byte on the one chunk with a jump in it was
+        // re-priced on every progression that followed, held again, and was written -- 295 KB a
+        // chunk where 32 bytes were exact, the file twice its size, and +70 % on the clock that
+        // six hypotheses about the time never explained. `PlanMemoryTests` holds the shape.
         ColumnPlan progression = SequenceOf(arena, node, target, in stats, cascade, measured);
         if (progression.Scheme != ColumnScheme.None)
         {
@@ -1104,37 +1094,56 @@ internal static class ColumnCompressor
             ? default
             : new RowComparer(arena, nodeIndex);
 
-        // 2. EXACT CANDIDATES, each priced, the cheapest kept as `best`.
-        long best = plain;
-        ColumnScheme bestScheme = ColumnScheme.None;
-
-        // Run-end: the count from the pass prices it; the gather waits for the verdict. A count the
-        // pass did not take is walked now, as today, because nothing else can price it.
+        // 2. RUN-END FROM THE PASS, under today's rule -- inside its ratio it wins before anything
+        // else is priced -- and before memory for the same reason as the progression: a count the
+        // pass took makes the verdict arithmetic, and a constant chunk after a held bit-packing was
+        // written as a width-0 packing with 256 bytes of framing where one run costs 32. A count
+        // the pass did not take is walked further down, after memory has had its say.
+        bool runEndAllowed =
+            Allows(target, "vortex.runend") && !cascade.RunsAreDead && length / RunEndRatio >= 1;
+        bool runsCounted = runEndAllowed && measured && stats.HasRunBoundaries;
         ColumnPlan walkedRuns = ColumnPlan.Canonical;
         long runEndCost = long.MaxValue;
         long runs = 0;
-        if (Allows(target, "vortex.runend") && !cascade.RunsAreDead && length / RunEndRatio >= 1)
+        if (runsCounted)
         {
-            if (measured && stats.HasRunBoundaries)
+            runs = stats.RunCount;
+            runEndCost = RunEndCostOf(runs, length, plain);
+            if (!runEndCompetes && runEndCost != long.MaxValue)
             {
-                runs = stats.RunCount;
+                return MaterializeRuns(arena, in node, in comparer, length, runs, in walkedRuns, runEndCost);
             }
-            else
-            {
-                walkedRuns = TryRuns(arena, in node, in comparer, length);
-                runs = walkedRuns.Scheme == ColumnScheme.None ? long.MaxValue : walkedRuns.Codes.Length;
-            }
+        }
 
-            if (runs == 1)
+        // 3. PLAN MEMORY (§3.4.3): a column whose last plan produced the bytes it was priced at, to
+        // five per cent, is offered that plan again -- re-priced on this chunk's own statistics,
+        // which is arithmetic -- and nothing else is priced. Only a plan that still wins on its
+        // own terms is reused; one that no longer does sends the column back to full pricing, and
+        // so does a column with no memory yet. A child a scheme invented has no cursor and so no
+        // memory, and a chunk the pass did not measure is not trusted with one. What memory skips
+        // is exactly what costs: the walks below and the trials at the end -- never a candidate
+        // the statistics have already answered above.
+        if (measured && chunk.Memory is { WithinTolerance: true } memory)
+        {
+            ColumnPlan remembered = Reprice(
+                memory.Scheme, arena, nodeIndex, node, target, in stats, cascade, chunk, plain);
+            if (remembered.Scheme == memory.Scheme)
             {
-                runEndCost = 32;
+                return remembered with { FromMemory = true };
             }
-            else if (runs <= length / RunEndRatio)
-            {
-                long ends = runs * FsstPlan.IndexPType(length).ByteWidth();
-                runEndCost = ends + (plain * runs / length) + 256;
-            }
+        }
 
+        // 4. EXACT CANDIDATES, each priced, the cheapest kept as `best`.
+        long best = plain;
+        ColumnScheme bestScheme = ColumnScheme.None;
+
+        // Run-end, when the pass did not count it: walked now, as today, because nothing else can
+        // price it; the gather still waits for the verdict.
+        if (runEndAllowed && !runsCounted)
+        {
+            walkedRuns = TryRuns(arena, in node, in comparer, length);
+            runs = walkedRuns.Scheme == ColumnScheme.None ? long.MaxValue : walkedRuns.Codes.Length;
+            runEndCost = RunEndCostOf(runs, length, plain);
             if (!runEndCompetes && runEndCost != long.MaxValue)
             {
                 // Today's rule: inside the ratio, run-end wins before anything else is priced.
@@ -1208,6 +1217,30 @@ internal static class ColumnCompressor
         }
     }
 
+    /// <summary>
+    /// Run-end's bytes for <paramref name="runs"/> runs over <paramref name="length"/> rows, or
+    /// <see cref="long.MaxValue"/> outside its ratio: 32 for a constant, and docs/11 §3.4.2's
+    /// <c>ends + values + 256</c> otherwise, the values priced as the runs' share of the plain column.
+    /// </summary>
+    /// <param name="runs">The run count, from the pass or from a walk.</param>
+    /// <param name="length">The chunk's rows.</param>
+    /// <param name="plain">The plain column's bytes.</param>
+    private static long RunEndCostOf(long runs, int length, long plain)
+    {
+        if (runs == 1)
+        {
+            return 32;
+        }
+
+        if (runs > length / RunEndRatio)
+        {
+            return long.MaxValue;
+        }
+
+        long ends = runs * FsstPlan.IndexPType(length).ByteWidth();
+        return ends + (plain * runs / length) + 256;
+    }
+
     /// <summary>The progression plan when the column is one, priced; canonical otherwise.</summary>
     private static ColumnPlan SequenceOf(
         CanonicalArena arena, CanonicalNode node, VortexEdition target, in BlockStats stats,
@@ -1265,14 +1298,12 @@ internal static class ColumnCompressor
                 }
 
                 long runs = stats.RunCount;
-                if (runs != 1 && runs > length / RunEndRatio)
+                long cost = RunEndCostOf(runs, length, plain);
+                if (cost == long.MaxValue)
                 {
                     return ColumnPlan.Canonical;
                 }
 
-                long cost = runs == 1
-                    ? 32
-                    : (runs * FsstPlan.IndexPType(length).ByteWidth()) + (plain * runs / length) + 256;
                 RowComparer comparer = new RowComparer(arena, nodeIndex);
                 ColumnPlan none = ColumnPlan.Canonical;
                 return MaterializeRuns(arena, in node, in comparer, length, runs, in none, cost);

@@ -325,6 +325,14 @@ re-pricing the alternatives** as long as the previous chunk's actual bytes were 
 achieved last time applied to `total_bytes`. Outside the tolerance the column re-prices in full,
 and the distinct table follows the same signal: it runs on the chunks where the dictionary is
 priced or chosen (§3.2.2).
+
+**What memory skips is what costs — the walks and the trials — never a candidate the statistics
+have already answered.** A progression (§3.4.1) and a run count the pass took are arithmetic on
+`BlockStats`; they are compared before the remembered plan is re-priced, or a bit-packing that
+held to the byte on the one chunk with a jump in it is re-priced on every progression that
+follows, holds again, and is written at 295 KB a chunk where 32 bytes are exact. Measured on the
+1M-row `chunked` file: 1 902 356 bytes against 890 004, and +70 % on the clock that the bytes,
+not the time, explained.
 This replaces bucketed signatures and periodic re-pricing with a control that costs nothing and
 measures the one thing that matters. An FSST symbol table is still trained per chunk (sharing one
 was measured at 4,3 % of output size, `bench/PLAN.md:62`); what is remembered is the decision,

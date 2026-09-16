@@ -111,6 +111,32 @@ internal struct BlockStats
     /// </remarks>
     internal bool DeltaBroken;
 
+    /// <summary>
+    /// The seam: the step from the row before this summary's first row into that row, when the
+    /// range opened a block and a row came before it. Kept apart from the block's own steps.
+    /// </summary>
+    /// <remarks>
+    /// A BLOCK USED TO BE STEPPED FROM ITS PREDECESSOR'S LAST ROW AS IF THAT ROW WERE ITS OWN, so
+    /// that a merge had the seam for free -- and the first block of a chunk, stepped from the last
+    /// row of the chunk BEFORE, called itself broken when the only break was between the two
+    /// chunks. The chunk it opened was a progression, the merge said it was not, the chooser
+    /// trusted the merge over the walk it makes when the steps are unknown, and packed 8 192 rows of
+    /// <c>200 000 + i</c> at 13 bits each. `PlanMemoryTests` has the file. The seam is recorded
+    /// here instead, and <see cref="Merge"/> reads it only for a block that is not the first of the
+    /// range: the first block's seam is with whatever came before the range, which is nothing the
+    /// range describes.
+    /// </remarks>
+    private long _leading;
+
+    /// <summary>Whether <see cref="_leading"/> holds a step.</summary>
+    internal bool LeadingKnown;
+
+    /// <summary>
+    /// Whether the seam cannot be a step at all: the row before was null, or the difference does not
+    /// fit the wire field.
+    /// </summary>
+    internal bool LeadingBroken;
+
     /// <summary>Whether the physical kind has a row equality, so the boundaries mean anything.</summary>
     /// <remarks>
     /// The four <c>IsComparable</c> kinds of <see cref="ColumnCompressor"/>, which are the only ones
@@ -206,7 +232,8 @@ internal struct BlockStats
         // The first block folded in decides where the range starts, so its own leading boundary is
         // the one `RunCount` discounts. Every later block's leading boundary is interior to the
         // range and counts.
-        if (!IsPresent)
+        bool first = !IsPresent;
+        if (first)
         {
             FirstRowStartsRun = other.FirstRowStartsRun;
             HasRunBoundaries = other.HasRunBoundaries;
@@ -224,7 +251,30 @@ internal struct BlockStats
         WidthsBroken |= other.WidthsBroken;
 
         // A progression survives a merge only if both halves are one AND they climb by the same
-        // step -- the step across the seam is already in `other`, which saw the row before it.
+        // step, across the seam included. The seam is `other`'s leading step, and it is a step of
+        // THIS range only when a block of this range came before `other`: the first block's seam
+        // is with the chunk before, and a jump there is no jump inside this one.
+        if (first)
+        {
+            _leading = other._leading;
+            LeadingKnown = other.LeadingKnown;
+            LeadingBroken = other.LeadingBroken;
+        }
+        else if (other.LeadingBroken)
+        {
+            DeltaBroken = true;
+        }
+        else if (other.LeadingKnown)
+        {
+            if (DeltaKnown && _delta != other._leading)
+            {
+                DeltaBroken = true;
+            }
+
+            _delta = other._leading;
+            DeltaKnown = true;
+        }
+
         DeltaBroken |= other.DeltaBroken;
         if (other.DeltaKnown)
         {
@@ -261,6 +311,9 @@ internal struct BlockStats
     /// <summary>The step seen so far; meaningless unless <see cref="DeltaKnown"/>.</summary>
     internal readonly long Delta => _delta;
 
+    /// <summary>The seam's step; meaningless unless <see cref="LeadingKnown"/>.</summary>
+    internal readonly long Leading => _leading;
+
     /// <summary>
     /// Records the step a range walked, the range having already checked that every pair agrees.
     /// </summary>
@@ -284,6 +337,17 @@ internal struct BlockStats
 
     /// <summary>Marks the rows as no progression, whatever the steps so far said.</summary>
     internal void BreakDelta() => DeltaBroken = true;
+
+    /// <summary>Records the seam: the step from the row before the block into its first row.</summary>
+    /// <param name="delta">That difference.</param>
+    internal void SetLeading(long delta)
+    {
+        _leading = delta;
+        LeadingKnown = true;
+    }
+
+    /// <summary>Marks the seam as no step: a null before the block, or a difference too wide.</summary>
+    internal void BreakLeading() => LeadingBroken = true;
 
     /// <summary>Folds one signed bound pair in, widening to the accumulator's domain.</summary>
     /// <param name="min">The smallest value the caller saw.</param>
