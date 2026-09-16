@@ -177,8 +177,73 @@ internal struct BlockStats
     /// </remarks>
     internal bool WidthsBroken;
 
+    // ORDER, FOR THE FILE STATISTICS' is_sorted / is_strict_sorted. Tracked the way the reference
+    // computes them (vortex-array-0.86.1 aggregate_fn/fns/is_sorted): a null sorts below every
+    // value, so a sorted nullable column has its nulls first; two equal neighbours -- two values
+    // or two nulls -- keep it sorted and make it not strict. A witness is sticky: one value below
+    // its predecessor and the column is unsorted for good. What is not tracked claims nothing
+    // (OrderUntracked): a NaN, whose place in the reference's order this pass does not reproduce,
+    // and the kinds without a scalar order.
+
+    /// <summary>
+    /// Whether some range tracked the rows' order at all: a primitive or a string column. A
+    /// summary that never did claims nothing, whatever the witnesses say.
+    /// </summary>
+    internal bool OrderTracked;
+
+    /// <summary>Whether the rows' order cannot be tracked, so neither flag is claimed.</summary>
+    internal bool OrderUntracked;
+
+    /// <summary>A row sorted below its predecessor, or a null came after a value.</summary>
+    internal bool Unsorted;
+
+    /// <summary>Two consecutive rows were equal, values or nulls.</summary>
+    internal bool Repeats;
+
+    /// <summary>
+    /// The seam with the block before: whether this block's first row sorts below the previous
+    /// block's last row (a break), or equals it (a repeat). Read by <see cref="Merge"/> for a
+    /// non-first block, the way <see cref="_leading"/> is.
+    /// </summary>
+    internal bool OrderSeamBroken;
+
+    /// <summary>The seam's repeat, see <see cref="OrderSeamBroken"/>.</summary>
+    internal bool OrderSeamRepeat;
+
     /// <summary>Which accumulator <see cref="Min"/> and <see cref="Max"/> read.</summary>
     internal BoundDomain Domain;
+
+    /// <summary>
+    /// The <c>is_sorted</c> statistic: non-decreasing with the nulls first, or null when the
+    /// order was not tracked.
+    /// </summary>
+    internal readonly bool? IsSorted => OrderTracked && !OrderUntracked ? !Unsorted : null;
+
+    /// <summary>The <c>is_strict_sorted</c> statistic: sorted with no two equal rows.</summary>
+    internal readonly bool? IsStrictSorted =>
+        OrderTracked && !OrderUntracked ? !Unsorted && !Repeats : null;
+
+    /// <summary>Records what the row before a range says of the range's first row.</summary>
+    /// <param name="order">The sign of <c>first - previous</c>, nulls below values.</param>
+    /// <param name="startsBlock">Whether the range opens a block, so the seam is the block's.</param>
+    internal void NoteOrderSeam(int order, bool startsBlock)
+    {
+        if (startsBlock)
+        {
+            OrderSeamBroken = order < 0;
+            OrderSeamRepeat = order == 0;
+            return;
+        }
+
+        if (order < 0)
+        {
+            Unsorted = true;
+        }
+        else if (order == 0)
+        {
+            Repeats = true;
+        }
+    }
 
     /// <summary>The smallest non-null, non-NaN value.</summary>
     internal FilterLiteral Min => Domain switch
@@ -249,6 +314,24 @@ internal struct BlockStats
         RunBoundaries += other.RunBoundaries;
         IsSummarizable |= other.IsSummarizable;
         WidthsBroken |= other.WidthsBroken;
+
+        // Order: the witnesses add up, and a non-first block's seam is a witness of its own. The
+        // first block's seam is with whatever came before the range, which is not the range's to
+        // judge, so it is carried instead -- as the leading step is, below.
+        OrderTracked |= other.OrderTracked;
+        OrderUntracked |= other.OrderUntracked;
+        Unsorted |= other.Unsorted;
+        Repeats |= other.Repeats;
+        if (first)
+        {
+            OrderSeamBroken = other.OrderSeamBroken;
+            OrderSeamRepeat = other.OrderSeamRepeat;
+        }
+        else
+        {
+            Unsorted |= other.OrderSeamBroken;
+            Repeats |= other.OrderSeamRepeat;
+        }
 
         // A progression survives a merge only if both halves are one AND they climb by the same
         // step, across the seam included. The seam is `other`'s leading step, and it is a step of

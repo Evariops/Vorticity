@@ -110,15 +110,15 @@ public sealed class WrittenSizeTests
     /// </remarks>
     private static readonly (string Id, long Bytes)[] Chunked =
     [
-        ("types/utf8_nonnull_r8193", 16_588),    // 17 chunks in, 17 zones
-        ("types/utf8_nullable_r8193", 17_068),   // 17 chunks in, 17 zones
+        ("types/utf8_nonnull_r8193", 16_684),    // 17 chunks in, 17 zones; +96 B since the file statistics segment (11a)
+        ("types/utf8_nullable_r8193", 17_164),   // 17 chunks in, 17 zones; +96 B, same
         // 4 700 -> 3 756 (-20,1 %) le 2026-09-15, WRITE-AUDIT.md W-31 : la copie du reste reporte
         // ne materialise plus que les octets que les vues nomment, donc le tas ecrit ne porte plus
         // les chaines des blocs deja emis. Verifie par bench/crosscheck.sh : 854 fichiers relus par
         // Vortex Rust, scalaire par scalaire. C'est le seul des quatre qui bouge -- les trois autres
         // n'ont pas de VarBinView dans leur chemin d'ecriture.
-        ("encodings/fsst", 3_812),               // 8 chunks in, 8 zones
-        ("encodings/dict", 2_820),               // 8 chunks in, 8 zones
+        ("encodings/fsst", 3_908),               // 8 chunks in, 8 zones; +96 B, same
+        ("encodings/dict", 2_916),               // 8 chunks in, 8 zones; +96 B, same
     ];
 
     [Fact]

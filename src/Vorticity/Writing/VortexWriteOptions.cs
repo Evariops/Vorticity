@@ -30,6 +30,21 @@ public sealed class VortexWriteOptions
     public bool Compress { get; init; } = true;
 
     /// <summary>
+    /// Whether the file carries a statistics segment: per top-level field its exact
+    /// <c>min</c> / <c>max</c>, <c>null_count</c>, and <c>is_sorted</c> /
+    /// <c>is_strict_sorted</c> when the pass tracked the column's order. Default on.
+    /// </summary>
+    /// <remarks>
+    /// What <c>VortexFile.MayMatch</c> answers from without a scan, what <c>MinAsync</c> and
+    /// <c>MaxAsync</c> answer from without a read, and what a key cursor's <c>SortedColumn</c>
+    /// source exists on (docs/12-index-reads.md §3). The reference writer computes the first
+    /// three by default and never the two order flags -- its file-level aggregation drops them
+    /// (vortex-layout-0.86.1 layouts/file_stats.rs) -- so a file written by this writer is the
+    /// one kind that says whether a column is sorted. A few dozen bytes per field.
+    /// </remarks>
+    public bool FileStatistics { get; init; } = true;
+
+    /// <summary>
     /// The edition every component in the file must belong to. Default
     /// <see cref="EditionRegistry.Newest"/>, which is what the reference writer defaults to.
     /// </summary>

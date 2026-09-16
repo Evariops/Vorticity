@@ -88,6 +88,27 @@ internal static class BlockStatsPass
                     Element(node.DType.PType, node.ConstantElement, ref stats);
                 }
 
+                // Order: one value repeated is sorted and not strict, and the seam with the row
+                // before is the element against it.
+                stats.OrderTracked = true;
+                if (!stats.OrderUntracked && !stats.Unsorted)
+                {
+                    OrderSeam(
+                        node.DType.PType, node.ConstantElement, mask.IsValid(start), startsBlock,
+                        ref stats, previous);
+                    if (count > 1)
+                    {
+                        stats.Repeats = true;
+                    }
+
+                    if (valid != 0 && valid != count)
+                    {
+                        // Values and nulls both: nulls after a value break the order unless the
+                        // nulls all come first, which a constant block's mask alone can say.
+                        stats.Unsorted |= !NullsFirst(in mask, start, count);
+                    }
+                }
+
                 // Every row holds the same value, so the only boundaries are where validity turns
                 // over -- which is why this is answered without reading a value per row.
                 ConstantRuns(node, in mask, start, count, valid, startsBlock, ref stats, previous);
@@ -96,6 +117,30 @@ internal static class BlockStatsPass
             case CanonicalKind.Primitive:
             {
                 stats.IsSummarizable = true;
+
+                // THE ORDER'S SEAM IS TAKEN FIRST TOO (the file statistics' is_sorted): the range's
+                // first row against the row before it, while `previous` still holds that row. The
+                // range's own pairs follow -- by the step when the range is a progression, by a
+                // second walk over the range otherwise (Order<T>) -- and only while the column
+                // can still be sorted: a witness is sticky.
+                stats.OrderTracked = true;
+                if (!stats.OrderUntracked && !stats.Unsorted)
+                {
+                    int width = node.PType.ByteWidth();
+                    bool firstValid = mask.IsValid(start);
+                    OrderSeam(
+                        node.PType,
+                        firstValid ? node.Values.Span.Slice(start * width, width) : default,
+                        firstValid, startsBlock, ref stats, previous);
+
+                    // An all-null range never reaches the value walk, and two nulls are two
+                    // equal rows: sorted, not strict (the reference says the same of a null
+                    // array).
+                    if (valid == 0 && count > 1)
+                    {
+                        stats.Repeats = true;
+                    }
+                }
 
                 // THE STEPS ARE TAKEN FIRST, and while `previous` still holds the row before this
                 // range: `FixedRuns` overwrites it with the range's last row.
@@ -116,6 +161,18 @@ internal static class BlockStatsPass
                     if (wasProgression && stats.DeltaKnown && !stats.DeltaBroken)
                     {
                         progression = true;
+
+                        // A progression's order is its step: it repeats when the step is zero
+                        // and descends when it is negative -- no value read.
+                        if (stats.Delta < 0)
+                        {
+                            stats.Unsorted = true;
+                        }
+                        else if (stats.Delta == 0)
+                        {
+                            stats.Repeats = true;
+                        }
+
                         ProgressionBounds(node, stats.Delta, start, count, ref stats);
                         ProgressionRuns(
                             node, stats.Delta, start, count, hadPrevious, startsBlock, ref stats,
@@ -176,6 +233,17 @@ internal static class BlockStatsPass
                 if (valid > 0)
                 {
                     stats.TotalBytes += ViewBytes(node, in mask, start, count, valid);
+                }
+
+                // Order, bytewise: the seam here, the pairs inside ViewRuns, which reads them
+                // for the run boundaries anyway.
+                stats.OrderTracked = true;
+                if (!stats.OrderUntracked && !stats.Unsorted)
+                {
+                    bool firstValid = mask.IsValid(start);
+                    OrderSeamBytes(
+                        firstValid ? Value(node, node.Views.Span, start) : default,
+                        firstValid, startsBlock, ref stats, previous);
                 }
 
                 ViewRuns(node, in mask, start, count, startsBlock, ref stats, previous);
@@ -831,9 +899,19 @@ internal static class BlockStatsPass
             startsBlock, ref stats, previous);
 
         // A view is sixteen bytes: two 64-bit loads and two compares, never a `SequenceEqual` call.
+        //
+        // ONE COMPARISON ANSWERS BOTH QUESTIONS while the column can still be sorted. A run
+        // boundary asks "are these two values different"; the order asks "is the second below the
+        // first"; and `SequenceCompareTo` answers the first by answering the second. The first
+        // version asked them separately -- `SameValue` and then a comparison of its own -- which
+        // doubled the byte compare on exactly the column that pays it most, one whose values are
+        // all the same length and all distinct (the `fsst` axis: +27 % of the write, measured with
+        // the tracking switched off). Equal views are equal values and need neither.
         ReadOnlySpan<ulong> pairs = MemoryMarshal.Cast<byte, ulong>(views);
         bool allValid = mask.AllValid;
         bool previousValid = firstValid;
+        bool tracking = !stats.OrderUntracked && !stats.Unsorted;
+        bool repeats = false;
         for (int i = 1; i < count; i++)
         {
             int row = start + i;
@@ -842,12 +920,22 @@ internal static class BlockStatsPass
             {
                 stats.RunBoundaries++;
                 previousValid = valid;
+                if (tracking && !valid)
+                {
+                    // A null after a value: nulls sort below every value.
+                    stats.Unsorted = true;
+                    tracking = false;
+                }
+
                 continue;
             }
 
             previousValid = valid;
             if (!valid)
             {
+                // Two nulls are two equal rows. Kept in a local and folded in once at the end, so
+                // that neither this nor the equal-views case below carries a branch on `tracking`.
+                repeats = true;
                 continue;
             }
 
@@ -855,14 +943,36 @@ internal static class BlockStatsPass
             int b = row * 2;
             if (pairs[a] == pairs[b] && pairs[a + 1] == pairs[b + 1])
             {
+                repeats = true;
                 continue;
             }
 
-            if (!SameValue(node, views, pairs, row - 1, row))
+            if (!tracking)
             {
-                stats.RunBoundaries++;
+                if (!SameValue(node, views, pairs, row - 1, row))
+                {
+                    stats.RunBoundaries++;
+                }
+
+                continue;
+            }
+
+            int order = Value(node, views, row - 1).SequenceCompareTo(Value(node, views, row));
+            if (order == 0)
+            {
+                repeats = true;
+                continue;
+            }
+
+            stats.RunBoundaries++;
+            if (order > 0)
+            {
+                stats.Unsorted = true;
+                tracking = false;
             }
         }
+
+        stats.Repeats |= repeats;
 
         int last = start + count - 1;
         bool lastValid = mask.IsValid(last);
@@ -1049,6 +1159,249 @@ internal static class BlockStatsPass
         widths[BitPackWidths.ZigZagOffset + 64 - BitOperations.LeadingZeroCount(zigzag)]++;
     }
 
+    // ------------------------------------------------------------------------------------ order
+    //
+    // The file statistics' is_sorted / is_strict_sorted, tracked as the reference computes them
+    // (vortex-array-0.86.1 aggregate_fn/fns/is_sorted): nulls below every value, equal neighbours
+    // allowed by the first flag and refused by the second. A block is fed range by range, so a
+    // range's first row is judged against the row before it (the seam) and its own rows against
+    // each other; the seam of a block's first range is the block's, and the merge reads it.
+
+    /// <summary>Whether every null of the range comes before every value.</summary>
+    private static bool NullsFirst(in ValidityMask mask, int start, int count)
+    {
+        bool sawValue = false;
+        for (int i = 0; i < count; i++)
+        {
+            bool valid = mask.IsValid(start + i);
+            if (!valid && sawValue)
+            {
+                return false;
+            }
+
+            sawValue |= valid;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The seam of a primitive range with the row before it: a null after a value breaks the
+    /// order, two nulls repeat, two values compare in the type's domain.
+    /// </summary>
+    private static void OrderSeam(
+        PType ptype, ReadOnlySpan<byte> first, bool firstValid, bool startsBlock,
+        ref BlockStats stats, PreviousRow? previous)
+    {
+        if (previous is null || !previous.HasValue)
+        {
+            return;
+        }
+
+        if (previous.IsNull)
+        {
+            stats.NoteOrderSeam(firstValid ? 1 : 0, startsBlock);
+            return;
+        }
+
+        if (!firstValid)
+        {
+            stats.NoteOrderSeam(-1, startsBlock);
+            return;
+        }
+
+        if (!TryOrder(ptype, first, previous.Bytes, out int order))
+        {
+            stats.OrderUntracked = true;
+            return;
+        }
+
+        stats.NoteOrderSeam(order, startsBlock);
+    }
+
+    /// <summary>The seam of a byte-string range with the row before it, bytewise.</summary>
+    private static void OrderSeamBytes(
+        ReadOnlySpan<byte> first, bool firstValid, bool startsBlock, ref BlockStats stats,
+        PreviousRow? previous)
+    {
+        if (previous is null || !previous.HasValue)
+        {
+            return;
+        }
+
+        if (previous.IsNull)
+        {
+            stats.NoteOrderSeam(firstValid ? 1 : 0, startsBlock);
+            return;
+        }
+
+        if (!firstValid)
+        {
+            stats.NoteOrderSeam(-1, startsBlock);
+            return;
+        }
+
+        stats.NoteOrderSeam(Math.Sign(first.SequenceCompareTo(previous.Bytes)), startsBlock);
+    }
+
+    /// <summary>The sign of <c>a - b</c> for two elements of a primitive type; false on a NaN.</summary>
+    private static bool TryOrder(PType ptype, ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, out int order)
+    {
+        if (ptype.IsSignedInteger())
+        {
+            order = ElementSigned(a, ptype).CompareTo(ElementSigned(b, ptype));
+            return true;
+        }
+
+        if (ptype.IsUnsignedInteger())
+        {
+            order = ElementUnsigned(a, ptype).CompareTo(ElementUnsigned(b, ptype));
+            return true;
+        }
+
+        double x = ReadFloat(a, ptype);
+        double y = ReadFloat(b, ptype);
+        if (double.IsNaN(x) || double.IsNaN(y))
+        {
+            order = 0;
+            return false;
+        }
+
+        // -0.0 and +0.0 compare equal here, as they do for the reference's `is_sorted`.
+        order = x.CompareTo(y);
+        return true;
+    }
+
+    private static double ReadFloat(ReadOnlySpan<byte> bytes, PType ptype) => ptype switch
+    {
+        PType.F16 => (double)BinaryPrimitives.ReadHalfLittleEndian(bytes),
+        PType.F32 => BinaryPrimitives.ReadSingleLittleEndian(bytes),
+        _ => BinaryPrimitives.ReadDoubleLittleEndian(bytes),
+    };
+
+    /// <summary>
+    /// The order of a range's rows, in a SECOND walk over the range: the bounds loop keeps the
+    /// two-compare shape the JIT vectorises (see <see cref="Signed{T}"/>), and this one runs only
+    /// while the column can still be sorted -- a witness is sticky, so an unsorted column pays it
+    /// once, for the rows up to its first descent.
+    /// </summary>
+    private static void Order<T>(ReadOnlySpan<T> values, in ValidityMask mask, int start, ref BlockStats stats)
+        where T : unmanaged, INumber<T>
+    {
+        if (stats.OrderUntracked || stats.Unsorted || values.Length == 0)
+        {
+            return;
+        }
+
+        if (mask.AllValid)
+        {
+            OrderValues(values, ref stats);
+            return;
+        }
+
+        bool sawValue = false;
+        bool previousNull = false;
+        T last = default;
+        for (int i = 0; i < values.Length; i++)
+        {
+            if (!mask.IsValid(start + i))
+            {
+                if (sawValue)
+                {
+                    stats.Unsorted = true;
+                    return;
+                }
+
+                if (previousNull)
+                {
+                    stats.Repeats = true;
+                }
+
+                previousNull = true;
+                continue;
+            }
+
+            previousNull = false;
+            T value = values[i];
+            if (T.IsNaN(value))
+            {
+                stats.OrderUntracked = true;
+                return;
+            }
+
+            if (sawValue)
+            {
+                if (value < last)
+                {
+                    stats.Unsorted = true;
+                    return;
+                }
+
+                if (value == last)
+                {
+                    stats.Repeats = true;
+                }
+            }
+
+            sawValue = true;
+            last = value;
+        }
+    }
+
+    /// <summary>
+    /// The pairs of an all-valid range: two compares per value, both of them predictable, and the
+    /// witnesses kept in locals so the loop writes nothing through the <c>ref</c>.
+    /// </summary>
+    /// <remarks>
+    /// SCALAR ON PURPOSE. The first version compared a vector of values against the vector one
+    /// element behind it, which reads well and measures badly: a 128-bit register holds TWO
+    /// <see cref="long"/>s, so each iteration paid two span constructions with their bounds checks
+    /// and three vector compares to advance two elements. Against a loop whose every branch is
+    /// perfectly predicted -- a sorted column never takes the first, an unsorted one takes it once
+    /// and leaves -- the vector form was the slower of the two.
+    /// <para>
+    /// A NaN is not ordered by this comparison and would sail through as "not below", so it is
+    /// asked for by name. The check folds away for an integer <typeparamref name="T"/>, where
+    /// <c>IsNaN</c> is a constant false.
+    /// </para>
+    /// </remarks>
+    private static void OrderValues<T>(ReadOnlySpan<T> values, ref BlockStats stats)
+        where T : unmanaged, INumber<T>
+    {
+        bool repeats = false;
+        T last = values[0];
+        if (T.IsNaN(last))
+        {
+            stats.OrderUntracked = true;
+            return;
+        }
+
+        for (int i = 1; i < values.Length; i++)
+        {
+            T value = values[i];
+            if (value < last)
+            {
+                stats.Unsorted = true;
+                return;
+            }
+
+            if (value == last)
+            {
+                repeats = true;
+            }
+            else if (T.IsNaN(value))
+            {
+                // Neither below nor equal: the only value that compares false against both.
+                stats.OrderUntracked = true;
+                return;
+            }
+
+            last = value;
+        }
+
+        stats.Repeats |= repeats;
+    }
+
     private static void Signed<T>(
         ReadOnlySpan<byte> bytes, in ValidityMask mask, int start, int count, ref BlockStats stats,
         Span<int> widths)
@@ -1057,6 +1410,7 @@ internal static class BlockStatsPass
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes).Slice(start, count);
         T min = T.MaxValue;
         T max = T.MinValue;
+        Order(values, in mask, start, ref stats);
 
         // THE BOUNDS LOOP STAYS AS IT WAS: two compares per value and nothing else, which is the
         // shape the JIT vectorises. Stage R1 put an `if (counting)` inside it, and the fourth
@@ -1286,6 +1640,7 @@ internal static class BlockStatsPass
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes).Slice(start, count);
         T min = T.MaxValue;
         T max = T.MinValue;
+        Order(values, in mask, start, ref stats);
 
         // Same discipline as the signed loop: bounds alone in the hot loop, widths in a second walk
         // over the range already in L1, and only when a plan will read them.
@@ -1369,6 +1724,7 @@ internal static class BlockStatsPass
         T min = T.PositiveInfinity;
         T max = T.NegativeInfinity;
         bool any = false;
+        Order(values, in mask, start, ref stats);
 
         if (mask.AllValid)
         {
@@ -1424,6 +1780,7 @@ internal static class BlockStatsPass
         float min = float.PositiveInfinity;
         float max = float.NegativeInfinity;
         bool any = false;
+        Order(values, in mask, start, ref stats);
 
         for (int i = 0; i < values.Length; i++)
         {

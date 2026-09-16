@@ -24,8 +24,15 @@ use std::path::PathBuf;
 
 use vortex::VortexSessionDefault;
 use vortex::array::ArrayRef;
+use vortex::array::Canonical;
+use vortex::array::ExecutionCtx;
+use vortex::array::IntoArray;
 use vortex::array::VortexSessionExecute;
+use vortex::array::arrays::Struct;
+use vortex::array::arrays::struct_::StructArrayExt;
+use vortex::array::expr::stats::Stat;
 use vortex::array::stream::ArrayStreamExt;
+use vortex::expr::stats::Precision;
 use vortex::editions::EditionSessionExt;
 use vortex::file::OpenOptionsSessionExt;
 use vortex::io::runtime::Handle;
@@ -169,7 +176,78 @@ async fn compare(session: &VortexSession, theirs: &Path, ours: &Path) -> anyhow:
         }
     }
 
+    check_statistics(session, ours, &actual, &mut ctx).await?;
+
     Ok(expected.len() as u64)
+}
+
+/// Holds every exact file statistic our writer claims to the reference's own recomputation of
+/// it over the data the reference just read back: min, max, null_count, and the two order flags
+/// the reference writer never emits (vortex-layout-0.86.1 layouts/file_stats.rs drops IsSorted
+/// and IsStrictSorted at the file level), so this is the one place their meaning is checked
+/// against the implementation that defines it.
+async fn check_statistics(
+    session: &VortexSession,
+    ours: &Path,
+    actual: &ArrayRef,
+    ctx: &mut ExecutionCtx,
+) -> anyhow::Result<()> {
+    let file = session.open_options().open_path(ours).await?;
+    let Some(statistics) = file.footer().statistics() else {
+        return Ok(());
+    };
+
+    let Some(root) = actual.as_opt::<Struct>() else {
+        return Ok(());
+    };
+
+    let checked: &[Stat] = &[
+        Stat::Min,
+        Stat::Max,
+        Stat::NullCount,
+        Stat::IsSorted,
+        Stat::IsStrictSorted,
+    ];
+    for (index, set) in statistics.stats_sets().iter().enumerate() {
+        let Some(encoded) = root.unmasked_field_opt(index) else {
+            anyhow::bail!("file statistics name field {index}, which the data does not have");
+        };
+
+        // CANONICAL FIRST. The reference recomputes a statistic through the kernel of whatever
+        // encoding holds the column, and on the arrays this writer produces some of those kernels
+        // answer `is_sorted = true` for a column that is not (a sawtooth i64 under fastlanes, a
+        // cycling label under a dictionary, a null after a value under a validity array). The
+        // primitive and varbinview kernels over canonical data are the definition the reference's
+        // own tests exercise, so the column is canonicalized before it is asked.
+        let column = encoded.clone().execute::<Canonical>(ctx)?.into_array();
+
+        for (stat, precision) in set.iter() {
+            if !checked.contains(stat) {
+                continue;
+            }
+            let Precision::Exact(claimed) = precision else {
+                continue;
+            };
+            let Some(stat_dtype) = stat.dtype(column.dtype()) else {
+                anyhow::bail!("field {index}: {} is claimed on a type it has no meaning for", stat.name());
+            };
+            let Some(computed) = column.statistics().compute_stat(*stat, ctx)? else {
+                anyhow::bail!("field {index}: {} is claimed but the reference cannot compute it", stat.name());
+            };
+
+            // Scalar equality is the reference's own, over values: an i32 column's minimum written
+            // as the widened i64 the protobuf carries is EQUAL to the i32 the reference computes.
+            let ours_scalar = Scalar::try_new(stat_dtype, Some(claimed.clone()))?;
+            if computed != ours_scalar {
+                anyhow::bail!(
+                    "field {index}: {} is {ours_scalar:?} in our file statistics, the reference computes {computed:?}",
+                    stat.name()
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn read_all(session: &VortexSession, path: &Path) -> anyhow::Result<ArrayRef> {

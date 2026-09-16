@@ -132,6 +132,16 @@ Nulls are in no source. 10 §5.1 inserts no null in any index, a sorted column's
 key, and the postings and dictionary sources hold values. A cursor never visits a null; `IS NULL`
 is the scan's question, answered from the zone map's null count.
 
+**Amendment (step 11a).** "A file written by anyone" overstated it. No file the reference writer
+produces carries `is_sorted` in its file statistics: vortex-layout-0.86.1's file-level aggregation
+(`layouts/file_stats.rs`) drops `IsSorted` and `IsStrictSorted` whatever the caller asks for, and
+the conformance corpus has none. The `SortedColumn` source therefore serves the files **this**
+writer produces, which since 11a carry a statistics segment with the two flags, tracked at ingest
+in the reference's own semantics (a null below every value, equal neighbours allowed by the first
+flag and refused by the second, a NaN claiming nothing) and held by the Rust cross-check against
+the reference's recomputation over the canonical column — the recomputation over the encoded
+column is not an oracle: some encoding kernels answer `true` for a column that is not sorted.
+
 ---
 
 ## 4. The cursor

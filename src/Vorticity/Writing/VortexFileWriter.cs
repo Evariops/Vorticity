@@ -36,6 +36,7 @@ using Vorticity.Arrays;
 using Vorticity.Layouts;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Columns;
+using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Schemas;
@@ -193,14 +194,16 @@ public sealed class VortexFileWriter : IAsyncDisposable
     private bool _started;
     private bool _completed;
     private byte[] _padding = new byte[VortexLimits.MaxAlignment];
+    private readonly bool _fileStatistics;
 
     private VortexFileWriter(
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
-        long blockBytes)
+        long blockBytes, bool fileStatistics)
     {
         _sink = sink;
         _schema = schema;
         _compress = compress;
+        _fileStatistics = fileStatistics;
         _target = target;
         _rowBlock = rowBlock;
         _blockBytes = blockBytes;
@@ -281,7 +284,8 @@ public sealed class VortexFileWriter : IAsyncDisposable
         }
 
         return new VortexFileWriter(
-            sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes);
+            sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
+            options.FileStatistics);
     }
 
     /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
@@ -742,6 +746,18 @@ public sealed class VortexFileWriter : IAsyncDisposable
         // records them.
         await WriteZoneMapsAsync(cancellationToken).ConfigureAwait(false);
 
+        // The file statistics, after the zone maps and before the footer (docs/11 §3.6): the
+        // merge of every closed block per top-level field, which is exact by construction.
+        long statisticsOffset = 0;
+        int statisticsLength = 0;
+        if (_fileStatistics)
+        {
+            statisticsOffset = _sink.Position;
+            byte[] statistics = BuildFileStatistics();
+            statisticsLength = statistics.Length;
+            await _sink.WriteAsync(statistics, cancellationToken).ConfigureAwait(false);
+        }
+
         long dtypeOffset = _sink.Position;
         byte[] dtype = DTypeFlatBuffers.Serialize(_schema);
         await _sink.WriteAsync(dtype, cancellationToken).ConfigureAwait(false);
@@ -755,7 +771,8 @@ public sealed class VortexFileWriter : IAsyncDisposable
         await _sink.WriteAsync(footer, cancellationToken).ConfigureAwait(false);
 
         byte[] postscript = BuildPostscript(
-            dtypeOffset, dtype.Length, layoutOffset, layout.Length, footerOffset, footer.Length);
+            dtypeOffset, dtype.Length, layoutOffset, layout.Length, footerOffset, footer.Length,
+            statisticsOffset, statisticsLength);
         if (postscript.Length > VortexLimits.MaxPostscriptSize)
         {
             throw new InvalidOperationException(
@@ -1045,7 +1062,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
     private byte[] BuildPostscript(
         long dtypeOffset, int dtypeLength, long layoutOffset, int layoutLength,
-        long footerOffset, int footerLength)
+        long footerOffset, int footerLength, long statisticsOffset, int statisticsLength)
     {
         using FlatBufferBuilder builder = new FlatBufferBuilder();
 
@@ -1058,9 +1075,88 @@ public sealed class VortexFileWriter : IAsyncDisposable
         int footer = PostscriptWriter.WriteSegment(
             builder, new SegmentSpec((ulong)footerOffset, (uint)footerLength, 0, 0, 0),
             CompressionScheme.None);
+        int statistics = statisticsLength == 0
+            ? 0
+            : PostscriptWriter.WriteSegment(
+                builder, new SegmentSpec((ulong)statisticsOffset, (uint)statisticsLength, 0, 0, 0),
+                CompressionScheme.None);
 
-        int table = PostscriptWriter.Write(builder, dtype, layout, statisticsSegment: 0, footer, []);
+        int table = PostscriptWriter.Write(builder, dtype, layout, statistics, footer, []);
         return builder.FinishToArray(table);
+    }
+
+    /// <summary>
+    /// The <c>FileStatistics</c> table (footer.fbs): one <c>ArrayStats</c> per top-level field of
+    /// a struct root, one for any other root, each the merge of the column's closed blocks.
+    /// </summary>
+    /// <remarks>
+    /// EXACT, AND ONLY WHAT THE PASS KNOWS. The bounds are the block summaries' own, so they are
+    /// <see cref="StatPrecision.Exact"/> and exist for the numeric domains the summaries hold
+    /// (a string column has no bound here: docs/11 §3.2 leaves the bounded prefixes to a policy);
+    /// the null count is the sum; the two order flags are stated when the pass tracked the
+    /// column's order and stay absent otherwise -- a NaN, a bool, a nested field -- because an
+    /// absent statistic licenses nothing and a wrong one lies (docs/08 §1). The reader needs
+    /// exactly one entry per field (VortexFile.ParseStatistics), which is what the loop writes.
+    /// </remarks>
+    private byte[] BuildFileStatistics()
+    {
+        using FlatBufferBuilder builder = new FlatBufferBuilder();
+        ScalarStore scalars = new ScalarStore();
+        int fields = _isTabular ? _fieldCount : 1;
+        int[] entries = new int[fields];
+        for (int field = 0; field < fields; field++)
+        {
+            DType column = _isTabular ? _schema.GetField(field) : _schema;
+            ColumnWriter writer = _columns[field];
+            BlockStats merged = writer.Chunk(0, writer.Blocks.Count);
+
+            ArrayStatsValues values = default;
+            values.MinPrecision = StatPrecision.Exact;
+            values.MaxPrecision = StatPrecision.Exact;
+            if (merged.IsPresent)
+            {
+                values.NullCount = (ulong)merged.NullCount;
+                values.IsSorted = merged.IsSorted;
+                values.IsStrictSorted = merged.IsStrictSorted;
+                if (merged.HasBounds && column.Kind == DTypeKind.Primitive)
+                {
+                    values.Min = ScalarProtobuf.SerializeValue(Bound(scalars, column.PType, merged.Min));
+                    values.Max = ScalarProtobuf.SerializeValue(Bound(scalars, column.PType, merged.Max));
+                }
+            }
+
+            entries[field] = ArrayWriter.WriteStats(builder, in values);
+        }
+
+        int vector = builder.CreateOffsetVector(entries);
+        builder.StartTable();
+        builder.AddOffset(SchemaFieldIds.FileStatisticsFieldStats, vector);
+        int table = builder.EndTable();
+        return builder.FinishToArray(table);
+    }
+
+    /// <summary>
+    /// A block summary's bound as the scalar the reference writes for the column's type: the
+    /// widened integer domain, and the float at its own width.
+    /// </summary>
+    private static ScalarValue Bound(ScalarStore scalars, PType ptype, FilterLiteral bound)
+    {
+        if (ptype.IsSignedInteger())
+        {
+            return scalars.Int64(bound.SignedValue);
+        }
+
+        if (ptype.IsUnsignedInteger())
+        {
+            return scalars.UInt64(bound.UnsignedValue);
+        }
+
+        return ptype switch
+        {
+            PType.F16 => scalars.F16((Half)bound.FloatValue),
+            PType.F32 => scalars.F32((float)bound.FloatValue),
+            _ => scalars.F64(bound.FloatValue),
+        };
     }
 
     private static int[] CreateStrings(FlatBufferBuilder builder, IReadOnlyList<string> ids)

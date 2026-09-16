@@ -400,6 +400,21 @@ that is fully overwritten.
 - `CompleteAsync` returns a **`WriteReport`** (§7.3): per column the encodings chosen and how often
   plan memory was reused, per index what was built, its size, and what was abandoned and why.
 
+**As delivered (step 11a).** "As today" was not true of the file statistics: the writer wrote no
+statistics segment at all. It does now, after the zone maps and before the footer: one
+`ArrayStats` per top-level field, the merge of the column's closed blocks — `min` / `max` in
+`Exact` for the numeric domains the block summaries hold (a string column has no bound here, the
+bounded prefixes of §3.2 being a policy), `null_count`, and `is_sorted` / `is_strict_sorted`
+whenever the pass tracked the column's order, absent otherwise. The order is tracked without
+touching the bounds loop: the seam of every range with the row before it, a progression's step,
+and for the rest a second, vectorised walk over the range that runs only while the column can
+still be sorted — a witness is sticky — and rides on the pairs `ViewRuns` already reads for a
+string column. The semantics are the reference's (`aggregate_fn/fns/is_sorted`): a null below
+every value, equal neighbours allowed by `is_sorted` and refused by `is_strict_sorted`, a NaN
+claiming nothing; the Rust cross-check holds every exact statistic written against the
+reference's recomputation over the canonical column. `VortexWriteOptions.FileStatistics` turns
+the segment off. A few dozen bytes per field; about two kilobytes of allocation per file.
+
 ### 3.7 Memory and allocation model
 
 | what | owner | size | lifetime |
