@@ -53,13 +53,19 @@ internal sealed class BloomBuilder : IndexBuilder
     private int _generationBlockWordCount;
     private int _blocks;
 
-    /// <param name="policy">A <see cref="IndexPolicyKind.Bloom"/> policy.</param>
+    private readonly bool _trigrams;
+
+    /// <param name="policy">A <see cref="IndexPolicyKind.Bloom"/> or <see cref="IndexPolicyKind.NgramBloom"/> policy.</param>
     internal BloomBuilder(IndexPolicy policy)
     {
         _policy = policy;
+        _trigrams = policy.Kind == IndexPolicyKind.NgramBloom;
         _generation = policy.Resolutions >= 2 ? new HashSet64() : null;
         _file = policy.Resolutions >= 3 ? new HashSet64() : null;
     }
+
+    /// <summary>The kind this builder writes.</summary>
+    internal string Kind => _trigrams ? IndexKinds.BloomNgram3 : IndexKinds.BloomSbbf;
 
     /// <summary>Why the file-level filter was dropped, when it was asked for and could not be kept.</summary>
     internal string? FileAbandoned { get; private set; }
@@ -80,11 +86,26 @@ internal sealed class BloomBuilder : IndexBuilder
     /// <param name="dtype">The column's dtype.</param>
     /// <param name="reason">Why not.</param>
     /// <returns>Whether a filter can be built.</returns>
-    internal static bool Supports(DType dtype, out string? reason)
+    internal static bool Supports(DType dtype, out string? reason) => Supports(dtype, trigrams: false, out reason);
+
+    /// <summary>Whether the dtype can be indexed by this kind, and why not.</summary>
+    /// <param name="dtype">The column's dtype.</param>
+    /// <param name="trigrams">Whether the index holds trigrams, which only text has.</param>
+    /// <param name="reason">Why not.</param>
+    /// <returns>Whether a filter can be built.</returns>
+    internal static bool Supports(DType dtype, bool trigrams, out string? reason)
     {
         while (dtype.Kind == DTypeKind.Extension)
         {
             dtype = dtype.StorageType;
+        }
+
+        if (trigrams)
+        {
+            reason = dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary
+                ? null
+                : $"a trigram index needs text, and this column is {dtype.Kind}";
+            return reason is null;
         }
 
         reason = dtype.Kind switch
@@ -125,6 +146,12 @@ internal sealed class BloomBuilder : IndexBuilder
         bool allValid = own.AllValid && wrapper.AllValid;
         BloomHash hash = _policy.Hash;
         HashSet64 block = _block;
+        if (_trigrams && node.Kind != CanonicalKind.VarBinView)
+        {
+            Abandon($"a trigram index needs text, and this column is {node.Kind}");
+            return;
+        }
+
         switch (node.Kind)
         {
             case CanonicalKind.Primitive:
@@ -142,6 +169,24 @@ internal sealed class BloomBuilder : IndexBuilder
                     {
                         block.Add(SplitBlockBloom.Hash(node.ConstantElement, hash));
                         return;
+                    }
+                }
+
+                return;
+
+            case CanonicalKind.VarBinView when _trigrams:
+                Span<byte> trigram = stackalloc byte[Trigrams.Length];
+                bool fold = _policy.CaseInsensitive;
+                for (int row = start; row < start + count; row++)
+                {
+                    if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
+                    {
+                        ReadOnlySpan<byte> value = LiteralReader.ViewAt(node, row);
+                        for (int i = 0; i + Trigrams.Length <= value.Length; i++)
+                        {
+                            Trigrams.Copy(value.Slice(i, Trigrams.Length), fold, trigram);
+                            block.Add(SplitBlockBloom.Hash(trigram, hash));
+                        }
                     }
                 }
 

@@ -9,6 +9,7 @@
 //     repeated uint32 n_blocks = 6;    // packed; one per filter, in the order a probe meets them
 //     uint32 generation_blocks = 7;    // k
 //     uint32 min_distinct = 8;
+//     bool   case_insensitive = 9;     // bloom.ngram3 only: trigrams ASCII-lower-cased on both sides
 //   }
 //
 // ONE ENTRY PER RESOLUTION, because runs inside an entry are disjoint (10 §4.1) and a generation
@@ -46,6 +47,7 @@ internal enum BloomLevel
 /// <param name="FilterBlocks">One count per filter, as the header describes.</param>
 /// <param name="GenerationBlocks">Blocks per generation.</param>
 /// <param name="MinDistinct">The floor below which a block got no filter.</param>
+/// <param name="CaseInsensitive">For a trigram filter, whether its trigrams were ASCII-lower-cased.</param>
 internal sealed record BloomIndexOptions(
     BloomLevel Level,
     int FalsePositivePpm,
@@ -53,7 +55,8 @@ internal sealed record BloomIndexOptions(
     int MaxBlocks,
     int[] FilterBlocks,
     int GenerationBlocks,
-    int MinDistinct)
+    int MinDistinct,
+    bool CaseInsensitive = false)
 {
     private const uint Version = 1;
 
@@ -79,6 +82,7 @@ internal sealed record BloomIndexOptions(
 
             writer.WriteUInt32Always(7, (uint)GenerationBlocks);
             writer.WriteUInt32Always(8, (uint)MinDistinct);
+            writer.WriteBool(9, CaseInsensitive);
             return writer.WrittenSpan.ToArray();
         }
         finally
@@ -104,6 +108,7 @@ internal sealed record BloomIndexOptions(
             uint maxBlocks = 0;
             uint generation = 0;
             uint minDistinct = 0;
+            bool caseInsensitive = false;
             List<int> blocks = [];
             while (reader.TryReadTag(out int field, out ProtoWireType wire))
             {
@@ -141,6 +146,9 @@ internal sealed record BloomIndexOptions(
                     case 8 when wire == ProtoWireType.Varint:
                         minDistinct = reader.ReadVarint32();
                         break;
+                    case 9 when wire == ProtoWireType.Varint:
+                        caseInsensitive = reader.ReadBool();
+                        break;
                     default:
                         reader.SkipField(wire);
                         break;
@@ -157,7 +165,8 @@ internal sealed record BloomIndexOptions(
             options = new BloomIndexOptions(
                 (BloomLevel)level, (int)Math.Min(fpp, int.MaxValue), (BloomHash)hash,
                 (int)Math.Min(maxBlocks, int.MaxValue), [.. blocks],
-                (int)Math.Min(generation, int.MaxValue), (int)Math.Min(minDistinct, int.MaxValue));
+                (int)Math.Min(generation, int.MaxValue), (int)Math.Min(minDistinct, int.MaxValue),
+                caseInsensitive);
             return true;
         }
         catch (VortexFormatException)

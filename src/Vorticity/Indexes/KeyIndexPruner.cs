@@ -55,9 +55,16 @@ internal sealed class KeyIndexPruner
     internal static async ValueTask<KeyIndexPruner?> BuildAsync(
         VortexFile file, VortexExpr filter, long blockRows, CancellationToken cancellationToken)
     {
+        // A file without a directory pays nothing, not even the collectors.
+        if (!file.HasIndexDirectory)
+        {
+            return null;
+        }
+
         Dictionary<string, List<FilterLiteral>> equalities = new Dictionary<string, List<FilterLiteral>>(StringComparer.Ordinal);
-        CollectEqualities(filter, equalities);
-        if (equalities.Count == 0 || !file.HasIndexDirectory)
+        Dictionary<string, List<StringMatchExpr>> matches = new Dictionary<string, List<StringMatchExpr>>(StringComparer.Ordinal);
+        CollectEqualities(filter, equalities, matches);
+        if (equalities.Count == 0 && matches.Count == 0)
         {
             return null;
         }
@@ -73,12 +80,53 @@ internal sealed class KeyIndexPruner
         foreach (IndexEntry entry in directory.Entries)
         {
             int stride = KeyRunOptions.StrideOf(entry.Kind);
+            bool trigrams = entry.Kind == IndexKinds.PostingsNgram3;
             if (stride == 0 || entry.BlockLength != (ulong)blockRows
                 || !TryResolve(file.Schema, entry.ColumnPath, out string path, out DType dtype)
-                || !equalities.TryGetValue(path, out List<FilterLiteral>? literals)
-                || !KeyLayout.TryOf(dtype, out KeyLayout layout)
-                || !KeyRunOptions.TryParseEntry(entry.Options, out _)
-                || columns.ContainsKey(path))
+                || !KeyRunOptions.TryParseEntry(entry.Options, out _, out bool fold))
+            {
+                continue;
+            }
+
+            string key = trigrams ? TrigramKey(path) : path;
+            List<FilterLiteral>? literals;
+            KeyLayout layout;
+            DType storage;
+            if (trigrams)
+            {
+                if (!matches.TryGetValue(path, out List<StringMatchExpr>? predicates))
+                {
+                    continue;
+                }
+
+                // The keys a text index holds are trigrams, typed binary; its literals are the
+                // trigrams the predicates require, folded as the index was.
+                literals = [];
+                foreach (StringMatchExpr predicate in predicates)
+                {
+                    foreach (byte[] trigram in Trigrams.Required(predicate, fold))
+                    {
+                        FilterLiteral literal = FilterLiteral.From(trigram);
+                        if (!literals.Contains(literal))
+                        {
+                            literals.Add(literal);
+                        }
+                    }
+                }
+
+                layout = new KeyLayout(KeyShape.Bytes, 0, default);
+                storage = new DTypeArena().Binary(Nullability.NonNullable);
+            }
+            else if (!equalities.TryGetValue(path, out literals) || !KeyLayout.TryOf(dtype, out layout))
+            {
+                continue;
+            }
+            else
+            {
+                storage = Storage(dtype);
+            }
+
+            if (columns.ContainsKey(key) || literals.Count == 0)
             {
                 continue;
             }
@@ -96,7 +144,7 @@ internal sealed class KeyIndexPruner
 
             if (runs.Count > 0)
             {
-                columns[path] = new Column(entry.Kind == IndexKinds.SortedRuns, layout, Storage(dtype), runs, literals, blocks);
+                columns[key] = new Column(entry.Kind == IndexKinds.SortedRuns, layout, storage, runs, literals, blocks, fold);
             }
         }
 
@@ -223,6 +271,18 @@ internal sealed class KeyIndexPruner
 
                 return @in.Values.Count > 0;
 
+            case StringMatchExpr match when _columns.TryGetValue(TrigramKey(match.Field.Path), out Column? text):
+                // Absent when ONE required trigram is: a matching value holds them all.
+                foreach (byte[] trigram in Trigrams.Required(match, text.Fold))
+                {
+                    if (text.Absent(FilterLiteral.From(trigram), block))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+
             default:
                 return false;
         }
@@ -231,13 +291,16 @@ internal sealed class KeyIndexPruner
     private bool Absent(string path, FilterLiteral value, int block) =>
         _columns.TryGetValue(path, out Column? column) && column.Absent(value, block);
 
-    private static void CollectEqualities(VortexExpr expr, Dictionary<string, List<FilterLiteral>> into)
+    private static string TrigramKey(string path) => path + "\0ngram3";
+
+    private static void CollectEqualities(
+        VortexExpr expr, Dictionary<string, List<FilterLiteral>> into, Dictionary<string, List<StringMatchExpr>> matches)
     {
         switch (expr)
         {
             case LogicalExpr logical:
-                CollectEqualities(logical.Left, into);
-                CollectEqualities(logical.Right, into);
+                CollectEqualities(logical.Left, into, matches);
+                CollectEqualities(logical.Right, into, matches);
                 break;
             case ComparisonExpr { Op: ComparisonOp.Equal } equal:
                 Add(into, equal.Field.Path, equal.Value);
@@ -248,6 +311,15 @@ internal sealed class KeyIndexPruner
                     Add(into, @in.Field.Path, value);
                 }
 
+                break;
+            case StringMatchExpr match:
+                if (!matches.TryGetValue(match.Field.Path, out List<StringMatchExpr>? list))
+                {
+                    list = [];
+                    matches[match.Field.Path] = list;
+                }
+
+                list.Add(match);
                 break;
             default:
                 break;
@@ -308,8 +380,10 @@ internal sealed class KeyIndexPruner
         private readonly byte[]?[] _otherZeros;
         private readonly bool[][] _absent;
 
-        internal Column(bool rows, KeyLayout layout, DType storage, List<Run> runs, List<FilterLiteral> literals, int blocks)
+        internal Column(
+            bool rows, KeyLayout layout, DType storage, List<Run> runs, List<FilterLiteral> literals, int blocks, bool fold)
         {
+            Fold = fold;
             _rows = rows;
             _layout = layout;
             _storage = storage;
@@ -332,6 +406,9 @@ internal sealed class KeyIndexPruner
         }
 
         internal List<Run> Runs { get; }
+
+        /// <summary>For a trigram index, whether its trigrams were folded.</summary>
+        internal bool Fold { get; }
 
         internal int Stride => _rows ? KeyRunOptions.SortedStride : KeyRunOptions.PostingsStride;
 

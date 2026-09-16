@@ -4,6 +4,7 @@
 //   message KeyIndexOptions {           // the entry's options
 //     uint32 version = 1;                // 1
 //     uint32 segment_entries = 2;        // 10 §4.2's payload_block_rows: the most entries a segment holds
+//     bool   case_insensitive = 3;       // postings.ngram3 only: trigrams ASCII-lower-cased
 //   }
 //   message KeyRunOptions {             // each run's options
 //     uint32 version = 1;                // 1
@@ -49,20 +50,22 @@ internal static class KeyRunOptions
     /// <param name="kind">The kind name.</param>
     internal static int StrideOf(string kind) => kind switch
     {
-        IndexKinds.PostingsBlocks => PostingsStride,
+        IndexKinds.PostingsBlocks or IndexKinds.PostingsNgram3 => PostingsStride,
         IndexKinds.SortedRuns => SortedStride,
         _ => 0,
     };
 
     /// <summary>Serializes an entry's options.</summary>
     /// <param name="segmentEntries">The segment size the runs were cut at.</param>
-    internal static byte[] Entry(int segmentEntries)
+    /// <param name="caseInsensitive">For trigram postings, whether trigrams were ASCII-lower-cased.</param>
+    internal static byte[] Entry(int segmentEntries, bool caseInsensitive = false)
     {
         ProtoWriter writer = new ProtoWriter();
         try
         {
             writer.WriteUInt32Always(1, Version);
             writer.WriteUInt32Always(2, (uint)segmentEntries);
+            writer.WriteBool(3, caseInsensitive);
             return writer.WrittenSpan.ToArray();
         }
         finally
@@ -75,9 +78,18 @@ internal static class KeyRunOptions
     /// <param name="bytes">The options.</param>
     /// <param name="segmentEntries">The segment size.</param>
     /// <returns>Whether they are usable.</returns>
-    internal static bool TryParseEntry(ReadOnlySpan<byte> bytes, out int segmentEntries)
+    internal static bool TryParseEntry(ReadOnlySpan<byte> bytes, out int segmentEntries) =>
+        TryParseEntry(bytes, out segmentEntries, out _);
+
+    /// <summary>Parses an entry's options.</summary>
+    /// <param name="bytes">The options.</param>
+    /// <param name="segmentEntries">The segment size.</param>
+    /// <param name="caseInsensitive">Whether trigrams were folded.</param>
+    /// <returns>Whether they are usable.</returns>
+    internal static bool TryParseEntry(ReadOnlySpan<byte> bytes, out int segmentEntries, out bool caseInsensitive)
     {
         segmentEntries = 0;
+        caseInsensitive = false;
         try
         {
             ProtoReader reader = new ProtoReader(bytes);
@@ -92,6 +104,9 @@ internal static class KeyRunOptions
                         break;
                     case 2 when wire == ProtoWireType.Varint:
                         entries = reader.ReadVarint32();
+                        break;
+                    case 3 when wire == ProtoWireType.Varint:
+                        caseInsensitive = reader.ReadBool();
                         break;
                     default:
                         reader.SkipField(wire);

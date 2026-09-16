@@ -62,6 +62,12 @@ internal sealed class IndexWriter : IDisposable
             _builders[field] = column.Kind switch
             {
                 IndexPolicyKind.Bloom => BloomBuilder.Supports(dtype, out reason) ? new BloomBuilder(column) : null,
+                IndexPolicyKind.NgramBloom =>
+                    BloomBuilder.Supports(dtype, trigrams: true, out reason) ? new BloomBuilder(column) : null,
+                IndexPolicyKind.NgramPostings =>
+                    BloomBuilder.Supports(dtype, trigrams: true, out reason)
+                        ? KeyIndexBuilder.ForTrigrams(column.CaseInsensitive, column.SegmentEntries)
+                        : null,
                 IndexPolicyKind.Postings or IndexPolicyKind.SortedRuns =>
                     KeyIndexBuilder.Supports(dtype, out KeyLayout layout, out bool utf8, out reason)
                         ? new KeyIndexBuilder(column.Kind == IndexPolicyKind.SortedRuns, layout, utf8, column.SegmentEntries)
@@ -272,16 +278,19 @@ internal sealed class IndexWriter : IDisposable
                     DictProbe(field, columns[field], chunkRows, blockRows);
                     break;
                 case IndexPolicyKind.Bloom:
-                    Bloom(field, blockRows);
+                    Bloom(field, IndexKinds.BloomSbbf, blockRows);
                     break;
                 case IndexPolicyKind.NgramBloom:
-                    NotYet(field, IndexKinds.BloomNgram3);
+                    Bloom(field, IndexKinds.BloomNgram3, blockRows);
                     break;
                 case IndexPolicyKind.Postings:
                     Locating(field, IndexKinds.PostingsBlocks, blockRows);
                     break;
                 case IndexPolicyKind.SortedRuns:
                     Locating(field, IndexKinds.SortedRuns, blockRows);
+                    break;
+                case IndexPolicyKind.NgramPostings:
+                    Locating(field, IndexKinds.PostingsNgram3, blockRows);
                     break;
                 default:
                     throw new InvalidOperationException($"Unhandled index policy {policy.Kind}.");
@@ -295,14 +304,14 @@ internal sealed class IndexWriter : IDisposable
         _reports.Add(new IndexWriteReport(_paths[field], kind, IndexOutcome.Abandoned, reason, 0, 0, 0));
 
     /// <summary>
-    /// <c>vorticity.bloom.sbbf.v1</c>: one entry per resolution the builder kept, each listing the
-    /// runs whose payload is written.
+    /// <c>vorticity.bloom.sbbf.v1</c> and <c>vorticity.bloom.ngram3.v1</c>: one entry per
+    /// resolution the builder kept, each listing the runs whose payload is written.
     /// </summary>
-    private void Bloom(int field, int blockRows)
+    private void Bloom(int field, string kind, int blockRows)
     {
         if (Refusal(field) is not null || _builders[field] is not BloomBuilder bloom)
         {
-            Abandoned(field, IndexKinds.BloomSbbf, Refusal(field) ?? "no builder ran");
+            Abandoned(field, kind, Refusal(field) ?? "no builder ran");
             return;
         }
 
@@ -324,7 +333,7 @@ internal sealed class IndexWriter : IDisposable
         if (blockRuns.Count > 0)
         {
             _entries.Add(new IndexEntry(
-                IndexKinds.BloomSbbf, ColumnPath(field), blockLength,
+                kind, ColumnPath(field), blockLength,
                 BloomOptions(policy, BloomLevel.Block, [.. bloom.BlockFilterBlocks]), blockRuns));
         }
 
@@ -344,7 +353,7 @@ internal sealed class IndexWriter : IDisposable
         if (generationRuns.Count > 0)
         {
             _entries.Add(new IndexEntry(
-                IndexKinds.BloomSbbf, ColumnPath(field), blockLength,
+                kind, ColumnPath(field), blockLength,
                 BloomOptions(policy, BloomLevel.Generation, [.. generationCounts]), generationRuns));
         }
 
@@ -353,7 +362,7 @@ internal sealed class IndexWriter : IDisposable
         if (bloom.File is { Generation: { Segment: { } fileSegment } filePayload } file)
         {
             _entries.Add(new IndexEntry(
-                IndexKinds.BloomSbbf, ColumnPath(field), blockLength,
+                kind, ColumnPath(field), blockLength,
                 BloomOptions(policy, BloomLevel.File, [file.GenerationBlocks]),
                 [Run(file.FirstBlock, file.BlockCount, filePayload)]));
             bytes += fileSegment.Length;
@@ -363,14 +372,14 @@ internal sealed class IndexWriter : IDisposable
         if (blockRuns.Count == 0 && generationRuns.Count == 0 && files == 0)
         {
             Abandoned(
-                field, IndexKinds.BloomSbbf,
+                field, kind,
                 $"no block holds the {policy.MinDistinct} distinct values the policy asks before a filter pays");
             return;
         }
 
         string? fileNote = policy.Resolutions >= 3 ? bloom.FileAbandoned : null;
         _reports.Add(new IndexWriteReport(
-            _paths[field], IndexKinds.BloomSbbf, IndexOutcome.Built,
+            _paths[field], kind, IndexOutcome.Built,
             fileNote is null ? null : "built without its file-level filter: " + fileNote,
             bytes, generationRuns.Count + files, blockRuns.Count));
     }
@@ -382,7 +391,8 @@ internal sealed class IndexWriter : IDisposable
         new BloomIndexOptions(
             level, policy.FalsePositivePpm, policy.Hash,
             level == BloomLevel.File ? BloomBuilder.FileMaxBlocks : policy.MaxBlocks,
-            counts, BloomBuilder.GenerationBlocks, policy.MinDistinct).ToBytes();
+            counts, BloomBuilder.GenerationBlocks, policy.MinDistinct,
+            policy.Kind == IndexPolicyKind.NgramBloom && policy.CaseInsensitive).ToBytes();
 
     /// <summary>
     /// <c>vorticity.postings.blocks.v1</c> and <c>vorticity.sorted.runs.v1</c>: one entry, one run
@@ -432,7 +442,7 @@ internal sealed class IndexWriter : IDisposable
 
         _entries.Add(new IndexEntry(
             kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1),
-            KeyRunOptions.Entry(keys.SegmentEntries), runs));
+            KeyRunOptions.Entry(keys.SegmentEntries, keys.CaseInsensitive), runs));
         _reports.Add(new IndexWriteReport(_paths[field], kind, IndexOutcome.Built, null, bytes, 0, runs.Count));
     }
 

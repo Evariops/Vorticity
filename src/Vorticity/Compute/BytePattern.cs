@@ -14,6 +14,7 @@
 // wildcards. The quadratic case a backtracker has -- `%a%a%a%...` against a long value -- is bounded
 // by the pattern, which the caller wrote, not by the file.
 using System;
+using System.Collections.Generic;
 
 namespace Vorticity.Compute;
 
@@ -127,6 +128,51 @@ internal static class BytePattern
         prefix[..length].CopyTo(destination);
         destination[length - 1]++;
         return length;
+    }
+
+    /// <summary>
+    /// The literal runs of a <c>LIKE</c> pattern: the stretches between unescaped wildcards, each of
+    /// which a matching value must contain somewhere (docs/10-indexes.md §5.2).
+    /// </summary>
+    /// <param name="pattern">The pattern.</param>
+    /// <param name="escape">The byte that quotes a wildcard.</param>
+    /// <returns>The runs, escapes resolved, empty ones left out.</returns>
+    internal static List<byte[]> LiteralRuns(ReadOnlySpan<byte> pattern, byte escape)
+    {
+        List<byte[]> runs = [];
+        List<byte> run = [];
+        for (int p = 0; p < pattern.Length;)
+        {
+            byte token = pattern[p];
+            if (token == Any || token == One)
+            {
+                Flush(runs, run);
+                p++;
+                continue;
+            }
+
+            if (token == escape && p + 1 < pattern.Length)
+            {
+                run.Add(pattern[p + 1]);
+                p += 2;
+                continue;
+            }
+
+            run.Add(token);
+            p++;
+        }
+
+        Flush(runs, run);
+        return runs;
+
+        static void Flush(List<byte[]> runs, List<byte> run)
+        {
+            if (run.Count > 0)
+            {
+                runs.Add([.. run]);
+                run.Clear();
+            }
+        }
     }
 
     /// <summary>

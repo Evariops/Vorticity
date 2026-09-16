@@ -35,6 +35,9 @@ public enum IndexPolicyKind
 
     /// <summary>Value to rows, exact (§6.2).</summary>
     SortedRuns = 5,
+
+    /// <summary>Trigram to blocks (§6.4).</summary>
+    NgramPostings = 6,
 }
 
 /// <summary>Which hash a Bloom filter uses.</summary>
@@ -153,6 +156,12 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     public static IndexPolicy SortedRuns => new IndexPolicy(
         IndexPolicyKind.SortedRuns, 0, 0, 0, -1, BloomHash.XxHash3, false);
 
+    /// <summary>Trigram to blocks, for <c>LIKE</c> and <c>CONTAINS</c> (§6.4).</summary>
+    /// <param name="caseInsensitive">Whether trigrams are ASCII-lower-cased on both sides.</param>
+    /// <returns>The policy.</returns>
+    public static IndexPolicy NgramPostings(bool caseInsensitive = false) => new IndexPolicy(
+        IndexPolicyKind.NgramPostings, 0, 0, 0, -1, BloomHash.XxHash3, caseInsensitive);
+
     /// <summary>A split-block Bloom filter (§5.1).</summary>
     /// <param name="falsePositivePpm">
     /// The target false-positive rate as parts per million, in <c>[1, 500 000]</c>. Default 1 %.
@@ -212,7 +221,7 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
         int kind, int fppPpm, int resolutions, int maxBlocks, int minDistinct, int hash,
         bool caseInsensitive, int segmentEntries = 0)
     {
-        IndexPolicyKind policy = kind is >= (int)IndexPolicyKind.None and <= (int)IndexPolicyKind.SortedRuns
+        IndexPolicyKind policy = kind is >= (int)IndexPolicyKind.None and <= (int)IndexPolicyKind.NgramPostings
             ? (IndexPolicyKind)kind
             : IndexPolicyKind.None;
         return new IndexPolicy(

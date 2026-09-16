@@ -60,9 +60,18 @@ internal sealed class BloomPruner
     internal static async ValueTask<BloomPruner?> BuildAsync(
         VortexFile file, VortexExpr filter, long blockRows, CancellationToken cancellationToken)
     {
+        // A FILE WITHOUT A DIRECTORY PAYS NOTHING, not even the collectors: the read-path
+        // allocation ceilings hold a filtered scan to the byte, and every file written before
+        // step 12 is such a file.
+        if (!file.HasIndexDirectory)
+        {
+            return null;
+        }
+
         HashSet<string> equalities = new HashSet<string>(StringComparer.Ordinal);
-        CollectEqualities(filter, equalities);
-        if (equalities.Count == 0 || !file.HasIndexDirectory)
+        HashSet<string> matches = new HashSet<string>(StringComparer.Ordinal);
+        CollectEqualities(filter, equalities, matches);
+        if (equalities.Count == 0 && matches.Count == 0)
         {
             return null;
         }
@@ -77,18 +86,20 @@ internal sealed class BloomPruner
         Dictionary<string, Column> columns = new Dictionary<string, Column>(StringComparer.Ordinal);
         foreach (IndexEntry entry in directory.Entries)
         {
-            if (entry.Kind != IndexKinds.BloomSbbf || entry.BlockLength != (ulong)blockRows
+            bool trigrams = entry.Kind == IndexKinds.BloomNgram3;
+            if ((!trigrams && entry.Kind != IndexKinds.BloomSbbf) || entry.BlockLength != (ulong)blockRows
                 || !TryResolve(schema, entry.ColumnPath, out string path, out DType dtype)
-                || !equalities.Contains(path)
+                || !(trigrams ? matches : equalities).Contains(path)
                 || !BloomIndexOptions.TryParse(entry.Options, out BloomIndexOptions? options))
             {
                 continue;
             }
 
-            if (!columns.TryGetValue(path, out Column? column))
+            string key = trigrams ? TrigramKey(path) : path;
+            if (!columns.TryGetValue(key, out Column? column))
             {
-                column = new Column(dtype);
-                columns[path] = column;
+                column = new Column(dtype, trigrams, options!.CaseInsensitive);
+                columns[key] = column;
             }
 
             column.Levels.Add(new Level(entry, options!));
@@ -263,6 +274,9 @@ internal sealed class BloomPruner
             case ComparisonExpr { Op: ComparisonOp.Equal } equal:
                 return Absent(equal.Field.Path, equal.Value, block, level);
 
+            case StringMatchExpr match:
+                return AbsentTrigrams(match, block, level);
+
             case InExpr @in:
                 foreach (FilterLiteral value in @in.Values)
                 {
@@ -308,19 +322,55 @@ internal sealed class BloomPruner
         return false;
     }
 
-    private static void CollectEqualities(VortexExpr expr, HashSet<string> into)
+    /// <summary>
+    /// A string predicate is absent from a block when one trigram it requires is absent from the
+    /// block's trigram filter (10 §5.2); a predicate that requires none claims nothing.
+    /// </summary>
+    private bool AbsentTrigrams(StringMatchExpr match, int block, BloomLevel level)
+    {
+        if (!_columns.TryGetValue(TrigramKey(match.Field.Path), out Column? column))
+        {
+            return false;
+        }
+
+        foreach (Level candidate in column.Levels)
+        {
+            if (candidate.Options.Level != level || !candidate.TryFilter(block, out ReadOnlySpan<uint> words))
+            {
+                continue;
+            }
+
+            foreach (byte[] trigram in column.Required(match))
+            {
+                if (!SplitBlockBloom.Contains(words, SplitBlockBloom.Hash(trigram, candidate.Options.Hash)))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The trigram entries of a column live beside its value entries, under their own key.</summary>
+    private static string TrigramKey(string path) => path + "\0ngram3";
+
+    private static void CollectEqualities(VortexExpr expr, HashSet<string> equalities, HashSet<string> matches)
     {
         switch (expr)
         {
             case LogicalExpr logical:
-                CollectEqualities(logical.Left, into);
-                CollectEqualities(logical.Right, into);
+                CollectEqualities(logical.Left, equalities, matches);
+                CollectEqualities(logical.Right, equalities, matches);
                 break;
             case ComparisonExpr { Op: ComparisonOp.Equal } equal:
-                into.Add(equal.Field.Path);
+                equalities.Add(equal.Field.Path);
                 break;
             case InExpr @in:
-                into.Add(@in.Field.Path);
+                equalities.Add(@in.Field.Path);
+                break;
+            case StringMatchExpr match:
+                matches.Add(match.Field.Path);
                 break;
             default:
                 break;
@@ -364,10 +414,28 @@ internal sealed class BloomPruner
     {
         private readonly bool _keyed;
         private readonly KeyLayout _layout;
+        private readonly bool _fold;
+        private readonly Dictionary<StringMatchExpr, List<byte[]>> _required = new(ReferenceEqualityComparer.Instance);
 
-        internal Column(DType dtype) => _keyed = KeyLayout.TryOf(dtype, out _layout);
+        internal Column(DType dtype, bool trigrams, bool fold)
+        {
+            _keyed = !trigrams && KeyLayout.TryOf(dtype, out _layout);
+            _fold = fold;
+        }
 
         internal List<Level> Levels { get; } = [];
+
+        /// <summary>The trigrams a predicate requires, folded as this column's filters were, computed once.</summary>
+        internal List<byte[]> Required(StringMatchExpr match)
+        {
+            if (!_required.TryGetValue(match, out List<byte[]>? trigrams))
+            {
+                trigrams = Trigrams.Required(match, _fold);
+                _required[match] = trigrams;
+            }
+
+            return trigrams;
+        }
 
         /// <summary>
         /// The hash (or the two, for a float zero) of <paramref name="value"/> as this column stores

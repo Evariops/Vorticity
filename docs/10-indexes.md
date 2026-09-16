@@ -302,6 +302,16 @@ distinct trigram count (bounded by 2²⁴). This is discussion #8682's trigram i
 form. Superset only: the pattern is always re-evaluated on survivors. **Prerequisite**: `LIKE`,
 `StartsWith` and `Contains` in `VortexExpr` and `FilterEvaluator` (§6.6).
 
+**As delivered (step 12d).** The Bloom builder in trigram mode: every byte trigram of every valid
+text value hashed into the block's set, sized like §5.1 from the exact distinct trigram count.
+`IndexPolicy.NgramBloom(caseInsensitive)` folds **ASCII** bytes on both sides (`options` field 9);
+a folded index still answers a case-*sensitive* predicate, since a value containing `Foo` contains
+`foo` once folded, so the probe folds what it looks for. `ILIKE` itself does not exist in the
+expression model, so the option buys a smaller filter and nothing else yet. `StartsWith`,
+`Contains` and `LIKE` all probe it: a predicate requires the trigrams of each literal run between
+its unescaped wildcards (`BytePattern.LiteralRuns`), and one absent trigram kills the block. Binary
+columns are indexed as well as utf8.
+
 ### 5.3 `vorticity.dict.probe.v1` — the dictionary is already an exact index
 
 When the writer dictionary-encoded a chunk, the chunk's values child *is* the set of distinct
@@ -403,6 +413,12 @@ queries at a fraction of the size, and this kind is measured before it is implem
 granularity over text columns. Bigger than the Bloom (one postings list per distinct trigram) and
 strictly more selective; the usual choice is one or the other per column. Same prerequisite on
 the expression model.
+
+**As delivered (step 12d).** The postings builder in trigram mode, `IndexPolicy.NgramPostings`:
+its keys are trigrams typed `binary` — a trigram may cut a UTF-8 code point — with the same
+segments, the same probe, and the entry's `options` field 3 for the folding. Exact at block
+granularity, it keeps live exactly the blocks whose rows together hold every required trigram; the
+tests assert that count.
 
 ### 6.5 Composite keys through the row encoding
 

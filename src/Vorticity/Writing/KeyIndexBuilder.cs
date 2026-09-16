@@ -46,6 +46,8 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     private readonly KeyLayout _layout;
     private readonly bool _utf8;
     private readonly int _segmentEntries;
+    private readonly bool _trigrams;
+    private readonly bool _fold;
     private ChunkKeys _table = new ChunkKeys();
     private List<int> _lastBlock = [];
     private long _row;
@@ -63,8 +65,32 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         _segmentEntries = segmentEntries;
     }
 
+    /// <summary>
+    /// A trigram postings builder (10 §6.4): the keys are every byte trigram of every value, typed
+    /// <c>binary</c> because a trigram may cut a UTF-8 code point in two.
+    /// </summary>
+    /// <param name="fold">Whether trigrams are ASCII-lower-cased.</param>
+    /// <param name="segmentEntries">The most entries a segment holds.</param>
+    internal static KeyIndexBuilder ForTrigrams(bool fold, int segmentEntries) =>
+        new KeyIndexBuilder(fold, segmentEntries);
+
+    private KeyIndexBuilder(bool fold, int segmentEntries)
+    {
+        _rows = false;
+        _layout = new KeyLayout(KeyShape.Bytes, 0, default);
+        _utf8 = false;
+        _segmentEntries = segmentEntries;
+        _trigrams = true;
+        _fold = fold;
+    }
+
     /// <summary>The kind this builder writes.</summary>
-    internal string Kind => _rows ? IndexKinds.SortedRuns : IndexKinds.PostingsBlocks;
+    internal string Kind => _trigrams
+        ? IndexKinds.PostingsNgram3
+        : _rows ? IndexKinds.SortedRuns : IndexKinds.PostingsBlocks;
+
+    /// <summary>Whether trigrams are ASCII-lower-cased.</summary>
+    internal bool CaseInsensitive => _fold;
 
     /// <summary>Every run closed, in block order.</summary>
     internal List<KeyRun> Runs { get; } = [];
@@ -127,6 +153,31 @@ internal sealed class KeyIndexBuilder : IndexBuilder
 
         bool allValid = own.AllValid && wrapper.AllValid;
         int width = _layout.Width;
+        if (_trigrams)
+        {
+            if (node.Kind != CanonicalKind.VarBinView)
+            {
+                Abandon($"a trigram index needs text, and this column is {node.Kind}");
+                return;
+            }
+
+            Span<byte> trigram = stackalloc byte[Trigrams.Length];
+            for (int row = start; row < start + count; row++)
+            {
+                if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
+                {
+                    ReadOnlySpan<byte> value = LiteralReader.ViewAt(node, row);
+                    for (int i = 0; i + Trigrams.Length <= value.Length; i++)
+                    {
+                        Trigrams.Copy(value.Slice(i, Trigrams.Length), _fold, trigram);
+                        Note(trigram, first + row - start);
+                    }
+                }
+            }
+
+            return;
+        }
+
         switch (node.Kind)
         {
             case CanonicalKind.Primitive:
