@@ -51,31 +51,57 @@ public sealed class ScanAllocationTests
         VortexExpr everything = Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(0L)));
         VortexExpr seventeen = Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_000_000L + (3 * 17_408L))));
 
-        long few = await MeasureCount(file, seventeen, 17 * 1024L);
-        long all = await MeasureCount(file, everything, 64 * 1024L);
+        (long few, long all) = await MeasureCounts(file, seventeen, everything);
 
-        Assert.Equal(few, all);
+        // NOT AN EQUALITY, AND THE SLACK CANNOT HIDE THE DEFECT IT IS THERE TO CATCH. The two runs
+        // differ by 47 decoded blocks; the smallest object the runtime allocates is 24 bytes, so a
+        // per-block allocation of any kind would show as 1 128 bytes or more. What is left under
+        // that is the shared pool's own state -- a rent that hits in one run and misses in the
+        // other -- which the interleaving below already suppresses and which an exact equality
+        // made this test fail about one full-suite run in three.
+        long drift = Math.Abs(few - all);
+        Assert.True(
+            drift <= 256,
+            string.Create(
+                CultureInfo.InvariantCulture,
+                $"47 extra decoded blocks moved the allocation by {drift} bytes ({few} against {all})"));
     }
 
-    private static async Task<long> MeasureCount(VortexFile file, VortexExpr filter, long expected)
+    /// <summary>
+    /// The two counts, measured ALTERNATELY so that the shared pool is in the same state for both,
+    /// then floored over several rounds.
+    /// </summary>
+    private static async Task<(long Few, long All)> MeasureCounts(
+        VortexFile file, VortexExpr seventeen, VortexExpr everything)
     {
+        const long fewRows = 17 * 1024L;
+        const long allRows = 64 * 1024L;
         for (int warm = 0; warm < 3; warm++)
         {
-            Assert.Equal(expected, await Count(file, filter));
+            Assert.Equal(fewRows, await Count(file, seventeen));
+            Assert.Equal(allRows, await Count(file, everything));
         }
 
-        List<long> runs = [];
+        List<long> few = [];
+        List<long> all = [];
         for (int i = 0; i < 5; i++)
         {
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            long counted = await Count(file, filter);
-            long delta = GC.GetAllocatedBytesForCurrentThread() - before;
-            Assert.Equal(expected, counted);
-            runs.Add(delta);
+            few.Add(await Measure(file, seventeen, fewRows));
+            all.Add(await Measure(file, everything, allRows));
         }
 
-        runs.Sort();
-        return runs[0];
+        few.Sort();
+        all.Sort();
+        return (few[0], all[0]);
+    }
+
+    private static async Task<long> Measure(VortexFile file, VortexExpr filter, long expected)
+    {
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        long counted = await Count(file, filter);
+        long delta = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.Equal(expected, counted);
+        return delta;
     }
 
     private static ValueTask<long> Count(VortexFile file, VortexExpr filter) =>

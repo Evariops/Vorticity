@@ -24,6 +24,7 @@ using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Types;
@@ -1402,6 +1403,86 @@ internal static class BlockStatsPass
         stats.Repeats |= repeats;
     }
 
+    /// <summary>
+    /// The extremes of a range, four to sixteen lanes at a time (docs/11-write-strategy.md §4.1,
+    /// the first row of its table).
+    /// </summary>
+    /// <param name="values">The range; every element counts, so the caller owes it all-valid.</param>
+    /// <param name="min">The smallest element.</param>
+    /// <param name="max">The largest.</param>
+    /// <remarks>
+    /// TWO ACCUMULATORS PER EXTREME, because the loop is latency-bound and not throughput-bound: a
+    /// single running vector makes every iteration wait for the previous one's `Min`, and the
+    /// second pair hides that behind the load. The horizontal reduce runs once per range, not once
+    /// per iteration, and the tail is the scalar twin this method keeps -- which is also the whole
+    /// method under <c>DOTNET_EnableHWIntrinsic=0</c>, where
+    /// <see cref="Vector128.IsHardwareAccelerated"/> is false and the suite runs it (§4).
+    /// <para>
+    /// A 64-bit lane has no NEON minimum and is emulated as a compare and a select, so the gain
+    /// there is smaller than on the narrower widths; it is still a gain, and writing the kernel
+    /// per width to say so would buy nothing the measurement does not.
+    /// </para>
+    /// </remarks>
+    private static void Bounds<T>(ReadOnlySpan<T> values, out T min, out T max)
+        where T : unmanaged, INumber<T>, IMinMaxValue<T>
+    {
+        min = T.MaxValue;
+        max = T.MinValue;
+        int i = 0;
+        int lanes = Vector128<T>.IsSupported ? Vector128<T>.Count : 0;
+        if (Vector128.IsHardwareAccelerated && lanes > 0 && values.Length >= lanes * 2)
+        {
+            ref T head = ref MemoryMarshal.GetReference(values);
+            Vector128<T> lowA = Vector128.LoadUnsafe(ref head);
+            Vector128<T> lowB = Vector128.LoadUnsafe(ref head, (nuint)lanes);
+            Vector128<T> highA = lowA;
+            Vector128<T> highB = lowB;
+
+            int step = lanes * 2;
+            int last = values.Length - step;
+            for (i = step; i <= last; i += step)
+            {
+                Vector128<T> a = Vector128.LoadUnsafe(ref head, (nuint)i);
+                Vector128<T> b = Vector128.LoadUnsafe(ref head, (nuint)(i + lanes));
+                lowA = Vector128.Min(lowA, a);
+                lowB = Vector128.Min(lowB, b);
+                highA = Vector128.Max(highA, a);
+                highB = Vector128.Max(highB, b);
+            }
+
+            Vector128<T> low = Vector128.Min(lowA, lowB);
+            Vector128<T> high = Vector128.Max(highA, highB);
+            for (int lane = 0; lane < lanes; lane++)
+            {
+                T small = low.GetElement(lane);
+                T large = high.GetElement(lane);
+                if (small < min)
+                {
+                    min = small;
+                }
+
+                if (large > max)
+                {
+                    max = large;
+                }
+            }
+        }
+
+        for (; i < values.Length; i++)
+        {
+            T value = values[i];
+            if (value < min)
+            {
+                min = value;
+            }
+
+            if (value > max)
+            {
+                max = value;
+            }
+        }
+    }
+
     private static void Signed<T>(
         ReadOnlySpan<byte> bytes, in ValidityMask mask, int start, int count, ref BlockStats stats,
         Span<int> widths)
@@ -1421,20 +1502,7 @@ internal static class BlockStatsPass
         // already in L1, and only while a plan will read them.
         if (mask.AllValid)
         {
-            for (int i = 0; i < values.Length; i++)
-            {
-                T value = values[i];
-                if (value < min)
-                {
-                    min = value;
-                }
-
-                if (value > max)
-                {
-                    max = value;
-                }
-            }
-
+            Bounds(values, out min, out max);
             stats.MergeSigned(long.CreateTruncating(min), long.CreateTruncating(max));
             if (!widths.IsEmpty)
             {
@@ -1646,20 +1714,7 @@ internal static class BlockStatsPass
         // over the range already in L1, and only when a plan will read them.
         if (mask.AllValid)
         {
-            for (int i = 0; i < values.Length; i++)
-            {
-                T value = values[i];
-                if (value < min)
-                {
-                    min = value;
-                }
-
-                if (value > max)
-                {
-                    max = value;
-                }
-            }
-
+            Bounds(values, out min, out max);
             stats.MergeUnsigned(ulong.CreateTruncating(min), ulong.CreateTruncating(max));
             if (!widths.IsEmpty)
             {
