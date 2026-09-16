@@ -404,7 +404,10 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// iteration's kernels, and an extension orders as its storage type -- a timestamp as its
     /// integer.
     /// </remarks>
-    private static bool TryKeyKind(DType dtype, out FilterLiteralKind kind)
+    /// <param name="dtype">The column's dtype.</param>
+    /// <param name="kind">Its comparison domain.</param>
+    /// <returns>Whether it has one.</returns>
+    internal static bool TryKeyKind(DType dtype, out FilterLiteralKind kind)
     {
         while (dtype.Kind == DTypeKind.Extension)
         {

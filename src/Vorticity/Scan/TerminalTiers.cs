@@ -15,8 +15,8 @@ internal enum TerminalTiers
     None = 0,
 
     /// <summary>
-    /// An exact index covers the predicate and the count is the sum of its slices. No source
-    /// provides one yet; the flag is here so that the switch exists when one does.
+    /// An exact source -- a sorted column or sorted runs -- covers the predicate: the count is the
+    /// sum of its slices, an extreme a seek to one end (<c>Keys/ExactCover</c>).
     /// </summary>
     ExactCover = 1,
 

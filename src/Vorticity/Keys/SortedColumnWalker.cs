@@ -1,0 +1,156 @@
+// A sorted column walked as one contiguous run (docs/12-index-reads.md §4.3, "as delivered").
+//
+// THE MERGE IS DEGENERATE HERE, and that is the whole reason this source comes first. The entries
+// are the column's non-null rows, contiguous and already in key order, so a step is an addition, a
+// rank is a subtraction, and a direction flip costs nothing: `Prev` after `Next` is `i - 1`. The
+// re-seek §4.2 charges for a flip is owed by the sorted runs, not by this source.
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+using Vorticity.Expressions;
+
+namespace Vorticity.Keys;
+
+/// <summary>A position in a sorted column's entries.</summary>
+internal sealed class SortedColumnWalker : KeySource
+{
+    private readonly SortedColumnSource _source;
+    private long _entry = -1;
+
+    internal SortedColumnWalker(SortedColumnSource source) => _source = source;
+
+    internal override FilterLiteralKind KeyKind => _source.KeyKind;
+
+    internal override long? EntryCount => _source.EntryCount;
+
+    internal override int Runs => 1;
+
+    internal override bool IsValid => _entry >= 0;
+
+    internal override FilterLiteral Key => _source.LoadedKey(_entry);
+
+    internal override ReadOnlySpan<byte> KeyBytes => _source.BytesAt(_entry);
+
+    internal override long Row => _source.RowOf(_entry);
+
+    internal override async ValueTask<bool> SeekAsync(
+        FilterLiteral key, SeekOp op, CancellationToken cancellationToken)
+    {
+        long at;
+        switch (op)
+        {
+            case SeekOp.AtOrAfter:
+                at = await _source.LowerBoundAsync(key, cancellationToken).ConfigureAwait(false);
+                break;
+            case SeekOp.After:
+                at = await _source.UpperBoundAsync(key, cancellationToken).ConfigureAwait(false);
+                break;
+            case SeekOp.AtOrBefore:
+                at = await _source.UpperBoundAsync(key, cancellationToken).ConfigureAwait(false) - 1;
+                break;
+            case SeekOp.Before:
+                at = await _source.LowerBoundAsync(key, cancellationToken).ConfigureAwait(false) - 1;
+                break;
+            default:
+                at = await _source.LowerBoundAsync(key, cancellationToken).ConfigureAwait(false);
+                if (at >= _source.EntryCount)
+                {
+                    Invalidate();
+                    return false;
+                }
+
+                // `lower_bound` lands on the first entry NOT below the key, which is the key
+                // itself when it is present and its successor when it is not.
+                await _source.EnsureEntryAsync(at, cancellationToken).ConfigureAwait(false);
+                if (SortedColumnSource.Compare(_source.LoadedKey(at), key) != 0)
+                {
+                    Invalidate();
+                    return false;
+                }
+
+                break;
+        }
+
+        return await PositionAsync(at, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal override ValueTask<bool> SeekFirstAsync(CancellationToken cancellationToken) =>
+        PositionAsync(0, cancellationToken);
+
+    internal override ValueTask<bool> SeekLastAsync(CancellationToken cancellationToken) =>
+        PositionAsync(_source.EntryCount - 1, cancellationToken);
+
+    internal override ValueTask<bool> NextAsync(CancellationToken cancellationToken) =>
+        PositionAsync(_entry + 1, cancellationToken);
+
+    internal override ValueTask<bool> PrevAsync(CancellationToken cancellationToken) =>
+        PositionAsync(_entry - 1, cancellationToken);
+
+    internal override async ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken)
+    {
+        long at = await _source.UpperBoundAsync(Key, cancellationToken).ConfigureAwait(false);
+        return await PositionAsync(at, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal override async ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken)
+    {
+        long at = await _source.LowerBoundAsync(Key, cancellationToken).ConfigureAwait(false) - 1;
+        return await PositionAsync(at, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal override ValueTask<long> RankAsync(FilterLiteral key, CancellationToken cancellationToken) =>
+        BoundAsync(key, upper: false, cancellationToken);
+
+    internal override ValueTask<long> UpperRankAsync(FilterLiteral key, CancellationToken cancellationToken) =>
+        BoundAsync(key, upper: true, cancellationToken);
+
+    private async ValueTask<long> BoundAsync(FilterLiteral key, bool upper, CancellationToken cancellationToken)
+    {
+        long rank = upper
+            ? await _source.UpperBoundAsync(key, cancellationToken).ConfigureAwait(false)
+            : await _source.LowerBoundAsync(key, cancellationToken).ConfigureAwait(false);
+
+        // The bisection may have decoded another zone; the position is put back.
+        if (IsValid)
+        {
+            await _source.EnsureEntryAsync(_entry, cancellationToken).ConfigureAwait(false);
+        }
+
+        return rank;
+    }
+
+    internal override ValueTask<bool> SeekRankAsync(long rank, CancellationToken cancellationToken) =>
+        PositionAsync(rank, cancellationToken);
+
+    internal override async ValueTask<long> KeyCountAsync(CancellationToken cancellationToken)
+    {
+        FilterLiteral key = Key;
+        long low = await _source.LowerBoundAsync(key, cancellationToken).ConfigureAwait(false);
+        long high = await _source.UpperBoundAsync(key, cancellationToken).ConfigureAwait(false);
+
+        // The positioning the count consumed is put back, so a caller can count and then step.
+        await _source.EnsureEntryAsync(_entry, cancellationToken).ConfigureAwait(false);
+        return high - low;
+    }
+
+    internal override void Invalidate() => _entry = -1;
+
+    public override ValueTask DisposeAsync()
+    {
+        _entry = -1;
+        return _source.DisposeAsync();
+    }
+
+    private async ValueTask<bool> PositionAsync(long entry, CancellationToken cancellationToken)
+    {
+        if (entry < 0 || entry >= _source.EntryCount)
+        {
+            Invalidate();
+            return false;
+        }
+
+        await _source.EnsureEntryAsync(entry, cancellationToken).ConfigureAwait(false);
+        _entry = entry;
+        return true;
+    }
+}

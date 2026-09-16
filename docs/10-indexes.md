@@ -430,7 +430,9 @@ range can hold a literal of the filter, in one coalesced read; a run's blocks st
 every encodable literal and are lifted where a lookup places it, or wholesale when a lookup fails.
 Being exact at block granularity, it leaves live exactly the blocks that hold the value — the tests
 assert the equality, not a bound. The row-selection half of §6.6 (an exact index delivering its rows
-without re-evaluating the predicate) is the `SortedRuns` source's, step 13.
+without re-evaluating the predicate) is the `SortedRuns` source's, step 13 — delivered as
+[12-index-reads.md](12-index-reads.md) §9 describes: a cover of at most a batch of rows is read as
+a take and the predicate is not evaluated; a larger one is pruned at block granularity as here.
 
 ### 6.3 `vorticity.hash.rows.v1` — hash → rows, superset
 

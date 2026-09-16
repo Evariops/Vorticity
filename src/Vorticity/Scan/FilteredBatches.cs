@@ -25,6 +25,8 @@ using System.Threading.Tasks;
 using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
+using Vorticity.File;
+using Vorticity.Keys;
 
 namespace Vorticity.Scan;
 
@@ -36,18 +38,22 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
     private readonly bool _prune;
     private readonly bool _indexes;
 
-    internal FilteredBatches(BatchAsyncEnumerable inner, VortexExpr? filter, bool prune, bool indexes = true)
+    private readonly RowRange _rows;
+
+    internal FilteredBatches(
+        BatchAsyncEnumerable inner, VortexExpr? filter, bool prune, bool indexes = true, RowRange? rows = null)
     {
         _inner = inner;
         _filter = filter;
         _prune = prune;
         _indexes = indexes;
+        _rows = rows ?? new RowRange(0, inner.File.RowCount);
     }
 
     /// <inheritdoc/>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         CancellationToken cancellationToken = default) =>
-        new Enumerator(_inner, _filter, _prune, _indexes, cancellationToken);
+        new Enumerator(_inner, _filter, _prune, _indexes, _rows, cancellationToken);
 
     private sealed class Enumerator : IAsyncEnumerator<RecordBatch>
     {
@@ -55,17 +61,52 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         private readonly VortexExpr? _filter;
         private readonly bool _prune;
         private readonly bool _indexes;
+        private readonly RowRange _rows;
         private readonly CancellationToken _token;
         private IAsyncEnumerator<RecordBatch>? _inner;
 
         internal Enumerator(
-            BatchAsyncEnumerable source, VortexExpr? filter, bool prune, bool indexes, CancellationToken token)
+            BatchAsyncEnumerable source, VortexExpr? filter, bool prune, bool indexes, RowRange rows,
+            CancellationToken token)
         {
             _source = source;
             _filter = filter;
             _prune = prune;
             _indexes = indexes;
+            _rows = rows;
             _token = token;
+        }
+
+        /// <summary>
+        /// The rows an exact source proves the filter selects, when there is one and they fit a
+        /// batch (docs/10-indexes.md §6.6): the scan then reads them and evaluates nothing.
+        /// </summary>
+        private async ValueTask<RowSelection?> ProvenAsync()
+        {
+            if (!_prune || _filter is null || _source.HasTake)
+            {
+                return null;
+            }
+
+            ExactCover? cover = await ExactCover
+                .TryCreateAsync(_source.File, _filter, _indexes, _token)
+                .ConfigureAwait(false);
+            if (cover is null)
+            {
+                return null;
+            }
+
+            try
+            {
+                long[]? rows = await cover
+                    .RowsAsync(_rows, SplitPlan.NaturalBatchRows(_source.Tree), _token)
+                    .ConfigureAwait(false);
+                return rows is null ? null : RowSelection.Create(rows, _source.File.RowCount);
+            }
+            finally
+            {
+                await cover.DisposeAsync().ConfigureAwait(false);
+            }
         }
 
         public RecordBatch Current =>
@@ -73,6 +114,11 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
 
         public async ValueTask<bool> MoveNextAsync()
         {
+            if (_inner is null && await ProvenAsync().ConfigureAwait(false) is { } proven)
+            {
+                _inner = _source.GetAsyncEnumerator(live: null, proven, _token);
+            }
+
             if (_inner is null)
             {
                 // One read of every zone map the filter can use, before the first batch, and one

@@ -320,7 +320,7 @@ public sealed class ScanBuilder
         // all it holds still produces a batch, but one gathered down to nothing must not.
         return _filter is null && _take is null
             ? batches
-            : new FilteredBatches(batches, _filter, _prune, _indexes);
+            : new FilteredBatches(batches, _filter, _prune, _indexes, rows);
     }
 
     /// <summary>Hands the scan a sink it adds its counters to as it runs (docs/11 §6.4).</summary>

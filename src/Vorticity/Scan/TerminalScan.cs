@@ -25,6 +25,7 @@ using Vorticity.Arrays;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.Keys;
 using Vorticity.Layouts;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
@@ -99,6 +100,11 @@ internal sealed class TerminalScan
             return 0;
         }
 
+        if (await TryExactCountAsync(cancellationToken).ConfigureAwait(false) is long exact)
+        {
+            return exact;
+        }
+
         SplitPlan plan = SplitPlan.Compute(_tree, _rows, in _mask, _cap);
         ZonePruningPlan.PruningPlan pruning = _prune
             ? await ZonePruningPlan
@@ -155,6 +161,62 @@ internal sealed class TerminalScan
         }
 
         return total;
+    }
+
+    /// <summary>
+    /// The first tier (docs/12 §5.2): an exact source covers the predicate, and the count is the
+    /// sum of its slices -- or, under <c>Rows</c> or <c>Take</c>, the slices' rows walked and
+    /// intersected, up to a batch of them. Null when no source covers it.
+    /// </summary>
+    private async ValueTask<long?> TryExactCountAsync(CancellationToken cancellationToken)
+    {
+        if ((_tiers & TerminalTiers.ExactCover) == 0 || !_prune || _filter is null)
+        {
+            return null;
+        }
+
+        ExactCover? cover = await ExactCover
+            .TryCreateAsync(_file, _filter, _indexes, cancellationToken)
+            .ConfigureAwait(false);
+        if (cover is null)
+        {
+            return null;
+        }
+
+        long[]? rows;
+        try
+        {
+            if (_wholeFile)
+            {
+                return cover.Count;
+            }
+
+            rows = await cover
+                .RowsAsync(_rows, SplitPlan.NaturalBatchRows(_tree), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            await cover.DisposeAsync().ConfigureAwait(false);
+        }
+
+        if (rows is null)
+        {
+            return null;
+        }
+
+        if (_take is null)
+        {
+            return rows.Length;
+        }
+
+        long count = 0;
+        foreach (long row in rows)
+        {
+            count += _take.CountIn(new RowRange(row, row + 1));
+        }
+
+        return count;
     }
 
     /// <summary>
@@ -242,7 +304,8 @@ internal sealed class TerminalScan
     /// candidate -- the true extreme is at or beyond it -- decoded only when it could still beat
     /// the best, cheapest first, which is usually one decode. Everything else is decoded: the
     /// filter evaluated, the extreme found among the rows it keeps, one split of memory at a
-    /// time. An ordered source (§5.3's third resolution) waits for step 11.
+    /// time. Before the zone bounds, an ordered source on the same column that covers the whole
+    /// predicate (§5.3's third resolution) answers with a seek to either end of its slices.
     /// </remarks>
     internal async ValueTask<FilterLiteral> ExtremeAsync(
         string path, bool wantMin, CancellationToken cancellationToken)
@@ -256,6 +319,34 @@ internal sealed class TerminalScan
             TryFileStatistic(path, wantMin, out FilterLiteral statistic))
         {
             return statistic;
+        }
+
+        // §5.3's third resolution: a predicate that an ordered source on the same column covers
+        // exactly has its extremes at the two ends of its slices.
+        if (_filter is not null && _wholeFile && _prune && (_tiers & TerminalTiers.ExactCover) != 0)
+        {
+            ExactCover? cover = await ExactCover
+                .TryCreateAsync(_file, _filter, _indexes, cancellationToken)
+                .ConfigureAwait(false);
+            if (cover is not null)
+            {
+                try
+                {
+                    if (string.Equals(cover.Path, path, StringComparison.Ordinal))
+                    {
+                        (bool answered, FilterLiteral extreme) =
+                            await cover.ExtremeAsync(wantMin, cancellationToken).ConfigureAwait(false);
+                        if (answered)
+                        {
+                            return extreme;
+                        }
+                    }
+                }
+                finally
+                {
+                    await cover.DisposeAsync().ConfigureAwait(false);
+                }
+            }
         }
 
         FieldExpr field = Expr.Field(path);

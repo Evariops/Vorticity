@@ -8,6 +8,10 @@ namespace Vorticity.File;
 public sealed class VortexReadOptions
 {
     private readonly long _maxDecompressedSize = VortexLimits.DefaultMaxDecompressedSize;
+    private readonly long _indexCacheBytes = DefaultIndexCacheBytes;
+
+    /// <summary>The default of <see cref="IndexCacheBytes"/>: 64 MiB.</summary>
+    public const long DefaultIndexCacheBytes = 64L << 20;
 
     /// <summary>The defaults: 256 MiB decompression ceiling, no statistics verification.</summary>
     public static VortexReadOptions Default { get; } = new VortexReadOptions();
@@ -24,6 +28,27 @@ public sealed class VortexReadOptions
         {
             ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
             _maxDecompressedSize = value;
+        }
+    }
+
+    /// <summary>
+    /// The bytes of decoded index runs one open file keeps for its cursors, least recently used
+    /// first out (docs/12-index-reads.md §9). Default <see cref="DefaultIndexCacheBytes"/>;
+    /// <c>0</c> keeps nothing, and every seek then reads what it needs.
+    /// </summary>
+    /// <remarks>
+    /// A cap in the sense of docs/08-semantics.md §6, and a guess until measured on real runs
+    /// (docs/12 §13): a run's keys can be a chunk's rows, so an unbounded cache would be bounded by
+    /// the file. A run larger than the whole cap is decoded, used and not kept.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
+    public long IndexCacheBytes
+    {
+        get => _indexCacheBytes;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _indexCacheBytes = value;
         }
     }
 

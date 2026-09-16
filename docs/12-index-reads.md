@@ -668,6 +668,39 @@ What the implementation adds, so that its shape is decided here rather than disc
 
 Nothing in the list touches a decoder, a layout reader, the writer, or a byte of the format.
 
+**As delivered (step 13, the `SortedRuns` source).** The source/merge split is folded into one
+internal `KeySource` per source, because the two sources that deliver rows are too unlike for it
+to pay: `SortedColumnWalker` is the contiguous walk of step 11b, and `SortedRunsSource` is the
+merge. The merge has **one primitive**, "the first position of a run at or after `(key, row)`",
+and everything is that primitive with a row of `long.MinValue`, `long.MaxValue` or a real row:
+the five operators, the re-seek of a direction flip (forward past `(k, r)` is `(k, r + 1)`,
+backward before it is `(k, r)`), `rank` as the sum over runs, `KeyCount`, and `select`, which
+bisects each run in turn with the entry's rank computed against the others — `O(r² log² n)`,
+waiting for a measurement to ask for better. A run whose `[min, max]` excludes the key costs no
+read; inside one, only the segment the search lands in is decoded (keys, then rows relative to
+the run's first row), copied out of the arena into a `RunSegment` and kept in the file's
+`IndexRunCache`, an LRU bounded by `VortexReadOptions.IndexCacheBytes` (64 MiB by default, `0`
+keeps nothing) with inserts that lose a race returning the first. The order is the total one of
+§4.4, so the two zeros are two keys and the NaNs the two ends. A run that does not make sense —
+a segment table that does not match its payload, bounds of the wrong width, more entries than its
+blocks have rows — refuses the whole source, since a walk missing a run would be wrong rather
+than slow; a payload that decodes to the wrong shape or names a row outside its run is a
+`VortexFormatException`. `KeyCursorBuilder` takes the sorted column first and the runs second and
+says why in `Explain`; `KeyCursor` keeps the argument rules and the lifetime and delegates the
+walk.
+
+**The exact cover** (§5.1, §5.2's first tier, §5.3's third resolution, and 10 §6.6) is
+`Keys/ExactCover`: a predicate whose every leaf is a comparison, `IN` or `StartsWith` on one
+column that an exact source serves becomes disjoint slices of rank space — `AND` and `OR` their
+intersection and union — computed without reading a data segment. The IEEE meaning is built into
+the bounds: `x = 0.0` runs from `−0.0` to `+0.0`, a range stops short of the NaNs, a NaN literal
+selects nothing, and `!=` on a float declines. `CountAsync` is the sum of the slices, `AnyAsync`
+its sign, `MinAsync` / `MaxAsync` of the covered column a seek to either end; under `Rows` or
+`Take` the slices' rows are walked and intersected, up to a batch of them. A filtered scan whose
+cover holds at most a batch's worth of rows reads them as a take and evaluates nothing — the
+enumerator only trims the filter's columns — which is 10 §6.6's row selection; past that, the
+block-mask chain of step 12c prunes as before.
+
 ---
 
 ## 10. Costs, honestly

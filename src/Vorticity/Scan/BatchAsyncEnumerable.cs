@@ -148,6 +148,22 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
             _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, live, _metrics,
             cancellationToken);
 
+    /// <summary>
+    /// Starts a scan whose filter an exact index has already answered: it reads exactly the rows
+    /// of <paramref name="proven"/> and evaluates nothing (docs/10-indexes.md §6.6).
+    /// </summary>
+    /// <param name="live">The mask of live blocks, or null.</param>
+    /// <param name="proven">The rows the filter selects.</param>
+    /// <param name="cancellationToken">Cancels at batch boundaries.</param>
+    internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
+        BlockMask? live, RowSelection proven, CancellationToken cancellationToken) =>
+        new BatchAsyncEnumerator(
+            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, proven, live, _metrics,
+            cancellationToken, filterProven: true);
+
+    /// <summary>Whether the scan already has a take of the caller's.</summary>
+    internal bool HasTake => _take is not null;
+
     /// <summary>The file this scan reads, for the pruning pass that runs before the first batch.</summary>
     internal VortexFile File => _file;
 
@@ -179,6 +195,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly FieldMask _keep;
     private readonly DType _schema;
     private readonly VortexExpr? _filter;
+    private readonly bool _filterProven;
     private readonly RowSelection? _take;
     private readonly BlockMask? _live;
     private readonly ScanMetrics? _metrics;
@@ -208,8 +225,10 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         RowSelection? take,
         BlockMask? live,
         ScanMetrics? metrics,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool filterProven = false)
     {
+        _filterProven = filterProven;
         _tree = tree;
         _take = take;
         _live = live;
@@ -464,6 +483,12 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         if (_filter is null)
         {
             return root;
+        }
+
+        if (_filterProven)
+        {
+            // Every row the take gathered is one the index proved: only the trim is left.
+            return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
         }
 
         int rows = context.Canonical.GetNode(root).Length;

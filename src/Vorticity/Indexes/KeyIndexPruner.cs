@@ -340,7 +340,13 @@ internal sealed class KeyIndexPruner
         }
     }
 
-    private static bool TryResolve(DType schema, IReadOnlyList<uint> fields, out string path, out DType dtype)
+    /// <summary>The dotted path and dtype an entry's field indices name, or false when they name nothing.</summary>
+    /// <param name="schema">The file's dtype.</param>
+    /// <param name="fields">The entry's column path.</param>
+    /// <param name="path">The dotted path.</param>
+    /// <param name="dtype">The column's dtype.</param>
+    /// <returns>Whether the indices name a column.</returns>
+    internal static bool TryResolve(DType schema, IReadOnlyList<uint> fields, out string path, out DType dtype)
     {
         path = string.Empty;
         dtype = schema;

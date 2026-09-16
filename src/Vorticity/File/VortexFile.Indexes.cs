@@ -21,6 +21,26 @@ public sealed partial class VortexFile
     private sealed record IndexState(IndexDirectory? Directory, string? Refusal);
 
     private IndexState? _indexState;
+    private IndexRunCache? _runCache;
+
+    /// <summary>
+    /// The decoded runs this file keeps for its cursors, created on first use and bounded by
+    /// <see cref="VortexReadOptions.IndexCacheBytes"/>.
+    /// </summary>
+    internal IndexRunCache RunCache
+    {
+        get
+        {
+            IndexRunCache? cache = _runCache;
+            if (cache is null)
+            {
+                Interlocked.CompareExchange(ref _runCache, new IndexRunCache(ReadOptions.IndexCacheBytes), null);
+                cache = _runCache!;
+            }
+
+            return cache;
+        }
+    }
 
     /// <summary>Whether the postscript names an index directory at all.</summary>
     public bool HasIndexDirectory => TryGetMetadataIndex(IndexDirectory.MetadataKeyUtf8, out _);
