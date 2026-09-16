@@ -435,6 +435,27 @@ a table of their own, sized by their own judgment.
 `Distinct` is a property of the cursor and not a terminal on the scan because it is an ordered walk
 with an early exit, and a terminal returning a list would buffer it.
 
+**As delivered (step 15).** A `Distinct()` cursor steps by `NextKey` and `PrevKey`, and a backward
+landing (`PrevAsync`, `SeekLastAsync`, `AtOrBefore`, `Before`) is moved to its key's first entry,
+so `Row` is always the key's first occurrence on a source with rows. The choice for a distinct walk
+is `SortedColumn`, `Postings`, `Dictionary`, `SortedRuns`; for rows it stays `SortedColumn`,
+`SortedRuns`, and the key-only sources are rejected by name ("only a Distinct() cursor takes
+them"). A key-only source forced on a cursor without `Distinct()` is an
+`InvalidOperationException`; a distinct walk with no source is refused naming
+`IndexPolicy.Postings`. The two key-only sources are the sorted-runs merge with the run's ordinal
+standing in for the row — keys are unique within a run, so `(key, ordinal)` is still a total order —
+and `HasRows` false: `Row`, `RankAsync`, `SeekRankAsync` and `KeyCountAsync` throw
+`InvalidOperationException`, and `EntryCount` is null, since a key in two chunks is two entries.
+`Postings` reads only the keys array of each segment (the offsets and blocks are the pruner's), and
+a walk over it reads no data segment — the test holds every request against the footer's segment
+specs. `Dictionary` finds the column's flat chunks under its struct field (through zoned wrappers),
+reads each chunk a `dict.probe` run claims, checks its root is `vortex.dict`, decodes the values
+child alone, drops the nulls, sorts in the total order and deduplicates; the runs are held by the
+source rather than the run cache, since the merge needs every head from its first seek. A claimed
+chunk that is not a dictionary refuses the source, and an `Explain` that has already chosen a
+cheaper source does not open the dictionaries just to reject them. Case-folded postings
+(`ngram3` or `CaseInsensitive`) are refused: their keys are not the column's values.
+
 **As delivered (step 10c, `MinAsync` / `MaxAsync`).** `TerminalScan.ExtremeAsync` takes §5.3's
 resolutions in order, the third excepted until an ordered source exists. The file statistic
 answers when the scan is the whole file and the statistic is `Exact`, with no read. The column's

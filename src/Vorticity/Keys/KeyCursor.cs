@@ -21,20 +21,37 @@ namespace Vorticity.Keys;
 public sealed class KeyCursor : IAsyncDisposable
 {
     private readonly KeySource _source;
+    private readonly bool _distinct;
     private bool _disposed;
 
-    internal KeyCursor(KeySource source) => _source = source;
+    internal KeyCursor(KeySource source, bool distinct = false)
+    {
+        _source = source;
+        _distinct = distinct;
+    }
 
     /// <summary>Whether the cursor is positioned on an entry.</summary>
     public bool IsValid => !_disposed && _source.IsValid;
 
-    /// <summary>Whether an entry can say which file row it came from.</summary>
-    public bool HasRows => true;
+    /// <summary>
+    /// Whether an entry can say which file row it came from: false for a <c>Distinct()</c> cursor
+    /// served by postings or a dictionary, which hold keys without rows (docs/12-index-reads.md §4.3).
+    /// </summary>
+    public bool HasRows => _source.HasRows;
+
+    /// <summary>
+    /// Whether the cursor visits each key once (<c>KeyCursorBuilder.Distinct()</c>): every step is
+    /// a <see cref="NextKeyAsync"/>, and an entry is its key's first.
+    /// </summary>
+    public bool IsDistinct => _distinct;
 
     /// <summary>The column's comparison domain: what a seek key must be.</summary>
     public FilterLiteralKind KeyKind => _source.KeyKind;
 
-    /// <summary>The source's entries, when known without a walk.</summary>
+    /// <summary>
+    /// The source's entries, when known without a walk: the column's non-null rows for a source
+    /// with rows, null for a source of keys without rows, whose entries repeat a key per chunk.
+    /// </summary>
     public long? EntryCount => _source.EntryCount;
 
     /// <summary>
@@ -65,13 +82,17 @@ public sealed class KeyCursor : IAsyncDisposable
         }
     }
 
-    /// <summary>The current entry's file row, the coordinate <c>Take</c> and <c>Rows</c> accept.</summary>
-    /// <exception cref="InvalidOperationException">The cursor is not positioned.</exception>
+    /// <summary>
+    /// The current entry's file row, the coordinate <c>Take</c> and <c>Rows</c> accept; for a
+    /// <c>Distinct()</c> cursor, the key's first row.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The cursor is not positioned, or its source has no rows (<see cref="HasRows"/>).</exception>
     public long Row
     {
         get
         {
             RequireValid();
+            RequireRows(nameof(Row));
             return _source.Row;
         }
     }
@@ -104,8 +125,19 @@ public sealed class KeyCursor : IAsyncDisposable
     {
         RequireKey(key);
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return _source.SeekAsync(key, op, cancellationToken);
+        ValueTask<bool> seek = _source.SeekAsync(key, op, cancellationToken);
+        return _distinct && op is SeekOp.AtOrBefore or SeekOp.Before
+            ? FirstOfKeyAsync(seek, cancellationToken)
+            : seek;
     }
+
+    /// <summary>
+    /// A distinct cursor's backward landing, moved to its key's first entry: a backward seek lands
+    /// on a key's last one, and a distinct entry is the key's first (§4.4).
+    /// </summary>
+    private async ValueTask<bool> FirstOfKeyAsync(ValueTask<bool> landing, CancellationToken cancellationToken) =>
+        await landing.ConfigureAwait(false)
+        && await _source.SeekAsync(_source.Key, SeekOp.AtOrAfter, cancellationToken).ConfigureAwait(false);
 
     /// <summary>Positions on the smallest key's first entry.</summary>
     /// <param name="cancellationToken">Cancels the read this makes.</param>
@@ -122,19 +154,30 @@ public sealed class KeyCursor : IAsyncDisposable
     public ValueTask<bool> SeekLastAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return _source.SeekLastAsync(cancellationToken);
+        ValueTask<bool> seek = _source.SeekLastAsync(cancellationToken);
+        return _distinct ? FirstOfKeyAsync(seek, cancellationToken) : seek;
     }
 
-    /// <summary>Steps to the next entry in <c>(key, row)</c> order.</summary>
+    /// <summary>
+    /// Steps to the next entry in <c>(key, row)</c> order; on a <c>Distinct()</c> cursor, to the
+    /// next key.
+    /// </summary>
     /// <param name="cancellationToken">Cancels the read this may make.</param>
     /// <returns>Whether there was one; the cursor is invalid past the end.</returns>
     public ValueTask<bool> NextAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return _source.IsValid ? _source.NextAsync(cancellationToken) : new ValueTask<bool>(false);
+        if (!_source.IsValid)
+        {
+            return new ValueTask<bool>(false);
+        }
+
+        return _distinct ? _source.NextKeyAsync(cancellationToken) : _source.NextAsync(cancellationToken);
     }
 
-    /// <summary>Steps to the previous entry.</summary>
+    /// <summary>
+    /// Steps to the previous entry; on a <c>Distinct()</c> cursor, to the previous key's first entry.
+    /// </summary>
     /// <param name="cancellationToken">Cancels the read this may make.</param>
     /// <returns>Whether there was one; the cursor is invalid past the start.</returns>
     /// <remarks>
@@ -144,7 +187,14 @@ public sealed class KeyCursor : IAsyncDisposable
     public ValueTask<bool> PrevAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return _source.IsValid ? _source.PrevAsync(cancellationToken) : new ValueTask<bool>(false);
+        if (!_source.IsValid)
+        {
+            return new ValueTask<bool>(false);
+        }
+
+        return _distinct
+            ? FirstOfKeyAsync(_source.PrevKeyAsync(cancellationToken), cancellationToken)
+            : _source.PrevAsync(cancellationToken);
     }
 
     /// <summary>
@@ -174,10 +224,12 @@ public sealed class KeyCursor : IAsyncDisposable
     /// <returns>The rank, between zero and <see cref="EntryCount"/>.</returns>
     /// <remarks>The cursor's position does not move.</remarks>
     /// <exception cref="ArgumentException">The key is of the wrong domain, or is null.</exception>
+    /// <exception cref="InvalidOperationException">The source has no rows (<see cref="HasRows"/>), so no entry count to rank in.</exception>
     public ValueTask<long> RankAsync(FilterLiteral key, CancellationToken cancellationToken = default)
     {
         RequireKey(key);
         ObjectDisposedException.ThrowIf(_disposed, this);
+        RequireRows(nameof(RankAsync));
         return _source.RankAsync(key, cancellationToken);
     }
 
@@ -185,9 +237,11 @@ public sealed class KeyCursor : IAsyncDisposable
     /// <param name="rank">The rank.</param>
     /// <param name="cancellationToken">Cancels the reads this makes.</param>
     /// <returns>Whether the rank names an entry.</returns>
+    /// <exception cref="InvalidOperationException">The source has no rows (<see cref="HasRows"/>).</exception>
     public ValueTask<bool> SeekRankAsync(long rank, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        RequireRows(nameof(SeekRankAsync));
         return _source.SeekRankAsync(rank, cancellationToken);
     }
 
@@ -195,10 +249,11 @@ public sealed class KeyCursor : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the reads this makes.</param>
     /// <returns>The count, at least one.</returns>
     /// <remarks>The cursor's position does not move.</remarks>
-    /// <exception cref="InvalidOperationException">The cursor is not positioned.</exception>
+    /// <exception cref="InvalidOperationException">The cursor is not positioned, or its source has no rows (<see cref="HasRows"/>).</exception>
     public ValueTask<long> KeyCountAsync(CancellationToken cancellationToken = default)
     {
         RequireValid();
+        RequireRows(nameof(KeyCountAsync));
         return _source.KeyCountAsync(cancellationToken);
     }
 
@@ -221,6 +276,17 @@ public sealed class KeyCursor : IAsyncDisposable
         {
             throw new InvalidOperationException(
                 "The cursor is not positioned on an entry; check the result of the positioning call.");
+        }
+    }
+
+    private void RequireRows(string member)
+    {
+        if (!_source.HasRows)
+        {
+            throw new InvalidOperationException(
+                $"{member} needs rows, and this cursor's source holds keys without rows " +
+                "(docs/12-index-reads.md §4.3). A cursor opened without Distinct() is always " +
+                "served with rows.");
         }
     }
 

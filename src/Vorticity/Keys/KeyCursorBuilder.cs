@@ -42,9 +42,12 @@ public sealed class KeyCursorBuilder
     /// </summary>
     /// <returns>This builder.</returns>
     /// <remarks>
-    /// Recorded and not yet honoured: the sources that make it cheap, <c>Postings</c> and
-    /// <c>Dictionary</c>, arrive with step 15. Over a sorted column or sorted runs the same walk is
-    /// <see cref="KeyCursor.NextKeyAsync"/>, one seek per group, which is what this would use.
+    /// The cursor's steps become <see cref="KeyCursor.NextKeyAsync"/>, one seek per group, and its
+    /// entry is a key's first. The sources are taken cheapest first for a walk of keys: the sorted
+    /// column, then the postings keys -- a few hundred bytes a chunk, and never a data segment --
+    /// then the dictionaries, whose chunks are read for their values child, then the sorted runs,
+    /// which hold an entry per row. A cursor served by postings or a dictionary has no rows
+    /// (<see cref="KeyCursor.HasRows"/>).
     /// </remarks>
     public KeyCursorBuilder Distinct()
     {
@@ -79,7 +82,7 @@ public sealed class KeyCursorBuilder
                 choice.Kind,
                 source?.Runs ?? 0,
                 source?.EntryCount,
-                HasRows: source is not null,
+                HasRows: source?.HasRows ?? false,
                 choice.Rejected);
         }
         finally
@@ -95,15 +98,14 @@ public sealed class KeyCursorBuilder
     /// <param name="cancellationToken">Cancels the reads this makes.</param>
     /// <returns>A cursor, not yet positioned.</returns>
     /// <exception cref="VortexUnsupportedException">No source serves this column.</exception>
+    /// <exception cref="InvalidOperationException">A source of keys without rows was forced on a cursor that is not <see cref="Distinct"/>.</exception>
     public async ValueTask<KeyCursor> OpenAsync(CancellationToken cancellationToken = default)
     {
-        if (_forced is KeySourceKind.Postings or KeySourceKind.Dictionary)
+        if (_forced is KeySourceKind.Postings or KeySourceKind.Dictionary && !_distinct)
         {
-            throw new VortexUnsupportedException(
-                SourceId(_forced),
-                "index",
-                $"{_forced} is not implemented yet; a cursor is served by a sorted column or by " +
-                "sorted runs (docs/12-index-reads.md §12).");
+            throw new InvalidOperationException(
+                $"{_forced} holds keys without rows and serves only a Distinct() cursor " +
+                "(docs/12-index-reads.md §3).");
         }
 
         Choice choice = await ChooseAsync(cancellationToken).ConfigureAwait(false);
@@ -112,25 +114,22 @@ public sealed class KeyCursorBuilder
             List<string> reasons = [];
             foreach (KeySourceRejection rejection in choice.Rejected)
             {
-                if (rejection.Source is KeySourceKind.SortedColumn or KeySourceKind.SortedRuns)
-                {
-                    reasons.Add($"{rejection.Source}: {rejection.Reason}");
-                }
+                reasons.Add($"{rejection.Source}: {rejection.Reason}");
             }
 
+            // A walk of keys is refused naming the cheapest structure that would serve it (§5.4);
+            // a walk of rows, the one that serves rows.
             throw new VortexUnsupportedException(
-                IndexKinds.SortedRuns,
+                _distinct ? IndexKinds.PostingsBlocks : IndexKinds.SortedRuns,
                 "index",
                 $"'{_path}' has no key source ({string.Join("; ", reasons)}). A cursor over an " +
                 "unindexed column would have to hold the column to sort it, which this library " +
-                "refuses. Write the file with IndexPolicy.SortedRuns for that column, or add the " +
-                "index after the fact (docs/10-indexes.md §8).");
+                "refuses. Write the file with " +
+                (_distinct ? "IndexPolicy.Postings" : "IndexPolicy.SortedRuns") +
+                " for that column, or add the index after the fact (docs/10-indexes.md §8).");
         }
 
-        // `Distinct()` is honoured by the walk: `NextKeyAsync` re-seeks past the duplicates, on
-        // either source, until the key-only sources of step 15 make it cheaper.
-        _ = _distinct;
-        return new KeyCursor(choice.Source);
+        return new KeyCursor(choice.Source, _distinct);
     }
 
     /// <summary>
@@ -194,74 +193,78 @@ public sealed class KeyCursorBuilder
     /// The cheapest source that serves, and why each other one was not taken: the sorted column
     /// first, then the sorted runs (docs/12 §3's "cheapest first").
     /// </summary>
+    /// <remarks>
+    /// Rows: the sorted column, then the sorted runs; the key-only sources are rejected by name.
+    /// Keys (<see cref="Distinct"/>): the sorted column, the postings, the dictionaries, the sorted
+    /// runs. A later source is opened only to say why it lost, which is what `Explain` reports.
+    /// </remarks>
     private async ValueTask<Choice> ChooseAsync(CancellationToken cancellationToken)
     {
+        KeySourceKind[] order = _distinct
+            ? [KeySourceKind.SortedColumn, KeySourceKind.Postings, KeySourceKind.Dictionary, KeySourceKind.SortedRuns]
+            : [KeySourceKind.SortedColumn, KeySourceKind.SortedRuns, KeySourceKind.Postings, KeySourceKind.Dictionary];
         List<KeySourceRejection> rejected = [];
         KeySource? chosen = null;
         KeySourceKind kind = KeySourceKind.None;
-
-        if (_forced is KeySourceKind.None or KeySourceKind.SortedColumn)
+        foreach (KeySourceKind candidate in order)
         {
-            (SortedColumnSource? column, string? reason) =
-                await SortedColumnSource.OpenAsync(_file, _path, cancellationToken).ConfigureAwait(false);
-            if (column is null)
+            if (_forced != KeySourceKind.None && _forced != candidate)
             {
-                rejected.Add(new KeySourceRejection(KeySourceKind.SortedColumn, reason!));
+                rejected.Add(new KeySourceRejection(candidate, $"the caller forced {_forced}"));
+                continue;
             }
-            else
-            {
-                chosen = new SortedColumnWalker(column);
-                kind = KeySourceKind.SortedColumn;
-            }
-        }
-        else
-        {
-            rejected.Add(new KeySourceRejection(KeySourceKind.SortedColumn, $"the caller forced {_forced}"));
-        }
 
-        if (_forced is KeySourceKind.None or KeySourceKind.SortedRuns)
-        {
-            (SortedRunsSource? runs, string? reason) =
-                await SortedRunsSource.OpenAsync(_file, _path, cancellationToken).ConfigureAwait(false);
-            if (runs is null)
+            if (!_distinct && candidate is KeySourceKind.Postings or KeySourceKind.Dictionary)
             {
-                rejected.Add(new KeySourceRejection(KeySourceKind.SortedRuns, reason!));
+                rejected.Add(new KeySourceRejection(
+                    candidate,
+                    "it holds keys without rows, which only a Distinct() cursor takes (docs/12-index-reads.md §3)"));
+                continue;
+            }
+
+            if (chosen is not null && candidate == KeySourceKind.Dictionary)
+            {
+                // Opening a dictionary source reads the column's chunks: not to say why it lost.
+                rejected.Add(new KeySourceRejection(candidate, $"{kind} is cheaper and was taken first; the dictionaries were not read"));
+                continue;
+            }
+
+            (KeySource? opened, string? reason) = await OpenAsync(candidate, cancellationToken).ConfigureAwait(false);
+            if (opened is null)
+            {
+                rejected.Add(new KeySourceRejection(candidate, reason!));
             }
             else if (chosen is not null)
             {
-                rejected.Add(new KeySourceRejection(
-                    KeySourceKind.SortedRuns,
-                    $"the sorted column is cheaper than {runs.Runs} runs: one zone-map read and one zone decode (docs/12-index-reads.md §3)"));
-                await runs.DisposeAsync().ConfigureAwait(false);
+                rejected.Add(new KeySourceRejection(candidate, $"{kind} is cheaper and was taken first (docs/12-index-reads.md §3)"));
+                await opened.DisposeAsync().ConfigureAwait(false);
             }
             else
             {
-                chosen = runs;
-                kind = KeySourceKind.SortedRuns;
+                chosen = opened;
+                kind = candidate;
             }
         }
-        else
-        {
-            rejected.Add(new KeySourceRejection(KeySourceKind.SortedRuns, $"the caller forced {_forced}"));
-        }
 
-        rejected.Add(new KeySourceRejection(
-            KeySourceKind.Postings,
-            "a postings source holds keys without rows, and is not implemented yet (docs/12-index-reads.md §12.6)"));
-        rejected.Add(new KeySourceRejection(
-            KeySourceKind.Dictionary,
-            "the dictionary probe source holds keys without rows, and is not implemented yet (docs/12-index-reads.md §12.6)"));
         return new Choice(chosen, kind, rejected);
     }
 
-    private sealed record Choice(KeySource? Source, KeySourceKind Kind, List<KeySourceRejection> Rejected);
-
-    private static string SourceId(KeySourceKind source) => source switch
+    private async ValueTask<(KeySource? Source, string? Reason)> OpenAsync(
+        KeySourceKind candidate, CancellationToken cancellationToken)
     {
-        KeySourceKind.SortedRuns => "vorticity.sorted.runs.v1",
-        KeySourceKind.Postings => "vorticity.postings.blocks.v1",
-        _ => "vorticity.dict.probe.v1",
-    };
+        if (candidate == KeySourceKind.SortedColumn)
+        {
+            (SortedColumnSource? column, string? reason) =
+                await SortedColumnSource.OpenAsync(_file, _path, cancellationToken).ConfigureAwait(false);
+            return column is null ? (null, reason) : (new SortedColumnWalker(column), null);
+        }
+
+        (SortedRunsSource? runs, string? why) =
+            await SortedRunsSource.OpenAsync(_file, _path, candidate, cancellationToken).ConfigureAwait(false);
+        return (runs, why);
+    }
+
+    private sealed record Choice(KeySource? Source, KeySourceKind Kind, List<KeySourceRejection> Rejected);
 }
 
 /// <summary>The cursor entry point.</summary>

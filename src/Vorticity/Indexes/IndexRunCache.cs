@@ -14,19 +14,21 @@ using System.Collections.Generic;
 
 namespace Vorticity.Indexes;
 
-/// <summary>A decoded segment of a sorted run: its keys and the rows they came from.</summary>
+/// <summary>
+/// A decoded segment of a run: its keys and, for a sorted run, the rows they came from. A postings
+/// run and a dictionary hold keys without rows.
+/// </summary>
 /// <param name="Keys">
 /// Fixed-width keys laid end to end; for byte keys, the bytes of every key laid end to end.
 /// </param>
 /// <param name="Offsets">For byte keys, where each key starts in <paramref name="Keys"/>, and one past the last; otherwise null.</param>
-/// <param name="Rows">Each entry's row, relative to the run's first row.</param>
-internal sealed record RunSegment(byte[] Keys, int[]? Offsets, uint[] Rows)
+/// <param name="Rows">Each entry's row, relative to the run's first row; null for keys without rows.</param>
+/// <param name="Count">The entries.</param>
+internal sealed record RunSegment(byte[] Keys, int[]? Offsets, uint[]? Rows, int Count)
 {
-    /// <summary>The entries.</summary>
-    internal int Count => Rows.Length;
-
     /// <summary>What the cache charges for it.</summary>
-    internal long Bytes => Keys.LongLength + ((Offsets?.LongLength ?? 0) * sizeof(int)) + (Rows.LongLength * sizeof(uint));
+    internal long Bytes =>
+        Keys.LongLength + ((Offsets?.LongLength ?? 0) * sizeof(int)) + ((Rows?.LongLength ?? 0) * sizeof(uint));
 }
 
 /// <summary>An LRU of decoded run segments, keyed by the file offset of their first payload.</summary>

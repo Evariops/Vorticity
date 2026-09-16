@@ -20,6 +20,13 @@
 // last key; a run whose range excludes the key costs nothing, and inside one only the segment the
 // search lands in is decoded -- into the file's run cache, where the next seek finds it.
 //
+// THE SAME MERGE WALKS KEYS WITHOUT ROWS. A `postings.blocks` run is a chunk's distinct keys, sorted,
+// and a dictionary is a chunk's values, sorted at open (SortedRunsSource.Dictionary.cs): each is a
+// run whose keys are unique within it, so the run's ordinal stands in for the row and `(key,
+// ordinal)` is still a total order on the entries. Such a source has no rows to give (§4.3), and
+// its entries are not the column's distinct keys -- a key in two chunks is two entries -- so it
+// counts none; a `Distinct()` cursor walks it by `NextKey`, which skips them.
+//
 // A RUN THAT DOES NOT MAKE SENSE REFUSES THE SOURCE WHOLE. The pruner can ignore one bad run and
 // lose pruning; a cursor that skipped one would return a wrong walk. A payload that decodes to the
 // wrong shape, or a row outside its run, is a `VortexFormatException` (Class I); keys out of order
@@ -40,26 +47,28 @@ using Vorticity.Types;
 
 namespace Vorticity.Keys;
 
-/// <summary>One column's sorted runs, merged into one walk.</summary>
-internal sealed class SortedRunsSource : KeySource
+/// <summary>One column's runs -- sorted runs, postings keys or dictionaries -- merged into one walk.</summary>
+internal sealed partial class SortedRunsSource : KeySource
 {
     private readonly VortexFile _file;
     private readonly KeyLayout _layout;
     private readonly DType _storage;
     private readonly Run[] _runs;
     private readonly int[] _heap;
+    private readonly KeySourceKind _source;
     private int _heapSize;
 
     /// <summary>+1 while the heap is a min-heap, -1 while it is a max-heap.</summary>
     private int _direction = 1;
 
     private SortedRunsSource(
-        VortexFile file, KeyLayout layout, DType storage, FilterLiteralKind kind, Run[] runs)
+        VortexFile file, KeyLayout layout, DType storage, FilterLiteralKind kind, Run[] runs, KeySourceKind source)
     {
         _file = file;
         _layout = layout;
         _storage = storage;
         _runs = runs;
+        _source = source;
         _heap = new int[runs.Length];
         KeyKind = kind;
         long entries = 0;
@@ -73,13 +82,18 @@ internal sealed class SortedRunsSource : KeySource
 
     internal override FilterLiteralKind KeyKind { get; }
 
-    internal override long? EntryCount => Entries;
+    internal override long? EntryCount => HasRows ? Entries : null;
 
     internal override int Runs => _runs.Length;
 
     internal override bool IsValid => _heapSize > 0;
 
-    /// <summary>Every entry of every run: the column's non-null rows.</summary>
+    internal override bool HasRows => _source == KeySourceKind.SortedRuns;
+
+    /// <summary>Which kind of run this source merges.</summary>
+    internal KeySourceKind Kind => _source;
+
+    /// <summary>Every entry of every run: the column's non-null rows, for sorted runs.</summary>
     internal long Entries { get; }
 
     internal override FilterLiteral Key
@@ -100,20 +114,43 @@ internal sealed class SortedRunsSource : KeySource
         get
         {
             Run run = _runs[_heap[0]];
-            return run.FirstRow + run.Current!.Rows[(int)(run.Position - run.CurrentStart)];
+            return RowAt(run, run.Current!, (int)(run.Position - run.CurrentStart));
         }
     }
 
     /// <summary>
-    /// Opens the source over <paramref name="path"/>, or says why the file offers none.
+    /// Opens a sorted-runs source over <paramref name="path"/>, or says why the file offers none.
     /// </summary>
     /// <param name="file">The open file.</param>
     /// <param name="path">The column, <c>.</c>-separated for a nested field.</param>
     /// <param name="cancellationToken">Cancels the directory read.</param>
     /// <returns>The source, or null with the reason.</returns>
+    internal static ValueTask<(SortedRunsSource? Source, string? Reason)> OpenAsync(
+        VortexFile file, string path, CancellationToken cancellationToken) =>
+        OpenAsync(file, path, KeySourceKind.SortedRuns, cancellationToken);
+
+    /// <summary>
+    /// Opens a source of <paramref name="source"/>'s kind over <paramref name="path"/>, or says why
+    /// the file offers none.
+    /// </summary>
+    /// <param name="file">The open file.</param>
+    /// <param name="path">The column.</param>
+    /// <param name="source">
+    /// <see cref="KeySourceKind.SortedRuns"/>, <see cref="KeySourceKind.Postings"/> or
+    /// <see cref="KeySourceKind.Dictionary"/>.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The source, or null with the reason.</returns>
     internal static async ValueTask<(SortedRunsSource? Source, string? Reason)> OpenAsync(
-        VortexFile file, string path, CancellationToken cancellationToken)
+        VortexFile file, string path, KeySourceKind source, CancellationToken cancellationToken)
     {
+        string kind = source switch
+        {
+            KeySourceKind.SortedRuns => IndexKinds.SortedRuns,
+            KeySourceKind.Postings => IndexKinds.PostingsBlocks,
+            _ => IndexKinds.DictProbe,
+        };
+
         if (!file.HasIndexDirectory)
         {
             return (null, "the file carries no index directory");
@@ -128,47 +165,70 @@ internal sealed class SortedRunsSource : KeySource
         string? reason = null;
         foreach (IndexEntry entry in directory.Entries)
         {
-            if (entry.Kind != IndexKinds.SortedRuns
+            if (entry.Kind != kind
                 || !KeyIndexPruner.TryResolve(file.Schema, entry.ColumnPath, out string resolved, out DType dtype)
                 || !string.Equals(resolved, path, StringComparison.Ordinal))
             {
                 continue;
             }
 
-            (SortedRunsSource? source, reason) = TryOpen(file, entry, dtype);
-            if (source is not null)
+            SortedRunsSource? opened;
+            (opened, reason) = source == KeySourceKind.Dictionary
+                ? await OpenDictionaryAsync(file, entry, path, dtype, cancellationToken).ConfigureAwait(false)
+                : TryOpen(file, entry, dtype, source);
+            if (opened is not null)
             {
-                return (source, null);
+                return (opened, null);
             }
         }
 
-        return (null, reason ?? $"the index directory has no {IndexKinds.SortedRuns} entry for this column");
+        return (null, reason ?? $"the index directory has no {kind} entry for this column");
     }
 
-    private static (SortedRunsSource? Source, string? Reason) TryOpen(VortexFile file, IndexEntry entry, DType dtype)
+    /// <summary>The key domain and byte layout of a column, and its storage type.</summary>
+    private static string? Shape(DType dtype, out FilterLiteralKind kind, out KeyLayout layout, out DType storage)
     {
-        if (!SortedColumnSource.TryKeyKind(dtype, out FilterLiteralKind kind) || !KeyLayout.TryOf(dtype, out KeyLayout layout))
+        storage = dtype;
+        if (!SortedColumnSource.TryKeyKind(dtype, out kind) || !KeyLayout.TryOf(dtype, out layout))
         {
-            return (null, $"a {dtype.Kind} column has no key order a cursor can walk (docs/12-index-reads.md §4.4)");
+            layout = default;
+            return $"a {dtype.Kind} column has no key order a cursor can walk (docs/12-index-reads.md §4.4)";
         }
 
-        if (entry.BlockLength == 0 || !KeyRunOptions.TryParseEntry(entry.Options, out _, out _))
-        {
-            return (null, "its entry's options or block length do not parse");
-        }
-
-        DType storage = dtype;
         while (storage.Kind == DTypeKind.Extension)
         {
             storage = storage.StorageType;
         }
 
+        return null;
+    }
+
+    private static (SortedRunsSource? Source, string? Reason) TryOpen(
+        VortexFile file, IndexEntry entry, DType dtype, KeySourceKind source)
+    {
+        if (Shape(dtype, out FilterLiteralKind kind, out KeyLayout layout, out DType storage) is { } shape)
+        {
+            return (null, shape);
+        }
+
+        if (entry.BlockLength == 0 || !KeyRunOptions.TryParseEntry(entry.Options, out _, out bool folded))
+        {
+            return (null, "its entry's options or block length do not parse");
+        }
+
+        if (folded)
+        {
+            // Case-folded keys are not the column's values: a walk over them would lie.
+            return (null, "its keys are case-folded, so they are not the column's values");
+        }
+
+        int stride = source == KeySourceKind.SortedRuns ? KeyRunOptions.SortedStride : KeyRunOptions.PostingsStride;
         Run[] runs = new Run[entry.Runs.Count];
         for (int i = 0; i < runs.Length; i++)
         {
             IndexRun meta = entry.Runs[i];
             if (!KeyRunOptions.TryParseRun(meta.OptionBytes, out List<KeySegment> segments)
-                || meta.Payload.Count != KeyRunOptions.SortedStride * segments.Count)
+                || meta.Payload.Count != stride * segments.Count)
             {
                 return (null, $"run {i} has a segment table that does not match its payload");
             }
@@ -201,10 +261,10 @@ internal sealed class SortedRunsSource : KeySource
                 return (null, $"run {i} holds more entries than its blocks have rows");
             }
 
-            runs[i] = new Run(meta, segments.ToArray(), starts, firstRow, limit);
+            runs[i] = new Run(meta, segments.ToArray(), starts, firstRow, limit, i);
         }
 
-        return (new SortedRunsSource(file, layout, storage, kind, runs), null);
+        return (new SortedRunsSource(file, layout, storage, kind, runs, source), null);
     }
 
     // ------------------------------------------------------------------------------ positioning
@@ -581,7 +641,7 @@ internal sealed class SortedRunsSource : KeySource
                 int order = CompareKey(KeyAt(segment, mid), key);
                 if (order == 0)
                 {
-                    order = (run.FirstRow + segment.Rows[mid]).CompareTo(row);
+                    order = RowAt(run, segment, mid).CompareTo(row);
                 }
 
                 if (order < 0)
@@ -612,7 +672,7 @@ internal sealed class SortedRunsSource : KeySource
         int at = (int)(position - run.Starts[s]);
         ReadOnlySpan<byte> key = KeyAt(segment, at);
         FilterLiteral literal = _layout.Shape == KeyShape.Bytes ? FilterLiteral.From(key) : Literal(key);
-        return (literal, run.FirstRow + segment.Rows[at]);
+        return (literal, RowAt(run, segment, at));
     }
 
     /// <summary>Makes <paramref name="position"/> the run's current entry, loading its segment.</summary>
@@ -663,7 +723,7 @@ internal sealed class SortedRunsSource : KeySource
             return new ValueTask<RunSegment>(run.Probe);
         }
 
-        IndexSegment keys = run.Meta.Payload[index * KeyRunOptions.SortedStride];
+        IndexSegment keys = run.Meta.Payload[index * Stride];
         if (_file.RunCache.TryGet(keys.Offset, out RunSegment cached))
         {
             run.Probe = cached;
@@ -676,17 +736,28 @@ internal sealed class SortedRunsSource : KeySource
 
     private async ValueTask<RunSegment> LoadAsync(Run run, int index, CancellationToken cancellationToken)
     {
-        IndexSegment keys = run.Meta.Payload[index * KeyRunOptions.SortedStride];
-        IndexSegment rows = run.Meta.Payload[(index * KeyRunOptions.SortedStride) + 1];
+        IndexSegment keys = run.Meta.Payload[index * Stride];
         int entries = (int)run.Segments[index].Entries;
         RunSegment decoded;
         using (SegmentRequestSet requests = new SegmentRequestSet(2))
         {
+            // A postings run's offsets and blocks are the pruner's; a cursor reads only its keys.
             int keySlot = requests.Add(new SegmentSpec(keys.Offset, keys.Length, keys.AlignmentExponent, 0, 0));
-            int rowSlot = requests.Add(new SegmentSpec(rows.Offset, rows.Length, rows.AlignmentExponent, 0, 0));
+            int rowSlot = -1;
+            if (HasRows)
+            {
+                IndexSegment rows = run.Meta.Payload[(index * Stride) + 1];
+                rowSlot = requests.Add(new SegmentSpec(rows.Offset, rows.Length, rows.AlignmentExponent, 0, 0));
+            }
+
             await _file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             using ScanContext context = new ScanContext(_file, ScanContext.MetadataCapacity);
-            decoded = Decode(context, requests.GetBuffer(keySlot), requests.GetBuffer(rowSlot), entries, run.RowLimit);
+            decoded = Decode(
+                context,
+                requests.GetBuffer(keySlot),
+                rowSlot < 0 ? default : requests.GetBuffer(rowSlot),
+                entries,
+                run.RowLimit);
         }
 
         decoded = _file.RunCache.Add(keys.Offset, decoded);
@@ -739,6 +810,11 @@ internal sealed class SortedRunsSource : KeySource
             keys = keyNode.Values.Span[..(entries * _layout.Width)].ToArray();
         }
 
+        if (!HasRows)
+        {
+            return new RunSegment(keys, offsets, null, entries);
+        }
+
         context.ResetBatch();
         CanonicalNode rowNode = context.Canonical.GetNode(DecodeRoot(context, rowBlob, u32, entries));
         if (rowNode.Kind != CanonicalKind.Primitive || rowNode.PType != PType.U32 || rowNode.Length != entries)
@@ -755,8 +831,11 @@ internal sealed class SortedRunsSource : KeySource
             }
         }
 
-        return new RunSegment(keys, offsets, rows);
+        return new RunSegment(keys, offsets, rows, entries);
     }
+
+    /// <summary>Payload arrays per segment of this source's runs.</summary>
+    private int Stride => HasRows ? KeyRunOptions.SortedStride : KeyRunOptions.PostingsStride;
 
     private static int DecodeRoot(ScanContext context, VortexBuffer blob, DType dtype, int length)
     {
@@ -766,7 +845,7 @@ internal sealed class SortedRunsSource : KeySource
     }
 
     private static VortexFormatException Malformed(string what) =>
-        new VortexFormatException($"A {IndexKinds.SortedRuns} run segment is malformed: {what}.");
+        new VortexFormatException($"A key index run segment is malformed: {what}.");
 
     // ------------------------------------------------------------------------------ keys
 
@@ -774,7 +853,11 @@ internal sealed class SortedRunsSource : KeySource
         KeyAt(run.Current!, (int)(run.Position - run.CurrentStart));
 
     private static long CurrentRow(Run run) =>
-        run.FirstRow + run.Current!.Rows[(int)(run.Position - run.CurrentStart)];
+        RowAt(run, run.Current!, (int)(run.Position - run.CurrentStart));
+
+    /// <summary>An entry's file row; for keys without rows, the run's ordinal, which orders them.</summary>
+    private static long RowAt(Run run, RunSegment segment, int index) =>
+        segment.Rows is { } rows ? run.FirstRow + rows[index] : run.Ordinal;
 
     private ReadOnlySpan<byte> KeyAt(RunSegment segment, int index) =>
         segment.Offsets is { } offsets
@@ -814,23 +897,26 @@ internal sealed class SortedRunsSource : KeySource
             : KeyOrder.Total(Literal(entry), key);
 
     /// <summary>A fixed-width key as a literal of the column's domain.</summary>
-    private FilterLiteral Literal(ReadOnlySpan<byte> key) => _layout.Shape switch
+    private FilterLiteral Literal(ReadOnlySpan<byte> key) => LiteralOf(_layout, key);
+
+    /// <summary>A fixed-width key of <paramref name="layout"/> as a literal of its domain.</summary>
+    private static FilterLiteral LiteralOf(KeyLayout layout, ReadOnlySpan<byte> key) => layout.Shape switch
     {
-        KeyShape.Signed => FilterLiteral.From(_layout.Width switch
+        KeyShape.Signed => FilterLiteral.From(layout.Width switch
         {
             1 => (sbyte)key[0],
             2 => System.Buffers.Binary.BinaryPrimitives.ReadInt16LittleEndian(key),
             4 => System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(key),
             _ => System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(key),
         }),
-        KeyShape.Unsigned => FilterLiteral.From(_layout.Width switch
+        KeyShape.Unsigned => FilterLiteral.From(layout.Width switch
         {
             1 => key[0],
             2 => System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(key),
             4 => System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(key),
             _ => System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(key),
         }),
-        _ => FilterLiteral.From(_layout.Width switch
+        _ => FilterLiteral.From(layout.Width switch
         {
             2 => (double)System.Buffers.Binary.BinaryPrimitives.ReadHalfLittleEndian(key),
             4 => System.Buffers.Binary.BinaryPrimitives.ReadSingleLittleEndian(key),
@@ -839,8 +925,11 @@ internal sealed class SortedRunsSource : KeySource
     };
 
     /// <summary>One run: its directory record, its segment table, and the merge's position in it.</summary>
-    private sealed class Run(IndexRun meta, KeySegment[] segments, long[] starts, long firstRow, long rowLimit)
+    private sealed class Run(IndexRun meta, KeySegment[] segments, long[] starts, long firstRow, long rowLimit, int ordinal)
     {
+        /// <summary>The run's place among the source's: the row a key without rows is ordered by.</summary>
+        internal int Ordinal { get; } = ordinal;
+
         internal IndexRun Meta { get; } = meta;
 
         internal KeySegment[] Segments { get; } = segments;

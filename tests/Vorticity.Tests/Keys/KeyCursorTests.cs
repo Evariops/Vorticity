@@ -217,6 +217,53 @@ public sealed class KeyCursorTests
         Assert.Equal(0, cursor.Row);
     }
 
+    [Theory]
+    [InlineData("dups_u32")]
+    [InlineData("nulls_i32")]
+    [InlineData("floats_f64")]
+    [InlineData("keys_utf8")]
+    public async Task ADistinctWalkOfASortedColumnIsEachKeyAtItsFirstRow(string column)
+    {
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync();
+        List<FilterLiteral> oracle = Oracle(column);
+        List<(FilterLiteral Key, long Row)> firsts = [];
+        for (int i = 0; i < oracle.Count; i++)
+        {
+            // IEEE: on a sorted column the two zeros are one key.
+            if (firsts.Count == 0 || !SameIeee(firsts[^1].Key, oracle[i]))
+            {
+                firsts.Add((oracle[i], FirstRow(column) + i));
+            }
+        }
+
+        KeyPlan plan = await written.File.Keys(column).Distinct().ExplainAsync();
+        Assert.Equal(KeySourceKind.SortedColumn, plan.Source);
+
+        await using KeyCursor cursor = await written.File.Keys(column).Distinct().OpenAsync();
+        Assert.True(cursor.HasRows);
+        int index = 0;
+        for (bool ok = await cursor.SeekFirstAsync(); ok; ok = await cursor.NextAsync())
+        {
+            Assert.True(SameIeee(firsts[index].Key, cursor.Key), $"key {index}: {Describe(cursor.Key)}");
+            Assert.Equal(firsts[index].Row, cursor.Row);
+            index++;
+        }
+
+        Assert.Equal(firsts.Count, index);
+        for (bool ok = await cursor.SeekLastAsync(); ok; ok = await cursor.PrevAsync())
+        {
+            index--;
+            Assert.True(SameIeee(firsts[index].Key, cursor.Key), $"key {index}: {Describe(cursor.Key)}");
+            Assert.Equal(firsts[index].Row, cursor.Row);
+        }
+
+        Assert.Equal(0, index);
+    }
+
+    private static bool SameIeee(FilterLiteral a, FilterLiteral b) =>
+        a.Kind == FilterLiteralKind.Float ? a.FloatValue == b.FloatValue : Same(a, b);
+
     [Fact]
     public async Task AColumnWithNoSourceIsRefusedAndTheRefusalNamesThePolicy()
     {
@@ -228,8 +275,15 @@ public sealed class KeyCursorTests
         Assert.Contains("IndexPolicy.SortedRuns", refused.Message, StringComparison.Ordinal);
         Assert.Contains("not sorted", refused.Message, StringComparison.Ordinal);
 
-        await Assert.ThrowsAsync<VortexUnsupportedException>(
+        // A key-only source serves a distinct walk and nothing else; a distinct walk with no source
+        // names the cheapest structure that would serve it.
+        await Assert.ThrowsAsync<InvalidOperationException>(
             async () => await written.File.Keys("strict_i64").WithSource(KeySourceKind.Postings).OpenAsync());
+        await Assert.ThrowsAsync<VortexUnsupportedException>(
+            async () => await written.File.Keys("strict_i64").Distinct().WithSource(KeySourceKind.Postings).OpenAsync());
+        VortexUnsupportedException keys = await Assert.ThrowsAsync<VortexUnsupportedException>(
+            async () => await written.File.Keys("shuffled_i64").Distinct().OpenAsync());
+        Assert.Contains("IndexPolicy.Postings", keys.Message, StringComparison.Ordinal);
 
         KeyPlan plan = await written.File.Keys("shuffled_i64").ExplainAsync();
         Assert.Equal(KeySourceKind.None, plan.Source);

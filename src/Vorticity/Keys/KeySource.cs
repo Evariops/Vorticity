@@ -25,6 +25,9 @@ internal abstract class KeySource : IAsyncDisposable
     /// <summary>The runs the source merges: 1 for a sorted column.</summary>
     internal abstract int Runs { get; }
 
+    /// <summary>Whether an entry can say which file row it came from (docs/12-index-reads.md §4.3).</summary>
+    internal virtual bool HasRows => true;
+
     /// <summary>Whether the source is positioned on an entry.</summary>
     internal abstract bool IsValid { get; }
 

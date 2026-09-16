@@ -20,8 +20,10 @@ using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Indexes;
+using Vorticity.IO;
 using Vorticity.Keys;
 using Vorticity.Scan;
+using Vorticity.Serialization.Schemas;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -64,6 +66,10 @@ public sealed class SortedRunsCursorTests
         "k" + ((uint)row * 2654435761u % 997).ToString(CultureInfo.InvariantCulture) + (row % 3 == 0 ? "-long-enough-to-leave-the-view" : string.Empty);
 
     private static int? Nullable(int row) => row % 7 == 0 ? null : (row * 13) % 101;
+
+    /// <summary>Five long strings and nulls: what a writer puts in a dictionary.</summary>
+    private static string? Label(int row) =>
+        row % 11 == 0 ? null : "label-" + (row % 5).ToString(CultureInfo.InvariantCulture) + "-long-enough-to-leave-the-view";
 
     public static TheoryData<string> Columns() => new(Names);
 
@@ -398,6 +404,189 @@ public sealed class SortedRunsCursorTests
         expected.Sort();
         Assert.Equal(expected, off);
         Assert.Equal(expected, on);
+    }
+
+    // ------------------------------------------------------------------ distinct keys (§5.4)
+
+    public static TheoryData<string, KeySourceKind> DistinctWalks()
+    {
+        TheoryData<string, KeySourceKind> data = new();
+        foreach (string column in Names)
+        {
+            data.Add(column, KeySourceKind.SortedRuns);
+            data.Add(column, KeySourceKind.Postings);
+        }
+
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(DistinctWalks))]
+    public async Task ADistinctWalkIsEveryKeyOnceBothWays(string column, KeySourceKind source)
+    {
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync(PolicyOf(source));
+        await AssertDistinctWalk(written.File, column, source);
+    }
+
+    [Fact]
+    public async Task TheDictionariesServeADistinctWalkOfTheColumnsTheWriterEncodedSo()
+    {
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync(IndexPolicy.Auto);
+        int served = 0;
+        List<string> refused = [];
+        foreach (string column in (string[])[.. Names, "label"])
+        {
+            KeyPlan plan = await written.File.Keys(column).Distinct().WithSource(KeySourceKind.Dictionary).ExplainAsync();
+            if (plan.Source != KeySourceKind.Dictionary)
+            {
+                KeySourceRejection why = Assert.Single(plan.Rejected, r => r.Source == KeySourceKind.Dictionary);
+                Assert.False(string.IsNullOrEmpty(why.Reason));
+                refused.Add($"{column}: {why.Reason}");
+                continue;
+            }
+
+            served++;
+            Assert.False(plan.HasRows);
+            Assert.Null(plan.EntryCount);
+            await AssertDistinctWalk(written.File, column, KeySourceKind.Dictionary);
+        }
+
+        // The writer picks the dictionary where it pays: eight floats with both zeros and both NaNs,
+        // and five long strings with nulls. The others go to bit-packing or stay plain, and their
+        // entry is simply absent.
+        Assert.True(served >= 2, $"{served} columns served by their dictionaries; {string.Join("; ", refused)}");
+        Assert.All(refused, r => Assert.Contains("has no vorticity.dict.probe.v1 entry", r, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ADistinctWalkOverPostingsReadsNoDataSegment()
+    {
+        Decoders.EnsureRegistered();
+        CountingSegmentSource? counting = null;
+        await using Written written = await Written.CreateAsync(
+            PolicyOf(KeySourceKind.Postings),
+            inner => counting = new CountingSegmentSource(inner));
+        VortexFile file = written.File;
+        counting!.ResetCounters();
+
+        await using KeyCursor cursor = await file.Keys("text").Distinct().OpenAsync();
+        int keys = 0;
+        for (bool ok = await cursor.SeekFirstAsync(); ok; ok = await cursor.NextAsync())
+        {
+            keys++;
+        }
+
+        HashSet<string> distinct = [];
+        for (int row = 0; row < Rows; row++)
+        {
+            distinct.Add(Text(row));
+        }
+
+        Assert.Equal(distinct.Count, keys);
+        Assert.True(counting.Requested.Count > 0);
+        foreach (SegmentSpec spec in counting.Requested)
+        {
+            foreach (SegmentSpec data in file.SegmentSpecs)
+            {
+                Assert.False(
+                    spec.Offset == data.Offset && spec.Length == data.Length,
+                    $"the walk read the data segment at {spec.Offset}");
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ADistinctChoiceTakesTheCheapestKeySourceAndSaysWhy()
+    {
+        Decoders.EnsureRegistered();
+        await using (Written postings = await Written.CreateAsync(PolicyOf(KeySourceKind.Postings)))
+        {
+            KeyPlan keys = await postings.File.Keys("i64").Distinct().ExplainAsync();
+            Assert.Equal(KeySourceKind.Postings, keys.Source);
+            Assert.False(keys.HasRows);
+
+            // Without Distinct(), keys without rows are refused by name.
+            KeyPlan rows = await postings.File.Keys("i64").ExplainAsync();
+            Assert.Equal(KeySourceKind.None, rows.Source);
+            Assert.Contains(rows.Rejected, r => r.Source == KeySourceKind.Postings && r.Reason.Contains("Distinct()", StringComparison.Ordinal));
+        }
+
+        await using Written runs = await Written.CreateAsync();
+        KeyPlan plan = await runs.File.Keys("i64").Distinct().ExplainAsync();
+        Assert.Equal(KeySourceKind.SortedRuns, plan.Source);
+        Assert.True(plan.HasRows);
+    }
+
+    private static IndexPolicy PolicyOf(KeySourceKind source) => source == KeySourceKind.Postings
+        ? IndexPolicy.Postings.WithSegmentEntries(SegmentEntries)
+        : IndexPolicy.SortedRuns.WithSegmentEntries(SegmentEntries);
+
+    /// <summary>
+    /// A distinct cursor forced onto <paramref name="source"/> visits the oracle's keys once each,
+    /// forward and backward, lands backward seeks on a key's first entry, and has rows exactly when
+    /// the source does.
+    /// </summary>
+    private static async Task AssertDistinctWalk(VortexFile file, string column, KeySourceKind source)
+    {
+        List<Entry> oracle = Oracle(column);
+        List<Entry> firsts = [];
+        foreach (Entry entry in oracle)
+        {
+            if (firsts.Count == 0 || Order(firsts[^1].Key, entry.Key) != 0)
+            {
+                firsts.Add(entry);
+            }
+        }
+
+        await using KeyCursor cursor = await file.Keys(column).Distinct().WithSource(source).OpenAsync();
+        Assert.True(cursor.IsDistinct);
+        bool rows = source == KeySourceKind.SortedRuns;
+        Assert.Equal(rows, cursor.HasRows);
+
+        int index = 0;
+        for (bool ok = await cursor.SeekFirstAsync(); ok; ok = await cursor.NextAsync())
+        {
+            AssertDistinctAt(cursor, firsts, index++, rows);
+        }
+
+        Assert.Equal(firsts.Count, index);
+        for (bool ok = await cursor.SeekLastAsync(); ok; ok = await cursor.PrevAsync())
+        {
+            AssertDistinctAt(cursor, firsts, --index, rows);
+        }
+
+        Assert.Equal(0, index);
+
+        // Backward seeks land on the key's first entry too.
+        int middle = firsts.Count / 2;
+        Assert.True(await cursor.SeekAsync(firsts[middle].Key, SeekOp.AtOrBefore));
+        AssertDistinctAt(cursor, firsts, middle, rows);
+        Assert.True(await cursor.SeekAsync(firsts[middle].Key, SeekOp.Before));
+        AssertDistinctAt(cursor, firsts, middle - 1, rows);
+
+        if (!rows)
+        {
+            Assert.Null(cursor.EntryCount);
+            Assert.Throws<InvalidOperationException>(() => cursor.Row);
+            await Assert.ThrowsAsync<InvalidOperationException>(async () => await cursor.KeyCountAsync());
+            await Assert.ThrowsAsync<InvalidOperationException>(async () => await cursor.RankAsync(firsts[0].Key));
+            await Assert.ThrowsAsync<InvalidOperationException>(async () => await cursor.SeekRankAsync(0));
+        }
+    }
+
+    private static void AssertDistinctAt(KeyCursor cursor, List<Entry> firsts, int index, bool rows)
+    {
+        Assert.True(cursor.IsValid, $"expected key {index}, the cursor is not positioned");
+        Entry expected = firsts[index];
+        Assert.True(
+            Order(expected.Key, cursor.Key) == 0,
+            $"key {index}: expected {Describe(expected.Key)}, got {Describe(cursor.Key)}");
+        if (rows)
+        {
+            Assert.Equal(expected.Row, cursor.Row);
+        }
     }
 
     // ------------------------------------------------------------------ key-ordered delivery (§6)
@@ -796,6 +985,7 @@ public sealed class SortedRunsCursorTests
                 "u8" => FilterLiteral.From((ulong)U8(row)),
                 "f32" => FilterLiteral.From((double)F32(row)),
                 "text" => FilterLiteral.From(Text(row)),
+                "label" => Label(row) is string s ? FilterLiteral.From(s) : null,
                 _ => Nullable(row) is int v ? FilterLiteral.From((long)v) : null,
             };
             if (key is { } k)
@@ -822,12 +1012,22 @@ public sealed class SortedRunsCursorTests
 
         internal VortexFile File { get; }
 
-        internal static async Task<Written> CreateAsync()
+        internal static Task<Written> CreateAsync() =>
+            CreateAsync(IndexPolicy.SortedRuns.WithSegmentEntries(SegmentEntries));
+
+        /// <summary>The fixture, every column but `row` indexed with <paramref name="policy"/>.</summary>
+        internal static async Task<Written> CreateAsync(IndexPolicy policy, Func<ISegmentSource, ISegmentSource>? wrap = null)
         {
             string path = System.IO.Path.Combine(
                 System.IO.Path.GetTempPath(), $"vorticity-runs-{Guid.NewGuid():N}.vortex");
-            await WriteAsync(path);
-            return new Written(path, await VortexFile.OpenAsync(path, CancellationToken.None));
+            await WriteAsync(path, policy);
+            if (wrap is null)
+            {
+                return new Written(path, await VortexFile.OpenAsync(path, CancellationToken.None));
+            }
+
+            ISegmentSource source = wrap(MemoryMappedSegmentSource.Open(path));
+            return new Written(path, await VortexFile.OpenAsync(source, new VortexOpenOptions(), CancellationToken.None));
         }
 
         public async ValueTask DisposeAsync()
@@ -836,7 +1036,7 @@ public sealed class SortedRunsCursorTests
             System.IO.File.Delete(Path);
         }
 
-        private static async Task WriteAsync(string path)
+        private static async Task WriteAsync(string path, IndexPolicy policy)
         {
             DTypeArena types = new DTypeArena();
             DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
@@ -844,7 +1044,9 @@ public sealed class SortedRunsCursorTests
             DType f32 = types.Primitive(PType.F32, Nullability.NonNullable);
             DType utf8 = types.Utf8(Nullability.NonNullable);
             DType i32n = types.Primitive(PType.I32, Nullability.Nullable);
-            DType schema = types.Struct([.. Names, "row"], [i64, u8, f32, utf8, i32n, i64], Nullability.NonNullable);
+            DType utf8n = types.Utf8(Nullability.Nullable);
+            DType schema = types.Struct(
+                [.. Names, "row", "label"], [i64, u8, f32, utf8, i32n, i64, utf8n], Nullability.NonNullable);
 
             VortexWriteOptions options = new VortexWriteOptions
             {
@@ -852,7 +1054,7 @@ public sealed class SortedRunsCursorTests
                 DataBlockTargetBytes = null,
                 IndexBudgetPerMille = 1_000_000,
                 Indexes = WritePolicy.None
-                    .WithDefault(IndexPolicy.SortedRuns.WithSegmentEntries(SegmentEntries))
+                    .WithDefault(policy)
                     .For("row", IndexPolicy.None),
             };
             await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, options);
@@ -865,9 +1067,10 @@ public sealed class SortedRunsCursorTests
                     Fixed<long>(arena, i64, PType.I64, start, count, I64),
                     Fixed<byte>(arena, u8, PType.U8, start, count, U8),
                     Fixed<float>(arena, f32, PType.F32, start, count, F32),
-                    Strings(arena, utf8, start, count),
+                    Strings(arena, types, utf8, start, count, Text),
                     Nullables(arena, types, i32n, start, count),
                     Fixed<long>(arena, i64, PType.I64, start, count, row => row),
+                    Strings(arena, types, utf8n, start, count, Label),
                 ];
                 int root = arena.AddStruct(schema, count, Validity.NonNullable, columns);
                 using RecordBatch record = new RecordBatch(arena, root, start);
@@ -911,16 +1114,41 @@ public sealed class SortedRunsCursorTests
             return arena.AddPrimitive(dtype, count, Validity.Bitmap(mask), PType.I32, buffer);
         }
 
-        /// <summary>Views inline and out of line, the latter in one data buffer.</summary>
-        private static int Strings(CanonicalArena arena, DType dtype, int start, int count)
+        /// <summary>Views inline and out of line, the latter in one data buffer; a null is an empty invalid view.</summary>
+        private static int Strings(
+            CanonicalArena arena, DTypeArena types, DType dtype, int start, int count, Func<int, string?> value)
         {
             List<byte[]> values = [];
             int heap = 0;
+            bool nulls = false;
             for (int i = 0; i < count; i++)
             {
-                byte[] utf8 = Encoding.UTF8.GetBytes(Text(start + i));
+                string? text = value(start + i);
+                nulls |= text is null;
+                byte[] utf8 = text is null ? [] : Encoding.UTF8.GetBytes(text);
                 values.Add(utf8);
                 heap += utf8.Length > 12 ? utf8.Length : 0;
+            }
+
+            Validity validity = Validity.NonNullable;
+            if (nulls)
+            {
+                VortexBuffer bits = arena.Allocate(Math.Max((count + 7) / 8, 1), 8, out Span<byte> raw);
+                raw.Clear();
+                for (int i = 0; i < count; i++)
+                {
+                    if (value(start + i) is not null)
+                    {
+                        raw[i >> 3] |= (byte)(1 << (i & 7));
+                    }
+                }
+
+                validity = Validity.Bitmap(
+                    arena.AddBool(types.Bool(Nullability.NonNullable), count, Validity.NonNullable, bits, 0));
+            }
+            else if (dtype.IsNullable)
+            {
+                validity = Validity.AllValid;
             }
 
             VortexBuffer data = arena.Allocate(Math.Max(heap, 1), 1, out Span<byte> dataBytes);
@@ -945,7 +1173,7 @@ public sealed class SortedRunsCursorTests
                 offset += utf8.Length;
             }
 
-            return arena.AddVarBinView(dtype, count, Validity.NonNullable, views, [data]);
+            return arena.AddVarBinView(dtype, count, validity, views, [data]);
         }
     }
 }
