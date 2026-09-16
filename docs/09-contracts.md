@@ -14,6 +14,10 @@ site.
 | `IAsyncEnumerator<RecordBatch>` | Single consumer, as the language requires |
 | `RecordBatch` | **Affine to its consumer.** Not thread-safe, and disposal must happen on the consuming flow. Its spans die with it |
 | Decoders / kernels | Pure functions over borrowed memory; no shared mutable state |
+| `KeyCursorBuilder` / `KeyCursor` | Not thread-safe, like the scan builder (docs/12-index-reads.md §8.3) |
+| The run cache on `VortexFile` | **Thread-safe**, like the layout tree; a load happens outside its lock, and the first insert wins a race |
+| `KeyPlan` / `ScanPlan` / `CountPlan` / `OrderPlan` | Immutable records |
+| `VortexFileWriter` (including an append) / `VortexFileIndexer` | One writer per file; an append is not atomic, and `VortexFileRepair` truncates a torn one |
 
 ## 2. Parallelism
 
@@ -89,6 +93,24 @@ bucket" report is diagnosable without a debugger:
 | `open-latency` | the 1–2 round trip promise, in production |
 
 Zero-cost when no listener is attached, which `EventSource` gives us for free.
+
+docs/12-index-reads.md §8.1 adds the counters that say whether an index earns its bytes:
+
+| Counter | Diagnoses |
+|---|---|
+| `index-runs-read` | index payload segments read — the price of consulting the runs |
+| `cursor-seeks` / `cursor-steps` | a cursor that seeks per row where it should step, or the reverse |
+| `count-blocks-proven` / `count-blocks-decoded` | whether counts resolve from the zone maps or pay a decode |
+| `key-order-windows` / `key-order-window-splits` | what `InKeyOrder` costs: splits per window near 1 on a correlated key, near the window on an uncorrelated one |
+
+**As delivered (step 18 of IMPL-PLAN).** `Diagnostics/VortexEventSource`, name `Vorticity`,
+publishes as `IncrementingPollingCounter`s: `segments-requested`, `bytes-requested`,
+`zones-pruned`, `zones-total`, and the six rows above. Every hook is one `IsEnabled` test; the
+totals are `Interlocked` longs, so a step still allocates nothing. `segments-read`, `bytes-used`,
+`cache-hits` / `cache-misses`, `bytes-decompressed` and `open-latency` are not published: they
+belong to the I/O and codec layers these specs did not change, and stay this section's to-do. A
+listener that asks for counters passes `EventCounterIntervalSec` as a whole number: the runtime
+parses it in the current culture.
 
 ## 6. Licensing and attribution
 

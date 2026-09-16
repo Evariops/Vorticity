@@ -431,11 +431,15 @@ public sealed class ScanBuilder
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
 
         List<PruningStep> steps = [];
-        Compute.BlockMask? live = _filter is not null && _prune
+        Compute.ZonePruningPlan.PruningPlan pruning = _filter is not null && _prune
             ? await Compute.ZonePruningPlan
-                .RefineAsync(_file, tree, _filter, cancellationToken, steps, metrics: null, _indexes)
+                .PlanAsync(_file, tree, _filter, cancellationToken, steps, metrics: null, _indexes)
                 .ConfigureAwait(false)
-            : null;
+            : default;
+        Compute.BlockMask? live = pruning.Live;
+        Compute.ZonePruner? zones = (_tiers & TerminalTiers.FullBlock) != 0 ? pruning.Zones : null;
+        int splitsPruned = 0;
+        int splitsProven = 0;
 
         long blockRows = live?.BlockRows ?? natural;
         int blocks = live?.BlockCount ?? checked((int)((rootRows + blockRows - 1) / blockRows));
@@ -460,11 +464,16 @@ public sealed class ScanBuilder
 
                 if (live is not null && !live.AnyLive(split))
                 {
+                    splitsPruned++;
                     continue;
                 }
 
                 liveSplits++;
                 reader.RegisterSegments(in root, split, in mask, segments);
+                if (zones is not null && Proves(zones, split))
+                {
+                    splitsProven++;
+                }
             }
 
             // The data segments of the live splits, plus what consulting each structure cost:
@@ -487,13 +496,103 @@ public sealed class ScanBuilder
                 || (_indexes
                     ? await _file.MayMatchAsync(_filter, cancellationToken).ConfigureAwait(false)
                     : Compute.FileStatisticsPruner.MayMatch(_file, _filter));
+            // The exact cover (docs/12 §5.2's first tier, 10 §6.6's row selection): a scan whose
+            // cover holds a batch or fewer reads those rows and evaluates nothing.
+            CountPlan? count = null;
+            long selected = 0;
+            if (_filter is not null)
+            {
+                (bool exact, long covered) = await ExactAsync(cancellationToken).ConfigureAwait(false);
+                if (exact && !_rowsSet && _take is null && covered <= natural)
+                {
+                    selected = covered;
+                }
+
+                count = new CountPlan(exact, covered, splitsPruned, splitsProven, liveSplits - splitsProven);
+            }
+
+            OrderPlan? order = _orderPath is null ? null : await OrderAsync(cancellationToken).ConfigureAwait(false);
             return new ScanPlan(
                 rows.Length, blockRows, blocks, liveBlocks, steps, splits, liveSplits,
-                RowsSelectedByIndex: 0, toRead, bytes, _file.FileLength, fileMayMatch);
+                selected, toRead, bytes, _file.FileLength, fileMayMatch)
+            {
+                Count = count,
+                Order = order,
+            };
         }
         finally
         {
             segments.Dispose();
+        }
+    }
+
+    /// <summary>What <c>TerminalScan</c>'s full-block proof would decide of a split.</summary>
+    private bool Proves(Compute.ZonePruner zones, RowRange split)
+    {
+        if (_take is null)
+        {
+            return zones.TryCount(split, out _);
+        }
+
+        Compute.RangeVerdict verdict = zones.Verdict(split);
+        return verdict.IsAllTrue || verdict.IsNoneTrue;
+    }
+
+    /// <summary>Whether an exact source covers the filter, and its count.</summary>
+    private async System.Threading.Tasks.ValueTask<(bool Exact, long Count)> ExactAsync(
+        System.Threading.CancellationToken cancellationToken)
+    {
+        if ((_tiers & TerminalTiers.ExactCover) == 0 || !_prune || _filter is null)
+        {
+            return (false, 0);
+        }
+
+        Keys.ExactCover? cover = await Keys.ExactCover
+            .TryCreateAsync(_file, _filter, _indexes, cancellationToken)
+            .ConfigureAwait(false);
+        if (cover is null)
+        {
+            return (false, 0);
+        }
+
+        try
+        {
+            return (true, cover.Count);
+        }
+        finally
+        {
+            await cover.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The key source <c>InKeyOrder</c> would walk, and the range it would walk; §6.</summary>
+    private async System.Threading.Tasks.ValueTask<OrderPlan> OrderAsync(System.Threading.CancellationToken cancellationToken)
+    {
+        (Keys.KeySource? source, Keys.KeySourceKind kind) = await Keys.KeyCursorBuilder
+            .OpenSourceAsync(_file, _orderPath!, _indexes, cancellationToken)
+            .ConfigureAwait(false);
+        if (source is null)
+        {
+            return new OrderPlan(_orderPath!, Keys.KeySourceKind.None, 0, 0, null, 0, _descending);
+        }
+
+        try
+        {
+            List<(long Low, long High)> slices = await Keys.ExactCover
+                .RangeAsync(_filter, source, _orderPath!, cancellationToken)
+                .ConfigureAwait(false);
+            long entries = 0;
+            foreach ((long low, long high) in slices)
+            {
+                entries += high - low;
+            }
+
+            int runsInRange = await source.RunsOverlappingAsync(slices, cancellationToken).ConfigureAwait(false);
+            return new OrderPlan(_orderPath!, kind, source.Runs, runsInRange, source.EntryCount, entries, _descending);
+        }
+        finally
+        {
+            await source.DisposeAsync().ConfigureAwait(false);
         }
     }
 

@@ -115,6 +115,7 @@ internal sealed class TerminalScan
         ZonePruner? zones = (_tiers & TerminalTiers.FullBlock) != 0 ? pruning.Zones : null;
 
         long total = 0;
+        long blockRows = Math.Max(live?.BlockRows ?? SplitPlan.NaturalBatchRows(_tree), 1);
         using ScanContext context = new ScanContext(_file);
         context.LiveBlocks = live;
         context.Metrics = _metrics;
@@ -138,12 +139,15 @@ internal sealed class TerminalScan
                     continue;
                 }
 
+                long blocks = (split.Length + blockRows - 1) / blockRows;
                 if (zones is not null && TryProve(zones, split, out long proven))
                 {
                     total += proven;
+                    Diagnostics.VortexEventSource.Counted(blocks, 0);
                 }
                 else
                 {
+                    Diagnostics.VortexEventSource.Counted(0, blocks);
                     cancellationToken.ThrowIfCancellationRequested();
                     total += await DecodeAndCountAsync(context, split, states, cancellationToken)
                         .ConfigureAwait(false);
@@ -249,7 +253,7 @@ internal sealed class TerminalScan
         try
         {
             SplitExecution.Register(context, _tree, in _mask, split);
-            _metrics?.AddRequests(context.Segments);
+            ScanMetrics.Note(_metrics, context.Segments);
             await _file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
             int root = SplitExecution.Execute(context, _tree, in _mask, split, _take);
             return CountTrue(context, root, states);
@@ -569,7 +573,7 @@ internal sealed class TerminalScan
         try
         {
             SplitExecution.Register(context, _tree, in _mask, split);
-            _metrics?.AddRequests(context.Segments);
+            ScanMetrics.Note(_metrics, context.Segments);
             await _file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
             int root = SplitExecution.Execute(context, _tree, in _mask, split, _take);
             return Extreme(context, root, field, wantMin, states, indices);

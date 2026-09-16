@@ -84,6 +84,38 @@ public sealed class ScanMetrics
         AddRequests(segments.Count, bytes);
     }
 
+    /// <summary>
+    /// Adds what a split registered to the scan's sink, when there is one, and to the process's
+    /// counters, when a listener is attached (docs/09 §5); nothing is walked when neither asks.
+    /// </summary>
+    /// <param name="metrics">The scan's sink, or null.</param>
+    /// <param name="segments">The request set, after registration.</param>
+    internal static void Note(ScanMetrics? metrics, IO.SegmentRequestSet segments)
+    {
+        if (metrics is null && !Diagnostics.VortexEventSource.On)
+        {
+            return;
+        }
+
+        long bytes = 0;
+        for (int i = 0; i < segments.Count; i++)
+        {
+            bytes += segments.GetSpec(i).Length;
+        }
+
+        Note(metrics, segments.Count, bytes);
+    }
+
+    /// <summary>Adds counted requests to the sink and to the process's counters.</summary>
+    /// <param name="metrics">The scan's sink, or null.</param>
+    /// <param name="segments">Segments asked for.</param>
+    /// <param name="bytes">Their bytes.</param>
+    internal static void Note(ScanMetrics? metrics, long segments, long bytes)
+    {
+        metrics?.AddRequests(segments, bytes);
+        Diagnostics.VortexEventSource.Requested(segments, bytes);
+    }
+
     internal void AddDecoded(long values) => Interlocked.Add(ref _valuesDecoded, values);
 
     internal void AddBatch(long rows)

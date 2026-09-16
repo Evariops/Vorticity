@@ -132,6 +132,7 @@ public sealed class KeyCursor : IAsyncDisposable
     {
         RequireKey(key);
         ObjectDisposedException.ThrowIf(_disposed, this);
+        Diagnostics.VortexEventSource.Seek();
         ValueTask<bool> seek = _source.SeekAsync(key, op, cancellationToken);
         return _distinct && op is SeekOp.AtOrBefore or SeekOp.Before
             ? FirstOfKeyAsync(seek, cancellationToken)
@@ -152,6 +153,7 @@ public sealed class KeyCursor : IAsyncDisposable
     public ValueTask<bool> SeekFirstAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        Diagnostics.VortexEventSource.Seek();
         return _source.SeekFirstAsync(cancellationToken);
     }
 
@@ -161,6 +163,7 @@ public sealed class KeyCursor : IAsyncDisposable
     public ValueTask<bool> SeekLastAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        Diagnostics.VortexEventSource.Seek();
         ValueTask<bool> seek = _source.SeekLastAsync(cancellationToken);
         return _distinct ? FirstOfKeyAsync(seek, cancellationToken) : seek;
     }
@@ -179,7 +182,15 @@ public sealed class KeyCursor : IAsyncDisposable
             return new ValueTask<bool>(false);
         }
 
-        return _distinct ? _source.NextKeyAsync(cancellationToken) : _source.NextAsync(cancellationToken);
+        // A distinct step is a seek past the key's other entries (§4.2).
+        if (_distinct)
+        {
+            Diagnostics.VortexEventSource.Seek();
+            return _source.NextKeyAsync(cancellationToken);
+        }
+
+        Diagnostics.VortexEventSource.Step();
+        return _source.NextAsync(cancellationToken);
     }
 
     /// <summary>
@@ -199,9 +210,14 @@ public sealed class KeyCursor : IAsyncDisposable
             return new ValueTask<bool>(false);
         }
 
-        return _distinct
-            ? FirstOfKeyAsync(_source.PrevKeyAsync(cancellationToken), cancellationToken)
-            : _source.PrevAsync(cancellationToken);
+        if (_distinct)
+        {
+            Diagnostics.VortexEventSource.Seek();
+            return FirstOfKeyAsync(_source.PrevKeyAsync(cancellationToken), cancellationToken);
+        }
+
+        Diagnostics.VortexEventSource.Step();
+        return _source.PrevAsync(cancellationToken);
     }
 
     /// <summary>
@@ -213,6 +229,7 @@ public sealed class KeyCursor : IAsyncDisposable
     public ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        Diagnostics.VortexEventSource.Seek();
         return _source.IsValid ? _source.NextKeyAsync(cancellationToken) : new ValueTask<bool>(false);
     }
 
@@ -222,6 +239,7 @@ public sealed class KeyCursor : IAsyncDisposable
     public ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        Diagnostics.VortexEventSource.Seek();
         return _source.IsValid ? _source.PrevKeyAsync(cancellationToken) : new ValueTask<bool>(false);
     }
 
@@ -249,6 +267,7 @@ public sealed class KeyCursor : IAsyncDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         RequireRows(nameof(SeekRankAsync));
+        Diagnostics.VortexEventSource.Seek();
         return _source.SeekRankAsync(rank, cancellationToken);
     }
 

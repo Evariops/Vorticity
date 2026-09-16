@@ -328,6 +328,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             }
 
             _scan.Metrics?.AddWindow(_splits.Count);
+            Diagnostics.VortexEventSource.Window(_splits.Count);
             return distinct;
         }
 
@@ -425,7 +426,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                 SplitExecution.Register(context, tree, in _read, _splits[i]);
             }
 
-            _scan.Metrics?.AddRequests(context.Segments);
+            ScanMetrics.Note(_scan.Metrics, context.Segments);
             await _scan.File.Segments.ReadManyAsync(context.Segments, _token).ConfigureAwait(false);
             _token.ThrowIfCancellationRequested();
             int[] parts = ArrayPool<int>.Shared.Rent(to - from);

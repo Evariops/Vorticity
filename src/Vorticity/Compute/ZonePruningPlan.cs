@@ -84,7 +84,7 @@ internal static class ZonePruningPlan
         // THE PRICE OF CONSULTING A STRUCTURE IS PART OF THE SCAN'S COST: the zone maps read here
         // are bytes the scan asked its source for, and they go to the same sink the batches feed
         // (docs/11 §6.4), so that the sink and the source agree to the request.
-        metrics?.AddRequests(segments, bytes);
+        Scan.ScanMetrics.Note(metrics, segments, bytes);
 
         long blockRows = Scan.SplitPlan.NaturalBatchRows(tree);
         Indexes.BloomPruner? blooms = indexes && blockRows > 0
@@ -114,7 +114,8 @@ internal static class ZonePruningPlan
         {
             before = live.LiveCount;
             await blooms.RefineAsync(file, live, cancellationToken).ConfigureAwait(false);
-            metrics?.AddRequests(blooms.Segments, blooms.Bytes);
+            Scan.ScanMetrics.Note(metrics, blooms.Segments, blooms.Bytes);
+            Diagnostics.VortexEventSource.RunsRead(blooms.Segments);
             steps?.Add(new Scan.PruningStep("bloom filter", before - live.LiveCount, blooms.Segments, blooms.Bytes));
         }
 
@@ -123,10 +124,12 @@ internal static class ZonePruningPlan
         {
             before = live.LiveCount;
             await locating.RefineAsync(file, live, cancellationToken).ConfigureAwait(false);
-            metrics?.AddRequests(locating.Segments, locating.Bytes);
+            Scan.ScanMetrics.Note(metrics, locating.Segments, locating.Bytes);
+            Diagnostics.VortexEventSource.RunsRead(locating.Segments);
             steps?.Add(new Scan.PruningStep("locating index", before - live.LiveCount, locating.Segments, locating.Bytes));
         }
 
+        Diagnostics.VortexEventSource.Pruned(live.BlockCount - live.LiveCount, live.BlockCount);
         return new PruningPlan(live, zones);
     }
 

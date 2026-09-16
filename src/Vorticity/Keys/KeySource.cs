@@ -76,6 +76,11 @@ internal abstract class KeySource : IAsyncDisposable
     /// <summary>The entries sharing the current key; the position does not move.</summary>
     internal abstract ValueTask<long> KeyCountAsync(CancellationToken cancellationToken);
 
+    /// <summary>The runs holding an entry of <paramref name="slices"/>; the position is lost.</summary>
+    internal virtual ValueTask<int> RunsOverlappingAsync(
+        System.Collections.Generic.List<(long Low, long High)> slices, CancellationToken cancellationToken) =>
+        new ValueTask<int>(slices.Count > 0 ? Runs : 0);
+
     /// <summary>Leaves no entry current.</summary>
     internal abstract void Invalidate();
 

@@ -443,7 +443,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// Adds what the batch just registered to the scan's sink: the distinct segments and their
     /// bytes, counted at the asking (docs/11 §6.4) -- a caching source may serve some without a read.
     /// </summary>
-    private void NoteRequests(ScanContext context) => _metrics?.AddRequests(context.Segments);
+    private void NoteRequests(ScanContext context) => ScanMetrics.Note(_metrics, context.Segments);
 
     private bool CompleteBatch()
     {

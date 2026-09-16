@@ -406,6 +406,147 @@ public sealed class SortedRunsCursorTests
         Assert.Equal(expected, on);
     }
 
+    // ------------------------------------------------------------------ explain and counters (§8.1)
+
+    [Fact]
+    public async Task ExplainSaysWhatTheIndexSelectsHowACountResolvesAndWhatAnOrderWalks()
+    {
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync();
+        VortexFile file = written.File;
+        // A range of about a hundred rows: fewer than a batch, so the index selects them outright.
+        (_, VortexExpr filter, Func<FilterLiteral, bool> matches) = Parse("i64 >= 2400");
+        List<Entry> oracle = Oracle("i64").FindAll(e => matches(e.Key));
+
+        ScanPlan plan = await file.Scan().Where(filter).ExplainAsync();
+        Assert.NotNull(plan.Count);
+        Assert.True(plan.Count.ExactCover);
+        Assert.Equal(oracle.Count, plan.Count.ExactCount);
+        Assert.Equal(oracle.Count, plan.RowsSelectedByIndex);
+        Assert.Equal(plan.LiveSplits, plan.Count.SplitsProven + plan.Count.SplitsDecoded);
+        Assert.Null(plan.Order);
+
+        // Without the index, no cover; a take narrows it off too.
+        ScanPlan off = await file.Scan().Where(filter).WithIndexes(false).ExplainAsync();
+        Assert.False(off.Count!.ExactCover);
+        Assert.Equal(0, off.RowsSelectedByIndex);
+
+        ScanPlan ordered = await file.Scan().Where(filter).InKeyOrder("i64", descending: true).ExplainAsync();
+        OrderPlan order = Assert.IsType<OrderPlan>(ordered.Order);
+        Assert.Equal(KeySourceKind.SortedRuns, order.Source);
+        Assert.Equal(oracle.Count, order.EntriesInRange);
+        Assert.True(order.Descending);
+        Assert.True(order.Runs > 1);
+        int runsWithKeys = 0;
+        for (int start = 0; start < Rows; start += Block)
+        {
+            bool any = false;
+            for (int row = start; row < Math.Min(start + Block, Rows); row++)
+            {
+                any |= I64(row) >= 2400;
+            }
+
+            runsWithKeys += any ? 1 : 0;
+        }
+
+        Assert.Equal(runsWithKeys, order.RunsInRange);
+
+        ScanPlan nothing = await file.Scan().InKeyOrder("i64").WithIndexes(false).ExplainAsync();
+        Assert.Equal(KeySourceKind.None, nothing.Order!.Source);
+    }
+
+    [Fact]
+    public async Task TheEventSourceCountsSeeksStepsRunsAndCountTiersWhileSomeoneListens()
+    {
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync();
+        VortexFile file = written.File;
+        using CounterListener listener = new CounterListener();
+
+        Vorticity.Diagnostics.VortexEventSource log = Vorticity.Diagnostics.VortexEventSource.Log;
+        long seeks = log.CursorSeeks;
+        long steps = log.CursorSteps;
+        long runs = log.IndexRunsRead;
+        long decoded = log.CountBlocksDecoded;
+        long windows = log.KeyOrderWindows;
+
+        await using (KeyCursor cursor = await file.Keys("text").OpenAsync())
+        {
+            for (bool ok = await cursor.SeekFirstAsync(); ok; ok = await cursor.NextAsync())
+            {
+            }
+        }
+
+        Assert.True(log.CursorSeeks > seeks);
+        Assert.True(log.CursorSteps - steps >= Oracle("text").Count);
+        Assert.True(log.IndexRunsRead > runs);
+
+        VortexExpr notIndexed = Expr.Ne(Expr.Field("f32"), Expr.Literal(FilterLiteral.From(0.0)));
+        await file.Scan().Where(notIndexed).CountAsync();
+        Assert.True(log.CountBlocksDecoded > decoded);
+
+        await foreach (RecordBatch batch in file.Scan().InKeyOrder("i64").WithMaxBatchRows(500).ExecuteAsync())
+        {
+        }
+
+        Assert.True(log.KeyOrderWindows - windows >= Rows / 500);
+
+        // The counters are published under the names docs/12 §8.1 gives.
+        Assert.True(await listener.SawAsync("cursor-seeks"), "no cursor-seeks counter was published; saw " + listener.Describe());
+    }
+
+    /// <summary>
+    /// Enables the `Vorticity` source with counters polled every second -- a whole number, because
+    /// the runtime parses the interval in the current culture and "0.1" is not a number in French.
+    /// </summary>
+    private sealed class CounterListener : System.Diagnostics.Tracing.EventListener
+    {
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _seen = new();
+
+        protected override void OnEventSourceCreated(System.Diagnostics.Tracing.EventSource source)
+        {
+            if (source.Name == "Vorticity")
+            {
+                EnableEvents(
+                    source,
+                    System.Diagnostics.Tracing.EventLevel.Verbose,
+                    System.Diagnostics.Tracing.EventKeywords.All,
+                    new Dictionary<string, string?> { ["EventCounterIntervalSec"] = "1" });
+            }
+        }
+
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _events = new();
+
+        internal string Describe() => string.Join(", ", _events.Keys);
+
+        protected override void OnEventWritten(System.Diagnostics.Tracing.EventWrittenEventArgs data)
+        {
+            _events[data.EventName ?? "?"] = true;
+            if (data.EventName != "EventCounters" || data.Payload is null)
+            {
+                return;
+            }
+
+            foreach (object? item in data.Payload)
+            {
+                if (item is IDictionary<string, object> fields && fields.TryGetValue("Name", out object? name) && name is string text)
+                {
+                    _seen[text] = true;
+                }
+            }
+        }
+
+        internal async Task<bool> SawAsync(string name)
+        {
+            for (int i = 0; i < 100 && !_seen.ContainsKey(name); i++)
+            {
+                await Task.Delay(50);
+            }
+
+            return _seen.ContainsKey(name);
+        }
+    }
+
     // ------------------------------------------------------------------ distinct keys (§5.4)
 
     public static TheoryData<string, KeySourceKind> DistinctWalks()

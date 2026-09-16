@@ -599,6 +599,16 @@ regular expressions and case folding are §13.
 | `Vorticity.RowEncoding` | `RowEncoder.EncodeKey(values, fields)` | the seek key of a composite cursor (§4.6) |
 | `EventSource` `Vorticity` (09 §5) | `index-runs-read`, `cursor-seeks`, `cursor-steps`, `count-blocks-proven`, `count-blocks-decoded` | whether an index earns its bytes, in production |
 
+**As delivered (step 18).** `ScanBuilder.ExplainAsync` fills `RowsSelectedByIndex` (the exact
+cover's rows when they fit a batch and the scan is not narrowed by `Rows` or `Take`), a `Count` plan
+(`CountPlan`: whether an exact cover answers and its count, then the splits the mask prunes, the
+zone maps prove and the decode is left with — the three tiers `CountAsync` takes, decided by the same
+predicates) and, under `InKeyOrder`, an `Order` plan (`OrderPlan`: the source, its runs, the runs the
+range reaches — found by selecting the two end keys of each slice and probing every run —, its
+entries and the entries the range admits, which bounds the rows the windows gather). `ScanMetrics`
+has `Windows` and `WindowSplits` since step 14. The `EventSource` is 09 §5's as-delivered note;
+`vxdump --explain` prints the plan and the count tiers.
+
 Not on the surface, on purpose: a `KeyRange` type (`Where` says it, §6); a `Probe(column, value)`
 (`AnyAsync` is it, §5.1); a `DistinctAsync` returning a list (§5.4); a key-ordered `Take` (the
 window inside `InKeyOrder` is the only reorder, §6); a `Sort` (constraint 2). Each would be a

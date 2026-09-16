@@ -536,6 +536,49 @@ internal sealed partial class SortedRunsSource : KeySource
         return count;
     }
 
+    /// <remarks>
+    /// Per slice, the keys at its two ends, then per run whether it holds a key between them: two
+    /// selections and <c>2r</c> probes a slice, for <c>Explain</c> only.
+    /// </remarks>
+    internal override async ValueTask<int> RunsOverlappingAsync(
+        List<(long Low, long High)> slices, CancellationToken cancellationToken)
+    {
+        bool[] hit = new bool[_runs.Length];
+        foreach ((long low, long high) in slices)
+        {
+            if (low >= high || !await SeekRankAsync(low, cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            FilterLiteral first = Key;
+            if (!await SeekRankAsync(high - 1, cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            FilterLiteral last = Key;
+            for (int r = 0; r < _runs.Length; r++)
+            {
+                if (!hit[r]
+                    && await FirstAtOrAfterAsync(_runs[r], first, long.MinValue, cancellationToken).ConfigureAwait(false)
+                        < await FirstAtOrAfterAsync(_runs[r], last, long.MaxValue, cancellationToken).ConfigureAwait(false))
+                {
+                    hit[r] = true;
+                }
+            }
+        }
+
+        Invalidate();
+        int count = 0;
+        foreach (bool h in hit)
+        {
+            count += h ? 1 : 0;
+        }
+
+        return count;
+    }
+
     internal override void Invalidate() => _heapSize = 0;
 
     public override ValueTask DisposeAsync()
@@ -863,6 +906,7 @@ internal sealed partial class SortedRunsSource : KeySource
             }
 
             await _file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            Diagnostics.VortexEventSource.RunsRead(requests.Count);
             using ScanContext context = _file.CreateIndexContext();
             decoded = Decode(
                 context,

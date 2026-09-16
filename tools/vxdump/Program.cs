@@ -654,6 +654,20 @@ internal static class Program
         output.Append("  splits           ").Append(Text(plan.LiveSplits)).Append(" live of ").Append(Text(plan.Splits)).Append('\n')
             .Append("  to read          ").Append(Text(plan.SegmentsToRead)).Append(" segments, ")
             .Append(Text(plan.BytesToRead)).Append(" bytes of ").Append(Text(plan.FileBytes)).Append('\n');
+        if (plan.RowsSelectedByIndex > 0)
+        {
+            output.Append("  index selects    ").Append(Text(plan.RowsSelectedByIndex)).Append(" rows outright\n");
+        }
+
+        if (plan.Count is { } tiers)
+        {
+            output.Append("  count tiers      ")
+                .Append(tiers.ExactCover ? "exact cover (" + Text(tiers.ExactCount) + "), " : string.Empty)
+                .Append(Text(tiers.SplitsPruned)).Append(" pruned, ")
+                .Append(Text(tiers.SplitsProven)).Append(" proven, ")
+                .Append(Text(tiers.SplitsDecoded)).Append(" decoded\n");
+        }
+
         long count = await file.Scan().Where(filter).CountAsync().ConfigureAwait(false);
         output.Append("  count            ").Append(Text(count)).Append('\n');
     }

@@ -71,6 +71,7 @@ internal sealed partial class SortedRunsSource
                 context.ResetBatch();
                 int slot = context.Segments.Add(SpecOf(file, flat));
                 await file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
+                Diagnostics.VortexEventSource.RunsRead(1);
                 RunSegment? values = Values(context, flat, slot, layout);
                 if (values is null)
                 {
