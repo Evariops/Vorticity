@@ -25,18 +25,38 @@ internal readonly struct ZoneBounds
     /// <summary>Nothing is known about this zone; every predicate must assume it may match.</summary>
     internal static ZoneBounds Unknown => default;
 
+    // THE COUNTS ARE INTS, AND THE STRUCT IS 64 BYTES BECAUSE OF IT. Two literals of 24 bytes, two
+    // counts and five flags fit one cache line exactly; two long counts would spill into 72 and
+    // cost eight more bytes per zone in the array PathAllocationTests holds. A zone is one batch
+    // of rows, so a count that does not fit an int is not a count this reader will ever meet, and
+    // Create treats one as "not recorded", which prunes and proves less and is never wrong.
+    private readonly int _nullCount;
+    private readonly int _nanCount;
+
     private ZoneBounds(
         FilterLiteral min, bool hasMin, FilterLiteral max, bool hasMax, bool exact,
-        long nullCount, bool hasNullCount)
+        int nullCount, bool hasNullCount, int nanCount, bool hasNanCount)
     {
         Min = min;
         HasMin = hasMin;
         Max = max;
         HasMax = hasMax;
         IsExact = exact;
-        NullCount = nullCount;
+        _nullCount = nullCount;
         HasNullCount = hasNullCount;
+        _nanCount = nanCount;
+        HasNanCount = hasNanCount;
     }
+
+    /// <summary>
+    /// How many of the zone's rows are NaN -- rows the bounds exclude (docs/08-semantics.md §2)
+    /// and no comparison ever selects, which is what a full-block proof has to know about them
+    /// (docs/12-index-reads.md §5.2).
+    /// </summary>
+    internal long NanCount => _nanCount;
+
+    /// <summary>Whether <see cref="NanCount"/> was recorded.</summary>
+    internal bool HasNanCount { get; }
 
     /// <summary>A lower bound on the zone's values.</summary>
     internal FilterLiteral Min { get; }
@@ -57,7 +77,7 @@ internal readonly struct ZoneBounds
     internal bool IsExact { get; }
 
     /// <summary>How many of the zone's rows are null.</summary>
-    internal long NullCount { get; }
+    internal long NullCount => _nullCount;
 
     /// <summary>Whether <see cref="NullCount"/> was recorded.</summary>
     internal bool HasNullCount { get; }
@@ -70,8 +90,18 @@ internal readonly struct ZoneBounds
     /// <param name="exact">Whether the bounds are exact extremes.</param>
     /// <param name="nullCount">The null count, when recorded.</param>
     /// <param name="hasNullCount">Whether a null count was recorded.</param>
+    /// <param name="nanCount">The NaN count, when recorded.</param>
+    /// <param name="hasNanCount">Whether a NaN count was recorded.</param>
     internal static ZoneBounds Create(
         FilterLiteral min, bool hasMin, FilterLiteral max, bool hasMax, bool exact,
-        long nullCount, bool hasNullCount) =>
-        new ZoneBounds(min, hasMin, max, hasMax, exact, nullCount, hasNullCount);
+        long nullCount, bool hasNullCount, long nanCount = 0, bool hasNanCount = false)
+    {
+        // A count outside an int is not recorded: see the fields.
+        bool nulls = hasNullCount && nullCount >= 0 && nullCount <= int.MaxValue;
+        bool nans = hasNanCount && nanCount >= 0 && nanCount <= int.MaxValue;
+        return new ZoneBounds(
+            min, hasMin, max, hasMax, exact,
+            nulls ? (int)nullCount : 0, nulls,
+            nans ? (int)nanCount : 0, nans);
+    }
 }

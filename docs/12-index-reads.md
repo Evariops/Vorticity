@@ -335,6 +335,30 @@ subtracting bounds, and the other two intersect with the selection.
 The property that makes this testable is pruning's own: **a wrong proof is a wrong count**. §11
 runs every count with each tier forced off in turn and asserts that the numbers agree.
 
+**As delivered (step 10a).** `ZonePruner.MustMatch(RowRange)` and `TryCount(RowRange, out long)`
+are two readings of one `RangeVerdict`: **three counts per range — true, false, unknown — each
+decided or not**, any two deciding the third. A zone map says how many and never which, so
+`NOT` is exact only with all three (it swaps true and false and keeps unknown), which is why the
+verdict does not push a negation into the comparison the way `MayMatch` does. `AND` and `OR`
+combine as the tautologies of three-valued logic over counts — a side that is true, false or
+unknown everywhere decides the other side's contribution — plus the one rule that does the work
+in practice: two predicates on the same column are unknown on the same rows, that column's
+nulls, and a verdict remembers whose nulls its unknowns are, so `x ≥ a AND x < b` on a nullable
+column is decided where the counts alone would not be. The leaves follow this section: an
+`Inexact` bound proves an order and never an equality; a NaN row is false for an ordering or an
+equality and true for `!=` (08 §2), so "every value satisfies `x > v`" leaves exactly
+`nan_count` false rows and "every value equals `v`" leaves exactly `nan_count` true rows for
+`x != v`; `nan_count` is read from the zone map; a zone the range covers in part contributes only
+what was uniform over it. `StartsWith(p)` proves whole and empty through `[p, succ(p))`; `LIKE`
+proves empty through its leading literal; `Contains` nothing but the empty pattern. What the
+algebra does not see, on purpose, falls to the third tier: `x > v OR x IS NULL` on one column
+(one side's unknowns are the other side's trues). Two things the dual found in the pruner are
+fixed with it: `NOT (x > v)` is true on a NaN row where the pushed-down `x ≤ v` is false, so
+`MayMatch` now keeps a zone that may hold a NaN under a negated ordering predicate; and a bound
+is ordered against a constant exactly as the kernels order a value — an integer widened to
+`double`, monotone and therefore sound for the bound — with "not comparable" told apart from
+"equal", which a prune never needed and a proof does.
+
 ### 5.3 `MinAsync` / `MaxAsync` — first and last
 
 `ValueTask<FilterLiteral> MinAsync(string path, ct)` and `MaxAsync`: the smallest and largest

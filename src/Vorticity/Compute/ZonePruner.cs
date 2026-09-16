@@ -21,7 +21,14 @@
 //
 // NOT is handled by pushing it into the comparison rather than by negating a bound. Negating "this
 // zone may contain a match" gives "this zone may contain a non-match", which is not the same
-// question and is almost always true anyway.
+// question and is almost always true anyway. One thing the push-down cannot see: NOT (x > v) is
+// TRUE on a NaN row, where x <= v is false (docs/08-semantics.md §2), so under a negation an
+// ordering predicate may match wherever the zone may hold a NaN.
+//
+// THE DUAL, `MustMatch` AND `TryCount` (docs/12-index-reads.md §5.2), errs the other way: it
+// proves only when the statistics point the safe way, in three-valued logic with counts
+// (RangeVerdict), NOT included as the exact operation it is rather than as a push-down. A wrong
+// proof there is a wrong count, and the tests hold every count against the decode.
 using System;
 using Vorticity.Expressions;
 using Vorticity.File;
@@ -64,6 +71,37 @@ internal sealed class ZonePruner : IBlockPruner
     /// <param name="rows">The candidate range, in file row coordinates.</param>
     internal bool MayMatch(RowRange rows) => MayMatch(_filter, rows, negated: false);
 
+    /// <summary>
+    /// Whether the filter selects EVERY row of <paramref name="rows"/>, from the zone maps
+    /// alone -- the dual of <see cref="MayMatch(RowRange)"/>, docs/12-index-reads.md §5.2.
+    /// </summary>
+    /// <param name="rows">The candidate range, in file row coordinates.</param>
+    /// <remarks>
+    /// Strict: a null or a NaN row is not selected by a comparison, so a range that holds one is
+    /// not proven whole. What the statistics prove of the rows AROUND them is
+    /// <see cref="TryCount"/>.
+    /// </remarks>
+    internal bool MustMatch(RowRange rows) =>
+        rows.IsEmpty || Verdict(_filter, rows).IsAllTrue;
+
+    /// <summary>
+    /// How many rows of <paramref name="rows"/> the filter selects, when the zone maps decide
+    /// it: the full-block proof of <c>CountAsync</c> (docs/12-index-reads.md §5.2).
+    /// </summary>
+    /// <param name="rows">The candidate range, in file row coordinates.</param>
+    /// <param name="count">The exact count, when decided.</param>
+    /// <returns>Whether the statistics decided it.</returns>
+    internal bool TryCount(RowRange rows, out long count)
+    {
+        RangeVerdict verdict = Verdict(_filter, rows);
+        count = verdict.TrueCount;
+        return verdict.TrueKnown;
+    }
+
+    /// <summary>The filter's verdict over <paramref name="rows"/>, both counts.</summary>
+    /// <param name="rows">The candidate range, in file row coordinates.</param>
+    internal RangeVerdict Verdict(RowRange rows) => Verdict(_filter, rows);
+
     /// <inheritdoc/>
     /// <remarks>
     /// BLOCK BY BLOCK THROUGH THE RANGE QUESTION ABOVE, so that the mask says of every block
@@ -91,7 +129,13 @@ internal sealed class ZonePruner : IBlockPruner
             {
                 ComparisonExpr comparison = (ComparisonExpr)expr;
                 ComparisonOp op = negated ? Negate(comparison.Op) : comparison.Op;
-                return MayMatchComparison(comparison.Field, op, comparison.Value, rows);
+
+                // NOT (x < v) is true on a NaN row, where the pushed-down x >= v is false: under
+                // a negation an ordering predicate matches wherever a NaN may be. Equality is not
+                // concerned -- NOT (x = v) becomes x != v, which never prunes, and NOT (x != v)
+                // is false on NaN exactly as x = v is.
+                bool nanMatches = negated && IsOrdering(comparison.Op);
+                return MayMatchComparison(comparison.Field, op, comparison.Value, rows, nanMatches);
             }
 
             case ExprKind.NullCheck:
@@ -208,7 +252,7 @@ internal sealed class ZonePruner : IBlockPruner
     }
 
     private bool MayMatchComparison(
-        FieldExpr field, ComparisonOp op, FilterLiteral value, RowRange rows)
+        FieldExpr field, ComparisonOp op, FilterLiteral value, RowRange rows, bool nanMatches = false)
     {
         if (value.Kind == FilterLiteralKind.Null)
         {
@@ -227,13 +271,491 @@ internal sealed class ZonePruner : IBlockPruner
         ZoneRange zones = column.Zones(rows);
         for (int zone = zones.Start; zone < zones.End; zone++)
         {
-            if (ZoneMayMatch(column, zone, op, value))
+            if (ZoneMayMatch(column, zone, op, value) || (nanMatches && ZoneMayHoldNaN(column, zone)))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Whether zone <paramref name="zone"/> may hold a NaN: its <c>nan_count</c> when it has one,
+    /// else whatever its bounds' type allows -- and a zone with no bounds allows everything.
+    /// </summary>
+    private static bool ZoneMayHoldNaN(ZoneColumn column, int zone)
+    {
+        ZoneBounds bounds = column.Bounds(zone);
+        if (bounds.HasNullCount && bounds.NullCount >= column.RowsInZone(zone))
+        {
+            // No values at all, NaN included.
+            return false;
+        }
+
+        if (bounds.HasNanCount)
+        {
+            return bounds.NanCount > 0;
+        }
+
+        return BoundsKind(bounds) is not FilterLiteralKind kind || kind == FilterLiteralKind.Float;
+    }
+
+    /// <summary>The type the bounds are in, or null when the zone has none.</summary>
+    private static FilterLiteralKind? BoundsKind(ZoneBounds bounds) =>
+        bounds.HasMin ? bounds.Min.Kind : bounds.HasMax ? bounds.Max.Kind : null;
+
+    private static bool IsOrdering(ComparisonOp op) =>
+        op is ComparisonOp.Less or ComparisonOp.LessOrEqual
+            or ComparisonOp.Greater or ComparisonOp.GreaterOrEqual;
+
+    // ------------------------------------------------------------------------------- the dual
+
+    /// <summary>
+    /// The filter's verdict over <paramref name="rows"/>: how many rows it selects and how many
+    /// it leaves unknown, in three-valued logic, from the zone maps alone.
+    /// </summary>
+    /// <remarks>
+    /// The leaves are decided per zone from the bounds and the counts, and NOT, AND and OR are
+    /// the exact operations of <see cref="RangeVerdict"/> -- no push-down, because a count of
+    /// trues negates exactly only with the unknowns beside it. A leaf the maps say nothing about
+    /// is <see cref="RangeVerdict.Undecided"/>, and the algebra lets it decide what it still can:
+    /// <c>false AND undecided</c> is false.
+    /// </remarks>
+    private RangeVerdict Verdict(VortexExpr expr, RowRange rows)
+    {
+        long length = rows.Length;
+        switch (expr.Kind)
+        {
+            case ExprKind.Comparison:
+            {
+                ComparisonExpr comparison = (ComparisonExpr)expr;
+                if (comparison.Value.Kind == FilterLiteralKind.Null)
+                {
+                    // "A comparison with a null operand yields unknown" -- for every row, which
+                    // is what ComparisonKernels.Compare fills.
+                    return RangeVerdict.AllUnknown(length);
+                }
+
+                return Decide(comparison.Field, rows, ZoneQuestion.Compare(comparison.Op, comparison.Value));
+            }
+
+            case ExprKind.NullCheck:
+            {
+                NullCheckExpr check = (NullCheckExpr)expr;
+                return Decide(check.Field, rows, ZoneQuestion.NullCheck(check.IsNull));
+            }
+
+            case ExprKind.In:
+            {
+                InExpr membership = (InExpr)expr;
+                return Decide(membership.Field, rows, ZoneQuestion.In(membership.Literals));
+            }
+
+            case ExprKind.StringMatch:
+                return StringMatchVerdict((StringMatchExpr)expr, rows);
+
+            case ExprKind.Not:
+                return RangeVerdict.Not(Verdict(((NotExpr)expr).Operand, rows));
+
+            case ExprKind.Logical:
+            {
+                LogicalExpr logical = (LogicalExpr)expr;
+                RangeVerdict left = Verdict(logical.Left, rows);
+                RangeVerdict right = Verdict(logical.Right, rows);
+                return logical.IsAnd
+                    ? RangeVerdict.And(left, right)
+                    : RangeVerdict.Or(left, right);
+            }
+
+            default:
+                return RangeVerdict.Undecided(length);
+        }
+    }
+
+    /// <summary>
+    /// A byte-pattern predicate, decided through the range a prefix is, exactly as
+    /// <see cref="MayMatchStringMatch"/> prunes it: <c>StartsWith(p)</c> is
+    /// <c>x ≥ p AND x &lt; succ(p)</c>, so its bounds prove it whole as well as impossible; a
+    /// <c>LIKE</c> claims only impossibility through its leading literal, since what follows the
+    /// prefix is not a range; <c>Contains</c> claims nothing but the empty pattern.
+    /// </summary>
+    private RangeVerdict StringMatchVerdict(StringMatchExpr match, RowRange rows)
+    {
+        ReadOnlySpan<byte> pattern = match.Pattern.BytesValue;
+        if (match.Op == StringMatchOp.Contains)
+        {
+            return Decide(match.Field, rows, ZoneQuestion.Contains(pattern.IsEmpty));
+        }
+
+        if (match.Op == StringMatchOp.StartsWith)
+        {
+            return Decide(match.Field, rows, Prefix(pattern, whole: true));
+        }
+
+        Span<byte> literal = pattern.Length <= Scratch
+            ? stackalloc byte[Scratch]
+            : new byte[pattern.Length];
+        int taken = BytePattern.LeadingLiteral(pattern, match.Escape, literal);
+        if (taken == 0)
+        {
+            // A pattern that opens with a wildcard says nothing a bound can check; the nulls are
+            // still the unknown rows.
+            return Decide(match.Field, rows, ZoneQuestion.Open);
+        }
+
+        return Decide(match.Field, rows, Prefix(literal[..taken], whole: false));
+    }
+
+    /// <summary>The prefix question: the range <c>[p, succ(p))</c>, both ends as literals.</summary>
+    /// <param name="prefix">The prefix.</param>
+    /// <param name="whole">Whether the predicate IS the prefix test, so that the range proves it whole.</param>
+    private static ZoneQuestion Prefix(ReadOnlySpan<byte> prefix, bool whole)
+    {
+        if (prefix.IsEmpty)
+        {
+            // Every string begins with the empty prefix.
+            return whole ? ZoneQuestion.Everything : ZoneQuestion.Open;
+        }
+
+        Span<byte> upper = prefix.Length <= Scratch ? stackalloc byte[Scratch] : new byte[prefix.Length];
+        int length = BytePattern.Successor(prefix, upper);
+        return ZoneQuestion.Prefix(
+            FilterLiteral.From(prefix),
+            length == 0 ? default : FilterLiteral.From(upper[..length]),
+            hasUpper: length > 0,
+            whole);
+    }
+
+    /// <summary>
+    /// Asks <paramref name="question"/> of every zone of <paramref name="field"/> that
+    /// <paramref name="rows"/> touches and sums the answers.
+    /// </summary>
+    /// <remarks>
+    /// A zone the range covers whole contributes its counts. A zone it covers in part is a
+    /// count over rows the map cannot tell apart, so it contributes only what is uniform over
+    /// the zone: nothing true, everything true, nothing unknown, everything unknown. A split
+    /// that straddles two blocks (docs/11 §6.1) is the case; a block that IS a zone never
+    /// meets it.
+    /// </remarks>
+    private RangeVerdict Decide(FieldExpr field, RowRange rows, in ZoneQuestion question)
+    {
+        ZoneColumn? column = Find(field);
+        if (column is null || !column.HasStatistics || rows.IsEmpty)
+        {
+            return RangeVerdict.Undecided(rows.Length);
+        }
+
+        ZoneRange zones = column.Zones(rows);
+        long covered = Math.Min((long)zones.End * column.ZoneLength, column.RowCount);
+        if (zones.End <= zones.Start || rows.Start < (long)zones.Start * column.ZoneLength || rows.End > covered)
+        {
+            // Rows the map does not describe decide nothing.
+            return RangeVerdict.Undecided(rows.Length);
+        }
+
+        RangeVerdict total = RangeVerdict.Of(0, 0, 0, 0, column);
+        for (int zone = zones.Start; zone < zones.End; zone++)
+        {
+            long zoneRows = column.RowsInZone(zone);
+            RowRange whole = RowRange.FromLength((long)zone * column.ZoneLength, zoneRows);
+            RowRange part = whole.Intersect(rows);
+            RangeVerdict answer = question.OfZone(column, column.Bounds(zone), zoneRows);
+            if (part.Length < zoneRows)
+            {
+                answer = answer.Restrict(part.Length);
+            }
+
+            total = RangeVerdict.Concat(total, answer);
+            if (!total.TrueKnown && !total.FalseKnown && !total.UnknownKnown)
+            {
+                return RangeVerdict.Undecided(rows.Length);
+            }
+        }
+
+        return total;
+    }
+
+    /// <summary>What the bounds of one zone prove of a comparison over its values.</summary>
+    private enum Proof : byte
+    {
+        /// <summary>The bounds decide nothing.</summary>
+        Open,
+
+        /// <summary>Every non-null, non-NaN value satisfies it.</summary>
+        All,
+
+        /// <summary>No value satisfies it.</summary>
+        None,
+    }
+
+    /// <summary>
+    /// What the bounds prove of <c>x op value</c>, over the values the bounds describe: the
+    /// non-null, non-NaN ones (docs/08-semantics.md §2). <see cref="Proof.All"/> reads an
+    /// Inexact bound the way docs/08 §1 allows -- the true minimum is at or above the stated
+    /// one, so <c>min ≥ v</c> proves <c>x ≥ v</c> -- and equality only from Exact bounds.
+    /// </summary>
+    private static Proof Prove(ZoneBounds bounds, ComparisonOp op, FilterLiteral value)
+    {
+        int low = 0;
+        int high = 0;
+        bool hasLow = bounds.HasMin && TryCompare(bounds.Min, value, out low);
+        bool hasHigh = bounds.HasMax && TryCompare(bounds.Max, value, out high);
+        switch (op)
+        {
+            case ComparisonOp.GreaterOrEqual:
+                return hasLow && low >= 0 ? Proof.All : hasHigh && high < 0 ? Proof.None : Proof.Open;
+            case ComparisonOp.Greater:
+                return hasLow && low > 0 ? Proof.All : hasHigh && high <= 0 ? Proof.None : Proof.Open;
+            case ComparisonOp.LessOrEqual:
+                return hasHigh && high <= 0 ? Proof.All : hasLow && low > 0 ? Proof.None : Proof.Open;
+            case ComparisonOp.Less:
+                return hasHigh && high < 0 ? Proof.All : hasLow && low >= 0 ? Proof.None : Proof.Open;
+            case ComparisonOp.Equal:
+                if ((hasLow && low > 0) || (hasHigh && high < 0))
+                {
+                    return Proof.None;
+                }
+
+                return hasLow && hasHigh && low == 0 && high == 0 && bounds.IsExact ? Proof.All : Proof.Open;
+            default:
+                // NotEqual: the mirror of Equal, over the values the bounds describe. The NaN
+                // rows, which are outside them and DO satisfy !=, are the caller's to count.
+                if ((hasLow && low > 0) || (hasHigh && high < 0))
+                {
+                    return Proof.All;
+                }
+
+                return hasLow && hasHigh && low == 0 && high == 0 && bounds.IsExact ? Proof.None : Proof.Open;
+        }
+    }
+
+    /// <summary>One predicate, asked zone by zone.</summary>
+    private readonly struct ZoneQuestion
+    {
+        private readonly Shape _shape;
+        private readonly ComparisonOp _op;
+        private readonly bool _isNull;
+        private readonly bool _whole;
+        private readonly bool _hasUpper;
+        private readonly FilterLiteral _value;
+        private readonly FilterLiteral _upper;
+        private readonly FilterLiteral[]? _literals;
+
+        private ZoneQuestion(
+            Shape shape, ComparisonOp op, bool isNull, bool whole, bool hasUpper,
+            FilterLiteral value, FilterLiteral upper, FilterLiteral[]? literals)
+        {
+            _shape = shape;
+            _op = op;
+            _isNull = isNull;
+            _whole = whole;
+            _hasUpper = hasUpper;
+            _value = value;
+            _upper = upper;
+            _literals = literals;
+        }
+
+        private enum Shape : byte
+        {
+            /// <summary>Nothing provable beyond the nulls being unknown.</summary>
+            Open,
+
+            /// <summary>True of every non-null row.</summary>
+            Everything,
+
+            /// <summary><c>x op v</c>.</summary>
+            Comparison,
+
+            /// <summary><c>IS NULL</c> or <c>IS NOT NULL</c>.</summary>
+            NullCheck,
+
+            /// <summary><c>x IN (…)</c>.</summary>
+            Membership,
+
+            /// <summary>A byte prefix: the range <c>[p, succ(p))</c>.</summary>
+            Prefix,
+        }
+
+        /// <summary>A predicate the bounds cannot check, unknown on the nulls.</summary>
+        internal static ZoneQuestion Open => new ZoneQuestion(Shape.Open, default, false, false, false, default, default, null);
+
+        /// <summary>A predicate true of every value, unknown on the nulls.</summary>
+        internal static ZoneQuestion Everything => new ZoneQuestion(Shape.Everything, default, false, false, false, default, default, null);
+
+        internal static ZoneQuestion Compare(ComparisonOp op, FilterLiteral value) =>
+            new ZoneQuestion(Shape.Comparison, op, false, false, false, value, default, null);
+
+        internal static ZoneQuestion NullCheck(bool isNull) =>
+            new ZoneQuestion(Shape.NullCheck, default, isNull, false, false, default, default, null);
+
+        internal static ZoneQuestion In(FilterLiteral[] literals) =>
+            new ZoneQuestion(Shape.Membership, default, false, false, false, default, default, literals);
+
+        /// <summary><c>Contains(p)</c>: everything when the pattern is empty, else unchecked.</summary>
+        internal static ZoneQuestion Contains(bool empty) => empty ? Everything : Open;
+
+        internal static ZoneQuestion Prefix(FilterLiteral lower, FilterLiteral upper, bool hasUpper, bool whole) =>
+            new ZoneQuestion(Shape.Prefix, default, false, whole, hasUpper, lower, upper, null);
+
+        /// <summary>The verdict over one whole zone of <paramref name="rows"/> rows.</summary>
+        internal RangeVerdict OfZone(ZoneColumn column, ZoneBounds bounds, long rows)
+        {
+            long? nulls = bounds.HasNullCount ? Math.Min(bounds.NullCount, rows) : null;
+
+            if (_shape == Shape.NullCheck)
+            {
+                // Never unknown (docs/08-semantics.md §3), and the count is the statistic itself.
+                return nulls is long known
+                    ? RangeVerdict.Of(rows, _isNull ? known : rows - known, _isNull ? rows - known : known, 0)
+                    : RangeVerdict.Undecided(rows);
+            }
+
+            if (nulls == rows)
+            {
+                // No values: unknown everywhere, and those unknowns are this column's nulls.
+                return RangeVerdict.AllUnknown(rows, column);
+            }
+
+            // Every remaining shape is unknown on exactly the nulls and decided elsewhere.
+            switch (_shape)
+            {
+                case Shape.Everything:
+                    return RangeVerdict.Of(rows, rows - nulls, 0, nulls, column);
+
+                case Shape.Comparison:
+                    return Comparison(column, bounds, rows, nulls);
+
+                case Shape.Membership:
+                    return Membership(column, bounds, rows, nulls);
+
+                case Shape.Prefix:
+                    return PrefixRange(column, bounds, rows, nulls);
+
+                default:
+                    return RangeVerdict.Of(rows, null, null, nulls, column);
+            }
+        }
+
+        /// <summary>
+        /// How many of the zone's rows are NaN: <c>nan_count</c> when the zone has one, none when
+        /// its bounds are of a type that has none, undecided otherwise.
+        /// </summary>
+        private static long? NaNs(ZoneBounds bounds, long rows)
+        {
+            if (bounds.HasNanCount)
+            {
+                return Math.Min(bounds.NanCount, rows);
+            }
+
+            return BoundsKind(bounds) is FilterLiteralKind kind && kind != FilterLiteralKind.Float ? 0 : null;
+        }
+
+        private RangeVerdict Comparison(ZoneColumn column, ZoneBounds bounds, long rows, long? nulls)
+        {
+            Proof proof = Prove(bounds, _op, _value);
+            long? nans = NaNs(bounds, rows);
+            if (_op == ComparisonOp.NotEqual)
+            {
+                // A NaN row satisfies != (docs/08 §2): the trues are every non-null row when the
+                // bounds prove the values, and exactly the NaN rows when they prove the values
+                // all equal -- the values themselves are then the falses.
+                return proof switch
+                {
+                    Proof.All => RangeVerdict.Of(rows, rows - nulls, 0, nulls, column),
+                    Proof.None => RangeVerdict.Of(rows, nans, rows - nulls - nans, nulls, column),
+                    _ => RangeVerdict.Of(rows, null, null, nulls, column),
+                };
+            }
+
+            // An ordering predicate or an equality: false on a NaN row (docs/08 §2), so the bounds
+            // proving every value leave exactly the NaN rows false, and proving none leaves no
+            // true row at all.
+            return proof switch
+            {
+                Proof.All => RangeVerdict.Of(rows, rows - nulls - nans, nans, nulls, column),
+                Proof.None => RangeVerdict.Of(rows, 0, rows - nulls, nulls, column),
+                _ => RangeVerdict.Of(rows, null, null, nulls, column),
+            };
+        }
+
+        /// <summary>
+        /// <c>x IN (…)</c> as the OR of equalities it is (ComparisonKernels.In): true wherever
+        /// one candidate is proven for every value -- two cannot be, unless they are the same
+        /// candidate -- and false only when every candidate is proven impossible. A null
+        /// candidate is unknown on every row, so the OR is unknown wherever it is not true.
+        /// </summary>
+        private RangeVerdict Membership(ZoneColumn column, ZoneBounds bounds, long rows, long? nulls)
+        {
+            FilterLiteral[] literals = _literals!;
+            bool anyNull = false;
+            bool anyAll = false;
+            bool allNone = true;
+            for (int i = 0; i < literals.Length; i++)
+            {
+                if (literals[i].Kind == FilterLiteralKind.Null)
+                {
+                    anyNull = true;
+                    continue;
+                }
+
+                Proof proof = Prove(bounds, ComparisonOp.Equal, literals[i]);
+                anyAll |= proof == Proof.All;
+                allNone &= proof == Proof.None;
+            }
+
+            long? nans = NaNs(bounds, rows);
+            long? trueCount = anyAll ? rows - nulls - nans : allNone ? 0 : null;
+            if (anyNull)
+            {
+                // Every row that is not true is unknown, the nulls of the column among them.
+                return RangeVerdict.Of(rows, trueCount, 0, rows - trueCount);
+            }
+
+            long? falseCount = anyAll ? nans : allNone ? rows - nulls : null;
+            return RangeVerdict.Of(rows, trueCount, falseCount, nulls, column);
+        }
+
+        /// <summary>
+        /// The range <c>[p, succ(p))</c> against string bounds: whole when the bounds sit inside
+        /// it (and the predicate is the prefix test itself), impossible when they sit entirely
+        /// outside it. An all-0xFF prefix has no successor and its lower bound is the whole claim.
+        /// </summary>
+        private RangeVerdict PrefixRange(ZoneColumn column, ZoneBounds bounds, long rows, long? nulls)
+        {
+            if (BoundsKind(bounds) != FilterLiteralKind.Bytes)
+            {
+                return RangeVerdict.Of(rows, null, null, nulls, column);
+            }
+
+            int low = 0;
+            int high = 0;
+            bool hasLow = bounds.HasMin && TryCompare(bounds.Min, _value, out low);
+            bool hasHigh = bounds.HasMax && TryCompare(bounds.Max, _value, out high);
+            bool none = hasHigh && high < 0;
+            bool all = hasLow && low >= 0;
+            if (_hasUpper)
+            {
+                int minVsUpper = 0;
+                int maxVsUpper = 0;
+                bool lowAboveUpper = bounds.HasMin && TryCompare(bounds.Min, _upper, out minVsUpper) && minVsUpper >= 0;
+                bool highBelowUpper = bounds.HasMax && TryCompare(bounds.Max, _upper, out maxVsUpper) && maxVsUpper < 0;
+                none |= lowAboveUpper;
+                all &= highBelowUpper;
+            }
+
+            if (none)
+            {
+                return RangeVerdict.Of(rows, 0, rows - nulls, nulls, column);
+            }
+
+            if (all && _whole)
+            {
+                return RangeVerdict.Of(rows, rows - nulls, 0, nulls, column);
+            }
+
+            return RangeVerdict.Of(rows, null, null, nulls, column);
+        }
     }
 
     private bool MayMatchNullCheck(FieldExpr field, bool isNull, RowRange rows)
@@ -339,34 +861,69 @@ internal sealed class ZonePruner : IBlockPruner
     /// The sign of <c>bound - value</c>, or <c>0</c> when the two are not comparable -- which makes
     /// every caller fall back to "may match" rather than guessing an order.
     /// </returns>
-    private static int Compare(FilterLiteral bound, FilterLiteral value)
+    private static int Compare(FilterLiteral bound, FilterLiteral value) =>
+        TryCompare(bound, value, out int order) ? order : 0;
+
+    /// <summary>
+    /// Orders a bound against a constant the way the comparison kernels order a value against
+    /// it, and says when it cannot -- which a proof has to know, where a prune only has to fall
+    /// back to "maybe".
+    /// </summary>
+    /// <param name="bound">The bound.</param>
+    /// <param name="value">The constant.</param>
+    /// <param name="order">The sign of <c>bound - value</c>, when the two are comparable.</param>
+    /// <returns>Whether they are.</returns>
+    /// <remarks>
+    /// An integer against a float goes through <c>double</c> exactly as
+    /// <c>ComparisonKernels.CompareSignedAgainstFloat</c> takes each value there, and that
+    /// widening is monotone, so what holds of the widened bound holds of every widened value on
+    /// its side of it -- lossy above 2^53 in the same way for the bound and for the rows. A NaN on
+    /// either side is not comparable: a zone's bounds exclude NaN (docs/08-semantics.md §2), and
+    /// a NaN constant compares false against everything.
+    /// </remarks>
+    internal static bool TryCompare(FilterLiteral bound, FilterLiteral value, out int order)
     {
+        order = 0;
         if (bound.Kind == value.Kind)
         {
-            return bound.Kind switch
+            switch (bound.Kind)
             {
-                FilterLiteralKind.Bool => bound.BoolValue.CompareTo(value.BoolValue),
-                FilterLiteralKind.Signed => bound.SignedValue.CompareTo(value.SignedValue),
-                FilterLiteralKind.Unsigned => bound.UnsignedValue.CompareTo(value.UnsignedValue),
-                FilterLiteralKind.Float => CompareFloat(bound.FloatValue, value.FloatValue),
-                FilterLiteralKind.Bytes => Math.Sign(bound.BytesValue.SequenceCompareTo(value.BytesValue)),
-                _ => 0,
-            };
+                case FilterLiteralKind.Bool:
+                    order = bound.BoolValue.CompareTo(value.BoolValue);
+                    return true;
+                case FilterLiteralKind.Signed:
+                    order = bound.SignedValue.CompareTo(value.SignedValue);
+                    return true;
+                case FilterLiteralKind.Unsigned:
+                    order = bound.UnsignedValue.CompareTo(value.UnsignedValue);
+                    return true;
+                case FilterLiteralKind.Float:
+                    return TryCompareFloat(bound.FloatValue, value.FloatValue, out order);
+                case FilterLiteralKind.Bytes:
+                    order = Math.Sign(bound.BytesValue.SequenceCompareTo(value.BytesValue));
+                    return true;
+                default:
+                    return false;
+            }
         }
 
-        // Mixed integer signs, the one cross-kind pair a filter can produce.
+        // Mixed integer signs, as ComparisonKernels.CompareSigned and CompareUnsigned settle
+        // them: a negative constant is below every unsigned value, a constant above i64::Max
+        // above every signed one.
         if (bound.Kind == FilterLiteralKind.Signed && value.Kind == FilterLiteralKind.Unsigned)
         {
-            return bound.SignedValue < 0
+            order = bound.SignedValue < 0
                 ? -1
                 : ((ulong)bound.SignedValue).CompareTo(value.UnsignedValue);
+            return true;
         }
 
         if (bound.Kind == FilterLiteralKind.Unsigned && value.Kind == FilterLiteralKind.Signed)
         {
-            return value.SignedValue < 0
+            order = value.SignedValue < 0
                 ? 1
                 : bound.UnsignedValue.CompareTo((ulong)value.SignedValue);
+            return true;
         }
 
         if (bound.Kind is FilterLiteralKind.Signed or FilterLiteralKind.Unsigned &&
@@ -375,22 +932,34 @@ internal sealed class ZonePruner : IBlockPruner
             double left = bound.Kind == FilterLiteralKind.Signed
                 ? bound.SignedValue
                 : bound.UnsignedValue;
-            return CompareFloat(left, value.FloatValue);
+            return TryCompareFloat(left, value.FloatValue, out order);
         }
 
-        return 0;
+        if (bound.Kind == FilterLiteralKind.Float &&
+            value.Kind is FilterLiteralKind.Signed or FilterLiteralKind.Unsigned)
+        {
+            // A float column against an integer constant: the constant widened, as
+            // ComparisonKernels.ToDouble widens it for every row.
+            double right = value.Kind == FilterLiteralKind.Signed
+                ? value.SignedValue
+                : value.UnsignedValue;
+            return TryCompareFloat(bound.FloatValue, right, out order);
+        }
+
+        return false;
     }
 
-    /// <summary>
-    /// Orders two floats, treating a NaN bound as "no information".
-    /// </summary>
-    /// <remarks>
-    /// A zone's min/max exclude NaN upstream (docs/08-semantics.md §2), so a NaN bound should not
-    /// occur; if one does, ordering it would license a prune from a value that compares false
-    /// against everything.
-    /// </remarks>
-    private static int CompareFloat(double bound, double value) =>
-        double.IsNaN(bound) || double.IsNaN(value) ? 0 : bound.CompareTo(value);
+    private static bool TryCompareFloat(double bound, double value, out int order)
+    {
+        if (double.IsNaN(bound) || double.IsNaN(value))
+        {
+            order = 0;
+            return false;
+        }
+
+        order = bound.CompareTo(value);
+        return true;
+    }
 
     private ZoneColumn? Find(FieldExpr field)
     {

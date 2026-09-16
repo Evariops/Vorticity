@@ -261,6 +261,7 @@ internal static class ZonePruningPlan
         int minColumn = -1;
         int maxColumn = -1;
         int nullColumn = -1;
+        int nanColumn = -1;
         bool exact = true;
 
         for (int i = 0; i < map.AggregateCount; i++)
@@ -289,6 +290,13 @@ internal static class ZonePruningPlan
                     break;
                 case AggregateId.NullCount:
                     nullColumn = column;
+                    break;
+                case AggregateId.NanCount:
+                    // Only a float column that holds a NaN carries one (the reference writer
+                    // emits it for nothing else), and a count-only proof needs it: the bounds
+                    // exclude NaN rows, so `rows - null_count` overstates a comparison's matches
+                    // by exactly this many (docs/12-index-reads.md §5.2).
+                    nanColumn = column;
                     break;
                 default:
                     break;
@@ -320,12 +328,23 @@ internal static class ZonePruningPlan
                 hasNulls = TryCount(nullCount, out nulls);
             }
 
+            long nans = 0;
+            bool hasNans = false;
+            if (nanColumn >= 0 &&
+                LiteralReader.TryRead(
+                    context.Canonical, zones.GetFieldIndex(nanColumn), z, out FilterLiteral nanCount))
+            {
+                hasNans = TryCount(nanCount, out nans);
+            }
+
             bounds[z] = ZoneBounds.Create(
                 min, hasMin,
                 max, hasMax,
                 exact,
                 nulls,
-                hasNulls);
+                hasNulls,
+                nans,
+                hasNans);
         }
 
         return new ZoneColumn(candidate.Field, map.ZoneLength, rowCount, bounds);
