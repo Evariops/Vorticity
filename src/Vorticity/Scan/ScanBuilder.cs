@@ -30,6 +30,7 @@ public sealed class ScanBuilder
     private VortexExpr? _filter;
     private List<string>? _filterPaths;
     private bool _prune = true;
+    private bool _indexes = true;
     private RowSelection? _take;
     private RowRange _rows;
     private bool _rowsSet;
@@ -244,6 +245,22 @@ public sealed class ScanBuilder
         return this;
     }
 
+    /// <summary>
+    /// Turns the file's index directory on or off, leaving the zone maps alone. On by default.
+    /// </summary>
+    /// <param name="enabled">Whether the scan may consult the file's indexes.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// The same diagnostic as <see cref="WithPruning"/>, one layer down: an index is a hint and
+    /// never changes which rows a scan returns (docs/10-indexes.md §6.6), so a scan with indexes
+    /// on and the same scan with them off are the equivalence test every index kind is held to.
+    /// </remarks>
+    public ScanBuilder WithIndexes(bool enabled)
+    {
+        _indexes = enabled;
+        return this;
+    }
+
     /// <summary>Opts in to decoding independent splits concurrently.</summary>
     /// <param name="degree">How many splits may be in flight at once. Must be positive.</param>
     /// <returns>This builder.</returns>
@@ -303,7 +320,7 @@ public sealed class ScanBuilder
         // all it holds still produces a batch, but one gathered down to nothing must not.
         return _filter is null && _take is null
             ? batches
-            : new FilteredBatches(batches, _filter, _prune);
+            : new FilteredBatches(batches, _filter, _prune, _indexes);
     }
 
     /// <summary>Hands the scan a sink it adds its counters to as it runs (docs/11 §6.4).</summary>
@@ -352,7 +369,7 @@ public sealed class ScanBuilder
         List<PruningStep> steps = [];
         Compute.BlockMask? live = _filter is not null && _prune
             ? await Compute.ZonePruningPlan
-                .RefineAsync(_file, tree, _filter, cancellationToken, steps)
+                .RefineAsync(_file, tree, _filter, cancellationToken, steps, metrics: null, _indexes)
                 .ConfigureAwait(false)
             : null;
 
@@ -401,7 +418,11 @@ public sealed class ScanBuilder
                 bytes += steps[i].BytesRead;
             }
 
-            bool fileMayMatch = _filter is null || _file.MayMatch(_filter);
+            // The whole file-level answer: the statistics, then the file filters when indexes are on.
+            bool fileMayMatch = _filter is null
+                || (_indexes
+                    ? await _file.MayMatchAsync(_filter, cancellationToken).ConfigureAwait(false)
+                    : Compute.FileStatisticsPruner.MayMatch(_file, _filter));
             return new ScanPlan(
                 rows.Length, blockRows, blocks, liveBlocks, steps, splits, liveSplits,
                 RowsSelectedByIndex: 0, toRead, bytes, _file.FileLength, fileMayMatch);
@@ -544,7 +565,7 @@ public sealed class ScanBuilder
             : Only(_filterPaths, extraPath);
         bool wholeFile = !_rowsSet && _take is null;
         return new TerminalScan(
-            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics);
+            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes);
     }
 
     /// <summary>The projection of exactly the fields a filter reads, plus one.</summary>

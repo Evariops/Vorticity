@@ -89,6 +89,7 @@ public sealed class RoundTripSweepTests
 
         int written = 0;
         int indexed = 0;
+        int blooms = 0;
         foreach (CorpusEntry entry in CorpusManifest.InScope())
         {
             // NOT WRITTEN FOR THE CROSS-CHECK, and the reason is the verifier's, not ours. Our
@@ -107,12 +108,26 @@ public sealed class RoundTripSweepTests
 
             await using VortexFile source = await VortexFile.OpenAsync(
                 entry.Path, OpenOptionsFor(entry), CancellationToken.None);
-            // WITH EVERY INDEX `Auto` BUILDS, so that the whole corpus crosses the rule of
-            // docs/10-indexes.md §3.1: a file with an index opens and scans in a strict Rust 0.86.1
-            // reader, without error and without configuration. The directory and its runs lie
-            // outside the layout, so the data the verifier compares is the default write's.
+            // WITH INDEXES, so that the whole corpus crosses the rule of docs/10-indexes.md §3.1: a
+            // file with an index opens and scans in a strict Rust 0.86.1 reader, without error and
+            // without configuration. Half the files index every column with a Bloom filter at all
+            // three resolutions, budget lifted -- which puts payload regions BETWEEN the data
+            // chunks, where no layout references them; the other half get what `Auto` builds, and
+            // a Bloom on every other field. The data the verifier compares is the default write's.
+            WritePolicy policy = written % 2 == 0
+                ? WritePolicy.None.WithDefault(IndexPolicy.Bloom(resolutions: 3))
+                : WritePolicy.Auto;
+            if (written % 2 == 1 && source.Schema.Kind == DTypeKind.Struct)
+            {
+                for (int field = 1; field < source.Schema.FieldCount; field += 2)
+                {
+                    policy = policy.For(source.Schema.GetFieldName(field), IndexPolicy.Bloom(resolutions: 3));
+                }
+            }
+
             await using VortexFileWriter writer = VortexFileWriter.Create(
-                destination, source.Schema, new VortexWriteOptions { Indexes = WritePolicy.Auto });
+                destination, source.Schema,
+                new VortexWriteOptions { Indexes = policy, IndexBudgetPerMille = 1_000_000 });
             await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {
@@ -126,14 +141,27 @@ public sealed class RoundTripSweepTests
                 indexed++;
             }
 
+            foreach (IndexWriteReport index in report.Indexes)
+            {
+                if (index.Kind == IndexKinds.BloomSbbf && index.Outcome == IndexOutcome.Built)
+                {
+                    blooms++;
+                    break;
+                }
+            }
+
             written++;
         }
 
         Console.Out.Write(
             "WROTE " + written.ToString(CultureInfo.InvariantCulture) + " files to " + root +
-            ", " + indexed.ToString(CultureInfo.InvariantCulture) + " of them with an index directory\n");
+            ", " + indexed.ToString(CultureInfo.InvariantCulture) + " of them with an index directory, " +
+            blooms.ToString(CultureInfo.InvariantCulture) + " with Bloom filter runs\n");
         Assert.True(written > 700);
         Assert.Equal(written, indexed);
+
+        // Enough files with payload regions between their chunks that the rule is tested, not assumed.
+        Assert.True(blooms > 200, $"only {blooms} files carry a Bloom filter");
     }
 
     /// <summary>Writes one corpus file out and reads it back, comparing every value.</summary>

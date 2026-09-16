@@ -258,6 +258,39 @@ when it runs, plus eight bit sets per generation at block close (≈ 3 ns per va
 generation, vectorised). Budget to hold: under 5 ns per value on the write path with one
 resolution, and at most `max_blocks × 32 B` per block on disk.
 
+**As delivered (step 12b).** `Indexes/SplitBlockBloom` is the reference's `BloomPartial` line for
+line, and `tools/conformance-gen/examples/gen_bloom_vectors.rs` proves it: 66 filters built by
+vortex 0.86.1's own public `Accumulator` over typed arrays (every integer width, both floats with
+both zeros, NaN and the infinities, nullable columns, strings on both sides of the inline limit,
+binaries), which our filter reproduces byte for byte — and so does the writer's builder, fed the
+same rows as canonical columns, wherever the clamp lets it size the same block count.
+Four departures from the text above, each deliberate:
+
+- **Exact distinct counts at every level.** A generation and the file are sized from the distinct
+  count of the union of their blocks, kept in a hash set, rather than from the sum: the sum sizes
+  a five-value status column's generation for eighty, the union for five — under the floor, so no
+  filter, which is right for a column the zone map already prunes.
+- **One entry per resolution**, `options` carrying the level (`0` block, `1` generation, `2`
+  file), `fpp`, the hash, `max_blocks`, `k`, `min_distinct` and the packed `n_blocks` table (per
+  block at block level, per run at the coarser ones): runs inside an entry are disjoint (§4.1), and
+  a generation's filter covers the same blocks as the filters beneath it.
+- **Runs are written when their generation closes**, between data chunks, not at `CompleteAsync`:
+  §7.2 asks for both "nothing buffered across chunks" and "runs at CompleteAsync", and the first
+  wins. The crosscheck writes 246 corpus files with payload regions between their chunks, and the
+  reference reads all of them.
+- **Payloads are written uncompressed** (a filter is uniform bits); still array blobs, `u32`,
+  with their dtype in `payload_dtype`.
+
+The probe is `Indexes/BloomPruner`, after the zone maps in the block-mask chain, one coalesced
+read per level, coarsest first; `ScanBuilder.WithIndexes(false)` turns it off. It hashes a
+literal only when it converts exactly into the column's type (an integer past 2⁵³ from a double,
+a non-integral float, an out-of-range integer: no claim), asks for both zeros when the literal is
+a zero, and asks for nothing on a NaN. A payload that is not the `u32` array its entry declares
+makes no claim for the blocks it covers. What no reader can catch is a well-formed filter whose
+bits are wrong: the format carries no checksum, and a zeroed filter would drop rows. The
+budget measured on the test fixture — 1,18 MiB of filters at 1 % against 0,50 MiB of ALP and
+bit-packed data for 1 024 distinct keys per block — is the case the default budget refuses.
+
 ### 5.2 `vorticity.bloom.ngram3.v1` — a token Bloom for `LIKE` and `CONTAINS`
 
 Same structure; the inserted keys are every byte **trigram** of every utf8 value in the block. A
@@ -278,6 +311,10 @@ it costs nothing to write, and the writer knows exactly when it applies. When a 
 dictionary-encoded the reader gets no claim for that chunk and falls through to the next index.
 
 ### 5.4 The file-level filter
+
+*As delivered (step 12b): `VortexFile.MayMatchAsync(expr)` answers from the statistics first and
+then from the file-level entries alone; the resolution is opt-in (`resolutions: 3`) and gives up
+past 2²² distinct values, which the report states.*
 
 A generation with `k` = every block of the file, built at `CompleteAsync` from the sum of block
 distinct counts, capped by `max_blocks` (default 1 Mi blocks = 32 MiB, rarely reached). It exists

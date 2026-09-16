@@ -206,7 +206,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
     private VortexFileWriter(
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
-        long blockBytes, bool fileStatistics, WritePolicy indexes)
+        long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille)
     {
         _sink = sink;
         _schema = schema;
@@ -238,7 +238,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
         }
 
         _indexes = IndexWriter.Asks(indexes)
-            ? new IndexWriter(indexes, schema, _isTabular, _fieldCount)
+            ? new IndexWriter(indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille)
             : null;
     }
 
@@ -297,9 +297,10 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
         ArgumentNullException.ThrowIfNull(options.Indexes, nameof(options));
         WritePolicy indexes = options.Profile == WriteProfile.Fastest ? WritePolicy.None : options.Indexes;
+        ArgumentOutOfRangeException.ThrowIfNegative(options.IndexBudgetPerMille, nameof(options));
         return new VortexFileWriter(
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
-            options.FileStatistics, indexes);
+            options.FileStatistics, indexes, options.IndexBudgetPerMille);
     }
 
     /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
@@ -467,6 +468,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
                 _columns[field].Accumulate(arena, _fieldNodes[field], 0, rows);
             }
 
+            FeedIndexes(arena, 0, rows);
             CloseBlock();
             return;
         }
@@ -480,6 +482,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
                 _columns[field].Accumulate(arena, _fieldNodes[field], offset, take);
             }
 
+            FeedIndexes(arena, offset, take);
             offset += take;
             _blockFilled += take;
             if (_blockFilled == _blockRows)
@@ -506,6 +509,20 @@ public sealed class VortexFileWriter : IAsyncDisposable
         }
     }
 
+    /// <summary>Hands the same rows to the index builders, right after the statistics pass.</summary>
+    private void FeedIndexes(CanonicalArena arena, int start, int count)
+    {
+        if (_indexes is not { Streams: true } indexes)
+        {
+            return;
+        }
+
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            indexes.Accumulate(field, arena, _fieldNodes[field], start, count);
+        }
+    }
+
     /// <summary>Seals the open block of every column.</summary>
     private void CloseBlock()
     {
@@ -514,7 +531,33 @@ public sealed class VortexFileWriter : IAsyncDisposable
             _columns[field].CloseBlock();
         }
 
+        _indexes?.CloseBlock();
         _blockFilled = 0;
+    }
+
+    /// <summary>
+    /// Writes every index payload the builders have closed, between data chunks (10 §4.2's run
+    /// segments: regions no layout references and no footer lists).
+    /// </summary>
+    private async ValueTask FlushIndexesAsync(CancellationToken cancellationToken)
+    {
+        if (_indexes is not { HasPending: true } indexes)
+        {
+            return;
+        }
+
+        while (indexes.TryTakePayload(_arrayEncodings, out ArrayBlobWriter.BlobLease blob, out PayloadTarget target))
+        {
+            using (blob)
+            {
+                long before = _sink.Position;
+                long aligned = await PadAsync(cancellationToken).ConfigureAwait(false);
+                await _sink.WriteAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
+                IndexSegment segment = new IndexSegment(
+                    (ulong)aligned, (uint)blob.Length, (byte)VortexLimits.MaxAlignmentExponent);
+                indexes.Placed(target, segment, _sink.Position - before, _sink.Position);
+            }
+        }
     }
 
     /// <summary>The arena the pending rows live in, created on first use.</summary>
@@ -718,6 +761,9 @@ public sealed class VortexFileWriter : IAsyncDisposable
         _emittedBlocks += blocks;
         _chunkRows.Add(rows);
         _rowCount += rows;
+
+        // The generations the blocks of this chunk closed go out right behind it.
+        await FlushIndexesAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -765,12 +811,15 @@ public sealed class VortexFileWriter : IAsyncDisposable
             ResetTransit();
         }
 
-        // Index runs go after the last data segment and before the zone maps (docs/10-indexes.md
-        // §7.2): regions no layout references and no footer lists. None of the kinds built so far
-        // carries a payload, so today this only decides.
+        // THE LAST RUNS, after the last data segment and before the zone maps (docs/10-indexes.md
+        // §7.2): the generation the end of the data left open, and the file-level filter. The
+        // others already went out behind the chunks that closed them.
         long dataEnd = _sink.Position;
-        _indexes?.Close(_columns, _chunkRows, _blockRows);
+        long interleaved = _indexes?.FileBytes ?? 0;
+        _indexes?.EndOfData();
+        await FlushIndexesAsync(cancellationToken).ConfigureAwait(false);
         long indexStart = _sink.Position;
+        _indexes?.Close(_columns, _chunkRows, _blockRows, dataEnd - interleaved);
 
         // The zones arrays are segments like any other and must be written BEFORE the footer that
         // records them.
@@ -831,11 +880,12 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
         await _sink.FlushAsync(cancellationToken).ConfigureAwait(false);
 
+        // Runs written between chunks sit inside `dataEnd`, and are moved to the index count.
         _reportBytes = new WriteBytes(
-            Data: dataEnd,
+            Data: dataEnd - interleaved,
             ZoneMaps: zoneMapsEnd - indexStart,
             Statistics: statisticsLength,
-            Indexes: (indexStart - dataEnd) + (directory?.Length ?? 0),
+            Indexes: interleaved + (indexStart - dataEnd) + (directory?.Length ?? 0),
             Footer: _sink.Position - dtypeOffset);
         return new WriteReport(this);
     }
@@ -903,6 +953,10 @@ public sealed class VortexFileWriter : IAsyncDisposable
                 _transit[i] = null;
             }
         }
+
+        // The index builders hold pooled hash sets and a payload arena; the report reads nothing of
+        // them but their results, which survive.
+        _indexes?.Dispose();
 
         if (_sink is IAsyncDisposable disposable)
         {
@@ -1037,6 +1091,18 @@ public sealed class VortexFileWriter : IAsyncDisposable
     private async ValueTask<int> WriteSegmentAsync(
         ArrayBlobWriter.BlobLease blob, CancellationToken cancellationToken)
     {
+        long aligned = await PadAsync(cancellationToken).ConfigureAwait(false);
+        await _sink.WriteAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
+
+        // blob.Length, never blob.Memory.Length's array: the rental is longer than the blob (W-4).
+        _segments.Add(new SegmentSpec(
+            (ulong)aligned, (uint)blob.Length, (byte)VortexLimits.MaxAlignmentExponent, 0, 0));
+        return _segments.Count - 1;
+    }
+
+    /// <summary>Pads the sink to the format's widest alignment and returns where the next byte lands.</summary>
+    private async ValueTask<long> PadAsync(CancellationToken cancellationToken)
+    {
         long position = _sink.Position;
         long aligned = (position + VortexLimits.MaxAlignment - 1) & ~((long)VortexLimits.MaxAlignment - 1);
         int padding = (int)(aligned - position);
@@ -1045,12 +1111,7 @@ public sealed class VortexFileWriter : IAsyncDisposable
             await _sink.WriteAsync(Padding.AsMemory(0, padding), cancellationToken).ConfigureAwait(false);
         }
 
-        await _sink.WriteAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
-
-        // blob.Length, never blob.Memory.Length's array: the rental is longer than the blob (W-4).
-        _segments.Add(new SegmentSpec(
-            (ulong)aligned, (uint)blob.Length, (byte)VortexLimits.MaxAlignmentExponent, 0, 0));
-        return _segments.Count - 1;
+        return aligned;
     }
 
     /// <summary>struct -> per field chunked -> per batch flat.</summary>

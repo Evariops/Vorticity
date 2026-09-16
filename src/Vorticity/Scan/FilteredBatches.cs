@@ -34,33 +34,37 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
     private readonly BatchAsyncEnumerable _inner;
     private readonly VortexExpr? _filter;
     private readonly bool _prune;
+    private readonly bool _indexes;
 
-    internal FilteredBatches(BatchAsyncEnumerable inner, VortexExpr? filter, bool prune)
+    internal FilteredBatches(BatchAsyncEnumerable inner, VortexExpr? filter, bool prune, bool indexes = true)
     {
         _inner = inner;
         _filter = filter;
         _prune = prune;
+        _indexes = indexes;
     }
 
     /// <inheritdoc/>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         CancellationToken cancellationToken = default) =>
-        new Enumerator(_inner, _filter, _prune, cancellationToken);
+        new Enumerator(_inner, _filter, _prune, _indexes, cancellationToken);
 
     private sealed class Enumerator : IAsyncEnumerator<RecordBatch>
     {
         private readonly BatchAsyncEnumerable _source;
         private readonly VortexExpr? _filter;
         private readonly bool _prune;
+        private readonly bool _indexes;
         private readonly CancellationToken _token;
         private IAsyncEnumerator<RecordBatch>? _inner;
 
         internal Enumerator(
-            BatchAsyncEnumerable source, VortexExpr? filter, bool prune, CancellationToken token)
+            BatchAsyncEnumerable source, VortexExpr? filter, bool prune, bool indexes, CancellationToken token)
         {
             _source = source;
             _filter = filter;
             _prune = prune;
+            _indexes = indexes;
             _token = token;
         }
 
@@ -76,7 +80,7 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
                 // the rest of the scan; every split asks the mask, never the zone maps.
                 BlockMask? live = _prune && _filter is not null
                     ? await ZonePruningPlan
-                        .RefineAsync(_source.File, _source.Tree, _filter, _token, steps: null, _source.Metrics)
+                        .RefineAsync(_source.File, _source.Tree, _filter, _token, steps: null, _source.Metrics, _indexes)
                         .ConfigureAwait(false)
                     : null;
 

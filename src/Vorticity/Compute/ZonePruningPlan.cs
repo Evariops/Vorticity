@@ -47,16 +47,16 @@ internal static class ZonePruningPlan
     /// The mask, or <see langword="null"/> when no structure can prune anything -- which a scan
     /// reads as "every split is live", the same object graph it has without a filter.
     /// </returns>
+    /// <param name="indexes">Whether the file's index directory takes part (<c>WithIndexes</c>).</param>
     /// <remarks>
-    /// The zone map is the only pruner today and the first in line whenever there are more: it is
-    /// already loaded and answers from min/max and null counts. The Bloom generations, postings
-    /// and exact indexes of docs/10-indexes.md join this list in that order, each over the blocks
-    /// still live, and the list stops at an empty mask.
+    /// The zone map is first in line: it is already loaded and answers from min/max and null
+    /// counts. The Bloom filters of docs/10-indexes.md §5.1 come next, over the blocks still live,
+    /// and the list stops at an empty mask.
     /// </remarks>
     internal static async ValueTask<BlockMask?> RefineAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
-        List<Scan.PruningStep>? steps = null, Scan.ScanMetrics? metrics = null) =>
-        (await PlanAsync(file, tree, filter, cancellationToken, steps, metrics).ConfigureAwait(false)).Live;
+        List<Scan.PruningStep>? steps = null, Scan.ScanMetrics? metrics = null, bool indexes = true) =>
+        (await PlanAsync(file, tree, filter, cancellationToken, steps, metrics, indexes).ConfigureAwait(false)).Live;
 
     /// <summary>The mask, and the structures that refined it -- which a count asks again, per block.</summary>
     /// <param name="Live">The mask of live blocks, or null when no structure can prune anything.</param>
@@ -74,9 +74,10 @@ internal static class ZonePruningPlan
     /// <param name="cancellationToken">Cancels the reads this makes.</param>
     /// <param name="steps">Receives what each structure pruned, for <c>Explain</c>; null when nobody asks.</param>
     /// <param name="metrics">The scan's sink, to which the reads made here are added; null when nobody asks.</param>
+    /// <param name="indexes">Whether the file's index directory takes part.</param>
     internal static async ValueTask<PruningPlan> PlanAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
-        List<Scan.PruningStep>? steps = null, Scan.ScanMetrics? metrics = null)
+        List<Scan.PruningStep>? steps = null, Scan.ScanMetrics? metrics = null, bool indexes = true)
     {
         (ZonePruner? zones, int segments, long bytes) =
             await BuildCountedAsync(file, tree, filter, metrics, cancellationToken).ConfigureAwait(false);
@@ -84,18 +85,36 @@ internal static class ZonePruningPlan
         // are bytes the scan asked its source for, and they go to the same sink the batches feed
         // (docs/11 §6.4), so that the sink and the source agree to the request.
         metrics?.AddRequests(segments, bytes);
-        if (zones is null)
+
+        long blockRows = Scan.SplitPlan.NaturalBatchRows(tree);
+        Indexes.BloomPruner? blooms = indexes && blockRows > 0
+            ? await Indexes.BloomPruner.BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false)
+            : null;
+        if (zones is null && blooms is null)
         {
             return default;
         }
 
-        BlockMask live = new BlockMask(tree.Root.RowCount, Scan.SplitPlan.NaturalBatchRows(tree));
+        BlockMask live = new BlockMask(tree.Root.RowCount, blockRows);
         int before = live.LiveCount;
-        zones.Refine(live);
-        // What each structure pruned, and what consulting it cost, for `Explain` (docs/11 §6.4):
-        // the blocks that were live when it ran and are not afterwards -- so a later structure is
-        // credited only with what the earlier ones left it -- against the segments read for it.
-        steps?.Add(new Scan.PruningStep("zone map", before - live.LiveCount, segments, bytes));
+        if (zones is not null)
+        {
+            zones.Refine(live);
+            // What each structure pruned, and what consulting it cost, for `Explain` (docs/11
+            // §6.4): the blocks that were live when it ran and are not afterwards -- so a later
+            // structure is credited only with what the earlier ones left it -- against the
+            // segments read for it.
+            steps?.Add(new Scan.PruningStep("zone map", before - live.LiveCount, segments, bytes));
+        }
+
+        if (blooms is not null && !live.IsEmpty)
+        {
+            before = live.LiveCount;
+            await blooms.RefineAsync(file, live, cancellationToken).ConfigureAwait(false);
+            metrics?.AddRequests(blooms.Segments, blooms.Bytes);
+            steps?.Add(new Scan.PruningStep("bloom filter", before - live.LiveCount, blooms.Segments, blooms.Bytes));
+        }
+
         return new PruningPlan(live, zones);
     }
 

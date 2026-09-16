@@ -36,4 +36,28 @@ public static class VortexFilePruningExtensions
         ArgumentNullException.ThrowIfNull(filter);
         return FileStatisticsPruner.MayMatch(file, filter);
     }
+
+    /// <summary>
+    /// <see cref="MayMatch"/>, then the file-level Bloom filters the file's index directory
+    /// carries (docs/10-indexes.md §5.4).
+    /// </summary>
+    /// <param name="file">An open file.</param>
+    /// <param name="filter">The predicate a scan would run.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>
+    /// <see langword="false"/> when the file statistics or a file-level filter prove no row matches.
+    /// </returns>
+    /// <remarks>
+    /// The statistics are answered first and read nothing. A filter costs the directory's segment
+    /// and one segment per equality-tested column that has one; a file written without the
+    /// file-level resolution answers exactly as <see cref="MayMatch"/> does.
+    /// </remarks>
+    public static async System.Threading.Tasks.ValueTask<bool> MayMatchAsync(
+        this VortexFile file, VortexExpr filter, System.Threading.CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        ArgumentNullException.ThrowIfNull(filter);
+        return FileStatisticsPruner.MayMatch(file, filter)
+            && await Indexes.BloomPruner.FileMayMatchAsync(file, filter, cancellationToken).ConfigureAwait(false);
+    }
 }

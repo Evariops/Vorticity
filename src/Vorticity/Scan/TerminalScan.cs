@@ -43,6 +43,7 @@ internal sealed class TerminalScan
     private readonly FieldMask _mask;
     private readonly RowSelection? _take;
     private readonly bool _prune;
+    private readonly bool _indexes;
     private readonly TerminalTiers _tiers;
     private readonly ScanMetrics? _metrics;
 
@@ -57,8 +58,10 @@ internal sealed class TerminalScan
         RowSelection? take,
         bool prune,
         TerminalTiers tiers,
-        ScanMetrics? metrics)
+        ScanMetrics? metrics,
+        bool indexes = true)
     {
+        _indexes = indexes;
         _file = file;
         _tree = tree;
         _filter = filter;
@@ -99,7 +102,7 @@ internal sealed class TerminalScan
         SplitPlan plan = SplitPlan.Compute(_tree, _rows, in _mask, _cap);
         ZonePruningPlan.PruningPlan pruning = _prune
             ? await ZonePruningPlan
-                .PlanAsync(_file, _tree, _filter, cancellationToken, steps: null, _metrics)
+                .PlanAsync(_file, _tree, _filter, cancellationToken, steps: null, _metrics, _indexes)
                 .ConfigureAwait(false)
             : default;
         BlockMask? live = pruning.Live;
@@ -259,7 +262,7 @@ internal sealed class TerminalScan
         SplitPlan plan = SplitPlan.Compute(_tree, _rows, in _mask, _cap);
         ZonePruningPlan.PruningPlan pruning = _prune && _filter is not null
             ? await ZonePruningPlan
-                .PlanAsync(_file, _tree, _filter, cancellationToken, steps: null, _metrics)
+                .PlanAsync(_file, _tree, _filter, cancellationToken, steps: null, _metrics, _indexes)
                 .ConfigureAwait(false)
             : default;
         BlockMask? live = pruning.Live;
