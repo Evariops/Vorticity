@@ -102,6 +102,24 @@ internal sealed class ZonePruner : IBlockPruner
     /// <param name="rows">The candidate range, in file row coordinates.</param>
     internal RangeVerdict Verdict(RowRange rows) => Verdict(_filter, rows);
 
+    /// <summary>
+    /// The zone map of <paramref name="path"/>, when the filter reads it and the column has a
+    /// usable one -- the bounds a <c>Min</c> or <c>Max</c> answers from (docs/12 §5.3).
+    /// </summary>
+    /// <param name="path">The column, as the filter names it.</param>
+    internal ZoneColumn? Column(string path)
+    {
+        for (int i = 0; i < _columns.Length; i++)
+        {
+            if (string.Equals(_columns[i].Field.Path, path, StringComparison.Ordinal))
+            {
+                return _columns[i].HasStatistics ? _columns[i] : null;
+            }
+        }
+
+        return null;
+    }
+
     /// <inheritdoc/>
     /// <remarks>
     /// BLOCK BY BLOCK THROUGH THE RANGE QUESTION ABOVE, so that the mask says of every block

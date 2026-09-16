@@ -74,16 +74,16 @@ public sealed class ZoneVerdictTests
         { "nans = 5", 63 },
         { "nans != -1", 64 },
 
-        // Strings under Inexact bounds: a prefix range proves whole, an equality never does. The
-        // reference writer's bounded_min(64) / bounded_max(64) are absent from some zones, which
-        // the message names when the count falls short.
-        { "strs StartsWith z0005-", 58 },
+        // Strings under Inexact bounds -- bounded_min(64), a plain scalar, and bounded_max(64), the
+        // reference's {bound, unknown} struct: a prefix range proves whole, an equality never
+        // does, and a LIKE only ever proves empty.
+        { "strs StartsWith z0005-", 64 },
         { "strs StartsWith empty", 64 },
-        { "strs LIKE z0005%", 58 },
+        { "strs LIKE z0005%", 63 },
         { "strs LIKE %5", 0 },
         { "strs Contains 5", 0 },
         { "strs Contains empty", 64 },
-        { "strs = z0005-0000", 58 },
+        { "strs = z0005-0000", 63 },
 
         // The algebra: same column, other column, the three connectives, nested. The disjunction
         // of a comparison with IS NULL on its own column is the shape the algebra does not see

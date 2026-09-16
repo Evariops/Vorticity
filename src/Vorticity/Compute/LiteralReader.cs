@@ -60,7 +60,7 @@ internal static class LiteralReader
                 return TryReadPrimitive(node, row, out literal);
 
             case CanonicalKind.VarBinView:
-                literal = FilterLiteral.From(Value(node, row));
+                literal = FilterLiteral.From(ViewAt(node, row));
                 return true;
 
             default:
@@ -103,7 +103,9 @@ internal static class LiteralReader
     }
 
     /// <summary>Resolves one 16-byte view, inline or by reference.</summary>
-    private static ReadOnlySpan<byte> Value(CanonicalNode node, int row)
+    /// <param name="node">A <c>VarBinView</c> node.</param>
+    /// <param name="row">The row.</param>
+    internal static ReadOnlySpan<byte> ViewAt(CanonicalNode node, int row)
     {
         ReadOnlySpan<byte> view = node.Views.Span.Slice(row * ViewSize, ViewSize);
         int size = BinaryPrimitives.ReadInt32LittleEndian(view);

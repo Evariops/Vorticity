@@ -148,7 +148,16 @@ internal static class FilterEvaluator
     /// <see cref="DType.IndexOfField(ReadOnlySpan{byte})"/> resolves interned names to handles rather than comparing
     /// strings.
     /// </remarks>
-    private static int Resolve(CanonicalArena arena, int rootIndex, FieldExpr field, int rows)
+    /// <summary>
+    /// The column <paramref name="field"/> names in the batch rooted at <paramref name="rootIndex"/>.
+    /// </summary>
+    /// <param name="arena">The arena holding the decoded batch.</param>
+    /// <param name="rootIndex">The batch's root node.</param>
+    /// <param name="field">The path.</param>
+    /// <param name="rows">The batch's row count, which the column must have.</param>
+    /// <returns>The column's node.</returns>
+    /// <exception cref="ArgumentException">The path names nothing in the batch's schema.</exception>
+    internal static int Resolve(CanonicalArena arena, int rootIndex, FieldExpr field, int rows)
     {
         int current = rootIndex;
         byte[][] segments = field.SegmentsUtf8;

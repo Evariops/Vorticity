@@ -410,6 +410,24 @@ a table of their own, sized by their own judgment.
 `Distinct` is a property of the cursor and not a terminal on the scan because it is an ordered walk
 with an early exit, and a terminal returning a list would buffer it.
 
+**As delivered (step 10c, `MinAsync` / `MaxAsync`).** `TerminalScan.ExtremeAsync` takes §5.3's
+resolutions in order, the third excepted until an ordered source exists. The file statistic
+answers when the scan is the whole file and the statistic is `Exact`, with no read. The column's
+zone map — read through the pruning plan on `IS NOT NULL(path)`, so its cost lands in the sink like
+any structure's — answers for every split that is whole zones of it and whose rows all qualify (no
+filter, or one `MustMatch` proves for the split): an `Exact` bound is the split's answer, an
+`Inexact` one a candidate, and the candidates are decoded best-bound-first, stopping at the first
+whose bound cannot beat the best, which is usually one decode. Everything else is decoded: the
+filter evaluated, its true rows selected without a gather, the extreme found among them by
+`Extremes` — which remembers the winning row and reads one `FilterLiteral` per split — in the
+filter's order: IEEE for floats, NaN skipped by name and never an extreme, `−0.0 == 0.0`. Each
+decode hands the readers a mask of its one split (`BlockMask.KeepOnly`) so that the restricted
+decode of 11 §6.1 materializes the split, not the chunk. `Rows`, `Take` and a filter push every
+split they touch to the decode unless the bounds decide it whole. The test of the `Inexact` bounds
+found that `vortex.bounded_max(64)` — the reference's `{bound, unknown}` struct — had never been
+read: string predicates pruned and proved from the minimum alone; `ZonePruningPlan` reads both
+shapes now.
+
 ---
 
 ## 6. Key-ordered delivery from the scan

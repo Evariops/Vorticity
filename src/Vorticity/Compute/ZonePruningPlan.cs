@@ -336,9 +336,9 @@ internal static class ZonePruningPlan
             FilterLiteral min = default;
             FilterLiteral max = default;
             bool hasMin = minColumn >= 0 &&
-                LiteralReader.TryRead(context.Canonical, zones.GetFieldIndex(minColumn), z, out min);
+                TryReadBound(context.Canonical, zones.GetFieldIndex(minColumn), z, out min);
             bool hasMax = maxColumn >= 0 &&
-                LiteralReader.TryRead(context.Canonical, zones.GetFieldIndex(maxColumn), z, out max);
+                TryReadBound(context.Canonical, zones.GetFieldIndex(maxColumn), z, out max);
 
             long nulls = 0;
             bool hasNulls = false;
@@ -369,6 +369,44 @@ internal static class ZonePruningPlan
         }
 
         return new ZoneColumn(candidate.Field, map.ZoneLength, rowCount, bounds);
+    }
+
+    /// <summary>
+    /// Reads zone <paramref name="zone"/>'s bound out of an aggregate column, whichever of the
+    /// two shapes the reference gives it.
+    /// </summary>
+    /// <remarks>
+    /// <c>min</c>, <c>max</c> and <c>bounded_min</c> are plain scalars. <c>bounded_max</c> is
+    /// <c>Struct({bound: element?, unknown: bool})</c> (ZoneMapSchema.BoundedMaxPartial): a
+    /// maximum bounded to N bytes is the truncated prefix stepped up, which does not exist for an
+    /// all-0xFF prefix, and <c>unknown</c> says so for the zone. A zone whose flag is set has no
+    /// bound; one whose flag is clear has it in <c>bound</c>. Until this read the shape, a
+    /// string column's bounded maximum was never seen, and every string predicate pruned and
+    /// proved from its minimum alone.
+    /// </remarks>
+    private static bool TryReadBound(CanonicalArena arena, int nodeIndex, int zone, out FilterLiteral literal)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        if (node.Kind != CanonicalKind.Struct)
+        {
+            return LiteralReader.TryRead(arena, nodeIndex, zone, out literal);
+        }
+
+        literal = default;
+        int bound = node.DType.IndexOfField("bound"u8);
+        int unknown = node.DType.IndexOfField("unknown"u8);
+        if (bound < 0 || unknown < 0)
+        {
+            return false;
+        }
+
+        if (LiteralReader.TryRead(arena, node.GetFieldIndex(unknown), zone, out FilterLiteral flag) &&
+            flag.Kind == FilterLiteralKind.Bool && flag.BoolValue)
+        {
+            return false;
+        }
+
+        return LiteralReader.TryRead(arena, node.GetFieldIndex(bound), zone, out literal);
     }
 
     private static bool TryCount(FilterLiteral literal, out long count)

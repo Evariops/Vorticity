@@ -1,21 +1,26 @@
-// The terminals - docs/12-index-reads.md §5.1 and §5.2: AnyAsync and CountAsync, computed without a
-// RecordBatch. "A terminal is the scan with a different output, never a different scan", so every
-// number here is held against the materialized scan -- with pruning on and off, and with the
-// full-block proof forced off -- because the property that makes a count testable is pruning's
-// own: a wrong proof is a wrong count, and a proof that is never taken is never wrong.
+// The terminals - docs/12-index-reads.md §5.1 to §5.3: AnyAsync, CountAsync, MinAsync and MaxAsync,
+// computed without a RecordBatch. "A terminal is the scan with a different output, never a
+// different scan", so every number here is held against the materialized scan -- with pruning on
+// and off, and with each tier forced off in turn -- because the property that makes a terminal
+// testable is pruning's own: a wrong proof is a wrong answer, and a proof that is never taken is
+// never wrong.
 //
-// The last test is about the batch enumerator, not the terminals: the pipelined path (a degree
-// above 1) built its batch straight from the decoded split, without the take and without the
-// filter. Found when the split's execution was moved to the one place both now share.
+// One test is about the batch enumerator, not the terminals: the pipelined path (a degree above
+// 1) built its batch straight from the decoded split, without the take and without the filter.
+// Found when the split's execution was moved to the one place both now share.
 using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Scan;
+using Vorticity.Types;
+using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Scan;
@@ -29,12 +34,22 @@ public sealed class ScanTerminalTests
     private const long Block = 1024;
 
     /// <summary>Pruning on and off, the full-block proof on and off.</summary>
-    private static readonly (bool Prune, CountTiers Tiers)[] Configurations =
+    private static readonly (bool Prune, TerminalTiers Tiers)[] Configurations =
     [
-        (true, CountTiers.All),
-        (true, CountTiers.All & ~CountTiers.FullBlock),
-        (false, CountTiers.All),
-        (false, CountTiers.All & ~CountTiers.FullBlock),
+        (true, TerminalTiers.All),
+        (true, TerminalTiers.All & ~TerminalTiers.FullBlock),
+        (false, TerminalTiers.All),
+        (false, TerminalTiers.All & ~TerminalTiers.FullBlock),
+    ];
+
+    /// <summary>Every resolution of an extreme, forced off one after the other, down to the decode.</summary>
+    private static readonly TerminalTiers[] ExtremeTiers =
+    [
+        TerminalTiers.All,
+        TerminalTiers.All & ~TerminalTiers.FileStatistic,
+        TerminalTiers.All & ~(TerminalTiers.FileStatistic | TerminalTiers.ZoneBounds),
+        TerminalTiers.All & ~TerminalTiers.FullBlock,
+        TerminalTiers.None,
     ];
 
     /// <summary>
@@ -67,6 +82,25 @@ public sealed class ScanTerminalTests
         { "nulls > 30000", "take" },
     };
 
+    /// <summary>
+    /// Column and filter, for the extremes: exact bounds, Inexact bounds (<c>strs</c>), nulls,
+    /// NaN, a filter proven whole on some splits and open on others, an empty result.
+    /// </summary>
+    public static TheoryData<string, string> Extremes => new TheoryData<string, string>
+    {
+        { "monotone", "none" },
+        { "banded", "none" },
+        { "strs", "none" },
+        { "nulls", "none" },
+        { "nans", "none" },
+        { "nulls", "nulls > 30000" },
+        { "nans", "NOT (nans > 1000)" },
+        { "monotone", "monotone band" },
+        { "strs", "banded = 5" },
+        { "monotone", "monotone < 0" },
+        { "nans", "banded IN (3, NULL)" },
+    };
+
     [Theory]
     [MemberData(nameof(Filters))]
     public async Task CountAndAnyAgreeWithTheMaterializedScanWhateverIsSwitchedOff(string name)
@@ -77,10 +111,10 @@ public sealed class ScanTerminalTests
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
         long expected = await Materialized(Build(file, filter, "none"));
 
-        foreach ((bool prune, CountTiers tiers) in Configurations)
+        foreach ((bool prune, TerminalTiers tiers) in Configurations)
         {
-            Assert.Equal(expected, await Build(file, filter, "none").WithPruning(prune).WithCountTiers(tiers).CountAsync());
-            Assert.Equal(expected > 0, await Build(file, filter, "none").WithPruning(prune).WithCountTiers(tiers).AnyAsync());
+            Assert.Equal(expected, await Build(file, filter, "none").WithPruning(prune).WithTiers(tiers).CountAsync());
+            Assert.Equal(expected > 0, await Build(file, filter, "none").WithPruning(prune).WithTiers(tiers).AnyAsync());
         }
     }
 
@@ -95,10 +129,31 @@ public sealed class ScanTerminalTests
         long expected = await Materialized(Build(file, filter, selection));
         Assert.True(expected > 0, "the selection should keep some matching rows, or the test proves nothing");
 
-        foreach ((bool prune, CountTiers tiers) in Configurations)
+        foreach ((bool prune, TerminalTiers tiers) in Configurations)
         {
-            Assert.Equal(expected, await Build(file, filter, selection).WithPruning(prune).WithCountTiers(tiers).CountAsync());
-            Assert.True(await Build(file, filter, selection).WithPruning(prune).WithCountTiers(tiers).AnyAsync());
+            Assert.Equal(expected, await Build(file, filter, selection).WithPruning(prune).WithTiers(tiers).CountAsync());
+            Assert.True(await Build(file, filter, selection).WithPruning(prune).WithTiers(tiers).AnyAsync());
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Extremes))]
+    public async Task MinAndMaxAgreeWithTheMaterializedScanWhateverIsSwitchedOff(string column, string filterName)
+    {
+        Decoders.EnsureRegistered();
+        VortexExpr? filter = filterName == "none" ? null : Filter(filterName);
+
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
+        (FilterLiteral expectedMin, FilterLiteral expectedMax) = await MaterializedExtremes(file, column, filter);
+
+        foreach (bool prune in new[] { true, false })
+        {
+            foreach (TerminalTiers tiers in ExtremeTiers)
+            {
+                string how = column + " under " + filterName + ", pruning " + prune + ", tiers " + tiers;
+                AssertLiteral(expectedMin, await Scan(file, filter).WithPruning(prune).WithTiers(tiers).MinAsync(column), "min of " + how);
+                AssertLiteral(expectedMax, await Scan(file, filter).WithPruning(prune).WithTiers(tiers).MaxAsync(column), "max of " + how);
+            }
         }
     }
 
@@ -138,7 +193,7 @@ public sealed class ScanTerminalTests
         ScanMetrics decoded = new ScanMetrics();
         Assert.Equal(Block, await file.Scan().Where(filter).WithMetrics(proven).CountAsync());
         Assert.Equal(Block, await file.Scan().Where(filter).WithMetrics(decoded)
-            .WithCountTiers(CountTiers.All & ~CountTiers.FullBlock).CountAsync());
+            .WithTiers(TerminalTiers.All & ~TerminalTiers.FullBlock).CountAsync());
 
         // The proof asked the source for the zone maps and nothing else; the decode asked for the
         // block's data on top, and materialized it.
@@ -182,12 +237,139 @@ public sealed class ScanTerminalTests
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
         ScanMetrics any = new ScanMetrics();
         ScanMetrics count = new ScanMetrics();
-        CountTiers decodeOnly = CountTiers.All & ~CountTiers.FullBlock;
-        Assert.True(await file.Scan().Where(filter).WithMetrics(any).WithCountTiers(decodeOnly).AnyAsync());
-        Assert.True(await file.Scan().Where(filter).WithMetrics(count).WithCountTiers(decodeOnly).CountAsync() > 0);
+        TerminalTiers decodeOnly = TerminalTiers.All & ~TerminalTiers.FullBlock;
+        Assert.True(await file.Scan().Where(filter).WithMetrics(any).WithTiers(decodeOnly).AnyAsync());
+        Assert.True(await file.Scan().Where(filter).WithMetrics(count).WithTiers(decodeOnly).CountAsync() > 0);
 
         Assert.True(any.ValuesDecoded > 0, "Any had to decode the one open block");
         Assert.True(any.ValuesDecoded * 4 < count.ValuesDecoded, "Any should stop long before Count is done");
+    }
+
+    [Fact]
+    public async Task TheFileStatisticAnswersTheWholeFileWithoutARead()
+    {
+        // The corpus file carries Exact file statistics: the whole-file extreme is one of them,
+        // and no segment is asked for.
+        Decoders.EnsureRegistered();
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
+        Assert.True(file.HasFileStatistics);
+
+        ScanMetrics metrics = new ScanMetrics();
+        FilterLiteral min = await file.Scan().WithMetrics(metrics).MinAsync("monotone");
+        FilterLiteral max = await file.Scan().WithMetrics(metrics).MaxAsync("monotone");
+        FilterLiteral last = await file.Scan().WithMetrics(metrics).MaxAsync("strs");
+
+        Assert.Equal(1_000_000L, min.SignedValue);
+        Assert.Equal(1_000_000L + (3 * (Rows - 1)), max.SignedValue);
+        Assert.Equal("z0063-1023", Encoding.UTF8.GetString(last.BytesValue));
+        Assert.Equal(0, metrics.SegmentRequests);
+        Assert.Equal(0, metrics.ValuesDecoded);
+    }
+
+    [Fact]
+    public async Task TheZoneBoundsAnswerWholeZonesWithoutADecode()
+    {
+        // A range is not the whole file, so the statistic is out and the zone map is in: every
+        // split is a whole zone with Exact bounds, and nothing but the map is decoded. With the
+        // bounds forced off, every block is.
+        Decoders.EnsureRegistered();
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
+        RowRange whole = new RowRange(0, Rows);
+
+        ScanMetrics bounds = new ScanMetrics();
+        ScanMetrics decode = new ScanMetrics();
+        FilterLiteral fromBounds = await file.Scan().Rows(whole).WithMetrics(bounds).MinAsync("monotone");
+        FilterLiteral fromDecode = await file.Scan().Rows(whole).WithMetrics(decode)
+            .WithTiers(TerminalTiers.All & ~TerminalTiers.ZoneBounds).MinAsync("monotone");
+
+        Assert.Equal(1_000_000L, fromBounds.SignedValue);
+        Assert.Equal(1_000_000L, fromDecode.SignedValue);
+        Assert.True(bounds.ValuesDecoded < Block, "only the zone map's rows should have been decoded, not " + bounds.ValuesDecoded);
+        Assert.True(decode.ValuesDecoded >= Rows, "every block should have been decoded, not " + decode.ValuesDecoded);
+    }
+
+    [Fact]
+    public async Task AnInexactBoundIsACandidateDecodedOnlyWhenItCouldWin()
+    {
+        // strs carries bounded_min(64) / bounded_max(64), Inexact by declaration: every zone is a
+        // candidate, the one with the best stated bound is decoded first, and its true minimum
+        // rules the rest out -- plus the few zones the reference writer left without a bound.
+        Decoders.EnsureRegistered();
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
+        RowRange whole = new RowRange(0, Rows);
+
+        ScanMetrics bounded = new ScanMetrics();
+        ScanMetrics decoded = new ScanMetrics();
+        FilterLiteral min = await file.Scan().Rows(whole).WithMetrics(bounded).MinAsync("strs");
+        FilterLiteral max = await file.Scan().Rows(whole).WithMetrics(bounded).MaxAsync("strs");
+        FilterLiteral minDecoded = await file.Scan().Rows(whole).WithMetrics(decoded).WithTiers(TerminalTiers.None).MinAsync("strs");
+        FilterLiteral maxDecoded = await file.Scan().Rows(whole).WithMetrics(decoded).WithTiers(TerminalTiers.None).MaxAsync("strs");
+
+        Assert.Equal("z0000-0000", Encoding.UTF8.GetString(min.BytesValue));
+        Assert.Equal("z0063-1023", Encoding.UTF8.GetString(max.BytesValue));
+        Assert.Equal("z0000-0000", Encoding.UTF8.GetString(minDecoded.BytesValue));
+        Assert.Equal("z0063-1023", Encoding.UTF8.GetString(maxDecoded.BytesValue));
+
+        // The bounds left one candidate to read per extreme -- the zone with the best stated
+        // bound, whose true extreme rules the other 63 out -- where the decode alone reads every
+        // split; counted as segments asked of the source, one per split of this column.
+        Assert.True(bounded.SegmentRequests > 0);
+        Assert.True(
+            bounded.SegmentRequests * 8 < decoded.SegmentRequests,
+            "the bounds should have spared nearly all of the 64 splits: " + bounded.SegmentRequests + " requests against " + decoded.SegmentRequests);
+    }
+
+    [Fact]
+    public async Task NothingIsNull()
+    {
+        Decoders.EnsureRegistered();
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
+
+        // Zone 63 of `nulls` is entirely null; a filter no row satisfies; a range past the end.
+        foreach (TerminalTiers tiers in ExtremeTiers)
+        {
+            Assert.Equal(FilterLiteralKind.Null, (await file.Scan().Rows(RowRange.FromLength(63 * Block, Block)).WithTiers(tiers).MinAsync("nulls")).Kind);
+            Assert.Equal(FilterLiteralKind.Null, (await file.Scan().Where(Filter("monotone < 0")).WithTiers(tiers).MaxAsync("monotone")).Kind);
+            Assert.Equal(FilterLiteralKind.Null, (await file.Scan().Rows(RowRange.FromLength(Rows + 10, 5)).WithTiers(tiers).MinAsync("monotone")).Kind);
+        }
+
+        Assert.Throws<ArgumentException>(() => file.Scan().MinAsync("no_such_column"));
+    }
+
+    [Fact]
+    public async Task NegativeZeroIsZeroAndNaNIsNeverAnExtreme()
+    {
+        // A file written here: a float column with NaN, 0.0 and -0.0; one that is all NaN; one
+        // that is all null. IEEE order for the extremes (docs/08-semantics.md §2): -0.0 equals
+        // 0.0, a NaN is skipped, and a column with no value is Null -- through every resolution,
+        // the writer's own statistics included.
+        Decoders.EnsureRegistered();
+        string path = WriteFloats();
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+            foreach (TerminalTiers tiers in ExtremeTiers)
+            {
+                FilterLiteral min = await file.Scan().WithTiers(tiers).MinAsync("mixed");
+                FilterLiteral max = await file.Scan().WithTiers(tiers).MaxAsync("mixed");
+                Assert.Equal(FilterLiteralKind.Float, min.Kind);
+                Assert.Equal(0.0, min.FloatValue);
+                Assert.Equal(2.5, max.FloatValue);
+
+                Assert.Equal(FilterLiteralKind.Null, (await file.Scan().WithTiers(tiers).MinAsync("nans")).Kind);
+                Assert.Equal(FilterLiteralKind.Null, (await file.Scan().WithTiers(tiers).MaxAsync("nans")).Kind);
+                Assert.Equal(FilterLiteralKind.Null, (await file.Scan().WithTiers(tiers).MinAsync("nulls")).Kind);
+            }
+
+            // And under a filter that keeps the NaN rows only, there is no extreme at all.
+            VortexExpr nanRows = Expr.Not(Expr.Ge(Expr.Field("mixed"), Expr.Literal(FilterLiteral.From(-1.0))));
+            Assert.Equal(2, await file.Scan().Where(nanRows).CountAsync());
+            Assert.Equal(FilterLiteralKind.Null, (await file.Scan().Where(nanRows).MinAsync("mixed")).Kind);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
     }
 
     [Fact]
@@ -210,6 +392,9 @@ public sealed class ScanTerminalTests
         Assert.True(both.Count > 0 && both.Count < taken.Count);
         Assert.Equal(both, await Selected(file.Scan().Where(filter).Take(take).WithDegreeOfParallelism(3)));
     }
+
+    private static ScanBuilder Scan(VortexFile file, VortexExpr? filter) =>
+        filter is null ? file.Scan() : file.Scan().Where(filter);
 
     /// <summary>
     /// The scan with the filter and one of the selections; nothing else set. "rows" is a wide
@@ -264,6 +449,96 @@ public sealed class ScanTerminalTests
         return rows;
     }
 
+    /// <summary>The extremes the long way: every value of the column, pruning off, NaN and null skipped.</summary>
+    private static async Task<(FilterLiteral Min, FilterLiteral Max)> MaterializedExtremes(
+        VortexFile file, string column, VortexExpr? filter)
+    {
+        FilterLiteral min = FilterLiteral.Null;
+        FilterLiteral max = FilterLiteral.Null;
+        byte[] name = Encoding.UTF8.GetBytes(column);
+        await foreach (RecordBatch batch in Scan(file, filter).Project(column).WithPruning(false).ExecuteAsync())
+        {
+            Fold(column, batch.Column(name), ref min, ref max);
+        }
+
+        return (min, max);
+    }
+
+    /// <summary>One value per row, read by the column's known type: i64, i32, f64 or utf8.</summary>
+    private static void Fold(string column, VortexColumn view, ref FilterLiteral min, ref FilterLiteral max)
+    {
+        int rows = view.Length;
+        for (int row = 0; row < rows; row++)
+        {
+            if (!view.IsValid(row))
+            {
+                continue;
+            }
+
+            FilterLiteral value;
+            switch (column)
+            {
+                case "monotone":
+                case "nulls":
+                    value = FilterLiteral.From(view.AsPrimitive<long>()[row]);
+                    break;
+                case "banded":
+                    value = FilterLiteral.From((long)view.AsPrimitive<int>()[row]);
+                    break;
+                case "nans":
+                    double d = view.AsPrimitive<double>()[row];
+                    if (double.IsNaN(d))
+                    {
+                        continue;
+                    }
+
+                    value = FilterLiteral.From(d);
+                    break;
+                default:
+                    value = FilterLiteral.From(view.AsBinary().GetSpan(row));
+                    break;
+            }
+
+            if (min.Kind == FilterLiteralKind.Null || Compare(value, min) < 0)
+            {
+                min = value;
+            }
+
+            if (max.Kind == FilterLiteralKind.Null || Compare(value, max) > 0)
+            {
+                max = value;
+            }
+        }
+    }
+
+    private static int Compare(FilterLiteral a, FilterLiteral b) => a.Kind switch
+    {
+        FilterLiteralKind.Signed => a.SignedValue.CompareTo(b.SignedValue),
+        FilterLiteralKind.Float => a.FloatValue.CompareTo(b.FloatValue),
+        _ => a.BytesValue.SequenceCompareTo(b.BytesValue),
+    };
+
+    private static void AssertLiteral(FilterLiteral expected, FilterLiteral actual, string what)
+    {
+        Assert.True(expected.Kind == actual.Kind, what + ": expected a " + expected.Kind + ", got a " + actual.Kind);
+        switch (expected.Kind)
+        {
+            case FilterLiteralKind.Null:
+                break;
+            case FilterLiteralKind.Signed:
+                Assert.True(expected.SignedValue == actual.SignedValue, what + ": expected " + expected.SignedValue + ", got " + actual.SignedValue);
+                break;
+            case FilterLiteralKind.Float:
+                Assert.True(expected.FloatValue == actual.FloatValue, what + ": expected " + expected.FloatValue + ", got " + actual.FloatValue);
+                break;
+            default:
+                Assert.True(
+                    expected.BytesValue.SequenceEqual(actual.BytesValue),
+                    what + ": expected " + Encoding.UTF8.GetString(expected.BytesValue) + ", got " + Encoding.UTF8.GetString(actual.BytesValue));
+                break;
+        }
+    }
+
     /// <summary>The rows the scan returns, by row index, through <c>monotone = 1 000 000 + 3·row</c>.</summary>
     private static async Task<List<long>> Selected(ScanBuilder scan)
     {
@@ -284,6 +559,59 @@ public sealed class ScanTerminalTests
         {
             rows.Add((values[i] - 1_000_000) / 3);
         }
+    }
+
+    /// <summary>
+    /// Six rows of three f64 columns: <c>mixed</c> = {NaN, 0.0, -0.0, 2.5, NaN, 2.5},
+    /// <c>nans</c> all NaN, <c>nulls</c> all null.
+    /// </summary>
+    private static string WriteFloats()
+    {
+        DTypeArena types = new DTypeArena();
+        CanonicalArena arena = new CanonicalArena();
+        DType f64 = types.Primitive(PType.F64, Nullability.NonNullable);
+        DType f64n = types.Primitive(PType.F64, Nullability.Nullable);
+        DType schema = types.Struct(["mixed", "nans", "nulls"], [f64, f64, f64n], Nullability.NonNullable);
+
+        const int rows = 6;
+        VortexBuffer mixed = arena.Allocate(rows * sizeof(double), sizeof(double), out Span<byte> mixedBytes);
+        Span<double> values = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, double>(mixedBytes);
+        values[0] = double.NaN;
+        values[1] = 0.0;
+        values[2] = -0.0;
+        values[3] = 2.5;
+        values[4] = double.NaN;
+        values[5] = 2.5;
+
+        VortexBuffer nans = arena.Allocate(rows * sizeof(double), sizeof(double), out Span<byte> nanBytes);
+        System.Runtime.InteropServices.MemoryMarshal.Cast<byte, double>(nanBytes).Fill(double.NaN);
+
+        VortexBuffer nulls = arena.Allocate(rows * sizeof(double), sizeof(double), out Span<byte> nullBytes);
+        nullBytes.Clear();
+
+        int[] columns =
+        [
+            arena.AddPrimitive(f64, rows, Validity.NonNullable, PType.F64, mixed),
+            arena.AddPrimitive(f64, rows, Validity.NonNullable, PType.F64, nans),
+            arena.AddPrimitive(f64n, rows, Validity.AllInvalid, PType.F64, nulls),
+        ];
+        int root = arena.AddStruct(schema, rows, Validity.NonNullable, columns);
+
+        string path = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"vorticity-extremes-{Guid.NewGuid():N}.vortex");
+        WriteAsync(path, schema, arena, root).GetAwaiter().GetResult();
+        return path;
+    }
+
+    private static async Task WriteAsync(string path, DType schema, CanonicalArena arena, int root)
+    {
+        await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, new VortexWriteOptions());
+        using (RecordBatch batch = new RecordBatch(arena, root, 0))
+        {
+            await writer.WriteAsync(batch, CancellationToken.None);
+        }
+
+        await writer.CompleteAsync(CancellationToken.None);
     }
 
     private static VortexExpr Filter(string name)

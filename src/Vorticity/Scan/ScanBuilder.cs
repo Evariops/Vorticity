@@ -36,7 +36,7 @@ public sealed class ScanBuilder
     private int _maxBatchRows;
     private int _degree = 1;
     private ScanMetrics? _metrics;
-    private CountTiers _tiers = CountTiers.All;
+    private TerminalTiers _tiers = TerminalTiers.All;
 
     internal ScanBuilder(VortexFile file)
     {
@@ -446,13 +446,59 @@ public sealed class ScanBuilder
         System.Threading.CancellationToken cancellationToken = default) =>
         Terminal().AnyAsync(cancellationToken);
 
-    /// <summary>Forces count tiers off, for the tests that hold every tier to the decode.</summary>
-    /// <param name="tiers">The tiers a count may take; <see cref="CountTiers.Decode"/> is always taken.</param>
+    /// <summary>
+    /// The smallest non-null value of <paramref name="path"/> among the rows the scan would
+    /// return, in the filter's order (docs/12-index-reads.md §5.3); <see cref="FilterLiteral.Null"/>
+    /// when there is none.
+    /// </summary>
+    /// <param name="path">The column, <c>.</c>-separated for a nested field.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The minimum.</returns>
+    /// <remarks>
+    /// Cheapest resolution first: the file's own statistic when the scan is the whole file and
+    /// the statistic is <c>Exact</c> (no read); the zone map's bounds for every split they decide
+    /// whole, an <c>Inexact</c> bound being a candidate decoded only when it could still win;
+    /// the decode of what is left, with a running extreme and one split of memory at a time. A
+    /// NaN is never the minimum nor the maximum, as the statistics have it (docs/08 §2).
+    /// <see cref="Where"/>, <see cref="Rows"/>, <see cref="Take"/> and <see cref="WithPruning"/>
+    /// are honoured exactly as <see cref="ExecuteAsync"/> honours them.
+    /// </remarks>
+    /// <exception cref="ArgumentException"><paramref name="path"/> does not resolve against the file's schema.</exception>
+    /// <exception cref="NotSupportedException">The column's type is outside the 1.0 filter scope.</exception>
+    public System.Threading.Tasks.ValueTask<FilterLiteral> MinAsync(
+        string path, System.Threading.CancellationToken cancellationToken = default) =>
+        Terminal(Resolved(path)).ExtremeAsync(path, wantMin: true, cancellationToken);
+
+    /// <summary>
+    /// The largest non-null value of <paramref name="path"/> among the rows the scan would
+    /// return, in the filter's order (docs/12-index-reads.md §5.3); <see cref="FilterLiteral.Null"/>
+    /// when there is none.
+    /// </summary>
+    /// <param name="path">The column, <c>.</c>-separated for a nested field.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The maximum.</returns>
+    /// <remarks>See <see cref="MinAsync"/>.</remarks>
+    /// <exception cref="ArgumentException"><paramref name="path"/> does not resolve against the file's schema.</exception>
+    /// <exception cref="NotSupportedException">The column's type is outside the 1.0 filter scope.</exception>
+    public System.Threading.Tasks.ValueTask<FilterLiteral> MaxAsync(
+        string path, System.Threading.CancellationToken cancellationToken = default) =>
+        Terminal(Resolved(path)).ExtremeAsync(path, wantMin: false, cancellationToken);
+
+    /// <summary>Forces terminal tiers off, for the tests that hold every tier to the decode.</summary>
+    /// <param name="tiers">The tiers a terminal may take; <see cref="TerminalTiers.Decode"/> is always taken.</param>
     /// <returns>This builder.</returns>
-    internal ScanBuilder WithCountTiers(CountTiers tiers)
+    internal ScanBuilder WithTiers(TerminalTiers tiers)
     {
         _tiers = tiers;
         return this;
+    }
+
+    /// <summary>A path checked against the schema now, so a typo is an error with the schema in hand.</summary>
+    private string Resolved(string path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        Projection.IncludePath(_file.Schema, path, new FieldMaskBuilder(), nameof(path));
+        return path;
     }
 
     /// <summary>
@@ -485,24 +531,37 @@ public sealed class ScanBuilder
     }
 
     /// <summary>
-    /// The terminal form of this scan: it reads the filter's columns and nothing else, since it
-    /// has no batch to fill.
+    /// The terminal form of this scan: it reads the filter's columns, and the one an extreme is
+    /// asked of, and nothing else, since it has no batch to fill.
     /// </summary>
-    private TerminalScan Terminal()
+    /// <param name="extraPath">The column a <c>Min</c> or <c>Max</c> reads, or null for a count.</param>
+    private TerminalScan Terminal(string? extraPath = null)
     {
         LayoutTree tree = _file.LayoutTree;
         (RowRange rows, _, long cap) = Frame(tree);
-        Projection read = _filter is null ? Projection.All : Only(_filterPaths!);
-        return new TerminalScan(_file, tree, _filter, rows, cap, read, _take, _prune, _tiers, _metrics);
+        Projection read = _filter is null && extraPath is null
+            ? Projection.All
+            : Only(_filterPaths, extraPath);
+        bool wholeFile = !_rowsSet && _take is null;
+        return new TerminalScan(
+            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics);
     }
 
-    /// <summary>The projection of exactly the fields a filter reads.</summary>
-    private Projection Only(List<string> filterPaths)
+    /// <summary>The projection of exactly the fields a filter reads, plus one.</summary>
+    private Projection Only(List<string>? filterPaths, string? extraPath)
     {
         FieldMaskBuilder builder = new FieldMaskBuilder();
-        for (int i = 0; i < filterPaths.Count; i++)
+        if (filterPaths is not null)
         {
-            Projection.IncludePath(_file.Schema, filterPaths[i], builder, "filter");
+            for (int i = 0; i < filterPaths.Count; i++)
+            {
+                Projection.IncludePath(_file.Schema, filterPaths[i], builder, "filter");
+            }
+        }
+
+        if (extraPath is not null)
+        {
+            Projection.IncludePath(_file.Schema, extraPath, builder, nameof(extraPath));
         }
 
         return Projection.Create(builder.Build());

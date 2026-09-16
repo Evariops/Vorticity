@@ -1,0 +1,194 @@
+// The running extreme over one decoded column - docs/12-index-reads.md §5.3, the last resolution
+// of MinAsync and MaxAsync: "a count-only decode over the live blocks with a running extreme: one
+// pass, one batch of memory".
+//
+// THE ANSWER IS A ROW, NOT A VALUE. The loop remembers where the best value sits and the caller
+// reads that one row as a FilterLiteral once the loop is done; nothing is copied per row, which is
+// what keeps a string column's minimum at one allocation per split rather than one per candidate.
+//
+// THE ORDER IS THE FILTER'S ORDER, docs/08-semantics.md §2: IEEE 754 for floats, so a NaN is never
+// the minimum nor the maximum -- it is skipped, exactly as the min / max statistics skip it -- and
+// -0.0 and 0.0 are equal, so whichever comes first stays. The total order of the row encoding
+// (docs/06-row-encoding.md §3), which does place NaN, is deliberately not used here.
+using System;
+using System.Numerics;
+using System.Runtime.InteropServices;
+using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Types;
+
+namespace Vorticity.Compute;
+
+/// <summary>Finds the row holding a column's smallest or largest value.</summary>
+internal static class Extremes
+{
+    /// <summary>
+    /// Finds the row of the smallest (or largest) non-null, non-NaN value among the rows of the
+    /// column at <paramref name="nodeIndex"/>.
+    /// </summary>
+    /// <param name="arena">The arena holding the decoded split.</param>
+    /// <param name="nodeIndex">The column.</param>
+    /// <param name="rows">The rows to consider, when <paramref name="listed"/>.</param>
+    /// <param name="listed">Whether <paramref name="rows"/> lists the rows, or every row is considered.</param>
+    /// <param name="wantMin">Whether the smallest value is wanted, else the largest.</param>
+    /// <param name="bestRow">The row holding it, when one does.</param>
+    /// <returns>Whether any row held a value.</returns>
+    /// <exception cref="NotSupportedException">The column's type is outside the 1.0 filter scope.</exception>
+    internal static bool TryFind(
+        CanonicalArena arena, int nodeIndex, ReadOnlySpan<int> rows, bool listed, bool wantMin, out int bestRow)
+    {
+        int index = ComparisonKernels.Unwrap(arena, nodeIndex);
+        CanonicalNode node = arena.GetNode(index);
+        ValidityMask mask = ValidityMask.From(arena, node.Validity);
+        int count = listed ? rows.Length : node.Length;
+        bestRow = -1;
+        if (count == 0 || mask.AllInvalid)
+        {
+            return false;
+        }
+
+        switch (node.Kind)
+        {
+            case CanonicalKind.Null:
+                return false;
+
+            case CanonicalKind.Bool:
+                return Bool(node, mask, rows, listed, wantMin, out bestRow);
+
+            case CanonicalKind.Primitive:
+                return Primitive(node, mask, rows, listed, wantMin, out bestRow);
+
+            case CanonicalKind.VarBinView:
+                return Bytes(node, mask, rows, listed, wantMin, out bestRow);
+
+            default:
+                throw new NotSupportedException(
+                    $"A {node.Kind} column has no minimum or maximum in the 1.0 filter scope " +
+                    "(docs/01-scope.md F7).");
+        }
+    }
+
+    private static bool Bool(
+        CanonicalNode node, ValidityMask mask, ReadOnlySpan<int> rows, bool listed, bool wantMin, out int bestRow)
+    {
+        // false < true: the smallest is the first false, or the first value when there is none.
+        ReadOnlySpan<byte> bits = node.Bits.Span;
+        int offset = node.BitOffset;
+        int count = listed ? rows.Length : node.Length;
+        bestRow = -1;
+        for (int i = 0; i < count; i++)
+        {
+            int row = listed ? rows[i] : i;
+            if (!mask.IsValid(row))
+            {
+                continue;
+            }
+
+            bool value = CanonicalSupport.BitAt(bits, offset + row);
+            if (bestRow < 0)
+            {
+                bestRow = row;
+            }
+
+            if (value != wantMin)
+            {
+                // The extreme itself: nothing can beat it.
+                bestRow = row;
+                return true;
+            }
+        }
+
+        return bestRow >= 0;
+    }
+
+    private static bool Primitive(
+        CanonicalNode node, ValidityMask mask, ReadOnlySpan<int> rows, bool listed, bool wantMin, out int bestRow)
+    {
+        ReadOnlySpan<byte> bytes = node.Values.Span;
+        return node.PType switch
+        {
+            PType.I8 => Best<sbyte>(bytes, mask, rows, listed, wantMin, out bestRow),
+            PType.I16 => Best<short>(bytes, mask, rows, listed, wantMin, out bestRow),
+            PType.I32 => Best<int>(bytes, mask, rows, listed, wantMin, out bestRow),
+            PType.I64 => Best<long>(bytes, mask, rows, listed, wantMin, out bestRow),
+            PType.U8 => Best<byte>(bytes, mask, rows, listed, wantMin, out bestRow),
+            PType.U16 => Best<ushort>(bytes, mask, rows, listed, wantMin, out bestRow),
+            PType.U32 => Best<uint>(bytes, mask, rows, listed, wantMin, out bestRow),
+            PType.U64 => Best<ulong>(bytes, mask, rows, listed, wantMin, out bestRow),
+            PType.F16 => Best<Half>(bytes, mask, rows, listed, wantMin, out bestRow),
+            PType.F32 => Best<float>(bytes, mask, rows, listed, wantMin, out bestRow),
+            _ => Best<double>(bytes, mask, rows, listed, wantMin, out bestRow),
+        };
+    }
+
+    /// <summary>
+    /// The loop, monomorphised per value type: C#'s own <c>&lt;</c> and <c>&gt;</c>, so that a
+    /// NaN compares false against everything and is skipped by name rather than ordered.
+    /// </summary>
+    private static bool Best<T>(
+        ReadOnlySpan<byte> bytes, ValidityMask mask, ReadOnlySpan<int> rows, bool listed, bool wantMin, out int bestRow)
+        where T : unmanaged, INumber<T>
+    {
+        ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes);
+        int count = listed ? rows.Length : values.Length;
+        bool allValid = mask.AllValid;
+        bestRow = -1;
+        T best = default;
+        for (int i = 0; i < count; i++)
+        {
+            int row = listed ? rows[i] : i;
+            if (!allValid && !mask.IsValid(row))
+            {
+                continue;
+            }
+
+            T value = values[row];
+            if (T.IsNaN(value))
+            {
+                continue;
+            }
+
+            if (bestRow < 0 || (wantMin ? value < best : value > best))
+            {
+                best = value;
+                bestRow = row;
+            }
+        }
+
+        return bestRow >= 0;
+    }
+
+    private static bool Bytes(
+        CanonicalNode node, ValidityMask mask, ReadOnlySpan<int> rows, bool listed, bool wantMin, out int bestRow)
+    {
+        int count = listed ? rows.Length : node.Length;
+        bool allValid = mask.AllValid;
+        bestRow = -1;
+        ReadOnlySpan<byte> best = default;
+        for (int i = 0; i < count; i++)
+        {
+            int row = listed ? rows[i] : i;
+            if (!allValid && !mask.IsValid(row))
+            {
+                continue;
+            }
+
+            ReadOnlySpan<byte> value = LiteralReader.ViewAt(node, row);
+            if (bestRow < 0)
+            {
+                best = value;
+                bestRow = row;
+                continue;
+            }
+
+            int order = value.SequenceCompareTo(best);
+            if (wantMin ? order < 0 : order > 0)
+            {
+                best = value;
+                bestRow = row;
+            }
+        }
+
+        return bestRow >= 0;
+    }
+}

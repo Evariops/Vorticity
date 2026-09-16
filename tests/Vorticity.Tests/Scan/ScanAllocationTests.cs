@@ -81,7 +81,7 @@ public sealed class ScanAllocationTests
     private static ValueTask<long> Count(VortexFile file, VortexExpr filter) =>
         file.Scan()
             .Where(filter)
-            .WithCountTiers(CountTiers.All & ~CountTiers.FullBlock)
+            .WithTiers(TerminalTiers.All & ~TerminalTiers.FullBlock)
             .CountAsync();
 
     [Fact]

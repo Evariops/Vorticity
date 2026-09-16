@@ -94,6 +94,32 @@ internal sealed class BlockMask
         }
     }
 
+    /// <summary>
+    /// Leaves live exactly the blocks <paramref name="rows"/> overlaps, whatever was live before.
+    /// </summary>
+    /// <param name="rows">The rows about to be decoded, in file coordinates.</param>
+    /// <remarks>
+    /// NOT A PRUNER'S OPERATION -- a pruner only clears bits (docs/11 §6.1). This is a consumer's:
+    /// a terminal that decodes one split of a chunk hands the readers a mask that says so, and the
+    /// restricted decode of step 8b materializes that split rather than the chunk, which on a
+    /// single-chunk file is the difference between one block and the whole column.
+    /// </remarks>
+    internal void KeepOnly(RowRange rows)
+    {
+        Array.Clear(_bits);
+        if (rows.IsEmpty || BlockCount == 0)
+        {
+            return;
+        }
+
+        long first = Math.Min(rows.Start / BlockRows, BlockCount - 1);
+        long last = Math.Min((rows.End - 1) / BlockRows, BlockCount - 1);
+        for (long block = first; block <= last; block++)
+        {
+            _bits[block >> 6] |= 1UL << (int)(block & 63);
+        }
+    }
+
     /// <summary>The rows of block <paramref name="block"/>, the last one clipped to the file.</summary>
     /// <param name="block">A block index below <see cref="BlockCount"/>.</param>
     internal RowRange BlockRange(int block)
