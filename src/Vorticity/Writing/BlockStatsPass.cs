@@ -1123,6 +1123,71 @@ internal static class BlockStatsPass
     }
 
     /// <summary>
+    /// The width histograms of rows <c>[start, start + count)</c> alone -- an integer primitive's,
+    /// valid rows by their bits and null rows as width zero in both domains -- for a block whose
+    /// statistics already hold them.
+    /// </summary>
+    /// <remarks>
+    /// THE CARRIED TAIL, COUNTED LATE. A plan holds at the end of a chunk, and the next chunk's
+    /// first block is already open with the rows the emission carried: rows the pass walked before
+    /// anyone wanted widths. Without them that block's histogram is partial, the chunk it opens
+    /// walks for its histogram all the same, and the count on the chunk's every other block is
+    /// paid for nobody -- on `fastlanes_bitpacked` one chunk of four counted for nothing, and the
+    /// histograms switched off measured exactly the +13 % the axis carried since they were
+    /// switched on. Counting the carried rows here, when the table sees them again
+    /// (`ColumnWriter.Reprobe`), completes the block, and the chunk it opens is the first to read
+    /// its widths instead of the second.
+    /// </remarks>
+    /// <param name="arena">The arena holding the column.</param>
+    /// <param name="nodeIndex">The column.</param>
+    /// <param name="start">First row of the range, inside the node.</param>
+    /// <param name="count">How many rows.</param>
+    /// <param name="widths">The block's pair of histograms (<see cref="BitPackWidths"/>).</param>
+    internal static void Widths(
+        CanonicalArena arena, int nodeIndex, int start, int count, Span<int> widths)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        if (count <= 0 || node.Kind != CanonicalKind.Primitive || !node.PType.IsInteger())
+        {
+            return;
+        }
+
+        ValidityMask mask = ValidityMask.From(arena, node.Validity);
+        if (!mask.AllValid)
+        {
+            int nulls = 0;
+            for (int i = 0; i < count; i++)
+            {
+                if (!mask.IsValid(start + i))
+                {
+                    nulls++;
+                }
+            }
+
+            widths[0] += nulls;
+            widths[BitPackWidths.ZigZagOffset] += nulls;
+        }
+
+        ReadOnlySpan<byte> bytes = node.Values.Span;
+        switch (node.PType)
+        {
+            case PType.I8: CountWidths(Range<sbyte>(bytes, start, count), in mask, start, widths, zigzag: true); return;
+            case PType.I16: CountWidths(Range<short>(bytes, start, count), in mask, start, widths, zigzag: true); return;
+            case PType.I32: CountWidths(Range<int>(bytes, start, count), in mask, start, widths, zigzag: true); return;
+            case PType.I64: CountWidths(Range<long>(bytes, start, count), in mask, start, widths, zigzag: true); return;
+            case PType.U8: CountWidths(Range<byte>(bytes, start, count), in mask, start, widths, zigzag: false); return;
+            case PType.U16: CountWidths(Range<ushort>(bytes, start, count), in mask, start, widths, zigzag: false); return;
+            case PType.U32: CountWidths(Range<uint>(bytes, start, count), in mask, start, widths, zigzag: false); return;
+            default: CountWidths(Range<ulong>(bytes, start, count), in mask, start, widths, zigzag: false); return;
+        }
+    }
+
+    /// <summary>Rows <c>[start, start + count)</c> of a value buffer, as <c>T</c>.</summary>
+    private static ReadOnlySpan<T> Range<T>(ReadOnlySpan<byte> bytes, int start, int count)
+        where T : unmanaged =>
+        MemoryMarshal.Cast<byte, T>(bytes).Slice(start, count);
+
+    /// <summary>
     /// The width histograms over a range the bounds loop has just read, valid rows only, the
     /// element's bits masked to its width so a signed value is measured as the packer sees it.
     /// </summary>
@@ -1156,9 +1221,27 @@ internal static class BlockStatsPass
             }
             else
             {
-                for (int i = 0; i < values.Length; i++)
+                // TWO HISTOGRAMS, ROWS ALTERNATING, SUMMED AT THE END. A run of equal widths -- 512
+                // rows at ten bits in `fastlanes_bitpacked`'s `i % 1024` -- increments one counter
+                // 512 times in a row, and each increment waits on the store before it. Split over
+                // two counters the chain is half as long, and the fold is 65 adds per range.
+                Span<int> odd = stackalloc int[65];
+                odd.Clear();
+                int i = 0;
+                for (; i + 1 < values.Length; i += 2)
                 {
                     RawWidth(ulong.CreateTruncating(values[i]) & mask64, widths);
+                    RawWidth(ulong.CreateTruncating(values[i + 1]) & mask64, odd);
+                }
+
+                if (i < values.Length)
+                {
+                    RawWidth(ulong.CreateTruncating(values[i]) & mask64, widths);
+                }
+
+                for (int w = 0; w < odd.Length; w++)
+                {
+                    widths[w] += odd[w];
                 }
             }
 
@@ -1187,7 +1270,7 @@ internal static class BlockStatsPass
         }
     }
 
-    /// <summary>The raw half of <see cref="Widths"/> alone, for a column zigzag is never offered.</summary>
+    /// <summary>The raw half of <see cref="Widths(ulong, int, Span{int})"/> alone, for a column zigzag is never offered.</summary>
     /// <param name="bits">The row's value, masked to the element width.</param>
     /// <param name="widths">The pair of histograms; only the raw one moves.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

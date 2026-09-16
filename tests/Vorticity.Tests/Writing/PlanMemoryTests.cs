@@ -166,6 +166,87 @@ public sealed class PlanMemoryTests
     }
 
     /// <summary>
+    /// A bit-packed column whose batches never line up with the blocks, so every chunk after the
+    /// first opens on the rows the emission before it carried: once the packing has held, the
+    /// chunk that opens on a carried tail reads its widths like every chunk after it.
+    /// </summary>
+    /// <remarks>
+    /// The carried rows were ingested before the plan held, so the block they open had no
+    /// histogram, the chunk it opens walked all the same, and the count on that chunk's other
+    /// blocks served nobody -- one chunk in four of `fastlanes_bitpacked`, and the whole of the
+    /// +13 % the axis carried since widths were counted at ingest: switching them off measured
+    /// exactly it. `ColumnWriter.Reprobe` counts the carried rows now, when the table sees them
+    /// again, and the block is whole.
+    /// </remarks>
+    [Fact]
+    public async Task ACarriedTailCompletesTheOpenBlockSoTheNextChunkReadsItsWidths()
+    {
+        Decoders.EnsureRegistered();
+
+        DTypeArena types = new DTypeArena();
+        CanonicalArena arena = new CanonicalArena();
+        DType dtype = types.Primitive(PType.I64, Nullability.NonNullable);
+
+        // Four batches of 8 131 rows -- the scan's batch, which never lines up with a block -- of
+        // values in [0, 1000): too many distinct for a dictionary, no progression, and a zero every
+        // thousand rows so every chunk's frame of reference is zero and its widths the ingested ones.
+        const int Batch = 8131;
+        const int Batches = 4;
+        int[] roots = new int[Batches];
+        long row = 0;
+        for (int b = 0; b < Batches; b++)
+        {
+            VortexBuffer values = arena.Allocate(Batch * sizeof(long), sizeof(long), out Span<byte> destination);
+            for (int i = 0; i < Batch; i++, row++)
+            {
+                System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(
+                    destination.Slice(i * sizeof(long), sizeof(long)), (row * 7919) % 1000);
+            }
+
+            roots[b] = arena.AddPrimitive(dtype, Batch, Validity.NonNullable, PType.I64, values);
+        }
+
+        // Blocks of 1 024 rows and at least 64 KB per chunk, cut from the batches in transit: the
+        // chunks are 15 360, 8 192, 8 192 and the 780 rows left, and each after the first opens on
+        // a carried tail.
+        VortexWriteOptions options = new VortexWriteOptions
+        {
+            RowBlockSize = 1024,
+            DataBlockTargetBytes = 65_536,
+        };
+
+        string path = Path.Combine(Path.GetTempPath(), $"vorticity-memory-widths-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            long fromWidths;
+            await using (VortexFileWriter writer = VortexFileWriter.Create(path, dtype, options))
+            {
+                for (int b = 0; b < Batches; b++)
+                {
+                    using RecordBatch batch = new RecordBatch(arena, roots[b], (long)b * Batch);
+                    await writer.WriteAsync(batch, CancellationToken.None);
+                }
+
+                await writer.CompleteAsync(CancellationToken.None);
+                fromWidths = writer.ChunksFromWidths;
+            }
+
+            // The first chunk walks for its histogram; the three that open on a carried tail read
+            // their widths. With the tail left uncounted, the second walked too. The bytes are the
+            // walk's, whichever priced the packing.
+            Assert.Equal(3, fromWidths);
+            Assert.Equal(43_316, new FileInfo(path).Length);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(path))
+            {
+                System.IO.File.Delete(path);
+            }
+        }
+    }
+
+    /// <summary>
     /// Writes the four chunks with <paramref name="rowBlock"/>-row blocks, one chunk per batch,
     /// with the differential probe installed; reads the file back; returns its size and the
     /// chunks on which the chooser and the reference chooser disagreed.

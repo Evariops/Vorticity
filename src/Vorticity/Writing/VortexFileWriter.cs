@@ -141,6 +141,29 @@ public sealed class VortexFileWriter : IAsyncDisposable
 
     private long _chunksFromTable;
 
+    /// <summary>
+    /// (Column chunk, field) pairs whose bit-packing was priced from the ingested width histograms
+    /// rather than from a walk of the chunk, the columns' children included.
+    /// </summary>
+    /// <remarks>
+    /// The width counterpart of <see cref="ChunksFromTable"/>: whether the chunk after a held
+    /// bit-packing reads its widths at all -- its first block is already open with the carried
+    /// tail when the plan holds -- is what `PlanMemoryTests` holds this counter to.
+    /// </remarks>
+    internal long ChunksFromWidths
+    {
+        get
+        {
+            long served = 0;
+            for (int column = 0; column < _fieldCount; column++)
+            {
+                served += _columns[column].WidthsServed;
+            }
+
+            return served;
+        }
+    }
+
     /// <summary>Canonical bytes to accumulate before emitting, or 0 for no byte threshold.</summary>
     private readonly long _blockBytes;
 

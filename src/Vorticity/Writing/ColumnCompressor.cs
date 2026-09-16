@@ -1159,6 +1159,11 @@ internal static class ColumnCompressor
         {
             Span<int> ingested = stackalloc int[BitPackWidths.Length];
             bool haveWidths = measured && integers && !stats.WidthsBroken && chunk.Widths(ingested);
+            if (haveWidths)
+            {
+                chunk.NoteWidthsServed();
+            }
+
             packed = BitPackPlan.TryBuild(
                 arena, node, zigzag: Allows(target, "vortex.zigzag"),
                 reference: cascade.Reference
@@ -1319,6 +1324,11 @@ internal static class ColumnCompressor
 
                 Span<int> ingested = stackalloc int[BitPackWidths.Length];
                 bool haveWidths = !stats.WidthsBroken && chunk.Widths(ingested);
+                if (haveWidths)
+                {
+                    chunk.NoteWidthsServed();
+                }
+
                 BitPackPlan? packed = BitPackPlan.TryBuild(
                     arena, node, zigzag: Allows(target, "vortex.zigzag"),
                     reference: cascade.Reference ?? Reference(node, in stats),

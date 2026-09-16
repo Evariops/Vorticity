@@ -341,6 +341,16 @@ subtree, the prediction never held, the distinct table was never expected to ser
 every chunk walked for the dictionary the table had already built. The encoder reports the layer
 as built — the same formula the plan was priced by — and that is what the tolerance compares.
 Measured: `dict` 15,7 → 11,3 ms per million rows, `table_mixed` 151 → 77.
+
+**The chunk after a plan holds opens on rows ingested before it held.** The emission carries the
+tail of the batch it cut, and that tail is already the next chunk's first block when the plan is
+remembered — probed into no table, counted into no histogram. The tables see it again at the
+carry (§3.2.2); the width histograms are counted at the same moment, so the block is whole and the
+chunk that opens on it reads its widths instead of walking with 31 counted blocks behind it that
+served nobody. Measured on `fastlanes_bitpacked`: one chunk in four counted for nothing, +13 % on
+the axis; counted at the carry, and with the raw count split over two alternating histograms so a
+run of equal widths is not one chain of dependent increments, −5 % under the writer before the
+pass existed.
 This replaces bucketed signatures and periodic re-pricing with a control that costs nothing and
 measures the one thing that matters. An FSST symbol table is still trained per chunk (sharing one
 was measured at 4,3 % of output size, `bench/PLAN.md:62`); what is remembered is the decision,

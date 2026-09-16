@@ -346,6 +346,34 @@ internal sealed class ColumnWriter
     /// <summary>The memory of the last chunk written, or none for the first.</summary>
     internal PlanMemory? Memory { get; private set; }
 
+    private long _widthsServed;
+
+    /// <summary>Records that a chunk's bit-packing was priced from ingested widths, not a walk.</summary>
+    internal void NoteWidthsServed() => _widthsServed++;
+
+    /// <summary>
+    /// Chunks of this column and its children whose bit-packing was priced from the ingested
+    /// width histograms rather than from a walk -- what `PlanMemoryTests` holds the carried tail's
+    /// count to.
+    /// </summary>
+    internal long WidthsServed
+    {
+        get
+        {
+            long served = _widthsServed;
+            ColumnWriter[]? children = _children;
+            if (children is not null)
+            {
+                for (int i = 0; i < children.Length; i++)
+                {
+                    served += children[i].WidthsServed;
+                }
+            }
+
+            return served;
+        }
+    }
+
     /// <summary>
     /// Records what the chunk just written was encoded as, against what it was priced at.
     /// </summary>
@@ -415,6 +443,22 @@ internal sealed class ColumnWriter
             // carried tail is the first thing it must see, so it is created here as well.
             _table ??= DistinctTable.For(node);
             _table?.Probe(arena, node, start, count);
+        }
+
+        // THE CARRIED ROWS ARE THE OPEN BLOCK, AND THE OPEN BLOCK HAS NO WIDTHS YET: they were
+        // ingested before the plan that wants widths held. Counted here, the block is whole and the
+        // chunk it opens reads its histograms; left partial, that chunk walks for its histogram and
+        // every later block of it is counted for nobody -- one chunk in four of
+        // `fastlanes_bitpacked`, and all of the +13 % the axis carried. Only when the carry is the
+        // whole block: a count over part of it would be a wrong histogram, not a missing one.
+        if (_widthsLive && _openWidths is null && _open.IsPresent && count == _open.Rows
+            && node.Kind == CanonicalKind.Primitive && node.PType.IsInteger())
+        {
+            _openWidths = ArrayPool<int>.Shared.Rent(BitPackWidths.Length);
+            Span<int> widths = _openWidths.AsSpan(0, BitPackWidths.Length);
+            widths.Clear();
+            BlockStatsPass.Widths(arena, nodeIndex, start, count, widths);
+            _open.WidthsBroken = false;
         }
 
         switch (node.Kind)

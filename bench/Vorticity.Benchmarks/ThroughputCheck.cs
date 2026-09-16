@@ -747,6 +747,10 @@ internal static class ThroughputCheck
     /// by the tool: `fastlanes_bitpacked` 1.50-1.51 against 1.33 -- the +13 % the refactor left on
     /// a `u32` column, identical bytes, one hypothesis refuted in R9 and a profile owed --
     /// `fastlanes_for` 0.93-0.96 against 0.88 (new at this pass), `table_wide` 0.46 against 0.43.
+    /// The profile was paid in R10 and blamed the wrong frame; two switchable variants measured
+    /// on the driver found the width histograms, whole: the chunk after a held packing opened on
+    /// a carried tail nobody had counted, and the count itself was one chain of dependent
+    /// increments. Both fixed, `fastlanes_bitpacked` measures 5 % UNDER the pre-refactor writer.
     /// </para>
     /// <para>
     /// THREE AXES ARE NOISIER THAN THE MARGIN, measured here and not assumed: between processes,
@@ -789,7 +793,7 @@ internal static class ThroughputCheck
         ("dict_u64_codes", 0.95),   // 3 passes, spread 0.92-0.95; was 1.50, -36.6%
         ("dict_u8_codes", 1.24),   // 3 passes, spread 1.18-1.24; was 1.72, -27.9%
         ("ext", 0.068),   // 3 passes, spread 0.063-0.068; was 0.070, -3.2%
-        ("fastlanes_bitpacked", 1.33),   // 3 passes, spread 1.50-1.51; HELD at 1.33: 3 of 3 passes above, peak 1.51, no loosening. +13 % depuis le refacto, octets identiques ; la moitié zigzag comptée pour rien sur un u32 était une hypothèse fausse (R9) : à profiler, pas à deviner
+        ("fastlanes_bitpacked", 1.33),   // 3 passes, spread 1.50-1.51; HELD at 1.33: 3 of 3 passes above, peak 1.51, no loosening. R10 : c'était les largeurs — la queue portée laissait un chunk sur quatre marcher pour rien, et une chaîne d'incréments sur un seul compteur ; corrigés, −5 % sous le pré-refacto au pilote
         ("fastlanes_bitpacked_patched_no_chunk_offsets", 1.14),   // 3 passes, spread 1.14-1.15; HELD at 1.14: 3 of 3 passes above, peak 1.15, no loosening
         ("fastlanes_delta", 0.18),   // 3 passes, spread 0.17-0.18; was 0.19, -2.8%
         ("fastlanes_for", 0.88),   // 3 passes, spread 0.93-0.96; HELD at 0.88: 3 of 3 passes above, peak 0.96, no loosening. +6 à +9 % à cette passe seulement (0.85-0.88 à la septième) : à relire avec `fastlanes_bitpacked`

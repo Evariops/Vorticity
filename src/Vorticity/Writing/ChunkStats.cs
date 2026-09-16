@@ -86,6 +86,9 @@ internal readonly struct ChunkStats
     /// <summary>The column's memory of its last chunk (docs/11 §3.4.3), or none.</summary>
     internal ColumnWriter.PlanMemory? Memory => _column?.Memory;
 
+    /// <summary>Tells the column its bit-packing was priced from the ingested widths.</summary>
+    internal void NoteWidthsServed() => _column?.NoteWidthsServed();
+
     /// <summary>
     /// Hands the column what its chunk was encoded as and what that produced, for the next chunk's
     /// memory. An absent cursor remembers nothing, which is what a child a scheme invented gets.
