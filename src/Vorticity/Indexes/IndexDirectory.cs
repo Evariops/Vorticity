@@ -231,6 +231,14 @@ public sealed record IndexDirectory(
     private const int ColumnCaseInsensitive = 8;
     private const int ColumnSegmentEntries = 9;
 
+    /// <summary>
+    /// Whether the budget may abandon this index (<c>IndexPolicy.AsRequired</c>). It is stored
+    /// because an append reuses the directory's policy rather than being told one again
+    /// (docs/11-write-strategy.md §3.8): a requirement that did not survive the round trip would
+    /// hold for the first write and quietly stop holding for every one after it.
+    /// </summary>
+    private const int ColumnRequired = 11;
+
     /// <summary>The key as UTF-8, for <c>VortexFile.TryGetMetadataIndex</c>.</summary>
     internal static ReadOnlySpan<byte> MetadataKeyUtf8 => "vorticity.index"u8;
 
@@ -346,6 +354,7 @@ public sealed record IndexDirectory(
         writer.WriteUInt32(ColumnHash, (uint)policy.Hash);
         writer.WriteBool(ColumnCaseInsensitive, policy.CaseInsensitive);
         WriteIfNot(ref writer, ColumnSegmentEntries, policy.SegmentEntries, IndexPolicy.DefaultSegmentEntries);
+        writer.WriteBool(ColumnRequired, policy.Required);
     }
 
     private static void WriteIfNot(ref ProtoWriter writer, int field, int value, int fallback)
@@ -794,6 +803,7 @@ public sealed record IndexDirectory(
         uint hash = 0;
         uint segmentEntries = 0;
         bool caseInsensitive = false;
+        bool required = false;
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
             switch (field)
@@ -825,6 +835,9 @@ public sealed record IndexDirectory(
                 case ColumnSegmentEntries when wire == ProtoWireType.Varint:
                     segmentEntries = reader.ReadVarint32();
                     break;
+                case ColumnRequired when wire == ProtoWireType.Varint:
+                    required = reader.ReadBool();
+                    break;
                 case ColumnKeyPaths when wire == ProtoWireType.LengthDelimited:
                     keyPaths.Add(Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
                     break;
@@ -842,6 +855,7 @@ public sealed record IndexDirectory(
             (int)Math.Min(minDistinct, int.MaxValue),
             (int)Math.Min(hash, int.MaxValue),
             caseInsensitive,
-            (int)Math.Min(segmentEntries, int.MaxValue));
+            (int)Math.Min(segmentEntries, int.MaxValue),
+            required);
     }
 }

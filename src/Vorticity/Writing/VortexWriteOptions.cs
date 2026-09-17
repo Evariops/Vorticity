@@ -34,6 +34,43 @@ public enum WriteProfile
 public sealed class VortexWriteOptions
 {
     /// <summary>The defaults: compression on.</summary>
+    public VortexWriteOptions()
+    {
+    }
+
+    /// <summary>
+    /// A copy, which the <c>With…</c> methods override one option of.
+    /// </summary>
+    /// <param name="other">The options to copy.</param>
+    /// <remarks>
+    /// THE FIELD LIST LIVES HERE AND NOWHERE ELSE. These options are a class, like every other
+    /// options type of this library, so a copy is a constructor rather than a record's `with` — and
+    /// a copy per caller was three lists of seventeen fields to keep in step, which is three
+    /// chances to drop one silently. An option added below is copied here, once.
+    /// </remarks>
+    private VortexWriteOptions(VortexWriteOptions other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+        Indexes = other.Indexes;
+        Profile = other.Profile;
+        EncodingHints = other.EncodingHints;
+        IndexBudgetPerMille = other.IndexBudgetPerMille;
+        KeyEncoder = other.KeyEncoder;
+        Identity = other.Identity;
+        ScratchDirectory = other.ScratchDirectory;
+        ScratchMemoryBytes = other.ScratchMemoryBytes;
+        WideRowsAbove = other.WideRowsAbove;
+        Fences = other.Fences;
+        ElementStatistics = other.ElementStatistics;
+        Compress = other.Compress;
+        FileStatistics = other.FileStatistics;
+        StringBoundBytes = other.StringBoundBytes;
+        TargetEdition = other.TargetEdition;
+        RowBlockSize = other.RowBlockSize;
+        DataBlockTargetBytes = other.DataBlockTargetBytes;
+    }
+
+    /// <summary>The defaults: compression on.</summary>
     public static VortexWriteOptions Default { get; } = new VortexWriteOptions();
 
     /// <summary>
@@ -125,26 +162,33 @@ public sealed class VortexWriteOptions
     /// into a store. It is a copy method rather than a record's `with` because these options are a
     /// class, like every other options type of this library.
     /// </remarks>
-    public VortexWriteOptions WithIdentity(Guid identity) => new VortexWriteOptions
+    public VortexWriteOptions WithIdentity(Guid identity) =>
+        new VortexWriteOptions(this) { Identity = identity };
+
+    /// <summary>These options with a different index policy.</summary>
+    /// <param name="indexes">The policy to write under.</param>
+    /// <returns>A copy; these options are unchanged.</returns>
+    /// <remarks>
+    /// For a caller that must add an index to whatever the user asked for rather than replace it:
+    /// a dataset with a declared clustering key writes every data object with the mandatory run on
+    /// that key (docs/13-dataset.md §6.1), on top of the policy it was handed.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="indexes"/> is null.</exception>
+    public VortexWriteOptions WithIndexes(WritePolicy indexes)
     {
-        Indexes = Indexes,
-        Profile = Profile,
-        EncodingHints = EncodingHints,
-        IndexBudgetPerMille = IndexBudgetPerMille,
-        KeyEncoder = KeyEncoder,
-        Identity = identity,
-        ScratchDirectory = ScratchDirectory,
-        ScratchMemoryBytes = ScratchMemoryBytes,
-        WideRowsAbove = WideRowsAbove,
-        Fences = Fences,
-        ElementStatistics = ElementStatistics,
-        Compress = Compress,
-        FileStatistics = FileStatistics,
-        StringBoundBytes = StringBoundBytes,
-        TargetEdition = TargetEdition,
-        RowBlockSize = RowBlockSize,
-        DataBlockTargetBytes = DataBlockTargetBytes,
-    };
+        ArgumentNullException.ThrowIfNull(indexes);
+        return new VortexWriteOptions(this) { Indexes = indexes };
+    }
+
+    /// <summary>These options with a composite-key encoder.</summary>
+    /// <param name="keyEncoder">The encoder, from the <c>Vorticity.RowEncoding</c> package.</param>
+    /// <returns>A copy; these options are unchanged.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="keyEncoder"/> is null.</exception>
+    public VortexWriteOptions WithKeyEncoder(IKeyEncoder keyEncoder)
+    {
+        ArgumentNullException.ThrowIfNull(keyEncoder);
+        return new VortexWriteOptions(this) { KeyEncoder = keyEncoder };
+    }
 
     /// <summary>
     /// Where a locating index's chunk runs wait for their merge once they pass the memory budget,
@@ -184,26 +228,15 @@ public sealed class VortexWriteOptions
     /// <param name="indexes">The policy the append writes under.</param>
     /// <param name="fileStatistics">Whether the file keeps a statistics segment.</param>
     /// <param name="budgetPerMille">The index budget.</param>
-    internal VortexWriteOptions ForAppend(int rowBlockSize, WritePolicy indexes, bool fileStatistics, int budgetPerMille) => new VortexWriteOptions
-    {
-        Indexes = indexes,
-        Profile = Profile,
-        EncodingHints = EncodingHints,
-        IndexBudgetPerMille = budgetPerMille,
-        KeyEncoder = KeyEncoder,
-        Identity = Identity,
-        ScratchDirectory = ScratchDirectory,
-        ScratchMemoryBytes = ScratchMemoryBytes,
-        WideRowsAbove = WideRowsAbove,
-        Fences = Fences,
-        ElementStatistics = ElementStatistics,
-        Compress = Compress,
-        FileStatistics = fileStatistics,
-        TargetEdition = TargetEdition,
-        RowBlockSize = rowBlockSize,
-        DataBlockTargetBytes = DataBlockTargetBytes,
-        StringBoundBytes = StringBoundBytes,
-    };
+    internal VortexWriteOptions ForAppend(
+        int rowBlockSize, WritePolicy indexes, bool fileStatistics, int budgetPerMille) =>
+        new VortexWriteOptions(this)
+        {
+            Indexes = indexes,
+            IndexBudgetPerMille = budgetPerMille,
+            FileStatistics = fileStatistics,
+            RowBlockSize = rowBlockSize,
+        };
 
     /// <summary>
     /// Whether the writer may pick an encoding per column chunk. Default <see langword="true"/>.

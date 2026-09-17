@@ -666,6 +666,20 @@ this writer does not build yet is reported abandoned with that reason, never sil
 The first kind is `dict.probe` (§5.3), recorded under `Auto` as one payload-free run per maximal
 range of consecutive dictionary-encoded chunks.
 
+**As delivered (step 39c): `IndexPolicy.AsRequired()`, the index the budget may not take.** The
+budget is a guard against `Auto`'s enthusiasm, and it was also overruling instructions: an index a
+caller named explicitly was abandoned beside the ones nobody asked for. The case that forced the
+distinction is [13-dataset.md](13-dataset.md) §6.1's **mandatory** run on a dataset's clustering
+key — on a narrow table a sorted run over one column is intrinsically comparable in size to that
+column, so *no* object is ever large enough to bring it under a tenth of the file, and a dataset
+whose objects lost their run cannot be walked in key order at all. `AsRequired()` marks a policy the
+budget must leave alone; the optional indexes around it are still the first thing it takes, and a
+required index still counts toward the total, so it has first claim on the budget rather than
+immunity from the arithmetic. `None` and `Auto` name no kind and cannot be required. The flag is
+**stored in the directory** (column field 11) because an append reuses the stored policy rather than
+being told one again (11 §3.8): a requirement that did not survive that round trip would hold for
+the first write and quietly stop holding for every one after it.
+
 **As delivered (nested columns, 2026-09-17).** An override whose path is not a top-level column,
 `For("person.address.city", …)`, is built on that leaf. Its entry's `column_path` is the whole
 field-index path, and its builder is fed the leaf's node reached through the structs (and the

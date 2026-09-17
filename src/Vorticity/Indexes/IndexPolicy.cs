@@ -90,7 +90,7 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
 
     private IndexPolicy(
         IndexPolicyKind kind, int fppPpm, int resolutions, int maxBlocks, int minDistinct,
-        BloomHash hash, bool caseInsensitive, int segmentEntries = 0)
+        BloomHash hash, bool caseInsensitive, int segmentEntries = 0, bool required = false)
     {
         Kind = kind;
         _fppPpm = fppPpm;
@@ -100,6 +100,39 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
         Hash = hash;
         CaseInsensitive = caseInsensitive;
         _segmentEntries = segmentEntries;
+        Required = required;
+    }
+
+    /// <summary>
+    /// Whether the budget of <c>VortexWriteOptions.IndexBudgetPerMille</c> may abandon this index.
+    /// </summary>
+    /// <remarks>
+    /// THE BUDGET IS A GUARD AGAINST <see cref="Auto"/>, and this is how a caller says the index is
+    /// not a suggestion. The share of the data an index may take is the right question for a filter
+    /// nobody asked for; it is the wrong question for one a structure depends on, and the case that
+    /// forced it is docs/13-dataset.md §6.1's <em>mandatory</em> run on a dataset's clustering key:
+    /// on a narrow table a run over one column is intrinsically comparable in size to that column,
+    /// so no object is ever big enough to bring it under a tenth of the file. A required index still
+    /// counts toward the budget — it has first claim on it, not immunity from arithmetic — so the
+    /// optional ones around it are abandoned first and, if it alone is over, it survives and the
+    /// report says what it cost.
+    /// </remarks>
+    public bool Required { get; }
+
+    /// <summary>The same policy, which the budget may not abandon.</summary>
+    /// <returns>A new policy.</returns>
+    /// <exception cref="InvalidOperationException">The policy is <see cref="None"/> or <see cref="Auto"/>.</exception>
+    public IndexPolicy AsRequired()
+    {
+        if (Kind is IndexPolicyKind.None or IndexPolicyKind.Auto)
+        {
+            throw new InvalidOperationException(
+                $"An index policy of {Kind} names no index to require; name the kind first.");
+        }
+
+        return new IndexPolicy(
+            Kind, _fppPpm, _resolutions, _maxBlocks, _minDistinctPlusOne - 1, Hash, CaseInsensitive,
+            _segmentEntries, required: true);
     }
 
     /// <summary>The most entries one segment of a locating run holds.</summary>
@@ -113,7 +146,8 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(entries, 1);
         return new IndexPolicy(
-            Kind, _fppPpm, _resolutions, _maxBlocks, _minDistinctPlusOne - 1, Hash, CaseInsensitive, entries);
+            Kind, _fppPpm, _resolutions, _maxBlocks, _minDistinctPlusOne - 1, Hash, CaseInsensitive, entries,
+            Required);
     }
 
     /// <summary>What the column gets.</summary>
@@ -217,11 +251,12 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     /// <param name="minDistinct">The distinct floor; a negative value, which a file cannot hold, means the default.</param>
     /// <param name="hash">The hash; an unknown value becomes <see cref="BloomHash.XxHash3"/>.</param>
     /// <param name="caseInsensitive">Whether trigrams are lower-cased.</param>
-    /// <returns>A policy inside every range.</returns>
     /// <param name="segmentEntries">The locating segment size; 0 for the default.</param>
+    /// <param name="required">Whether the budget may not abandon it; ignored for a kind-less policy.</param>
+    /// <returns>A policy inside every range.</returns>
     internal static IndexPolicy FromStored(
         int kind, int fppPpm, int resolutions, int maxBlocks, int minDistinct, int hash,
-        bool caseInsensitive, int segmentEntries = 0)
+        bool caseInsensitive, int segmentEntries = 0, bool required = false)
     {
         IndexPolicyKind policy = kind is >= (int)IndexPolicyKind.None and <= (int)IndexPolicyKind.NgramPostings
             ? (IndexPolicyKind)kind
@@ -234,7 +269,11 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
             minDistinct,
             hash == (int)BloomHash.XxHash64 ? BloomHash.XxHash64 : BloomHash.XxHash3,
             caseInsensitive,
-            Math.Max(segmentEntries, 0));
+            Math.Max(segmentEntries, 0),
+
+            // A kind-less policy is never required, whatever the bytes said: `AsRequired` refuses to
+            // produce one, so reading one back would be a state this library cannot otherwise reach.
+            required && policy is not (IndexPolicyKind.None or IndexPolicyKind.Auto));
     }
 
     private static void CheckBloom(int falsePositivePpm, int resolutions, int maxBlocks, int minDistinct)
@@ -256,7 +295,8 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
         && MinDistinct == other.MinDistinct
         && Hash == other.Hash
         && CaseInsensitive == other.CaseInsensitive
-        && SegmentEntries == other.SegmentEntries;
+        && SegmentEntries == other.SegmentEntries
+        && Required == other.Required;
 
     /// <inheritdoc/>
     public override bool Equals(object? obj) => obj is IndexPolicy other && Equals(other);
@@ -264,7 +304,8 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     /// <inheritdoc/>
     public override int GetHashCode() =>
         HashCode.Combine(
-            Kind, FalsePositivePpm, Resolutions, MaxBlocks, MinDistinct, Hash, CaseInsensitive, SegmentEntries);
+            Kind, FalsePositivePpm, Resolutions, MaxBlocks, MinDistinct, Hash, CaseInsensitive,
+            HashCode.Combine(SegmentEntries, Required));
 
     /// <summary>Whether two policies ask for the same thing.</summary>
     /// <param name="left">One policy.</param>

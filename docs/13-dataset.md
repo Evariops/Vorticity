@@ -224,12 +224,13 @@ copy**, measured: the store grows by the commit objects **to the byte**), `Objec
 `Scan()`. A data object is a plain Vortex file, so the scan over one object is the core's own scan,
 filter and indexes included; the dataset adds the order and the pruning below. Until a clustering
 key is declared, a leaf's key is §4.1's other option — **the object's first row position**, eight
-big-endian bytes, whose `memcmp` order is its numeric order — which keeps the dataset free of the
-0.x row-encoding package until it needs it.
+big-endian bytes, whose `memcmp` order is its numeric order — and a dataset that declares none needs
+no row encoding at all.
 
 **As delivered (step 39b): the summaries, and what they let the walk skip.** A leaf entry now carries
 `min`, `max` and `null_count` per summarised column — the first 32 top-level columns by default, or
-`DatasetOptions.SummaryColumns` — and an internal entry carries their union. The bounds are the
+`DatasetOptions.SummaryColumns`, and **always** the clustering key's own columns whatever the limit
+says — and an internal entry carries their union. The bounds are the
 object's own file statistics (02 §3, the segment 11 §6.3 prunes a whole file with), read out of the
 buffer the sink still holds, **before** the put: they cost the append no request, which is the only
 currency §9.1 counts.
@@ -259,11 +260,35 @@ and **8** with `WithSummaries(false)`, for the same 100 rows; a tree of depth 3 
 answers an impossible filter by skipping **2 subtrees** and considering **0 objects**.
 
 `Rows(a, b)` (§6.6) is the same walk with the row sums as its test, so an object outside the range
-is neither read nor counted. With the first-row-position key this tree *is* the insertion-order
-tree: key order and insertion order are the same order.
+is neither read nor counted.
 
-**What step 39 still leaves:** the mandatory run on the clustering key (§6.1), and `InKeyOrder` with
-its terminals across objects (§6.6).
+**A tension between §6.6 and §4.1, resolved here.** §4.1 says "one tree per level", ordered by the
+clustering key *or* by first row position; §6.6 says `Rows(a, b)` goes through "the insertion-order
+tree". Both cannot hold once a clustering key is declared, because there is only one tree. Resolved
+in favour of §4.1: **`Rows(a, b)` addresses rows in the dataset's own order**, which is the key order
+when one is declared and insertion order otherwise — and with the first-row-position key this tree
+*is* the insertion-order tree, the two orders being the same one. A second tree, keyed by position
+beside the one keyed by value, is what §6.6's wording would need, and it would double what a commit
+writes; nothing has asked for it yet.
+
+**As delivered (step 39c): the clustering key.** `DatasetOptions.ClusteringKey` declares it, the
+header carries it, and a leaf's key becomes the **row encoding of the object's smallest key**
+followed by the object's first row position: the encoding puts the objects in key order whatever
+order they arrived in, and the suffix makes level-0 keys unique where two objects share a minimum.
+The row encoding of 06 is self-delimiting, so the suffix decides only a tie and never an order.
+
+The minimum costs one seek on the object's own key cursor, which the mandatory run of §6.1 serves.
+An imported object with no run and no sorted column falls back to the per-column minima its
+summaries carry — for one column that *is* the minimum; for a tuple it is a key at or below the true
+one whose leading component is right, so such objects may tie wrongly below the first column. An
+order that is approximate, never an answer that is wrong: every scan still reads every object the
+summaries do not refute.
+
+**What step 39 still leaves:** `InKeyOrder` *batches* across objects. The merged cursor below
+already walks the keys in order; turning that into record batches needs two things the core does not
+expose — a batch that is a **window** over another batch's buffers, and a per-row read of a column as
+a filter literal. Both exist inside the scan; neither is public, and inventing a second copy of
+either in this package is the wrong place for them.
 
 The acceptance is §14's and it is a comparison, never a chosen number: the same rows written into a
 dataset of several objects and into one file answer the same, unfiltered and filtered, with the
@@ -552,9 +577,25 @@ first row of the table, the in-order walk of a level, is the same walk with no r
 **not** prefetched in parallel yet, so its cost is one dependent read per page rather than one per
 level.
 
-`ORDER BY x LIMIT k` and `InKeyOrder` across objects are not delivered: they need the mandatory run
-of §6.1 on the level-0 objects, which is what remains of step 39. The summaries the first of them
-prunes by are in place (§4.2).
+**As delivered (step 39c), the second row and the fourth.** `DatasetKeyCursor` is the k-way merge:
+one `KeyCursor` per level-0 object, over the mandatory run of §6.1, chosen between by
+`KeyCursor.Compare` so a merge cannot disagree with the runs it merges. `Cursors` reports how many
+are open, because **that number is the claim** — what bounds it is not this code but §5's invariant,
+and until compaction exists (step 41) it grows with every append. A linear scan picks the smallest
+of *k*, not a heap: *k* is bounded by a small constant and a heap would cost bookkeeping to save
+comparisons that do not exist.
+
+An object with no source for the key is a **refusal**, not a skip: a walk that quietly left an
+imported object's rows out would answer a question nobody asked. The scan is unaffected — it reads
+objects, not keys.
+
+The terminals came with it. `AnyAsync`, `MinAsync` and `MaxAsync` run across the objects, and an
+object whose own summary cannot beat the best so far is skipped unopened — §6.6's third answer,
+"`ORDER BY x LIMIT k` prunes by the summaries", at *k* = 1. An inexact bound is still a bound, which
+is what makes the skip legal: a summary `min` at or below the true minimum that already loses to the
+best cannot be hiding a winner.
+
+What is **not** delivered is `InKeyOrder` as batches across objects; §4.2's note says what it needs.
 
 ## 7. Identity and integrity
 

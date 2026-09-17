@@ -46,6 +46,19 @@ public sealed record DatasetOptions
     /// <summary>How the data objects an append writes are encoded.</summary>
     public VortexWriteOptions Write { get; init; } = new VortexWriteOptions();
 
+    /// <summary>
+    /// The clustering key: the columns the dataset is ordered by (§4.1), or null for the objects'
+    /// first row position.
+    /// </summary>
+    /// <remarks>
+    /// Declaring one changes two things and nothing else. A leaf's key becomes the row-encoded
+    /// minimum of the key over the object, so the tree walks the objects in key order; and every
+    /// data object an append writes carries the mandatory sorted run on that key (§6.1), so a
+    /// lookup inside one object is a seek rather than a scan. It is fixed at creation and travels
+    /// in every header: a reader that opens the dataset finds it there.
+    /// </remarks>
+    public IReadOnlyList<string>? ClusteringKey { get; init; }
+
     /// <summary>How many times a commit rebases before giving up (§8.2).</summary>
     public int MaxAttempts { get; init; } = 8;
 
@@ -101,6 +114,7 @@ public sealed class VortexDataset : IAsyncDisposable
         Schema = header.Schema.IsEmpty
             ? default
             : DTypeProtobuf.Read(header.Schema.Span, _types);
+        Key = Schema.IsDefault ? null : ClusteringKey.For(header.ClusteringKey, Schema);
     }
 
     /// <summary>The version this handle reads.</summary>
@@ -120,6 +134,12 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>The seed every boundary of its trees is decided under (§4.1).</summary>
     public ulong Seed => _header.Seed;
+
+    /// <summary>The columns it is ordered by (§4.1), empty when it is ordered by row position.</summary>
+    public IReadOnlyList<string> ClusteringKeyPaths => _header.ClusteringKey;
+
+    /// <summary>Its clustering key (§4.1), or null when it is ordered by row position.</summary>
+    public ClusteringKey? Key { get; }
 
     /// <summary>Creates a dataset under a store prefix and returns a handle on version 1.</summary>
     /// <param name="store">The store. The dataset is everything under its keys.</param>
@@ -148,6 +168,7 @@ public sealed class VortexDataset : IAsyncDisposable
             Version = 1,
             Seed = options.Seed,
             Schema = DTypeProtobuf.Serialize(schema),
+            ClusteringKey = [.. options.ClusteringKey ?? []],
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,
                 ProllyBoundaryRule.DefaultTargetBytes,
@@ -228,19 +249,22 @@ public sealed class VortexDataset : IAsyncDisposable
 
         ObjectSegmentSource source = new ObjectSegmentSource(_store, objectKey);
         ObjectEntry entry;
+        ReadOnlyMemory<byte> treeKey;
         await using (source.ConfigureAwait(false))
         {
             VortexFile file = await VortexFile
                 .OpenAsync(source, new VortexOpenOptions(), cancellationToken).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))
             {
+                ObjectSummaries summaries = Summaries(file);
                 entry = new ObjectEntry(
-                    objectKey, Identity(file), file.RowCount, head.Length, UInt128.Zero, Summaries(file));
+                    objectKey, Identity(file), file.RowCount, head.Length, UInt128.Zero, summaries);
+                treeKey = await TreeKeyAsync(file, summaries, RowCount, cancellationToken).ConfigureAwait(false);
             }
         }
 
         return await ApplyAsync(
-            [new DatasetOperation.AddObject(KeyOf(RowCount), entry)], cancellationToken).ConfigureAwait(false);
+            [new DatasetOperation.AddObject(treeKey, entry)], cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Writes the batches as one data object and adds it to the dataset.</summary>
@@ -260,7 +284,14 @@ public sealed class VortexDataset : IAsyncDisposable
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
         ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes);
         long rows = 0;
-        VortexFileWriter writer = VortexFileWriter.Create(sink, Schema, _options.Write.WithIdentity(identity));
+        VortexWriteOptions write = _options.Write.WithIdentity(identity);
+        if (Key is { } clustering)
+        {
+            // §6.1's mandatory run, added to whatever policy the caller asked for.
+            write = clustering.Applied(write);
+        }
+
+        VortexFileWriter writer = VortexFileWriter.Create(sink, Schema, write);
         await using (writer.ConfigureAwait(false))
         {
             await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
@@ -282,8 +313,9 @@ public sealed class VortexDataset : IAsyncDisposable
         UInt128 hash = sink.ContentHash;
 
         // Before the put, out of the buffer the sink still holds: the bounds §4.2 asks the entry to
-        // carry cost no request at all this way.
-        ObjectSummaries summaries = await SummariesAsync(sink.Written, cancellationToken).ConfigureAwait(false);
+        // carry, and the smallest key §4.1 orders the leaf by, cost no request at all this way.
+        (ObjectSummaries summaries, ReadOnlyMemory<byte> treeKey) =
+            await DescribeAsync(sink.Written, RowCount, cancellationToken).ConfigureAwait(false);
         if (await sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
         {
             throw new ObjectStoreException($"'{key}' was taken; a fresh uid cannot collide (13 §3).");
@@ -291,7 +323,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
         ObjectEntry entry = new ObjectEntry(key, Uid(identity), rows, bytes, hash, summaries);
         return await ApplyAsync(
-            [new DatasetOperation.AddObject(KeyOf(RowCount), entry)], cancellationToken).ConfigureAwait(false);
+            [new DatasetOperation.AddObject(treeKey, entry)], cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Applies operations and moves this handle to the version they created.</summary>
@@ -397,23 +429,72 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>The bounds §4.2 asks an entry to carry, read out of a file's own statistics.</summary>
     /// <param name="file">The data object, open.</param>
-    private ObjectSummaries Summaries(VortexFile file) =>
-        ObjectSummaries.Of(file, _options.SummaryColumns, _options.SummaryColumnLimit);
+    /// <remarks>
+    /// THE CLUSTERING KEY'S COLUMNS ARE ALWAYS AMONG THEM, whatever the limit or the declared list
+    /// says. They are the columns the dataset is ORDERED by: an entry that did not summarise them
+    /// could not fall back on §4.1's minimum for an object with no cursor, and a scan could not
+    /// prune on the one column a reader is most likely to filter by. A key on the fortieth column
+    /// of a wide table is exactly the case a default of "the first 32" would have lost in silence.
+    /// </remarks>
+    private ObjectSummaries Summaries(VortexFile file)
+    {
+        IReadOnlyList<ColumnSummary> columns = _options.SummaryColumns is { } declared
+            ? ColumnSummaries.Of(file, declared)
+            : ColumnSummaries.Of(file, _options.SummaryColumnLimit);
+        if (Key is not { } clustering)
+        {
+            return ObjectSummaries.From(columns);
+        }
 
-    /// <summary>The same, read out of bytes that have not reached the store yet.</summary>
+        List<ColumnSummary> all = [.. columns];
+        HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (ColumnSummary column in columns)
+        {
+            seen.Add(column.Path);
+        }
+
+        foreach (ColumnSummary column in ColumnSummaries.Of(file, clustering.Paths))
+        {
+            if (seen.Add(column.Path))
+            {
+                all.Add(column);
+            }
+        }
+
+        return ObjectSummaries.From(all);
+    }
+
+    /// <summary>
+    /// The two things a leaf entry needs, read out of bytes that have not reached the store yet:
+    /// the object's bounds and the key its leaf sits at.
+    /// </summary>
     /// <param name="bytes">The whole file, as the sink still holds it.</param>
+    /// <param name="firstRow">Its first row in the dataset.</param>
     /// <param name="cancellationToken">Cancels the parse.</param>
-    private async ValueTask<ObjectSummaries> SummariesAsync(
-        ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
+    private async ValueTask<(ObjectSummaries Summaries, ReadOnlyMemory<byte> Key)> DescribeAsync(
+        ReadOnlyMemory<byte> bytes, long firstRow, CancellationToken cancellationToken)
     {
         MemorySegmentSource source = new MemorySegmentSource(bytes);
         VortexFile file = await VortexFile
             .OpenAsync(source, new VortexOpenOptions(), cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
         {
-            return Summaries(file);
+            ObjectSummaries summaries = Summaries(file);
+            return (summaries, await TreeKeyAsync(file, summaries, firstRow, cancellationToken)
+                .ConfigureAwait(false));
         }
     }
+
+    /// <summary>Where an object's leaf sits in the tree (§4.1).</summary>
+    /// <param name="file">The object, open.</param>
+    /// <param name="summaries">Its bounds.</param>
+    /// <param name="firstRow">Its first row in the dataset.</param>
+    /// <param name="cancellationToken">Cancels the seek a clustering key makes.</param>
+    private ValueTask<ReadOnlyMemory<byte>> TreeKeyAsync(
+        VortexFile file, ObjectSummaries summaries, long firstRow, CancellationToken cancellationToken) =>
+        Key is { } clustering
+            ? clustering.KeyOfAsync(file, summaries, firstRow, cancellationToken)
+            : new ValueTask<ReadOnlyMemory<byte>>(KeyOf(firstRow));
 
     private static CommitOptions Commit(DatasetOptions options, CommitHeader template)
     {

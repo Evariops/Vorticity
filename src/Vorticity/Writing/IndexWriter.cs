@@ -1067,12 +1067,22 @@ internal sealed class IndexWriter : IDisposable
 
     private bool OverBudget(long dataBytes) => LivingBytes * 1000 > dataBytes * _budgetPerMille;
 
+    /// <summary>
+    /// Abandons every index the budget may abandon — which is every one the caller did not mark
+    /// required (<c>IndexPolicy.AsRequired</c>).
+    /// </summary>
+    /// <param name="dataBytes">The data bytes the budget is a share of.</param>
     private void AbandonForBudget(long dataBytes)
     {
         long living = LivingBytes;
-        foreach (List<IndexBuilder> builders in _builders)
+        for (int field = 0; field < _builders.Length; field++)
         {
-            foreach (IndexBuilder builder in builders)
+            if (_columns[field].Required)
+            {
+                continue;
+            }
+
+            foreach (IndexBuilder builder in _builders[field])
             {
                 builder.Abandon(
                     $"the file's indexes reached {living} bytes against {dataBytes} bytes of data, " +

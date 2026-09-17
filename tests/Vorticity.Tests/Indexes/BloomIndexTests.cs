@@ -315,6 +315,76 @@ public sealed class BloomIndexTests
     }
 
     [Fact]
+    public async Task TheBudgetDoesNotAbandonAnIndexTheCallerRequired()
+    {
+        // The budget is a guard against `Auto`'s enthusiasm, not an override of an instruction:
+        // docs/13-dataset.md §6.1's mandatory run is an index a structure DEPENDS on, and on a
+        // narrow table it is intrinsically comparable in size to the column it indexes, so no file
+        // is ever large enough to bring it under a share of the data. `AsRequired` says so, and the
+        // optional filters around it are still the first thing the budget takes.
+        Decoders.EnsureRegistered();
+        WritePolicy policy = Policy().For("key", IndexPolicy.Bloom(resolutions: 3).AsRequired());
+        await using Written written = await Written.CreateAsync(policy, budgetPerMille: 1);
+
+        IndexWriteReport key = Assert.IsType<IndexWriteReport>(written.Report.Index("key", IndexKinds.BloomSbbf));
+        Assert.Equal(IndexOutcome.Built, key.Outcome);
+        IndexWriteReport name = Assert.IsType<IndexWriteReport>(written.Report.Index("name", IndexKinds.BloomSbbf));
+        Assert.Equal(IndexOutcome.Abandoned, name.Outcome);
+        Assert.Contains("budget", name.Reason, StringComparison.Ordinal);
+
+        // "key" is field 0, and it is the only column left with an entry.
+        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
+        Assert.NotEmpty(directory.Entries);
+        foreach (IndexEntry entry in directory.Entries)
+        {
+            Assert.Equal([0u], entry.ColumnPath);
+        }
+
+        // And the answer is the answer either way, which is the only thing an index may not change.
+        int present = Key(40_000);
+        Assert.Equal(Oracle($"key = {present}"), await written.File.Scan().Where(Parse($"key = {present}")).CountAsync());
+    }
+
+    [Fact]
+    public void AKindlessPolicyCannotBeRequired()
+    {
+        Assert.Throws<InvalidOperationException>(() => IndexPolicy.Auto.AsRequired());
+        Assert.Throws<InvalidOperationException>(() => IndexPolicy.None.AsRequired());
+        Assert.True(IndexPolicy.SortedRuns.AsRequired().Required);
+        Assert.False(IndexPolicy.SortedRuns.Required);
+
+        // The flag survives the other copy method, which is the one that could drop it.
+        Assert.True(IndexPolicy.SortedRuns.AsRequired().WithSegmentEntries(4_096).Required);
+
+        // And it is part of what a policy asks for, so two policies that differ by it differ.
+        Assert.NotEqual(IndexPolicy.SortedRuns, IndexPolicy.SortedRuns.AsRequired());
+    }
+
+    [Fact]
+    public async Task ARequiredPolicySurvivesTheDirectoryRoundTrip()
+    {
+        // An append reuses the directory's policy rather than being told one again (11 §3.8), so a
+        // requirement that did not survive the round trip would hold for the first write and
+        // quietly stop holding for every one after it.
+        Decoders.EnsureRegistered();
+        WritePolicy policy = Policy().For("key", IndexPolicy.Bloom(resolutions: 3).AsRequired());
+        await using Written written = await Written.CreateAsync(policy);
+
+        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
+        Assert.True(directory.Policy.Of("key").Required);
+        Assert.False(directory.Policy.Of("name").Required);
+
+        Assert.True(
+            IndexDirectory.TryParse(
+                directory.ToBytes(), directory.RowCount, (ulong)written.File.FileLength,
+                out IndexDirectory? again, out string? reason),
+            reason);
+        IndexDirectory read = Assert.IsType<IndexDirectory>(again);
+        Assert.True(read.Policy.Of("key").Required);
+        Assert.False(read.Policy.Of("name").Required);
+    }
+
+    [Fact]
     public async Task AnUnindexedScanReadsNoIndexSegment()
     {
         Decoders.EnsureRegistered();

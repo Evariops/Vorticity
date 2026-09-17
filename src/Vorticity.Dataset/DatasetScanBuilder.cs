@@ -14,9 +14,15 @@
 // and with the summaries refuting nothing must still return the same rows -- that is the acceptance,
 // and the metrics are how the SHORTCUT is shown to have been taken rather than assumed.
 //
-// WHAT IT DOES NOT DO YET: order across objects by a clustering key (`InKeyOrder`, §6.6) and the
-// terminals that ride on it. Those need the mandatory run of §6.1 on the level-0 objects, which is
-// the rest of the plan's step 39.
+// THE TERMINALS ARE THE SCAN WITH A DIFFERENT OUTPUT, one level up (12 §5). `AnyAsync` stops at the
+// first object that holds a row; `MinAsync` and `MaxAsync` skip an object whose own summary cannot
+// beat the best so far, which is §6.6's "`ORDER BY x LIMIT k` prunes by the summaries" at k = 1.
+//
+// WHAT IT DOES NOT DO YET: deliver BATCHES in the key order of a clustering key across objects
+// (`InKeyOrder`, §6.6). `DatasetKeyCursor` already walks the keys in that order; making record
+// batches of them needs a batch that is a window over another's buffers, and a per-row read of a
+// column as a filter literal — both of which live inside the core's scan and neither of which is
+// public. 13 §4.2 records that, so the seam is asked for where it belongs rather than copied here.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -24,6 +30,7 @@ using System.Threading.Tasks;
 using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.Keys;
 using Vorticity.Scan;
 
 namespace Vorticity.Dataset;
@@ -171,6 +178,119 @@ public sealed class DatasetScanBuilder
 
         return rows;
     }
+
+    /// <summary>Whether the scan would return at least one row (12 §5.1, across objects).</summary>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>Whether some row matches.</returns>
+    /// <remarks>
+    /// The summaries answer for the objects they refute without opening them, and the first object
+    /// that holds a row answers for the dataset: a membership probe over a dataset reads, at worst,
+    /// what it would read over the one object that has the answer.
+    /// </remarks>
+    public async ValueTask<bool> AnyAsync(CancellationToken cancellationToken = default)
+    {
+        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+        {
+            ObjectLease lease = await _dataset.RentAsync(held.Entry.Key, cancellationToken).ConfigureAwait(false);
+            await using (lease.ConfigureAwait(false))
+            {
+                RecordOpen(lease);
+                if (await Of(lease.File, held).AnyAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The smallest non-null value of a column among the rows the scan would return.</summary>
+    /// <param name="path">The column, <c>.</c>-separated for a nested field.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The minimum, or <see cref="FilterLiteral.Null"/> when there is none.</returns>
+    public ValueTask<FilterLiteral> MinAsync(string path, CancellationToken cancellationToken = default) =>
+        ExtremeAsync(path, wantMin: true, cancellationToken);
+
+    /// <summary>The largest non-null value of a column among the rows the scan would return.</summary>
+    /// <param name="path">The column, <c>.</c>-separated for a nested field.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The maximum, or <see cref="FilterLiteral.Null"/> when there is none.</returns>
+    public ValueTask<FilterLiteral> MaxAsync(string path, CancellationToken cancellationToken = default) =>
+        ExtremeAsync(path, wantMin: false, cancellationToken);
+
+    /// <summary>
+    /// The extreme over the objects, each one skipped when its own summary cannot beat the best so
+    /// far — §6.6's third answer, "<c>ORDER BY x LIMIT k</c> prunes by the summaries", at k = 1.
+    /// </summary>
+    /// <param name="path">The column.</param>
+    /// <param name="wantMin">Whether the smallest is wanted.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <remarks>
+    /// AN INEXACT BOUND IS STILL A BOUND, and that is what makes this legal: the summary's
+    /// <c>min</c> is at or below the object's true minimum, so a summary min that already loses to
+    /// the best cannot hide a winner behind it. The same holds the other way for <c>max</c>. Nothing
+    /// here needs the bounds to be exact, and nothing here may use the equality shortcut that would.
+    /// </remarks>
+    private async ValueTask<FilterLiteral> ExtremeAsync(
+        string path, bool wantMin, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        FilterLiteral best = FilterLiteral.Null;
+        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (_summaries && Loses(held.Entry.Summaries, path, best, wantMin))
+            {
+                if (_metrics is { } skipped)
+                {
+                    skipped.ObjectsSkipped++;
+                }
+
+                continue;
+            }
+
+            ObjectLease lease = await _dataset.RentAsync(held.Entry.Key, cancellationToken).ConfigureAwait(false);
+            await using (lease.ConfigureAwait(false))
+            {
+                RecordOpen(lease);
+                ScanBuilder scan = Of(lease.File, held);
+                FilterLiteral candidate = wantMin
+                    ? await scan.MinAsync(path, cancellationToken).ConfigureAwait(false)
+                    : await scan.MaxAsync(path, cancellationToken).ConfigureAwait(false);
+                if (candidate.Kind != FilterLiteralKind.Null && Beats(candidate, best, wantMin))
+                {
+                    best = candidate;
+                }
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>Whether an object's summary proves it cannot hold a better value than the best.</summary>
+    private static bool Loses(ObjectSummaries summaries, string path, FilterLiteral best, bool wantMin)
+    {
+        if (best.Kind == FilterLiteralKind.Null || !summaries.TryGet(path, out ColumnSummary column))
+        {
+            return false;
+        }
+
+        if (wantMin)
+        {
+            return column.HasMin && Comparable(column.Min, best) && KeyCursor.Compare(column.Min, best) >= 0;
+        }
+
+        return column.HasMax && Comparable(column.Max, best) && KeyCursor.Compare(column.Max, best) <= 0;
+    }
+
+    private static bool Beats(FilterLiteral candidate, FilterLiteral best, bool wantMin) =>
+        best.Kind == FilterLiteralKind.Null
+        || !Comparable(candidate, best)
+        || (wantMin ? KeyCursor.Compare(candidate, best) < 0 : KeyCursor.Compare(candidate, best) > 0);
+
+    /// <summary>Whether two literals are of one comparison kind, so that an order holds between them.</summary>
+    private static bool Comparable(FilterLiteral left, FilterLiteral right) =>
+        left.Kind == right.Kind && left.Kind != FilterLiteralKind.Null;
 
     /// <summary>The objects this scan will read, in key order, each with its first row.</summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
