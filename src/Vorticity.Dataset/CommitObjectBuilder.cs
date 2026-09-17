@@ -23,7 +23,7 @@ using Vorticity.Serialization.Protobuf;
 namespace Vorticity.Dataset;
 
 /// <summary>Builds the bytes of one commit object.</summary>
-public sealed class CommitObjectBuilder
+public sealed class CommitObjectBuilder : IPageSink
 {
     private readonly ulong _version;
     private readonly List<byte[]> _pages = [];
@@ -62,6 +62,10 @@ public sealed class CommitObjectBuilder
         _pageBytes += page.Length;
         return reference;
     }
+
+    /// <inheritdoc/>
+    /// <remarks>The tree's seam onto this builder: a page it emits is a page of this commit.</remarks>
+    PageReference IPageSink.WritePage(ReadOnlySpan<byte> page) => AddPage(page);
 
     /// <summary>Adds an index fragment (§6.4) and returns the reference that will name it.</summary>
     /// <param name="fragment">Its bytes; copied.</param>

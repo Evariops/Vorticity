@@ -213,6 +213,16 @@ internal static class Program
                 check, only, tpPasses, Array.IndexOf(args, "--rebase") >= 0).ConfigureAwait(false);
         }
 
+        if (args.Length > 0 && args[0] == "--tree")
+        {
+            // The shape of the two boundary rules of 13 §13.J, side by side.
+            int[] sizes = [.. args[1..]
+                .Where(a => !a.StartsWith("--", StringComparison.Ordinal))
+                .Select(a => int.TryParse(a, CultureInfo.InvariantCulture, out int size) ? size : 0)
+                .Where(size => size > 0)];
+            return await TreeBench.RunAsync(sizes).ConfigureAwait(false);
+        }
+
         if (args.Length > 0 && args[0] == "--probe")
         {
             // The decomposition of WRITE-ARCHITECTURE.md §1.2: one line per file, five columns.
@@ -397,6 +407,9 @@ internal static class Program
           --probe [name…]          the write, decomposed: scan, serialize, transit, compress,
                                      five configurations a file, median of five
                                      (WRITE-ARCHITECTURE.md §1.2)
+          --tree [count…]          the dataset tree's shape under both boundary rules: fan-out,
+                                     page bytes, pages written and read per commit
+                                     (docs/13-dataset.md §13.J, §14)
           --profile <name> [secs]  one scenario in a bare loop, for dotnet-trace
           --ab <dir> <file> [name…] two builds of the library in one process
                                      --after <dir>     judge a commit against its parent, not HEAD

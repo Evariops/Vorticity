@@ -168,6 +168,33 @@ dependent pages** up to about 650 objects, **1** up to about 400 000, **2** up t
 million. The B+tree at the same cap would move each threshold by about 2× in objects, one step
 on a logarithmic scale, which is why the cap is the latency's to set and not the structure's.
 
+**As delivered (step 37), and the curve the bullets above do not fix.** "A probability that rises
+with the bytes accumulated so that the mean page is about 128 KiB" admits many curves and most of
+them are wrong. A first implementation raised the per-entry probability linearly from the floor to
+the cap; `bench -- --tree` measured a mean page of **71 KiB** against the 128 asked for, because a
+page holds hundreds of entries and a probability that looks small per entry is a near-certainty per
+kilobyte. The family that lands the mean where it is asked is a hazard proportional to the room
+left: `p = k · entryBytes / (max − bytes)`, whose mean extent past the floor is `(max − min)/(k+1)`,
+so `k = (max − min)/(target − min) − 1` — which is **2** at 64 / 128 / 256 KiB. The mean is then the
+target by construction, and the bench checks it rather than the comment claiming it:
+
+| rule | objects | fan-out | mean page | min | max | pages written per commit | pages read |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| prolly | 10⁶ | 684 | 130 751 | 65 707 | 254 019 | 3 | 4 |
+| B+tree fill | 10⁶ | 686 | 131 109 | 64 800 | 131 250 | 3 | 4 |
+
+Both rules are behind `IBoundaryRule`, as this section requires, and the numbers sit beside each
+other. §4.1's prediction of "about 650" at 200-byte entries is 684 at the ~180-byte entries the
+bench uses, and the floor and the cap are respected to the entry that crosses them.
+
+**What a commit costs here, measured.** Pages are **written** only where something changed, at every
+level: an untouched page is a reference, and a point commit writes `depth` pages at a million
+objects. Pages are **read** in the levels above the leaves, because a level's pages are described by
+the entries of the level above and this implementation materialises them: 4 reads at a million
+objects, which is `depth + 1`; at a billion it would be the ~2 400 pages of level 1. The descent
+that would make the read cost `O(depth)` at every size is named here so that the number above is
+what it has to beat.
+
 ### 4.2 What a node carries
 
 A **leaf entry** describes one data object:
