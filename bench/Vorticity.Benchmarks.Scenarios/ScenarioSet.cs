@@ -47,7 +47,7 @@ public static class ScenarioSet
 
     /// <summary>The scenario names this assembly answers to.</summary>
     public static string[] Names =>
-        ["fullscan", "projected", "take", "filtered", "write", "write-postings", "write-sorted-runs"];
+        ["fullscan", "projected", "take", "filtered", "write", "write-bloom", "write-postings", "write-sorted-runs"];
 
     /// <summary>
     /// The scenario <paramref name="name"/> names, as a delegate of shared-runtime types only.
@@ -66,7 +66,7 @@ public static class ScenarioSet
         "take" => p => ScatteredTake(p, TakeCount, TakeStride),
         "filtered" => p => FilteredScan(p, BandLow, NarrowBand),
         "write" => ReadAndWrite,
-        "write-postings" => p => ReadAndWriteIndexed(p, IndexPolicy.Postings),
+        "write-bloom" => p => ReadAndWriteIndexed(p, IndexPolicy.Bloom()),        "write-postings" => p => ReadAndWriteIndexed(p, IndexPolicy.Postings),
         "write-sorted-runs" => p => ReadAndWriteIndexed(p, IndexPolicy.SortedRuns),
         _ => null,
     };
@@ -212,7 +212,7 @@ public static class ScenarioSet
     public static Task<long> ReadAndWrite(string path) => ReadAndWrite(path, null);
 
     /// <summary>
-    /// The write-back with a locating index on every column, which no default ever builds: the
+    /// The write-back with one index kind asked for on every column, which no default does: the
     /// builders' own cost, above <see cref="ReadAndWrite(string)"/>.
     /// </summary>
     /// <param name="path">The file.</param>

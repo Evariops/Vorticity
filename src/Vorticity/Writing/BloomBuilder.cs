@@ -545,8 +545,10 @@ internal sealed class BloomBuilder : IndexBuilder
                 _generation.InsertInto(generationWords);
             }
 
-            // A generation's set is as large as sixteen blocks; the next one starts small again.
-            _generation.Shrink();
+            // THE TABLE IS KEPT for the next generation, which is as large as this one on the columns
+            // where it matters: handing it back and growing it again from a kilobyte cost a
+            // million distinct integers 15 % of their forced-Bloom write.
+            _generation.Clear();
         }
 
         if (Abandoned is null)

@@ -110,19 +110,6 @@ internal sealed class HashSet64 : IDisposable
         _hasZero = false;
     }
 
-    /// <summary>Empties the set and hands a grown table back, for a set that is done growing for a while.</summary>
-    internal void Shrink()
-    {
-        if (_mask + 1 > InitialSlots)
-        {
-            ArrayPool<ulong>.Shared.Return(_slots);
-            _slots = ArrayPool<ulong>.Shared.Rent(InitialSlots);
-            _mask = InitialSlots - 1;
-        }
-
-        Clear();
-    }
-
     private Span<ulong> Slots => _slots.AsSpan(0, _mask + 1);
 
     private void Grow()
