@@ -187,6 +187,61 @@ public sealed class BitPackPlanTests
         Assert.Equal((ulong)((1L << 40) - 1000), patched[0]);
     }
 
+    /// <summary>
+    /// The pack's transform and its exception scan against the rule spelled out, at both element
+    /// widths the lanes serve, under both maps: exceptions at every lane position, blocks that
+    /// wrap, and a tail.
+    /// </summary>
+    [Theory]
+    [InlineData(32, true)]
+    [InlineData(32, false)]
+    [InlineData(64, true)]
+    [InlineData(64, false)]
+    public void ThePackFindsTheRulesExceptions(int elementBits, bool signed)
+    {
+        const int Length = 3 * 1024 + 5;
+        long[] values = new long[Length];
+        for (int i = 0; i < Length; i++)
+        {
+            long small = signed ? ((i % 2 == 0 ? 1 : -1) * (i % 300)) : 1_000_000 + ((i * 7919) % 4000);
+            // The exceptions sit at the far end from the bulk's minimum, so a frame keeps its
+            // reference at the bulk and zigzag sees them as the widest values.
+            long extreme = signed
+                ? (elementBits == 32 ? int.MinValue + i : long.MinValue + i)
+                : (elementBits == 32 ? int.MaxValue - i : long.MaxValue - i);
+            values[i] = i % 211 < 2 || i >= Length - 3 ? extreme : small;
+        }
+
+        using ColumnFixture fixture = new ColumnFixture();
+        int node = elementBits == 32
+            ? fixture.Int32Node(Array.ConvertAll(values, v => (int)v), Validity.NonNullable)
+            : fixture.Int64Node(values, Validity.NonNullable);
+        BitPackPlan? plan = Plan(fixture, node);
+        Assert.NotNull(plan);
+        Assert.Equal(signed ? BitPackTransform.ZigZag : BitPackTransform.Frame, plan.Transform);
+
+        ulong mask = elementBits == 64 ? ulong.MaxValue : uint.MaxValue;
+        System.Collections.Generic.List<int> expectedRows = [];
+        System.Collections.Generic.List<ulong> expectedValues = [];
+        for (int i = 0; i < Length; i++)
+        {
+            ulong bits = (ulong)(elementBits == 32 ? (int)values[i] : values[i]) & mask;
+            ulong encoded = plan.Transform == BitPackTransform.Frame
+                ? (bits - plan.Reference) & mask
+                : ((bits << 1) ^ (0UL - (bits >> (elementBits - 1)))) & mask;
+            if (plan.BitWidth < 64 && encoded >= 1UL << plan.BitWidth)
+            {
+                expectedRows.Add(i);
+                expectedValues.Add(encoded);
+            }
+        }
+
+        (int[] indices, ulong[] patched) = ArrayBlobWriter.Patches(fixture.Arena, fixture.Arena.GetNode(node), plan);
+        Assert.NotEmpty(indices);
+        Assert.Equal(expectedRows, indices);
+        Assert.Equal(expectedValues, patched);
+    }
+
     private static BitPackPlan? Plan(ColumnFixture fixture, int node)
     {
         ColumnPlan plan = ColumnCompressor.Choose(fixture.Arena, node);

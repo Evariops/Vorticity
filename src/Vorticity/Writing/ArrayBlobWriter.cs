@@ -27,7 +27,10 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -478,17 +481,16 @@ internal static class ArrayBlobWriter
                     wide[count..].Clear();
                 }
 
-                for (int i = 0; i < count; i++)
+                // TWO METHODS, NEITHER INLINED: with the masked loop left in this one, the lanes'
+                // call moved its code enough to cost `chunked_mixed_validity` 14 % on the blocks
+                // that still take it, bytes unchanged.
+                if (mask.AllValid)
                 {
-                    int row = start + i;
-
-                    // A null row encodes as zero under either transform: its value is never read
-                    // back and a stable zero compresses better than whatever the buffer held.
-                    wide[i] = mask.IsValid(row)
-                        ? BitPackPlan.Encode(
-                            CompressedValues.ReadUnsigned(values, ToUnsigned(ptype), row),
-                            plan.Transform, plan.Reference, elementBits)
-                        : 0;
+                    TransformValid(values, ptype, start, count, plan, elementBits, wide);
+                }
+                else
+                {
+                    TransformMasked(values, in mask, ptype, start, count, plan, elementBits, wide);
                 }
 
                 // THE PATCHES ARE GATHERED FROM `wide`, IN A LOOP OF THEIR OWN, and not from the
@@ -535,6 +537,123 @@ internal static class ArrayBlobWriter
         }
 
         return destination;
+    }
+
+    /// <summary>
+    /// The transform of an all-valid block applied on the load (docs/11-write-strategy.md §4.2):
+    /// two 64-bit values or four 32-bit ones per step, widened into <paramref name="wide"/>.
+    /// </summary>
+    /// <remarks>
+    /// THE ELEMENT WIDTH'S OWN ARITHMETIC IS THE MASK. <see cref="BitPackPlan.Encode"/> computes
+    /// in 64 bits and masks to the element width; a 32-bit lane wraps at 32 bits and its arithmetic
+    /// shift by 31 is the sign word, so its result, zero-extended, is the same number. Only the
+    /// low word of the reference takes part, which is all the mask kept of it. The narrower widths
+    /// and the tail are left to the scalar loop.
+    /// </remarks>
+    /// <param name="values">The column's values, from its first row.</param>
+    /// <param name="ptype">The column's element type.</param>
+    /// <param name="start">The block's first row.</param>
+    /// <param name="count">The block's rows.</param>
+    /// <param name="plan">The transform and its reference.</param>
+    /// <param name="elementBits">The element width, for the scalar tail.</param>
+    /// <param name="wide">The block's transformed values.</param>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void TransformValid(
+        ReadOnlySpan<byte> values, PType ptype, int start, int count, BitPackPlan plan,
+        int elementBits, Span<ulong> wide)
+    {
+        int done = TransformLanes(values, ptype.ByteWidth(), start, count, plan.Transform, plan.Reference, wide);
+        switch (ptype.ByteWidth())
+        {
+            case 1: TransformRows<byte>(values, done, start, count, plan, elementBits, wide); return;
+            case 2: TransformRows<ushort>(values, done, start, count, plan, elementBits, wide); return;
+            case 4: TransformRows<uint>(values, done, start, count, plan, elementBits, wide); return;
+            default: TransformRows<ulong>(values, done, start, count, plan, elementBits, wide); return;
+        }
+    }
+
+    /// <summary>
+    /// Rows <c>[done, count)</c> of the block, the width resolved once: the lanes' tail, or the
+    /// whole block for the widths the lanes do not serve.
+    /// </summary>
+    private static void TransformRows<T>(
+        ReadOnlySpan<byte> values, int done, int start, int count, BitPackPlan plan,
+        int elementBits, Span<ulong> wide)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        ReadOnlySpan<T> block = MemoryMarshal.Cast<byte, T>(values).Slice(start, count);
+        for (int i = done; i < block.Length; i++)
+        {
+            wide[i] = BitPackPlan.Encode(
+                ulong.CreateTruncating(block[i]), plan.Transform, plan.Reference, elementBits);
+        }
+    }
+
+    /// <summary>The transform of a block that may hold nulls, row by row.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void TransformMasked(
+        ReadOnlySpan<byte> values, in ValidityMask mask, PType ptype, int start, int count,
+        BitPackPlan plan, int elementBits, Span<ulong> wide)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            int row = start + i;
+
+            // A null row encodes as zero under either transform: its value is never read back and
+            // a stable zero compresses better than whatever the buffer held.
+            wide[i] = mask.IsValid(row)
+                ? BitPackPlan.Encode(
+                    CompressedValues.ReadUnsigned(values, ToUnsigned(ptype), row),
+                    plan.Transform, plan.Reference, elementBits)
+                : 0;
+        }
+    }
+
+    /// <summary>The lanes of <see cref="TransformValid"/>, for 32- and 64-bit elements.</summary>
+    /// <returns>The rows written: a prefix of the block.</returns>
+    private static int TransformLanes(
+        ReadOnlySpan<byte> values, int byteWidth, int start, int count,
+        BitPackTransform transform, ulong reference, Span<ulong> wide)
+    {
+        if (!Vector128.IsHardwareAccelerated)
+        {
+            return 0;
+        }
+
+        bool frame = transform == BitPackTransform.Frame;
+        ref ulong destination = ref MemoryMarshal.GetReference(wide);
+        int i = 0;
+        if (byteWidth == sizeof(ulong))
+        {
+            ref ulong source = ref Unsafe.Add(
+                ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, ulong>(values)), start);
+            Vector128<ulong> origin = Vector128.Create(reference);
+            for (; i + 2 <= count; i += 2)
+            {
+                Vector128<ulong> value = Vector128.LoadUnsafe(ref source, (nuint)i);
+                Vector128<ulong> encoded = frame
+                    ? value - origin
+                    : (value << 1) ^ Vector128.ShiftRightArithmetic(value.AsInt64(), 63).AsUInt64();
+                encoded.StoreUnsafe(ref destination, (nuint)i);
+            }
+        }
+        else if (byteWidth == sizeof(uint))
+        {
+            ref uint source = ref Unsafe.Add(
+                ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, uint>(values)), start);
+            Vector128<uint> origin = Vector128.Create(unchecked((uint)reference));
+            for (; i + 4 <= count; i += 4)
+            {
+                Vector128<uint> value = Vector128.LoadUnsafe(ref source, (nuint)i);
+                Vector128<uint> encoded = frame
+                    ? value - origin
+                    : (value << 1) ^ Vector128.ShiftRightArithmetic(value.AsInt32(), 31).AsUInt32();
+                Vector128.WidenLower(encoded).StoreUnsafe(ref destination, (nuint)i);
+                Vector128.WidenUpper(encoded).StoreUnsafe(ref destination, (nuint)(i + 2));
+            }
+        }
+
+        return i;
     }
 
     private static void PackInto(
