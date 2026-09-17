@@ -88,6 +88,28 @@ internal sealed class ColumnWriter
     internal bool EditionAllowsDictionary { get; init; } = true;
 
     /// <summary>
+    /// The byte limit of the bounded string extremes this column's zones carry, or 0 for none
+    /// (<see cref="VortexWriteOptions.StringBoundBytes"/>).
+    /// </summary>
+    /// <remarks>
+    /// ONE FIELD FOR THE WHOLE FEATURE, null when it is off: `WriteAllocationTests` holds every
+    /// column writer to its size, and the default write asks for no string bounds.
+    /// </remarks>
+    internal int StringBoundBytes
+    {
+        get => _stringZones?.Limit ?? 0;
+        init => _stringZones = value > 0 ? new StringZones(value) : null;
+    }
+
+    private StringZones? _stringZones;
+
+    /// <summary>
+    /// Every block's string extremes, or <see langword="null"/> when a block lacks them — the zone
+    /// map then carries none rather than describe some zones and invent the others.
+    /// </summary>
+    internal IReadOnlyList<ZoneString>? StringZones => _stringZones?.All(_closed.Count);
+
+    /// <summary>
     /// Whether the table has a consumer on the chunk being ingested, so it should run at all —
     /// docs/11-write-strategy.md §3.2.2's liveness rule.
     /// </summary>
@@ -195,6 +217,10 @@ internal sealed class ColumnWriter
         Span<int> widths =
             _openWidths is null ? default : _openWidths.AsSpan(0, BitPackWidths.Length);
         BlockStatsPass.Accumulate(arena, nodeIndex, start, count, ref _open, _previous, widths);
+        if (_stringZones is not null && node.Kind == CanonicalKind.VarBinView)
+        {
+            _stringZones.Accumulate(arena, node, start, count);
+        }
 
         // THE DISTINCT TABLE RUNS ON THE SAME ROWS, RIGHT AFTER: the statistics pass has just loaded
         // them, so the probe pays its hash and its compare and none of its loads. Created on the
@@ -555,6 +581,8 @@ internal sealed class ColumnWriter
 
         _closed.Add(_open);
         _widths.Add(_openWidths);
+        _stringZones?.Close();
+
         // A DEAD TABLE RECORDS NOTHING, so that the chooser reads "no table" rather than a stale
         // count and the writer's fallback counter knows the table was never expected to serve.
         _tableAtClose.Add(
@@ -579,13 +607,18 @@ internal sealed class ColumnWriter
     /// written again over them, and the chunks already out keep their block numbers.
     /// </summary>
     /// <param name="blocks">The summaries, in block order, before any block of this writer.</param>
-    internal void Seed(IReadOnlyList<BlockStats> blocks)
+    /// <param name="strings">
+    /// The old zones' string bounds, parallel to <paramref name="blocks"/>, already cut to
+    /// <see cref="StringBoundBytes"/>; <see langword="null"/> when the old part has none.
+    /// </param>
+    internal void Seed(IReadOnlyList<BlockStats> blocks, IReadOnlyList<ZoneString?>? strings = null)
     {
-        foreach (BlockStats block in blocks)
+        for (int i = 0; i < blocks.Count; i++)
         {
-            _closed.Add(block);
+            _closed.Add(blocks[i]);
             _widths.Add(null);
             _tableAtClose.Add((-1, 0));
+            _stringZones?.Seed(strings?[i]);
         }
 
         _seeded += blocks.Count;

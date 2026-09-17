@@ -93,6 +93,7 @@ public sealed class VortexWriteOptions
         TargetEdition = TargetEdition,
         RowBlockSize = rowBlockSize,
         DataBlockTargetBytes = DataBlockTargetBytes,
+        StringBoundBytes = StringBoundBytes,
     };
 
     /// <summary>
@@ -119,6 +120,29 @@ public sealed class VortexWriteOptions
     /// one kind that says whether a column is sorted. A few dozen bytes per field.
     /// </remarks>
     public bool FileStatistics { get; init; } = true;
+
+    /// <summary>
+    /// The byte limit of the string bounds a utf8 or binary column's zones carry, or 0 — the
+    /// default — for none. The reference writes them at 64.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A zone of a string column then carries <c>vortex.bounded_min(n)</c> and
+    /// <c>vortex.bounded_max(n)</c> beside its null count (docs/11-write-strategy.md §3.2, "when
+    /// asked"): the block's smallest and largest value cut to at most <c>n</c> bytes, the lower
+    /// bound a prefix and the upper one a prefix with its last character incremented, by the
+    /// reference's own rules (vortex-array-0.86.1 <c>scalar/truncation.rs</c>). A reader prunes
+    /// ranges, prefixes and equalities on them; a maximum no cut can bound is written as
+    /// <c>unknown</c> and prunes nothing.
+    /// </para>
+    /// <para>
+    /// OFF BY DEFAULT because it moves bytes: every string column's zone map gains two columns.
+    /// The aggregates belong to <c>core2026.08.0</c>, like the zone map itself; a lower target
+    /// writes no zone map at all. An append keeps the old zones' bounds when the old file has them
+    /// at the same limit, and writes none for the column otherwise.
+    /// </para>
+    /// </remarks>
+    public int StringBoundBytes { get; init; }
 
     /// <summary>
     /// The edition every component in the file must belong to. Default

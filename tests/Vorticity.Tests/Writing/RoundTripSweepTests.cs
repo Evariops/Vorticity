@@ -91,6 +91,7 @@ public sealed class RoundTripSweepTests
         int indexed = 0;
         int appended = 0;
         int afterTheFact = 0;
+        int stringBounded = 0;
         int tables = 0;
         Dictionary<string, int> built = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (CorpusEntry entry in CorpusManifest.InScope())
@@ -141,11 +142,20 @@ public sealed class RoundTripSweepTests
             // written without indexes and the runs appended with a new directory and footer.
             bool tabular = source.Schema.Kind == DTypeKind.Struct && source.Schema.FieldCount > 0 && source.RowCount > 1;
             int mode = tabular ? (tables++ % 3) switch { 1 => 1, 2 => 3, _ => 0 } : 0;
+            // STRING ZONE BOUNDS ON HALF THE FILES (docs/11 §3.2): the reference's 64 bytes on one in
+            // four, and 5 on another, so that values are cut, characters straddle the cut and some
+            // maxima have no bound. The verifier prunes with them.
+            int stringBounds = (written % 4) switch { 0 => 64, 2 => 5, _ => 0 };
             VortexWriteOptions options = new VortexWriteOptions
             {
                 Indexes = mode == 3 ? WritePolicy.None : policy,
                 IndexBudgetPerMille = 1_000_000,
+                StringBoundBytes = stringBounds,
             };
+            if (stringBounds > 0 && HasStringField(source.Schema))
+            {
+                stringBounded++;
+            }
             IReadOnlyList<IndexWriteReport> indexes;
             int columns;
             long split = mode == 1 ? (source.RowCount / 2) + 1 : long.MaxValue;
@@ -209,7 +219,8 @@ public sealed class RoundTripSweepTests
             .Append(written.ToString(CultureInfo.InvariantCulture)).Append(" files to ").Append(root)
             .Append(", ").Append(indexed.ToString(CultureInfo.InvariantCulture)).Append(" of them with an index directory, ")
             .Append(appended.ToString(CultureInfo.InvariantCulture)).Append(" appended, ")
-            .Append(afterTheFact.ToString(CultureInfo.InvariantCulture)).Append(" indexed after the fact;");
+            .Append(afterTheFact.ToString(CultureInfo.InvariantCulture)).Append(" indexed after the fact, ")
+            .Append(stringBounded.ToString(CultureInfo.InvariantCulture)).Append(" with string zone bounds;");
         foreach ((string kind, int files) in built)
         {
             line.Append(' ').Append(kind).Append(": ").Append(files.ToString(CultureInfo.InvariantCulture)).Append(';');
@@ -219,6 +230,7 @@ public sealed class RoundTripSweepTests
         Assert.True(written > 700);
         Assert.Equal(written, indexed);
         Assert.True(appended > 15 && afterTheFact > 15, $"{appended} appended, {afterTheFact} indexed after the fact");
+        Assert.True(stringBounded > 50, $"only {stringBounded} files carry string zone bounds");
 
         // Enough files with payload regions between their chunks that the rule is tested, not assumed.
         foreach (string kind in new[] { IndexKinds.BloomSbbf, IndexKinds.PostingsBlocks, IndexKinds.SortedRuns })
@@ -319,6 +331,30 @@ public sealed class RoundTripSweepTests
         entry.HasDTypeSegment
             ? VortexOpenOptions.Default
             : new VortexOpenOptions { DType = OutOfBandSchema.Value };
+
+    /// <summary>Whether a zone map of this schema can carry string bounds: a top-level utf8 or binary.</summary>
+    private static bool HasStringField(DType schema)
+    {
+        if (schema.Kind is DTypeKind.Utf8 or DTypeKind.Binary)
+        {
+            return true;
+        }
+
+        if (schema.Kind != DTypeKind.Struct)
+        {
+            return false;
+        }
+
+        for (int field = 0; field < schema.FieldCount; field++)
+        {
+            if (schema.GetField(field).Kind is DTypeKind.Utf8 or DTypeKind.Binary)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private static readonly Lazy<DType> OutOfBandSchema = new Lazy<DType>(static () =>
     {

@@ -32,6 +32,12 @@ use vortex::array::arrays::Struct;
 use vortex::array::arrays::struct_::StructArrayExt;
 use vortex::array::expr::stats::Stat;
 use vortex::array::stream::ArrayStreamExt;
+use vortex::dtype::DType;
+use vortex::expr::col;
+use vortex::expr::eq;
+use vortex::expr::gt;
+use vortex::expr::lit;
+use vortex::expr::lt;
 use vortex::expr::stats::Precision;
 use vortex::editions::EditionSessionExt;
 use vortex::file::OpenOptionsSessionExt;
@@ -177,8 +183,83 @@ async fn compare(session: &VortexSession, theirs: &Path, ours: &Path) -> anyhow:
     }
 
     check_statistics(session, ours, &actual, &mut ctx).await?;
+    check_string_pruning(session, theirs, ours, &actual, &mut ctx).await?;
 
     Ok(expected.len() as u64)
+}
+
+/// Asks the reference to PRUNE with our string zones: for every utf8 or binary field, equality and
+/// both strict comparisons against values taken from the data, scanned with the filter in our file
+/// and in the reference's own. The reference's file answers with its own zone maps, so the counts
+/// agree unless one of our `vortex.bounded_min` / `vortex.bounded_max` zones claims a bound its
+/// rows break -- the one failure a zone map may never have, and one no unfiltered read can see.
+async fn check_string_pruning(
+    session: &VortexSession,
+    theirs: &Path,
+    ours: &Path,
+    actual: &ArrayRef,
+    ctx: &mut ExecutionCtx,
+) -> anyhow::Result<()> {
+    let Some(root) = actual.as_opt::<Struct>() else {
+        return Ok(());
+    };
+
+    let ours_file = session.open_options().open_path(ours).await?;
+    let theirs_file = session.open_options().open_path(theirs).await?;
+    let dtype = ours_file.dtype().clone();
+    let DType::Struct(fields, _) = &dtype else {
+        return Ok(());
+    };
+
+    for (index, name) in fields.names().iter().enumerate() {
+        if !matches!(fields.field_by_index(index), Some(DType::Utf8(_) | DType::Binary(_))) {
+            continue;
+        }
+
+        let Some(column) = root.unmasked_field_opt(index) else {
+            continue;
+        };
+        let rows = column.len();
+        if rows == 0 {
+            continue;
+        }
+
+        for row in [0, rows / 3, rows / 2, rows - 1] {
+            let probe = column.execute_scalar(row, ctx)?;
+            if probe.is_null() {
+                continue;
+            }
+
+            for (op, filter) in [
+                ("=", eq(col(name.clone()), lit(probe.clone()))),
+                ("<", lt(col(name.clone()), lit(probe.clone()))),
+                (">", gt(col(name.clone()), lit(probe.clone()))),
+            ] {
+                let bound = filter.bind(&dtype)?;
+                let want = theirs_file
+                    .scan()?
+                    .with_filter(bound.clone())
+                    .into_array_stream()?
+                    .read_all()
+                    .await?
+                    .len();
+                let got = ours_file
+                    .scan()?
+                    .with_filter(bound)
+                    .into_array_stream()?
+                    .read_all()
+                    .await?
+                    .len();
+                if want != got {
+                    anyhow::bail!(
+                        "field {name}: `{op} {probe:?}` selects {got} rows in ours and {want} in the reference's"
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Holds every exact file statistic our writer claims to the reference's own recomputation of

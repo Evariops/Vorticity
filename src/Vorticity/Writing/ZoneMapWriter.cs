@@ -41,6 +41,10 @@ internal static class ZoneMapWriter
     /// <param name="metadata">The <c>vortex.zoned</c> layout metadata.</param>
     /// <param name="zoneLength">Rows per zone.</param>
     /// <param name="blob">The serialized zones array.</param>
+    /// <param name="strings">
+    /// A utf8 or binary column's bounded extremes, one per zone, or <see langword="null"/> for none.
+    /// </param>
+    /// <param name="stringBytes">The limit they were cut to: the <c>n</c> of the aggregates.</param>
     /// <returns><see langword="false"/> when this column gets no zone map.</returns>
     internal static bool TryBuild(
         DType column,
@@ -48,7 +52,9 @@ internal static class ZoneMapWriter
         EncodingDictionary encodings,
         uint zoneLength,
         out byte[] metadata,
-        out ArrayBlobWriter.BlobLease blob)
+        out ArrayBlobWriter.BlobLease blob,
+        IReadOnlyList<ZoneString>? strings = null,
+        int stringBytes = 0)
     {
         metadata = [];
         blob = default;
@@ -62,6 +68,8 @@ internal static class ZoneMapWriter
         // has them: an all-null i64 column would otherwise get a min/max pair of nothing, which
         // costs bytes and licenses no pruning.
         bool bounds = zones[0].IsSummarizable && AnyBounds(zones);
+        bool bounded = stringBytes > 0 && strings is not null && strings.Count == zones.Count
+            && column.Kind is (DTypeKind.Utf8 or DTypeKind.Binary) && AnyPresent(strings);
 
         DTypeArena types = new DTypeArena();
         CanonicalArena arena = new CanonicalArena();
@@ -74,7 +82,11 @@ internal static class ZoneMapWriter
         try
         {
             AggregateSpecList specs = new AggregateSpecList();
-            List<int> columns = [];
+            int fields = (bounds ? 2 : 0) + (bounded ? 2 : 0) + 1;
+            Span<int> columns = stackalloc int[fields];
+            string[] names = new string[fields];
+            DType[] dtypes = new DType[fields];
+            int at = 0;
 
             // The fourth namespace the allowlist covers. It cannot fire today - all six aggregates
             // and the `vortex.zoned` layout that carries them were introduced by the same edition,
@@ -89,14 +101,40 @@ internal static class ZoneMapWriter
                 RequireAggregate(encodings.Target, "vortex.max");
                 specs.Add("vortex.min"u8, SkipNaNs);
                 specs.Add("vortex.max"u8, SkipNaNs);
-                columns.Add(Bounds(arena, types, column, zones, wantMin: true));
-                columns.Add(Bounds(arena, types, column, zones, wantMin: false));
+                DType bound = types.Primitive(column.PType, Nullability.Nullable);
+                Field(columns, names, dtypes, ref at, Bounds(arena, types, column, zones, wantMin: true), "vortex.min()", bound);
+                Field(columns, names, dtypes, ref at, Bounds(arena, types, column, zones, wantMin: false), "vortex.max()", bound);
+            }
+
+            if (bounded)
+            {
+                // The options are `max_bytes.to_le_bytes()`, eight raw bytes and not a message
+                // (vortex-array-0.86.1 aggregate_fn/fns/bounded_min/mod.rs), and the display name
+                // carries the limit.
+                RequireAggregate(encodings.Target, "vortex.bounded_min");
+                RequireAggregate(encodings.Target, "vortex.bounded_max");
+                byte[] limit = new byte[sizeof(ulong)];
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(limit, (ulong)stringBytes);
+                string n = stringBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                DType element = column.Kind == DTypeKind.Utf8
+                    ? types.Utf8(Nullability.Nullable)
+                    : types.Binary(Nullability.Nullable);
+
+                specs.Add("vortex.bounded_min"u8, limit);
+                Field(columns, names, dtypes, ref at, BoundedMin(arena, types, element, strings!), "vortex.bounded_min(" + n + ")", element);
+
+                specs.Add("vortex.bounded_max"u8, limit);
+                DType partial = BoundedMaxPartial(types, element);
+                Field(columns, names, dtypes, ref at, BoundedMax(arena, types, element, partial, strings!), "vortex.bounded_max(" + n + ")", partial);
             }
 
             specs.Add("vortex.null_count"u8, default);
-            columns.Add(NullCounts(arena, types, zones));
+            Field(
+                columns, names, dtypes, ref at, NullCounts(arena, types, zones), "vortex.null_count()",
+                types.Primitive(PType.U64, Nullability.NonNullable));
 
-            int root = Struct(arena, types, column, bounds, columns);
+            DType dtype = types.Struct(names, dtypes, Nullability.NonNullable);
+            int root = arena.AddStruct(dtype, zones.Count, Arrays.Validity.NonNullable, columns);
             blob = ArrayBlobWriter.Write(arena, root, encodings);
             metadata = ZonedMetadata.Serialize(ZonedMetadata.Create(zoneLength, specs));
             return true;
@@ -210,32 +248,163 @@ internal static class ZoneMapWriter
         return Arrays.Validity.Bitmap(node);
     }
 
-    private static int Struct(
-        CanonicalArena arena, DTypeArena types, DType column, bool bounds, List<int> columns)
+    /// <summary>
+    /// Records one zone column. The name is the aggregate's display form, which is what
+    /// ZoneMapSchema derives: "vortex.min()" for the default options, "vortex.bounded_min(64)" with
+    /// the limit.
+    /// </summary>
+    private static void Field(
+        Span<int> columns, string[] names, DType[] dtypes, ref int at, int column, string name, DType dtype)
     {
-        // Names must match ZoneMapSchema's own, which are the aggregate's display form:
-        // "vortex.min()" for the default options, not "vortex.min".
-        int fields = columns.Count;
-        string[] names = new string[fields];
-        DType[] dtypes = new DType[fields];
+        columns[at] = column;
+        names[at] = name;
+        dtypes[at] = dtype;
+        at++;
+    }
 
-        int at = 0;
-        if (bounds)
+    private static bool AnyPresent(IReadOnlyList<ZoneString> strings)
+    {
+        for (int i = 0; i < strings.Count; i++)
         {
-            names[at] = "vortex.min()";
-            dtypes[at++] = types.Primitive(column.PType, Nullability.Nullable);
-            names[at] = "vortex.max()";
-            dtypes[at++] = types.Primitive(column.PType, Nullability.Nullable);
+            if (strings[i].Present)
+            {
+                return true;
+            }
         }
 
-        names[at] = "vortex.null_count()";
-        dtypes[at] = types.Primitive(PType.U64, Nullability.NonNullable);
+        return false;
+    }
 
-        DType dtype = types.Struct(names, dtypes, Nullability.NonNullable);
-        int rows = arena.GetNode(columns[0]).Length;
-        return arena.AddStruct(
-            dtype, rows, Arrays.Validity.NonNullable,
-            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(columns));
+    /// <summary>
+    /// <c>vortex.bounded_min</c>'s partial is a bare nullable scalar: the bound, or null for a zone
+    /// with no valid value.
+    /// </summary>
+    private static int BoundedMin(
+        CanonicalArena arena, DTypeArena types, DType element, IReadOnlyList<ZoneString> strings)
+    {
+        byte[]?[] values = new byte[]?[strings.Count];
+        for (int i = 0; i < values.Length; i++)
+        {
+            values[i] = strings[i].Present ? strings[i].Min : null;
+        }
+
+        return Views(arena, types, element, values);
+    }
+
+    /// <summary>
+    /// <c>vortex.bounded_max</c>'s partial (<c>make_bounded_max_partial_dtype</c>): a nullable
+    /// struct of a nullable bound and a non-null <c>unknown</c>. A zone with no valid value is a
+    /// null struct; one whose maximum no cut can bound is a null bound with <c>unknown</c> set.
+    /// </summary>
+    private static int BoundedMax(
+        CanonicalArena arena, DTypeArena types, DType element, DType partial,
+        IReadOnlyList<ZoneString> strings)
+    {
+        int count = strings.Count;
+        byte[]?[] values = new byte[]?[count];
+        bool[] present = new bool[count];
+        int bytes = CanonicalSupport.BitmapByteCount(count);
+        VortexBuffer unknown = arena.Allocate(Math.Max(bytes, 1), 1, out Span<byte> unknownBits);
+        for (int i = 0; i < count; i++)
+        {
+            present[i] = strings[i].Present;
+            values[i] = strings[i].Present ? strings[i].Max : null;
+            if (strings[i].Present && strings[i].Max is null)
+            {
+                CanonicalSupport.SetBit(unknownBits, i);
+            }
+        }
+
+        Span<int> children = stackalloc int[2];
+        children[0] = Views(arena, types, element, values);
+        children[1] = arena.AddBool(
+            types.Bool(Nullability.NonNullable), count, Arrays.Validity.NonNullable, unknown, 0);
+        return arena.AddStruct(partial, count, Mask(arena, types, present), children);
+    }
+
+    private static DType BoundedMaxPartial(DTypeArena types, DType element)
+    {
+        string[] names = ["bound", "unknown"];
+        DType[] fields = [element, types.Bool(Nullability.NonNullable)];
+        return types.Struct(names, fields, Nullability.Nullable);
+    }
+
+    /// <summary>A nullable varbinview of <paramref name="values"/>, a null entry a null row.</summary>
+    private static int Views(CanonicalArena arena, DTypeArena types, DType dtype, byte[]?[] values)
+    {
+        int count = values.Length;
+        int heapBytes = 0;
+        bool[] valid = new bool[count];
+        for (int i = 0; i < count; i++)
+        {
+            valid[i] = values[i] is not null;
+            heapBytes += values[i] is { Length: > 12 } value ? value.Length : 0;
+        }
+
+        Span<byte> data = default;
+        VortexBuffer heap = heapBytes > 0 ? arena.Allocate(heapBytes, 1, out data) : VortexBuffer.Empty;
+        VortexBuffer views = arena.Allocate(count * 16, 16, out Span<byte> viewBytes);
+        int written = 0;
+        for (int i = 0; i < count; i++)
+        {
+            if (values[i] is not { } value)
+            {
+                continue;
+            }
+
+            Span<byte> view = viewBytes.Slice(i * 16, 16);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(view, value.Length);
+            if (value.Length <= 12)
+            {
+                value.CopyTo(view[4..]);
+                continue;
+            }
+
+            value.AsSpan(0, 4).CopyTo(view[4..]);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(view[12..], written);
+            value.CopyTo(data[written..]);
+            written += value.Length;
+        }
+
+        Validity validity = Mask(arena, types, valid);
+        return heapBytes > 0
+            ? arena.AddVarBinView(dtype, count, validity, views, [heap])
+            : arena.AddVarBinView(dtype, count, validity, views, default);
+    }
+
+    /// <summary>The validity of a nullable zone column, in the shortest form that says it.</summary>
+    private static Validity Mask(CanonicalArena arena, DTypeArena types, bool[] valid)
+    {
+        int count = valid.Length;
+        int set = 0;
+        foreach (bool bit in valid)
+        {
+            set += bit ? 1 : 0;
+        }
+
+        if (set == count)
+        {
+            return Arrays.Validity.AllValid;
+        }
+
+        if (set == 0)
+        {
+            return Arrays.Validity.AllInvalid;
+        }
+
+        int bytes = CanonicalSupport.BitmapByteCount(count);
+        VortexBuffer bits = arena.Allocate(Math.Max(bytes, 1), 1, out Span<byte> destination);
+        for (int i = 0; i < count; i++)
+        {
+            if (valid[i])
+            {
+                CanonicalSupport.SetBit(destination, i);
+            }
+        }
+
+        int node = arena.AddBool(
+            types.Bool(Nullability.NonNullable), count, Arrays.Validity.NonNullable, bits, 0);
+        return Arrays.Validity.Bitmap(node);
     }
 
     private static void Write(Span<byte> destination, PType ptype, FilterLiteral value)

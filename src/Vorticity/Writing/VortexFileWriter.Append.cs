@@ -162,11 +162,65 @@ public sealed partial class VortexFileWriter
         for (int field = 0; field < _fieldCount; field++)
         {
             _columnSegments[field].AddRange(plan.Columns[field].KeptSegments);
-            _columns[field].Seed(plan.Columns[field].Blocks);
+            _columns[field].Seed(plan.Columns[field].Blocks, Recut(plan.Columns[field].Strings, field));
             noZoneMap[field] = !plan.Columns[field].HasZones && plan.Boundary > 0;
         }
 
         _indexes?.Continue(plan.Entries, plan.Boundary, plan.KeptRows, plan.FileLength);
+    }
+
+    /// <summary>
+    /// What an old zone says about its strings: nothing for a zone of nulls, its bounds when it
+    /// has a lower one, and <see langword="null"/> — no bounds for the column — otherwise.
+    /// </summary>
+    private static ZoneString? OldString(ZoneBounds bounds, long zoneRows)
+    {
+        if (bounds.NullCount >= zoneRows)
+        {
+            return new ZoneString(false, null, null);
+        }
+
+        if (!bounds.HasMin || bounds.Min.Kind != FilterLiteralKind.Bytes)
+        {
+            return null;
+        }
+
+        byte[]? max = bounds.HasMax && bounds.Max.Kind == FilterLiteralKind.Bytes
+            ? bounds.Max.BytesValue.ToArray()
+            : null;
+        return new ZoneString(true, bounds.Min.BytesValue.ToArray(), max);
+    }
+
+    /// <summary>
+    /// The old zones' string bounds cut to this writer's limit. A bound already within it is
+    /// itself; a longer one — an old file written with a larger limit — is cut again, which keeps
+    /// it a bound: a prefix of a lower bound is one, and the upper bound of an upper bound is one.
+    /// </summary>
+    private ZoneString?[]? Recut(ZoneString?[]? strings, int field)
+    {
+        int limit = _columns[field].StringBoundBytes;
+        if (strings is null || limit == 0)
+        {
+            return null;
+        }
+
+        bool utf8 = (_isTabular ? _schema.GetField(field) : _schema).Kind == DTypeKind.Utf8;
+        ZoneString?[] cut = new ZoneString?[strings.Length];
+        for (int i = 0; i < strings.Length; i++)
+        {
+            if (strings[i] is not { Present: true } zone)
+            {
+                cut[i] = strings[i];
+                continue;
+            }
+
+            cut[i] = new ZoneString(
+                true,
+                StringBounds.LowerBound(zone.Min, limit, utf8),
+                zone.Max is null ? null : StringBounds.UpperBound(zone.Max, limit, utf8));
+        }
+
+        return cut;
     }
 
     /// <summary>
@@ -393,6 +447,9 @@ public sealed partial class VortexFileWriter
                 ZoneColumn? column = zones?.Column(schema.GetFieldName(field));
                 BlockStats[] blocks = new BlockStats[boundary];
                 bool hasZones = column is { HasStatistics: true } && zoned[field];
+                ZoneString?[]? strings = dtype.Kind is (DTypeKind.Utf8 or DTypeKind.Binary)
+                    ? new ZoneString?[boundary]
+                    : null;
                 for (int z = 0; z < boundary; z++)
                 {
                     long zoneRows = Math.Min(blockRows, rows - ((long)z * blockRows));
@@ -415,9 +472,14 @@ public sealed partial class VortexFileWriter
                     blocks[z] = BlockStats.Summary(
                         zoneRows, bounds.NullCount, dtype.Kind == DTypeKind.Primitive,
                         exact ? bounds.Min : null, exact ? bounds.Max : null, scheme);
+                    if (strings is not null)
+                    {
+                        strings[z] = OldString(bounds, zoneRows);
+                    }
                 }
 
                 columns[field] = OldColumn.From(statistics, field, rows, hasZones, blocks, chunks[field], keptChunks);
+                columns[field].Strings = hasZones ? strings : null;
             }
 
             // The re-opened chunk, owned: the file is closed before the append writes.
@@ -574,6 +636,13 @@ public sealed partial class VortexFileWriter
     internal sealed class OldColumn
     {
         internal required BlockStats[] Blocks { get; init; }
+
+        /// <summary>
+        /// A string column's old zone bounds as the old file stored them, one per kept block, or
+        /// <see langword="null"/> when the old zones carry none. An entry is <see langword="null"/>
+        /// when that zone has values and no lower bound.
+        /// </summary>
+        internal ZoneString?[]? Strings { get; set; }
 
         internal required List<int> KeptSegments { get; init; }
 

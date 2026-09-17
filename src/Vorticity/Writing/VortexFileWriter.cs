@@ -206,7 +206,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
 
     private VortexFileWriter(
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
-        long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder)
+        long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
+        int stringBoundBytes)
     {
         _sink = sink;
         _schema = schema;
@@ -234,6 +235,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
             _columns[i] = new ColumnWriter
             {
                 EditionAllowsDictionary = ColumnCompressor.Allows(target, "vortex.dict"),
+                StringBoundBytes = stringBoundBytes,
             };
         }
 
@@ -298,9 +300,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(options.Indexes, nameof(options));
         WritePolicy indexes = options.Profile == WriteProfile.Fastest ? WritePolicy.None : options.Indexes;
         ArgumentOutOfRangeException.ThrowIfNegative(options.IndexBudgetPerMille, nameof(options));
+        ArgumentOutOfRangeException.ThrowIfNegative(options.StringBoundBytes, nameof(options));
         return new VortexFileWriter(
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
-            options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder);
+            options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
+            options.StringBoundBytes);
     }
 
     /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
@@ -1012,7 +1016,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
 
             if (!ZoneMapWriter.TryBuild(
                     column, _columns[field].Blocks, _arrayEncodings, zoneLength,
-                    out byte[] metadata, out ArrayBlobWriter.BlobLease blob))
+                    out byte[] metadata, out ArrayBlobWriter.BlobLease blob,
+                    _columns[field].StringZones, _columns[field].StringBoundBytes))
             {
                 continue;
             }

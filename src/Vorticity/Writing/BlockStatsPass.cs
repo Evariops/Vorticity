@@ -1045,7 +1045,7 @@ internal static class BlockStatsPass
     }
 
     /// <summary>One varbinview row's bytes, inline or through its data buffer.</summary>
-    private static ReadOnlySpan<byte> Value(CanonicalNode node, ReadOnlySpan<byte> views, int row)
+    internal static ReadOnlySpan<byte> Value(CanonicalNode node, ReadOnlySpan<byte> views, int row)
     {
         ReadOnlySpan<byte> view = views.Slice(row * 16, 16);
         int size = BinaryPrimitives.ReadInt32LittleEndian(view);
