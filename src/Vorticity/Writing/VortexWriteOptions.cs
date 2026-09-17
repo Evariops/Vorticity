@@ -22,7 +22,8 @@ public enum WriteProfile
 
     /// <summary>
     /// No index, whatever <see cref="VortexWriteOptions.Indexes"/> says: the file is the data, its
-    /// zone map and its statistics, byte for byte what this writer produced before indexes existed
+    /// zone map, its statistics and its identity, byte for byte a write under
+    /// <see cref="WritePolicy.None"/> with the same <see cref="VortexWriteOptions.Identity"/>
     /// (docs/10-indexes.md §7.3).
     /// </summary>
     Fastest = 1,
@@ -77,6 +78,21 @@ public sealed class VortexWriteOptions
     /// </remarks>
     public IKeyEncoder? KeyEncoder { get; init; }
 
+    /// <summary>
+    /// The identity the file's postscript carries, or null -- the default -- for a fresh random
+    /// one.
+    /// </summary>
+    /// <remarks>
+    /// Every postscript this writer writes carries sixteen bytes that name that version of the file
+    /// (docs/13-dataset.md §7): a write, an append and a post-hoc indexing each mint their own, and
+    /// <c>VortexFile.Identity</c> reads it back from the tail an open already reads. An index or a
+    /// dataset bound to a file records it and refuses a file whose identity differs, without
+    /// reading its data. Pinning it makes a write a pure function of its batches again, byte for
+    /// byte, which is what a test comparing two writes needs; two different files must never share
+    /// one.
+    /// </remarks>
+    public Guid? Identity { get; init; }
+
     /// <summary>A copy with the three things an append decides from the file.</summary>
     /// <param name="rowBlockSize">The file's block length.</param>
     /// <param name="indexes">The policy the append writes under.</param>
@@ -88,6 +104,7 @@ public sealed class VortexWriteOptions
         Profile = Profile,
         IndexBudgetPerMille = budgetPerMille,
         KeyEncoder = KeyEncoder,
+        Identity = Identity,
         Compress = Compress,
         FileStatistics = fileStatistics,
         TargetEdition = TargetEdition,

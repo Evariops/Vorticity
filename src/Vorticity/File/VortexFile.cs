@@ -923,6 +923,29 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <summary>The file length in bytes.</summary>
     public long FileLength { get; }
 
+    /// <summary>
+    /// The identity of this version of the file's bytes, or null when the file carries none.
+    /// </summary>
+    /// <remarks>
+    /// Sixteen bytes every postscript this library writes carries, minted anew by every write,
+    /// append and post-hoc indexing (docs/13-dataset.md §7), read from the tail the open already
+    /// read. A file written by another writer has none. An index or a dataset bound to a file
+    /// compares it, and never the file's content, to prove it describes these bytes.
+    /// <para>
+    /// Computed from the retained tail on every call, so a file that is never asked costs nothing
+    /// for it.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>
+    public Guid? Identity
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return FileIdentity.Find(_metadataKeysUtf8, _metadataSegments, _tail.Buffer.Span, _tailOffset);
+        }
+    }
+
     /// <summary>The arena that owns <see cref="Schema"/>'s nodes. Lives as long as the file.</summary>
     public DTypeArena Types => _schema.Arena;
 

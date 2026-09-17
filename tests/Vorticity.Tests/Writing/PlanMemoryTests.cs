@@ -52,8 +52,10 @@ public sealed class PlanMemoryTests
         // -- one packed chunk of 8 192 seventeen-bit values (17 408 bytes) plus framing. With the
         // packing carried over the three chunks that follow it was 32 372.
         (long size, List<string> disagreements) = await Write(rowBlock: Rows);
+        // 19 148 since every postscript carries the file's identity (step 20, 13 §7: 16 bytes of
+        // value, the entry's key and segment in the postscript, and the padding they move);
         // 19 052 since the file statistics segment (11a); 18 932 before it.
-        Assert.Equal(19_052, size);
+        Assert.Equal(19_148, size);
         Assert.True(
             disagreements.Count == 0,
             "the chooser and the reference disagree on " + disagreements.Count + " chunk(s):\n  "
@@ -77,8 +79,9 @@ public sealed class PlanMemoryTests
     public async Task AProgressionThatStartsAChunkAfterAJumpIsStillAProgression()
     {
         (long size, List<string> disagreements) = await Write(rowBlock: 1024);
-        // 19 724 since the file statistics segment (11a); 19 604 before it.
-        Assert.Equal(19_724, size);
+        // 19 820 since the file's identity (step 20); 19 724 since the file statistics segment
+        // (11a); 19 604 before it.
+        Assert.Equal(19_820, size);
         Assert.True(
             disagreements.Count == 0,
             "the chooser and the reference disagree on " + disagreements.Count + " chunk(s):\n  "
@@ -156,10 +159,11 @@ public sealed class PlanMemoryTests
             Assert.Equal(0, withoutTable);
             // The bytes the reference chooser's dictionaries make, whether the table or a walk built
             // them: pinned so that a table that served a different dictionary would show here first.
-            // 35 775 since Auto became the default (12e): the column is a dictionary, so the file
-            // carries its dict.probe entry and the directory that lists it. 35 636 since the file
-            // statistics segment (11a); 35 540 before it.
-            Assert.Equal(35_775, new FileInfo(path).Length);
+            // 35 847 since the file's identity (step 20). 35 775 since Auto became the default
+            // (12e): the column is a dictionary, so the file carries its dict.probe entry and the
+            // directory that lists it. 35 636 since the file statistics segment (11a); 35 540
+            // before it.
+            Assert.Equal(35_847, new FileInfo(path).Length);
         }
         finally
         {
@@ -240,8 +244,9 @@ public sealed class PlanMemoryTests
             // their widths. With the tail left uncounted, the second walked too. The bytes are the
             // walk's, whichever priced the packing.
             Assert.Equal(3, fromWidths);
-            // 43 436 since the file statistics segment (11a); 43 316 before it.
-            Assert.Equal(43_436, new FileInfo(path).Length);
+            // 43 532 since the file's identity (step 20); 43 436 since the file statistics segment
+            // (11a); 43 316 before it.
+            Assert.Equal(43_532, new FileInfo(path).Length);
         }
         finally
         {

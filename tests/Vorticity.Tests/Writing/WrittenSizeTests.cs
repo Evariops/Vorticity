@@ -56,8 +56,17 @@ public sealed class WrittenSizeTests
     /// 0.65 had grown back to **2,9 %** of slack. 0.64 leaves **1,43 %**, the same margin the
     /// paragraph above argues for.
     /// </para>
+    /// <para>
+    /// 0.64 -> **0.65 on 2026-09-17**, RAISED, and this is what grew: step 20 of IMPL-PLAN.md
+    /// writes the file's identity into every postscript (docs/13-dataset.md §7) -- sixteen bytes of
+    /// value, the entry's key and segment in the postscript, and the padding they move: 72 to 96
+    /// bytes a file. Measured that day: 856 files, **10 190 005** bytes before (ratio 0,6375) and
+    /// **10 269 757** after (0,6425), +79 752. It is accepted because it is what lets an index or a
+    /// dataset prove which bytes it describes without reading them, the design error the sidecar
+    /// made. 0.65 leaves **1,17 %**; no compression moved.
+    /// </para>
     /// </remarks>
-    private const double CorpusCeiling = 0.64;
+    private const double CorpusCeiling = 0.65;
 
     /// <summary>How many of the worst offenders to name, so the number is actionable.</summary>
     private const int Worst = 12;
@@ -114,15 +123,17 @@ public sealed class WrittenSizeTests
         // dict.probe (10 §5.3), gratuite à l'écriture, et le répertoire d'index qui la porte avec
         // son entrée de métadonnées au postscript. Un fichier dont Auto ne garde rien n'a pas de
         // répertoire et ne bouge pas.
-        ("types/utf8_nonnull_r8193", 16_822),    // 17 chunks in, 17 zones; +96 B since the file statistics segment (11a); +138 B, the dictionary probe (12e)
-        ("types/utf8_nullable_r8193", 17_302),   // 17 chunks in, 17 zones; +96 B, same; +138 B, same
+        // +72 or +96 B (step 20) : l'identité du fichier dans chaque postscript (13 §7) -- 16 octets
+        // de valeur, la clé et le segment de l'entrée, et le rembourrage qu'ils déplacent.
+        ("types/utf8_nonnull_r8193", 16_894),    // 17 chunks in, 17 zones; +96 B since the file statistics segment (11a); +138 B, the dictionary probe (12e); +72 B, the identity (20)
+        ("types/utf8_nullable_r8193", 17_374),   // 17 chunks in, 17 zones; +96 B, same; +138 B, same; +72 B, same
         // 4 700 -> 3 756 (-20,1 %) le 2026-09-15, WRITE-AUDIT.md W-31 : la copie du reste reporte
         // ne materialise plus que les octets que les vues nomment, donc le tas ecrit ne porte plus
         // les chaines des blocs deja emis. Verifie par bench/crosscheck.sh : 854 fichiers relus par
         // Vortex Rust, scalaire par scalaire. C'est le seul des quatre qui bouge -- les trois autres
         // n'ont pas de VarBinView dans leur chemin d'ecriture.
-        ("encodings/fsst", 3_908),               // 8 chunks in, 8 zones; +96 B, same
-        ("encodings/dict", 3_054),               // 8 chunks in, 8 zones; +96 B, same; +138 B, the dictionary probe (12e)
+        ("encodings/fsst", 4_004),               // 8 chunks in, 8 zones; +96 B, same; +96 B, the identity (20)
+        ("encodings/dict", 3_126),               // 8 chunks in, 8 zones; +96 B, same; +138 B, the dictionary probe (12e); +72 B, the identity (20)
     ];
 
     [Fact]

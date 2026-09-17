@@ -79,7 +79,7 @@ public static class VortexFileIndexer
                     using IndexWriter indexes = await BuildAsync(
                         file, sink, policy, options, encodings, previous?.Entries ?? [], length, cancellationToken).ConfigureAwait(false);
                     reports = [.. indexes.Reports];
-                    await WriteTailAsync(file, sink, indexes, encodings, cancellationToken).ConfigureAwait(false);
+                    await WriteTailAsync(file, sink, indexes, encodings, options?.Identity, cancellationToken).ConfigureAwait(false);
                     await sink.FlushAsync(cancellationToken).ConfigureAwait(false);
                 }
             }
@@ -372,7 +372,7 @@ public static class VortexFileIndexer
     /// <summary>The statistics, directory, dtype, layout, footer, postscript and EOF, after the runs.</summary>
     private static async ValueTask WriteTailAsync(
         VortexFile file, StreamSegmentSink sink, IndexWriter indexes, EncodingDictionary encodings,
-        CancellationToken cancellationToken)
+        Guid? identity, CancellationToken cancellationToken)
     {
         OldTail old = await OldTail.ReadAsync(file, cancellationToken).ConfigureAwait(false);
 
@@ -409,11 +409,15 @@ public static class VortexFileIndexer
         byte[] footer = VortexFileWriter.Footer(encodings.Ids, layouts, file.SegmentSpecs);
         await sink.WriteAsync(footer, cancellationToken).ConfigureAwait(false);
 
-        byte[] postscript = VortexFileWriter.BuildPostscript(
-            dtypeOffset, dtype.Length, layoutOffset, old.Layout.Length, footerOffset, footer.Length,
-            statisticsOffset, statisticsLength, directoryOffset, directory?.Length ?? 0);
-        await sink.WriteAsync(postscript, cancellationToken).ConfigureAwait(false);
-        await sink.WriteAsync(VortexFileWriter.Eof(postscript.Length), cancellationToken).ConfigureAwait(false);
+        // A NEW POSTSCRIPT IS A NEW VERSION of the bytes, even though no data byte moved: the file
+        // an index outside it was built against is not this one (docs/13-dataset.md §7).
+        await VortexFileWriter.WriteEndAsync(
+            sink,
+            new VortexFileWriter.PostscriptPlacement(
+                dtypeOffset, dtype.Length, layoutOffset, old.Layout.Length, footerOffset, footer.Length,
+                statisticsOffset, statisticsLength, directoryOffset, directory?.Length ?? 0),
+            identity,
+            cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The layout and statistics bytes of the old postscript, which the new one names again.</summary>

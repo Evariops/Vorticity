@@ -96,7 +96,9 @@ construction. The run segments are not metadata entries and Rust does not know t
 
 What this costs: one metadata slot out of sixteen (the directory is one entry however many indexes
 the file holds); and the run bytes are dead weight for a reader that ignores them, which is the
-same cost upstream's own designs accept.
+same cost upstream's own designs accept. *Since step 20 a second slot is this library's too:
+`vorticity.identity`, which every file carries ([13-dataset.md](13-dataset.md) §7). Fourteen
+remain for the caller.*
 
 ### 3.3 The carriers we do not use, and when we will
 
@@ -552,7 +554,10 @@ kind abandons cleanly, whole, with a reason in the report.
 ### 7.3 What it must not cost
 
 - A file written with `Profile = Fastest` is byte-identical to today's output. `WrittenSizeTests`
-  holds.
+  holds. *Amended at step 20 ([13-dataset.md](13-dataset.md) §7): every file now carries its
+  identity, so the promise is kept under one pinned `VortexWriteOptions.Identity` —
+  `Fastest` is byte-identical to a write under `WritePolicy.None` — and `WrittenSizeTests` moved
+  once, by the identity entry.*
 - No builder adds a pass over the column: the hash comes from the buffer, the keys from the table.
 - `WriteAllocationTests` gets one row per index kind, so a builder that allocates per row is caught.
 

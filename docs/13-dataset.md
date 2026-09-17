@@ -356,6 +356,21 @@ bounded. Three answers, stated so that nobody expects a fourth:
   claim nothing for the blocks it covers; a corrupt data segment is a `VortexFormatException` as
   today. XXH3 guards against accident, not forgery.
 
+**As delivered (step 20, the identity).** `File/FileIdentity`: the entry's value is a `Guid`'s
+sixteen bytes, minted by `Guid.NewGuid()` unless `VortexWriteOptions.Identity` pins one, and written
+right after the footer, so the postscript is the only thing between it and the EOF record. The
+writer, the append and `VortexFileIndexer.AppendIndexesAsync` all end through one method,
+`VortexFileWriter.WriteEndAsync`, which also writes the postscript from the builder's rented buffer
+(`FlatBufferBuilder.FinishMemory`) instead of a copy: that saving pays for the entry, and a write
+allocates 144 bytes less than before it. `VortexFile.Identity` reads the value from the retained
+tail at every call, with no field and no request; an entry that is not sixteen bytes, or that
+lies outside the tail, is no identity. `vxdump` prints it. What it costs on disk is 72 to 96 bytes
+a file, not the 40 estimated: the value, the entry's key and segment tables in the postscript, and
+the padding they move; the corpus rewrite goes from 0,6375 to 0,6425 of the reference's bytes. A
+pinned identity makes two writes of the same batches byte-identical again, which is the form
+11 §2's determinism and 10 §7.3's `Fastest` promise now take. A strict Rust 0.86.1 reader opens
+every such file: the cross-check reads 854 of them.
+
 ## 8. The commit protocol
 
 ### 8.1 A commit is one conditional creation

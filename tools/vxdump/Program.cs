@@ -151,7 +151,8 @@ internal static class Program
             .Append("version   ").Append(Text(file.FormatVersion)).Append('\n')
             .Append("bytes     ").Append(Text(file.FileLength)).Append('\n')
             .Append("rows      ").Append(Text(file.RowCount)).Append('\n')
-            .Append("tabular   ").Append(file.IsTabular ? "yes" : "no").Append('\n');
+            .Append("tabular   ").Append(file.IsTabular ? "yes" : "no").Append('\n')
+            .Append("identity  ").Append(file.Identity is { } identity ? identity.ToString("N") : "none").Append('\n');
     }
 
     private static void Schema(StringBuilder output, VortexFile file)

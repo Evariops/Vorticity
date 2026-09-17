@@ -675,6 +675,19 @@ public sealed class FlatBufferBuilder : IDisposable
     /// <summary>Finishes the buffer and copies it into a fresh array.</summary>
     public byte[] FinishToArray(int rootTableOffset) => Finish(rootTableOffset).ToArray();
 
+    /// <summary>
+    /// Finishes the buffer and lends it as memory, valid until the builder is cleared or disposed.
+    /// </summary>
+    /// <remarks>
+    /// The form an asynchronous sink takes without a copy: a span cannot cross an <c>await</c>,
+    /// and <see cref="FinishToArray"/> allocates the buffer's length again.
+    /// </remarks>
+    public ReadOnlyMemory<byte> FinishMemory(int rootTableOffset)
+    {
+        int length = Finish(rootTableOffset).Length;
+        return new ReadOnlyMemory<byte>(_buffer, _buffer.Length - length, length);
+    }
+
     // ---------------------------------------------------------------------------------------
     // Internals.
     // ---------------------------------------------------------------------------------------

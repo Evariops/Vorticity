@@ -87,7 +87,10 @@ encodes in one pass into arena-owned output that is written once.
   if so decided, the wire form of a constant (§10).
 - **Determinism**: a pure function of the sequence of batches. No seed, no sample. Plan memory
   makes a chunk's encoding depend on the chunks before it, which is still a pure function of the
-  input; the file's chunking already depended on the caller's batching.
+  input; the file's chunking already depended on the caller's batching. *One exception since
+  step 20: the sixteen bytes of the file's identity ([13-dataset.md](13-dataset.md) §7) are random
+  unless `VortexWriteOptions.Identity` pins them, and with them pinned the file is again a pure
+  function of its batches.*
 - **Pruning structures**: exact by construction (§5.1); an index is written whole or not at all;
   an append extends them without touching what was written (§3.8).
 - **Memory**: one block-sized scratch per **writer**, reused for every column of every block;

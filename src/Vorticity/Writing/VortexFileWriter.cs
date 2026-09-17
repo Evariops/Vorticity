@@ -26,6 +26,7 @@
 // is the property that makes an S3 multipart upload trivial in the layer above
 // (docs/03-architecture.md §3.8).
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using Vorticity.Editions;
@@ -198,6 +199,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
     // writer was 88 bytes on every file for 64 zeros, which is what pays for the report's fields.
     private static readonly byte[] Padding = new byte[VortexLimits.MaxAlignment];
     private readonly bool _fileStatistics;
+
+    /// <summary>The identity the options pinned, or null for a fresh one (docs/13-dataset.md §7).</summary>
+    private readonly Guid? _identity;
     // NULL WHEN THE POLICY ASKS FOR NOTHING, which is the default: the index machinery then costs a
     // write not one allocation, and the file is byte for byte what it was (docs/10-indexes.md §7.3).
     private readonly IndexWriter? _indexes;
@@ -207,10 +211,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
     private VortexFileWriter(
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
-        int stringBoundBytes)
+        int stringBoundBytes, Guid? identity)
     {
         _sink = sink;
         _schema = schema;
+        _identity = identity;
         _compress = compress;
         _fileStatistics = fileStatistics;
         _target = target;
@@ -304,7 +309,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
         return new VortexFileWriter(
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
-            options.StringBoundBytes);
+            options.StringBoundBytes, options.Identity);
     }
 
     /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
@@ -871,20 +876,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
         byte[] footer = BuildFooter();
         await _sink.WriteAsync(footer, cancellationToken).ConfigureAwait(false);
 
-        byte[] postscript = BuildPostscript(
-            dtypeOffset, dtype.Length, layoutOffset, layout.Length, footerOffset, footer.Length,
-            statisticsOffset, statisticsLength, directoryOffset, directory?.Length ?? 0);
-        if (postscript.Length > VortexLimits.MaxPostscriptSize)
-        {
-            throw new InvalidOperationException(
-                $"The postscript is {postscript.Length} bytes; the format's ceiling is " +
-                $"{VortexLimits.MaxPostscriptSize}. Reduce the schema or the user metadata.");
-        }
-
-        await _sink.WriteAsync(postscript, cancellationToken).ConfigureAwait(false);
-
-        // EOF: u16 version, u16 postscript length, then the magic. Read backwards by every reader.
-        await _sink.WriteAsync(Eof(postscript.Length), cancellationToken).ConfigureAwait(false);
+        await WriteEndAsync(
+            _sink,
+            new PostscriptPlacement(
+                dtypeOffset, dtype.Length, layoutOffset, layout.Length, footerOffset, footer.Length,
+                statisticsOffset, statisticsLength, directoryOffset, directory?.Length ?? 0),
+            _identity,
+            cancellationToken).ConfigureAwait(false);
 
         await _sink.FlushAsync(cancellationToken).ConfigureAwait(false);
 
@@ -1230,50 +1228,101 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
         return builder.FinishToArray(table);
     }
 
-    /// <summary>The EOF record for a postscript of <paramref name="postscriptLength"/> bytes.</summary>
-    internal static byte[] Eof(int postscriptLength)
-    {
-        byte[] eof = new byte[VortexFileFormat.EofSize];
-        BinaryPrimitives.WriteUInt16LittleEndian(eof, (ushort)VortexFileFormat.Version);
-        BinaryPrimitives.WriteUInt16LittleEndian(eof.AsSpan(2), (ushort)postscriptLength);
-        VortexFileFormat.MagicBytes.CopyTo(eof.AsSpan(VortexFileFormat.EofMagicOffset));
-        return eof;
-    }
+    /// <summary>Where the segments a postscript names lie; a length of 0 is an absent segment.</summary>
+    internal readonly record struct PostscriptPlacement(
+        long DTypeOffset, int DTypeLength, long LayoutOffset, int LayoutLength,
+        long FooterOffset, int FooterLength, long StatisticsOffset, int StatisticsLength,
+        long DirectoryOffset, int DirectoryLength);
 
-    internal static byte[] BuildPostscript(
-        long dtypeOffset, int dtypeLength, long layoutOffset, int layoutLength,
-        long footerOffset, int footerLength, long statisticsOffset, int statisticsLength,
-        long directoryOffset, int directoryLength)
+    /// <summary>
+    /// Writes the last bytes of every file this library writes: the identity, the postscript and
+    /// the EOF record.
+    /// </summary>
+    /// <param name="sink">The file's sink, positioned right after the footer.</param>
+    /// <param name="placement">The segments the postscript names.</param>
+    /// <param name="identity">The identity the options pinned, or null for a fresh one.</param>
+    /// <param name="cancellationToken">Cancels the writes.</param>
+    /// <remarks>
+    /// THE IDENTITY GOES LAST BEFORE THE POSTSCRIPT (docs/13-dataset.md §7), so the tail every open
+    /// reads covers it. NOTHING HERE IS ALLOCATED PER FILE: the postscript is written from the
+    /// builder's rented buffer and the EOF record from a rented one, which is what pays for the
+    /// identity's entry on the write-path ceilings.
+    /// </remarks>
+    internal static async ValueTask WriteEndAsync(
+        ISegmentSink sink, PostscriptPlacement placement, Guid? identity, CancellationToken cancellationToken)
     {
-        using FlatBufferBuilder builder = new FlatBufferBuilder();
+        long identityOffset = sink.Position;
+        await FileIdentity.WriteAsync(sink, identity, cancellationToken).ConfigureAwait(false);
 
-        // The metadata vector's entries must exist before the postscript table that lists them.
-        int[] metadata = [];
-        if (directoryLength > 0)
+        int postscriptLength;
+        using (FlatBufferBuilder builder = new FlatBufferBuilder())
         {
-            int segment = PostscriptWriter.WriteSegment(
-                builder, new SegmentSpec((ulong)directoryOffset, (uint)directoryLength, 0, 0, 0),
-                CompressionScheme.None);
-            metadata = [PostscriptWriter.WriteMetadata(builder, IndexDirectory.MetadataKeyUtf8, segment)];
+            ReadOnlyMemory<byte> postscript = BuildPostscript(builder, placement, identityOffset);
+            if (postscript.Length > VortexLimits.MaxPostscriptSize)
+            {
+                throw new InvalidOperationException(
+                    $"The postscript is {postscript.Length} bytes; the format's ceiling is " +
+                    $"{VortexLimits.MaxPostscriptSize}. Reduce the schema or the user metadata.");
+            }
+
+            postscriptLength = postscript.Length;
+            await sink.WriteAsync(postscript, cancellationToken).ConfigureAwait(false);
         }
 
+        // EOF: u16 version, u16 postscript length, then the magic. Read backwards by every reader.
+        byte[] eof = ArrayPool<byte>.Shared.Rent(VortexFileFormat.EofSize);
+        try
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(eof, (ushort)VortexFileFormat.Version);
+            BinaryPrimitives.WriteUInt16LittleEndian(eof.AsSpan(2), (ushort)postscriptLength);
+            VortexFileFormat.MagicBytes.CopyTo(eof.AsSpan(VortexFileFormat.EofMagicOffset));
+            await sink.WriteAsync(eof.AsMemory(0, VortexFileFormat.EofSize), cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(eof);
+        }
+    }
+
+    /// <summary>Builds the postscript in <paramref name="builder"/> and lends its bytes.</summary>
+    private static ReadOnlyMemory<byte> BuildPostscript(
+        FlatBufferBuilder builder, in PostscriptPlacement placement, long identityOffset)
+    {
+        // The metadata vector's entries must exist before the postscript table that lists them:
+        // the index directory when there is one, then the identity, which every file carries.
+        int identitySegment = PostscriptWriter.WriteSegment(
+            builder, new SegmentSpec((ulong)identityOffset, FileIdentity.Length, 0, 0, 0),
+            CompressionScheme.None);
+        int identity = PostscriptWriter.WriteMetadata(builder, FileIdentity.MetadataKeyUtf8, identitySegment);
+        Span<int> metadata = stackalloc int[2];
+        int entries = 0;
+        if (placement.DirectoryLength > 0)
+        {
+            int segment = PostscriptWriter.WriteSegment(
+                builder, new SegmentSpec((ulong)placement.DirectoryOffset, (uint)placement.DirectoryLength, 0, 0, 0),
+                CompressionScheme.None);
+            metadata[entries++] = PostscriptWriter.WriteMetadata(builder, IndexDirectory.MetadataKeyUtf8, segment);
+        }
+
+        metadata[entries++] = identity;
+
         int dtype = PostscriptWriter.WriteSegment(
-            builder, new SegmentSpec((ulong)dtypeOffset, (uint)dtypeLength, 0, 0, 0),
+            builder, new SegmentSpec((ulong)placement.DTypeOffset, (uint)placement.DTypeLength, 0, 0, 0),
             CompressionScheme.None);
         int layout = PostscriptWriter.WriteSegment(
-            builder, new SegmentSpec((ulong)layoutOffset, (uint)layoutLength, 0, 0, 0),
+            builder, new SegmentSpec((ulong)placement.LayoutOffset, (uint)placement.LayoutLength, 0, 0, 0),
             CompressionScheme.None);
         int footer = PostscriptWriter.WriteSegment(
-            builder, new SegmentSpec((ulong)footerOffset, (uint)footerLength, 0, 0, 0),
+            builder, new SegmentSpec((ulong)placement.FooterOffset, (uint)placement.FooterLength, 0, 0, 0),
             CompressionScheme.None);
-        int statistics = statisticsLength == 0
+        int statistics = placement.StatisticsLength == 0
             ? 0
             : PostscriptWriter.WriteSegment(
-                builder, new SegmentSpec((ulong)statisticsOffset, (uint)statisticsLength, 0, 0, 0),
+                builder, new SegmentSpec((ulong)placement.StatisticsOffset, (uint)placement.StatisticsLength, 0, 0, 0),
                 CompressionScheme.None);
 
-        int table = PostscriptWriter.Write(builder, dtype, layout, statistics, footer, metadata);
-        return builder.FinishToArray(table);
+        int table = PostscriptWriter.Write(builder, dtype, layout, statistics, footer, metadata[..entries]);
+        return builder.FinishMemory(table);
     }
 
     /// <summary>

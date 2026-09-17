@@ -51,10 +51,13 @@ public sealed class IndexWriteTests
     [Fact]
     public async Task FastestIsByteIdenticalToTheDefaultsWhateverThePolicySays()
     {
+        // UNDER ONE IDENTITY: every postscript carries its own (13 §7), so two writes of the same
+        // rows differ in those sixteen bytes and in nothing else.
         Decoders.EnsureRegistered();
-        (byte[] plain, _) = await WriteAsync(Options());
+        Guid identity = Guid.NewGuid();
+        (byte[] plain, _) = await WriteAsync(Options(identity: identity));
         (byte[] fastest, WriteReport report) = await WriteAsync(
-            Options(WritePolicy.Auto, WriteProfile.Fastest));
+            Options(WritePolicy.Auto, WriteProfile.Fastest, identity));
 
         Assert.Empty(report.Indexes);
         Assert.Equal(plain, fastest);
@@ -295,13 +298,15 @@ public sealed class IndexWriteTests
     }
 
     /// <summary>One chunk per block: the byte target off, so the chunking is the block length alone.</summary>
-    private static VortexWriteOptions Options(WritePolicy? indexes = null, WriteProfile profile = WriteProfile.Default) =>
+    private static VortexWriteOptions Options(
+        WritePolicy? indexes = null, WriteProfile profile = WriteProfile.Default, Guid? identity = null) =>
         new VortexWriteOptions
         {
             RowBlockSize = Block,
             DataBlockTargetBytes = null,
             Indexes = indexes ?? WritePolicy.None,
             Profile = profile,
+            Identity = identity,
         };
 
     private static async Task<string> Dump(VortexFile file)
