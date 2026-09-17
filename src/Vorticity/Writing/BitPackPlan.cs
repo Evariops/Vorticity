@@ -325,6 +325,45 @@ internal sealed class BitPackPlan
         }
     }
 
+    /// <summary>
+    /// The framed widths of an all-valid column, four rows per step into four histograms.
+    /// </summary>
+    /// <remarks>
+    /// THE COUNTERS ARE THE COST, NOT THE WIDTHS. Consecutive values of a column mostly share a
+    /// width, so one histogram turns the loop into a chain of increments of the same counter, each
+    /// waiting on the store before it; four histograms taken in turn break that chain four ways,
+    /// which is what R10 measured on the ingest pass's raw count. They are folded at the end.
+    /// </remarks>
+    private static void FramedWidths<T>(ReadOnlySpan<T> values, T reference, int elementBits, Span<int> frames)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        const int Lanes = 4;
+        Span<int> spare = stackalloc int[65 * (Lanes - 1)];
+        spare.Clear();
+        Span<int> b = spare[..65];
+        Span<int> c = spare.Slice(65, 65);
+        Span<int> d = spare.Slice(130, 65);
+        int length = values.Length - (values.Length % Lanes);
+        int row = 0;
+        for (; row < length; row += Lanes)
+        {
+            frames[Width(unchecked(values[row] - reference), elementBits)]++;
+            b[Width(unchecked(values[row + 1] - reference), elementBits)]++;
+            c[Width(unchecked(values[row + 2] - reference), elementBits)]++;
+            d[Width(unchecked(values[row + 3] - reference), elementBits)]++;
+        }
+
+        for (; row < values.Length; row++)
+        {
+            frames[Width(unchecked(values[row] - reference), elementBits)]++;
+        }
+
+        for (int w = 0; w < 65; w++)
+        {
+            frames[w] += b[w] + c[w] + d[w];
+        }
+    }
+
     /// <summary>One element width's histograms.</summary>
     /// <remarks>
     /// The all-valid case is a separate loop rather than a test inside one, because a validity test
@@ -348,6 +387,12 @@ internal sealed class BitPackPlan
         T reference = T.CreateTruncating(minimum);
         int elementBits = Unsafe.SizeOf<T>() * 8;
         int shift = elementBits - 1;
+
+        if (mask.AllValid && !signed)
+        {
+            FramedWidths(values, reference, elementBits, frames);
+            return;
+        }
 
         if (mask.AllValid)
         {

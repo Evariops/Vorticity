@@ -770,7 +770,7 @@ internal static class ThroughputCheck
         ("alp", 0.41),   // 3 passes, spread 0.40-0.41; was 0.47, -13.7%
         ("alp_no_patches", 0.62),   // 3 passes, spread 0.61-0.62; was 0.71, -13.1%
         ("alp_patched_no_chunk_offsets", 0.53),   // 3 passes, spread 0.52-0.53; was 0.55, -3.2%
-        ("alprd", 0.25),   // 3 passes, spread 0.23-0.25; was 0.30, -17.8%
+        ("alprd", 0.24),   // 3 passes, spread 0.24-0.24; was 0.25, -2.8%
         ("bool", 0.32),   // 3 passes; TENU à la main : --rebase proposait +2.5 %, et une référence ne monte jamais
         ("bool_bit_offset3", 0.42),   // 3 passes; TENU à la main : --rebase proposait +8.7 %, et une référence ne monte jamais
         ("bool_bit_offset7", 0.43),   // 3 passes; TENU à la main : --rebase proposait +5.0 %, et une référence ne monte jamais
@@ -779,7 +779,7 @@ internal static class ThroughputCheck
         ("chunked", 0.23),   // 3 passes, spread 0.22-0.23; was 0.29, -21.9%. R8 : le +55 % d'avant était des octets (1 902 356 contre 890 004), pas du temps
         ("chunked_bool", 0.27),   // 3 passes; TENU à la main : --rebase proposait +5.9 %, et une référence ne monte jamais
         ("chunked_decimal", 0.13),   // 3 passes, spread 0.12-0.13; was 0.14, -8.6%
-        ("chunked_empty_chunks", 0.17),   // 3 passes, spread 0.16-0.17; was 0.18, -7.7%
+        ("chunked_empty_chunks", 0.16),   // 3 passes, spread 0.16-0.16; was 0.17, -4.7%
         ("chunked_mixed_validity", 0.62),   // 3 passes, spread 0.63-0.64; HELD at 0.62: 3 of 3 passes above, peak 0.64, no loosening
         ("chunked_one_chunk", 0.13),   // 3 passes, spread 0.13-0.13; was 0.14, -7.1%
         ("chunked_varbinview", 0.23),   // 3 passes, spread 0.23-0.23; was 0.25, -7.0%
@@ -787,17 +787,17 @@ internal static class ThroughputCheck
         ("datetimeparts", 0.27),   // 3 passes, spread 0.27-0.28; HELD at 0.27: 2 of 3 passes above, peak 0.28, no loosening
         ("decimal", 0.13),   // 3 passes, spread 0.13-0.13; was 0.15, -10.2%
         ("decimal_byte_parts", 0.13),   // 3 passes, spread 0.13-0.13; was 0.15, -10.2%
-        ("dict", 0.84),   // 3 passes, spread 0.83-0.84; was 0.94, -10.5%
-        ("dict_nullable_codes", 1.06),   // 3 passes, spread 1.03-1.06; was 1.12, -5.5%
-        ("dict_nullable_values_nonnull_codes", 1.14),   // 3 passes, spread 1.07-1.14; was 1.19, -4.6%
-        ("dict_u64_codes", 0.86),   // 3 passes, spread 0.84-0.86; was 0.95, -9.7%
-        ("dict_u8_codes", 1.24),   // 3 passes, spread 1.18-1.24; was 1.72, -27.9%
+        ("dict", 0.79),   // 3 passes, spread 0.78-0.79; was 0.84, -6.3%
+        ("dict_nullable_codes", 0.98),   // 3 passes, spread 0.96-0.98; was 1.06, -7.7%
+        ("dict_nullable_values_nonnull_codes", 1.02),   // 3 passes, spread 1.00-1.02; was 1.14, -10.7%
+        ("dict_u64_codes", 0.80),   // 3 passes, spread 0.79-0.80; was 0.86, -7.2%
+        ("dict_u8_codes", 1.13),   // 3 passes, spread 1.11-1.13; was 1.24, -9.0%
         ("ext", 0.068),   // 3 passes, spread 0.063-0.068; was 0.070, -3.2%
-        ("fastlanes_bitpacked", 0.73),   // 3 passes, spread 0.71-0.73; was 1.33, -45.0%. 7i : la transformation par registres à la charge
-        ("fastlanes_bitpacked_patched_no_chunk_offsets", 0.64),   // 3 passes, spread 0.63-0.64; was 0.78, -18.3%. 7j : la détection des patches par registres
+        ("fastlanes_bitpacked", 0.60),   // axe entier, 3 passes, spread 0.59-0.60; was 0.73. 7i : la transformation à la charge ; 7k : les compteurs de largeurs alternés (0.55-0.57 en sous-ensemble, B8)
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 0.45),   // axe entier, 3 passes, spread 0.42-0.45; was 0.64. 7j : les patches par registres ; 7k (0.36-0.37 en sous-ensemble, B8)
         ("fastlanes_delta", 0.18),   // 3 passes, spread 0.17-0.18; was 0.19, -2.8%
-        ("fastlanes_for", 0.64),   // 3 passes, spread 0.61-0.64; was 0.88, -27.6%
-        ("fastlanes_rle", 0.91),   // 3 passes, spread 0.88-0.91; was 0.93, -2.2%
+        ("fastlanes_for", 0.63),   // 3 passes, spread 0.61-0.63; was 0.64, -1.9%
+        ("fastlanes_rle", 0.89),   // 3 passes, spread 0.88-0.89; was 0.91, -2.1%
         ("fixed_size_list", 0.12),   // 3 passes, spread 0.11-0.12; HELD at 0.12: 2 of 3 passes above, peak 0.12, no loosening
         ("fsst", 0.24),   // 3 passes, spread 0.24-0.24; HELD at 0.24: 3 of 3 passes above, peak 0.24, no loosening
         ("masked", 0.67),   // 3 passes, spread 0.67-0.68; HELD at 0.67: 2 of 3 passes above, peak 0.68, no loosening
@@ -813,11 +813,11 @@ internal static class ThroughputCheck
         ("sparse", 1.48),   // 3 passes, spread 1.48-1.49; HELD at 1.48: 3 of 3 passes above, peak 1.49, no loosening
         ("struct", 0.22),   // 3 passes, spread 0.22-0.22; was 0.24, -6.6%
         ("table_mixed", 0.22),   // 3 passes, spread 0.21-0.22; was 0.25, -12.5%
-        ("table_wide", 0.43),   // 3 passes, spread 0.46-0.46; HELD at 0.43: 3 of 3 passes above, peak 0.46, no loosening. +7 % depuis le refacto, dans la marge : à surveiller
+        ("table_wide", 0.35),   // axe entier, 3 passes, spread 0.35-0.35; was 0.43. Le +7 % d'après le refacto est rattrapé (7i, 7k)
         ("varbin", 0.20),   // 3 passes, spread 0.19-0.20; was 0.20, -2.1%
         ("varbinview", 0.24),   // 3 passes, spread 0.24-0.24; was 0.40, -39.0%
         ("variant", 3.48),   // 3 passes, spread 3.51-3.68; HELD at 3.48: 3 of 3 passes above, peak 3.68, no loosening
-        ("zigzag", 0.34),   // 3 passes, spread 0.33-0.34; was 0.57, -40.4%
+        ("zigzag", 0.33),   // 3 passes, spread 0.32-0.33; was 0.34, -1.6%
         ("zstd", 0.95),   // 3 passes, spread 0.94-0.95; was 1.33, -28.7%
         ("zstd_buffers", 0.076),   // 3 passes, spread 0.081-0.11; HELD at 0.076: 3 of 3 passes above, peak 0.11, no loosening. Axe de 5 ms : le pic à 0.11 est un processus bruyant, les deux autres à 0.081
         ("list", 1.61),   // 3 passes, spread 1.63-1.65; HELD at 1.61: 3 of 3 passes above, peak 1.65, no loosening
