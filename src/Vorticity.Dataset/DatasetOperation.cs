@@ -19,6 +19,16 @@ public abstract record DatasetOperation
     /// <summary>Adds one data object to the dataset.</summary>
     /// <param name="Key">Its sort key in the tree.</param>
     /// <param name="Entry">What the leaf entry will say.</param>
+    /// <remarks>
+    /// THE KEY MUST BE A FUNCTION OF THE OBJECT, and both halves of that matter. It must be UNIQUE
+    /// to the object, because a tree's keys are unique and an add at a key another object already
+    /// holds does not add, it REPLACES — a writer whose key came from a version another writer has
+    /// already moved past would delete that writer's object and nothing would say so. And it must
+    /// be the SAME key every time this operation is re-applied, because §8.2's rebase re-applies it
+    /// and a store that crashed after its put will have the object under the first key it chose: a
+    /// key recomputed from the winner's state would come out different and add the object twice.
+    /// <c>VortexDataset</c> satisfies both by ending the key with the object's <c>uid</c>.
+    /// </remarks>
     public sealed record AddObject(ReadOnlyMemory<byte> Key, ObjectEntry Entry) : DatasetOperation;
 
     /// <summary>Replaces objects by the outputs of a compaction (§5.3).</summary>

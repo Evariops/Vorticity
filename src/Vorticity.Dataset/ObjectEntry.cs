@@ -70,6 +70,66 @@ public sealed record ObjectEntry(
     {
     }
 
+    /// <summary>Whether two entries describe the same object in the same state.</summary>
+    /// <param name="other">The other entry.</param>
+    /// <returns>Whether they are equal.</returns>
+    /// <remarks>
+    /// BY VALUE, WHICH A RECORD'S OWN EQUALITY WOULD NOT GIVE. <see cref="Fragments"/> is a list,
+    /// and the compiler's generated equality compares lists by REFERENCE: two entries holding the
+    /// same fragments in the same order, read out of two pages, would come back unequal. A record
+    /// that says it is a value and is not is a trap for anything that compares one — an oracle, a
+    /// rebase that wants to know whether an operation changed anything — so the comparison is
+    /// written out.
+    /// </remarks>
+    public bool Equals(ObjectEntry? other)
+    {
+        if (ReferenceEquals(this, other))
+        {
+            return true;
+        }
+
+        if (other is null
+            || !string.Equals(Key, other.Key, StringComparison.Ordinal)
+            || Uid != other.Uid
+            || Rows != other.Rows
+            || Bytes != other.Bytes
+            || Hash != other.Hash
+            || Fragments.Count != other.Fragments.Count
+            || !Summaries.Equals(other.Summaries))
+        {
+            return false;
+        }
+
+        for (int i = 0; i < Fragments.Count; i++)
+        {
+            if (Fragments[i] != other.Fragments[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <inheritdoc/>
+    public override int GetHashCode()
+    {
+        HashCode hash = default;
+        hash.Add(Key, StringComparer.Ordinal);
+        hash.Add(Uid);
+        hash.Add(Rows);
+        hash.Add(Bytes);
+        hash.Add(Hash);
+        hash.Add(Fragments.Count);
+        foreach (PageReference fragment in Fragments)
+        {
+            hash.Add(fragment);
+        }
+
+        hash.Add(Summaries);
+        return hash.ToHashCode();
+    }
+
     /// <summary>The entry with <paramref name="fragment"/> attached.</summary>
     /// <param name="fragment">The fragment's reference.</param>
     /// <returns>The new entry.</returns>

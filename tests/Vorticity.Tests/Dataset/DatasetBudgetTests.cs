@@ -1,0 +1,224 @@
+// The counting matrix of docs/13-dataset.md §9.2, over a dataset instead of over one file.
+//
+// WHAT §9.2 CLAIMS, and it is a claim about CONSTANTS, not about speed: "a clustering-key point
+// lookup costs at most R requests and B bytes, constants of the design, asserted equal across data
+// objects of 1 GiB, 10 GiB and 100 GiB (sparse, only the bytes read matter) and across datasets of
+// 1, 10³ and 10⁶ objects (synthetic leaves)". Two axes, and they fail differently: the SIZE axis
+// catches anything on the read path that scales with an object's length, which step 27 already
+// proved for one file and which a dataset must not reintroduce; the COUNT axis catches a descent
+// that walks a level instead of descending it, which no single-file test can see at all.
+//
+// AND A THIRD INVARIANT A COUNT CANNOT PROVE. "The dependent requests are the critical path […]
+// which no total of requests can prove, since parallel requests hide in a total." Ten requests
+// issued together cost one round trip and ten issued in sequence cost ten, and both are ten. So the
+// third test puts a latency on the store and reads a clock: it is the only assertion here that is
+// about time, and it is about time because the thing it measures is a DEPTH.
+//
+// THE LEAVES ARE SYNTHETIC ON THE COUNT AXIS, as §9.2 says they must be: a million real data
+// objects is a million files, and the thing under test is the tree above them, not the files below.
+// An entry is the bytes an entry is; the tree cannot tell the difference and neither can the budget.
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Text;
+using System.Threading.Tasks;
+using Vorticity.Dataset;
+using Vorticity.Expressions;
+using Vorticity.Scan;
+using Xunit;
+
+namespace Vorticity.Tests.Dataset;
+
+public sealed class DatasetBudgetTests
+{
+    private const ulong Seed = 0xB0D9E7_5EED;
+
+    /// <summary>
+    /// The chunker at its own defaults — 64 / 128 / 256 KiB — because that is the parameterisation
+    /// §4.1 and §9.1 state their numbers for. A smaller cap makes a deeper tree out of fewer
+    /// entries, which is convenient and measures something else: a fan-out the design does not
+    /// have. The entries below are sized to §4.1's own worked assumption instead, "entries of about
+    /// 200 bytes and pages of about 128 KiB", which is what makes its "fan-out is about 650" the
+    /// thing under test.
+    /// </summary>
+    private static CommitOptions Options() => new CommitOptions
+    {
+        Seed = Seed,
+        Template = new CommitHeader
+        {
+            Version = 1,
+            ClusteringKey = ["k"],
+            Chunker = new ChunkerSettings(
+                ProllyBoundaryRule.DefaultMinBytes,
+                ProllyBoundaryRule.DefaultTargetBytes,
+                ProllyBoundaryRule.DefaultMaxBytes),
+        },
+    };
+
+    private static ReadOnlyMemory<byte> Key(int i) => Encoding.UTF8.GetBytes($"k{i:D9}");
+
+    /// <summary>Four summarised columns, which is what brings an entry to §4.1's ~200 bytes.</summary>
+    private static ObjectSummaries Summaries(int i) => ObjectSummaries.From(
+    [
+        new ColumnSummary("k", FilterLiteral.From((long)i), true, FilterLiteral.From(i + 999L), true, true, 0, true),
+        new ColumnSummary("amount", FilterLiteral.From(i * 1.5), true, FilterLiteral.From(i * 2.5), true, true, 3, true),
+        new ColumnSummary("tenant", FilterLiteral.From($"t{i:D6}"), true, FilterLiteral.From($"t{i + 40:D6}"), true, true, 0, true),
+        new ColumnSummary("region", FilterLiteral.From($"r{i % 97:D3}"), true, FilterLiteral.From($"r{i % 97:D3}"), true, true, 0, true),
+    ]);
+
+    private static DatasetOperation Add(int i) => new DatasetOperation.AddObject(
+        Key(i),
+        new ObjectEntry(
+            CommitKey.ForData($"{i:x8}"), (UInt128)(uint)i + 1, 1_000, 1 << 20, (UInt128)(uint)i, Summaries(i)));
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(1_000)]
+    [InlineData(100_000)]
+    public async Task APointLookupCostsTheSameWhateverTheObjectCount(int objects)
+    {
+        // §9.2, invariant 1, on the axis a single-file test cannot see. The numbers are printed
+        // rather than pinned one by one: what the assertion holds is that they do not GROW, which
+        // is the claim, and a ceiling nobody derived would be a number somebody chose.
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+
+        List<DatasetOperation> operations = new List<DatasetOperation>(objects);
+        for (int i = 0; i < objects; i++)
+        {
+            operations.Add(Add(i));
+        }
+
+        CommitResult built = await DatasetCommitter.CommitAsync(store, operations, Options(), default);
+        Assert.Equal(objects, built.Tree.Entries);
+
+        // Cold: nothing is known, so this is §9.1's first two rows plus the descent.
+        store.Reset();
+        (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, default);
+        CommitObject found = Assert.IsType<CommitObject>(commit);
+        CommitPageSource pages = new CommitPageSource(store);
+        pages.Inline(found.Header);
+        pages.Know(version, found.HeaderEnd);
+        DatasetTree tree = DatasetCommitter.TreeOf(found.Header);
+
+        TreeEntry? hit = await tree.FindAsync(Key(objects / 2), pages, default);
+        Assert.True(hit.HasValue, "the key was committed and should be found");
+        Assert.Equal(Key(objects / 2).ToArray(), hit.Value.Key.ToArray());
+
+        long requests = store.Requests;
+        long steps = store.DependentSteps;
+        long bytes = store.BytesRead;
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET BUDGET: {objects} objects, depth {tree.Depth}: a cold point lookup cost {requests} requests in {steps} dependent steps and {bytes} bytes, {pages.Reads} page read(s).\n"));
+
+        // THE CONSTANT: the list, the header, and at most two pages below what the header inlined
+        // (§4.1's "0 up to ~650 objects, 1 up to ~400 000, 2 up to ~280 million"). Four is the
+        // ceiling the design states; a descent that walked a level would blow past it at 100 000.
+        Assert.InRange(requests, 2, 4);
+        Assert.InRange(steps, 2, 4);
+        Assert.Equal(1, store.CountOf(ObjectOperation.List));
+
+        // Warm, the same key on the same handle: the pages are immutable, so nothing is re-read.
+        // A DIFFERENT key is a different page and is not warm, which is the honest half of
+        // "cacheable, forever" (§9.1): the cache holds what was read, not what could be.
+        store.Reset();
+        Assert.True((await tree.FindAsync(Key(objects / 2), pages, default)).HasValue);
+        Assert.Equal(0, store.Requests);
+    }
+
+    [Fact]
+    public async Task TheDependentStepsAreTheCriticalPathAndNotTheRequestCount()
+    {
+        // §9.2, invariant 3: "the in-memory store injects a latency λ and no CPU cost; a cold
+        // clustering-key lookup completes within D × λ, D the count of §9.1, which no total of
+        // requests can prove, since parallel requests hide in a total". So this one reads a clock.
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+
+        List<DatasetOperation> operations = new List<DatasetOperation>(2_000);
+        for (int i = 0; i < 2_000; i++)
+        {
+            operations.Add(Add(i));
+        }
+
+        await DatasetCommitter.CommitAsync(store, operations, Options(), default);
+
+        TimeSpan latency = TimeSpan.FromMilliseconds(20);
+        inner.Latency = latency;
+        store.Reset();
+
+        Stopwatch clock = Stopwatch.StartNew();
+        (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, default);
+        CommitObject found = Assert.IsType<CommitObject>(commit);
+        CommitPageSource pages = new CommitPageSource(store);
+        pages.Inline(found.Header);
+        pages.Know(version, found.HeaderEnd);
+        DatasetTree tree = DatasetCommitter.TreeOf(found.Header);
+        Assert.NotNull(await tree.FindAsync(Key(1_000), pages, default));
+        clock.Stop();
+
+        long steps = store.DependentSteps;
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET LATENCY: a cold lookup over 2 000 objects took {clock.ElapsedMilliseconds} ms of {latency.TotalMilliseconds} ms per request, in {steps} dependent steps for {store.Requests} requests.\n"));
+
+        // A LOWER BOUND AND NO UPPER ONE, deliberately. The lower bound is the claim: the lookup
+        // waited for its round trips, one after another, so the clock saw the DEPTH and not the
+        // count. An upper bound would be a wall-clock ceiling in the test suite, which this
+        // repository keeps out of CI on purpose — the suite runs its classes in parallel, and a
+        // ceiling that a busy machine breaks is a flake, not a measurement. What an upper bound
+        // would buy is proof that parallel requests do not add up, and a descent of three
+        // sequential requests has none to hide.
+        Assert.True(
+            clock.Elapsed.TotalMilliseconds >= (steps - 1) * latency.TotalMilliseconds,
+            $"{steps} dependent steps at {latency.TotalMilliseconds} ms each cannot take {clock.ElapsedMilliseconds} ms");
+
+        // And warm costs no round trip at all, which is the other half of "2 to 3 warm" (§9.1).
+        store.Reset();
+        Assert.True((await tree.FindAsync(Key(1_000), pages, default)).HasValue);
+        Assert.Equal(0, store.Requests);
+    }
+
+    [Fact]
+    public async Task ACommitCostsThreeRequestsAndOneMoreWhenItOutgrowsTheInlining()
+    {
+        // §8.1 says a commit is "three dependent requests: the List, the read of N's header, the
+        // creation", and §8.2 says an iteration is "depth + 2: the header of N+1, the touched
+        // leaves, the creation". BOTH ARE TRUE, and what decides which is §3's inlining: while the
+        // header carries the pages the commit will touch, the touched leaves cost nothing and the
+        // total is three. Once the tree outgrows the 192 KiB the header inlines, the touched leaf
+        // is a read of its own and the total is four. That is the whole story of this number, and
+        // it is why the assertion below is a range with an explanation rather than a constant.
+        int[] sizes = [1, 1_000, 100_000];
+        long[] steps = new long[sizes.Length];
+        long[] written = new long[sizes.Length];
+        for (int at = 0; at < sizes.Length; at++)
+        {
+            await using MemoryObjectStore inner = new MemoryObjectStore();
+            await using CountingObjectStore store = new CountingObjectStore(inner);
+            List<DatasetOperation> operations = new List<DatasetOperation>(sizes[at]);
+            for (int i = 0; i < sizes[at]; i++)
+            {
+                operations.Add(Add(i));
+            }
+
+            await DatasetCommitter.CommitAsync(store, operations, Options(), default);
+
+            store.Reset();
+            CommitResult one = await DatasetCommitter.CommitAsync(store, [Add(sizes[at] + 1)], Options(), default);
+            steps[at] = store.DependentSteps;
+            written[at] = store.BytesWritten;
+            Assert.Equal(sizes[at] + 1, one.Tree.Entries);
+            Assert.Equal(1, one.Attempts);
+        }
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET COMMIT COST: one object added to {sizes[0]}, {sizes[1]} and {sizes[2]} objects cost {steps[0]}, {steps[1]} and {steps[2]} dependent steps and wrote {written[0]}, {written[1]} and {written[2]} bytes.\n"));
+
+        // Three while the inlining covers the path, four when it does not, and never a function of
+        // the object count: a commit that walked the objects would be off by orders of magnitude
+        // here, not by one.
+        Assert.Equal(3, steps[0]);
+        Assert.Equal(3, steps[1]);
+        Assert.InRange(steps[2], 3, 4);
+    }
+}

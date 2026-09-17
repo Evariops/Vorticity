@@ -256,10 +256,9 @@ public sealed class VortexDataset : IAsyncDisposable
                 .OpenAsync(source, new VortexOpenOptions(), cancellationToken).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))
             {
-                ObjectSummaries summaries = Summaries(file);
                 entry = new ObjectEntry(
-                    objectKey, Identity(file), file.RowCount, head.Length, UInt128.Zero, summaries);
-                treeKey = await TreeKeyAsync(file, summaries, RowCount, cancellationToken).ConfigureAwait(false);
+                    objectKey, Identity(file), file.RowCount, head.Length, UInt128.Zero, Summaries(file));
+                treeKey = await TreeKeyAsync(file, entry, RowCount, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -314,7 +313,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
         // Before the put, out of the buffer the sink still holds: the bounds §4.2 asks the entry to
         // carry, and the smallest key §4.1 orders the leaf by, cost no request at all this way.
-        (ObjectSummaries summaries, ReadOnlyMemory<byte> treeKey) =
+        (ObjectSummaries summaries, byte[] prefix) =
             await DescribeAsync(sink.Written, RowCount, cancellationToken).ConfigureAwait(false);
         if (await sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
         {
@@ -323,7 +322,8 @@ public sealed class VortexDataset : IAsyncDisposable
 
         ObjectEntry entry = new ObjectEntry(key, Uid(identity), rows, bytes, hash, summaries);
         return await ApplyAsync(
-            [new DatasetOperation.AddObject(treeKey, entry)], cancellationToken).ConfigureAwait(false);
+            [new DatasetOperation.AddObject(KeyOf(prefix, entry), entry)], cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>Applies operations and moves this handle to the version they created.</summary>
@@ -471,7 +471,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="bytes">The whole file, as the sink still holds it.</param>
     /// <param name="firstRow">Its first row in the dataset.</param>
     /// <param name="cancellationToken">Cancels the parse.</param>
-    private async ValueTask<(ObjectSummaries Summaries, ReadOnlyMemory<byte> Key)> DescribeAsync(
+    private async ValueTask<(ObjectSummaries Summaries, byte[] Prefix)> DescribeAsync(
         ReadOnlyMemory<byte> bytes, long firstRow, CancellationToken cancellationToken)
     {
         MemorySegmentSource source = new MemorySegmentSource(bytes);
@@ -480,21 +480,32 @@ public sealed class VortexDataset : IAsyncDisposable
         await using (file.ConfigureAwait(false))
         {
             ObjectSummaries summaries = Summaries(file);
-            return (summaries, await TreeKeyAsync(file, summaries, firstRow, cancellationToken)
+            return (summaries, await PrefixAsync(file, summaries, firstRow, cancellationToken)
                 .ConfigureAwait(false));
         }
     }
 
-    /// <summary>Where an object's leaf sits in the tree (§4.1).</summary>
+    /// <summary>What orders an object's leaf (§4.1): its smallest key, or its first row position.</summary>
     /// <param name="file">The object, open.</param>
     /// <param name="summaries">Its bounds.</param>
-    /// <param name="firstRow">Its first row in the dataset.</param>
+    /// <param name="firstRow">Its first row in the dataset, as this handle counts them.</param>
     /// <param name="cancellationToken">Cancels the seek a clustering key makes.</param>
-    private ValueTask<ReadOnlyMemory<byte>> TreeKeyAsync(
+    private async ValueTask<byte[]> PrefixAsync(
         VortexFile file, ObjectSummaries summaries, long firstRow, CancellationToken cancellationToken) =>
         Key is { } clustering
-            ? clustering.KeyOfAsync(file, summaries, firstRow, cancellationToken)
-            : new ValueTask<ReadOnlyMemory<byte>>(KeyOf(firstRow));
+            ? await clustering.MinimumAsync(file, summaries, cancellationToken).ConfigureAwait(false)
+            : PositionOf(firstRow);
+
+    /// <summary>The tree key of an object: what orders it, then what makes it unique.</summary>
+    /// <param name="file">The object, open.</param>
+    /// <param name="entry">Its leaf entry, whose identity is the suffix.</param>
+    /// <param name="firstRow">Its first row in the dataset.</param>
+    /// <param name="cancellationToken">Cancels the seek a clustering key makes.</param>
+    private async ValueTask<ReadOnlyMemory<byte>> TreeKeyAsync(
+        VortexFile file, ObjectEntry entry, long firstRow, CancellationToken cancellationToken) =>
+        KeyOf(
+            await PrefixAsync(file, entry.Summaries, firstRow, cancellationToken).ConfigureAwait(false),
+            entry);
 
     private static CommitOptions Commit(DatasetOptions options, CommitHeader template)
     {
@@ -516,17 +527,54 @@ public sealed class VortexDataset : IAsyncDisposable
             ? new ProllyBoundaryRule(seed, chunker.MinBytes, chunker.TargetBytes, chunker.MaxBytes)
             : null;
 
-    /// <summary>The tree key of an object that starts at row <paramref name="row"/>.</summary>
-    /// <param name="row">Its first row in the dataset.</param>
+    /// <summary>The tree key of an object: what orders it, then what makes it unique.</summary>
+    /// <param name="prefix">Its order: the row-encoded clustering key, or its first row position.</param>
+    /// <param name="entry">Its leaf entry, whose identity (§7) no other object shares.</param>
+    /// <remarks>
+    /// THE SUFFIX IS THE UID, AND THE FUZZER IS WHY. The prefix orders the object and does not
+    /// identify it: two writers on one dataset read the same version, compute the same first row
+    /// position, and produce the same prefix — and an add at a key another object holds REPLACES
+    /// it. Ten appends became six objects, and nothing said so. The suffix has to make the key
+    /// unique, and it has to be a function of the OBJECT rather than of the tree: §8.2 re-applies
+    /// an operation after a rebase, and a store that crashed after its put holds the object under
+    /// the key the first attempt chose, so a suffix recomputed from the winner's state would add
+    /// the object a second time. The uid is both: unique by construction (§7 mints it per version
+    /// of the bytes) and carried by the entry.
+    ///
+    /// What it costs is the ORDER between two objects whose prefixes are equal: it is their uids'
+    /// order, which is arbitrary, where §8.2's first row says "order by commit". Under a clustering
+    /// key that is a tie between equal minima and means nothing. Without one it is two concurrent
+    /// appends that believed they started at the same row, and they did; their relative order is
+    /// then a coin the uid already flipped, and both of them are there, which is the property that
+    /// was actually at stake.
+    /// </remarks>
+    private static ReadOnlyMemory<byte> KeyOf(ReadOnlySpan<byte> prefix, ObjectEntry entry)
+    {
+        // A file this library did not write has no identity to mint (§7), and its entry's uid is
+        // zero; two of them would share a suffix. Its OBJECT KEY is unique in the store by
+        // definition, so it stands in, hashed to the same sixteen bytes. The entry's uid stays
+        // zero, because that field says what the postscript says and a fragment binds to it.
+        UInt128 unique = entry.Uid != UInt128.Zero
+            ? entry.Uid
+            : System.IO.Hashing.XxHash128.HashToUInt128(System.Text.Encoding.UTF8.GetBytes(entry.Key));
+        byte[] key = new byte[prefix.Length + 16];
+        prefix.CopyTo(key);
+        BinaryPrimitives.WriteUInt64BigEndian(key.AsSpan(prefix.Length), (ulong)(unique >> 64));
+        BinaryPrimitives.WriteUInt64BigEndian(key.AsSpan(prefix.Length + 8), (ulong)unique);
+        return key;
+    }
+
+    /// <summary>An object's order when the dataset declares no clustering key: its first row.</summary>
+    /// <param name="row">Its first row in the dataset, as this handle counts them.</param>
     /// <remarks>
     /// Big-endian, so that `memcmp` order is numeric order: the tree compares keys as bytes and
     /// nothing else (06), and a little-endian key would order 256 before 2.
     /// </remarks>
-    private static ReadOnlyMemory<byte> KeyOf(long row)
+    private static byte[] PositionOf(long row)
     {
-        byte[] key = new byte[sizeof(long)];
-        BinaryPrimitives.WriteInt64BigEndian(key, row);
-        return key;
+        byte[] prefix = new byte[sizeof(long)];
+        BinaryPrimitives.WriteInt64BigEndian(prefix, row);
+        return prefix;
     }
 
     /// <summary>A file's identity as §7 mints it, or zero when it has none.</summary>

@@ -103,25 +103,6 @@ public sealed class ClusteringKey
             : composite;
     }
 
-    /// <summary>The tree key of an object: its smallest key, then its first row (the file comment).</summary>
-    /// <param name="file">The object, open.</param>
-    /// <param name="summaries">Its summaries, for the fallback when it has no key cursor.</param>
-    /// <param name="firstRow">Its first row in the dataset, which breaks a tie between equal minima.</param>
-    /// <param name="cancellationToken">Cancels the seek.</param>
-    /// <returns>The key.</returns>
-    /// <exception cref="ArgumentNullException">An argument is null.</exception>
-    public async ValueTask<ReadOnlyMemory<byte>> KeyOfAsync(
-        VortexFile file, ObjectSummaries summaries, long firstRow, CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(file);
-        ArgumentNullException.ThrowIfNull(summaries);
-        byte[] minimum = await MinimumAsync(file, summaries, cancellationToken).ConfigureAwait(false);
-        byte[] key = new byte[minimum.Length + sizeof(long)];
-        minimum.CopyTo(key, 0);
-        System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(key.AsSpan(minimum.Length), firstRow);
-        return key;
-    }
-
     /// <summary>The row encoding of one tuple, for a seek or a comparison.</summary>
     /// <param name="values">The leading key values, in key order.</param>
     /// <returns>The bytes.</returns>
@@ -162,8 +143,13 @@ public sealed class ClusteringKey
         }
     }
 
-    /// <summary>The object's smallest key, encoded; empty when it has no rows.</summary>
-    private async ValueTask<byte[]> MinimumAsync(
+    /// <summary>The object's smallest key, row-encoded; empty when it has no rows.</summary>
+    /// <param name="file">The object, open.</param>
+    /// <param name="summaries">Its summaries, for the fallback when it has no key cursor.</param>
+    /// <param name="cancellationToken">Cancels the seek.</param>
+    /// <returns>The encoded minimum, which is what orders the object's leaf (§4.1).</returns>
+    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    public async ValueTask<byte[]> MinimumAsync(
         VortexFile file, ObjectSummaries summaries, CancellationToken cancellationToken)
     {
         KeyCursor? cursor = await TryOpenAsync(file, cancellationToken).ConfigureAwait(false);

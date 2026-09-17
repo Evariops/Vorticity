@@ -690,6 +690,21 @@ commits (§5.3), not by the tree.
 
 Every case is a row of the rebase matrix test (§14).
 
+**As delivered (step 40): what the fuzzer found in row 1.** "Both objects land in level 0" was true
+of the intention and false of the bytes. A tree's keys are unique, and an object's key was what
+orders it — its first row position, or its smallest clustering key — computed by the writer from the
+version *it* had read. Two handles on one dataset read the same version, computed the same position
+and produced the same key, and the second commit did not add an object: it **replaced** the first
+one's entry. Ten appends left six objects, and nothing said so.
+
+The key now ends with the object's `uid`. That makes it unique, and — the half that is easy to miss
+— it makes it a function of the **object** rather than of the tree, which §8.2 requires of anything
+it re-applies: a store that crashed after its put holds the object under the key the first attempt
+chose, so a suffix recomputed against the winner would add the object a second time. What it costs
+is the order between two objects whose prefixes are equal, which is then their uids' order rather
+than the commit order this table names. Under a clustering key that is a tie between equal minima.
+Without one it is two concurrent appends that believed they started at the same row, and they did.
+
 **As delivered (step 38).** `DatasetCommitter.CommitAsync` is the loop above: `List`, open the
 winner, re-apply, `PutIfAbsent`, repeat. The operations are the four this section names
 (`AddObject`, `AddFragment`, `DropFragment`, `ReplaceObjects`) and each carries its own answer to a
@@ -787,6 +802,35 @@ With the fan-outs and page sizes fixed:
 - **What it does not prove.** The files differ in length, not in rows. A file of ten times the
   rows reads a larger footer and zone map: those are O(chunks) by the Vortex format, and bounding
   them is the dataset's job.
+
+**As delivered (step 40), invariants 1 and 3 over a dataset.** The counting store measures a cold
+clustering-key lookup — the `List`, the header, the descent — across datasets of 1, 10³ and 10⁵
+objects, at the chunker's own defaults and at §4.1's own worked assumption of ~200-byte entries, so
+that its "fan-out is about 650" is the thing under test rather than a smaller cap chosen for the
+test's convenience:
+
+| objects | depth | requests | dependent steps | pages read below the header |
+|---|---|---|---|---|
+| 1 | 1 | 2 | 2 | 0 |
+| 1 000 | 2 | 2 | 2 | 0 |
+| 100 000 | 2 | 3 | 3 | 1 |
+
+A second lookup **on the same key** costs nothing: the pages are immutable and the source keeps
+them. A second lookup on a *different* key is not warm, and the test says so — the cache holds what
+was read, not what could have been.
+
+Invariant 3 is the one no count can prove, so it reads a clock: with the in-memory store's latency
+at 20 ms, the same lookup waits for its round trips one after another. The assertion is a **lower**
+bound only. An upper bound would be a wall-clock ceiling in the test suite, which this repository
+keeps out of CI; what it would buy is proof that parallel requests do not add up, and a descent of
+three sequential requests has none to hide.
+
+**And the write side, which §4.3 states and §8.1 counts.** One object added to a dataset of 1, 10³
+and 10⁵ objects costs **3, 3 and 4** dependent steps. Both of the spec's numbers are right and §3's
+inlining is what decides which: while the header carries the pages the commit will touch, the
+touched leaves cost nothing and §8.1's three holds; once the tree outgrows the 192 KiB the header
+inlines, the touched leaf is a read of its own and §8.2's `depth + 2` shows through. Neither is a
+function of the object count, which is the claim.
 
 10 §8.1.8's "identical bytes on 1 GiB and 10 GiB" was right in intent and too strong in form: a
 tree reads a page more at each order of magnitude. The constants hold at a fixed page cap, which
@@ -1062,9 +1106,19 @@ of §9.1. Where the two still differ under latency:
 
 - **The counting matrix** of §9.2: 3 object sizes × 3 object counts, the first two invariants;
   the third under the injected latency of the in-memory store, cold and warm.
+  *As delivered (step 40): the object-count axis and invariant 3, in `DatasetBudgetTests`, with the
+  table in §9.2. The object-SIZE axis is `ReadBudgetTests` (step 27) and stays there: it is a claim
+  about one file's read path, which a dataset adds a constant to and cannot change.*
 - **The interleaving fuzzer** over the in-memory store: seeded schedules of readers, writers,
   indexers, compactors and vacuum, crashes between any two store calls; every read equals a scan
   with indexes off on the same version; every retained root references only existing objects.
+  *As delivered (step 40): `DatasetFuzzTests`. Each writer PREPARES its operations against the
+  version it read and COMMITS them after a seeded number of other writers have moved the ground, so
+  the staleness is the point rather than an accident; one commit in five crashes after its put and
+  is retried. The oracle is a model of §8.2's rules over a dictionary, and the tree must equal it
+  entry for entry — which is what caught the key collision recorded in §8.2. Vacuum and the
+  compactor's policy are not scheduled because they do not exist yet (steps 41 and 43); their
+  operations are, so the schedule drives those directly.*
 - **The rebase matrix** of §8.2, every row.
 - **The invariant of §5.2** after every compaction step of a randomised append stream; `Explain`
   reports the lag when it is violated on purpose.
