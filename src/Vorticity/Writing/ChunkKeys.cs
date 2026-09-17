@@ -12,8 +12,9 @@
 //
 // A CHUNK CLOSE CUTS THE LOG. Ingest runs ahead of emission by the rows the writer carries, so when
 // a chunk of rows [r, r + n) goes out the log may hold the carried rows' pairs after its own. When
-// it does not -- the common case -- the whole table becomes the run and a fresh one starts; when it
-// does, the table keeps its ids for the run and only the carried suffix is re-interned.
+// it does not -- the common case -- the whole table becomes the run and the builder's emptied spare
+// takes its place; when it does, the table keeps its ids for the run and only the carried suffix is
+// re-interned. The two tables trade places at every chunk, so their buffers are grown once.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -131,11 +132,16 @@ internal sealed class ChunkKeys : IDisposable
     /// keeps the rest.
     /// </summary>
     /// <param name="end">The first position the chunk does not cover.</param>
-    /// <returns>
-    /// The chunk's table. Its key list may hold keys only the kept suffix uses; <see cref="Ranked"/>
-    /// leaves those out.
-    /// </returns>
-    internal ChunkKeys Cut(long end)
+    /// <param name="taken">
+    /// An empty table that becomes the chunk's. Its key list may hold keys only the kept suffix
+    /// uses; <see cref="Ranked"/> leaves those out.
+    /// </param>
+    /// <remarks>
+    /// The two tables trade places here and trade back in <see cref="Reclaim"/>, so the buffers that
+    /// grew to a chunk's size stay with the open table and the spare only ever holds a carried
+    /// suffix: a builder that keeps both allocates nothing per chunk once the first has grown.
+    /// </remarks>
+    internal void Cut(long end, ChunkKeys taken)
     {
         int split = 0;
         while (split < _log.Count && _log[split].Position < end)
@@ -143,30 +149,62 @@ internal sealed class ChunkKeys : IDisposable
             split++;
         }
 
-        ChunkKeys taken = new ChunkKeys();
         taken.Exchange(this);
         if (split == taken._log.Count)
         {
-            return taken;
+            return;
         }
 
         // Carried rows: re-intern the suffix here, then drop it from the chunk's table.
-        List<(int Key, long Position)> log = taken._log;
-        Dictionary<int, int> ids = [];
-        for (int i = split; i < log.Count; i++)
-        {
-            (int key, long position) = log[i];
-            if (!ids.TryGetValue(key, out int id))
-            {
-                id = Intern(taken.KeyBytes(key));
-                ids[key] = id;
-            }
+        taken.CopyInto(this, split);
+        taken._log.RemoveRange(split, taken._log.Count - split);
+    }
 
-            Note(id, position);
+    /// <summary>
+    /// Takes back the buffers of the table <see cref="Cut"/> filled, once its run is built: the
+    /// carried pairs move into it and the two trade places again, <paramref name="spent"/> ending
+    /// empty.
+    /// </summary>
+    /// <param name="spent">The chunk's table, read and no longer needed.</param>
+    internal void Reclaim(ChunkKeys spent)
+    {
+        spent.Reset();
+        CopyInto(spent, 0);
+        Exchange(spent);
+        spent.Reset();
+    }
+
+    /// <summary>Re-interns the pairs from <paramref name="from"/> on into <paramref name="target"/>.</summary>
+    private void CopyInto(ChunkKeys target, int from)
+    {
+        if (from == _log.Count)
+        {
+            return;
         }
 
-        log.RemoveRange(split, log.Count - split);
-        return taken;
+        int keys = _keys.Count;
+        int[] ids = ArrayPool<int>.Shared.Rent(keys);
+        ids.AsSpan(0, keys).Fill(-1);
+        for (int i = from; i < _log.Count; i++)
+        {
+            (int key, long position) = _log[i];
+            if (ids[key] < 0)
+            {
+                ids[key] = target.Intern(KeyBytes(key));
+            }
+
+            target.Note(ids[key], position);
+        }
+
+        ArrayPool<int>.Shared.Return(ids);
+    }
+
+    private void Reset()
+    {
+        _heapUsed = 0;
+        _keys.Clear();
+        _log.Clear();
+        _slots.AsSpan().Fill(-1);
     }
 
     private void Exchange(ChunkKeys other)
@@ -180,9 +218,15 @@ internal sealed class ChunkKeys : IDisposable
 
     /// <summary>The ids the log uses, in the layout's total order.</summary>
     /// <param name="layout">How the bytes compare.</param>
-    internal int[] Ranked(KeyLayout layout)
+    /// <param name="ranked">
+    /// The ids, in an array rented from <see cref="ArrayPool{T}.Shared"/> that the caller returns.
+    /// </param>
+    /// <returns>How many ids <paramref name="ranked"/> holds.</returns>
+    internal int Ranked(KeyLayout layout, out int[] ranked)
     {
-        bool[] used = new bool[_keys.Count];
+        int keys = _keys.Count;
+        bool[] used = ArrayPool<bool>.Shared.Rent(keys);
+        used.AsSpan(0, keys).Clear();
         int count = 0;
         foreach ((int key, _) in _log)
         {
@@ -193,18 +237,24 @@ internal sealed class ChunkKeys : IDisposable
             }
         }
 
-        int[] order = new int[count];
+        ranked = ArrayPool<int>.Shared.Rent(count);
         int next = 0;
-        for (int id = 0; id < used.Length; id++)
+        for (int id = 0; id < keys; id++)
         {
             if (used[id])
             {
-                order[next++] = id;
+                ranked[next++] = id;
             }
         }
 
-        Array.Sort(order, (a, b) => layout.Compare(KeyBytes(a), KeyBytes(b)));
-        return order;
+        ArrayPool<bool>.Shared.Return(used);
+        ranked.AsSpan(0, count).Sort(new ByKey(this, layout));
+        return count;
+    }
+
+    private readonly struct ByKey(ChunkKeys table, KeyLayout layout) : IComparer<int>
+    {
+        public int Compare(int x, int y) => layout.Compare(table.KeyBytes(x), table.KeyBytes(y));
     }
 
     /// <inheritdoc/>

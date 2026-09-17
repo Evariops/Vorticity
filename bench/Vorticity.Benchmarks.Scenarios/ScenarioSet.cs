@@ -18,6 +18,7 @@ using System.Threading.Tasks;
 using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.Indexes;
 using Vorticity.Scan;
 using Vorticity.Writing;
 
@@ -45,7 +46,8 @@ public static class ScenarioSet
     public const long WideBand = 32_768;
 
     /// <summary>The scenario names this assembly answers to.</summary>
-    public static string[] Names => ["fullscan", "projected", "take", "filtered", "write"];
+    public static string[] Names =>
+        ["fullscan", "projected", "take", "filtered", "write", "write-postings", "write-sorted-runs"];
 
     /// <summary>
     /// The scenario <paramref name="name"/> names, as a delegate of shared-runtime types only.
@@ -64,6 +66,8 @@ public static class ScenarioSet
         "take" => p => ScatteredTake(p, TakeCount, TakeStride),
         "filtered" => p => FilteredScan(p, BandLow, NarrowBand),
         "write" => ReadAndWrite,
+        "write-postings" => p => ReadAndWriteIndexed(p, IndexPolicy.Postings),
+        "write-sorted-runs" => p => ReadAndWriteIndexed(p, IndexPolicy.SortedRuns),
         _ => null,
     };
 
@@ -205,11 +209,26 @@ public static class ScenarioSet
     /// The read is inside the measurement on both sides and is therefore common-mode, but it is not
     /// small: subtract the scan axis before reading the quotient as a statement about writers.
     /// </remarks>
-    public static async Task<long> ReadAndWrite(string path)
+    public static Task<long> ReadAndWrite(string path) => ReadAndWrite(path, null);
+
+    /// <summary>
+    /// The write-back with a locating index on every column, which no default ever builds: the
+    /// builders' own cost, above <see cref="ReadAndWrite(string)"/>.
+    /// </summary>
+    /// <param name="path">The file.</param>
+    /// <param name="index">The index every column gets.</param>
+    /// <remarks>The budget is lifted: the axis times the builder, not whether its index pays.</remarks>
+    public static Task<long> ReadAndWriteIndexed(string path, IndexPolicy index) =>
+        ReadAndWrite(
+            path,
+            new VortexWriteOptions { Indexes = WritePolicy.None.WithDefault(index), IndexBudgetPerMille = 1_000_000 });
+
+    private static async Task<long> ReadAndWrite(string path, VortexWriteOptions? options)
     {
         await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await using VortexFileWriter writer =
-            VortexFileWriter.Create(new DiscardSink(), source.Schema);
+        await using VortexFileWriter writer = options is null
+            ? VortexFileWriter.Create(new DiscardSink(), source.Schema)
+            : VortexFileWriter.Create(new DiscardSink(), source.Schema, options);
 
         long rows = 0;
         await foreach (RecordBatch batch in source.Scan().ExecuteAsync()

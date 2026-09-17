@@ -19,6 +19,7 @@
 // first row, which is `first_block × block_len` because a chunk is a whole number of blocks. So a
 // row fits `u32` whatever the file's length.
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
@@ -48,8 +49,9 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     private readonly int _segmentEntries;
     private readonly bool _trigrams;
     private readonly bool _fold;
+    private readonly ChunkKeys _spare = new ChunkKeys();
+    private readonly List<int> _lastBlock = [];
     private ChunkKeys _table;
-    private List<int> _lastBlock = [];
     private long _row;
     private int _block;
 
@@ -295,54 +297,55 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         }
 
         long end = _rows ? firstRow + rows : (long)firstBlock + blocks;
-        using ChunkKeys chunk = _table.Cut(end);
+        ChunkKeys chunk = _spare;
+        _table.Cut(end, chunk);
+        try
+        {
+            KeyRun run = _rows
+                ? SortedRun(chunk, firstBlock, blocks, firstRow)
+                : PostingsRun(chunk, firstBlock, blocks);
+            Runs.Add(run);
+            foreach (PendingPayload payload in run.Payloads)
+            {
+                Enqueue(payload);
+            }
+        }
+        finally
+        {
+            _table.Reclaim(chunk);
+        }
+
         if (!_rows)
         {
             // The carried suffix was re-interned: its ids are new, and so are their last blocks.
-            List<int> last = [];
+            _lastBlock.Clear();
             foreach ((int key, long position) in _table.Log)
             {
-                while (last.Count <= key)
+                while (_lastBlock.Count <= key)
                 {
-                    last.Add(-1);
+                    _lastBlock.Add(-1);
                 }
 
-                last[key] = (int)position;
+                _lastBlock[key] = (int)position;
             }
-
-            _lastBlock = last;
-        }
-
-        KeyRun run = _rows
-            ? SortedRun(chunk, firstBlock, blocks, firstRow)
-            : PostingsRun(chunk, firstBlock, blocks);
-        Runs.Add(run);
-        foreach (PendingPayload payload in run.Payloads)
-        {
-            Enqueue(payload);
         }
     }
 
+    // EVERY ARRAY BELOW IS RENTED. The work arrays go back when the run is built; the payload arrays
+    // go back when the index writer has laid them (PendingPayload's release), and an array that is a
+    // whole segment's payload as it stands is handed over rather than copied.
     private KeyRun PostingsRun(ChunkKeys chunk, int firstBlock, int blocks)
     {
-        int[] ranked = chunk.Ranked(_layout);
-        int[] rank = RankOf(ranked, chunk);
+        int distinct = chunk.Ranked(_layout, out int[] ranked);
+        int[] rank = RankOf(ranked, distinct, chunk);
+        int entries = chunk.Log.Count;
 
         // The block lists, grouped by rank: count, prefix-sum, fill in log order (which is block
         // order, so each list comes out sorted).
-        int[] starts = new int[ranked.Length + 1];
-        foreach ((int key, _) in chunk.Log)
-        {
-            starts[rank[key] + 1]++;
-        }
-
-        for (int i = 0; i < ranked.Length; i++)
-        {
-            starts[i + 1] += starts[i];
-        }
-
-        uint[] lists = new uint[chunk.Log.Count];
-        int[] cursor = (int[])starts.Clone();
+        int[] starts = Counts(chunk, rank, distinct);
+        uint[] lists = ArrayPool<uint>.Shared.Rent(entries);
+        int[] cursor = ArrayPool<int>.Shared.Rent(distinct + 1);
+        starts.AsSpan(0, distinct + 1).CopyTo(cursor);
         foreach ((int key, long block) in chunk.Log)
         {
             lists[cursor[rank[key]]++] = checked((uint)(block - firstBlock));
@@ -350,73 +353,115 @@ internal sealed class KeyIndexBuilder : IndexBuilder
 
         List<KeySegment> segments = [];
         List<PendingPayload> payloads = [];
-        for (int from = 0; from < Math.Max(ranked.Length, 1); from += _segmentEntries)
+        bool listsHandedOver = false;
+        for (int from = 0; from < Math.Max(distinct, 1); from += _segmentEntries)
         {
-            int to = Math.Min(from + _segmentEntries, ranked.Length);
-            uint[] offsets = new uint[to - from + 1];
+            int to = Math.Min(from + _segmentEntries, distinct);
+            uint[] offsets = ArrayPool<uint>.Shared.Rent(to - from + 1);
             for (int i = from; i <= to; i++)
             {
                 offsets[i - from] = (uint)(starts[i] - starts[from]);
             }
 
-            uint[] segmentLists = lists.AsSpan(starts[from], starts[to] - starts[from]).ToArray();
-            segments.Add(Segment(chunk, ranked, from, to, to - from));
-            payloads.Add(Keys(chunk, ranked, from, to, entries: null));
-            payloads.Add(PendingPayload.U32(offsets, compress: true));
-            payloads.Add(PendingPayload.U32(segmentLists, compress: true));
+            ReadOnlySpan<int> ids = ranked.AsSpan(from, to - from);
+            segments.Add(Segment(chunk, ids));
+            payloads.Add(Keys(chunk, ids));
+            payloads.Add(PendingPayload.RentedU32(offsets, to - from + 1, compress: true));
+            payloads.Add(Rows(lists, starts[from], starts[to], entries, ref listsHandedOver));
         }
 
-        return new KeyRun(firstBlock, blocks, ranked.Length, segments, payloads);
+        Return(lists, listsHandedOver);
+        ArrayPool<int>.Shared.Return(cursor);
+        ArrayPool<int>.Shared.Return(starts);
+        ArrayPool<int>.Shared.Return(rank);
+        ArrayPool<int>.Shared.Return(ranked);
+        return new KeyRun(firstBlock, blocks, distinct, segments, payloads);
     }
 
     private KeyRun SortedRun(ChunkKeys chunk, int firstBlock, int blocks, long firstRow)
     {
-        int[] ranked = chunk.Ranked(_layout);
-        int[] rank = RankOf(ranked, chunk);
+        int distinct = chunk.Ranked(_layout, out int[] ranked);
+        int[] rank = RankOf(ranked, distinct, chunk);
         List<(int Key, long Position)> log = chunk.Log;
+        int entries = log.Count;
 
-        // A stable counting sort of the rows by their key's rank.
-        int[] starts = new int[ranked.Length + 1];
-        foreach ((int key, _) in log)
-        {
-            starts[rank[key] + 1]++;
-        }
-
-        for (int i = 0; i < ranked.Length; i++)
-        {
-            starts[i + 1] += starts[i];
-        }
-
-        int[] entryRank = new int[log.Count];
-        uint[] rows = new uint[log.Count];
-        int[] cursor = (int[])starts.Clone();
+        // A stable counting sort of the rows by their key's rank; each entry keeps its key's id.
+        int[] cursor = Counts(chunk, rank, distinct);
+        int[] entryIds = ArrayPool<int>.Shared.Rent(entries);
+        uint[] rows = ArrayPool<uint>.Shared.Rent(entries);
         foreach ((int key, long row) in log)
         {
             int slot = cursor[rank[key]]++;
-            entryRank[slot] = rank[key];
+            entryIds[slot] = key;
             rows[slot] = checked((uint)(row - firstRow));
         }
 
         List<KeySegment> segments = [];
         List<PendingPayload> payloads = [];
-        for (int from = 0; from < Math.Max(log.Count, 1); from += _segmentEntries)
+        bool rowsHandedOver = false;
+        for (int from = 0; from < Math.Max(entries, 1); from += _segmentEntries)
         {
-            int to = Math.Min(from + _segmentEntries, log.Count);
-            int[] entries = entryRank.AsSpan(from, to - from).ToArray();
-            segments.Add(to == from
-                ? new KeySegment(0, [], [])
-                : new KeySegment(
-                    (ulong)(to - from),
-                    chunk.KeyBytes(ranked[entries[0]]).ToArray(),
-                    chunk.KeyBytes(ranked[entries[^1]]).ToArray()));
-            payloads.Add(Keys(chunk, ranked, 0, 0, entries));
-            payloads.Add(PendingPayload.U32(rows.AsSpan(from, to - from).ToArray(), compress: true));
+            int to = Math.Min(from + _segmentEntries, entries);
+            ReadOnlySpan<int> ids = entryIds.AsSpan(from, to - from);
+            segments.Add(Segment(chunk, ids));
+            payloads.Add(Keys(chunk, ids));
+            payloads.Add(Rows(rows, from, to, entries, ref rowsHandedOver));
         }
 
-        return new KeyRun(firstBlock, blocks, log.Count, segments, payloads);
+        Return(rows, rowsHandedOver);
+        ArrayPool<int>.Shared.Return(entryIds);
+        ArrayPool<int>.Shared.Return(cursor);
+        ArrayPool<int>.Shared.Return(rank);
+        ArrayPool<int>.Shared.Return(ranked);
+        return new KeyRun(firstBlock, blocks, entries, segments, payloads);
     }
 
-    private static int[] RankOf(int[] ranked, ChunkKeys chunk)
+    /// <summary>
+    /// Where each rank's entries start: <c>[0]</c> is zero and <c>[distinct]</c> the log's length.
+    /// </summary>
+    private static int[] Counts(ChunkKeys chunk, int[] rank, int distinct)
+    {
+        int[] starts = ArrayPool<int>.Shared.Rent(distinct + 1);
+        starts.AsSpan(0, distinct + 1).Clear();
+        foreach ((int key, _) in chunk.Log)
+        {
+            starts[rank[key] + 1]++;
+        }
+
+        for (int i = 0; i < distinct; i++)
+        {
+            starts[i + 1] += starts[i];
+        }
+
+        return starts;
+    }
+
+    /// <summary>
+    /// The payload of words <c>[from, to)</c>: the array itself when that is all of it, a rented
+    /// copy otherwise.
+    /// </summary>
+    private static PendingPayload Rows(uint[] words, int from, int to, int length, ref bool handedOver)
+    {
+        if (from == 0 && to == length)
+        {
+            handedOver = true;
+            return PendingPayload.RentedU32(words, length, compress: true);
+        }
+
+        uint[] copy = ArrayPool<uint>.Shared.Rent(to - from);
+        words.AsSpan(from, to - from).CopyTo(copy);
+        return PendingPayload.RentedU32(copy, to - from, compress: true);
+    }
+
+    private static void Return(uint[] words, bool handedOver)
+    {
+        if (!handedOver)
+        {
+            ArrayPool<uint>.Shared.Return(words);
+        }
+    }
+
+    private static int[] RankOf(int[] ranked, int distinct, ChunkKeys chunk)
     {
         int maxId = 0;
         foreach ((int key, _) in chunk.Log)
@@ -424,8 +469,9 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             maxId = Math.Max(maxId, key);
         }
 
-        int[] rank = new int[maxId + 1];
-        for (int i = 0; i < ranked.Length; i++)
+        // Only the ids the log uses are read, and every one of them is ranked.
+        int[] rank = ArrayPool<int>.Shared.Rent(maxId + 1);
+        for (int i = 0; i < distinct; i++)
         {
             rank[ranked[i]] = i;
         }
@@ -433,44 +479,48 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         return rank;
     }
 
-    private static KeySegment Segment(ChunkKeys chunk, int[] ranked, int from, int to, int entries) =>
-        to == from
+    private static KeySegment Segment(ChunkKeys chunk, ReadOnlySpan<int> ids) =>
+        ids.IsEmpty
             ? new KeySegment(0, [], [])
-            : new KeySegment((ulong)entries, chunk.KeyBytes(ranked[from]).ToArray(), chunk.KeyBytes(ranked[to - 1]).ToArray());
+            : new KeySegment((ulong)ids.Length, chunk.KeyBytes(ids[0]).ToArray(), chunk.KeyBytes(ids[^1]).ToArray());
 
     /// <summary>
-    /// The keys array of a segment, copied out of the chunk's table now: the table is gone by the
-    /// time the payload is laid out. Either the distinct keys <c>ranked[from..to)</c>, or one key
-    /// per entry, by rank.
+    /// The keys array of a segment, one key per id, copied out of the chunk's table now: the table
+    /// is reset by the time the payload is laid out.
     /// </summary>
-    private PendingPayload Keys(ChunkKeys chunk, int[] ranked, int from, int to, int[]? entries)
+    private PendingPayload Keys(ChunkKeys chunk, ReadOnlySpan<int> ids)
     {
-        int count = entries?.Length ?? to - from;
-        int[] offsets = new int[count + 1];
+        int count = ids.Length;
+        int[] offsets = ArrayPool<int>.Shared.Rent(count + 1);
+        offsets[0] = 0;
         for (int i = 0; i < count; i++)
         {
-            int id = entries is null ? ranked[from + i] : ranked[entries[i]];
-            offsets[i + 1] = offsets[i] + chunk.KeyBytes(id).Length;
+            offsets[i + 1] = offsets[i] + chunk.KeyBytes(ids[i]).Length;
         }
 
-        byte[] heap = new byte[offsets[count]];
+        int length = offsets[count];
+        byte[] heap = ArrayPool<byte>.Shared.Rent(length);
         for (int i = 0; i < count; i++)
         {
-            int id = entries is null ? ranked[from + i] : ranked[entries[i]];
-            chunk.KeyBytes(id).CopyTo(heap.AsSpan(offsets[i]));
+            chunk.KeyBytes(ids[i]).CopyTo(heap.AsSpan(offsets[i]));
         }
 
         KeyLayout layout = _layout;
         bool utf8 = _utf8;
         return new PendingPayload(
             (arena, types) => layout.Shape == KeyShape.Bytes
-                ? Views(arena, types, utf8, heap, offsets)
-                : Fixed(arena, types, layout, heap, count),
+                ? Views(arena, types, utf8, heap.AsSpan(0, length), offsets.AsSpan(0, count + 1))
+                : Fixed(arena, types, layout, heap.AsSpan(0, length), count),
             compress: true,
-            estimate: heap.Length + (layout.Shape == KeyShape.Bytes ? 16L * count : 0));
+            estimate: length + (layout.Shape == KeyShape.Bytes ? 16L * count : 0),
+            () =>
+            {
+                ArrayPool<byte>.Shared.Return(heap);
+                ArrayPool<int>.Shared.Return(offsets);
+            });
     }
 
-    private static int Fixed(CanonicalArena arena, DTypeArena types, KeyLayout layout, byte[] heap, int count)
+    private static int Fixed(CanonicalArena arena, DTypeArena types, KeyLayout layout, ReadOnlySpan<byte> heap, int count)
     {
         VortexBuffer buffer = arena.AllocateUninitialized(heap.Length, layout.Width, out Span<byte> bytes);
         heap.CopyTo(bytes);
@@ -478,7 +528,8 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             types.Primitive(layout.PType, Nullability.NonNullable), count, Validity.NonNullable, layout.PType, buffer);
     }
 
-    private static int Views(CanonicalArena arena, DTypeArena types, bool utf8, byte[] heap, int[] offsets)
+    private static int Views(
+        CanonicalArena arena, DTypeArena types, bool utf8, ReadOnlySpan<byte> heap, ReadOnlySpan<int> offsets)
     {
         int count = offsets.Length - 1;
         VortexBuffer data = arena.AllocateUninitialized(Math.Max(heap.Length, 1), 1, out Span<byte> dataBytes);
@@ -492,11 +543,11 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             MemoryMarshal.Write(view, in length);
             if (length <= 12)
             {
-                heap.AsSpan(offsets[i], length).CopyTo(view[4..]);
+                heap.Slice(offsets[i], length).CopyTo(view[4..]);
                 continue;
             }
 
-            heap.AsSpan(offsets[i], 4).CopyTo(view[4..]);
+            heap.Slice(offsets[i], 4).CopyTo(view[4..]);
             int buffer = 0;
             int offset = offsets[i];
             MemoryMarshal.Write(view[8..], in buffer);
@@ -508,5 +559,9 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     }
 
     /// <inheritdoc/>
-    public override void Dispose() => _table.Dispose();
+    public override void Dispose()
+    {
+        _table.Dispose();
+        _spare.Dispose();
+    }
 }

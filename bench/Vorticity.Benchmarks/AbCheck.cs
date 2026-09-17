@@ -154,8 +154,10 @@ internal static class AbCheck
                 continue;
             }
 
+            // A scenario without a reference counterpart (`filtered`, the indexed writes) is not in
+            // `Scenarios.All`, and this build answers for it the way the older one does.
             Func<string, Task<long>>? ours = afterResolve is null
-                ? Scenarios.ByName(name)?.Ours
+                ? Scenarios.ByName(name)?.Ours ?? Vorticity.Bench.Scenarios.ScenarioSet.Resolve(name)
                 : afterResolve.Invoke(null, [name]) as Func<string, Task<long>>;
             if (ours is null)
             {
