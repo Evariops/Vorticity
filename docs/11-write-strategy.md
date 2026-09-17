@@ -843,11 +843,22 @@ step is bytes-identical except where noted.
 
 Open:
 
-- The wire form of a constant chunk: `vortex.constant` (smaller, the reference's choice, moves
-  bytes) or today's one-run run-end (byte-identical). Decided at stage 3 with the ratchet.
-- `plan_tolerance` (5 %) and `for_margin` (10 %): measured on the corpus and on `table_mixed`.
-- Whether bounded string min/max are on by default (Rust writes them; ~2 to 5 ns per value).
-- The default `IndexBudgetBytes` and `Auto`'s per-column share of it.
+- The default `IndexBudgetBytes` and `Auto`'s per-column share of it. Calibrated with `Auto`'s
+  other thresholds, [10-indexes.md](10-indexes.md) §11 (step 33).
+
+**Decided at step 30 (2026-09-17), by the bytes and the decode measured.** The corpus is the 856
+files of `WrittenSizeTests` (10 266 524 bytes written, ratio 0,642 — the baseline every figure
+below is against); the decode figures are the gate's own `fullscan` scenario over four seconds on
+the 1M-row files, more iterations being better.
+
+| question | decision | what the measurement said |
+|---|---|---|
+| the wire form of a constant chunk | today's one-run run-end stays | a constant integer chunk is ALREADY a `vortex.sequence` — a constant is a progression of step zero — so the question only ever concerned all-null and non-integer constant chunks: **22 of them in the 856 files**, over 59 396 rows, about 250 bytes of data each against a constant node's ~40. That is 0,05 % of the corpus for a new writer path and a byte move |
+| run-end priced and competing (§3.4.2), against today's "inside `rows / 4` it wins outright" | today's rule stays | the spec's rule writes **10 267 244 bytes, +720** on the corpus, and +672 with the 256-byte frame constant set to zero. The constant is framing the encoder's buffers do not hold; it is read only in the competing path, which nothing takes |
+| trials under the best cost in hand (§3.4.1, step 3) | today's rule stays: a trial is offered only to a column no exact scheme took | it wins **8,4 % of the corpus** (10 266 524 → 9 406 924, ratio 0,589) and costs decode. `fullscan` in four seconds: `alp` 4 824 → 777 iterations (**6,2× slower**, the file 2 740 812 → 1 871 204 bytes), `table_mixed` 328 → 258 (−21 %, 7 445 145 → 6 916 569), `fastlanes_bitpacked` 14 298 → 22 465 (+57 %, the file 1 254 332 → 11 924 bytes — a column zstd flattens to nothing reads faster because there is nothing to read). A size-against-decode trade that belongs to the caller, per column, and step 29's `EncodingHint` is where it is taken |
+| `for_margin` (10 %) | closed: it never became a knob | §3.2.3 as delivered prices no bound. The framed histogram is the ingest's when the reference is zero and an exact walk otherwise, so there is no contested band to widen or narrow |
+| `plan_tolerance` (5 %) | 5 % stays | on the corpus and on six 1M files (`table_mixed`, `dict`, `chunked`, `fastlanes_bitpacked`, `alp`, `varbinview`), **0 %, 5 % and infinity write the same bytes**: the degenerate candidates are priced before memory, and a remembered scheme is re-priced and kept only when it still wins on its own terms. What moves is the write — `table_mixed` 1,043 at 0 %, 0,963 at infinity — so the number is a write-time knob, and 5 % is the middle that keeps the check honest for data that changes shape. A caller who wants infinity pins the scheme (§7.1) |
+| bounded string `min`/`max` on by default | off stays | they cost **+0,48 % of the corpus bytes** and, on the write axis, **+34 % on `varbinview`, +36 % on `fsst`, +27 % on `table_mixed`** — far above the 2 to 5 ns a value this section estimated. What they buy, on the 1M `table_mixed`: a prefix of `subject-name-0000000` leaves **1 block of 123 live and reads 93 732 bytes instead of 7 385 628**, and a prefix no row has reads 6 740; on `label`, sixteen values spread over every block, they buy nothing but the absent prefix. A per-file option for a caller who queries strings by range, not a cost for everyone |
 
 Decided (2026-09-15): XxHash3-64 comes from the `System.IO.Hashing` package, the one first-party
 dependency [03-architecture.md](03-architecture.md) §1 admits; see [10-indexes.md](10-indexes.md)
