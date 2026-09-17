@@ -40,7 +40,7 @@ public sealed class ScanExplainTests
             Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_300L))));
 
         await using MemoryMappedSegmentSource inner = MemoryMappedSegmentSource.Open(Corpus.Path(Zoned));
-        CountingSegmentSource counting = new CountingSegmentSource(inner);
+        RecordingSegmentSource counting = new RecordingSegmentSource(inner);
         await using VortexFile file = await VortexFile.OpenAsync(
             counting, new VortexOpenOptions { LeaveSourceOpen = true }, CancellationToken.None);
 

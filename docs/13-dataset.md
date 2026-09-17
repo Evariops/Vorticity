@@ -572,6 +572,23 @@ With the fan-outs and page sizes fixed:
    no CPU cost; a cold clustering-key lookup completes within `D × λ`, `D` the count of §9.1,
    which no total of requests can prove, since parallel requests hide in a total.
 
+**As delivered (step 27), invariant 1 on one file.**
+- **The counter.** `Vorticity.IO.CountingSegmentSource` counts what a reader asks: one request
+  per single read, one per set of ranges read together, and the ranges and bytes.
+- **The two files.** `ReadBudgetTests` writes the same 200 000 rows twice, with a hole after
+  every write of 32 KiB or more: 48 MiB for a 1.31 GiB file, 480 MiB for a 13.1 GiB one, both
+  sparse. The holes follow the data and the filter leaves, never the index sections. Those sections
+  end up between 2²⁸ and 2³⁵ in both files, so a fence page's varint offsets take the same bytes.
+- **The lookup.** It opens the file, counts a key through a sorted run in fence pages, scans a
+  tenant through a filter tree, seeks a key cursor, and asks the roots. It costs the same **13
+  requests and 415 811 bytes** on both files. With the indexes in an identity-bound sidecar, the
+  data file sees 3 requests and 114 807 bytes on both.
+- **What it catches.** A whole-file hash put back into the sidecar's binding (the SHA-256 before
+  step 26) turns that into 1 157 against 11 525 requests, and the test fails.
+- **What it does not prove.** The files differ in length, not in rows. A file of ten times the
+  rows reads a larger footer and zone map: those are O(chunks) by the Vortex format, and bounding
+  them is the dataset's job.
+
 10 §8.1.8's "identical bytes on 1 GiB and 10 GiB" was right in intent and too strong in form: a
 tree reads a page more at each order of magnitude. The constants hold at a fixed page cap, which
 makes the pages' share of B exactly `depth × 256 KiB` thanks to the forced boundary; the axis it

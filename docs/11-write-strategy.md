@@ -666,6 +666,10 @@ why the zone map's `zone_len` stays 8 192 whatever the chunk shape.
   the blocks the mask still holds live, and cached on the `VortexFile`, which is shared between
   scans and therefore thread-safe ([09-contracts.md](09-contracts.md) §1).
   `VortexOpenOptions.PreloadIndexes` exists for object stores where a lazy read is a round trip.
+  *Delivered at step 27.* It reads the directory, or opens the sidecar, before the open returns.
+  The directory usually lies inside the tail the open already read, and then preloading costs no
+  request; a test counts it. The runs stay lazy: their regions are read by the first query that
+  needs them, and the fence roots are in the directory anyway.
 - **File-level pruning**: `VortexFile.MayMatch(expr)` answers from the footer's file statistics
   and the file-level Bloom generation without reading a data segment; an engine over many files
   calls it before opening a scan.

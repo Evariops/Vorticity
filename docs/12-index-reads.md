@@ -615,6 +615,16 @@ entries and the entries the range admits, which bounds the rows the windows gath
 has `Windows` and `WindowSplits` since step 14. The `EventSource` is 09 §5's as-delivered note;
 `vxdump --explain` prints the plan and the count tiers.
 
+**As delivered (step 27): `VortexFile.Indexes`.**
+- **What it returns.** A list of `VortexIndexInfo`, one per index the reader kept: kind, column (a
+  dotted path, or a composite key's columns in parentheses), block length, runs, blocks covered,
+  entries, the bytes of the regions the directory lists, and a `VortexIndexLayout` (`None`,
+  `Listed`, `FencePages`, `FilterTree`). The layout says whether more lies below the listed bytes.
+- **When.** It is `null` until the directory has been read — by a scan, by
+  `ReadIndexesAsync`, or at the open under `VortexOpenOptions.PreloadIndexes` — and costs no
+  request after.
+- **Where it shows.** `vxdump --indexes` prints it.
+
 Not on the surface, on purpose: a `KeyRange` type (`Where` says it, §6); a `Probe(column, value)`
 (`AnyAsync` is it, §5.1); a `DistinctAsync` returning a list (§5.4); a key-ordered `Take` (the
 window inside `InKeyOrder` is the only reorder, §6); a `Sort` (constraint 2). Each would be a

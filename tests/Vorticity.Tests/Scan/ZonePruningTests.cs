@@ -187,7 +187,7 @@ public sealed class ZonePruningTests
     {
         Decoders.EnsureRegistered();
         await using MemoryMappedSegmentSource inner = MemoryMappedSegmentSource.Open(Corpus.Path(id));
-        CountingSegmentSource counting = new CountingSegmentSource(inner);
+        RecordingSegmentSource counting = new RecordingSegmentSource(inner);
 
         await using VortexFile file = await VortexFile.OpenAsync(
             counting,

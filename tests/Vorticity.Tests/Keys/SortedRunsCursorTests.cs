@@ -608,10 +608,10 @@ public sealed class SortedRunsCursorTests
     public async Task ADistinctWalkOverPostingsReadsNoDataSegment()
     {
         Decoders.EnsureRegistered();
-        CountingSegmentSource? counting = null;
+        RecordingSegmentSource? counting = null;
         await using Written written = await Written.CreateAsync(
             PolicyOf(KeySourceKind.Postings),
-            inner => counting = new CountingSegmentSource(inner));
+            inner => counting = new RecordingSegmentSource(inner));
         VortexFile file = written.File;
         counting!.ResetCounters();
 

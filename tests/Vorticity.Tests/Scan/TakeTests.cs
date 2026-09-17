@@ -217,7 +217,7 @@ public sealed class TakeTests
         Decoders.EnsureRegistered();
         await using MemoryMappedSegmentSource inner =
             MemoryMappedSegmentSource.Open(Corpus.Path(Zoned));
-        CountingSegmentSource counting = new CountingSegmentSource(inner);
+        RecordingSegmentSource counting = new RecordingSegmentSource(inner);
 
         await using VortexFile file = await VortexFile.OpenAsync(
             counting, new VortexOpenOptions { LeaveSourceOpen = true }, CancellationToken.None);

@@ -34,7 +34,7 @@ public sealed class ScanIoTests
         Decoders.EnsureRegistered();
 
         const string Entry = "types/struct_field_names";
-        CountingSegmentSource source = new CountingSegmentSource(
+        RecordingSegmentSource source = new RecordingSegmentSource(
             MemoryMappedSegmentSource.Open(Corpus.Path(Entry)));
         await using VortexFile file = await VortexFile.OpenAsync(
             source, new VortexOpenOptions(), CancellationToken.None);
@@ -129,7 +129,7 @@ public sealed class ScanIoTests
     {
         Decoders.EnsureRegistered();
 
-        CountingSegmentSource source = new CountingSegmentSource(
+        RecordingSegmentSource source = new RecordingSegmentSource(
             MemoryMappedSegmentSource.Open(Corpus.Path("distributions/high_cardinality_i64_r8193")));
         await using VortexFile file = await VortexFile.OpenAsync(
             source, new VortexOpenOptions(), CancellationToken.None);
@@ -162,7 +162,7 @@ public sealed class ScanIoTests
     {
         Decoders.EnsureRegistered();
 
-        CountingSegmentSource source = new CountingSegmentSource(
+        RecordingSegmentSource source = new RecordingSegmentSource(
             MemoryMappedSegmentSource.Open(Corpus.Path(entry)));
         await using VortexFile file = await VortexFile.OpenAsync(
             source, new VortexOpenOptions(), CancellationToken.None);
@@ -180,7 +180,7 @@ public sealed class ScanIoTests
 
     private static async Task<HashSet<uint>> RequestedFor(string entry, int[]? fields)
     {
-        CountingSegmentSource source = new CountingSegmentSource(
+        RecordingSegmentSource source = new RecordingSegmentSource(
             MemoryMappedSegmentSource.Open(Corpus.Path(entry)));
         await using VortexFile file = await VortexFile.OpenAsync(
             source, new VortexOpenOptions(), CancellationToken.None);
@@ -200,7 +200,7 @@ public sealed class ScanIoTests
         return RequestedIds(file, source);
     }
 
-    private static HashSet<uint> RequestedIds(VortexFile file, CountingSegmentSource source)
+    private static HashSet<uint> RequestedIds(VortexFile file, RecordingSegmentSource source)
     {
         ReadOnlySpan<SegmentSpec> specs = file.SegmentSpecs;
         HashSet<uint> ids = new HashSet<uint>();

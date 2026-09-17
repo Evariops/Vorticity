@@ -125,18 +125,41 @@ public sealed partial class VortexFile : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(options);
         MemoryMappedSegmentSource source = MemoryMappedSegmentSource.Open(path);
         ValueTask<VortexFile> open = OpenCoreAsync(source, options, ownsSource: true, cancellationToken);
-        return options.Read.IndexSidecarPath is null ? open : RememberTokenAsync(open, path);
+        string? tokenPath = options.Read.IndexSidecarPath is null ? null : path;
+        return tokenPath is null && !options.PreloadIndexes
+            ? open
+            : FinishOpenAsync(open, tokenPath, options.PreloadIndexes, cancellationToken);
     }
 
     /// <summary>
-    /// The store token of a file opened from a path for a sidecar (13 §7): the binding of a file
-    /// without an identity, taken at the open.
+    /// What an open does after the tail: the store token of a file opened from a path for a sidecar
+    /// (13 §7), the binding of a file without an identity, taken now; then the index directory when
+    /// the options preload it (11 §6.3).
     /// </summary>
-    private static async ValueTask<VortexFile> RememberTokenAsync(ValueTask<VortexFile> open, string path)
+    private static async ValueTask<VortexFile> FinishOpenAsync(
+        ValueTask<VortexFile> open, string? tokenPath, bool preload, CancellationToken cancellationToken)
     {
         VortexFile file = await open.ConfigureAwait(false);
-        Indexes.IndexSidecar.RememberToken(file, path);
-        return file;
+        try
+        {
+            if (tokenPath is not null)
+            {
+                global::Vorticity.Indexes.IndexSidecar.RememberToken(file, tokenPath);
+            }
+
+            // A file without a directory is answered without a read, and then describes none.
+            if (preload)
+            {
+                await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            return file;
+        }
+        catch
+        {
+            await file.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <summary>Opens a Vortex file over an already-constructed segment source.</summary>
@@ -151,7 +174,8 @@ public sealed partial class VortexFile : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(options);
-        return OpenCoreAsync(source, options, ownsSource: !options.LeaveSourceOpen, cancellationToken);
+        ValueTask<VortexFile> open = OpenCoreAsync(source, options, ownsSource: !options.LeaveSourceOpen, cancellationToken);
+        return options.PreloadIndexes ? FinishOpenAsync(open, null, preload: true, cancellationToken) : open;
     }
 
     /// <summary>

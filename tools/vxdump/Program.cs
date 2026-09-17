@@ -699,52 +699,24 @@ internal static class Program
         }
 
         output.Append('\n');
-        DType schema = file.Schema;
-        foreach (Vorticity.Indexes.IndexEntry entry in directory.Entries)
-        {
-            ulong bytes = 0;
-            ulong entries = 0;
-            foreach (Vorticity.Indexes.IndexRun run in entry.Runs)
-            {
-                entries += run.EntryCount;
-                foreach (Vorticity.Indexes.IndexSegment segment in run.Payload)
-                {
-                    bytes += segment.Length;
-                }
-            }
 
-            output.Append("  ").Append(entry.Kind)
-                .Append("  column=").Append(ColumnName(schema, entry.ColumnPath))
-                .Append("  block=").Append(Text(entry.BlockLength))
-                .Append("  runs=").Append(Text(entry.Runs.Count))
-                .Append("  blocks=").Append(entry.Runs.Count == 0 ? "-" : Text(entry.Runs[0].FirstBlock) + ".." + Text(entry.Runs[^1].EndBlock))
-                .Append("  entries=").Append(Text(entries))
-                .Append("  bytes=").Append(Text(bytes))
+        // What the file carries, as the library describes it (12 §8.1): the listed bytes are the
+        // directory's regions, and a paged or tree layout holds more below them.
+        IReadOnlyList<VortexIndexInfo> infos = await file.ReadIndexesAsync().ConfigureAwait(false);
+        for (int i = 0; i < infos.Count; i++)
+        {
+            VortexIndexInfo info = infos[i];
+            IReadOnlyList<Vorticity.Indexes.IndexRun> runs = directory.Entries[i].Runs;
+            output.Append("  ").Append(info.Kind)
+                .Append("  column=").Append(info.Column.Length == 0 ? "(root)" : info.Column)
+                .Append("  block=").Append(Text(info.BlockLength))
+                .Append("  runs=").Append(Text(info.Runs))
+                .Append("  blocks=").Append(runs.Count == 0 ? "-" : Text(runs[0].FirstBlock) + ".." + Text(runs[^1].EndBlock))
+                .Append("  entries=").Append(Text(info.Entries))
+                .Append("  listed-bytes=").Append(Text(info.ListedBytes))
+                .Append("  layout=").Append(info.Layout.ToString())
                 .Append('\n');
         }
-    }
-
-    private static string ColumnName(DType schema, IReadOnlyList<uint> path)
-    {
-        if (path.Count == 0)
-        {
-            return "(root or composite)";
-        }
-
-        StringBuilder name = new StringBuilder();
-        DType node = schema;
-        foreach (uint index in path)
-        {
-            if (node.Kind != DTypeKind.Struct || index >= (uint)node.FieldCount)
-            {
-                return name.Append("?").ToString();
-            }
-
-            name.Append(name.Length == 0 ? string.Empty : ".").Append(node.GetFieldName((int)index));
-            node = node.GetField((int)index);
-        }
-
-        return name.ToString();
     }
 
     /// <summary>`--explain`: docs/11-write-strategy.md §7.3, the plan of a filtered scan.</summary>

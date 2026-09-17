@@ -99,6 +99,31 @@ internal static class KeyRunOptions
         }
     }
 
+    /// <summary>Whether a run's options are a paged run's (version 2), without parsing the root.</summary>
+    /// <param name="options">The run's options.</param>
+    internal static bool IsPaged(ReadOnlySpan<byte> options)
+    {
+        try
+        {
+            ProtoReader reader = new ProtoReader(options);
+            while (reader.TryReadTag(out int field, out ProtoWireType wire))
+            {
+                if (field == 1 && wire == ProtoWireType.Varint)
+                {
+                    return reader.ReadVarint32() == PagedVersion;
+                }
+
+                reader.SkipField(wire);
+            }
+        }
+        catch (VortexFormatException)
+        {
+            return false;
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// The serialized dtype of a run's keys array: the directory's, or a paged run's own; empty when
     /// neither says.

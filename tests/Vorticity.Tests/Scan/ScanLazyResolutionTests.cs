@@ -107,7 +107,7 @@ public sealed class ScanLazyResolutionTests
         // The throw happens inside Execute, after the read: the context must be reset anyway, or
         // the scan leaks a segment reference for every failed batch.
         Decoders.EnsureRegistered();
-        CountingSegmentSource source = new CountingSegmentSource(
+        RecordingSegmentSource source = new RecordingSegmentSource(
             Vorticity.IO.MemoryMappedSegmentSource.Open(Corpus.Forged(Forged)));
 
         await using VortexFile file = await VortexFile.OpenAsync(

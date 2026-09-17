@@ -240,7 +240,7 @@ public sealed class ZoneMapWritingTests
     private static async Task<int> CountSegments(string path, VortexExpr filter, bool prune)
     {
         await using MemoryMappedSegmentSource inner = MemoryMappedSegmentSource.Open(path);
-        CountingSegmentSource counting = new CountingSegmentSource(inner);
+        RecordingSegmentSource counting = new RecordingSegmentSource(inner);
 
         await using VortexFile file = await VortexFile.OpenAsync(
             counting, new VortexOpenOptions { LeaveSourceOpen = true }, CancellationToken.None);

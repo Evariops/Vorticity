@@ -106,6 +106,17 @@ public sealed class VortexOpenOptions
     /// </remarks>
     public VortexTornTailPolicy TornTail { get; init; }
 
+    /// <summary>
+    /// Whether the open also reads the index directory -- a sidecar's included -- rather than the
+    /// first scan that needs it (docs/11-write-strategy.md §6.3). Default <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// For an object store, where a lazy read is one more round trip in the middle of a query. The
+    /// directory usually lies inside the tail the open reads anyway, and then preloading it costs no
+    /// request at all; <see cref="VortexFile.Indexes"/> answers from it without one.
+    /// </remarks>
+    public bool PreloadIndexes { get; init; }
+
     /// <summary>These options for the first <paramref name="fileLength"/> bytes, refusing a torn tail there.</summary>
     /// <param name="fileLength">The prefix's length.</param>
     internal VortexOpenOptions ForPrefix(long fileLength) => new VortexOpenOptions
@@ -116,5 +127,6 @@ public sealed class VortexOpenOptions
         LeaveSourceOpen = LeaveSourceOpen,
         Read = Read,
         TornTail = VortexTornTailPolicy.Refuse,
+        PreloadIndexes = PreloadIndexes,
     };
 }

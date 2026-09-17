@@ -105,12 +105,12 @@ internal static class Decoders
 /// for. This is the only way to see the two properties §13 claims but a value comparison cannot
 /// show: exactly one <c>ReadManyAsync</c> per batch, and no I/O at all for an unprojected column.
 /// </summary>
-internal sealed class CountingSegmentSource : ISegmentSource
+internal sealed class RecordingSegmentSource : ISegmentSource
 {
     private readonly ISegmentSource _inner;
     private readonly List<SegmentSpec> _requested = new List<SegmentSpec>();
 
-    internal CountingSegmentSource(ISegmentSource inner) => _inner = inner;
+    internal RecordingSegmentSource(ISegmentSource inner) => _inner = inner;
 
     internal int ReadManyCalls { get; private set; }
 
