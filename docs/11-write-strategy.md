@@ -286,7 +286,9 @@ struct field's.
 - **Zones.** The file carries no zone map for the elements. A list column's `vortex.zoned`
   describes the list values, a strict Rust reader reads it, and no index kind of 10 carries element
   bounds. The element blocks serve the chooser, and a Bloom filter over the elements answers
-  "does any element of a row in this block equal v" (10 §5.1, step 28b).
+  "does any element of a row in this block equal v" (10 §5.1, step 28b). The predicate that asks
+  it, `ListContains` (12 §7), is also pruned by the list's null count: a zone of null lists holds
+  no row for it nor for its negation.
 
 ### 3.3 Merging: zones, chunks, resolutions, file
 

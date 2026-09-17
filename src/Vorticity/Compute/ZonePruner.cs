@@ -187,6 +187,9 @@ internal sealed class ZonePruner : IBlockPruner
             case ExprKind.StringMatch:
                 return MayMatchStringMatch((StringMatchExpr)expr, rows, negated);
 
+            case ExprKind.ListContains:
+                return MayMatchListContains((ListContainsExpr)expr, rows);
+
             case ExprKind.Not:
                 return MayMatch(((NotExpr)expr).Operand, rows, !negated);
 
@@ -208,6 +211,42 @@ internal sealed class ZonePruner : IBlockPruner
             default:
                 return true;
         }
+    }
+
+    /// <summary>
+    /// <c>list_contains</c>, pruned by the list's null count alone: a null list is unknown, and so
+    /// is its negation, so a zone of nothing but null lists holds no row either way.
+    /// </summary>
+    /// <remarks>
+    /// A list column's zone map describes the LIST values — a strict Rust reader reads it — and not
+    /// their elements, so its bounds are never read here (docs/11-write-strategy.md §3.2.4). The
+    /// elements are the Bloom filter's (docs/10-indexes.md §5.1). A null literal is left alone, as
+    /// a comparison's is: pruning on it would rest a correctness claim on a constant.
+    /// </remarks>
+    private bool MayMatchListContains(ListContainsExpr contains, RowRange rows)
+    {
+        if (contains.Value.Kind == FilterLiteralKind.Null)
+        {
+            return true;
+        }
+
+        ZoneColumn? column = Find(contains.Field);
+        if (column is null || !column.HasStatistics)
+        {
+            return true;
+        }
+
+        ZoneRange zones = column.Zones(rows);
+        for (int zone = zones.Start; zone < zones.End; zone++)
+        {
+            ZoneBounds bounds = column.Bounds(zone);
+            if (!bounds.HasNullCount || bounds.NullCount < column.RowsInZone(zone))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -372,6 +411,15 @@ internal sealed class ZonePruner : IBlockPruner
 
             case ExprKind.StringMatch:
                 return StringMatchVerdict((StringMatchExpr)expr, rows);
+
+            case ExprKind.ListContains:
+            {
+                // The nulls are the unknown rows, and nothing a zone holds decides the others.
+                ListContainsExpr contains = (ListContainsExpr)expr;
+                return contains.Value.Kind == FilterLiteralKind.Null
+                    ? RangeVerdict.AllUnknown(length)
+                    : Decide(contains.Field, rows, ZoneQuestion.Open);
+            }
 
             case ExprKind.Not:
                 return RangeVerdict.Not(Verdict(((NotExpr)expr).Operand, rows));

@@ -593,6 +593,13 @@ internal sealed class IndexWriter : IDisposable
             CanonicalKind.Constant => slices.AddConstant(dtype, count, validity, node.ConstantElement),
             CanonicalKind.VarBinView => MaskedViews(slices, node, dtype, count, validity),
 
+            // A list under a null parent names no element (10 §5.1, step 28b): the same offsets and
+            // elements, under the folded validity.
+            CanonicalKind.ListView => slices.AddListView(
+                dtype, count, validity, node.ElementsIndex, node.Offsets, node.OffsetPType, node.Sizes, node.SizePType),
+            CanonicalKind.FixedSizeList => slices.AddFixedSizeList(
+                dtype, count, validity, node.ElementsIndex, node.FixedSize),
+
             // No builder keys the other kinds, and each says so when it is fed one.
             _ => sliced,
         };

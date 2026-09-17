@@ -4,7 +4,8 @@
 // ONLY EQUALITY PROVES ANYTHING. `x = v` kills a block whose filter does not hold v; `x IN (...)`
 // one that holds none of them; an AND kills what any conjunct kills, an OR what every arm kills.
 // Nothing else -- `!=`, an ordering, a NOT -- claims anything; a string match claims through the
-// trigram filters.
+// trigram filters. A LIST'S FILTER HOLDS ITS ELEMENTS (10 §5.1, step 28b): `list_contains(x, v)`
+// kills a block whose filter does not hold v, and an equality on a list column claims nothing.
 //
 // THE LITERAL IS HASHED AS THE COLUMN STORES IT, and only when that is exact. The kernels compare in
 // three domains -- i64, u64, f64 -- so `x = 5` on an i32 column is the four bytes of 5, and `x = 5.0`
@@ -388,7 +389,11 @@ internal sealed class BloomPruner
                 return ProvesAbsent(or.Left, block, level) && ProvesAbsent(or.Right, block, level);
 
             case ComparisonExpr { Op: ComparisonOp.Equal } equal:
-                return Absent(equal.Field.Path, equal.Value, block, level);
+                return Absent(equal.Field.Path, equal.Value, block, level, elements: false);
+
+            case ListContainsExpr contains:
+                // A list's filter holds its elements, each in its row's block (10 §5.1).
+                return Absent(contains.Field.Path, contains.Value, block, level, elements: true);
 
             case StringMatchExpr match:
                 return AbsentTrigrams(match, block, level);
@@ -396,7 +401,7 @@ internal sealed class BloomPruner
             case InExpr @in:
                 foreach (FilterLiteral value in @in.Values)
                 {
-                    if (!Absent(@in.Field.Path, value, block, level))
+                    if (!Absent(@in.Field.Path, value, block, level, elements: false))
                     {
                         return false;
                     }
@@ -409,9 +414,16 @@ internal sealed class BloomPruner
         }
     }
 
-    private bool Absent(string path, FilterLiteral value, int block, int level)
+    /// <summary>
+    /// Whether the filter over <paramref name="block"/> proves <paramref name="value"/> absent from
+    /// the column, or from its lists' elements when <paramref name="elements"/> — and only when the
+    /// column is what the question takes it for: an equality on a list column, or an element on a
+    /// scalar one, claims nothing.
+    /// </summary>
+    private bool Absent(string path, FilterLiteral value, int block, int level, bool elements)
     {
         if (!_columns.TryGetValue(path, out Column? column)
+            || column.IsList != elements
             || column.TreeOf(block) is not { } tree
             || !tree.TryFilter(level, block, out ReadOnlySpan<uint> words))
         {
@@ -467,6 +479,9 @@ internal sealed class BloomPruner
             case InExpr @in:
                 equalities.Add(@in.Field.Path);
                 break;
+            case ListContainsExpr contains:
+                equalities.Add(contains.Field.Path);
+                break;
             case StringMatchExpr match:
                 matches.Add(match.Field.Path);
                 break;
@@ -518,9 +533,20 @@ internal sealed class BloomPruner
 
         internal Column(DType dtype, bool trigrams, bool fold)
         {
-            _keyed = !trigrams && KeyLayout.TryOf(dtype, out _layout);
+            // A list's filter holds its elements, so its values are keyed as the elements are.
+            DType storage = dtype;
+            while (storage.Kind == DTypeKind.Extension)
+            {
+                storage = storage.StorageType;
+            }
+
+            IsList = storage.Kind is DTypeKind.List or DTypeKind.FixedSizeList;
+            _keyed = !trigrams && KeyLayout.TryOf(IsList ? storage.ElementType : dtype, out _layout);
             _fold = fold;
         }
+
+        /// <summary>Whether the column is a list, whose filter answers for its elements.</summary>
+        internal bool IsList { get; }
 
         /// <summary>The column's trees, in block order; their runs are disjoint (10 §4.1).</summary>
         internal List<Tree> Trees { get; } = [];

@@ -580,6 +580,19 @@ shape the byte comparisons already have — and `ZonePruner` one rewrite, `Start
 which is the safe answer. This is exactly the set 10 §6.6 names and nothing more; `EndsWith`,
 regular expressions and case folding are §13.
 
+*As delivered (step 28b): a fourth predicate, the one a Bloom filter over a list's elements
+answers (10 §5.1).* `ExprKind.ListContains`, node `ListContainsExpr { FieldExpr Field;
+FilterLiteral Value }`, built by `Expr.ListContains(list, value)`: the reference's
+`vortex.list.contains` with a constant needle.
+
+| true when | null | evaluation | pruning |
+|---|---|---|---|
+| an element of the row's list equals the value, under the comparison kernels' equality (IEEE for floats; a NaN matches nothing, the two zeros match each other) | a null list is `unknown`, and so is every row under a null value; a null element matches nothing and leaves the row `false`, as the reference gives the result the list's validity alone; an empty list is `false` | `ListKernels`: the elements the batch's valid rows name are compared once, over their window only, since a batch shares its chunk's elements whole; each row then looks for a match in its own range | the list's null count: a zone of null lists holds no row for the predicate nor for its negation. The list's zone map describes list values, so its bounds are never read. The Bloom filter over the elements proves absence per block, the file-level one per file. An equality on a list column claims nothing from that filter |
+
+The column is a list or a fixed-size list of booleans, numbers or bytes, or an extension over
+one. Any other column throws `NotSupportedException` when the filter first runs, as a comparison
+does.
+
 ---
 
 ## 8. The surface a consumer sees

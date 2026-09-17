@@ -13,6 +13,10 @@
 //   * a literal's type is checked against the column only when the filter runs, because the schema
 //     is not in scope at construction.
 //
+// Two predicates were added since, each where an index needed a question to answer: the byte
+// patterns of docs/12-index-reads.md §7, and `ListContains`, which a Bloom filter over a list's
+// elements answers (docs/10-indexes.md §5.1, step 28b).
+//
 // Three-valued logic lives in the evaluator, not here: this file is only the shape.
 using System;
 using System.Collections.Generic;
@@ -45,6 +49,9 @@ public enum ExprKind : byte
 
     /// <summary><c>StartsWith</c>, <c>Contains</c> or <c>Like</c> over bytes.</summary>
     StringMatch = 7,
+
+    /// <summary>Whether a list holds an element equal to a literal.</summary>
+    ListContains = 8,
 }
 
 /// <summary>The three byte-pattern predicates of docs/12-index-reads.md §7.</summary>
@@ -339,6 +346,38 @@ public sealed class StringMatchExpr : VortexExpr
     public override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
 }
 
+/// <summary>A list column tested for an element equal to a literal.</summary>
+/// <remarks>
+/// The reference's <c>vortex.list.contains</c> with a constant needle, and the question a Bloom
+/// filter over a list's elements answers (docs/10-indexes.md §5.1). THREE-VALUED LIKE A COMPARISON
+/// (docs/08-semantics.md §3), with one rule of its own: a null list is <c>unknown</c>, and so is
+/// every row under a null literal; otherwise the row is <c>true</c> when an element equals the
+/// literal under the comparison kernels' equality (IEEE for floats, so a NaN matches nothing and
+/// the two zeros match each other) and <c>false</c> when none does. A NULL ELEMENT MATCHES NOTHING
+/// and leaves the row <c>false</c>, not unknown: the reference gives the result the list's validity
+/// alone. An empty list is <c>false</c>.
+/// </remarks>
+public sealed class ListContainsExpr : VortexExpr
+{
+    internal ListContainsExpr(FieldExpr field, FilterLiteral value)
+    {
+        Field = field;
+        Value = value;
+    }
+
+    /// <summary>The list column: a list or a fixed-size list of a comparable element, or an extension over one.</summary>
+    public FieldExpr Field { get; }
+
+    /// <summary>The element sought.</summary>
+    public FilterLiteral Value { get; }
+
+    /// <inheritdoc/>
+    public override ExprKind Kind => ExprKind.ListContains;
+
+    /// <inheritdoc/>
+    public override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
+}
+
 /// <summary>Builds filter expressions.</summary>
 public static class Expr
 {
@@ -471,6 +510,16 @@ public static class Expr
     public static StringMatchExpr Like(
         FieldExpr field, FilterLiteral pattern, byte escape = (byte)'\\') =>
         Match(field, StringMatchOp.Like, pattern, escape);
+
+    /// <summary><c>list</c> holds an element equal to <paramref name="value"/>.</summary>
+    /// <param name="list">A list or fixed-size list column of booleans, numbers or bytes, or an extension over one.</param>
+    /// <param name="value">The element sought; a null one makes every row unknown.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="list"/> is null.</exception>
+    public static ListContainsExpr ListContains(FieldExpr list, FilterLiteral value)
+    {
+        ArgumentNullException.ThrowIfNull(list);
+        return new ListContainsExpr(list, value);
+    }
 
     /// <summary>
     /// Rejects the one shape these predicates cannot evaluate, at CONSTRUCTION rather than during a

@@ -67,6 +67,8 @@ Predicates evaluate over `{true, false, unknown}`, SQL-style:
 * `unknown AND false = false`; `unknown OR true = true`; `NOT unknown = unknown`.
 * A row is returned only when the filter evaluates to `true` — `unknown` does not match.
 * `IS NULL` / `IS NOT NULL` never yield `unknown`.
+* `ListContains(list, v)` (step 28b) is `unknown` on a null list and under a null `v`; a null
+  element matches nothing and leaves the row `false` ([12-index-reads.md](12-index-reads.md) §7).
 
 Pruning consequence: a zone where `null_count == row_count` can be skipped for any predicate that
 is not satisfiable by nulls — that is, anything except `IS NULL` and expressions reducible to it.

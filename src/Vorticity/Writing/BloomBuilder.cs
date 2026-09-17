@@ -161,6 +161,30 @@ internal sealed class BloomBuilder : IndexBuilder
             return reason is null;
         }
 
+        if (dtype.Kind is DTypeKind.List or DTypeKind.FixedSizeList)
+        {
+            // 10 §5.1: a list's elements, each into its row's block (step 28b).
+            if (trigrams)
+            {
+                reason = $"a trigram index needs text, and this column is {dtype.Kind}";
+                return false;
+            }
+
+            DType element = dtype.ElementType;
+            while (element.Kind == DTypeKind.Extension)
+            {
+                element = element.StorageType;
+            }
+
+            reason = element.Kind switch
+            {
+                DTypeKind.Primitive or DTypeKind.Decimal or DTypeKind.Utf8 or DTypeKind.Binary => null,
+                DTypeKind.Bool => "a two-value domain has nothing a Bloom filter could skip",
+                _ => $"a Bloom filter indexes the scalar elements of a list, and this list holds {element.Kind}",
+            };
+            return reason is null;
+        }
+
         reason = dtype.Kind switch
         {
             DTypeKind.Primitive or DTypeKind.Decimal or DTypeKind.Utf8 or DTypeKind.Binary => null,
@@ -182,6 +206,167 @@ internal sealed class BloomBuilder : IndexBuilder
             return;
         }
 
+        CanonicalNode storage = arena.GetNode(nodeIndex);
+        while (storage.Kind == CanonicalKind.Extension)
+        {
+            storage = arena.GetNode(storage.StorageIndex);
+        }
+
+        if (storage.Kind is CanonicalKind.ListView or CanonicalKind.FixedSizeList)
+        {
+            Lists(arena, nodeIndex, start, count);
+            return;
+        }
+
+        Values(arena, nodeIndex, start, count, capacity: BlockRows);
+    }
+
+    /// <summary>
+    /// A list column's rows: each element of a valid row, into the row's block (10 §5.1, step 28b),
+    /// so the filter answers "does any element of a row in this block equal v".
+    /// </summary>
+    /// <remarks>
+    /// A null list names nothing, and a null element is not inserted. The ranges of consecutive
+    /// rows that lie end to end are hashed as one, which is every row of a list the writer laid
+    /// out. `Auto` judges inside the block only where the block's elements have a bound: a
+    /// fixed-size list's are its rows times the size; a list view's are unbounded, and its
+    /// verdicts wait for the block's close, where the raw bytes are known.
+    /// </remarks>
+    private void Lists(CanonicalArena arena, int nodeIndex, int start, int count)
+    {
+        if (_trigrams)
+        {
+            Abandon("a trigram index needs text, and this column is a list");
+            return;
+        }
+
+        CanonicalNode outer = arena.GetNode(nodeIndex);
+        CanonicalNode node = outer;
+        while (node.Kind == CanonicalKind.Extension)
+        {
+            node = arena.GetNode(node.StorageIndex);
+        }
+
+        ValidityMask own = ValidityMask.From(arena, node.Validity);
+        ValidityMask wrapper = ValidityMask.From(arena, outer.Validity);
+        if (own.AllInvalid || wrapper.AllInvalid)
+        {
+            return;
+        }
+
+        bool allValid = own.AllValid && wrapper.AllValid;
+        int elements = node.ElementsIndex;
+        if (node.Kind == CanonicalKind.FixedSizeList)
+        {
+            int size = checked((int)node.FixedSize);
+            int end = start + count;
+            for (int row = start; size > 0 && row < end && Abandoned is null;)
+            {
+                if (!allValid && !(own.IsValid(row) && wrapper.IsValid(row)))
+                {
+                    row++;
+                    continue;
+                }
+
+                int run = row + 1;
+                while (run < end && (allValid || (own.IsValid(run) && wrapper.IsValid(run))))
+                {
+                    run++;
+                }
+
+                Values(arena, elements, checked(row * size), checked((run - row) * size), capacity: (long)BlockRows * size);
+                row = run;
+            }
+
+            return;
+        }
+
+        ListRanges ranges = new ListRanges(this, arena, elements);
+        switch (node.OffsetPType)
+        {
+            case PType.U8: ranges.OnSizes<byte>(node, own, wrapper, allValid, start, count); return;
+            case PType.U16: ranges.OnSizes<ushort>(node, own, wrapper, allValid, start, count); return;
+            case PType.U32: ranges.OnSizes<uint>(node, own, wrapper, allValid, start, count); return;
+            case PType.U64: ranges.OnSizes<ulong>(node, own, wrapper, allValid, start, count); return;
+            case PType.I8: ranges.OnSizes<sbyte>(node, own, wrapper, allValid, start, count); return;
+            case PType.I16: ranges.OnSizes<short>(node, own, wrapper, allValid, start, count); return;
+            case PType.I32: ranges.OnSizes<int>(node, own, wrapper, allValid, start, count); return;
+            default: ranges.OnSizes<long>(node, own, wrapper, allValid, start, count); return;
+        }
+    }
+
+    /// <summary>A list view's rows, walked with both physical types resolved, as their element ranges.</summary>
+    private readonly ref struct ListRanges(BloomBuilder builder, CanonicalArena arena, int elements)
+    {
+        internal void OnSizes<TOffset>(
+            CanonicalNode node, ValidityMask own, ValidityMask wrapper, bool allValid, int start, int count)
+            where TOffset : unmanaged
+        {
+            switch (node.SizePType)
+            {
+                case PType.U8: Rows<TOffset, byte>(node, own, wrapper, allValid, start, count); return;
+                case PType.U16: Rows<TOffset, ushort>(node, own, wrapper, allValid, start, count); return;
+                case PType.U32: Rows<TOffset, uint>(node, own, wrapper, allValid, start, count); return;
+                case PType.U64: Rows<TOffset, ulong>(node, own, wrapper, allValid, start, count); return;
+                case PType.I8: Rows<TOffset, sbyte>(node, own, wrapper, allValid, start, count); return;
+                case PType.I16: Rows<TOffset, short>(node, own, wrapper, allValid, start, count); return;
+                case PType.I32: Rows<TOffset, int>(node, own, wrapper, allValid, start, count); return;
+                default: Rows<TOffset, long>(node, own, wrapper, allValid, start, count); return;
+            }
+        }
+
+        private void Rows<TOffset, TSize>(
+            CanonicalNode node, ValidityMask own, ValidityMask wrapper, bool allValid, int start, int count)
+            where TOffset : unmanaged
+            where TSize : unmanaged
+        {
+            ReadOnlySpan<TOffset> offsets = MemoryMarshal.Cast<byte, TOffset>(node.Offsets.Span).Slice(start, count);
+            ReadOnlySpan<TSize> sizes = MemoryMarshal.Cast<byte, TSize>(node.Sizes.Span).Slice(start, count);
+            long from = 0;
+            long to = 0;
+            for (int i = 0; i < count; i++)
+            {
+                long size = ListViewDecoder.Widen(sizes[i]);
+                if (size <= 0 || (!allValid && !(own.IsValid(start + i) && wrapper.IsValid(start + i))))
+                {
+                    continue;
+                }
+
+                long offset = ListViewDecoder.Widen(offsets[i]);
+                if (offset == to && to > from)
+                {
+                    to += size;
+                    continue;
+                }
+
+                Flush(from, to);
+                from = offset;
+                to = offset + size;
+            }
+
+            Flush(from, to);
+        }
+
+        private void Flush(long from, long to)
+        {
+            if (to > from && builder.Abandoned is null)
+            {
+                builder.Values(arena, elements, checked((int)from), checked((int)(to - from)), capacity: 0);
+            }
+        }
+    }
+
+    /// <summary>Hashes rows <c>[start, start + count)</c> of a node of scalar values into the open block.</summary>
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="nodeIndex">The column, or a list's elements.</param>
+    /// <param name="start">The first row.</param>
+    /// <param name="count">How many rows.</param>
+    /// <param name="capacity">
+    /// The most values the open block can hold, which bounds its raw bytes for `Auto`'s verdicts
+    /// inside the block; 0 when nothing bounds it.
+    /// </param>
+    private void Values(CanonicalArena arena, int nodeIndex, int start, int count, long capacity)
+    {
         CanonicalNode outer = arena.GetNode(nodeIndex);
         CanonicalNode node = outer;
         while (node.Kind == CanonicalKind.Extension)
@@ -208,11 +393,11 @@ internal sealed class BloomBuilder : IndexBuilder
         switch (node.Kind)
         {
             case CanonicalKind.Primitive:
-                Fixed(node.Values.Span, node.PType.ByteWidth(), start, count, allValid, own, wrapper, hash);
+                Fixed(node.Values.Span, node.PType.ByteWidth(), start, count, allValid, own, wrapper, hash, capacity);
                 return;
 
             case CanonicalKind.Decimal:
-                Fixed(node.Values.Span, DecimalStorage.ByteWidth(node.Storage), start, count, allValid, own, wrapper, hash);
+                Fixed(node.Values.Span, DecimalStorage.ByteWidth(node.Storage), start, count, allValid, own, wrapper, hash, capacity);
                 return;
 
             case CanonicalKind.Constant:
@@ -271,15 +456,17 @@ internal sealed class BloomBuilder : IndexBuilder
     /// <summary>
     /// Fixed-width values. `Auto` checks its share every <see cref="CheckStride"/> rows: the block's
     /// distinct count so far can only grow, and a full block bounds its raw bytes, so a verdict
-    /// reached here is the one the block's close would reach, a block's hashing earlier.
+    /// reached here is the one the block's close would reach, a block's hashing earlier. The block
+    /// holds at most <paramref name="capacity"/> values: its rows, or a fixed-size list's rows times
+    /// the size; a list view's elements pass 0, and are judged at the block's close.
     /// </summary>
     private void Fixed(
         ReadOnlySpan<byte> values, int width, int start, int count, bool allValid,
-        ValidityMask own, ValidityMask wrapper, BloomHash hash)
+        ValidityMask own, ValidityMask wrapper, BloomHash hash, long capacity)
     {
         _rawBytes += (long)count * width;
         HashSet64 block = _block;
-        bool checks = AutoShare > 0 && BlockRows > 0;
+        bool checks = capacity > 0 && AutoShare > 0 && BlockRows > 0;
         int end = start + count;
         int row = start;
         bool inline = hash == BloomHash.XxHash3 && allValid && width <= 16;
@@ -300,7 +487,7 @@ internal sealed class BloomBuilder : IndexBuilder
                 }
             }
 
-            if (checks && GivesUpInBlock(_blockRawStart + ((long)BlockRows * width)))
+            if (checks && GivesUpInBlock(_blockRawStart + (capacity * width)))
             {
                 return;
             }

@@ -75,6 +75,14 @@ internal static class FilterEvaluator
                 return;
             }
 
+            case ExprKind.ListContains:
+            {
+                ListContainsExpr contains = (ListContainsExpr)filter;
+                int column = Resolve(arena, rootIndex, contains.Field, rows);
+                ListKernels.Contains(arena, column, contains.Value, destination);
+                return;
+            }
+
             case ExprKind.NullCheck:
             {
                 NullCheckExpr check = (NullCheckExpr)filter;

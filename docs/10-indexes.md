@@ -288,6 +288,19 @@ filters with Parquet tooling. Rebuilding an index is cheap, so a change of hash 
 | list elements | each element, into the **parent row's** block (§3.2.4 of the write spec): the filter answers "does any element of a row in this block equal v" |
 | null | not inserted; `x = v` and `x IN (...)` never match a null |
 
+*As delivered (step 28b).* A list or fixed-size list whose elements are one of the kinds above
+takes a Bloom filter, named by its own path, top-level or nested. `BloomBuilder` hashes each
+element of a valid row into the row's block; a null list names nothing and a null element is not
+inserted. A list under a null struct names nothing either: the writer folds the parents' nulls
+into the list's validity before the builder sees it. A list of lists and a map are refused with
+their reason, and so is a trigram index on a list. The question is
+`ListContains(list, v)` ([12-index-reads.md](12-index-reads.md) §7), and the pruner answers it
+from the element filters; an equality on a list column claims nothing from them. `Auto` weighs a
+list like any column. Its verdicts come at the block's close for a list view, whose block has no
+element bound, and inside the block for a fixed-size list, whose block holds its rows times the
+size. On the corpus and on the 1M-row list files `Auto` gives the filters up, so no byte moves;
+the 1M-row `fixed_size_list` write stays at 1,019 of step 28a thanks to that bound.
+
 **Size.** Built **when the block closes**, from the block's hash buffer, with `n_blocks` the
 smallest power of two that gives the target false-positive rate (`fpp`, default 1 %) for the
 block's **exact** distinct count by the Parquet sizing formula, clamped to `[1, max_blocks]`
