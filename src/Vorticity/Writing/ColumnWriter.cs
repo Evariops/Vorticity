@@ -30,9 +30,12 @@ namespace Vorticity.Writing;
 /// which is what WRITE-ARCHITECTURE.md §1 charges `variant` 62 % for.
 /// <para>
 /// A STRUCT'S FIELDS AND AN EXTENSION'S STORAGE ARE ROW-ALIGNED with their parent, so a child's
-/// blocks are the parent's blocks and the row range passes straight down. A LIST'S ELEMENTS ARE NOT:
-/// §3.2.4 defines their blocks as the parent's ROWS, found through the offsets, and that is a later
-/// stage — until then a list's elements child has no node here and the chooser measures it itself.
+/// blocks are the parent's blocks and the row range passes straight down. A LIST'S ELEMENTS ARE NOT
+/// ROW-ALIGNED, and §3.2.4 still gives them the parent's blocks: block <c>i</c> of the elements
+/// covers the elements of parent rows <c>[8192·i, 8192·(i+1))</c>, found through the offsets
+/// (<see cref="ListElements"/>). Element-side counts are not block-aligned and never need to be. A
+/// range whose window of elements does not abut the one before it leaves its block
+/// <c>Scattered</c>, and a chunk covering it measures its elements itself (step 28).
 /// </para>
 /// </remarks>
 internal sealed class ColumnWriter
@@ -198,6 +201,15 @@ internal sealed class ColumnWriter
     /// <param name="count">How many rows; the caller has cut the range at the block boundary.</param>
     internal void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
     {
+        if (count <= 0)
+        {
+            // A list range whose rows name no element: nothing to summarize, and the subtree still
+            // has to exist before the block closes, so that every node closes as many blocks as
+            // its parent.
+            Shape(arena, nodeIndex);
+            return;
+        }
+
         CanonicalNode node = arena.GetNode(nodeIndex);
         if (_openWidths is null && _widthsLive
             && node.Kind == CanonicalKind.Primitive && node.PType.IsInteger())
@@ -250,9 +262,123 @@ internal sealed class ColumnWriter
                 Children(1)[0].Accumulate(arena, node.StorageIndex, start, count);
                 return;
 
+            case CanonicalKind.ListView:
+            {
+                // §3.2.4: the window of elements the rows name goes into THIS block, whatever its
+                // own count, when it abuts the window before it; otherwise the block is scattered
+                // and summarizes nothing. A map is a list view of entries and takes the same path,
+                // its entries a struct.
+                int elements = node.ElementsIndex;
+                ColumnWriter child = Children(1)[0];
+                if (ListElements.Contiguous(
+                        node, arena.GetNode(elements).Length, start, count, _previous, out int from, out int length))
+                {
+                    child.Accumulate(arena, elements, from, length);
+                    return;
+                }
+
+                child.Shape(arena, elements);
+                child.Scatter();
+                return;
+            }
+
+            case CanonicalKind.FixedSizeList:
+            {
+                // Row r's elements are [r·size, (r+1)·size), always in order.
+                long size = node.FixedSize;
+                Children(1)[0].Accumulate(
+                    arena, node.ElementsIndex, checked((int)(start * size)), checked((int)(count * size)));
+                return;
+            }
+
             default:
                 return;
         }
+    }
+
+    /// <summary>
+    /// Creates the nodes under this one that <paramref name="nodeIndex"/>'s shape calls for,
+    /// summarizing nothing.
+    /// </summary>
+    /// <remarks>
+    /// A LIST RANGE CAN NAME NO ELEMENT, or a window it cannot vouch for, and the elements'
+    /// subtree must exist all the same before the block closes: a node created a block late would
+    /// close one block fewer than its parent, and every block after would be summarized under the
+    /// wrong number.
+    /// </remarks>
+    /// <param name="arena">The arena holding the batch.</param>
+    /// <param name="nodeIndex">This column inside the batch.</param>
+    private void Shape(CanonicalArena arena, int nodeIndex)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        switch (node.Kind)
+        {
+            case CanonicalKind.Struct:
+            {
+                ColumnWriter[] children = Children(node.FieldCount);
+                for (int i = 0; i < children.Length; i++)
+                {
+                    children[i].Shape(arena, node.GetFieldIndex(i));
+                }
+
+                return;
+            }
+
+            case CanonicalKind.Extension:
+                Children(1)[0].Shape(arena, node.StorageIndex);
+                return;
+
+            case CanonicalKind.ListView or CanonicalKind.FixedSizeList:
+                Children(1)[0].Shape(arena, node.ElementsIndex);
+                return;
+
+            default:
+                return;
+        }
+    }
+
+    /// <summary>
+    /// Marks the open block of this node and of every node under it as elements that cannot be
+    /// summarized in place.
+    /// </summary>
+    private void Scatter()
+    {
+        _open.Scattered = true;
+        ColumnWriter[]? children = _children;
+        if (children is null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < children.Length; i++)
+        {
+            children[i].Scatter();
+        }
+    }
+
+    /// <summary>
+    /// The elements' node over a chunk, when the chunk's elements can be summarized from its
+    /// blocks; <see langword="null"/> when this is not a list, when a block is scattered, or when
+    /// the blocks name another number of elements than the chunk writes.
+    /// </summary>
+    /// <param name="first">The chunk's first block.</param>
+    /// <param name="count">How many blocks it covers.</param>
+    /// <param name="elements">The elements the chunk's list node holds, after narrowing.</param>
+    internal ColumnWriter? ElementsOver(int first, int count, long elements)
+    {
+        if (Field(0) is not { } child || _children!.Length != 1)
+        {
+            return null;
+        }
+
+        BlockStats merged = child.Chunk(first, count);
+        if (merged.Scattered)
+        {
+            return null;
+        }
+
+        // A chunk whose lists are all empty has no element block present, and nothing to price.
+        return merged.Rows == elements ? child : null;
     }
 
     /// <summary>
@@ -545,6 +671,33 @@ internal sealed class ColumnWriter
             case CanonicalKind.Extension:
                 Children(1)[0].Reprobe(arena, node.StorageIndex, start, count);
                 return;
+
+            case CanonicalKind.ListView:
+            {
+                // The carried rows' elements, in the order the next chunk will hold them. A block
+                // whose elements were scattered is never summarized, so what its window holds there
+                // serves no chunk; the table forgets it with the chunk.
+                int elements = node.ElementsIndex;
+                ListElements.Window(node, arena.GetNode(elements).Length, start, count, out int from, out int length);
+                if (length > 0)
+                {
+                    Children(1)[0].Reprobe(arena, elements, from, length);
+                }
+
+                return;
+            }
+
+            case CanonicalKind.FixedSizeList:
+            {
+                long size = node.FixedSize;
+                if (size > 0)
+                {
+                    Children(1)[0].Reprobe(
+                        arena, node.ElementsIndex, checked((int)(start * size)), checked((int)(count * size)));
+                }
+
+                return;
+            }
 
             default:
                 return;

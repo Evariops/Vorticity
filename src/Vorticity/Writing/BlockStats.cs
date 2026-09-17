@@ -177,6 +177,21 @@ internal struct BlockStats
     /// </remarks>
     internal bool WidthsBroken;
 
+    /// <summary>
+    /// Whether this block's rows are the elements of list rows whose window does not abut the
+    /// window before it, so that no chunk covering the block can be summarized from it.
+    /// </summary>
+    /// <remarks>
+    /// docs/11-write-strategy.md §3.2.4 gives a list's elements the parent's blocks, and the merge
+    /// of those blocks describes the elements array a chunk writes only when the ranges' windows
+    /// lie end to end (<c>ListElements</c>). A block that cannot vouch for that carries this flag,
+    /// even when nothing was summarized into it, and <see cref="Merge"/> keeps it from an absent
+    /// block too: the chooser must then measure the elements, because a bound or a step read from
+    /// the wrong elements would write wrong values rather than cost a pass. It takes one of the
+    /// spare bytes the struct's padding already had.
+    /// </remarks>
+    internal bool Scattered;
+
     // ORDER, FOR THE FILE STATISTICS' is_sorted / is_strict_sorted. Tracked the way the reference
     // computes them (vortex-array-0.86.1 aggregate_fn/fns/is_sorted): a null sorts below every
     // value, so a sorted nullable column has its nulls first; two equal neighbours -- two values
@@ -350,6 +365,8 @@ internal struct BlockStats
     /// <param name="other">The summary to fold in; a default one is a no-op.</param>
     internal void Merge(in BlockStats other)
     {
+        // The one fact an absent summary can carry: its elements cannot be summarized in place.
+        Scattered |= other.Scattered;
         if (!other.IsPresent)
         {
             return;

@@ -3,8 +3,8 @@
 // "PLAN MEMORY IS SEEDED FROM THE LAST CHUNK'S ENCODING TREE, so that the appended data keeps the
 // file's encodings unless its statistics say otherwise." The tree is read once, from the last
 // chunk's segment of each column, and turned into what `ColumnWriter.Remember` would have left had
-// the same writer written that chunk a moment ago: a scheme per column, and per struct field below
-// it, since those are the nodes that keep a memory.
+// the same writer written that chunk a moment ago: a scheme per column, and per struct field and
+// list's elements below it, since those are the nodes that keep a memory.
 //
 // A MEMORY THAT HELD, BY CONSTRUCTION. The old chunk's bytes are the bytes its plan produced, so the
 // prediction is taken as met. The chooser still re-prices the scheme on the new chunk's statistics
@@ -42,7 +42,10 @@ internal sealed class PlanSeed
     /// </summary>
     internal bool WidthsServe { get; }
 
-    /// <summary>Per child column (a struct's fields, an extension's storage), its seed or none.</summary>
+    /// <summary>
+    /// Per child column (a struct's fields, an extension's storage, a list's elements), its seed or
+    /// none.
+    /// </summary>
     internal PlanSeed?[] Fields { get; }
 
     /// <summary>The seed of a column chunk's root, or <see langword="null"/> when it says nothing.</summary>
@@ -82,6 +85,35 @@ internal sealed class PlanSeed
             return any ? new PlanSeed(null, false, seeds) : null;
         }
 
+        if (dtype.Kind is DTypeKind.List or DTypeKind.FixedSizeList or DTypeKind.Map)
+        {
+            // A LIST'S ELEMENTS KEEP A MEMORY TOO since step 28 (docs/11 §3.2.4), and are the
+            // list's only child, whichever of the three list arrays holds them: elements first.
+            ArrayNode list = node;
+            if (dtype.Kind == DTypeKind.Map)
+            {
+                if (node.Encoding != ArrayEncodingId.Map || node.ChildCount != 1)
+                {
+                    return null;
+                }
+
+                list = node.GetChild(0);
+            }
+
+            bool shaped = dtype.Kind == DTypeKind.FixedSizeList
+                ? list.Encoding == ArrayEncodingId.FixedSizeList
+                : list.Encoding is ArrayEncodingId.ListView or ArrayEncodingId.List;
+            if (!shaped || list.ChildCount == 0)
+            {
+                return null;
+            }
+
+            PlanSeed? elements = dtype.Kind == DTypeKind.Map
+                ? Entries(list.GetChild(0), dtype)
+                : Of(list.GetChild(0), dtype.ElementType);
+            return elements is null ? null : new PlanSeed(null, false, [elements]);
+        }
+
         ColumnScheme? scheme = SchemeOf(node.Encoding);
         return scheme is null
             ? null
@@ -89,6 +121,22 @@ internal sealed class PlanSeed
                 scheme,
                 node.Encoding is ArrayEncodingId.FastLanesBitPacked or ArrayEncodingId.ZigZag,
                 []);
+    }
+
+    /// <summary>A map's entries: a struct of its key and its value, in that order.</summary>
+    /// <param name="node">The entries array.</param>
+    /// <param name="map">The map's dtype.</param>
+    private static PlanSeed? Entries(ArrayNode node, DType map)
+    {
+        int offset = node.ChildCount - 2;
+        if (node.Encoding != ArrayEncodingId.Struct || offset is not (0 or 1))
+        {
+            return null;
+        }
+
+        PlanSeed? key = Of(node.GetChild(offset), map.KeyType);
+        PlanSeed? value = Of(node.GetChild(offset + 1), map.ValueType);
+        return key is null && value is null ? null : new PlanSeed(null, false, [key, value]);
     }
 
     /// <summary>

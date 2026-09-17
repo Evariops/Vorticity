@@ -48,7 +48,7 @@ using Vorticity.Types.Serialization;
 namespace Vorticity.Writing;
 
 /// <summary>Writes a Vortex file, one batch at a time, in a single forward pass.</summary>
-public sealed partial class VortexFileWriter : IAsyncDisposable
+public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 {
     private readonly ISegmentSink _sink;
     private readonly DType _schema;
@@ -115,6 +115,32 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
     internal long ChunksWithoutStatistics => _chunksWithoutStatistics;
 
     private long _chunksWithoutStatistics;
+
+    /// <summary>
+    /// List chunks whose elements the chooser measured itself, because their blocks did not name
+    /// exactly the elements the chunk writes (docs/11 §3.2.4) — the elements' counterpart of
+    /// <see cref="ChunksWithoutStatistics"/>, and silent for the same reason.
+    /// </summary>
+    /// <remarks>
+    /// A list whose ranges name windows of elements laid end to end leaves this at zero; one whose
+    /// windows overlap or leave a gap between two blocks counts here, and is written from a
+    /// measurement, which is the safe answer rather than a loss of bytes.
+    /// </remarks>
+    internal long ElementChunksWithoutStatistics => _elementChunksWithoutStatistics;
+
+    private long _elementChunksWithoutStatistics;
+
+    private readonly bool _elementStatistics;
+
+    /// <summary>Column <paramref name="field"/>'s ingest state, for the tests that follow a child's memory.</summary>
+    /// <param name="field">The top-level field.</param>
+    internal ColumnWriter ColumnState(int field) => _columns[field];
+
+    /// <inheritdoc/>
+    bool IChunkLedger.ElementsServe => _elementStatistics;
+
+    /// <inheritdoc/>
+    void IChunkLedger.ElementsUnserved() => _elementChunksWithoutStatistics++;
 
     /// <summary>
     /// (Column chunk, field) pairs of a comparable kind whose distinct table could not answer, so the
@@ -212,9 +238,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
         int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
-        FenceShape fences)
+        FenceShape fences, bool elementStatistics)
     {
         _sink = sink;
+        _elementStatistics = elementStatistics;
         _schema = schema;
         _identity = identity;
         _compress = compress;
@@ -316,7 +343,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
-            options.WideRowsAbove, options.Fences);
+            options.WideRowsAbove, options.Fences, options.ElementStatistics);
     }
 
     /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
@@ -746,7 +773,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
             // exactly these rows, so every candidate that used to measure the column again reads
             // them instead. `Choose` checks the row count against the node it is given and falls
             // back to measuring when they disagree, so this can only ever cost a pass.
-            ChunkStats stats = new ChunkStats(_columns[field], _emittedBlocks, blocks);
+            ChunkStats stats = new ChunkStats(_columns[field], _emittedBlocks, blocks, this);
             if (stats.Stats.Rows != rows)
             {
                 _chunksWithoutStatistics++;

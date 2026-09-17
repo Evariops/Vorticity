@@ -8,6 +8,7 @@
 using System;
 
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Tests.Columns;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -81,6 +82,83 @@ public sealed class ProgressionSeamTests
         // The four nulls are one run, and 5 opens the next one against a null.
         Assert.Equal(5, column.Chunk(0, 2).RunCount);
         Assert.Equal(4, column.Chunk(1, 1).RunCount);
+    }
+
+    /// <summary>
+    /// A column that climbs by one past its type's maximum is no progression, though every
+    /// difference the lanes take in the type's own width is one (step 28a's register walk).
+    /// </summary>
+    [Theory]
+    [InlineData(0, 200)]
+    [InlineData(80, 120)]
+    public void AClimbThatWrapsIsNoProgression(int cut, int rows)
+    {
+        int[] values = new int[rows];
+        for (int i = 0; i < rows; i++)
+        {
+            values[i] = unchecked(int.MaxValue - 99 + i);
+        }
+
+        Assert.True(Steps(values, PType.I32, cut).DeltaBroken, "the column wraps at row 100");
+
+        // The same climb stopping on the maximum is one.
+        int[] limit = new int[rows];
+        for (int i = 0; i < rows; i++)
+        {
+            limit[i] = int.MaxValue - (rows - 1) + i;
+        }
+
+        BlockStats stats = Steps(limit, PType.I32, cut);
+        Assert.False(stats.DeltaBroken);
+        Assert.Equal(1, stats.Delta);
+    }
+
+    /// <summary>The same on bytes, sixteen lanes, climbing and descending.</summary>
+    [Fact]
+    public void ByteLanesTellAWrapFromADescent()
+    {
+        byte[] wraps = new byte[200];
+        byte[] descends = new byte[200];
+        for (int i = 0; i < 200; i++)
+        {
+            wraps[i] = unchecked((byte)(100 + i));
+            descends[i] = (byte)(255 - i);
+        }
+
+        Assert.True(Steps(wraps, PType.U8, 0).DeltaBroken);
+        BlockStats down = Steps(descends, PType.U8, 0);
+        Assert.False(down.DeltaBroken);
+        Assert.Equal(-1, down.Delta);
+
+        // A step that breaks deep inside a register.
+        descends[137] = 7;
+        Assert.True(Steps(descends, PType.U8, 0).DeltaBroken);
+    }
+
+    /// <summary>
+    /// Rows of <paramref name="values"/> through the pass, in two ranges cut at
+    /// <paramref name="cut"/> (none when 0), the second continuing the first.
+    /// </summary>
+    private static BlockStats Steps<T>(T[] values, PType ptype, int cut)
+        where T : unmanaged
+    {
+        CanonicalArena arena = new CanonicalArena();
+        DTypeArena types = new DTypeArena();
+        int width = System.Runtime.CompilerServices.Unsafe.SizeOf<T>();
+        VortexBuffer buffer = arena.Allocate(values.Length * width, width, out Span<byte> bytes);
+        System.Runtime.InteropServices.MemoryMarshal.AsBytes(values.AsSpan()).CopyTo(bytes);
+        int node = arena.AddPrimitive(
+            types.Primitive(ptype, Nullability.NonNullable), values.Length, Validity.NonNullable, ptype, buffer);
+
+        BlockStats stats = default;
+        PreviousRow previous = new PreviousRow();
+        if (cut > 0)
+        {
+            BlockStatsPass.Accumulate(arena, node, 0, cut, ref stats, previous);
+        }
+
+        BlockStatsPass.Accumulate(arena, node, cut, values.Length - cut, ref stats, previous);
+        return stats;
     }
 
     private static ColumnWriter TwoBlocks(ColumnFixture f, ReadOnlySpan<long> values)

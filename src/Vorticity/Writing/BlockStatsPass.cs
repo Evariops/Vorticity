@@ -409,11 +409,16 @@ internal static class BlockStatsPass
     /// inside the hot loop and made this pass MORE expensive than the `SequencePlan` walk it
     /// replaces: `sequence` 0,16 -&gt; 0,22 and `ext` 0,098 -&gt; 0,12, measured. In this shape the
     /// steady state is one subtract and one compare, which is what the walk it replaces costs.
+    /// <para>
+    /// AND A REGISTER OF THEM WHERE THE LANES ARE WIDE ENOUGH (step 28a): a list's elements go
+    /// through here too, and on the 1M-row `fixed_size_list` — three million rows of 0, 1, 2… —
+    /// that one compare a row cost 0,65 ns in place, against 0,41 for the walk it had replaced.
+    /// </para>
     /// </remarks>
     private static void Narrow<T>(
         ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> seed, bool seam, int start, int count,
         ref BlockStats stats)
-        where T : unmanaged, IBinaryInteger<T>
+        where T : unmanaged, IBinaryInteger<T>, IMinMaxValue<T>
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes);
         long step = stats.Delta;
@@ -440,7 +445,38 @@ internal static class BlockStatsPass
             first = 0;
         }
 
-        for (int i = first; i < count; i++)
+        // A REGISTER AT A TIME once the step is known and the previous row is inside the span
+        // (docs/11-write-strategy.md §4.1): a list's elements put millions of rows of a progression
+        // through here, where the scalar loop cost more than the `SequencePlan` walk it replaced.
+        int i = first;
+        if (Vector128.IsHardwareAccelerated && Vector128<T>.IsSupported && Vector128<T>.Count >= 4
+            && count - first > 4 * Vector128<T>.Count)
+        {
+            // The first pair, scalar: it names the step when none is known, and its previous row may
+            // be the seed, which is not in the span.
+            long head = long.CreateTruncating(values[start + i]);
+            long delta = head - last;
+            if (known && delta != step)
+            {
+                stats.BreakDelta();
+                return;
+            }
+
+            step = delta;
+            known = true;
+            last = head;
+            i++;
+            if (!Progression(values, start + i, start + count, last, step))
+            {
+                stats.BreakDelta();
+                return;
+            }
+
+            stats.SetDelta(step);
+            return;
+        }
+
+        for (; i < count; i++)
         {
             long value = long.CreateTruncating(values[start + i]);
             long delta = value - last;
@@ -465,6 +501,62 @@ internal static class BlockStatsPass
         {
             stats.SetDelta(step);
         }
+    }
+
+    /// <summary>
+    /// Whether rows <c>[from, end)</c> each climb by <paramref name="step"/> from the row before,
+    /// the row before <paramref name="from"/> being <paramref name="previous"/> — a register at a
+    /// time.
+    /// </summary>
+    /// <remarks>
+    /// THE LANES SUBTRACT IN THE TYPE'S OWN WIDTH, so a difference that wraps would compare equal
+    /// to a step it is not. The ENDPOINT closes that: a progression is monotone, so when its last
+    /// row, <c>previous + (end - from)·step</c>, lies in the type's range, every row before it does
+    /// too, and two values of that range that agree modulo 2^w are the same value. A range whose
+    /// endpoint leaves the type's range is no progression, and says so before a lane is loaded.
+    /// <para>
+    /// FOUR LANES OR MORE, as <see cref="OrderLanes"/>: the 64-bit columns keep their scalar walk.
+    /// The tail is the scalar twin, and so is the caller's loop under
+    /// <c>DOTNET_EnableHWIntrinsic=0</c> (11 §4, §5.2). <paramref name="from"/> is at least one
+    /// past the span's first row, so the first window's previous row is in the span.
+    /// </para>
+    /// </remarks>
+    private static bool Progression<T>(ReadOnlySpan<T> values, int from, int end, long previous, long step)
+        where T : unmanaged, IBinaryInteger<T>, IMinMaxValue<T>
+    {
+        Int128 endpoint = (Int128)previous + ((Int128)(end - from) * step);
+        if (endpoint < long.CreateTruncating(T.MinValue) || endpoint > long.CreateTruncating(T.MaxValue))
+        {
+            return false;
+        }
+
+        int lanes = Vector128<T>.Count;
+        ref T head = ref MemoryMarshal.GetReference(values);
+        Vector128<T> steps = Vector128.Create(T.CreateTruncating(step));
+        int row = from;
+        for (; row + lanes <= end; row += lanes)
+        {
+            Vector128<T> here = Vector128.LoadUnsafe(ref head, (nuint)row);
+            Vector128<T> before = Vector128.LoadUnsafe(ref head, (nuint)(row - 1));
+            if (!Vector128.EqualsAll(here - before, steps))
+            {
+                return false;
+            }
+        }
+
+        long last = long.CreateTruncating(values[row - 1]);
+        for (; row < end; row++)
+        {
+            long value = long.CreateTruncating(values[row]);
+            if (value - last != step)
+            {
+                return false;
+            }
+
+            last = value;
+        }
+
+        return true;
     }
 
     /// <summary>

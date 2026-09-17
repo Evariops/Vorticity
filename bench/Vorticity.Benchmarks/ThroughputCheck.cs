@@ -798,7 +798,7 @@ internal static class ThroughputCheck
         ("fastlanes_delta", 0.18),   // 3 passes, spread 0.17-0.18; was 0.19, -2.8%
         ("fastlanes_for", 0.63),   // 3 passes, spread 0.61-0.63; was 0.64, -1.9%
         ("fastlanes_rle", 0.89),   // 3 passes, spread 0.88-0.89; was 0.91, -2.1%
-        ("fixed_size_list", 0.12),   // 3 passes, spread 0.11-0.12; HELD at 0.12: 2 of 3 passes above, peak 0.12, no loosening
+        ("fixed_size_list", 0.065),   // 3 passes, spread 0.064-0.065; was 0.12, -45.5% (28a, 2026-09-17 : les éléments résumés à l'ingestion, la marche des pas par registres)
         ("fsst", 0.24),   // 3 passes, spread 0.24-0.24; HELD at 0.24: 3 of 3 passes above, peak 0.24, no loosening
         ("masked", 0.67),   // 3 passes, spread 0.67-0.68; HELD at 0.67: 2 of 3 passes above, peak 0.68, no loosening
         ("masked_all_invalid", 0.38),   // 3 passes; TENU à la main : --rebase proposait +0.5 %, et une référence ne monte jamais
@@ -820,9 +820,9 @@ internal static class ThroughputCheck
         ("zigzag", 0.33),   // 3 passes, spread 0.32-0.33; was 0.34, -1.6%
         ("zstd", 0.95),   // 3 passes, spread 0.94-0.95; was 1.33, -28.7%
         ("zstd_buffers", 0.076),   // 3 passes, spread 0.081-0.11; HELD at 0.076: 3 of 3 passes above, peak 0.11, no loosening. Axe de 5 ms : le pic à 0.11 est un processus bruyant, les deux autres à 0.081
-        ("list", 1.61),   // 3 passes, spread 1.63-1.65; HELD at 1.61: 3 of 3 passes above, peak 1.65, no loosening
-        ("listview", 0.96),   // 3 passes, spread 0.97-0.98; HELD at 0.96: 3 of 3 passes above, peak 0.98, no loosening
-        ("map", 0.54),   // 3 passes, spread 0.54-0.55; HELD at 0.54: 1 of 3 passes above, peak 0.55, no loosening
+        ("list", 0.97),   // 3 passes, spread 0.95-0.97; was 1.61, -39.9% (28a, 2026-09-17 : le chooser lit les éléments dans leurs blocs)
+        ("listview", 0.60),   // 3 passes, spread 0.59-0.60; was 0.96, -37.9% (28a, idem)
+        ("map", 0.35),   // 3 passes, spread 0.34-0.35; was 0.54, -35.3% (28a, idem)
     ];
 
     private static readonly (string Encoding, double Reference)[] TakeReferences =

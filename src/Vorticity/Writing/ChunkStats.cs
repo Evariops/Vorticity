@@ -10,13 +10,27 @@
 // row-aligned with their parent, so they share its blocks exactly -- while the column changes at
 // every step. Merging at each level costs a loop over the chunk's blocks, a few dozen additions.
 //
+// A LIST'S ELEMENTS DESCEND TOO (step 28): their blocks are the parent's (docs/11 §3.2.4), so the
+// same block range covers them, and the cursor is handed down only when those blocks summarized
+// exactly the elements the chunk writes, in its order.
+//
 // AN ABSENT CURSOR IS THE SAFE ANSWER, and every path that cannot answer takes it: a child a scheme
-// invented (a dictionary's values, ALP's integers), a list's elements, a shape that disagrees with
-// the first batch's. `Choose` then measures the column itself, which is what it did before any of
-// this existed.
+// invented (a dictionary's values, ALP's integers), a list whose ranges' windows do not abut, a
+// shape that disagrees with the first batch's. `Choose` then measures the column itself, which is
+// what it did before any of this existed.
 using System;
 
 namespace Vorticity.Writing;
+
+/// <summary>What the writer counts about the cursors it hands out.</summary>
+internal interface IChunkLedger
+{
+    /// <summary>Whether a list's elements may be summarized from their blocks at all.</summary>
+    bool ElementsServe { get; }
+
+    /// <summary>A list chunk's elements could not be, and will be measured.</summary>
+    void ElementsUnserved();
+}
 
 /// <summary>A position in the ingest statistics, for one chunk, that can descend to a child.</summary>
 internal readonly struct ChunkStats
@@ -24,16 +38,19 @@ internal readonly struct ChunkStats
     private readonly ColumnWriter? _column;
     private readonly int _firstBlock;
     private readonly int _blockCount;
+    private readonly IChunkLedger? _ledger;
 
     /// <summary>Points at <paramref name="column"/> over the chunk's block range.</summary>
     /// <param name="column">The column's ingest state, or <see langword="null"/> for none.</param>
     /// <param name="firstBlock">The chunk's first block.</param>
     /// <param name="blockCount">How many blocks the chunk covers.</param>
-    internal ChunkStats(ColumnWriter? column, int firstBlock, int blockCount)
+    /// <param name="ledger">Where the misses of a list's elements are counted, or none.</param>
+    internal ChunkStats(ColumnWriter? column, int firstBlock, int blockCount, IChunkLedger? ledger = null)
     {
         _column = column;
         _firstBlock = firstBlock;
         _blockCount = blockCount;
+        _ledger = ledger;
     }
 
     /// <summary>This column's summary over the chunk, or an absent one.</summary>
@@ -106,5 +123,29 @@ internal readonly struct ChunkStats
     internal ChunkStats Field(int index) =>
         _column is null
             ? default
-            : new ChunkStats(_column.Field(index), _firstBlock, _blockCount);
+            : new ChunkStats(_column.Field(index), _firstBlock, _blockCount, _ledger);
+
+    /// <summary>
+    /// The cursor for a list's elements over the same blocks (docs/11 §3.2.4), or an absent one
+    /// when those blocks do not describe the <paramref name="elements"/> elements the chunk writes.
+    /// </summary>
+    /// <param name="elements">The length of the chunk's elements child, after narrowing.</param>
+    internal ChunkStats Elements(long elements)
+    {
+        if (_column is null)
+        {
+            return default;
+        }
+
+        ColumnWriter? child = _ledger is { ElementsServe: false }
+            ? null
+            : _column.ElementsOver(_firstBlock, _blockCount, elements);
+        if (child is null)
+        {
+            _ledger?.ElementsUnserved();
+            return default;
+        }
+
+        return new ChunkStats(child, _firstBlock, _blockCount, _ledger);
+    }
 }

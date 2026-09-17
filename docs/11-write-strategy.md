@@ -256,6 +256,38 @@ today's exact patched FoR pricing, at a fraction of its four passes.
 | variant | the shredded columns as struct fields; the core storage as binary |
 | null | nothing |
 
+*As delivered (step 28a).* A list view, a map and a fixed-size list each get an elements
+`ColumnWriter`, and the chooser reads a list chunk's elements from their blocks as it reads a
+struct field's.
+- **What a block summarizes.** The writer narrows a chunk's elements to the window its rows name,
+  `[min offset, max end)`, gaps included (`ChunkCompactor`), and lays batches window after window.
+  So block `i` summarizes the window of the rows of block `i`, not the rows' elements one by one.
+  Inside the window the rows may name their elements in any order.
+- **When a block cannot.** Two consecutive ranges of one batch must have windows that abut. When
+  they do not, the block is *scattered*, with everything under it, and a chunk covering it measures
+  its elements. A bound or a step read from elements the chunk does not hold, or in another order,
+  would write wrong values. A batch's first range answers to nothing, because batches are narrowed
+  one by one. The check is one pass over the offsets and sizes, and the window's end is kept in
+  the list node's unused previous-row buffer.
+- **What is measured.** A block with no element closes like any other, so every node closes as
+  many blocks as its parent. `WriteAsync` counts the list chunks that fell back
+  (`ElementChunksWithoutStatistics`), and an audit hook compares every summary handed to the
+  chooser with a measurement of the node it came with. Plan memory reaches the elements, and an
+  append seeds it from the last chunk's elements (§3.8).
+- **Bytes.** Unchanged. The corpus lists and the 1M-row `list`, `listview`, `map` and
+  `fixed_size_list` rewrite to the same bytes, identity aside.
+- **Speed.** The 1M-row write axis against step 27: `map` 0,893, `list` 0,901, `listview` 0,911,
+  `fixed_size_list` 0,477. The last one needed a kernel: three million elements 0, 1, 2… cost the
+  scalar step walk more than the chooser's own walk had. The step walk of types of 32 bits or less
+  now takes a register at a time (§4.1). The lanes subtract in the type's width, and the range's
+  endpoint must lie in the type's range, which makes the check exact.
+- **Allocation.** A map's column tree gains three nodes, 2 984 bytes on `encodings/map`, per
+  column and not per row.
+- **Zones.** The file carries no zone map for the elements. A list column's `vortex.zoned`
+  describes the list values, a strict Rust reader reads it, and no index kind of 10 carries element
+  bounds. The element blocks serve the chooser, and a Bloom filter over the elements answers
+  "does any element of a row in this block equal v" (10 §5.1, step 28b).
+
 ### 3.3 Merging: zones, chunks, resolutions, file
 
 - **Zone map**: a zone is a block; `min`, `max`, `null_count` (and the bounded string prefixes when
@@ -529,6 +561,14 @@ software-emulated on NEON, which has no 64-bit lane multiply.
 | hashing, strings (XxHash3-64) | short inputs take scalar dedicated paths (≤ 16, ≤ 128, ≤ 240 bytes: a handful of multiplies, no loop); above 240 bytes the stripe loop is vectorised (`Vector128` in the dotnet/runtime implementation) | portable | ×2 to ×3 over xxHash64 on short strings, which is the choice itself; a multi-buffer variant (four strings in lanes) is future work behind a measurement | — |
 | distinct table probe | Swiss-table group compare: `Vector128<byte>` equality of sixteen control bytes with the tag, `ExtractMostSignificantBits` → candidate slots; for strings the stored hash is compared before the bytes; the code is stored to the codes buffer in the same step | portable | one dependent load per probe instead of a chain walk: ~×2 on the probe, and one probe per row for the whole write | linear probe on bytes |
 | Bloom build at block close | for each hash of the buffer: the eight Parquet salts as a `Vector256<uint>` (or two `Vector128<uint>`), `bits = 1 << ((h × salt) >> 27)` per lane, OR into the 256-bit block | portable on 128 bits, one instruction per step on AVX2 | ~3 ns per value per generation against eight scalar bit sets | scalar loop |
+
+*As delivered (step 28a): the step walk.* A progression is checked a register at a time for types
+of 32 bits or less (`BlockStatsPass.Progression`): `v[i] − v[i−1]` against the broadcast step,
+subtracted in the type's own width, all lanes equal. A wrapped difference would compare equal to a
+step it is not, so the range's endpoint `previous + n·step` must lie in the type's range first: a
+progression is monotone, and two values of that range equal modulo 2^w are equal. 0,5 → 0,2 ns a
+value; 64-bit columns keep the scalar walk, as the order check does. The scalar loop is the twin
+under `DOTNET_EnableHWIntrinsic=0`.
 
 ### 4.2 Encoding
 

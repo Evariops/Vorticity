@@ -120,6 +120,12 @@ public sealed class VortexWriteOptions
     /// </summary>
     internal FenceShape Fences { get; init; } = FenceShape.Default;
 
+    /// <summary>
+    /// Whether the chooser reads a list's elements from their ingest blocks (docs/11 §3.2.4);
+    /// turned off only by the tests that compare the bytes against a chooser that measures them.
+    /// </summary>
+    internal bool ElementStatistics { get; init; } = true;
+
     /// <summary>A copy with the three things an append decides from the file.</summary>
     /// <param name="rowBlockSize">The file's block length.</param>
     /// <param name="indexes">The policy the append writes under.</param>
@@ -136,6 +142,7 @@ public sealed class VortexWriteOptions
         ScratchMemoryBytes = ScratchMemoryBytes,
         WideRowsAbove = WideRowsAbove,
         Fences = Fences,
+        ElementStatistics = ElementStatistics,
         Compress = Compress,
         FileStatistics = fileStatistics,
         TargetEdition = TargetEdition,

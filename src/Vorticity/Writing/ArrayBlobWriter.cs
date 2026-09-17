@@ -1386,11 +1386,11 @@ internal static class ArrayBlobWriter
             // produces a file THIS READER REFUSES, correctly: "vortex.listview produces a List
             // dtype; it was asked for Map".
             CanonicalKind.ListView => node.DType.Kind == DTypeKind.Map
-                ? WriteMap(builder, arena, node, buffers, encodings, compress)
-                : WriteListView(builder, arena, node, buffers, encodings, compress),
+                ? WriteMap(builder, arena, node, buffers, encodings, compress, stats)
+                : WriteListView(builder, arena, node, buffers, encodings, compress, stats),
 
             CanonicalKind.FixedSizeList =>
-                WriteFixedSizeList(builder, arena, node, buffers, encodings, compress),
+                WriteFixedSizeList(builder, arena, node, buffers, encodings, compress, stats),
 
             // THE DTYPE DECIDES, as it does for a map above: a Struct wearing a VARIANT dtype is a
             // variant column in this library's canonical form, and writing it as `vortex.struct`
@@ -1674,17 +1674,47 @@ internal static class ArrayBlobWriter
     /// </remarks>
     private static int WriteMap(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
-        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress)
+        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress,
+        ChunkStats stats = default)
     {
-        int entries = WriteListView(builder, arena, node, buffers, encodings, compress);
+        int entries = WriteListView(builder, arena, node, buffers, encodings, compress, stats);
         Span<int> children = stackalloc int[1];
         children[0] = entries;
         return Node(builder, encodings, "vortex.map"u8, default, children, []);
     }
 
+    /// <summary>
+    /// What a test installs to see every list chunk's elements beside the summary the chooser is
+    /// handed for them (docs/11 §3.2.4): the arena, the elements node, and the summary, absent when
+    /// the chooser measures. It flows with the async write, as <c>ColumnCompressor.Differential</c>
+    /// does, so two tests writing at once never see each other's chunks.
+    /// </summary>
+    internal static readonly System.Threading.AsyncLocal<Action<CanonicalArena, int, BlockStats>?> ElementsHanded =
+        new System.Threading.AsyncLocal<Action<CanonicalArena, int, BlockStats>?>();
+
+    /// <summary>The cursor for a list's elements, shown to the audit when one is installed.</summary>
+    private static ChunkStats ElementsOf(CanonicalArena arena, int elements, bool compress, ChunkStats stats)
+    {
+        if (!compress)
+        {
+            return default;
+        }
+
+        ChunkStats cursor = stats.Elements(arena.GetNode(elements).Length);
+        ElementsHanded.Value?.Invoke(arena, elements, cursor.Stats);
+        return cursor;
+    }
+
+    /// <remarks>
+    /// THE ELEMENTS ARE A COLUMN WITH STATISTICS OF THEIR OWN (docs/11 §3.2.4, step 28): the
+    /// ingest summarized them into the list's blocks, so the chooser reads them as it reads a
+    /// struct field's — when the blocks name exactly the elements this chunk holds, which the
+    /// cursor checks, and measures them otherwise.
+    /// </remarks>
     private static int WriteListView(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
-        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress)
+        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress,
+        ChunkStats stats = default)
     {
         CanonicalNode elements = arena.GetNode(node.ElementsIndex);
         byte[] metadata = ListViewBytes(
@@ -1692,7 +1722,9 @@ internal static class ArrayBlobWriter
 
         // Children in the reader's order: elements, offsets, sizes, then validity.
         Span<int> children = stackalloc int[4];
-        children[0] = WriteChild(builder, arena, node.ElementsIndex, buffers, encodings, compress);
+        children[0] = WriteChild(
+            builder, arena, node.ElementsIndex, buffers, encodings, compress,
+            ElementsOf(arena, node.ElementsIndex, compress, stats));
         children[1] = compress
             ? WriteIndexBuffer(
                 builder, arena, node.DType.Arena, node.Offsets, node.OffsetPType, node.Length,
@@ -1710,10 +1742,13 @@ internal static class ArrayBlobWriter
 
     private static int WriteFixedSizeList(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
-        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress)
+        List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress,
+        ChunkStats stats = default)
     {
         Span<int> children = stackalloc int[2];
-        children[0] = WriteChild(builder, arena, node.ElementsIndex, buffers, encodings, compress);
+        children[0] = WriteChild(
+            builder, arena, node.ElementsIndex, buffers, encodings, compress,
+            ElementsOf(arena, node.ElementsIndex, compress, stats));
         int count = 1 + Validity(builder, arena, node, buffers, encodings, children[1..]);
         return Node(
             builder, encodings, "vortex.fixed_size_list"u8, default, children[..count], []);
