@@ -634,6 +634,27 @@ injectable latency, failures and crashes for the tests, and a **counting** decor
 also records the critical path. Data objects are written through the store by a forward-only
 `ISegmentSink` adapter (03 §3.8), which is what lets the S3 library use a multipart upload.
 
+**As delivered (step 35).** `Vorticity.Dataset`, a 0.x package that references the core and that
+the core knows nothing about. `IObjectStore` is the five operations above; `ObjectRange` carries a
+read's bytes **and** the object's token in one answer, because §7 binds what a reader believes to
+the object it read and two calls prove nothing. Keys are checked in one place (`ObjectKey`), by the
+file store's rules — no leading or trailing slash, no `..`, no empty segment, printable ASCII
+without a backslash — so what the memory store accepts is what the file store can represent.
+
+| what | how, and what it is for |
+| --- | --- |
+| `MemoryObjectStore` | a sorted map under one lock, plus the three injections §11 asks for: `Latency` (per operation, so requests issued together overlap and requests issued in a row do not), `Fails` (throws, changes nothing) and `CrashesAfterPut` (**stores the object, then throws** — the state §8.2's rebase exists for, where the key is taken by bytes the writer never learned it wrote) |
+| `FileObjectStore` | `FileMode.CreateNew` is the atomic `PutIfAbsent`: the kernel creates the file or says someone else did. The content is not atomic — a process that dies mid-write leaves a short object — and the format detects that (§3's XXH3-64, the postscript), so the store says what it does rather than claiming more. Its token is the length and the last-write time |
+| `CountingObjectStore` | counts per operation, bytes read and written (a refused put's bytes counted: they crossed the seam), keys listed, and **`DependentSteps`** — an operation that starts while none is in flight begins a new step. That is §9.2's critical path, and it is the number a total of requests cannot give |
+| `ObjectSegmentSource` | an `ISegmentSource` over one object, planning its reads with the core's own `SegmentCoalescer` and issuing the runs **together**, so a split of forty segments is one step and not forty. It remembers the object's token and refuses a read whose token differs: the object changed under the reader |
+| `ObjectSegmentSink` | buffers and creates the object in `CommitAsync`, whose answer (`Created` or `Exists`) **is** the outcome of a commit (§8.1). It outlives its writer on purpose: `VortexFileWriter` disposes the sink it was handed, and the file is not complete until that dispose returns, so a dispose here closes the sink and keeps the bytes |
+
+The contract is a test suite, not prose: `ObjectStoreContractTests` takes a factory and runs the
+same ten cases against both stores — atomicity under sixteen concurrent writers, a token that
+changes when a key is deleted and created again, ordinal listing and its paging, a range clamped to
+the object and refused past its end, an empty object, a 4 MiB object read in pieces, and every key
+shape that could escape the store. An S3 library runs it against its own store.
+
 ## 12. What stays, what goes
 
 | | today | 10 §8.1 | here |

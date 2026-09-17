@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/Vorticity/Vorticity.csproj" />
     <Project Path="src/Vorticity.RowEncoding/Vorticity.RowEncoding.csproj" />
+    <Project Path="src/Vorticity.Dataset/Vorticity.Dataset.csproj" />
   </Folder>
   <Folder Name="/bench/">
     <Project Path="bench/Vorticity.Benchmarks/Vorticity.Benchmarks.csproj" />

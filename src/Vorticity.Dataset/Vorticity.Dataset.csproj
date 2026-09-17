@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 0.x, like Vorticity.RowEncoding and for a related reason: docs/13-dataset.md describes a
+       format this repository is the first to write, and §15 still lists decisions left open. The
+       core stays 1.x and knows nothing of this package; this package references the core. -->
+  <PropertyGroup>
+    <RootNamespace>Vorticity.Dataset</RootNamespace>
+    <AssemblyName>Vorticity.Dataset</AssemblyName>
+    <Version>0.1.0</Version>
+    <Description>A versioned dataset over an object store: immutable data and commit objects, a prolly tree of leaves, and the store seam an S3 library implements. Experimental format, versioned 0.x.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Vorticity/Vorticity.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Vorticity.Tests" />
+    <InternalsVisibleTo Include="Vorticity.Benchmarks" />
+  </ItemGroup>
+
+  <!-- Build-time only, as in the core: the package stays dependency-free at runtime. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.VisualStudio.Threading.Analyzers" PrivateAssets="all" />
+    <AdditionalFiles Include="../../BannedSymbols.txt" />
+  </ItemGroup>
+
+</Project>
