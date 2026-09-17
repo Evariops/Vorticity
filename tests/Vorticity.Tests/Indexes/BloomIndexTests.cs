@@ -68,7 +68,9 @@ public sealed class BloomIndexTests
             IndexWriteReport report = Assert.IsType<IndexWriteReport>(written.Report.Index(column, IndexKinds.BloomSbbf));
             Assert.True(report.Outcome == IndexOutcome.Built, column + ": " + report.Reason);
             Assert.Null(report.Reason);
-            Assert.Equal(Blocks / BloomBuilder.GenerationBlocks, report.Runs);
+
+            // One tree (13 §6.2): four generation nodes under a root that holds the file's filter.
+            Assert.Equal(1, report.Runs);
             Assert.Equal((Blocks / BloomBuilder.GenerationBlocks) + 1, report.Generations);
             Assert.True(report.Bytes > 0);
         }
@@ -81,22 +83,21 @@ public sealed class BloomIndexTests
         Assert.Equal(IndexOutcome.Abandoned, small.Outcome);
         Assert.Contains("distinct", small.Reason, StringComparison.Ordinal);
 
+        // One entry per column, one run, one root: nothing in the directory grows with the blocks.
         IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
-        Assert.Equal(9, directory.Entries.Count);
+        Assert.Equal(3, directory.Entries.Count);
         foreach (IndexEntry entry in directory.Entries)
         {
             Assert.Equal(IndexKinds.BloomSbbf, entry.Kind);
             Assert.Equal((ulong)Block, entry.BlockLength);
             Assert.True(BloomIndexOptions.TryParse(entry.Options, out BloomIndexOptions? options));
-            int expectedRuns = options!.Level == BloomLevel.File ? 1 : Blocks / BloomBuilder.GenerationBlocks;
-            Assert.Equal(expectedRuns, entry.Runs.Count);
-            Assert.Equal(options.Level == BloomLevel.Block ? Blocks : expectedRuns, options.FilterBlocks.Length);
-            foreach (IndexRun run in entry.Runs)
-            {
-                IndexSegment segment = Assert.Single(run.Payload);
-                Assert.Equal(0UL, segment.Offset % 64);
-                Assert.True(segment.Offset + segment.Length <= (ulong)written.Length);
-            }
+            Assert.Equal(BloomBuilder.FileMaxBlocks, options!.RootMaxBlocks);
+            IndexRun run = Assert.Single(entry.Runs);
+            Assert.Equal((0UL, (uint)Blocks), (run.FirstBlock, run.BlockCount));
+            IndexSegment segment = Assert.Single(run.Payload);
+            Assert.Equal(0UL, segment.Offset % 64);
+            Assert.True(segment.Offset + segment.Length <= (ulong)written.Length);
+            Assert.True(BloomTreeRun.RootWords(run.OptionBytes) > BloomNode.HeaderWords);
         }
 
         // The report's bytes still sum to the file, with the runs between the chunks.
@@ -226,28 +227,32 @@ public sealed class BloomIndexTests
         Assert.False(await written.File.MayMatchAsync(Parse("name = nope and key < 50000")));
         Assert.True(await written.File.MayMatchAsync(Parse("key != 5")));
 
-        // Without the file-level resolution, the async answer is the statistics' answer.
+        // With two resolutions the root is built under the node ceiling, and answers as well; with
+        // one, there is no node filter, and the async answer is the statistics' answer.
         await using Written two = await Written.CreateAsync(Policy(resolutions: 2));
-        Assert.True(await two.File.MayMatchAsync(Parse("name = nope")));
+        Assert.False(await two.File.MayMatchAsync(Parse("name = nope")));
+        await using Written one = await Written.CreateAsync(Policy(resolutions: 1));
+        Assert.True(await one.File.MayMatchAsync(Parse("name = nope")));
     }
 
     [Fact]
-    public async Task TwoResolutionsProbeTheGenerationsThenTheBlocks()
+    public async Task TwoResolutionsDescendTheTree()
     {
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy(resolutions: 2));
         int present = Key(40_000);
 
         IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
-        Assert.Equal(6, directory.Entries.Count);
+        Assert.Equal(3, directory.Entries.Count);
 
         ScanPlan plan = await written.File.Scan().Where(Parse($"key = {present}")).ExplainAsync();
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
 
-        // The four generations are read; then only the block filters of the generations still live.
-        int generations = Blocks / BloomBuilder.GenerationBlocks;
-        Assert.InRange(bloom.SegmentsRead, generations + 1, (2 * generations) - 1);
-        Assert.True(plan.LiveBlocks <= HoldingBlocks(present) + 4);
+        // The root; the four generation nodes, one region; then the leaves of each generation still
+        // live, one region each.
+        int holding = HoldingBlocks(present);
+        Assert.InRange(bloom.SegmentsRead, 3, 2 + Math.Min(holding + 1, Blocks / BloomBuilder.GenerationBlocks));
+        Assert.True(plan.LiveBlocks <= holding + 4);
     }
 
     [Fact]

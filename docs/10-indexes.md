@@ -254,7 +254,10 @@ maps are ours, out of tree.
 
 *Amended by [13-dataset.md](13-dataset.md) §6.2: the generations are laid out as a filter tree of
 fan-out 16, each node's children contiguous behind it, so that a probe descends and never reads
-the per-block table whole.*
+the per-block table whole. Delivered at step 24: the generations are the tree's level-1 nodes, and
+every level above them is built the same way up to one root per run, which is the file-level
+filter when the policy asks for three resolutions. One entry per column replaces one per
+resolution; 13 §6.2's note has the layout.*
 
 ---
 
@@ -297,6 +300,11 @@ column and too little for a 100 000-distinct id column.
 **Options.** `fpp` (as parts per million), `hash` (0 = XxHash3-64, the default; 1 = xxHash64, the
 Parquet-compatible variant), `max_blocks`, and per block or generation a `u32 n_blocks` table so
 that a probe can locate its filter without reading the others.
+
+*Amended at step 24 (13 §6.2): the `n_blocks` table is gone. Options are version 2 — `fpp`,
+`hash`, `max_blocks`, the fan-out of 16, `min_distinct`, `case_insensitive` and the root's
+ceiling — and a filter is located through the tree, whose nodes name their children's regions.
+`Indexes/BloomIndexOptions.cs` holds the message.*
 
 **Probe rules** (a pruner in the scan's block-mask chain, [11-write-strategy.md](11-write-strategy.md) §6.1):
 
@@ -380,7 +388,9 @@ dictionary-encoded the reader gets no claim for that chunk and falls through to 
 
 *As delivered (step 12b): `VortexFile.MayMatchAsync(expr)` answers from the statistics first and
 then from the file-level entries alone; the resolution is opt-in (`resolutions: 3`) and gives up
-past 2²² distinct values, which the report states.*
+past 2²² distinct values, which the report states. Since step 24 (13 §6.2) the file-level filter is
+the root of each run's tree, and `MayMatchAsync` reads the roots alone. A policy of two
+resolutions has a root too, under `max_blocks`, so it answers as well while its union fits.*
 
 A generation with `k` = every block of the file, built at `CompleteAsync` from the sum of block
 distinct counts, capped by `max_blocks` (default 1 Mi blocks = 32 MiB, rarely reached). It exists
@@ -429,6 +439,13 @@ and on medium-cardinality columns whose generations clear the floor, and nowhere
 bit-packs to a byte a row. A directory is written only when it lists something or the policy is
 the caller's own. The file budget counts the indexes still alive, never the dead weight of an
 abandoned one.
+
+*Amended at step 24 (13 §6.5):* `Auto` also gives up a column whose first generation holds more
+values than a node of `max_blocks` holds at the target rate. That generation's node would have no
+filter, and a probe would read every block's filter; a sorted run is the structure for such a
+column. The share now counts every level of the tree. A level costs about what the level below it
+costs when values do not repeat, so a column of unique values needs wider values than before to
+stay under 2 %.
 
 ---
 

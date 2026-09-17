@@ -698,39 +698,34 @@ internal sealed class IndexWriter : IDisposable
             _keyFields[field] is null ? null : _keyEncoder!.Format);
 
     /// <summary>An old entry restricted to the runs that end by <paramref name="boundary"/>, or null.</summary>
+    /// <remarks>
+    /// A FILTER TREE IS CUT, NOT DROPPED (13 §6.2): its nodes over the blocks the append writes again
+    /// hold values those blocks no longer have, which only makes them say "maybe" more often, and the
+    /// run's shorter range keeps every probe of those blocks for the append's own tree. A Bloom entry
+    /// this reader cannot parse -- version 1 -- is dropped, as the reader ignores it.
+    /// </remarks>
     private static IndexEntry? Kept(IndexEntry entry, int boundary)
     {
-        List<IndexRun> runs = [];
-        List<int> kept = [];
-        for (int i = 0; i < entry.Runs.Count; i++)
-        {
-            if (entry.Runs[i].EndBlock <= (ulong)boundary)
-            {
-                runs.Add(entry.Runs[i]);
-                kept.Add(i);
-            }
-        }
-
-        if (runs.Count == 0)
+        bool bloom = IsBloom(entry.Kind);
+        if (bloom && !BloomIndexOptions.TryParse(entry.Options, out _))
         {
             return null;
         }
 
-        byte[] options = entry.Options;
-        if (IsBloom(entry.Kind))
+        List<IndexRun> runs = [];
+        foreach (IndexRun run in entry.Runs)
         {
-            if (!BloomIndexOptions.TryParse(options, out BloomIndexOptions? bloom))
+            if (run.EndBlock <= (ulong)boundary)
             {
-                return null;
+                runs.Add(run);
             }
-
-            int[] counts = bloom!.Level == BloomLevel.Block
-                ? bloom.FilterBlocks.AsSpan(0, Math.Min(boundary, bloom.FilterBlocks.Length)).ToArray()
-                : [.. kept.ConvertAll(i => i < bloom.FilterBlocks.Length ? bloom.FilterBlocks[i] : 0)];
-            options = (bloom with { FilterBlocks = counts }).ToBytes();
+            else if (bloom && run.FirstBlock < (ulong)boundary)
+            {
+                runs.Add(run with { BlockCount = checked((uint)((ulong)boundary - run.FirstBlock)) });
+            }
         }
 
-        return entry with { Options = options, Runs = runs };
+        return runs.Count == 0 ? null : entry with { Runs = runs };
     }
 
     private static bool IsBloom(string kind) => kind is IndexKinds.BloomSbbf or IndexKinds.BloomNgram3;
@@ -794,26 +789,7 @@ internal sealed class IndexWriter : IDisposable
             }
 
             IndexEntry current = merged[match];
-            byte[] options = current.Options;
-            if (IsBloom(old.Kind))
-            {
-                BloomIndexOptions.TryParse(old.Options, out BloomIndexOptions? before);
-                BloomIndexOptions.TryParse(current.Options, out BloomIndexOptions? after);
-                int[] counts;
-                if (before!.Level == BloomLevel.Block)
-                {
-                    counts = (int[])after!.FilterBlocks.Clone();
-                    before.FilterBlocks.AsSpan(0, Math.Min(before.FilterBlocks.Length, counts.Length)).CopyTo(counts);
-                }
-                else
-                {
-                    counts = [.. before.FilterBlocks, .. after!.FilterBlocks];
-                }
-
-                options = (after with { FilterBlocks = counts }).ToBytes();
-            }
-
-            merged[match] = current with { Options = options, Runs = [.. old.Runs, .. current.Runs] };
+            merged[match] = current with { Runs = [.. old.Runs, .. current.Runs] };
         }
 
         return merged;
@@ -837,24 +813,15 @@ internal sealed class IndexWriter : IDisposable
         return true;
     }
 
-    /// <summary>Whether a new entry continues an old one: same kind, column and options but for the counts.</summary>
-    private static bool Continues(IndexEntry old, IndexEntry current)
-    {
-        if (old.Kind != current.Kind || !SamePath(old.ColumnPath, current.ColumnPath))
-        {
-            return false;
-        }
-
-        if (!IsBloom(old.Kind))
-        {
-            return old.Options.AsSpan().SequenceEqual(current.Options);
-        }
-
-        return BloomIndexOptions.TryParse(old.Options, out BloomIndexOptions? a)
-            && BloomIndexOptions.TryParse(current.Options, out BloomIndexOptions? b)
-            && (a! with { FilterBlocks = Array.Empty<int>() }) == (b! with { FilterBlocks = Array.Empty<int>() })
-            && old.BlockLength == current.BlockLength;
-    }
+    /// <summary>
+    /// Whether a new entry continues an old one: same kind, column, block length and options. A
+    /// Bloom entry's options hold nothing that grows with the file since step 24, so the bytes decide.
+    /// </summary>
+    private static bool Continues(IndexEntry old, IndexEntry current) =>
+        old.Kind == current.Kind
+        && SamePath(old.ColumnPath, current.ColumnPath)
+        && old.BlockLength == current.BlockLength
+        && old.Options.AsSpan().SequenceEqual(current.Options);
 
     /// <summary>Whether any column asked for anything: a file with no request carries no directory.</summary>
     internal bool Enabled
@@ -1181,60 +1148,15 @@ internal sealed class IndexWriter : IDisposable
         }
 
         IndexPolicy policy = bloom.Policy;
-        ulong blockLength = (ulong)Math.Max(blockRows, 1);
-        long bytes = 0;
 
-        // Block level: a run only where at least one of its blocks has a filter.
-        List<IndexRun> blockRuns = [];
-        foreach (BloomRun run in bloom.Runs)
+        // ONE ENTRY, ONE RUN, ONE ROOT (13 §6.2): the tree names every other region itself.
+        if (bloom.Tree is not { Payload: { Segment: { } root, DType: { } dtype } } tree)
         {
-            if (run.Blocks is { Segment: { } segment } payload)
-            {
-                blockRuns.Add(Run(run.FirstBlock, run.BlockCount, payload));
-                bytes += segment.Length;
-            }
+            Abandoned(field, kind, "the column wrote no block");
+            return;
         }
 
-        if (blockRuns.Count > 0)
-        {
-            _entries.Add(new IndexEntry(
-                kind, ColumnPath(field), blockLength,
-                BloomOptions(policy, BloomLevel.Block, [.. bloom.BlockFilterBlocks]), blockRuns));
-        }
-
-        // Generation level: one count per listed run.
-        List<IndexRun> generationRuns = [];
-        List<int> generationCounts = [];
-        foreach (BloomRun run in bloom.Runs)
-        {
-            if (run.Generation is { Segment: { } segment } payload)
-            {
-                generationRuns.Add(Run(run.FirstBlock, run.BlockCount, payload));
-                generationCounts.Add(run.GenerationBlocks);
-                bytes += segment.Length;
-            }
-        }
-
-        if (generationRuns.Count > 0)
-        {
-            _entries.Add(new IndexEntry(
-                kind, ColumnPath(field), blockLength,
-                BloomOptions(policy, BloomLevel.Generation, [.. generationCounts]), generationRuns));
-        }
-
-        // File level.
-        int files = 0;
-        if (bloom.File is { Generation: { Segment: { } fileSegment } filePayload } file)
-        {
-            _entries.Add(new IndexEntry(
-                kind, ColumnPath(field), blockLength,
-                BloomOptions(policy, BloomLevel.File, [file.GenerationBlocks]),
-                [Run(file.FirstBlock, file.BlockCount, filePayload)]));
-            bytes += fileSegment.Length;
-            files = 1;
-        }
-
-        if (blockRuns.Count == 0 && generationRuns.Count == 0 && files == 0)
+        if (bloom.Leaves == 0 && tree.Nodes == 0)
         {
             Abandoned(
                 field, kind,
@@ -1242,22 +1164,20 @@ internal sealed class IndexWriter : IDisposable
             return;
         }
 
+        BloomIndexOptions options = new BloomIndexOptions(
+            policy.FalsePositivePpm, policy.Hash, BloomBuilder.MaxBlocksOf(policy), policy.MinDistinct,
+            policy.Kind == IndexPolicyKind.NgramBloom && policy.CaseInsensitive,
+            policy.Resolutions >= 3 ? BloomBuilder.FileMaxBlocks : BloomBuilder.MaxBlocksOf(policy));
+        IndexRun run = new IndexRun(
+            (ulong)tree.FirstBlock, checked((uint)tree.Leaves), [root], [dtype], 0, BloomTreeRun.Options(tree.RootWords));
+        _entries.Add(new IndexEntry(kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), options.ToBytes(), [run]));
+
         string? fileNote = policy.Resolutions >= 3 ? bloom.FileAbandoned : null;
         _reports.Add(new IndexWriteReport(
             _paths[field], kind, IndexOutcome.Built,
             fileNote is null ? null : "built without its file-level filter: " + fileNote,
-            bytes, generationRuns.Count + files, blockRuns.Count));
+            bloom.WrittenBytes, tree.Nodes, 1));
     }
-
-    private static IndexRun Run(int firstBlock, int blockCount, PendingPayload payload) =>
-        new IndexRun((ulong)firstBlock, checked((uint)blockCount), [payload.Segment!.Value], [payload.DType!]);
-
-    private static byte[] BloomOptions(IndexPolicy policy, BloomLevel level, int[] counts) =>
-        new BloomIndexOptions(
-            level, policy.FalsePositivePpm, policy.Hash,
-            level == BloomLevel.File ? BloomBuilder.FileMaxBlocks : policy.MaxBlocks,
-            counts, BloomBuilder.GenerationBlocks, policy.MinDistinct,
-            policy.Kind == IndexPolicyKind.NgramBloom && policy.CaseInsensitive).ToBytes();
 
     /// <summary>
     /// <c>vorticity.postings.blocks.v1</c> and <c>vorticity.sorted.runs.v1</c>: one entry, one run

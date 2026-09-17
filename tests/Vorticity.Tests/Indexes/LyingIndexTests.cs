@@ -132,8 +132,8 @@ public sealed class LyingIndexTests
     public async Task AZeroedFilterIsCaughtByItsChecksumAndCostsNoRow()
     {
         // 10 §5.1: "a zeroed filter would drop rows", and no structural check can see it. The bits
-        // of every block filter of `f` are zeroed, the array framing kept: a well-formed filter that
-        // says every value is absent.
+        // of the root filter of `f` are zeroed, the array framing and the node's header kept: a
+        // well-formed tree whose root says every value is absent (13 §6.2).
         Decoders.EnsureRegistered();
         byte[] original = await WriteAsync(0);
         List<IndexSegment> filters = await FiltersAsync(original, column: 3);
@@ -141,7 +141,7 @@ public sealed class LyingIndexTests
         byte[] zeroed = (byte[])original.Clone();
         foreach (IndexSegment filter in filters)
         {
-            ZeroBits(zeroed, filter);
+            ZeroRootFilter(zeroed, filter);
         }
 
         VortexExpr present = Expr.Eq(Expr.Field("f"), Expr.Literal(FilterLiteral.From(12.5)));
@@ -397,7 +397,7 @@ public sealed class LyingIndexTests
         return forged;
     }
 
-    /// <summary>Every Bloom filter region of one top-level column, at every resolution.</summary>
+    /// <summary>Every Bloom tree's root region of one top-level column.</summary>
     private static async Task<List<IndexSegment>> FiltersAsync(byte[] bytes, uint column)
     {
         await using MemorySegmentSource source = new MemorySegmentSource(bytes);
@@ -420,14 +420,18 @@ public sealed class LyingIndexTests
     }
 
     /// <summary>
-    /// Zeroes an array blob's buffers and keeps its framing: the flatbuffer and its length, at the
-    /// blob's end (02 §5.1), stay as written.
+    /// Zeroes the filter words of the root node an array blob holds, and keeps everything else: the
+    /// node's header and child sizes, and the blob's framing. The u32 buffer starts the blob (02 §5.1).
     /// </summary>
-    private static void ZeroBits(byte[] bytes, IndexSegment blob)
+    private static void ZeroRootFilter(byte[] bytes, IndexSegment blob)
     {
         Span<byte> region = bytes.AsSpan(checked((int)blob.Offset), checked((int)blob.Length));
-        int flatbuffer = checked((int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(region[^4..]));
-        region[..(region.Length - 4 - flatbuffer)].Clear();
+        uint tag = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(region);
+        int listed = (tag >> 24) != 0 ? 0 : (int)((tag >> 16) & 0xFF);
+        int filterBlocks = checked((int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(region[8..]));
+        Assert.True(filterBlocks > 0, "the root has no filter to zero");
+        int start = (BloomNode.HeaderWords + listed) * sizeof(uint);
+        region.Slice(start, filterBlocks * SplitBlockBloom.BytesPerBlock).Clear();
     }
 
     private static async Task<long> CountAsync(byte[] bytes, VortexExpr filter, bool indexes)

@@ -123,8 +123,10 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     public int FalsePositivePpm => _fppPpm == 0 ? DefaultFalsePositivePpm : _fppPpm;
 
     /// <summary>
-    /// How many resolutions a skipping index carries: 1 = per block, 2 = block and generation,
-    /// 3 = block, generation and file (docs/10-indexes.md §4.3, §5.4).
+    /// How much of a Bloom filter's tree carries filters (docs/13-dataset.md §6.2): 1 = the blocks
+    /// alone; 2 = the blocks and every node above them, generations and root included, each while it
+    /// fits <see cref="MaxBlocks"/>; 3 = the same, with the root under the file-level ceiling
+    /// (docs/10-indexes.md §4.3, §5.4).
     /// </summary>
     public int Resolutions => _resolutions == 0 ? DefaultResolutions : _resolutions;
 

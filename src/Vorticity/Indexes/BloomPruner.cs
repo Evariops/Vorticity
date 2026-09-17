@@ -1,9 +1,10 @@
-// The read side of `vorticity.bloom.sbbf.v1` (docs/10-indexes.md §5.1): a pruner in the scan's
-// block-mask chain (docs/11-write-strategy.md §6.1), after the zone maps.
+// The read side of the split-block Bloom filters (docs/10-indexes.md §5.1, docs/13-dataset.md §6.2):
+// a pruner in the scan's block-mask chain (docs/11-write-strategy.md §6.1), after the zone maps.
 //
 // ONLY EQUALITY PROVES ANYTHING. `x = v` kills a block whose filter does not hold v; `x IN (...)`
 // one that holds none of them; an AND kills what any conjunct kills, an OR what every arm kills.
-// Nothing else -- `!=`, an ordering, a string match, a NOT -- claims anything.
+// Nothing else -- `!=`, an ordering, a NOT -- claims anything; a string match claims through the
+// trigram filters.
 //
 // THE LITERAL IS HASHED AS THE COLUMN STORES IT, and only when that is exact. The kernels compare in
 // three domains -- i64, u64, f64 -- so `x = 5` on an i32 column is the four bytes of 5, and `x = 5.0`
@@ -12,10 +13,16 @@
 // hashing one of them would lose the others. A float zero asks for BOTH zeros, since the filter
 // stores bit patterns and the scan's equality is IEEE; a NaN asks for nothing.
 //
-// COARSEST FIRST, AND A FINER LEVEL ONLY WHERE IT CAN STILL KILL (10 §4.3): the file filter, then
-// the generations of the blocks still live, then those blocks' own filters, each level one
-// coalesced read. A payload that is not what its entry says -- the wrong length, the wrong type --
-// makes no claim for the blocks it covers: a lying index may cost pruning, never rows.
+// A PROBE DESCENDS EACH TREE A LEVEL AT A TIME (13 §6.2). Every run's root first, in one read; then,
+// level by level, the children of the nodes that still cover a live block -- a node's children are
+// one region, and a level's regions one coalesced read. A node whose filter proves the predicate
+// false kills its blocks, so its children are never read; a node without a filter proves nothing,
+// and the probe goes through it. A value present in one block costs 1 + 16 × depth filters, depth
+// being log16 of the blocks, for as long as the nodes fit their ceiling.
+//
+// WHAT DOES NOT CHECK OUT CLAIMS NOTHING: a region whose bytes are not its checksum's, a node that is
+// not what its parent says, words that do not decode. Its blocks stay live, and nothing beneath it
+// is read: a lying index may cost pruning, never rows.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -83,6 +90,7 @@ internal sealed class BloomPruner
         }
 
         DType schema = file.Schema;
+        ulong blocks = (ulong)((file.RowCount + blockRows - 1) / blockRows);
         Dictionary<string, Column> columns = new Dictionary<string, Column>(StringComparer.Ordinal);
         foreach (IndexEntry entry in directory.Entries)
         {
@@ -102,31 +110,41 @@ internal sealed class BloomPruner
                 columns[key] = column;
             }
 
-            column.Levels.Add(new Level(entry, options!));
+            foreach (IndexRun run in entry.Runs)
+            {
+                if (run.Payload.Count == 1 && run.EndBlock <= blocks && BloomTreeRun.RootWords(run.OptionBytes) > 0)
+                {
+                    column.Trees.Add(new Tree(run, options!.Hash));
+                }
+            }
         }
 
-        if (columns.Count == 0)
+        List<string> empty = [];
+        foreach ((string key, Column column) in columns)
         {
-            return null;
+            column.Trees.Sort((a, b) => a.Run.FirstBlock.CompareTo(b.Run.FirstBlock));
+            if (column.Trees.Count == 0)
+            {
+                empty.Add(key);
+            }
         }
 
-        foreach (Column column in columns.Values)
+        foreach (string key in empty)
         {
-            // File, then generations, then blocks.
-            column.Levels.Sort((a, b) => b.Options.Level.CompareTo(a.Options.Level));
+            columns.Remove(key);
         }
 
-        return new BloomPruner(filter, columns);
+        return columns.Count == 0 ? null : new BloomPruner(filter, columns);
     }
 
     /// <summary>
-    /// Whether the file-level filters leave room for a match (10 §5.4): the multi-file question,
-    /// answered with one read per filtered column and no zone map.
+    /// Whether the roots leave room for a match (10 §5.4): the multi-file question, answered with one
+    /// read per filtered column and no zone map.
     /// </summary>
     /// <param name="file">The open file.</param>
     /// <param name="filter">The predicate.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns><see langword="false"/> only when a file-level filter proves no row can match.</returns>
+    /// <returns><see langword="false"/> only when the roots prove no row can match.</returns>
     internal static async ValueTask<bool> FileMayMatchAsync(
         VortexFile file, VortexExpr filter, CancellationToken cancellationToken)
     {
@@ -143,67 +161,24 @@ internal sealed class BloomPruner
         }
 
         BlockMask live = new BlockMask(file.RowCount, blockRows);
-        await pruner.RefineAsync(file, live, cancellationToken, BloomLevel.File).ConfigureAwait(false);
+        await pruner.RefineAsync(file, live, cancellationToken, rootsOnly: true).ConfigureAwait(false);
         return !live.IsEmpty;
     }
 
-    /// <summary>Refines <paramref name="live"/>, reading the filters it needs level by level.</summary>
+    /// <summary>Refines <paramref name="live"/>, descending the trees a level at a time.</summary>
     /// <param name="file">The open file.</param>
     /// <param name="live">The mask, which only loses blocks.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <param name="finest">The finest level to consult.</param>
+    /// <param name="rootsOnly">Whether to stop at the roots.</param>
     internal async ValueTask RefineAsync(
-        VortexFile file, BlockMask live, CancellationToken cancellationToken, BloomLevel finest = BloomLevel.Block)
+        VortexFile file, BlockMask live, CancellationToken cancellationToken, bool rootsOnly = false)
     {
-        for (int pass = (int)BloomLevel.File; pass >= (int)finest && !live.IsEmpty; pass--)
+        int top = await LoadRootsAsync(file, live, cancellationToken).ConfigureAwait(false);
+        for (int level = top; level >= 0 && !live.IsEmpty; level--)
         {
-            BloomLevel level = (BloomLevel)pass;
-            using SegmentRequestSet requests = new SegmentRequestSet();
-            List<(Level Level, int Run, int Slot)> wanted = [];
-            foreach (Column column in _columns.Values)
+            if (!rootsOnly && level < top)
             {
-                foreach (Level candidate in column.Levels)
-                {
-                    if (candidate.Options.Level != level)
-                    {
-                        continue;
-                    }
-
-                    IReadOnlyList<IndexRun> runs = candidate.Entry.Runs;
-                    for (int run = 0; run < runs.Count; run++)
-                    {
-                        if (candidate.Loaded.ContainsKey(run) || !AnyLive(live, runs[run]))
-                        {
-                            continue;
-                        }
-
-                        IndexSegment segment = runs[run].Payload[0];
-                        int slot = requests.Add(new SegmentSpec(
-                            segment.Offset, segment.Length, segment.AlignmentExponent, 0, 0));
-                        wanted.Add((candidate, run, slot));
-                    }
-                }
-            }
-
-            if (wanted.Count > 0)
-            {
-                Segments += requests.Count;
-                for (int i = 0; i < requests.Count; i++)
-                {
-                    Bytes += requests.GetSpec(i).Length;
-                }
-
-                await file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-                using ScanContext context = file.CreateIndexContext();
-                foreach ((Level candidate, int run, int slot) in wanted)
-                {
-                    // A REGION WHOSE BYTES ARE NOT THE ONES WRITTEN CLAIMS NOTHING (13 §7): a filter
-                    // with its bits zeroed decodes perfectly and would kill every block it covers.
-                    VortexBuffer bytes = requests.GetBuffer(slot);
-                    candidate.Loaded[run] = candidate.Entry.Runs[run].Payload[0].Holds(bytes.Span)
-                        ? Decode(context, bytes, candidate, run)
-                        : null;
-                }
+                await LoadLevelAsync(file, live, level, cancellationToken).ConfigureAwait(false);
             }
 
             for (int block = 0; block < live.BlockCount; block++)
@@ -216,14 +191,150 @@ internal sealed class BloomPruner
         }
     }
 
-    /// <summary>
-    /// The run's filter words, copied out of the segment, or <see langword="null"/> when the payload
-    /// is not the u32 array of the length its entry declares.
-    /// </summary>
-    private static uint[]? Decode(ScanContext context, VortexBuffer segment, Level level, int run)
+    /// <summary>Reads every root over a live block, in one read; returns the deepest root's level.</summary>
+    private async ValueTask<int> LoadRootsAsync(VortexFile file, BlockMask live, CancellationToken cancellationToken)
     {
-        long expected = level.ExpectedWords(run);
-        if (expected <= 0 || expected > int.MaxValue)
+        using SegmentRequestSet requests = new SegmentRequestSet();
+        List<(Tree Tree, int Slot)> wanted = [];
+        foreach (Column column in _columns.Values)
+        {
+            foreach (Tree tree in column.Trees)
+            {
+                if (tree.Root is null && AnyLive(live, (long)tree.Run.FirstBlock, (long)tree.Run.EndBlock))
+                {
+                    IndexSegment root = tree.Run.Payload[0];
+                    wanted.Add((tree, requests.Add(new SegmentSpec(root.Offset, root.Length, root.AlignmentExponent, 0, 0))));
+                }
+            }
+        }
+
+        if (wanted.Count > 0)
+        {
+            await ReadAsync(file, requests, cancellationToken).ConfigureAwait(false);
+            using ScanContext context = file.CreateIndexContext();
+            foreach ((Tree tree, int slot) in wanted)
+            {
+                VortexBuffer bytes = requests.GetBuffer(slot);
+                uint[]? words = tree.Run.Payload[0].Holds(bytes.Span)
+                    ? Decode(context, bytes, BloomTreeRun.RootWords(tree.Run.OptionBytes))
+                    : null;
+                tree.Root = words is null ? null : ParseRoot(words, tree.Run);
+            }
+        }
+
+        int top = 0;
+        foreach (Column column in _columns.Values)
+        {
+            foreach (Tree tree in column.Trees)
+            {
+                top = Math.Max(top, tree.Root?.Level ?? 0);
+            }
+        }
+
+        return top;
+    }
+
+    /// <summary>A root, checked against its own header and its run: it covers at least the run's blocks.</summary>
+    private static BloomNode? ParseRoot(uint[] words, IndexRun run)
+    {
+        if (words.Length < BloomNode.HeaderWords)
+        {
+            return null;
+        }
+
+        int level = (int)((words[0] >> 8) & 0xFF);
+        long leaves = words[1];
+        if (leaves < run.BlockCount || leaves == 0 || level != BloomNode.LevelFor(leaves))
+        {
+            return null;
+        }
+
+        return BloomNode.TryRead(words, 0, words.Length, level, leaves, out BloomNode? root) ? root : null;
+    }
+
+    /// <summary>
+    /// Reads the children, at <paramref name="level"/>, of every node one level up that still covers
+    /// a live block: one region per node, one read for the level.
+    /// </summary>
+    private async ValueTask LoadLevelAsync(VortexFile file, BlockMask live, int level, CancellationToken cancellationToken)
+    {
+        using SegmentRequestSet requests = new SegmentRequestSet();
+        List<(Tree Tree, long Index, BloomNode Parent, int Slot)> wanted = [];
+        foreach (Column column in _columns.Values)
+        {
+            foreach (Tree tree in column.Trees)
+            {
+                if (tree.Root is null || tree.Root.Level <= level)
+                {
+                    continue;
+                }
+
+                foreach ((long index, BloomNode parent) in tree.NodesAt(level + 1))
+                {
+                    if (parent.Children is not { } region || tree.IsOpened(level + 1, index))
+                    {
+                        continue;
+                    }
+
+                    long start = (long)tree.Run.FirstBlock + (index << (4 * (level + 1)));
+                    long end = Math.Min(start + parent.Leaves, (long)tree.Run.EndBlock);
+                    if (!AnyLive(live, start, end))
+                    {
+                        continue;
+                    }
+
+                    tree.Open(level + 1, index);
+                    int slot = requests.Add(new SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+                    wanted.Add((tree, index, parent, slot));
+                }
+            }
+        }
+
+        if (wanted.Count == 0)
+        {
+            return;
+        }
+
+        await ReadAsync(file, requests, cancellationToken).ConfigureAwait(false);
+        using ScanContext context = file.CreateIndexContext();
+        foreach ((Tree tree, long index, BloomNode parent, int slot) in wanted)
+        {
+            VortexBuffer bytes = requests.GetBuffer(slot);
+            ReadOnlySpan<uint> childWords = parent.ChildWords;
+            long total = 0;
+            foreach (uint child in childWords)
+            {
+                total += child;
+            }
+
+            uint[]? words = parent.Children!.Value.Holds(bytes.Span) && total <= int.MaxValue
+                ? Decode(context, bytes, (int)total)
+                : null;
+            if (words is not null)
+            {
+                tree.Adopt(level, index, parent, words);
+            }
+        }
+    }
+
+    private async ValueTask ReadAsync(VortexFile file, SegmentRequestSet requests, CancellationToken cancellationToken)
+    {
+        Segments += requests.Count;
+        for (int i = 0; i < requests.Count; i++)
+        {
+            Bytes += requests.GetSpec(i).Length;
+        }
+
+        await file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A region's words, copied out of the segment, or <see langword="null"/> when the payload is
+    /// not the u32 array of the length its parent declares.
+    /// </summary>
+    private static uint[]? Decode(ScanContext context, VortexBuffer segment, int expected)
+    {
+        if (expected <= 0)
         {
             return null;
         }
@@ -235,14 +346,14 @@ internal sealed class BloomPruner
             DTypeArena types = new DTypeArena();
             DType u32 = types.Primitive(PType.U32, Nullability.NonNullable);
             ArrayNode root = context.Nodes.Root;
-            int node = context.Decode.DecodeRoot(in root, u32, (int)expected);
+            int node = context.Decode.DecodeRoot(in root, u32, expected);
             CanonicalNode array = context.Canonical.GetNode(node);
             if (array.Kind != CanonicalKind.Primitive || array.PType != PType.U32 || array.Length != expected)
             {
                 return null;
             }
 
-            return array.Values.Cast<uint>()[..(int)expected].ToArray();
+            return array.Values.Cast<uint>()[..expected].ToArray();
         }
         catch (VortexFormatException)
         {
@@ -250,10 +361,10 @@ internal sealed class BloomPruner
         }
     }
 
-    private static bool AnyLive(BlockMask live, IndexRun run)
+    private static bool AnyLive(BlockMask live, long start, long end)
     {
-        long end = Math.Min((long)run.EndBlock, live.BlockCount);
-        for (long block = (long)run.FirstBlock; block < end; block++)
+        end = Math.Min(end, live.BlockCount);
+        for (long block = Math.Max(start, 0); block < end; block++)
         {
             if (live.IsLive((int)block))
             {
@@ -266,7 +377,7 @@ internal sealed class BloomPruner
 
     // ------------------------------------------------------------------------------ the proof
 
-    private bool ProvesAbsent(VortexExpr expr, int block, BloomLevel level)
+    private bool ProvesAbsent(VortexExpr expr, int block, int level)
     {
         switch (expr)
         {
@@ -298,59 +409,41 @@ internal sealed class BloomPruner
         }
     }
 
-    private bool Absent(string path, FilterLiteral value, int block, BloomLevel level)
+    private bool Absent(string path, FilterLiteral value, int block, int level)
     {
-        if (!_columns.TryGetValue(path, out Column? column))
+        if (!_columns.TryGetValue(path, out Column? column)
+            || column.TreeOf(block) is not { } tree
+            || !tree.TryFilter(level, block, out ReadOnlySpan<uint> words))
         {
             return false;
         }
 
-        foreach (Level candidate in column.Levels)
+        if (!column.Hashes(value, tree.Hash, out ulong first, out ulong second, out bool two))
         {
-            if (candidate.Options.Level != level || !candidate.TryFilter(block, out ReadOnlySpan<uint> words))
-            {
-                continue;
-            }
-
-            if (!column.Hashes(value, candidate.Options.Hash, out ulong first, out ulong second, out bool two))
-            {
-                return false;
-            }
-
-            bool held = SplitBlockBloom.Contains(words, first) || (two && SplitBlockBloom.Contains(words, second));
-            if (!held)
-            {
-                return true;
-            }
+            return false;
         }
 
-        return false;
+        return !SplitBlockBloom.Contains(words, first) && !(two && SplitBlockBloom.Contains(words, second));
     }
 
     /// <summary>
     /// A string predicate is absent from a block when one trigram it requires is absent from the
-    /// block's trigram filter (10 §5.2); a predicate that requires none claims nothing.
+    /// filter over the block (10 §5.2); a predicate that requires none claims nothing.
     /// </summary>
-    private bool AbsentTrigrams(StringMatchExpr match, int block, BloomLevel level)
+    private bool AbsentTrigrams(StringMatchExpr match, int block, int level)
     {
-        if (!_columns.TryGetValue(TrigramKey(match.Field.Path), out Column? column))
+        if (!_columns.TryGetValue(TrigramKey(match.Field.Path), out Column? column)
+            || column.TreeOf(block) is not { } tree
+            || !tree.TryFilter(level, block, out ReadOnlySpan<uint> words))
         {
             return false;
         }
 
-        foreach (Level candidate in column.Levels)
+        foreach (byte[] trigram in column.Required(match))
         {
-            if (candidate.Options.Level != level || !candidate.TryFilter(block, out ReadOnlySpan<uint> words))
+            if (!SplitBlockBloom.Contains(words, SplitBlockBloom.Hash(trigram, tree.Hash)))
             {
-                continue;
-            }
-
-            foreach (byte[] trigram in column.Required(match))
-            {
-                if (!SplitBlockBloom.Contains(words, SplitBlockBloom.Hash(trigram, candidate.Options.Hash)))
-                {
-                    return true;
-                }
+                return true;
             }
         }
 
@@ -410,7 +503,7 @@ internal sealed class BloomPruner
 
     // ------------------------------------------------------------------------------ state
 
-    /// <summary>One column's entries and how its values hash.</summary>
+    /// <summary>One column's trees and how its values hash.</summary>
     /// <remarks>
     /// The literal's bytes come from <see cref="KeyLayout.TryEncode"/>, the one conversion every
     /// value index shares; a decimal has no layout, so a decimal filter claims nothing here.
@@ -421,6 +514,7 @@ internal sealed class BloomPruner
         private readonly KeyLayout _layout;
         private readonly bool _fold;
         private readonly Dictionary<StringMatchExpr, List<byte[]>> _required = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<(FilterLiteral Value, BloomHash Hash), (bool Ok, ulong First, ulong Second, bool Two)> _hashes = [];
 
         internal Column(DType dtype, bool trigrams, bool fold)
         {
@@ -428,7 +522,34 @@ internal sealed class BloomPruner
             _fold = fold;
         }
 
-        internal List<Level> Levels { get; } = [];
+        /// <summary>The column's trees, in block order; their runs are disjoint (10 §4.1).</summary>
+        internal List<Tree> Trees { get; } = [];
+
+        /// <summary>The tree whose run covers <paramref name="block"/>, or null.</summary>
+        internal Tree? TreeOf(int block)
+        {
+            int low = 0;
+            int high = Trees.Count - 1;
+            while (low <= high)
+            {
+                int mid = (low + high) >>> 1;
+                IndexRun run = Trees[mid].Run;
+                if ((ulong)block < run.FirstBlock)
+                {
+                    high = mid - 1;
+                }
+                else if ((ulong)block >= run.EndBlock)
+                {
+                    low = mid + 1;
+                }
+                else
+                {
+                    return Trees[mid];
+                }
+            }
+
+            return null;
+        }
 
         /// <summary>The trigrams a predicate requires, folded as this column's filters were, computed once.</summary>
         internal List<byte[]> Required(StringMatchExpr match)
@@ -444,9 +565,22 @@ internal sealed class BloomPruner
 
         /// <summary>
         /// The hash (or the two, for a float zero) of <paramref name="value"/> as this column stores
-        /// it; <see langword="false"/> when the conversion is not exact and nothing can be claimed.
+        /// it, computed once per query; <see langword="false"/> when the conversion is not exact and
+        /// nothing can be claimed.
         /// </summary>
         internal bool Hashes(FilterLiteral value, BloomHash hash, out ulong first, out ulong second, out bool two)
+        {
+            if (!_hashes.TryGetValue((value, hash), out (bool Ok, ulong First, ulong Second, bool Two) known))
+            {
+                known.Ok = Compute(value, hash, out known.First, out known.Second, out known.Two);
+                _hashes[(value, hash)] = known;
+            }
+
+            (first, second, two) = (known.First, known.Second, known.Two);
+            return known.Ok;
+        }
+
+        private bool Compute(FilterLiteral value, BloomHash hash, out ulong first, out ulong second, out bool two)
         {
             first = 0;
             second = 0;
@@ -469,112 +603,104 @@ internal sealed class BloomPruner
         }
     }
 
-    /// <summary>One entry: its options, its runs, and the filters read so far.</summary>
-    private sealed class Level(IndexEntry entry, BloomIndexOptions options)
+    /// <summary>One run's tree: its root, and the nodes and leaves read so far.</summary>
+    private sealed class Tree(IndexRun run, BloomHash hash)
     {
-        private long[]? _blockOffsets;
+        /// <summary>[level]: node index at that level to node; [0] is unused, leaves live apart.</summary>
+        private readonly List<Dictionary<long, BloomNode>> _nodes = [];
+        private readonly Dictionary<long, (uint[] Words, int Start, int Length)> _leaves = [];
+        private readonly HashSet<(int Level, long Index)> _opened = [];
+        private BloomNode? _root;
 
-        internal IndexEntry Entry { get; } = entry;
+        internal IndexRun Run { get; } = run;
 
-        internal BloomIndexOptions Options { get; } = options;
+        internal BloomHash Hash { get; } = hash;
 
-        /// <summary>Run index to its words; <see langword="null"/> for a payload that made no sense.</summary>
-        internal Dictionary<int, uint[]?> Loaded { get; } = [];
-
-        /// <summary>The words the run's payload must hold.</summary>
-        internal long ExpectedWords(int run)
+        /// <summary>The root, once read; null while unread or when it did not check out.</summary>
+        internal BloomNode? Root
         {
-            IndexRun meta = Entry.Runs[run];
-            int[] counts = Options.FilterBlocks;
-            long blocks = 0;
-            if (Options.Level == BloomLevel.Block)
+            get => _root;
+            set
             {
-                for (ulong block = meta.FirstBlock; block < meta.EndBlock; block++)
+                _root = value;
+                if (value is not null)
                 {
-                    if (block >= (ulong)counts.Length)
+                    Level(value.Level)[0] = value;
+                }
+            }
+        }
+
+        internal IEnumerable<KeyValuePair<long, BloomNode>> NodesAt(int level) =>
+            level < _nodes.Count ? _nodes[level] : [];
+
+        internal bool IsOpened(int level, long index) => _opened.Contains((level, index));
+
+        internal void Open(int level, long index) => _opened.Add((level, index));
+
+        /// <summary>Takes the children of <paramref name="parent"/>, whose words are <paramref name="words"/>.</summary>
+        /// <param name="level">The children's level.</param>
+        /// <param name="index">The parent's index at the level above.</param>
+        /// <param name="parent">The parent.</param>
+        /// <param name="words">The children's words, concatenated.</param>
+        internal void Adopt(int level, long index, BloomNode parent, uint[] words)
+        {
+            ReadOnlySpan<uint> sizes = parent.ChildWords;
+            int at = 0;
+            for (int child = 0; child < sizes.Length; child++)
+            {
+                int length = (int)sizes[child];
+                long position = (index * BloomIndexOptions.Fanout) + child;
+                if (level == 0)
+                {
+                    if (length > 0)
                     {
-                        return -1;
+                        _leaves[position] = (words, at, length);
                     }
-
-                    blocks += counts[block];
                 }
-            }
-            else
-            {
-                if (run >= counts.Length)
+                else if (BloomNode.TryRead(words, at, length, level, BloomNode.ChildLeaves(parent.Level, parent.Leaves, child), out BloomNode? node))
                 {
-                    return -1;
+                    Level(level)[position] = node!;
                 }
 
-                blocks = counts[run];
+                at += length;
             }
-
-            return blocks * SplitBlockBloom.WordsPerBlock;
         }
 
-        /// <summary>The filter that covers <paramref name="block"/> at this level, when one was loaded.</summary>
-        internal bool TryFilter(int block, out ReadOnlySpan<uint> words)
+        /// <summary>The filter over <paramref name="block"/> at <paramref name="level"/>, when one was read.</summary>
+        internal bool TryFilter(int level, int block, out ReadOnlySpan<uint> words)
         {
+            long relative = block - (long)Run.FirstBlock;
+            if (level == 0)
+            {
+                if (_leaves.TryGetValue(relative, out (uint[] Words, int Start, int Length) leaf))
+                {
+                    words = leaf.Words.AsSpan(leaf.Start, leaf.Length);
+                    return true;
+                }
+
+                words = default;
+                return false;
+            }
+
+            if (level < _nodes.Count && _nodes[level].TryGetValue(relative >> (4 * level), out BloomNode? node)
+                && node.FilterBlocks > 0)
+            {
+                words = node.Filter;
+                return true;
+            }
+
             words = default;
-            int run = RunOf(block);
-            if (run < 0 || !Loaded.TryGetValue(run, out uint[]? all) || all is null)
-            {
-                return false;
-            }
-
-            if (Options.Level != BloomLevel.Block)
-            {
-                words = all;
-                return all.Length > 0;
-            }
-
-            int[] counts = Options.FilterBlocks;
-            if (counts[block] == 0)
-            {
-                return false;
-            }
-
-            _blockOffsets ??= Offsets(counts);
-            long start = (_blockOffsets[block] - _blockOffsets[(int)Entry.Runs[run].FirstBlock]) * SplitBlockBloom.WordsPerBlock;
-            words = all.AsSpan((int)start, counts[block] * SplitBlockBloom.WordsPerBlock);
-            return true;
+            return false;
         }
 
-        private static long[] Offsets(int[] counts)
+        private Dictionary<long, BloomNode> Level(int level)
         {
-            long[] offsets = new long[counts.Length + 1];
-            for (int i = 0; i < counts.Length; i++)
+            while (_nodes.Count <= level)
             {
-                offsets[i + 1] = offsets[i] + counts[i];
+                _nodes.Add([]);
             }
 
-            return offsets;
-        }
-
-        private int RunOf(int block)
-        {
-            IReadOnlyList<IndexRun> runs = Entry.Runs;
-            int low = 0;
-            int high = runs.Count - 1;
-            while (low <= high)
-            {
-                int mid = (low + high) >>> 1;
-                IndexRun run = runs[mid];
-                if ((ulong)block < run.FirstBlock)
-                {
-                    high = mid - 1;
-                }
-                else if ((ulong)block >= run.EndBlock)
-                {
-                    low = mid + 1;
-                }
-                else
-                {
-                    return mid;
-                }
-            }
-
-            return -1;
+            return _nodes[level];
         }
     }
 }

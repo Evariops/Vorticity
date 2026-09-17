@@ -8,7 +8,7 @@
 //
 //   ts      sorted, unique     Bloom given up inside its first block: its distinct values alone
 //                              outweigh the share, before the zone map could say it climbs
-//   blob    unique, 256 random Bloom kept, block and generation (1,6 % of a block that does not compress)
+//   blob    unique, 384 random Bloom kept: leaves, generations and a root (1,4 % of a column that does not compress)
 //   tenant  two per block      no block filter (under the floor); generation filters kept
 //   status  five values        dictionary probe kept; Bloom has nothing to hold
 //
@@ -42,10 +42,12 @@ public sealed class AutoIndexTests
     private const int Rows = Chunk * Chunks;
     /// <summary>
     /// Wide enough that a Bloom filter pays: at 1 % a block's filter is 2 KiB after the power-of-two
-    /// rounding, its generation's the same again per block, and 256 incompressible bytes a row make
-    /// that 1,6 % of the column -- under `Auto`'s 2 %, where 128 bytes made it 3,1 %.
+    /// rounding, its generation's the same again per block, and the root of the three generations
+    /// two thirds of that again (13 §6.2: a level costs what the one below it costs when the values
+    /// do not repeat). 384 incompressible bytes a row make that 1,4 % of the column, under `Auto`'s
+    /// 2 %; 256 made it 2,1 % once the root was built, and 1,6 % before.
     /// </summary>
-    private const int BlobLength = 256;
+    private const int BlobLength = 384;
 
     private static readonly string[] Names = ["ts", "blob", "tenant", "status"];
     private static readonly string[] Statuses = ["open", "closed", "pending", "void", "held"];
@@ -61,14 +63,17 @@ public sealed class AutoIndexTests
         return x ^ (x >> 33);
     }
 
-    /// <summary>128 bytes no compressor can shorten, unique per row.</summary>
+    /// <summary>
+    /// <see cref="BlobLength"/> bytes no compressor can shorten, unique per row. The offset takes
+    /// sixteen bits of the mixed word: at eight, the words past byte 255 of a row were another row's.
+    /// </summary>
     private static byte[] Blob(int row)
     {
         byte[] bytes = new byte[BlobLength];
         for (int i = 0; i < BlobLength; i += sizeof(ulong))
         {
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(
-                bytes.AsSpan(i), Mix(((ulong)row << 8) | (uint)i));
+                bytes.AsSpan(i), Mix(((ulong)row << 16) | (uint)i));
         }
 
         return bytes;
@@ -100,11 +105,11 @@ public sealed class AutoIndexTests
         Assert.True(blobBloom.Runs > 0);
 
         // Two tenants a block is under the floor of a block filter, and thirty-odd a generation is
-        // over it: the Bloom that survives here is its coarse level alone.
+        // over it: the tree that survives has bare generation nodes -- no leaf -- under a root.
         IndexWriteReport tenantBloom = Find(report, "tenant", IndexKinds.BloomSbbf);
         Assert.True(tenantBloom.Outcome == IndexOutcome.Built, tenantBloom.Reason);
-        Assert.Equal(0, tenantBloom.Runs);
-        Assert.True(tenantBloom.Generations > 0);
+        Assert.Equal(1, tenantBloom.Runs);
+        Assert.Equal((Rows / Block / 16) + 1, tenantBloom.Generations);
 
         Assert.Equal(IndexOutcome.Abandoned, Find(report, "status", IndexKinds.BloomSbbf).Outcome);
         IndexWriteReport statusProbe = Find(report, "status", IndexKinds.DictProbe);

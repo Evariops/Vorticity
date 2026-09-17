@@ -20,11 +20,17 @@
 // on those columns its lookup costs what the hash did. What pays is not hashing -- the verdicts
 // below come within the first block or the first generation.
 //
-// A RUN IS WRITTEN WHEN ITS GENERATION CLOSES, not at `CompleteAsync`. 10 §7.2 says both "nothing
-// is buffered across chunks" and "runs are written at CompleteAsync"; holding every filter to the
-// end is megabytes per column per million rows, so the streaming half wins and the run lands
-// between data chunks. A run is a file region no layout references, so where it lies changes
-// nothing for any reader (10 §3.2).
+// THE FILTERS GO OUT WHEN THEIR GENERATION CLOSES, not at `CompleteAsync`. 10 §7.2 says both
+// "nothing is buffered across chunks" and "runs are written at CompleteAsync"; holding every filter
+// to the end is megabytes per column per million rows, so the streaming half wins and the regions
+// land between data chunks. A region is a file region no layout references, so where it lies
+// changes nothing for any reader (10 §3.2).
+//
+// THEY GO OUT AS A TREE (13 §6.2, step 24): a generation's sixteen block filters are the leaves of a
+// level-1 node, whose filter is the generation's, and `BloomTreeWriter` stacks the nodes sixteen to
+// a level up to one root, the run's payload. The bits of every filter are what they were; a node
+// whose union passes `max_blocks` is now not built, where a generation filter used to be clamped
+// into uselessness.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -57,11 +63,21 @@ internal sealed class BloomBuilder : IndexBuilder
     private const int RepeatBlocks = 4;
 
     private readonly IndexPolicy _policy;
+    private readonly int _maxBlocks;
     private int _firstDistinct;
     private long _blockRawStart;
     private readonly HashSet64 _block = new HashSet64();
-    private readonly HashSet64? _generation;
     private HashSet64? _file;
+
+    /// <summary>
+    /// The tree, which also holds the open generation's union (<see cref="BloomTreeWriter.Generation"/>);
+    /// created by the first block the builder keeps, so that a column `Auto` gives up inside its first
+    /// block costs none.
+    /// </summary>
+    private BloomTreeWriter? _tree;
+
+    private BloomTreeWriter TreeWriter => _tree ??= new BloomTreeWriter(
+        _policy.FalsePositivePpm, _maxBlocks, _policy.MinDistinct, filters: _policy.Resolutions >= 2, this);
 
     private int _generationFirst;
     private long _rawBytes;
@@ -75,17 +91,25 @@ internal sealed class BloomBuilder : IndexBuilder
     internal BloomBuilder(IndexPolicy policy)
     {
         _policy = policy;
+        _maxBlocks = MaxBlocksOf(policy);
         _trigrams = policy.Kind == IndexPolicyKind.NgramBloom;
-        _generation = policy.Resolutions >= 2 ? new HashSet64() : null;
         _file = policy.Resolutions >= 3 ? new HashSet64() : null;
     }
+
+    /// <summary>A policy's ceiling, within what a reader takes (<see cref="BloomBuilderLimits.MaxFilterBlocks"/>).</summary>
+    /// <param name="policy">The policy.</param>
+    internal static int MaxBlocksOf(IndexPolicy policy) =>
+        (int)Math.Min((uint)policy.MaxBlocks, BloomBuilderLimits.MaxFilterBlocks);
 
     /// <summary>The kind this builder writes.</summary>
     internal string Kind => _trigrams ? IndexKinds.BloomNgram3 : IndexKinds.BloomSbbf;
 
     /// <inheritdoc/>
-    /// <remarks>The open generation's block filters: uncompressed, so their size is their size.</remarks>
-    protected override long OpenBytes => (long)_generationBlockWordCount * sizeof(uint);
+    /// <remarks>
+    /// The open generation's block filters and the node filters waiting for their level to go out:
+    /// uncompressed, so their size is their size.
+    /// </remarks>
+    protected override long OpenBytes => ((long)_generationBlockWordCount * sizeof(uint)) + (_tree?.OpenBytes ?? 0);
 
     /// <summary>
     /// Rows per block, which bounds a block's raw bytes before it closes, so that `Auto` can give up
@@ -99,11 +123,14 @@ internal sealed class BloomBuilder : IndexBuilder
     /// <summary>Filter blocks per closed block, in block order: 0 where a block got no filter.</summary>
     internal List<int> BlockFilterBlocks { get; } = [];
 
-    /// <summary>Every generation closed, written or not, in block order.</summary>
+    /// <summary>Every generation closed, with the region of its leaves, in block order.</summary>
     internal List<BloomRun> Runs { get; } = [];
 
-    /// <summary>The file-level filter, once <see cref="EndOfData"/> built it.</summary>
-    internal BloomRun? File { get; private set; }
+    /// <summary>The tree, once <see cref="EndOfData"/> finished it.</summary>
+    internal BloomTree? Tree { get; private set; }
+
+    /// <summary>The blocks, since the builder's first, whose filter was built.</summary>
+    internal int Leaves { get; private set; }
 
     /// <summary>The policy this builder serves.</summary>
     internal IndexPolicy Policy => _policy;
@@ -343,7 +370,7 @@ internal sealed class BloomBuilder : IndexBuilder
         }
 
         long projected = Bytes + ((long)SplitBlockBloom.BlocksFor(
-            distinct, _policy.FalsePositivePpm, _policy.MaxBlocks) * SplitBlockBloom.WordsPerBlock * sizeof(uint));
+            distinct, _policy.FalsePositivePpm, _maxBlocks) * SplitBlockBloom.WordsPerBlock * sizeof(uint));
         if (projected * 1000 <= rawBound * AutoShare)
         {
             return false;
@@ -376,7 +403,8 @@ internal sealed class BloomBuilder : IndexBuilder
         int filterBlocks = 0;
         if (distinct > 0 && distinct >= _policy.MinDistinct)
         {
-            filterBlocks = SplitBlockBloom.BlocksFor(distinct, _policy.FalsePositivePpm, _policy.MaxBlocks);
+            // A LEAF IS CLAMPED, as it always was: its bits are the reference's (BloomVectorTests).
+            filterBlocks = SplitBlockBloom.BlocksFor(distinct, _policy.FalsePositivePpm, _maxBlocks);
             int words = filterBlocks * SplitBlockBloom.WordsPerBlock;
 
             // `AUTO` GIVES UP BEFORE BUILDING when the filters would already outweigh their share of
@@ -398,9 +426,18 @@ internal sealed class BloomBuilder : IndexBuilder
         }
 
         BlockFilterBlocks.Add(filterBlocks);
-        if (_generation is not null)
+        Leaves += filterBlocks > 0 ? 1 : 0;
+        if (_policy.Resolutions >= 2)
         {
-            _generation.AddAll(_block);
+            if (TreeWriter.Generation is { } generation)
+            {
+                generation.AddAll(_block);
+                if (generation.Count > TreeWriter.Capacity && PassesTheCeiling())
+                {
+                    return;
+                }
+            }
+
             if (AutoShare > 0 && block < RepeatBlocks && GivesUpOnRepeats(block, distinct))
             {
                 return;
@@ -426,6 +463,27 @@ internal sealed class BloomBuilder : IndexBuilder
     }
 
     /// <summary>
+    /// The open generation holds more values than a node of the ceiling: its node gets no filter.
+    /// `Auto` gives the column up when that is its first generation (13 §6.5's symmetric rule): the
+    /// probe would read every block's filter, and a sorted run is the structure for such a column.
+    /// </summary>
+    /// <returns>Whether the builder gave up.</returns>
+    private bool PassesTheCeiling()
+    {
+        TreeWriter.PassGeneration();
+        if (AutoShare <= 0 || _generationFirst != _start)
+        {
+            return false;
+        }
+
+        Abandon(
+            $"Auto gave it up: its first generation holds more than {TreeWriter.Capacity} distinct values, " +
+            $"more than a filter of {_maxBlocks} blocks holds at {_policy.FalsePositivePpm} ppm, so a " +
+            "probe would read every block's filter; a sorted run serves such a column (docs/13-dataset.md §6.5)");
+        return true;
+    }
+
+    /// <summary>
     /// `Auto`'s verdict on a column whose first blocks hold one and the same set: a block filter
     /// then says "maybe" for every value the generation holds, and prunes nothing.
     /// </summary>
@@ -445,7 +503,7 @@ internal sealed class BloomBuilder : IndexBuilder
             _firstDistinct = distinct;
         }
 
-        if (distinct == 0 || distinct != _firstDistinct || _generation!.Count != distinct)
+        if (distinct == 0 || distinct != _firstDistinct || (_tree?.GenerationCount ?? 0) != distinct)
         {
             _firstDistinct = -1;
             return false;
@@ -481,7 +539,10 @@ internal sealed class BloomBuilder : IndexBuilder
         }
     }
 
-    /// <summary>Closes a partial generation at the end of the data, and builds the file-level filter.</summary>
+    /// <summary>
+    /// Closes a partial generation at the end of the data, then the tree, whose root takes the
+    /// file-level filter when the policy asks for one.
+    /// </summary>
     internal override void EndOfData()
     {
         if (_blocks > _generationFirst)
@@ -491,85 +552,73 @@ internal sealed class BloomBuilder : IndexBuilder
 
         HashSet64? file = _file;
         _file = null;
-        if (file is null || Abandoned is not null)
-        {
-            file?.Dispose();
-            return;
-        }
-
         using (file)
         {
-            int distinct = file.Count;
-            if (distinct == 0 || distinct < _policy.MinDistinct)
+            if (Abandoned is not null)
             {
-                FileAbandoned = $"the file holds {distinct} distinct values, under the policy's floor of {_policy.MinDistinct}";
+                _tree?.Abandon();
                 return;
             }
 
-            int blocks = SplitBlockBloom.BlocksFor(distinct, _policy.FalsePositivePpm, FileMaxBlocks);
-            uint[] words = new uint[blocks * SplitBlockBloom.WordsPerBlock];
-            file.InsertInto(words);
             // Over the blocks it hashed: after an append, those since the boundary.
-            File = new BloomRun(_start, _blocks - _start, null, PendingPayload.U32(words, compress: false), blocks);
-            Enqueue(File.Generation!);
+            Tree = _tree?.Finish(_start, file is null ? null : () => FileFilter(file));
         }
+    }
+
+    /// <summary>The file-wide filter under the file-level ceiling (10 §5.4), or null with the reason kept.</summary>
+    private uint[]? FileFilter(HashSet64 file)
+    {
+        int distinct = file.Count;
+        if (distinct == 0 || distinct < _policy.MinDistinct)
+        {
+            FileAbandoned = $"the file holds {distinct} distinct values, under the policy's floor of {_policy.MinDistinct}";
+            return null;
+        }
+
+        int blocks = SplitBlockBloom.BlocksFor(distinct, _policy.FalsePositivePpm, FileMaxBlocks);
+        uint[] words = new uint[blocks * SplitBlockBloom.WordsPerBlock];
+        file.InsertInto(words);
+        return words;
     }
 
     private void CloseGeneration()
     {
         int first = _generationFirst;
         int count = _blocks - first;
-        uint[] blockWords = _generationBlockWords is null
-            ? []
-            : _generationBlockWords.AsSpan(0, _generationBlockWordCount).ToArray();
-        uint[] generationWords = [];
-        int generationBlocks = 0;
-        if (Abandoned is null && _generation is not null && AutoShare > 0 && first == 0
-            && count == GenerationBlocks && _generation.Count < _policy.MinDistinct)
+        int union = _tree?.GenerationCount ?? 0;
+        if (Abandoned is null && _policy.Resolutions >= 2 && AutoShare > 0 && first == 0
+            && count == GenerationBlocks && !(_tree?.GenerationPassed ?? false) && union < _policy.MinDistinct)
         {
             // A FULL FIRST GENERATION UNDER THE FLOOR IS A DICTIONARY'S COLUMN: no block and no
             // generation of it got a filter, the dictionary probe answers its equalities, and
             // hashing the rest of the file would buy nothing.
             Abandon(
-                $"Auto gave it up: the first {count} blocks hold {_generation.Count} distinct values, " +
+                $"Auto gave it up: the first {count} blocks hold {union} distinct values, " +
                 $"under the floor of {_policy.MinDistinct} (docs/10-indexes.md §5.5)");
-        }
-
-        if (Abandoned is null && _generation is not null)
-        {
-            int distinct = _generation.Count;
-            if (distinct > 0 && distinct >= _policy.MinDistinct)
-            {
-                generationBlocks = SplitBlockBloom.BlocksFor(distinct, _policy.FalsePositivePpm, _policy.MaxBlocks);
-                generationWords = new uint[generationBlocks * SplitBlockBloom.WordsPerBlock];
-                _generation.InsertInto(generationWords);
-            }
-
-            // THE TABLE IS KEPT for the next generation, which is as large as this one on the columns
-            // where it matters: handing it back and growing it again from a kilobyte cost a
-            // million distinct integers 15 % of their forced-Bloom write.
-            _generation.Clear();
         }
 
         if (Abandoned is null)
         {
             // NOT COMPRESSED: a filter is uniform bits by construction, and pricing the column's
-            // candidates over it is work whose answer is known.
-            BloomRun run = new BloomRun(
-                first, count,
-                blockWords.Length > 0 ? PendingPayload.U32(blockWords, compress: false) : null,
-                generationWords.Length > 0 ? PendingPayload.U32(generationWords, compress: false) : null,
-                generationBlocks);
-            Runs.Add(run);
-            if (run.Blocks is { } blocks)
+            // candidates over it is work whose answer is known. The leaves go out before the node
+            // that names them.
+            PendingPayload? leaves = _generationBlockWordCount > 0
+                ? PendingPayload.U32(_generationBlockWords.AsSpan(0, _generationBlockWordCount).ToArray(), compress: false)
+                : null;
+            if (leaves is not null)
             {
-                Enqueue(blocks);
+                Enqueue(leaves);
             }
 
-            if (run.Generation is { } generation)
+            Runs.Add(new BloomRun(first, count, leaves));
+            int[] leafWords = new int[count];
+            for (int i = 0; i < count; i++)
             {
-                Enqueue(generation);
+                leafWords[i] = BlockFilterBlocks[first + i] * SplitBlockBloom.WordsPerBlock;
             }
+
+            // The tree takes the generation's union with the node, and starts the next one.
+            TreeWriter.CloseGeneration(leafWords, leaves);
         }
 
         _generationFirst = _blocks;
@@ -599,6 +648,7 @@ internal sealed class BloomBuilder : IndexBuilder
         _generationBlockWordCount = 0;
         _file?.Dispose();
         _file = null;
+        _tree?.Abandon();
     }
 
     private static void EnsureWords(ref uint[]? words, int needed)
@@ -622,9 +672,9 @@ internal sealed class BloomBuilder : IndexBuilder
     public override void Dispose()
     {
         _block.Dispose();
-        _generation?.Dispose();
         _file?.Dispose();
         _file = null;
+        _tree?.Dispose();
         if (_generationBlockWords is not null)
         {
             ArrayPool<uint>.Shared.Return(_generationBlockWords);
@@ -633,11 +683,8 @@ internal sealed class BloomBuilder : IndexBuilder
     }
 }
 
-/// <summary>One generation's filters.</summary>
+/// <summary>One generation's leaves.</summary>
 /// <param name="FirstBlock">The generation's first block.</param>
 /// <param name="BlockCount">Its blocks.</param>
 /// <param name="Blocks">The block filters of the generation, concatenated in block order; none when no block has one.</param>
-/// <param name="Generation">The generation's own filter, or the file's; none when there is none.</param>
-/// <param name="GenerationBlocks">That filter's 256-bit blocks.</param>
-internal sealed record BloomRun(
-    int FirstBlock, int BlockCount, PendingPayload? Blocks, PendingPayload? Generation, int GenerationBlocks);
+internal sealed record BloomRun(int FirstBlock, int BlockCount, PendingPayload? Blocks);

@@ -121,9 +121,12 @@ internal abstract class IndexBuilder : IDisposable
         _pending = 0;
     }
 
-    /// <summary>Queues a payload, counting its estimate toward the builder.</summary>
+    /// <summary>
+    /// Queues a payload, counting its estimate toward the builder; a helper that assembles the
+    /// builder's regions (<see cref="BloomTreeWriter"/>) queues through it too.
+    /// </summary>
     /// <param name="payload">The payload.</param>
-    protected void Enqueue(PendingPayload payload)
+    internal void Enqueue(PendingPayload payload)
     {
         payload.Owner = this;
         _pending += payload.Estimate;

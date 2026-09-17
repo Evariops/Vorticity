@@ -289,6 +289,51 @@ at the target `fpp` (about 100 000 keys), that level is the leaves, and the prob
 every block's filter: O(blocks). **That is not a layout problem, it is the wrong structure for
 the column**, and §6.5 says which one is right.
 
+**As delivered (step 24).**
+- **One entry per column, one run per tree, one root per run.** The entry's options are version 2
+  and hold nothing that grows with the file: no `n_blocks` table. The run's payload is the root,
+  and the run's options give the root's word count. Version 1 entries are no longer read; a reader
+  ignores them, so a file written before this step loses that pruning and no row.
+- **A node** is u32 words in an array blob: a header of nine words (level, leaves, filter size,
+  and the offset, length, XXH3-64 and alignment of its children's region), one size per child, then
+  its filter. The children are written before the node, as one region, and the node carries their
+  checksum, so a probe checks every region it reads. The format is in `Indexes/BloomTree.cs`. A
+  level-1 node none of whose blocks has a filter is **bare**: it lists no child and names no region,
+  which saves sixteen words where they are most of the cost.
+- **The writer** is `Writing/BloomTreeWriter`. A generation closes into a level-1 node; sixteen
+  closed nodes of a level go out as one region under a new node; at the end, the partial levels
+  close from the bottom and the first level left with one node is the root. A level holds at most
+  sixteen nodes in memory. A node's filter comes from the union of its children, one hash set per
+  open level. A closed node's set moves up: handed over when it is the first child, folded in and
+  recycled otherwise. A set that passes what a node of `max_blocks` holds is dropped, and that node
+  and every node above it get no filter. At 1 % under the default ceiling a node holds about
+  108 000 values.
+- **The leaves keep their bits and their clamp**, and the reference's vectors still hold. A node
+  above the leaves is either built at the size its union asks for or not built. It is never clamped
+  into a saturated filter, as a version 1 generation filter was.
+- **The root is the file-level filter** when the policy asks for three resolutions. It then uses
+  the file-level ceiling and set. Under two resolutions it is built like any node.
+  `VortexFile.MayMatchAsync` reads the roots alone, so it now answers from a file of two
+  resolutions too.
+- **The probe** (`Indexes/BloomPruner`) reads every run's root in one read. Then, level by level,
+  it reads the children of the nodes that still cover a live block: one region per node, one
+  coalesced read per level. A node that proves the predicate false kills its blocks, so its children
+  are never read. A region or a node that does not check out claims nothing, and nothing beneath it
+  is read.
+- **What it reads, counted** (`BloomTreeTests`). Over 4 096 blocks, a value present in one block
+  reads 4 regions: the root, then one group per level. An absent value reads the root alone. Under
+  a ceiling of 64 blocks, the two upper levels have no filter, and the same probe reads 19 regions.
+- **An append cuts a tree, it does not drop it.** The nodes over the blocks the append writes again
+  hold values those blocks no longer have, so they only answer "maybe" more often. The shorter run
+  leaves those blocks to the append's own tree. Trees are not merged, since filters of different
+  sizes do not merge, so a probe reads one root per append.
+- **What a level costs.** When values do not repeat, a level costs about what the level below
+  costs. On `AutoIndexTests`' 48-block fixture, the root took a unique 256-byte column from 1.6 % to
+  2.1 % of its bytes, past `Auto`'s 2 %. The fixture's values are now 384 bytes wide.
+- **§6.5's symmetric rule** is in `BloomBuilder`. Under `Auto`, a column whose first generation
+  passes a node's capacity is given up, with that reason. Asked for by name, it keeps its leaves,
+  and its generations have no filter.
+
 ### 6.3 Hierarchical fences
 
 A run's segment table (first and last key, entry count, offset, length, XXH3-64 per segment) is

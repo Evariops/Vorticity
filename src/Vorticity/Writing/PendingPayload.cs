@@ -22,26 +22,44 @@ using Vorticity.Types;
 
 namespace Vorticity.Writing;
 
+/// <summary>Something that lays a payload's array itself, where a delegate and its closure would be two more objects.</summary>
+internal interface IPayloadLayout
+{
+    /// <summary>Lays the array into the arena and returns its node.</summary>
+    /// <param name="arena">The arena to lay it into.</param>
+    /// <param name="types">The dtype arena.</param>
+    int Lay(CanonicalArena arena, DTypeArena types);
+}
+
 /// <summary>One payload array of one run.</summary>
 /// <param name="build">Lays the array into the arena and returns its node.</param>
 /// <param name="compress">Whether the column compressor may choose its encoding.</param>
 /// <param name="estimate">Its uncompressed bytes, until the real length is known.</param>
 /// <param name="release">Gives back what <paramref name="build"/> read, once it has run.</param>
 internal sealed class PendingPayload(
-    Func<CanonicalArena, DTypeArena, int> build, bool compress, long estimate, Action? release = null)
+    Func<CanonicalArena, DTypeArena, int>? build, bool compress, long estimate, Action? release = null)
 {
-    private Func<CanonicalArena, DTypeArena, int>? _build = build;
+    /// <summary>What lays the array: a delegate, or an <see cref="IPayloadLayout"/>; null once laid.</summary>
+    private object? _build = build;
     private Action? _release = release;
+
+    /// <summary>A payload laid by <paramref name="layout"/>.</summary>
+    /// <param name="layout">What lays it.</param>
+    /// <param name="compress">Whether the column compressor may choose its encoding.</param>
+    /// <param name="estimate">Its uncompressed bytes.</param>
+    internal PendingPayload(IPayloadLayout layout, bool compress, long estimate)
+        : this((Func<CanonicalArena, DTypeArena, int>?)null, compress, estimate) => _build = layout;
 
     /// <summary>Lays the array into the arena and returns its node; a payload is laid once.</summary>
     /// <param name="arena">The arena to lay it into.</param>
     /// <param name="types">The dtype arena.</param>
     internal int Build(CanonicalArena arena, DTypeArena types)
     {
-        Func<CanonicalArena, DTypeArena, int> lay = _build
-            ?? throw new InvalidOperationException("An index payload is laid once.");
+        object lay = _build ?? throw new InvalidOperationException("An index payload is laid once.");
         _build = null;
-        int node = lay(arena, types);
+        int node = lay is IPayloadLayout layout
+            ? layout.Lay(arena, types)
+            : ((Func<CanonicalArena, DTypeArena, int>)lay)(arena, types);
         Action? release = _release;
         _release = null;
         release?.Invoke();

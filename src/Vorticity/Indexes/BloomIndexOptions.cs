@@ -1,64 +1,47 @@
-// The `options` bytes of a `vorticity.bloom.sbbf.v1` entry (docs/10-indexes.md §5.1):
+// The `options` bytes of a `vorticity.bloom.sbbf.v1` or `vorticity.bloom.ngram3.v1` entry
+// (docs/10-indexes.md §5.1, as amended by docs/13-dataset.md §6.2 at step 24):
 //
 //   message BloomOptions {
-//     uint32 version = 1;              // 1
-//     uint32 level = 2;                // 0 = one filter per block, 1 = per generation, 2 = the file
+//     uint32 version = 1;              // 2: one filter tree per run
 //     uint32 fpp_ppm = 3;
 //     uint32 hash = 4;                 // 0 = XxHash3-64, 1 = xxHash64
-//     uint32 max_blocks = 5;
-//     repeated uint32 n_blocks = 6;    // packed; one per filter, in the order a probe meets them
-//     uint32 generation_blocks = 7;    // k
-//     uint32 min_distinct = 8;
+//     uint32 max_blocks = 5;           // a node's ceiling: a node that needs more has no filter
+//     uint32 fanout = 7;               // children per node: 16
+//     uint32 min_distinct = 8;         // below it, a block or a node has no filter
 //     bool   case_insensitive = 9;     // bloom.ngram3 only: trigrams ASCII-lower-cased on both sides
+//     uint32 root_max_blocks = 10;     // the root's ceiling: max_blocks, or the file-level one
 //   }
 //
-// ONE ENTRY PER RESOLUTION, because runs inside an entry are disjoint (10 §4.1) and a generation
-// filter covers the same blocks as the block filters beneath it. The scan evaluates the coarsest
-// entry first and asks a finer one only for the blocks still live (10 §4.3).
-//
-// THE TABLE LOCATES A FILTER WITHOUT READING THE OTHERS. At block level it has one count per block
-// of the column, zero where a block got no filter, and a block's filter starts in its run's payload
-// at eight words times the sum of the counts before it in that run. At the two coarser levels it
-// has one count per run, in run order.
+// ONE ENTRY PER COLUMN, AND NOTHING IN IT GROWS WITH THE FILE. Version 1 listed one entry per
+// resolution and, at block level, one filter size per block of the file: a directory that grew
+// with the data, and a probe that read every generation. Its entries are no longer read. An entry a
+// reader cannot use is ignored (10 §4.1), which costs a file written before step 24 its pruning and
+// never a row; fields 2 and 6 stay version 1's.
 using System;
-using System.Collections.Generic;
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Indexes;
 
-/// <summary>Which filters an entry holds.</summary>
-internal enum BloomLevel
-{
-    /// <summary>One filter per block.</summary>
-    Block = 0,
-
-    /// <summary>One filter per generation of blocks.</summary>
-    Generation = 1,
-
-    /// <summary>One filter for the whole file.</summary>
-    File = 2,
-}
-
 /// <summary>The parsed options of one Bloom entry.</summary>
-/// <param name="Level">The resolution.</param>
 /// <param name="FalsePositivePpm">The rate the filters were sized for.</param>
 /// <param name="Hash">The hash they store.</param>
-/// <param name="MaxBlocks">The ceiling they were clamped to.</param>
-/// <param name="FilterBlocks">One count per filter, as the header describes.</param>
-/// <param name="GenerationBlocks">Blocks per generation.</param>
-/// <param name="MinDistinct">The floor below which a block got no filter.</param>
+/// <param name="MaxBlocks">A leaf's clamp and a node's ceiling.</param>
+/// <param name="MinDistinct">The floor below which a block or a node got no filter.</param>
 /// <param name="CaseInsensitive">For a trigram filter, whether its trigrams were ASCII-lower-cased.</param>
+/// <param name="RootMaxBlocks">The root's ceiling.</param>
 internal sealed record BloomIndexOptions(
-    BloomLevel Level,
     int FalsePositivePpm,
     BloomHash Hash,
     int MaxBlocks,
-    int[] FilterBlocks,
-    int GenerationBlocks,
     int MinDistinct,
-    bool CaseInsensitive = false)
+    bool CaseInsensitive,
+    int RootMaxBlocks)
 {
-    private const uint Version = 1;
+    /// <summary>The version this library writes and reads: a filter tree per run.</summary>
+    internal const uint Version = 2;
+
+    /// <summary>Children per node: 10 §4.3's generation of sixteen blocks, at every level.</summary>
+    internal const int Fanout = 16;
 
     /// <summary>Serializes the options.</summary>
     /// <returns>The entry's <c>options</c> bytes.</returns>
@@ -68,21 +51,13 @@ internal sealed record BloomIndexOptions(
         try
         {
             writer.WriteUInt32Always(1, Version);
-            writer.WriteUInt32Always(2, (uint)Level);
             writer.WriteUInt32Always(3, (uint)FalsePositivePpm);
             writer.WriteUInt32(4, (uint)Hash);
             writer.WriteUInt32Always(5, (uint)MaxBlocks);
-            using (ProtoWriter.MessageScope packed = writer.BeginMessage(6))
-            {
-                foreach (int blocks in FilterBlocks)
-                {
-                    writer.WriteVarint((uint)blocks);
-                }
-            }
-
-            writer.WriteUInt32Always(7, (uint)GenerationBlocks);
+            writer.WriteUInt32Always(7, Fanout);
             writer.WriteUInt32Always(8, (uint)MinDistinct);
             writer.WriteBool(9, CaseInsensitive);
+            writer.WriteUInt32Always(10, (uint)RootMaxBlocks);
             return writer.WrittenSpan.ToArray();
         }
         finally
@@ -102,23 +77,19 @@ internal sealed record BloomIndexOptions(
         {
             ProtoReader reader = new ProtoReader(bytes);
             uint version = 0;
-            uint level = uint.MaxValue;
             uint fpp = 0;
             uint hash = 0;
             uint maxBlocks = 0;
-            uint generation = 0;
+            uint fanout = 0;
             uint minDistinct = 0;
             bool caseInsensitive = false;
-            List<int> blocks = [];
+            uint rootMaxBlocks = 0;
             while (reader.TryReadTag(out int field, out ProtoWireType wire))
             {
                 switch (field)
                 {
                     case 1 when wire == ProtoWireType.Varint:
                         version = reader.ReadVarint32();
-                        break;
-                    case 2 when wire == ProtoWireType.Varint:
-                        level = reader.ReadVarint32();
                         break;
                     case 3 when wire == ProtoWireType.Varint:
                         fpp = reader.ReadVarint32();
@@ -129,19 +100,8 @@ internal sealed record BloomIndexOptions(
                     case 5 when wire == ProtoWireType.Varint:
                         maxBlocks = reader.ReadVarint32();
                         break;
-                    case 6 when wire == ProtoWireType.LengthDelimited:
-                        ProtoReader packed = reader.ReadMessage();
-                        while (!packed.End)
-                        {
-                            blocks.Add(Count(packed.ReadVarint32()));
-                        }
-
-                        break;
-                    case 6 when wire == ProtoWireType.Varint:
-                        blocks.Add(Count(reader.ReadVarint32()));
-                        break;
                     case 7 when wire == ProtoWireType.Varint:
-                        generation = reader.ReadVarint32();
+                        fanout = reader.ReadVarint32();
                         break;
                     case 8 when wire == ProtoWireType.Varint:
                         minDistinct = reader.ReadVarint32();
@@ -149,24 +109,26 @@ internal sealed record BloomIndexOptions(
                     case 9 when wire == ProtoWireType.Varint:
                         caseInsensitive = reader.ReadBool();
                         break;
+                    case 10 when wire == ProtoWireType.Varint:
+                        rootMaxBlocks = reader.ReadVarint32();
+                        break;
                     default:
                         reader.SkipField(wire);
                         break;
                 }
             }
 
-            // A hash this reader does not compute would turn every probe into a false "absent".
-            if (version != Version || level > (uint)BloomLevel.File || hash > (uint)BloomHash.XxHash64
-                || blocks.Contains(-1))
+            // A hash this reader does not compute would turn every probe into a false "absent"; a
+            // fan-out it does not know would place every child wrongly.
+            if (version != Version || hash > (uint)BloomHash.XxHash64 || fanout != Fanout
+                || !Fits(maxBlocks) || !Fits(rootMaxBlocks))
             {
                 return false;
             }
 
             options = new BloomIndexOptions(
-                (BloomLevel)level, (int)Math.Min(fpp, int.MaxValue), (BloomHash)hash,
-                (int)Math.Min(maxBlocks, int.MaxValue), [.. blocks],
-                (int)Math.Min(generation, int.MaxValue), (int)Math.Min(minDistinct, int.MaxValue),
-                caseInsensitive);
+                (int)Math.Min(fpp, int.MaxValue), (BloomHash)hash, (int)maxBlocks,
+                (int)Math.Min(minDistinct, int.MaxValue), caseInsensitive, (int)rootMaxBlocks);
             return true;
         }
         catch (VortexFormatException)
@@ -175,13 +137,12 @@ internal sealed record BloomIndexOptions(
         }
     }
 
-    /// <summary>A count that fits a filter we could hold, or -1 to refuse the entry.</summary>
-    private static int Count(uint blocks) => blocks <= BloomBuilderLimits.MaxFilterBlocks ? (int)blocks : -1;
+    private static bool Fits(uint blocks) => blocks is >= 1 and <= BloomBuilderLimits.MaxFilterBlocks;
 }
 
-/// <summary>The largest filter any level may declare, which bounds what a probe will read.</summary>
+/// <summary>The largest filter any node may declare, which bounds what a probe will read.</summary>
 internal static class BloomBuilderLimits
 {
-    /// <summary>1 MiB blocks: the file-level ceiling of 10 §5.4, the largest of the three.</summary>
+    /// <summary>1 MiB blocks: the file-level ceiling of 10 §5.4, the largest there is.</summary>
     internal const uint MaxFilterBlocks = 1u << 20;
 }
