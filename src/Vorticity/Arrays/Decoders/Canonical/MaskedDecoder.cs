@@ -64,7 +64,7 @@ public sealed class MaskedDecoder : ArrayDecoder
             VerifyChildHasNoNulls(context, childIndex);
         }
 
-        return CanonicalRewrap.WithValidity(context, childIndex, dtype, validity, length);
+        return CanonicalRewrap.WithValidity(context.Canonical, childIndex, dtype, validity, length);
     }
 
     /// <summary>

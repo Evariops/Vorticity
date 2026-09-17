@@ -14,6 +14,8 @@
 using System;
 using System.Buffers;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Types;
 
@@ -183,7 +185,7 @@ internal static class FilterEvaluator
                     $"'{field.Path}' names a field the batch's schema does not have.", nameof(field));
             }
 
-            current = node.GetFieldIndex(index);
+            current = MaskedBy(arena, node.GetFieldIndex(index), node.Validity);
         }
 
         CanonicalNode column = arena.GetNode(current);
@@ -194,5 +196,59 @@ internal static class FilterEvaluator
         }
 
         return current;
+    }
+
+    /// <summary>The dtype of the validity bitmaps made here; a bitmap's own dtype is never read.</summary>
+    private static readonly DType BitmapType = new DTypeArena().Bool(Nullability.NonNullable);
+
+    /// <summary>
+    /// A struct's field as a filter reads it: null wherever the struct is, whatever its own buffer
+    /// holds there.
+    /// </summary>
+    /// <remarks>
+    /// THE REFERENCE'S `get_item`, which masks the field with the struct's validity
+    /// (vortex-array-0.86.1 `scalar_fn/fns/get_item.rs`: `field.mask(input.validity())`). Without
+    /// it a filter on `person.name` matched the rows whose `person` is null by the value their
+    /// field buffer happened to hold. A struct with no null costs nothing here; one with nulls
+    /// re-publishes the field over the same buffers with the two validities intersected.
+    /// </remarks>
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="child">The field's node.</param>
+    /// <param name="parent">The struct's validity.</param>
+    /// <returns>The field's node, or its masked re-publication.</returns>
+    internal static int MaskedBy(CanonicalArena arena, int child, Validity parent)
+    {
+        ValidityMask outer = ValidityMask.From(arena, parent);
+        if (outer.AllValid)
+        {
+            return child;
+        }
+
+        CanonicalNode field = arena.GetNode(child);
+        CanonicalNode storage = field;
+        while (storage.Kind == CanonicalKind.Extension)
+        {
+            storage = arena.GetNode(storage.StorageIndex);
+        }
+
+        int rows = field.Length;
+        ValidityMask own = ValidityMask.From(arena, storage.Validity);
+        Validity validity = Validity.AllInvalid;
+        if (!outer.AllInvalid && !own.AllInvalid)
+        {
+            VortexBuffer bits = arena.Allocate(Math.Max((rows + 7) / 8, 1), 1, out Span<byte> raw);
+            raw.Clear();
+            for (int row = 0; row < rows; row++)
+            {
+                if (outer.IsValid(row) && own.IsValid(row))
+                {
+                    raw[row >> 3] |= (byte)(1 << (row & 7));
+                }
+            }
+
+            validity = Validity.Bitmap(arena.AddBool(BitmapType, rows, Validity.NonNullable, bits, 0));
+        }
+
+        return CanonicalRewrap.WithValidity(arena, child, field.DType, validity, rows);
     }
 }

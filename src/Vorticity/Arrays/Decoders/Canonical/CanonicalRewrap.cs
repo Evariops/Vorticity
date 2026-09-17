@@ -1,7 +1,7 @@
 // Re-publishes an already-decoded canonical node under a different dtype and validity, sharing
-// every buffer and child. `vortex.masked` is the only Phase 1 encoding that needs it: its child is
-// decoded at `P` with nullability stripped and the mask is then applied on top
-// (vortex-array-0.86.1/src/arrays/masked/vtable/mod.rs).
+// every buffer and child. `vortex.masked` needs it: its child is decoded at `P` with nullability
+// stripped and the mask is then applied on top (vortex-array-0.86.1/src/arrays/masked/vtable/mod.rs).
+// So does a filter reading a field through a nullable struct (`FilterEvaluator.MaskedBy`).
 //
 // Nothing is copied. The new record points at the same VortexBuffers, which belong to the batch's
 // segments or to the canonical arena's own rentals - either way to something whose lifetime is the
@@ -22,7 +22,7 @@ internal static class CanonicalRewrap
     /// Adds a node equal to <paramref name="sourceIndex"/> but carrying
     /// <paramref name="dtype"/> and <paramref name="validity"/>.
     /// </summary>
-    /// <param name="context">The decode context owning the arena.</param>
+    /// <param name="arena">The arena holding the node, which receives the new one.</param>
     /// <param name="sourceIndex">The already-decoded node to re-publish.</param>
     /// <param name="dtype">The dtype the result must carry.</param>
     /// <param name="validity">The validity the result must carry.</param>
@@ -36,9 +36,8 @@ internal static class CanonicalRewrap
     /// <c>.editorconfig</c> -- now fails the build when a named kind is missing.
     /// </remarks>
     internal static int WithValidity(
-        ArrayDecodeContext context, int sourceIndex, DType dtype, Validity validity, int length)
+        CanonicalArena arena, int sourceIndex, DType dtype, Validity validity, int length)
     {
-        CanonicalArena arena = context.Canonical;
         CanonicalNode source = arena.GetNode(sourceIndex);
         if (source.Length != length)
         {
@@ -64,7 +63,7 @@ internal static class CanonicalRewrap
 
             // An extension's validity is the storage's, so the mask has to be pushed down one level
             // rather than applied to the wrapper.
-            CanonicalKind.Extension => RewrapExtension(context, in source, dtype, validity, length),
+            CanonicalKind.Extension => RewrapExtension(arena, in source, dtype, validity, length),
             // EMPRUNTE (Z1b-c2b) : re-publier une constante sous un autre dtype et une autre
             // validite ne touche pas la valeur.
             CanonicalKind.Constant =>
@@ -118,7 +117,7 @@ internal static class CanonicalRewrap
     }
 
     private static int RewrapExtension(
-        ArrayDecodeContext context, in CanonicalNode source, DType dtype, Validity validity, int length)
+        CanonicalArena arena, in CanonicalNode source, DType dtype, Validity validity, int length)
     {
         if (dtype.Kind != DTypeKind.Extension)
         {
@@ -126,7 +125,7 @@ internal static class CanonicalRewrap
                 $"An Extension child cannot be re-published as a {dtype.Kind} array.");
         }
 
-        int storage = WithValidity(context, source.StorageIndex, dtype.StorageType, validity, length);
-        return context.Canonical.AddExtension(dtype, length, storage);
+        int storage = WithValidity(arena, source.StorageIndex, dtype.StorageType, validity, length);
+        return arena.AddExtension(dtype, length, storage);
     }
 }

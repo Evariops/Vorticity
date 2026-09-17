@@ -313,7 +313,7 @@ public sealed class WritePolicy
     /// The same policy with a locating index over the tuple of <paramref name="columnPaths"/>,
     /// keyed by its row encoding (docs/10-indexes.md §6.5, docs/12-index-reads.md §4.6).
     /// </summary>
-    /// <param name="columnPaths">Two or more top-level columns, in key order.</param>
+    /// <param name="columnPaths">Two or more columns, in key order, <c>.</c>-separated for a nested field.</param>
     /// <param name="policy"><see cref="IndexPolicy.SortedRuns"/>, with its options.</param>
     /// <returns>A new policy.</returns>
     /// <remarks>

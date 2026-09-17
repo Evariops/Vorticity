@@ -317,7 +317,8 @@ has the spec's overload, which infers `i64`, `u64`, `f64`, `utf8` or `bool` from
 that takes the key columns' dtypes, since width and nullability shape the bytes; both build a
 one-row column per value and call the batch encoder, which is how the test proves the seek key and
 the index key are the same bytes. `RowKeyEncoder(params RowSortField[])` is the writer's encoder;
-one field applies to every column of every key. Only top-level columns can be key columns.
+one field applies to every column of every key. A key column may be nested (`"person.address.city"`):
+its entry carries the field-index path, and a row whose tuple crosses a null struct is no entry.
 
 ---
 

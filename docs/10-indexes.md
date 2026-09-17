@@ -468,7 +468,7 @@ row encoding produces, which the spec quantifies per type.
 **As delivered (step 16, amending the above).** `column_path` is one list of field indices, so
 `(a, b)` and `a.b` could not be told apart in it. A composite entry therefore keeps the kind
 `vorticity.sorted.runs.v1`, leaves `column_path` **empty**, and carries its key columns in its
-options: field 4, one message per column with its field indices (top-level columns only), and
+options: field 4, one message per column with its field indices (a nested column's whole path), and
 field 5, the encoder's `Format` (`vortex-row 0.86.1 asc-nf`) — the row format is experimental, so
 the bytes say what they follow. A reader that does not know these fields resolves the empty path to
 the root struct and ignores the entry, which is the hint rule of §4.1. The encoder lives where
@@ -517,6 +517,17 @@ of every chunk and the plan-memory hit rate; per index built or abandoned with i
 this writer does not build yet is reported abandoned with that reason, never silently skipped.
 The first kind is `dict.probe` (§5.3), recorded under `Auto` as one payload-free run per maximal
 range of consecutive dictionary-encoded chunks.
+
+**As delivered (nested columns, 2026-09-17).** An override whose path is not a top-level column,
+`For("person.address.city", …)`, is built on that leaf. Its entry's `column_path` is the whole
+field-index path, and its builder is fed the leaf's node reached through the structs (and the
+extensions around them). A row one of its parents nulls out is no entry: the leaf is re-published
+over the range with the parents' nulls in its validity. The default policy and `Auto` choose among
+the top-level columns only, so an `Auto` override on a nested path is reported abandoned with that
+reason, and so is an override naming nothing in the schema; until then both were dropped without a
+word. The reader already resolved nested paths. What it lacked is the reference's `get_item` rule,
+`field.mask(struct.validity)`: a filter or an extreme on `person.name` read the buffer under a null
+`person`. `FilterEvaluator.Resolve` now masks every field it descends into.
 
 ### 7.2 Build
 

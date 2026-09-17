@@ -318,7 +318,10 @@ public static class VortexFileKeyExtensions
     /// order (docs/12-index-reads.md §4.6).
     /// </summary>
     /// <param name="file">An open file.</param>
-    /// <param name="paths">The key's top-level columns, in order; one path is <see cref="Keys(VortexFile, string)"/>.</param>
+    /// <param name="paths">
+    /// The key's columns, in order, <c>.</c>-separated for a nested field; one path is
+    /// <see cref="Keys(VortexFile, string)"/>.
+    /// </param>
     /// <returns>A fresh builder.</returns>
     /// <remarks>
     /// The keys are the row encoding of the tuple, so <see cref="KeyCursor.KeyKind"/> is bytes and

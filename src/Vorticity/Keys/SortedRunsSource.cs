@@ -246,7 +246,7 @@ internal sealed partial class SortedRunsSource : KeySource
     /// row encoding of the tuple, bytes ordered bytewise.
     /// </summary>
     /// <param name="file">The open file.</param>
-    /// <param name="paths">The key's top-level columns, in key order.</param>
+    /// <param name="paths">The key's columns, in key order.</param>
     /// <param name="cancellationToken">Cancels the directory read.</param>
     /// <returns>The source, or null with the reason.</returns>
     internal static async ValueTask<(SortedRunsSource? Source, string? Reason)> OpenCompositeAsync(
@@ -302,11 +302,50 @@ internal sealed partial class SortedRunsSource : KeySource
 
         for (int i = 0; i < columns.Count; i++)
         {
-            if (columns[i].Length != 1 || columns[i][0] >= (uint)schema.FieldCount
-                || !string.Equals(schema.GetFieldName((int)columns[i][0]), paths[i], StringComparison.Ordinal))
+            if (!PathOf(schema, columns[i], paths[i]))
             {
                 return false;
             }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Whether a field-index path spells <paramref name="path"/>: one top-level name, dots and all,
+    /// or the names of the structs it descends through, joined by dots.
+    /// </summary>
+    private static bool PathOf(DType schema, uint[] fields, string path)
+    {
+        if (fields.Length == 1)
+        {
+            return fields[0] < (uint)schema.FieldCount
+                && string.Equals(schema.GetFieldName((int)fields[0]), path, StringComparison.Ordinal);
+        }
+
+        DType dtype = schema;
+        int at = 0;
+        for (int i = 0; i < fields.Length; i++)
+        {
+            while (dtype.Kind == DTypeKind.Extension)
+            {
+                dtype = dtype.StorageType;
+            }
+
+            if (dtype.Kind != DTypeKind.Struct || fields[i] >= (uint)dtype.FieldCount)
+            {
+                return false;
+            }
+
+            string name = dtype.GetFieldName((int)fields[i]);
+            int end = i + 1 < fields.Length ? path.IndexOf('.', at) : path.Length;
+            if (end < 0 || !path.AsSpan(at, end - at).SequenceEqual(name))
+            {
+                return false;
+            }
+
+            at = end + 1;
+            dtype = dtype.GetField((int)fields[i]);
         }
 
         return true;

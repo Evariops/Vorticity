@@ -11,6 +11,7 @@
 // index reads what happened to it, and an index is a hint whose absence costs no correctness
 // (docs/08-semantics.md §5).
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -34,9 +35,16 @@ internal sealed class IndexWriter : IDisposable
     private readonly int _fieldCount;
     private readonly IKeyEncoder? _keyEncoder;
 
-    /// <summary>For a composite key's slot, the real fields it encodes, in key order.</summary>
-    private readonly int[]?[] _keyFields;
+    /// <summary>For a composite key's slot, the columns it encodes in key order, each a field-index path.</summary>
+    private readonly int[][]?[] _keyFields;
+
+    /// <summary>
+    /// For a nested column's slot, its field-index path from the root; <see langword="null"/> when
+    /// the policy names no nested column, which is every default write.
+    /// </summary>
+    private readonly int[]?[]? _nested;
     private CanonicalArena? _keySlices;
+    private DTypeArena? _maskTypes;
     private bool _firstBlockClosed;
 
     /// <summary>
@@ -73,14 +81,41 @@ internal sealed class IndexWriter : IDisposable
         // A COMPOSITE KEY IS ONE MORE COLUMN, after the real ones: every loop over the builders --
         // blocks, chunks, the budget, the payloads, the close -- serves it with no second path, and
         // only the feed differs, because its rows are several columns encoded together.
-        int total = fieldCount + policy.Keys.Count;
+        //
+        // SO IS A NESTED COLUMN AN OVERRIDE NAMES, after the keys (10 §4.1: `column_path` resolves
+        // to a leaf column). It is fed from its top-level column's node, descended through the
+        // structs, and a row one of its parents nulls out is no entry. An override naming nothing
+        // in the schema takes a slot too, so that the report says so rather than skip it.
+        List<string>? nested = Unmatched(policy, schema, isTabular);
+        int keys = policy.Keys.Count;
+        int total = fieldCount + keys + (nested?.Count ?? 0);
         _paths = new string[total];
         _columns = new IndexPolicy[total];
         _builders = new List<IndexBuilder>[total];
         _refusals = new string?[total];
         _columnBytes = new long[total];
-        _keyFields = new int[]?[total];
-        for (int k = 0; k < policy.Keys.Count; k++)
+        _keyFields = new int[][]?[total];
+        for (int n = 0; n < (nested?.Count ?? 0); n++)
+        {
+            int slot = fieldCount + keys + n;
+            string path = nested![n];
+            IndexPolicy column = policy.Of(path);
+            _paths[slot] = path;
+            _columns[slot] = column;
+            _builders[slot] = [];
+            if (!TryResolve(schema, isTabular, path, out int[] chain, out DType leaf, out string? missing))
+            {
+                _refusals[slot] = missing;
+                continue;
+            }
+
+            (_nested ??= new int[]?[total])[slot] = chain;
+            _refusals[slot] = column.Kind == IndexPolicyKind.Auto
+                ? "Auto chooses among the top-level columns; a nested column is indexed when its override names a kind"
+                : Explicit(column, leaf, _builders[slot]);
+        }
+
+        for (int k = 0; k < keys; k++)
         {
             int field = fieldCount + k;
             CompositeKeyPolicy key = policy.Keys[k];
@@ -106,35 +141,6 @@ internal sealed class IndexWriter : IDisposable
             string? reason = null;
             switch (column.Kind)
             {
-                case IndexPolicyKind.Bloom:
-                    if (BloomBuilder.Supports(dtype, out reason))
-                    {
-                        builders.Add(new BloomBuilder(column));
-                    }
-
-                    break;
-                case IndexPolicyKind.NgramBloom:
-                    if (BloomBuilder.Supports(dtype, trigrams: true, out reason))
-                    {
-                        builders.Add(new BloomBuilder(column));
-                    }
-
-                    break;
-                case IndexPolicyKind.NgramPostings:
-                    if (BloomBuilder.Supports(dtype, trigrams: true, out reason))
-                    {
-                        builders.Add(KeyIndexBuilder.ForTrigrams(column.CaseInsensitive, column.SegmentEntries));
-                    }
-
-                    break;
-                case IndexPolicyKind.Postings or IndexPolicyKind.SortedRuns:
-                    if (KeyIndexBuilder.Supports(dtype, out KeyLayout layout, out bool utf8, out reason))
-                    {
-                        builders.Add(new KeyIndexBuilder(
-                            column.Kind == IndexPolicyKind.SortedRuns, layout, utf8, column.SegmentEntries));
-                    }
-
-                    break;
                 case IndexPolicyKind.Auto:
                     // EVERY CHEAP BUILDER THAT APPLIES STARTS AT BLOCK 0 (10 §5.5); a dtype one does
                     // not apply to is not a candidate, and is not reported as refused. Sorted runs are
@@ -157,11 +163,129 @@ internal sealed class IndexWriter : IDisposable
 
                     break;
                 default:
+                    reason = Explicit(column, dtype, builders);
                     break;
             }
 
             _refusals[field] = reason;
         }
+    }
+
+    /// <summary>The builder a policy names for a column of <paramref name="dtype"/>, or why there is none.</summary>
+    private static string? Explicit(IndexPolicy column, DType dtype, List<IndexBuilder> builders)
+    {
+        string? reason = null;
+        switch (column.Kind)
+        {
+            case IndexPolicyKind.Bloom:
+                if (BloomBuilder.Supports(dtype, out reason))
+                {
+                    builders.Add(new BloomBuilder(column));
+                }
+
+                break;
+            case IndexPolicyKind.NgramBloom:
+                if (BloomBuilder.Supports(dtype, trigrams: true, out reason))
+                {
+                    builders.Add(new BloomBuilder(column));
+                }
+
+                break;
+            case IndexPolicyKind.NgramPostings:
+                if (BloomBuilder.Supports(dtype, trigrams: true, out reason))
+                {
+                    builders.Add(KeyIndexBuilder.ForTrigrams(column.CaseInsensitive, column.SegmentEntries));
+                }
+
+                break;
+            case IndexPolicyKind.Postings or IndexPolicyKind.SortedRuns:
+                if (KeyIndexBuilder.Supports(dtype, out KeyLayout layout, out bool utf8, out reason))
+                {
+                    builders.Add(new KeyIndexBuilder(
+                        column.Kind == IndexPolicyKind.SortedRuns, layout, utf8, column.SegmentEntries));
+                }
+
+                break;
+            default:
+                break;
+        }
+
+        return reason;
+    }
+
+    /// <summary>
+    /// The override paths that are not a top-level column, in ordinal order so that one policy lays
+    /// its slots out one way; <see langword="null"/> when there is none.
+    /// </summary>
+    private static List<string>? Unmatched(WritePolicy policy, DType schema, bool isTabular)
+    {
+        List<string>? unmatched = null;
+        foreach (string path in policy.Columns.Keys)
+        {
+            bool column = isTabular ? schema.IndexOfField(path) >= 0 : path.Length == 0;
+            if (!column)
+            {
+                (unmatched ??= []).Add(path);
+            }
+        }
+
+        unmatched?.Sort(StringComparer.Ordinal);
+        return unmatched;
+    }
+
+    /// <summary>
+    /// A column path as field indices from the root, through structs and the extensions around
+    /// them, and the dtype it ends on; or why it names nothing.
+    /// </summary>
+    /// <param name="schema">The file's dtype.</param>
+    /// <param name="isTabular">Whether the root is a struct of columns.</param>
+    /// <param name="path">The path, <c>.</c>-separated as the scan spells it.</param>
+    /// <param name="chain">The field indices.</param>
+    /// <param name="leaf">The dtype the path ends on.</param>
+    /// <param name="reason">Why the path names nothing.</param>
+    internal static bool TryResolve(
+        DType schema, bool isTabular, string path, out int[] chain, out DType leaf, out string? reason)
+    {
+        leaf = schema;
+        if (!isTabular)
+        {
+            chain = [];
+            reason = $"'{path}' names no column: the file's root is its only column";
+            return false;
+        }
+
+        // A top-level name that holds a dot is that column, as the scan reads it.
+        int top = schema.IndexOfField(path);
+        if (top >= 0)
+        {
+            chain = [top];
+            leaf = schema.GetField(top);
+            reason = null;
+            return true;
+        }
+
+        string[] names = path.Split('.');
+        chain = new int[names.Length];
+        for (int i = 0; i < names.Length; i++)
+        {
+            while (leaf.Kind == DTypeKind.Extension)
+            {
+                leaf = leaf.StorageType;
+            }
+
+            int field = leaf.Kind == DTypeKind.Struct ? leaf.IndexOfField(names[i]) : -1;
+            if (field < 0)
+            {
+                reason = $"'{path}' names no column of the schema";
+                return false;
+            }
+
+            chain[i] = field;
+            leaf = leaf.GetField(field);
+        }
+
+        reason = null;
+        return true;
     }
 
     /// <summary>
@@ -172,9 +296,9 @@ internal sealed class IndexWriter : IDisposable
     internal static bool Asks(WritePolicy policy) =>
         policy.Default.Kind != IndexPolicyKind.None || policy.Columns.Count > 0 || policy.Keys.Count > 0;
 
-    /// <summary>Why a composite key cannot be built, or null; and the fields it encodes.</summary>
+    /// <summary>Why a composite key cannot be built, or null; and the columns it encodes, as field-index paths.</summary>
     private static string? Composite(
-        CompositeKeyPolicy key, DType schema, bool isTabular, IKeyEncoder? encoder, out int[]? fields)
+        CompositeKeyPolicy key, DType schema, bool isTabular, IKeyEncoder? encoder, out int[][]? fields)
     {
         fields = null;
         if (!isTabular)
@@ -187,13 +311,12 @@ internal sealed class IndexWriter : IDisposable
             return "no key encoder: set VortexWriteOptions.KeyEncoder, which the Vorticity.RowEncoding package provides (RowKeyEncoder)";
         }
 
-        int[] resolved = new int[key.Paths.Count];
+        int[][] resolved = new int[key.Paths.Count][];
         for (int i = 0; i < resolved.Length; i++)
         {
-            resolved[i] = schema.IndexOfField(key.Paths[i]);
-            if (resolved[i] < 0)
+            if (!TryResolve(schema, isTabular, key.Paths[i], out resolved[i], out _, out string? reason))
             {
-                return $"'{key.Paths[i]}' is not a top-level column of the schema";
+                return reason;
             }
         }
 
@@ -213,7 +336,8 @@ internal sealed class IndexWriter : IDisposable
     {
         for (int field = _fieldCount; field < _builders.Length; field++)
         {
-            if (_builders[field].Count == 0 || _builders[field][0] is not KeyIndexBuilder builder)
+            if (_keyFields[field] is not { } fields
+                || _builders[field].Count == 0 || _builders[field][0] is not KeyIndexBuilder builder)
             {
                 continue;
             }
@@ -224,15 +348,23 @@ internal sealed class IndexWriter : IDisposable
                 continue;
             }
 
-            int[] fields = _keyFields[field]!;
             CanonicalArena slices = _keySlices ??= new CanonicalArena();
             slices.Reset();
             int[] columns = new int[fields.Length];
             bool[] include = new bool[count];
             include.AsSpan().Fill(true);
+            bool masked = true;
             for (int c = 0; c < fields.Length; c++)
             {
-                columns[c] = Layouts.CanonicalSlice.SliceAcross(arena, slices, fieldNodes[fields[c]], start, count);
+                int leaf = Descend(arena, fieldNodes, fields[c], start, include, ref masked);
+                if (leaf < 0)
+                {
+                    builder.Abandon($"a batch has no column at '{_paths[field]}''s path");
+                    builder.Skip(count);
+                    break;
+                }
+
+                columns[c] = Layouts.CanonicalSlice.SliceAcross(arena, slices, leaf, start, count);
                 ValidityMask validity = ValidityMask.From(slices, slices.GetNode(columns[c]).Validity);
                 if (validity.AllValid)
                 {
@@ -243,6 +375,11 @@ internal sealed class IndexWriter : IDisposable
                 {
                     include[row] &= validity.IsValid(row);
                 }
+            }
+
+            if (builder.Abandoned is not null)
+            {
+                continue;
             }
 
             try
@@ -256,6 +393,181 @@ internal sealed class IndexWriter : IDisposable
                 builder.Skip(count);
             }
         }
+    }
+
+    /// <summary>
+    /// Feeds every nested column its rows: its node, reached from its top-level column, as it
+    /// stands when no parent is null, and otherwise re-published over the range with the parents'
+    /// nulls folded into its validity -- so a builder reads a nested column as it reads any other.
+    /// </summary>
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="fieldNodes">Every real column's node in it, in field order.</param>
+    /// <param name="start">The first row.</param>
+    /// <param name="count">How many rows.</param>
+    internal void AccumulateNested(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int start, int count)
+    {
+        if (_nested is not { } nested || count <= 0)
+        {
+            return;
+        }
+
+        for (int field = 0; field < nested.Length; field++)
+        {
+            if (nested[field] is not { } chain || _builders[field].Count == 0)
+            {
+                continue;
+            }
+
+            bool[] include = ArrayPool<bool>.Shared.Rent(count);
+            try
+            {
+                bool masked = false;
+                int leaf = Descend(arena, fieldNodes, chain, start, include.AsSpan(0, count), ref masked);
+                if (leaf < 0)
+                {
+                    foreach (IndexBuilder builder in _builders[field])
+                    {
+                        builder.Abandon($"a batch has no column at '{_paths[field]}'");
+                    }
+
+                    continue;
+                }
+
+                CanonicalArena source = arena;
+                int from = start;
+                if (masked)
+                {
+                    source = _keySlices ??= new CanonicalArena();
+                    leaf = Masked(arena, leaf, start, include.AsSpan(0, count));
+                    from = 0;
+                }
+
+                foreach (IndexBuilder builder in _builders[field])
+                {
+                    builder.Accumulate(source, leaf, from, count);
+                }
+            }
+            finally
+            {
+                ArrayPool<bool>.Shared.Return(include);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The node a field-index path ends on in a batch, with the rows its parents null out cleared
+    /// in <paramref name="include"/>; -1 when the batch does not have the path.
+    /// </summary>
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="fieldNodes">Every real column's node in it.</param>
+    /// <param name="chain">The path.</param>
+    /// <param name="start">The first row.</param>
+    /// <param name="include">Per row of the range, whether it may be an entry.</param>
+    /// <param name="masked">
+    /// Whether <paramref name="include"/> holds anything yet: filled with <see langword="true"/> by
+    /// the first parent that has a null.
+    /// </param>
+    private static int Descend(
+        CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int[] chain, int start, Span<bool> include, ref bool masked)
+    {
+        int node = fieldNodes[chain[0]];
+        for (int d = 1; d < chain.Length; d++)
+        {
+            CanonicalNode parent = arena.GetNode(node);
+            Exclude(arena, parent.Validity, start, include, ref masked);
+            while (parent.Kind == CanonicalKind.Extension)
+            {
+                parent = arena.GetNode(parent.StorageIndex);
+                Exclude(arena, parent.Validity, start, include, ref masked);
+            }
+
+            if (parent.Kind != CanonicalKind.Struct || chain[d] >= parent.FieldCount)
+            {
+                return -1;
+            }
+
+            node = parent.GetFieldIndex(chain[d]);
+        }
+
+        return node;
+    }
+
+    private static void Exclude(CanonicalArena arena, Validity validity, int start, Span<bool> include, ref bool masked)
+    {
+        ValidityMask mask = ValidityMask.From(arena, validity);
+        if (mask.AllValid)
+        {
+            return;
+        }
+
+        if (!masked)
+        {
+            include.Fill(true);
+            masked = true;
+        }
+
+        for (int row = 0; row < include.Length; row++)
+        {
+            include[row] &= mask.IsValid(start + row);
+        }
+    }
+
+    /// <summary>
+    /// Rows <c>[start, start + include.Length)</c> of <paramref name="leaf"/>, in the scratch arena,
+    /// valid where the leaf is and <paramref name="include"/> says so.
+    /// </summary>
+    private int Masked(CanonicalArena arena, int leaf, int start, ReadOnlySpan<bool> include)
+    {
+        int count = include.Length;
+        CanonicalArena slices = _keySlices!;
+        slices.Reset();
+        int sliced = Layouts.CanonicalSlice.SliceAcross(arena, slices, leaf, start, count);
+        CanonicalNode outer = slices.GetNode(sliced);
+        CanonicalNode node = outer;
+        while (node.Kind == CanonicalKind.Extension)
+        {
+            node = slices.GetNode(node.StorageIndex);
+        }
+
+        ValidityMask own = ValidityMask.From(slices, node.Validity);
+        ValidityMask wrapper = ValidityMask.From(slices, outer.Validity);
+        Buffers.VortexBuffer bits = slices.Allocate(Math.Max((count + 7) / 8, 1), 1, out Span<byte> raw);
+        raw.Clear();
+        for (int row = 0; row < count; row++)
+        {
+            if (include[row] && own.IsValid(row) && wrapper.IsValid(row))
+            {
+                raw[row >> 3] |= (byte)(1 << (row & 7));
+            }
+        }
+
+        DTypeArena types = _maskTypes ??= new DTypeArena();
+        Validity validity = Validity.Bitmap(
+            slices.AddBool(types.Bool(Nullability.NonNullable), count, Validity.NonNullable, bits, 0));
+        DType dtype = node.DType;
+        return node.Kind switch
+        {
+            CanonicalKind.Primitive => slices.AddPrimitive(dtype, count, validity, node.PType, node.Values),
+            CanonicalKind.Decimal => slices.AddDecimal(
+                dtype, count, validity, node.Storage, node.Precision, node.Scale, node.Values),
+            CanonicalKind.Bool => slices.AddBool(dtype, count, validity, node.Bits, node.BitOffset),
+            CanonicalKind.Constant => slices.AddConstant(dtype, count, validity, node.ConstantElement),
+            CanonicalKind.VarBinView => MaskedViews(slices, node, dtype, count, validity),
+
+            // No builder keys the other kinds, and each says so when it is fed one.
+            _ => sliced,
+        };
+    }
+
+    private static int MaskedViews(CanonicalArena slices, CanonicalNode node, DType dtype, int count, Validity validity)
+    {
+        Buffers.VortexBuffer[] data = new Buffers.VortexBuffer[node.DataBufferCount];
+        for (int i = 0; i < data.Length; i++)
+        {
+            data[i] = node.GetDataBuffer(i);
+        }
+
+        return slices.AddVarBinView(dtype, count, validity, node.Views, data);
     }
 
     // ------------------------------------------------------------------------------ an append
@@ -714,6 +1026,10 @@ internal sealed class IndexWriter : IDisposable
             {
                 case IndexPolicyKind.None:
                     break;
+                case IndexPolicyKind.Auto when field >= _fieldCount:
+                    // An override that names no column, or a nested one, under Auto: said, not skipped.
+                    Abandoned(field, "auto", _refusals[field] ?? "Auto chooses among the top-level columns");
+                    break;
                 case IndexPolicyKind.Auto:
                     DictProbe(field, columns[field], chunkRows, blockRows);
                     foreach (IndexBuilder builder in builders)
@@ -958,12 +1274,20 @@ internal sealed class IndexWriter : IDisposable
     private void NotYet(int field, string kind) =>
         Abandoned(field, kind, "this writer does not build this kind yet");
 
-    /// <summary>A real column's path; empty for the root and for a composite key, whose columns are in its options.</summary>
-    private uint[] ColumnPath(int field) => _isTabular && field < _fieldCount ? [checked((uint)field)] : [];
+    /// <summary>
+    /// A column's path: its field for a top-level column, its fields for a nested one; empty for the
+    /// root and for a composite key, whose columns are in its options.
+    /// </summary>
+    private uint[] ColumnPath(int field) =>
+        _nested?[field] is { } chain ? Unsigned(chain)
+        : _isTabular && field < _fieldCount ? [checked((uint)field)]
+        : [];
 
     /// <summary>A composite key's columns, as the entry options carry them; null for a real column.</summary>
     private List<uint[]>? KeyColumns(int field) =>
-        _keyFields[field] is { } fields ? [.. Array.ConvertAll(fields, f => new[] { checked((uint)f) })] : null;
+        _keyFields[field] is { } fields ? [.. Array.ConvertAll(fields, Unsigned)] : null;
+
+    private static uint[] Unsigned(int[] chain) => Array.ConvertAll(chain, f => checked((uint)f));
 
     /// <summary>The directory's bytes, or <see langword="null"/> when there is nothing to list.</summary>
     /// <param name="rowCount">The file's row count.</param>

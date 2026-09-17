@@ -527,6 +527,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
         }
 
         indexes.AccumulateKeys(arena, _fieldNodes, start, count);
+        indexes.AccumulateNested(arena, _fieldNodes, start, count);
     }
 
     /// <summary>Seals the open block of every column.</summary>

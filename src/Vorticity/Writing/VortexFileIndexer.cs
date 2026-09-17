@@ -309,6 +309,7 @@ public static class VortexFileIndexer
             }
 
             indexes.AccumulateKeys(arena, fieldNodes, offset, take);
+            indexes.AccumulateNested(arena, fieldNodes, offset, take);
             offset += take;
             filled += take;
             if (filled == blockRows)
