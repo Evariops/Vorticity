@@ -397,6 +397,25 @@ child alone (a few hundred bytes) and never the codes. It is the cheapest equali
 it costs nothing to write, and the writer knows exactly when it applies. When a chunk is *not*
 dictionary-encoded the reader gets no claim for that chunk and falls through to the next index.
 
+**As delivered (step 33), and one sentence above is wrong.** The block pruner now answers `x = v`
+and `x IN (…)` from the chunks' dictionaries, last in the chain of 11 §6 — after the zone maps and
+the filters, before nothing, since it reads the column's own bytes. A chunk claims only the blocks
+it covers **whole**, so a block two chunks share stays live, and the file's last block counts as
+whole because no row lies past it. On `table_mixed` written with `Auto`, where `label` holds
+sixteen values and the entry is 61 bytes:
+
+| `label` | blocks live | bytes the plan reads |
+| --- | --- | --- |
+| a value no chunk holds | 0 of 123 | 539 696 (was 7 385 628) |
+| a value every chunk holds | 123 of 123 | 7 924 232 (was 7 385 628) |
+
+So the claim "a few hundred bytes" is not what a probe costs today: **a flat chunk is one segment**,
+so decoding the values child means reading the chunk's bytes — 538 604 for `label`'s one chunk —
+and only then are the codes skipped. The trade is that read against the whole scan: 13.7× less when
+the value is absent, 7 % more when it is present. It pays on this file because the probed column is
+one of six; it would break even on a file of one column, and it would become what §5.3 promised if
+a dictionary's values were given a segment of their own.
+
 ### 5.4 The file-level filter
 
 *As delivered (step 12b): `VortexFile.MayMatchAsync(expr)` answers from the statistics first and
@@ -452,6 +471,20 @@ and on medium-cardinality columns whose generations clear the floor, and nowhere
 bit-packs to a byte a row. A directory is written only when it lists something or the policy is
 the caller's own. The file budget counts the indexes still alive, never the dead weight of an
 abandoned one.
+
+*Amended at step 33, on the repeated-set verdict, which is right for a reason it did not give.* The
+leaves of such a column do prune nothing — on `table_mixed`'s `label`, an explicit Bloom reads
+5 840 bytes of filters for a present value and keeps all 123 blocks — but the **root** of that same
+tree answers an absent value in 180 bytes and kills all 123, where the zone map alone reads
+7 385 628. What is unaffordable is not the root's bytes (6 kB for the whole tree) but the pass that
+fills it: one hash and one set insert per row, measured at ~9 ms per million rows. On a column the
+chooser writes for almost nothing — `zstd_buffers`, 630 724 bytes for a million rows — that pass
+takes the write from 5 ms to 14, far past the +10 % of 11 §5.3; on `table_mixed`, where five other
+columns pay the bill, the same filter costs 1 ms in 162 and does not show. A writer cannot tell
+those apart without timing itself, which would make its bytes depend on the machine, so `Auto`
+keeps the pessimistic verdict — and §5.3's dictionary probe answers absence on exactly these
+columns for no write at all. An explicit `IndexPolicy.Bloom()` buys the root back at that measured
+price.
 
 *Amended at step 24 (13 §6.5):* `Auto` also gives up a column whose first generation holds more
 values than a node of `max_blocks` holds at the target rate. That generation's node would have no
@@ -1040,6 +1073,18 @@ migration changes a payload byte.
   same chain with one fewer type on the surface, and the cursor of its §4 is the surface for an
   engine that plans its own I/O.
 - The default `k` of a generation (16) and whether `Auto` builds one at all without a policy.
+
+**As delivered (step 33), answering the four above.** Every number below is one process against
+`table_mixed` (1 M rows, six columns, 123 blocks, 7 445 145 bytes written with `Auto`) or the
+throughput corpus, taking the best of three writes.
+
+| Question | Answer | What the measurement said |
+| --- | --- | --- |
+| The 2 % payload budget (`AutoBloomShare`, 20 ‰ of the column's raw bytes) | **kept at 20 ‰** | It refuses every fixed-width column of the corpus, and that is right: an explicit Bloom on the six columns of `table_mixed` writes 10 672 264 bytes of filters against 7 445 204 bytes of data (143 %), takes the write from 164 ms to 315, and an absent probe then **reads 1 967 620 bytes of filters to skip 7 385 628 of data**. The rule bites at 31 ‰ for an 8-byte column at 10 000 ppm (2 048 bytes of filter per 65 536 raw), so 20 ‰ has margin on the only side that matters. |
+| `min_distinct` (8) | **kept at 8** | It is a floor on a generation's distinct values, and the only corpus column it decides alone is `dict` (5 values): with §5.5's repeated-set rule taken out, the floor still refuses it, but only at the sixteenth block, and the file writes in 19 ms instead of 13. The floor is the right verdict late; the repeated-set rule is the same verdict at the fourth block. |
+| The generation `k` (16) | **not a knob** | `k` is the tree's fanout, which every entry's options carry and a reader refuses when it is not its own. At `k` = 8 with the fanout left at 16, `table_mixed`'s filters grow to 20 019 048 bytes and **every** probe measured prunes nothing; moving both to 8 fails 28 tests of the index suite. Changing it is a format version, not a default. |
+| `dict.probe` as a kind (§5.3) | **a kind, and now read by the pruner** | The entry is 61 bytes on `table_mixed` and 59 on the corpus's `dict`, and it is what lets a reader find the dictionary chunks without opening one layout — the `Dictionary` key source already did. Deriving it per chunk would cost a layout read to learn what one directory message says. §5.3 says what it now costs to use. |
+| A Bloom over `(a, b)` pairs (§6.5) | **refused** | Three reasons, in order: the core has no encoder on the read side and cannot take one from `Vorticity.RowEncoding` without depending on it; a tuple's cardinality is the product of its columns', so the filter lands exactly in the regime the first row of this table rejects; and `WritePolicy.ForKey(paths, IndexPolicy.SortedRuns)` answers the same question exactly, per block, with fences. |
 
 Decided (2026-09-15): XxHash3-64 is `System.IO.Hashing.XxHash3` taken as the **package** — the
 first-party implementation in `dotnet/runtime` (MIT; `XxHash64` from the same package for the

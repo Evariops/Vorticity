@@ -56,6 +56,7 @@ internal sealed partial class SortedRunsSource
         }
 
         List<Run> runs = [];
+        long read = 0;
         using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
         foreach (IndexRun meta in entry.Runs)
         {
@@ -69,7 +70,9 @@ internal sealed partial class SortedRunsSource
                 }
 
                 context.ResetBatch();
-                int slot = context.Segments.Add(SpecOf(file, flat));
+                SegmentSpec spec = SpecOf(file, flat);
+                read += spec.Length;
+                int slot = context.Segments.Add(spec);
                 await file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
                 Diagnostics.VortexEventSource.RunsRead(1);
                 RunSegment? values = Values(context, flat, slot, layout);
@@ -94,7 +97,12 @@ internal sealed partial class SortedRunsSource
             }
         }
 
-        return (new SortedRunsSource(file, layout, storage, kind, [.. runs], KeySourceKind.Dictionary), null);
+        return (
+            new SortedRunsSource(file, layout, storage, kind, [.. runs], KeySourceKind.Dictionary)
+            {
+                DictionaryBytes = read,
+            },
+            null);
     }
 
     /// <summary>The spec of a flat node's one segment.</summary>
@@ -210,6 +218,59 @@ internal sealed partial class SortedRunsSource
         }
 
         return new RunSegment(keys, bytes ? offsets : null, null, kept.Count);
+    }
+
+    /// <summary>
+    /// The chunks this dictionary source read, for a caller that wants the sets themselves rather
+    /// than a walk over their union: the block pruner of 10 §5.3, which answers `x = v` from the
+    /// values child alone.
+    /// </summary>
+    internal int Dictionaries => _source == KeySourceKind.Dictionary ? _runs.Length : 0;
+
+    /// <summary>What one segment read cost, summed over the chunks read at open.</summary>
+    internal long DictionaryBytes { get; private init; }
+
+    /// <summary>Chunk <paramref name="chunk"/>'s first row and its rows.</summary>
+    /// <param name="chunk">The chunk, under <see cref="Dictionaries"/>.</param>
+    internal (long FirstRow, long Rows) DictionaryExtent(int chunk) =>
+        (_runs[chunk].FirstRow, _runs[chunk].RowLimit);
+
+    /// <summary>Whether chunk <paramref name="chunk"/>'s dictionary holds <paramref name="key"/>.</summary>
+    /// <param name="chunk">The chunk, under <see cref="Dictionaries"/>.</param>
+    /// <param name="key">The key, encoded as the column's layout encodes one.</param>
+    /// <remarks>
+    /// The values were sorted and deduplicated at open, so this is a binary search over the
+    /// chunk's distinct values -- `O(log d)` and no read at all.
+    /// </remarks>
+    internal bool DictionaryHolds(int chunk, ReadOnlySpan<byte> key)
+    {
+        if (_runs[chunk].Probe is not { } probe)
+        {
+            return false;
+        }
+
+        int low = 0;
+        int high = probe.Count - 1;
+        while (low <= high)
+        {
+            int middle = (int)(((uint)low + (uint)high) >> 1);
+            int order = _layout.Compare(KeyBytesAt(probe, _layout, middle), key);
+            if (order == 0)
+            {
+                return true;
+            }
+
+            if (order < 0)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return false;
     }
 
     private static ReadOnlySpan<byte> KeyBytesAt(RunSegment segment, KeyLayout layout, int index) =>

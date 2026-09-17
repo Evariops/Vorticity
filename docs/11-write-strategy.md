@@ -687,6 +687,8 @@ predicate. The scan builds the mask once per query (a bit per block: 123 bits fo
 loaded), then Bloom generations from the coarsest to the finest (each only over blocks still live,
 each hash of a literal computed once per query), then postings (one key lookup per literal, a
 merge-join for a sorted `IN`), then exact indexes — and **stops as soon as the mask is empty**.
+The dictionary probe of 10 §5.3 runs with that last group and is the only one that reads the
+column's own bytes rather than an index's, which is why it is last and why 10 §5.3 prices it.
 Then, per split:
 
 - a split whose blocks are all dead is skipped before its read: the I/O saving;

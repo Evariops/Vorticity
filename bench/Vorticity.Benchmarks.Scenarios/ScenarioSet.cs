@@ -72,8 +72,38 @@ public static class ScenarioSet
         "write-postings" => p => ReadAndWriteIndexed(p, IndexPolicy.Postings),
         "write-sorted-runs" => p => ReadAndWriteIndexed(p, IndexPolicy.SortedRuns),
         "lookup-sorted-runs" => LookupSortedRuns,
+        "prune-in" => PruneIn,
         _ => null,
     };
+
+    /// <summary>
+    /// Plans an <c>IN</c> of <see cref="LookupProbes"/> keys of the column against that same file:
+    /// what the locating index costs to ANSWER a filter, where `lookup-sorted-runs` measures what
+    /// it costs to seek one key at a time.
+    /// </summary>
+    /// <param name="path">A tabular file.</param>
+    /// <returns>The blocks the plan leaves live.</returns>
+    /// <remarks>
+    /// THE QUESTION IS ASKED PER BLOCK, and there are as many literals as probes, so this is the
+    /// scenario that catches a per-block cost that grows with the filter -- step 33 found one worth
+    /// half the plan (docs/12-index-reads.md §13). The probes are keys the column holds, so the
+    /// index cannot prune them away and every block is asked about every literal.
+    /// </remarks>
+    public static async Task<long> PruneIn(string path)
+    {
+        if (!Lookups.TryGetValue(path, out (byte[] Bytes, string Column, FilterLiteral[] Probes) prepared))
+        {
+            prepared = await PrepareLookupAsync(path);
+            Lookups.TryAdd(path, prepared);
+        }
+
+        await using VortexFile file = await VortexFile.OpenAsync(
+            new Vorticity.IO.MemorySegmentSource(prepared.Bytes), new VortexOpenOptions(), CancellationToken.None);
+        ScanPlan plan = await file.Scan()
+            .Where(Expr.In(Expr.Field(prepared.Column), prepared.Probes))
+            .ExplainAsync(CancellationToken.None);
+        return plan.LiveBlocks;
+    }
 
     /// <summary>The written file, its keyed column and its probes, per input: built on the first call.</summary>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (byte[] Bytes, string Column, FilterLiteral[] Probes)> Lookups = new();

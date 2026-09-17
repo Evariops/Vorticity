@@ -907,7 +907,28 @@ and its gate; the first four need no index and run on today's corpus.
   UTF-8 that 10 §5.2's lower-cased trigrams also need.
 - **The selection algorithm.** `O(r log² n)` is adequate until measured otherwise.
 - **`IndexCacheBytes` at 64 MiB** is a guess, like every default in 10 §11, to be calibrated on
-  `table_mixed` once real runs exist.
+  `table_mixed` once real runs exist. **Calibrated at step 33, and it is not what it was blamed
+  for.** On `table_mixed` rewritten with sorted runs, one process, best of five, planning an `IN`
+  of a thousand keys:
+
+  | column | index bytes | cache 0 | 1 MiB | 8 MiB | 64 MiB | 256 MiB |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | `key`, a sequence, every literal present | 4 854 | 28,3 ms | 24,7 | 24,0 | 23,6 | 23,2 |
+  | `measure`, random, every literal absent | 5 127 836 | 1,7 ms | 1,6 | 1,6 | 1,7 | 1,6 |
+
+  From nothing to a quarter of a gigabyte the plan moves by 18 % on the worst shape and not at all
+  on the other, and a file kept open does not get faster across rounds. **64 MiB stays**, not
+  because it buys speed but because it bounds what one open file holds: a sorted run's segment for
+  a million rows is 12 MB of keys and rows, so the default holds a handful and an unbounded cache
+  would hold the file. Step 32 left ~39 ms of an `IN (1000)` to "the two rank lookups a literal
+  makes in the key source (the run cache, `IndexCacheBytes`)"; that attribution was wrong. The cost
+  was **per block, not per read**: `ProvesAbsent` asked the column whether each literal was absent
+  from each block, and finding the literal's slot walked the filter's list — 123 blocks × 1 000
+  literals × ~500 comparisons, 61 million of them, for a plan that took 28,2 ms of which the scan
+  it guards is 0,11. The slots are now found once per expression and read per block; `bench/ab.sh`
+  on `prune-in` (200 literals, in one process, 21 rounds) says **0,836** [0,823 ; 0,860] with
+  `lookup-sorted-runs` unchanged at 1,004. What is left grows with the literals because each one
+  descends the fences of every run it may be in, which is the design of §6.
 
 Decided (2026-09-15): two models rather than one, with the scan as the only engine that returns
 rows and the cursor as the only structure that returns order; no `KeyRange`, no `Probe`, no `Sort`

@@ -33,6 +33,10 @@ internal sealed class KeyIndexPruner
     private readonly VortexExpr _filter;
     private readonly Dictionary<string, Column> _columns;
 
+    /// <summary>Each <c>IN</c> of the filter, by reference, with what <see cref="Resolve"/> found.</summary>
+    private readonly Dictionary<InExpr, (Column? Column, int[] Slots)> _ins =
+        new Dictionary<InExpr, (Column? Column, int[] Slots)>(ReferenceEqualityComparer.Instance);
+
     private KeyIndexPruner(VortexExpr filter, Dictionary<string, Column> columns)
     {
         _filter = filter;
@@ -148,6 +152,27 @@ internal sealed class KeyIndexPruner
             }
         }
 
+        // THE DICTIONARY PROBE LAST, and only where no index of runs already answers the column:
+        // its claim is per chunk where theirs is per block, and it reads the column's own bytes.
+        // Nothing is read here -- the chunks are decoded at the refinement, when the zone maps have
+        // had their say (10 §5.3).
+        foreach (IndexEntry entry in directory.Entries)
+        {
+            if (entry.Kind != IndexKinds.DictProbe || entry.Runs.Count == 0
+                || !TryResolve(file.Schema, entry.ColumnPath, out string path, out DType dtype)
+                || columns.ContainsKey(path)
+                || !equalities.TryGetValue(path, out List<FilterLiteral>? literals) || literals.Count == 0
+                || !KeyLayout.TryOf(dtype, out KeyLayout layout))
+            {
+                continue;
+            }
+
+            columns[path] = new Column(rows: false, layout, Storage(dtype), [], literals, blocks, fold: false)
+            {
+                DictionaryPath = path,
+            };
+        }
+
         return columns.Count == 0 ? null : new KeyIndexPruner(filter, columns);
     }
 
@@ -171,6 +196,12 @@ internal sealed class KeyIndexPruner
         List<(Column Column, Run Run, Fence Fence, int[] Slots)> wanted = [];
         foreach (Column column in _columns.Values)
         {
+            if (column.DictionaryPath is { } dictionary)
+            {
+                await ProbeAsync(file, column, dictionary, live, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
             foreach (Run run in column.Runs)
             {
                 if (!AnyLive(live, run.Meta))
@@ -291,15 +322,27 @@ internal sealed class KeyIndexPruner
                 return Absent(equal.Field.Path, equal.Value, block);
 
             case InExpr @in:
-                foreach (FilterLiteral value in @in.Values)
+            {
+                // RESOLVED ONCE, ASKED PER BLOCK. The question "is every one of these literals
+                // absent from this block" is asked for each of the file's blocks against the same
+                // expression, so the literals' slots are found once and the blocks then cost one
+                // array read each (docs/12-index-reads.md §13).
+                (Column? column, int[] slots) = Resolve(@in);
+                if (column is null || slots.Length == 0)
                 {
-                    if (!Absent(@in.Field.Path, value, block))
+                    return false;
+                }
+
+                foreach (int slot in slots)
+                {
+                    if (slot < 0 || !column.AbsentAt(slot, block))
                     {
                         return false;
                     }
                 }
 
-                return @in.Values.Count > 0;
+                return true;
+            }
 
             case StringMatchExpr match when _columns.TryGetValue(TrigramKey(match.Field.Path), out Column? text):
                 // Absent when ONE required trigram is: a matching value holds them all.
@@ -320,6 +363,70 @@ internal sealed class KeyIndexPruner
 
     private bool Absent(string path, FilterLiteral value, int block) =>
         _columns.TryGetValue(path, out Column? column) && column.Absent(value, block);
+
+    /// <summary>
+    /// Fills a dictionary-backed column's claims: opens the column's chunks' dictionaries and asks
+    /// each one whether it holds the filter's literals (10 §5.3, "the cheapest equality index
+    /// there is").
+    /// </summary>
+    /// <param name="file">The open file.</param>
+    /// <param name="column">The column, whose claims are empty until this runs.</param>
+    /// <param name="path">Its path.</param>
+    /// <param name="live">The mask as the earlier structures left it.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <remarks>
+    /// A SOURCE THAT REFUSES CLAIMS NOTHING: a chunk the entry claims and that is not a dictionary
+    /// makes the source refuse whole, and the column then proves no literal absent anywhere --
+    /// which is what an index that cannot be read must do.
+    /// </remarks>
+    private async ValueTask ProbeAsync(
+        VortexFile file, Column column, string path, BlockMask live, CancellationToken cancellationToken)
+    {
+        (Keys.SortedRunsSource? source, _) = await Keys.SortedRunsSource
+            .OpenAsync(file, path, Keys.KeySourceKind.Dictionary, cancellationToken).ConfigureAwait(false);
+        if (source is null)
+        {
+            return;
+        }
+
+        await using (source.ConfigureAwait(false))
+        {
+            Segments += source.Dictionaries;
+            Bytes += source.DictionaryBytes;
+            for (int chunk = 0; chunk < source.Dictionaries; chunk++)
+            {
+                column.Dictionary(source, chunk, live.BlockRows);
+            }
+        }
+    }
+
+    /// <summary>The column an <c>IN</c> asks about and its literals' slots in it, found once.</summary>
+    /// <param name="expr">The expression, the same instance at every block.</param>
+    private (Column? Column, int[] Slots) Resolve(InExpr expr)
+    {
+        if (_ins.TryGetValue(expr, out (Column? Column, int[] Slots) found))
+        {
+            return found;
+        }
+
+        if (!_columns.TryGetValue(expr.Field.Path, out Column? column))
+        {
+            found = (null, []);
+        }
+        else
+        {
+            int[] slots = new int[expr.Values.Count];
+            for (int i = 0; i < slots.Length; i++)
+            {
+                slots[i] = column.SlotOf(expr.Values[i]);
+            }
+
+            found = (column, slots);
+        }
+
+        _ins[expr] = found;
+        return found;
+    }
 
     private static string TrigramKey(string path) => path + "\0ngram3";
 
@@ -418,6 +525,9 @@ internal sealed class KeyIndexPruner
         private readonly KeyLayout _layout;
         private readonly DType _storage;
         private readonly List<FilterLiteral> _literals;
+
+        /// <summary>Each literal's slot, the first when the filter names one twice.</summary>
+        private readonly Dictionary<FilterLiteral, int> _slots;
         private readonly byte[]?[] _keys;
         private readonly byte[]?[] _otherZeros;
         private readonly bool[][] _absent;
@@ -440,6 +550,7 @@ internal sealed class KeyIndexPruner
             _storage = storage;
             Runs = runs;
             _literals = literals;
+            _slots = new Dictionary<FilterLiteral, int>(literals.Count);
             _keys = new byte[]?[literals.Count];
             _otherZeros = new byte[]?[literals.Count];
             _absent = new bool[literals.Count][];
@@ -447,6 +558,7 @@ internal sealed class KeyIndexPruner
             Span<byte> zero = stackalloc byte[sizeof(ulong)];
             for (int i = 0; i < literals.Count; i++)
             {
+                _slots.TryAdd(literals[i], i);
                 _absent[i] = new bool[blocks];
                 if (layout.TryEncode(literals[i], scratch, out ReadOnlySpan<byte> key, zero, out bool hasOtherZero))
                 {
@@ -457,6 +569,12 @@ internal sealed class KeyIndexPruner
         }
 
         internal List<Run> Runs { get; }
+
+        /// <summary>
+        /// The column, when its claims come from the chunks' dictionaries (10 §5.3) rather than
+        /// from an index's runs; null for every other kind.
+        /// </summary>
+        internal string? DictionaryPath { get; init; }
 
         /// <summary>For a trigram index, whether its trigrams were folded.</summary>
         internal bool Fold { get; }
@@ -510,6 +628,56 @@ internal sealed class KeyIndexPruner
             return [.. found.Values];
         }
 
+        /// <summary>
+        /// Claims one chunk's blocks from its dictionary (10 §5.3): a literal the chunk's values do
+        /// not hold is absent from every block the chunk covers whole.
+        /// </summary>
+        /// <param name="source">The column's dictionary source, open over the claimed chunks.</param>
+        /// <param name="chunk">The chunk, under the source's count.</param>
+        /// <param name="blockRows">Rows per block.</param>
+        /// <remarks>
+        /// ONLY THE BLOCKS THE CHUNK COVERS WHOLE. A dictionary says what its own rows hold and
+        /// nothing about the rows around them, so a block a chunk shares with its neighbour is left
+        /// live -- the writer aligns chunks to blocks, so this costs nothing there and stays right
+        /// on a file whose chunks are not aligned.
+        /// </remarks>
+        internal void Dictionary(Keys.SortedRunsSource source, int chunk, long blockRows)
+        {
+            (long firstRow, long rows) = source.DictionaryExtent(chunk);
+            int count = _absent.Length == 0 ? 0 : _absent[0].Length;
+            long last = firstRow + rows;
+            ulong first = (ulong)((firstRow + blockRows - 1) / blockRows);
+
+            // The chunk's last block counts as whole when the file holds no row past it: the tail
+            // of the file's last block is not another chunk's, it is nothing at all.
+            ulong end = (ulong)((last + blockRows - 1) / blockRows >= count ? count : last / blockRows);
+            if (end <= first)
+            {
+                return;
+            }
+
+            for (int i = 0; i < _keys.Length; i++)
+            {
+                if (_keys[i] is not { } key)
+                {
+                    continue;
+                }
+
+                // THE TWO ZEROS OF A FLOAT ARE ONE LITERAL, and a dictionary may hold either.
+                bool holds = source.DictionaryHolds(chunk, key)
+                    || (_otherZeros[i] is { } other && source.DictionaryHolds(chunk, other));
+                if (holds)
+                {
+                    continue;
+                }
+
+                for (ulong block = first; block < end && block < (ulong)_absent[i].Length; block++)
+                {
+                    _absent[i][block] = true;
+                }
+            }
+        }
+
         /// <summary>Marks every block of the run absent for every encodable literal.</summary>
         internal void Cover(IndexRun run)
         {
@@ -539,11 +707,27 @@ internal sealed class KeyIndexPruner
             }
         }
 
-        internal bool Absent(FilterLiteral value, int block)
-        {
-            int i = _literals.IndexOf(value);
-            return i >= 0 && (uint)block < (uint)_absent[i].Length && _absent[i][block];
-        }
+        /// <summary>Whether the runs prove <paramref name="value"/> absent from <paramref name="block"/>.</summary>
+        /// <remarks>
+        /// ASKED ONCE PER LITERAL PER BLOCK, so the literal's slot is found through a map and not by
+        /// walking the list: an `IN` of a thousand keys over `table_mixed`'s 123 blocks asked this
+        /// 123 000 times, and the walk made it 61 million literal comparisons -- 28 ms of the 28,2
+        /// the whole plan took, where the scan it guards reads 7 MB (docs/12-index-reads.md §13).
+        /// </remarks>
+        /// <param name="value">The literal.</param>
+        /// <param name="block">The block.</param>
+        internal bool Absent(FilterLiteral value, int block) =>
+            _slots.TryGetValue(value, out int i) && AbsentAt(i, block);
+
+        /// <summary>The slot of <paramref name="value"/>, or −1 when the filter never named it.</summary>
+        /// <param name="value">The literal.</param>
+        internal int SlotOf(FilterLiteral value) => _slots.TryGetValue(value, out int i) ? i : -1;
+
+        /// <summary>Whether the runs prove slot <paramref name="slot"/>'s key absent from the block.</summary>
+        /// <param name="slot">The literal's slot.</param>
+        /// <param name="block">The block.</param>
+        internal bool AbsentAt(int slot, int block) =>
+            (uint)block < (uint)_absent[slot].Length && _absent[slot][block];
 
         /// <summary>
         /// Decodes one segment's arrays and marks, for every literal, the blocks that hold it.

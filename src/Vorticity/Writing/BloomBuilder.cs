@@ -47,8 +47,20 @@ namespace Vorticity.Writing;
 /// <summary>Builds one column's split-block Bloom filters, block by block.</summary>
 internal sealed class BloomBuilder : IndexBuilder
 {
-    /// <summary>Blocks per generation: 10 §4.3's `k`.</summary>
-    internal const int GenerationBlocks = 16;
+    /// <summary>
+    /// Blocks per generation: 10 §4.3's `k`, which is the tree's fanout and not a free parameter.
+    /// </summary>
+    /// <remarks>
+    /// STEP 33 TRIED TO CALIBRATE IT AND FOUND IT WAS NOT A KNOB. `k` is how many blocks one
+    /// generation covers; <see cref="BloomIndexOptions.Fanout"/> is how many children a node of the
+    /// tree takes, it is written into every entry's options and a reader rejects a file whose
+    /// fanout is not its own. They are one number: at `k` = 8 with the fanout left at 16 the
+    /// generations no longer line up with the nodes, `table_mixed`'s filters grow from 10 672 264
+    /// bytes to 20 019 048 and every probe measured prunes nothing at all; moving both to 8 fails
+    /// 28 tests of the index suite, the file filter among them. Changing it is a format version,
+    /// a code change and a fresh calibration, not a default to tune (docs/10-indexes.md §11).
+    /// </remarks>
+    internal const int GenerationBlocks = BloomIndexOptions.Fanout;
 
     /// <summary>The file-level filter's own ceiling, 10 §5.4: 1 MiB blocks, 32 MiB.</summary>
     internal const int FileMaxBlocks = 1 << 20;
@@ -677,8 +689,21 @@ internal sealed class BloomBuilder : IndexBuilder
     /// <remarks>
     /// The sets are equal exactly when, after each block's fold, the union is as large as the block
     /// and as the first block: no block lacked a value another had. A cycle of seventeen values
-    /// over a million rows -- the corpus's `zstd_buffers` -- is this column, and its filter cost
-    /// the write +37 %.
+    /// over a million rows -- the corpus's `zstd_buffers` -- is this column.
+    /// <para>
+    /// WHAT STEP 33 MEASURED, and why the rule stays although it is not the whole truth: the LEAVES
+    /// prune nothing, as the name says -- on `table_mixed`'s `label`, a present value reads 5 840
+    /// bytes of filters and keeps all 123 blocks -- but the ROOT of that same tree answers an
+    /// ABSENT value in 180 bytes and prunes all 123, where the bare zone map reads 7 385 628. The
+    /// cost of owning that root is not its bytes (6 kB) but the pass that fills it: one hash and
+    /// one set insert per row, ~9 ms per million rows. On a column the chooser writes for almost
+    /// nothing -- `zstd_buffers`, 630 724 bytes for a million rows -- that pass takes the write
+    /// from 5 ms to 14, far past the +10 % 11 §5.3 allows; on `table_mixed`, where five other
+    /// columns pay the bill, it does not show at all. A writer cannot tell those two apart without
+    /// timing itself, which would make its bytes depend on the machine, so `Auto` keeps the
+    /// pessimistic verdict and an explicit <see cref="IndexPolicy"/> Bloom buys the root back at
+    /// a measured 9 ms and 6 kB per million rows (docs/10-indexes.md §11).
+    /// </para>
     /// </remarks>
     /// <param name="block">The block just sealed.</param>
     /// <param name="distinct">Its distinct count.</param>
@@ -702,8 +727,9 @@ internal sealed class BloomBuilder : IndexBuilder
         }
 
         Abandon(
-            $"Auto gave it up: its first {RepeatBlocks} blocks hold the same {distinct} values, so a " +
-            "block filter prunes nothing (docs/10-indexes.md §5.5)");
+            $"Auto gave it up: its first {RepeatBlocks} blocks hold the same {distinct} values, so its " +
+            "block filters prune nothing and the pass that would fill their root costs more than a " +
+            "default write may spend; an explicit Bloom policy buys it (docs/10-indexes.md §5.5)");
         _block.Clear();
         return true;
     }
