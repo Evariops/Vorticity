@@ -96,6 +96,42 @@ this writer produces alone, outside any dataset, stays what it is today.
 superseded objects. That is true of every table format and it is stated, not solved: the latest
 commit object is the only definition of the dataset's content.
 
+**As delivered (step 36), the bytes.** A commit object is opened by its **head**, where a Vortex
+file is opened by its tail, and for the reason this section gives: the header must be inside the
+first ranged read, so it is at offset zero.
+
+| where | what | bytes |
+| --- | --- | --- |
+| 0 | magic `VXCOMMIT` | 8 |
+| 8 | format version, little-endian | 4 |
+| 12 | header length, little-endian | 4 |
+| 16 | header, proto3 | header length |
+| … | pages, back to back | |
+| … | fragments, back to back (§6.4) | |
+| … | table, proto3 | |
+| length − 32 | table offset, table length, **object length**, XXH3-64 over header ++ table, magic `VXCT` | 32 |
+
+Three decisions the prose left open, and what settled each:
+
+- **Every page reference is a fixed 36 bytes** (version, offset, length, XXH3-128). The header lies
+  before the pages and names their offsets, so the header's length depends on offsets that depend
+  on the header's length. Fixed-width references break that circle: the header is serialized once
+  to measure it, then again with the offsets rebased, and the builder **checks** that the second
+  pass is the same length rather than assuming it.
+- **A reference this commit hands out is relative until `Build`**, and a reference to another
+  version passes through untouched. That is what makes "every page the commit did not change is
+  referenced where it already lies" (§4.3) one line rather than a bookkeeping problem.
+- **The object's own length is in the trailer.** A store hands back what it has, so a truncated
+  object is a shorter object and not an error; recording the intended length turns every truncation
+  into a sentence. `CommitObjectTests` truncates a real object at **every byte** and requires a
+  `CommitFormatException` with a reason at each one.
+
+Opening is one request, measured by the counting store of §11. A commit smaller than the 256 KiB
+read comes back whole, so that one read verifies the header, the table and the checksum; a larger
+one opens on its header alone, and its pages are then read by the references that name them and
+checked against them on arrival. The checksum covers the header and the table only, as §7 says:
+re-hashing every page at open would make opening cost the whole object.
+
 ## 4. The dataset tree
 
 ### 4.1 What it is
