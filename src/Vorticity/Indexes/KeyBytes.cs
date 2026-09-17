@@ -116,10 +116,13 @@ internal readonly record struct KeyLayout(KeyShape Shape, int Width, PType PType
             return TotalFloat(key);
         }
 
-        Span<byte> wide = stackalloc byte[sizeof(ulong)];
-        wide.Clear();
-        key.CopyTo(wide);
-        ulong value = BinaryPrimitives.ReadUInt64LittleEndian(wide);
+        ulong value = Width switch
+        {
+            1 => key[0],
+            2 => BinaryPrimitives.ReadUInt16LittleEndian(key),
+            4 => BinaryPrimitives.ReadUInt32LittleEndian(key),
+            _ => BinaryPrimitives.ReadUInt64LittleEndian(key),
+        };
 
         // Two's complement orders like the unsigned value once its sign bit is flipped.
         return Shape == KeyShape.Signed ? value ^ (1UL << ((Width * 8) - 1)) : value;

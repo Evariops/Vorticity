@@ -425,7 +425,11 @@ runs. A rewrite compacts runs into one per generation.
 
 *Amended by [13-dataset.md](13-dataset.md) §6.1: the per-chunk runs are spilled and merged at
 `CompleteAsync` into one run per entry, with hierarchical fences and a checksum per segment, and
-at most K = 4 runs stay in flux after appends. A lookup no longer probes one run per chunk.*
+at most K = 4 runs stay in flux after appends. A lookup no longer probes one run per chunk.
+Delivered at step 22 for postings (§6.1 above), trigram postings (§6.4) and sorted runs, composite
+keys included: one run per entry, plus the last chunk's own when the rows are not whole blocks; a
+run's rows at `u64` when it spans 2³² rows or more. 13 §6.1's note says how, and what the K rule
+costs over many appends.*
 
 Per chunk, a run of `keys` sorted with their **row positions** (`u32` when the file has under
 2³² rows): a sort of one chunk's rows, O(chunk log chunk) in time and one chunk in memory, in

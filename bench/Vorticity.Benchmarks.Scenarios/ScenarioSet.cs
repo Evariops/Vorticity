@@ -19,6 +19,7 @@ using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Indexes;
+using Vorticity.Keys;
 using Vorticity.Scan;
 using Vorticity.Writing;
 
@@ -47,7 +48,7 @@ public static class ScenarioSet
 
     /// <summary>The scenario names this assembly answers to.</summary>
     public static string[] Names =>
-        ["fullscan", "projected", "take", "filtered", "write", "write-bloom", "write-postings", "write-sorted-runs"];
+        ["fullscan", "projected", "take", "filtered", "write", "write-bloom", "write-postings", "write-sorted-runs", "lookup-sorted-runs"];
 
     /// <summary>
     /// The scenario <paramref name="name"/> names, as a delegate of shared-runtime types only.
@@ -68,8 +69,98 @@ public static class ScenarioSet
         "write" => ReadAndWrite,
         "write-bloom" => p => ReadAndWriteIndexed(p, IndexPolicy.Bloom()),        "write-postings" => p => ReadAndWriteIndexed(p, IndexPolicy.Postings),
         "write-sorted-runs" => p => ReadAndWriteIndexed(p, IndexPolicy.SortedRuns),
+        "lookup-sorted-runs" => LookupSortedRuns,
         _ => null,
     };
+
+    /// <summary>The written file, its keyed column and its probes, per input: built on the first call.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (byte[] Bytes, string Column, FilterLiteral[] Probes)> Lookups = new();
+
+    /// <summary>Probes per call.</summary>
+    public const int LookupProbes = 200;
+
+    /// <summary>
+    /// Opens the input rewritten with sorted runs on its first keyable column, in chunks of 64 KiB,
+    /// and seeks <see cref="LookupProbes"/> keys: what a point lookup costs on a file of many chunks.
+    /// </summary>
+    /// <param name="path">A tabular file.</param>
+    /// <remarks>
+    /// The rewrite is done once per input and per build, on the first call, which the harness's
+    /// warm-up rounds absorb; every call after it opens the file cold and seeks, so the run cache is
+    /// empty each time -- the lookup a fresh reader pays.
+    /// </remarks>
+    public static async Task<long> LookupSortedRuns(string path)
+    {
+        if (!Lookups.TryGetValue(path, out (byte[] Bytes, string Column, FilterLiteral[] Probes) prepared))
+        {
+            prepared = await PrepareLookupAsync(path);
+            Lookups.TryAdd(path, prepared);
+        }
+
+        await using VortexFile file = await VortexFile.OpenAsync(
+            new Vorticity.IO.MemorySegmentSource(prepared.Bytes), new VortexOpenOptions(), CancellationToken.None);
+        await using KeyCursor cursor = await file.Keys(prepared.Column)
+            .WithSource(KeySourceKind.SortedRuns).OpenAsync(CancellationToken.None);
+        long found = 0;
+        foreach (FilterLiteral probe in prepared.Probes)
+        {
+            found += await cursor.SeekAsync(probe, SeekOp.Exact, CancellationToken.None) ? 1 : 0;
+        }
+
+        return found;
+    }
+
+    private static async Task<(byte[] Bytes, string Column, FilterLiteral[] Probes)> PrepareLookupAsync(string path)
+    {
+        await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
+        string column = string.Empty;
+        for (int i = 0; i < source.Schema.FieldCount && column.Length == 0; i++)
+        {
+            string name = source.Schema.GetFieldName(i);
+            if (name == "measure" || name == Field)
+            {
+                column = name;
+            }
+        }
+
+        if (column.Length == 0)
+        {
+            column = source.Schema.GetFieldName(0);
+        }
+
+        System.IO.MemoryStream written = new System.IO.MemoryStream();
+        VortexWriteOptions options = new VortexWriteOptions
+        {
+            Indexes = WritePolicy.None.For(column, IndexPolicy.SortedRuns),
+            IndexBudgetPerMille = 1_000_000,
+            DataBlockTargetBytes = 64 << 10,
+        };
+        await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(written), source.Schema, options))
+        {
+            await foreach (RecordBatch batch in source.Scan().ExecuteAsync().WithCancellation(CancellationToken.None))
+            {
+                await writer.WriteAsync(batch, CancellationToken.None);
+            }
+
+            await writer.CompleteAsync(CancellationToken.None);
+        }
+
+        byte[] bytes = written.ToArray();
+        await using VortexFile file = await VortexFile.OpenAsync(
+            new Vorticity.IO.MemorySegmentSource(bytes), new VortexOpenOptions(), CancellationToken.None);
+        await using KeyCursor cursor = await file.Keys(column)
+            .WithSource(KeySourceKind.SortedRuns).OpenAsync(CancellationToken.None);
+        long entries = cursor.EntryCount ?? file.RowCount;
+        long stride = Math.Max(1, entries / LookupProbes);
+        FilterLiteral[] probes = new FilterLiteral[LookupProbes];
+        for (int i = 0; i < LookupProbes; i++)
+        {
+            await cursor.SeekRankAsync(Math.Min(entries - 1, i * stride), CancellationToken.None);
+            probes[i] = cursor.Key;
+        }
+
+        return (bytes, column, probes);
+    }
 
     /// <summary>Every row of every column, canonicalized.</summary>
     /// <param name="path">The file.</param>

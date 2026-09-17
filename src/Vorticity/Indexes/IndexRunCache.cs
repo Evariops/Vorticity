@@ -24,11 +24,23 @@ namespace Vorticity.Indexes;
 /// <param name="Offsets">For byte keys, where each key starts in <paramref name="Keys"/>, and one past the last; otherwise null.</param>
 /// <param name="Rows">Each entry's row, relative to the run's first row; null for keys without rows.</param>
 /// <param name="Count">The entries.</param>
-internal sealed record RunSegment(byte[] Keys, int[]? Offsets, uint[]? Rows, int Count)
+/// <param name="WideRows">
+/// The same, for a run spanning 2³² rows or more, whose rows are 64-bit (13 §6.1); then
+/// <paramref name="Rows"/> is null.
+/// </param>
+internal sealed record RunSegment(byte[] Keys, int[]? Offsets, uint[]? Rows, int Count, ulong[]? WideRows = null)
 {
     /// <summary>What the cache charges for it.</summary>
     internal long Bytes =>
-        Keys.LongLength + ((Offsets?.LongLength ?? 0) * sizeof(int)) + ((Rows?.LongLength ?? 0) * sizeof(uint));
+        Keys.LongLength + ((Offsets?.LongLength ?? 0) * sizeof(int)) + ((Rows?.LongLength ?? 0) * sizeof(uint))
+        + ((WideRows?.LongLength ?? 0) * sizeof(ulong));
+
+    /// <summary>Whether its entries carry rows.</summary>
+    internal bool HasRows => Rows is not null || WideRows is not null;
+
+    /// <summary>Entry <paramref name="index"/>'s row, relative to the run's first row.</summary>
+    /// <param name="index">The entry.</param>
+    internal long RowAt(int index) => Rows is { } narrow ? narrow[index] : checked((long)WideRows![index]);
 }
 
 /// <summary>An LRU of decoded run segments, keyed by the file offset of their first payload.</summary>

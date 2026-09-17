@@ -529,18 +529,29 @@ internal sealed class KeyIndexPruner
                 ulong firstBlock = run.Meta.FirstBlock;
                 if (_rows)
                 {
-                    int rowsNode = Decode(context, requests.GetBuffer(slots[1]), u32, entries);
+                    // A RUN SPANNING 2³² ROWS OR MORE WRITES THEM AT 64 BITS (13 §6.1); its dtype says so.
+                    bool wide = KeyRunOptions.WideRows(run.Meta, (segment * KeyRunOptions.SortedStride) + 1);
+                    PType width = wide ? PType.U64 : PType.U32;
+                    int rowsNode = Decode(
+                        context, requests.GetBuffer(slots[1]), types.Primitive(width, Nullability.NonNullable), entries);
                     CanonicalNode rows = context.Canonical.GetNode(rowsNode);
-                    if (rows.Kind != CanonicalKind.Primitive || rows.PType != PType.U32 || rows.Length != entries)
+                    if (rows.Kind != CanonicalKind.Primitive || rows.PType != width || rows.Length != entries)
                     {
                         return false;
                     }
 
-                    ReadOnlySpan<uint> offsets = rows.Values.Cast<uint>();
                     for (int i = 0; i < _keys.Length; i++)
                     {
-                        MarkRows(i, _keys[i], keyNode, offsets, firstBlock, blockRows);
-                        MarkRows(i, _otherZeros[i], keyNode, offsets, firstBlock, blockRows);
+                        if (wide)
+                        {
+                            MarkRows(i, _keys[i], keyNode, rows.Values.Cast<ulong>(), firstBlock, blockRows);
+                            MarkRows(i, _otherZeros[i], keyNode, rows.Values.Cast<ulong>(), firstBlock, blockRows);
+                        }
+                        else
+                        {
+                            MarkRows(i, _keys[i], keyNode, rows.Values.Cast<uint>(), firstBlock, blockRows);
+                            MarkRows(i, _otherZeros[i], keyNode, rows.Values.Cast<uint>(), firstBlock, blockRows);
+                        }
                     }
 
                     return true;
@@ -617,6 +628,21 @@ internal sealed class KeyIndexPruner
             for (int e = lo; e < hi; e++)
             {
                 Present(literal, firstBlock + (ulong)(rows[e] / blockRows));
+            }
+        }
+
+        private void MarkRows(
+            int literal, byte[]? key, CanonicalNode keys, ReadOnlySpan<ulong> rows, ulong firstBlock, long blockRows)
+        {
+            if (key is null)
+            {
+                return;
+            }
+
+            (int lo, int hi) = Range(keys, key);
+            for (int e = lo; e < hi; e++)
+            {
+                Present(literal, firstBlock + (rows[e] / (ulong)blockRows));
             }
         }
 

@@ -211,7 +211,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
     private VortexFileWriter(
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
-        int stringBoundBytes, Guid? identity)
+        int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove)
     {
         _sink = sink;
         _schema = schema;
@@ -245,7 +245,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
         }
 
         _indexes = IndexWriter.Asks(indexes)
-            ? new IndexWriter(indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder)
+            ? new IndexWriter(
+                indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder,
+                scratchDirectory, scratchMemoryBytes, wideRowsAbove)
             : null;
     }
 
@@ -309,7 +311,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
         return new VortexFileWriter(
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
-            options.StringBoundBytes, options.Identity);
+            options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
+            options.WideRowsAbove);
     }
 
     /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>

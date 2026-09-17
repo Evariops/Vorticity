@@ -436,12 +436,15 @@ public sealed class SortedRunsCursorTests
         Assert.Equal(KeySourceKind.SortedRuns, order.Source);
         Assert.Equal(oracle.Count, order.EntriesInRange);
         Assert.True(order.Descending);
-        Assert.True(order.Runs > 1);
+        // TWO RUNS (13 §6.1): the chunk runs merged, and the last chunk's own, since 6 000 rows are
+        // not a whole number of 512-row blocks and an append would re-open it.
+        Assert.Equal(2, order.Runs);
+        int tailStart = Rows / Block * Block;
         int runsWithKeys = 0;
-        for (int start = 0; start < Rows; start += Block)
+        foreach ((int start, int end) in new[] { (0, tailStart), (tailStart, Rows) })
         {
             bool any = false;
-            for (int row = start; row < Math.Min(start + Block, Rows); row++)
+            for (int row = start; row < end; row++)
             {
                 any |= I64(row) >= 2400;
             }

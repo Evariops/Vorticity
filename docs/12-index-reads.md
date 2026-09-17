@@ -795,6 +795,10 @@ each staging step (§12).
 | `InKeyOrder`, sorted column | a contiguous read per window | a plain scan plus one permutation per window | |
 | `InKeyOrder`, uncorrelated column | up to `W` splits per window | a scattered take: **0,34× a full scan for 64 rows over 64 splits of 1 024** (452 µs against 1,3 ms), about 7 µs per scattered row | selective ranges only |
 
+*Since step 22 ([13-dataset.md](13-dataset.md) §6.1), `r` is at most 4 for a sorted-runs or
+postings entry, whatever the number of chunks: one merged run, the last chunk's own, and what
+appends added before the K rule merged them. A seek reads one segment per run it reaches.*
+
 The two numbers that decide whether a consumer should use `InKeyOrder` — the splits a window
 touches and the entries in the range — are exactly what `Explain` and `ScanMetrics` report.
 

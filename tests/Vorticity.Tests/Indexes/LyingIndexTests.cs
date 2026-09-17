@@ -169,7 +169,11 @@ public sealed class LyingIndexTests
         Decoders.EnsureRegistered();
         byte[] original = await WriteAsync(0);
         (IndexSegment a, IndexSegment b) = await SwappablePairAsync(original, keys: false);
-        byte[] bytes = Swap(original, a, b);
+
+        // Unforged, the checksums refuse the swap; forged, the lie reaches the rows' own checks.
+        byte[] swapped = Swap(original, a, b);
+        await Assert.ThrowsAsync<VortexFormatException>(() => WalkAsync(swapped, "v", verify: false));
+        byte[] bytes = await ForgeChecksumsAsync(swapped, (a, b.Checksum), (b, a.Checksum));
         foreach (bool verify in new[] { false, true })
         {
             try
@@ -480,8 +484,10 @@ public sealed class LyingIndexTests
         {
             for (int j = i + 1; j < candidates.Count; j++)
             {
-                bool apart = keys || candidates[i].Run != candidates[j].Run;
-                if (apart && candidates[i].Segment.Length == candidates[j].Segment.Length
+                // ANY TWO SEGMENTS: since step 22 a column has one run and the last chunk's, so the
+                // rows of "another run" are those of another segment of the same one, whose range
+                // covers the whole file.
+                if (candidates[i].Segment.Length == candidates[j].Segment.Length
                     && !bytes.AsSpan(checked((int)candidates[i].Segment.Offset), checked((int)candidates[i].Segment.Length))
                         .SequenceEqual(bytes.AsSpan(checked((int)candidates[j].Segment.Offset), checked((int)candidates[j].Segment.Length))))
                 {

@@ -46,6 +46,25 @@ internal static class KeyRunOptions
     /// <summary>Payload arrays per segment of a sorted run: keys, rows.</summary>
     internal const int SortedStride = 2;
 
+    /// <summary>
+    /// The serialized dtype of a sorted run's rows written at 64 bits, which a run spanning 2³² rows
+    /// or more carries (13 §6.1); any other rows are 32-bit.
+    /// </summary>
+    private static readonly byte[] WideRowsDType = SerializeU64();
+
+    private static byte[] SerializeU64()
+    {
+        Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
+        return Vorticity.Types.Serialization.DTypeFlatBuffers.Serialize(
+            types.Primitive(Vorticity.Types.PType.U64, Vorticity.Types.Nullability.NonNullable));
+    }
+
+    /// <summary>Whether a sorted run's rows array at <paramref name="payload"/> is 64-bit.</summary>
+    /// <param name="run">The run.</param>
+    /// <param name="payload">The rows array's index in the run's payload.</param>
+    internal static bool WideRows(IndexRun run, int payload) =>
+        payload < run.PayloadDTypes.Count && run.PayloadDTypes[payload].AsSpan().SequenceEqual(WideRowsDType);
+
     /// <summary>The stride of a kind, or 0 for a kind that is not a locating one.</summary>
     /// <param name="kind">The kind name.</param>
     internal static int StrideOf(string kind) => kind switch

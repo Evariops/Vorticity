@@ -9,6 +9,13 @@
 // flux: a counting sort of the rows by the rank of their key, the ranks from one sort of the
 // chunk's DISTINCT keys -- which is what makes a low-cardinality column cheap to order.
 //
+// ONE RUN PER ENTRY, NOT PER CHUNK (docs/13-dataset.md §6.1, step 22). A chunk's run is still
+// built in flux from the chunk's own table, then laid raw in the writer's scratch; when the data
+// ends, the chunk runs are merged (`RunMerger`) into one run, so a lookup probes one run whatever
+// the number of chunks. The last chunk keeps a run of its own when the file's rows are not a whole
+// number of blocks: an append re-opens that chunk (11 §3.8) and drops its run, and the merged run,
+// which ends before it, stays as it is.
+//
 // BOTH ARE CUT INTO SEGMENTS of at most `segment_entries` entries (10 §4.2), each segment one keys
 // array plus the kind's arrays beside it, and each described in the run's options by its first and
 // last key, so that a probe reads the segments that can hold its key and no other. The arrays are
@@ -16,8 +23,8 @@
 // block lists and row offsets bit-pack.
 //
 // POSITIONS ARE RELATIVE TO THE RUN: a block id counts from the run's first block, a row from its
-// first row, which is `first_block × block_len` because a chunk is a whole number of blocks. So a
-// row fits `u32` whatever the file's length.
+// first row, which is `first_block × block_len` because a chunk is a whole number of blocks. A row
+// is written at `u32` while the run spans fewer than 2³² rows, and at `u64` beyond.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -96,8 +103,33 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>Whether trigrams are ASCII-lower-cased.</summary>
     internal bool CaseInsensitive => _fold;
 
-    /// <summary>Every run closed, in block order.</summary>
+    /// <summary>The runs the merge produced when the data ended, in block order.</summary>
     internal List<KeyRun> Runs { get; } = [];
+
+    /// <summary>The writer's scratch, where chunk runs wait for the merge; set by the index writer.</summary>
+    internal RunScratch? Scratch { get; set; }
+
+    /// <summary>Rows per block, 0 when the caller's batches are the blocks; set by the index writer.</summary>
+    internal long BlockRows { get; set; }
+
+    /// <summary>The row span above which the rows are written at 64 bits; set by the index writer.</summary>
+    internal long WideRowsAbove { get; set; } = uint.MaxValue;
+
+    /// <summary>The chunk runs laid in the scratch, in block order.</summary>
+    private readonly List<RawRun> _chunkRuns = [];
+
+    /// <summary>
+    /// Runs read from the file an append continues, merged in front of the chunk runs because the
+    /// entry would otherwise pass <see cref="MaxRuns"/> (13 §6.1); they live in
+    /// <see cref="AbsorbedScratch"/>.
+    /// </summary>
+    internal List<RawRun>? Absorbed { get; set; }
+
+    /// <summary>Where <see cref="Absorbed"/> lives.</summary>
+    internal RunScratch? AbsorbedScratch { get; set; }
+
+    /// <summary>The most runs an entry keeps: K of 13 §6.1.</summary>
+    internal const int MaxRuns = 4;
 
     /// <summary>The segment size the runs are cut at.</summary>
     internal int SegmentEntries => _segmentEntries;
@@ -301,14 +333,10 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         _table.Cut(end, chunk);
         try
         {
-            KeyRun run = _rows
-                ? SortedRun(chunk, firstBlock, blocks, firstRow)
-                : PostingsRun(chunk, firstBlock, blocks);
-            Runs.Add(run);
-            foreach (PendingPayload payload in run.Payloads)
-            {
-                Enqueue(payload);
-            }
+            RunScratch scratch = Scratch ?? throw new InvalidOperationException("A locating builder needs the writer's scratch.");
+            _chunkRuns.Add(_rows
+                ? SortedRaw(scratch, chunk, firstBlock, blocks)
+                : PostingsRaw(scratch, chunk, firstBlock, blocks));
         }
         finally
         {
@@ -331,89 +359,295 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         }
     }
 
-    // EVERY ARRAY BELOW IS RENTED. The work arrays go back when the run is built; the payload arrays
-    // go back when the index writer has laid them (PendingPayload's release), and an array that is a
-    // whole segment's payload as it stands is handed over rather than copied.
-    private KeyRun PostingsRun(ChunkKeys chunk, int firstBlock, int blocks)
+    /// <summary>
+    /// Merges the chunk runs -- after the runs an append absorbed -- into the entry's run, and the
+    /// last chunk's into a run of its own when an append would re-open it.
+    /// </summary>
+    internal override void EndOfData()
+    {
+        if (Abandoned is not null || (_chunkRuns.Count == 0 && Absorbed is not { Count: > 0 }))
+        {
+            return;
+        }
+
+        RunScratch scratch = Scratch ?? throw new InvalidOperationException("A locating builder needs the writer's scratch.");
+        RawRun? tail = null;
+        List<RawRun> mains = [.. _chunkRuns];
+        if (BlockRows > 0 && _row % BlockRows != 0 && mains.Count > 0)
+        {
+            tail = mains[^1];
+            mains.RemoveAt(mains.Count - 1);
+        }
+
+        if (mains.Count > 0 || Absorbed is { Count: > 0 })
+        {
+            Emit(MergeMains(scratch, mains));
+        }
+
+        if (tail is not null)
+        {
+            Emit(Final([Open(scratch, tail, 0)], tail.FirstBlock, tail.BlockCount));
+            tail.Release(scratch);
+        }
+
+        _chunkRuns.Clear();
+        Absorbed = null;
+    }
+
+    private void Emit(KeyRun run)
+    {
+        Runs.Add(run);
+        foreach (PendingPayload payload in run.Payloads)
+        {
+            Enqueue(payload);
+        }
+    }
+
+    /// <summary>
+    /// The absorbed runs and the chunk runs, merged: in passes of at most
+    /// <see cref="RunMerger.MaxFanIn"/> runs laid back into the scratch, then once into payloads.
+    /// </summary>
+    private KeyRun MergeMains(RunScratch scratch, List<RawRun> mains)
+    {
+        List<RawRun> absorbed = Absorbed ?? [];
+        int firstBlock = int.MaxValue;
+        int endBlock = 0;
+        foreach (RawRun run in (IEnumerable<RawRun>)[.. absorbed, .. mains])
+        {
+            firstBlock = Math.Min(firstBlock, run.FirstBlock);
+            endBlock = Math.Max(endBlock, run.FirstBlock + run.BlockCount);
+        }
+
+        List<RawRun> level = mains;
+        while (absorbed.Count + level.Count > RunMerger.MaxFanIn)
+        {
+            // THE PASS NEVER MIXES ABSORBED RUNS INTO A LAID ONE: they are few (at most K) and first
+            // in block order, so the chunk runs alone are narrowed until they fit beside them.
+            List<RawRun> next = [];
+            for (int from = 0; from < level.Count; from += RunMerger.MaxFanIn)
+            {
+                List<RawRun> group = level.GetRange(from, Math.Min(RunMerger.MaxFanIn, level.Count - from));
+                if (group.Count == 1)
+                {
+                    next.Add(group[0]);
+                    continue;
+                }
+
+                RawRun first = group[0];
+                RawRun last = group[^1];
+                using RawRunWriter writer = new RawRunWriter(
+                    scratch, _rows, _layout.Width, first.FirstBlock, last.FirstBlock + last.BlockCount - first.FirstBlock);
+                List<RunCursor> cursors = [];
+                for (int i = 0; i < group.Count; i++)
+                {
+                    cursors.Add(Open(scratch, group[i], i));
+                }
+
+                RunMerger.Merge(cursors, _layout, _rows, writer);
+                next.Add(writer.Finish());
+                foreach (RawRun input in group)
+                {
+                    input.Release(scratch);
+                }
+            }
+
+            level = next;
+        }
+
+        List<RunCursor> all = [];
+        foreach (RawRun run in absorbed)
+        {
+            all.Add(Open(AbsorbedScratch!, run, all.Count));
+        }
+
+        foreach (RawRun run in level)
+        {
+            all.Add(Open(scratch, run, all.Count));
+        }
+
+        KeyRun merged = Final(all, firstBlock, endBlock - firstBlock);
+        foreach (RawRun run in level)
+        {
+            run.Release(scratch);
+        }
+
+        return merged;
+    }
+
+    private RunCursor Open(RunScratch scratch, RawRun run, int ordinal) =>
+        new RunCursor(
+            run.Held ? new HeldWindowSource(run) : new RawWindowSource(scratch, run), _layout, _rows, ordinal);
+
+    private KeyRun Final(List<RunCursor> cursors, int firstBlock, int blockCount)
+    {
+        PayloadRunSink sink = new PayloadRunSink(
+            _layout, _utf8, _rows, _segmentEntries, firstBlock, blockCount, BlockRows, WideRowsAbove);
+        RunMerger.Merge(cursors, _layout, _rows, sink);
+        return sink.Finish();
+    }
+
+    // EVERY ARRAY BELOW IS RENTED, and goes back once the chunk's run is laid in the scratch.
+    private RawRun PostingsRaw(RunScratch scratch, ChunkKeys chunk, int firstBlock, int blocks)
     {
         int distinct = chunk.Ranked(_layout, out int[] ranked);
         int[] rank = RankOf(ranked, distinct, chunk);
         int entries = chunk.Log.Count;
 
         // The block lists, grouped by rank: count, prefix-sum, fill in log order (which is block
-        // order, so each list comes out sorted).
+        // order, so each list comes out sorted). The blocks are the file's.
         int[] starts = Counts(chunk, rank, distinct);
-        uint[] lists = ArrayPool<uint>.Shared.Rent(entries);
+        uint[] lists = ArrayPool<uint>.Shared.Rent(Math.Max(entries, 1));
         int[] cursor = ArrayPool<int>.Shared.Rent(distinct + 1);
         starts.AsSpan(0, distinct + 1).CopyTo(cursor);
         foreach ((int key, long block) in chunk.Log)
         {
-            lists[cursor[rank[key]]++] = checked((uint)(block - firstBlock));
+            lists[cursor[rank[key]]++] = checked((uint)block);
         }
 
-        List<KeySegment> segments = [];
-        List<PendingPayload> payloads = [];
-        bool listsHandedOver = false;
-        for (int from = 0; from < Math.Max(distinct, 1); from += _segmentEntries)
+        int keyBytes = KeyBytesOf(chunk, ranked, distinct);
+        long held = RawRun.HeldBytes(distinct, keyBytes, hasRows: false, entries);
+        RawRun run;
+        if (scratch.Admit(held))
         {
-            int to = Math.Min(from + _segmentEntries, distinct);
-            uint[] offsets = ArrayPool<uint>.Shared.Rent(to - from + 1);
-            for (int i = from; i <= to; i++)
+            // HELD: the arrays are the run, and the merge reads them in place.
+            (byte[] keys, int[]? offsets) = Gather(chunk, ranked, distinct, keyBytes);
+            run = new RawRun
             {
-                offsets[i - from] = (uint)(starts[i] - starts[from]);
+                HasRows = false,
+                KeyWidth = _layout.Width,
+                FirstBlock = firstBlock,
+                BlockCount = blocks,
+                Entries = distinct,
+                HeldKeys = keys,
+                HeldKeyOffsets = offsets,
+                HeldBlockOffsets = starts,
+                HeldBlocks = lists,
+                Admitted = held,
+            };
+            ArrayPool<int>.Shared.Return(cursor);
+            ArrayPool<int>.Shared.Return(rank);
+            ArrayPool<int>.Shared.Return(ranked);
+            return run;
+        }
+
+        using (RawRunWriter writer = new RawRunWriter(scratch, hasRows: false, _layout.Width, firstBlock, blocks))
+        {
+            for (int i = 0; i < distinct; i++)
+            {
+                writer.BeginKey(chunk.KeyBytes(ranked[i]));
+                writer.AddBlocks(lists.AsSpan(starts[i], starts[i + 1] - starts[i]));
+                writer.EndKey();
             }
 
-            ReadOnlySpan<int> ids = ranked.AsSpan(from, to - from);
-            segments.Add(Segment(chunk, ids));
-            payloads.Add(Keys(chunk, ids));
-            payloads.Add(PendingPayload.RentedU32(offsets, to - from + 1, compress: true));
-            payloads.Add(Rows(lists, starts[from], starts[to], entries, ref listsHandedOver));
+            run = writer.Finish();
         }
 
-        Return(lists, listsHandedOver);
+        ArrayPool<uint>.Shared.Return(lists);
         ArrayPool<int>.Shared.Return(cursor);
         ArrayPool<int>.Shared.Return(starts);
         ArrayPool<int>.Shared.Return(rank);
         ArrayPool<int>.Shared.Return(ranked);
-        return new KeyRun(firstBlock, blocks, distinct, segments, payloads);
+        return run;
     }
 
-    private KeyRun SortedRun(ChunkKeys chunk, int firstBlock, int blocks, long firstRow)
+    /// <summary>The bytes of the keys <paramref name="ids"/> names.</summary>
+    private int KeyBytesOf(ChunkKeys chunk, int[] ids, int count)
+    {
+        if (_layout.Shape != KeyShape.Bytes)
+        {
+            return checked(count * _layout.Width);
+        }
+
+        long total = 0;
+        for (int i = 0; i < count; i++)
+        {
+            total += chunk.KeyBytes(ids[i]).Length;
+        }
+
+        return checked((int)total);
+    }
+
+    /// <summary>The keys <paramref name="ids"/> names, end to end, and for byte keys their offsets; rented.</summary>
+    private (byte[] Keys, int[]? Offsets) Gather(ChunkKeys chunk, int[] ids, int count, int keyBytes)
+    {
+        byte[] keys = ArrayPool<byte>.Shared.Rent(Math.Max(keyBytes, 1));
+        int[]? offsets = _layout.Shape == KeyShape.Bytes ? ArrayPool<int>.Shared.Rent(count + 1) : null;
+        int at = 0;
+        for (int i = 0; i < count; i++)
+        {
+            ReadOnlySpan<byte> key = chunk.KeyBytes(ids[i]);
+            if (offsets is not null)
+            {
+                offsets[i] = at;
+            }
+
+            key.CopyTo(keys.AsSpan(at));
+            at += key.Length;
+        }
+
+        if (offsets is not null)
+        {
+            offsets[count] = at;
+        }
+
+        return (keys, offsets);
+    }
+
+    private RawRun SortedRaw(RunScratch scratch, ChunkKeys chunk, int firstBlock, int blocks)
     {
         int distinct = chunk.Ranked(_layout, out int[] ranked);
         int[] rank = RankOf(ranked, distinct, chunk);
         List<(int Key, long Position)> log = chunk.Log;
         int entries = log.Count;
 
-        // A stable counting sort of the rows by their key's rank; each entry keeps its key's id.
+        // A stable counting sort of the rows by their key's rank; each entry keeps its key's id and
+        // its file row.
         int[] cursor = Counts(chunk, rank, distinct);
-        int[] entryIds = ArrayPool<int>.Shared.Rent(entries);
-        uint[] rows = ArrayPool<uint>.Shared.Rent(entries);
+        int[] entryIds = ArrayPool<int>.Shared.Rent(Math.Max(entries, 1));
+        long[] rows = ArrayPool<long>.Shared.Rent(Math.Max(entries, 1));
         foreach ((int key, long row) in log)
         {
             int slot = cursor[rank[key]]++;
             entryIds[slot] = key;
-            rows[slot] = checked((uint)(row - firstRow));
+            rows[slot] = row;
         }
 
-        List<KeySegment> segments = [];
-        List<PendingPayload> payloads = [];
-        bool rowsHandedOver = false;
-        for (int from = 0; from < Math.Max(entries, 1); from += _segmentEntries)
+        int keyBytes = KeyBytesOf(chunk, entryIds, entries);
+        long held = RawRun.HeldBytes(entries, keyBytes, hasRows: true, 0);
+        RawRun run;
+        if (scratch.Admit(held))
         {
-            int to = Math.Min(from + _segmentEntries, entries);
-            ReadOnlySpan<int> ids = entryIds.AsSpan(from, to - from);
-            segments.Add(Segment(chunk, ids));
-            payloads.Add(Keys(chunk, ids));
-            payloads.Add(Rows(rows, from, to, entries, ref rowsHandedOver));
+            (byte[] keys, int[]? offsets) = Gather(chunk, entryIds, entries, keyBytes);
+            run = new RawRun
+            {
+                HasRows = true,
+                KeyWidth = _layout.Width,
+                FirstBlock = firstBlock,
+                BlockCount = blocks,
+                Entries = entries,
+                HeldKeys = keys,
+                HeldKeyOffsets = offsets,
+                HeldRows = rows,
+                Admitted = held,
+            };
+        }
+        else
+        {
+            using RawRunWriter writer = new RawRunWriter(scratch, hasRows: true, _layout.Width, firstBlock, blocks);
+            for (int i = 0; i < entries; i++)
+            {
+                writer.Add(chunk.KeyBytes(entryIds[i]), rows[i]);
+            }
+
+            run = writer.Finish();
+            ArrayPool<long>.Shared.Return(rows);
         }
 
-        Return(rows, rowsHandedOver);
         ArrayPool<int>.Shared.Return(entryIds);
         ArrayPool<int>.Shared.Return(cursor);
         ArrayPool<int>.Shared.Return(rank);
         ArrayPool<int>.Shared.Return(ranked);
-        return new KeyRun(firstBlock, blocks, entries, segments, payloads);
+        return run;
     }
 
     /// <summary>
@@ -436,31 +670,6 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         return starts;
     }
 
-    /// <summary>
-    /// The payload of words <c>[from, to)</c>: the array itself when that is all of it, a rented
-    /// copy otherwise.
-    /// </summary>
-    private static PendingPayload Rows(uint[] words, int from, int to, int length, ref bool handedOver)
-    {
-        if (from == 0 && to == length)
-        {
-            handedOver = true;
-            return PendingPayload.RentedU32(words, length, compress: true);
-        }
-
-        uint[] copy = ArrayPool<uint>.Shared.Rent(to - from);
-        words.AsSpan(from, to - from).CopyTo(copy);
-        return PendingPayload.RentedU32(copy, to - from, compress: true);
-    }
-
-    private static void Return(uint[] words, bool handedOver)
-    {
-        if (!handedOver)
-        {
-            ArrayPool<uint>.Shared.Return(words);
-        }
-    }
-
     private static int[] RankOf(int[] ranked, int distinct, ChunkKeys chunk)
     {
         int maxId = 0;
@@ -477,85 +686,6 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         }
 
         return rank;
-    }
-
-    private static KeySegment Segment(ChunkKeys chunk, ReadOnlySpan<int> ids) =>
-        ids.IsEmpty
-            ? new KeySegment(0, [], [])
-            : new KeySegment((ulong)ids.Length, chunk.KeyBytes(ids[0]).ToArray(), chunk.KeyBytes(ids[^1]).ToArray());
-
-    /// <summary>
-    /// The keys array of a segment, one key per id, copied out of the chunk's table now: the table
-    /// is reset by the time the payload is laid out.
-    /// </summary>
-    private PendingPayload Keys(ChunkKeys chunk, ReadOnlySpan<int> ids)
-    {
-        int count = ids.Length;
-        int[] offsets = ArrayPool<int>.Shared.Rent(count + 1);
-        offsets[0] = 0;
-        for (int i = 0; i < count; i++)
-        {
-            offsets[i + 1] = offsets[i] + chunk.KeyBytes(ids[i]).Length;
-        }
-
-        int length = offsets[count];
-        byte[] heap = ArrayPool<byte>.Shared.Rent(length);
-        for (int i = 0; i < count; i++)
-        {
-            chunk.KeyBytes(ids[i]).CopyTo(heap.AsSpan(offsets[i]));
-        }
-
-        KeyLayout layout = _layout;
-        bool utf8 = _utf8;
-        return new PendingPayload(
-            (arena, types) => layout.Shape == KeyShape.Bytes
-                ? Views(arena, types, utf8, heap.AsSpan(0, length), offsets.AsSpan(0, count + 1))
-                : Fixed(arena, types, layout, heap.AsSpan(0, length), count),
-            compress: true,
-            estimate: length + (layout.Shape == KeyShape.Bytes ? 16L * count : 0),
-            () =>
-            {
-                ArrayPool<byte>.Shared.Return(heap);
-                ArrayPool<int>.Shared.Return(offsets);
-            });
-    }
-
-    private static int Fixed(CanonicalArena arena, DTypeArena types, KeyLayout layout, ReadOnlySpan<byte> heap, int count)
-    {
-        VortexBuffer buffer = arena.AllocateUninitialized(heap.Length, layout.Width, out Span<byte> bytes);
-        heap.CopyTo(bytes);
-        return arena.AddPrimitive(
-            types.Primitive(layout.PType, Nullability.NonNullable), count, Validity.NonNullable, layout.PType, buffer);
-    }
-
-    private static int Views(
-        CanonicalArena arena, DTypeArena types, bool utf8, ReadOnlySpan<byte> heap, ReadOnlySpan<int> offsets)
-    {
-        int count = offsets.Length - 1;
-        VortexBuffer data = arena.AllocateUninitialized(Math.Max(heap.Length, 1), 1, out Span<byte> dataBytes);
-        heap.CopyTo(dataBytes);
-        VortexBuffer views = arena.Allocate(count * 16, 16, out Span<byte> viewBytes);
-        viewBytes.Clear();
-        for (int i = 0; i < count; i++)
-        {
-            int length = offsets[i + 1] - offsets[i];
-            Span<byte> view = viewBytes.Slice(i * 16, 16);
-            MemoryMarshal.Write(view, in length);
-            if (length <= 12)
-            {
-                heap.Slice(offsets[i], length).CopyTo(view[4..]);
-                continue;
-            }
-
-            heap.Slice(offsets[i], 4).CopyTo(view[4..]);
-            int buffer = 0;
-            int offset = offsets[i];
-            MemoryMarshal.Write(view[8..], in buffer);
-            MemoryMarshal.Write(view[12..], in offset);
-        }
-
-        DType dtype = utf8 ? types.Utf8(Nullability.NonNullable) : types.Binary(Nullability.NonNullable);
-        return arena.AddVarBinView(dtype, count, Validity.NonNullable, views, [data]);
     }
 
     /// <inheritdoc/>

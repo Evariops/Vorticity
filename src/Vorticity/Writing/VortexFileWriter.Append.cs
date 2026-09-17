@@ -119,6 +119,7 @@ public sealed partial class VortexFileWriter
         catch
         {
             await stream.DisposeAsync().ConfigureAwait(false);
+            plan.AbsorbedScratch?.Dispose();
             throw;
         }
 
@@ -175,7 +176,17 @@ public sealed partial class VortexFileWriter
             noZoneMap[field] = !plan.Columns[field].HasZones && plan.Boundary > 0;
         }
 
-        _indexes?.Continue(plan.Entries, plan.Boundary, plan.KeptRows, plan.FileLength);
+        // THE SCRATCH CHANGES HANDS HERE: the index writer disposes it, or, when there is no index
+        // writer to merge anything, it is disposed now.
+        RunScratch? scratch = plan.AbsorbedScratch;
+        plan.AbsorbedScratch = null;
+        if (_indexes is null)
+        {
+            scratch?.Dispose();
+            return;
+        }
+
+        _indexes.Continue(plan.Entries, plan.Boundary, plan.KeptRows, plan.FileLength, plan.Absorbed, scratch);
     }
 
     /// <summary>
@@ -372,6 +383,12 @@ public sealed partial class VortexFileWriter
 
         internal FileStatistics? Statistics { get; init; }
 
+        /// <summary>The entries whose tail of runs was read back to be merged (13 §6.1).</summary>
+        internal List<AbsorbedEntry>? Absorbed { get; init; }
+
+        /// <summary>Where those runs lie, until the writer takes it; disposed with the writer.</summary>
+        internal RunScratch? AbsorbedScratch { get; set; }
+
         internal static async ValueTask<AppendPlan> ReadAsync(
             VortexFile file, VortexWriteOptions? options, CancellationToken cancellationToken)
         {
@@ -525,6 +542,32 @@ public sealed partial class VortexFileWriter
                 keptChunkRows.Add(end - first[c].Start);
             }
 
+            // AT MOST K RUNS PER ENTRY (13 §6.1): the tails the append will merge are read now,
+            // while the file is open for reading, into a scratch the writer takes over.
+            RunScratch? scratch = null;
+            List<AbsorbedEntry>? absorbed = null;
+            if (directory is { Entries.Count: > 0 })
+            {
+                scratch = new RunScratch(
+                    options?.ScratchMemoryBytes ?? IndexWriter.DefaultScratchMemoryBytes, options?.ScratchDirectory);
+                try
+                {
+                    absorbed = await RunAbsorb.ReadAsync(file, directory.Entries, boundary, scratch, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    scratch.Dispose();
+                    throw;
+                }
+
+                if (absorbed.Count == 0)
+                {
+                    scratch.Dispose();
+                    scratch = null;
+                    absorbed = null;
+                }
+            }
+
             return new AppendPlan
             {
                 Schema = schema,
@@ -542,6 +585,8 @@ public sealed partial class VortexFileWriter
                 Policy = directory?.Policy,
                 BudgetPerMille = directory?.BudgetPerMille ?? IndexDirectory.DefaultBudgetPerMille,
                 Statistics = statistics,
+                Absorbed = absorbed,
+                AbsorbedScratch = scratch,
             };
         }
 

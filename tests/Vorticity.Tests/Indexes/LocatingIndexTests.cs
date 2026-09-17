@@ -63,19 +63,22 @@ public sealed class LocatingIndexTests
             .For("flag", IndexPolicy.Postings);
 
     [Fact]
-    public async Task TheWriterBuildsOneRunPerChunkAndCountsItsEntries()
+    public async Task TheWriterMergesTheChunkRunsIntoOneRunAndCountsItsEntries()
     {
+        // 13 §6.1 (step 22): a run per chunk is how the builders work, one run per entry is what
+        // they write. The rows are a whole number of blocks, so no chunk keeps a run of its own.
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
         int chunks = written.Report.ChunkRows.Count;
         Assert.True(chunks > 1);
+        Assert.Equal(0, Rows % Block);
 
         foreach (string column in new[] { "key", "name", "price", "opt", "status" })
         {
             string kind = column is "key" or "opt" ? IndexKinds.PostingsBlocks : IndexKinds.SortedRuns;
             IndexWriteReport report = Assert.IsType<IndexWriteReport>(written.Report.Index(column, kind));
             Assert.True(report.Outcome == IndexOutcome.Built, column + ": " + report.Reason);
-            Assert.Equal(chunks, report.Runs);
+            Assert.Equal(1, report.Runs);
             Assert.True(report.Bytes > 0);
         }
 

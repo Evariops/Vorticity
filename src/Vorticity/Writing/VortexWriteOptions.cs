@@ -93,6 +93,27 @@ public sealed class VortexWriteOptions
     /// </remarks>
     public Guid? Identity { get; init; }
 
+    /// <summary>
+    /// Where a locating index's chunk runs wait for their merge once they pass the memory budget,
+    /// or null -- the default -- for the system's temporary directory.
+    /// </summary>
+    /// <remarks>
+    /// A postings or sorted-runs index is built one run per chunk and written as one run per entry
+    /// (docs/13-dataset.md §6.1): the chunk runs are kept, raw, until the data ends, in memory up to
+    /// 64 MiB and in a temporary file here beyond, deleted when the writer is disposed. A write
+    /// without a locating index uses none.
+    /// </remarks>
+    public string? ScratchDirectory { get; init; }
+
+    /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
+    internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;
+
+    /// <summary>
+    /// The row span above which a sorted run writes its rows at 64 bits; 2³² − 1 by construction,
+    /// lowered only by the tests that read such a run back.
+    /// </summary>
+    internal long WideRowsAbove { get; init; } = uint.MaxValue;
+
     /// <summary>A copy with the three things an append decides from the file.</summary>
     /// <param name="rowBlockSize">The file's block length.</param>
     /// <param name="indexes">The policy the append writes under.</param>
@@ -105,6 +126,9 @@ public sealed class VortexWriteOptions
         IndexBudgetPerMille = budgetPerMille,
         KeyEncoder = KeyEncoder,
         Identity = Identity,
+        ScratchDirectory = ScratchDirectory,
+        ScratchMemoryBytes = ScratchMemoryBytes,
+        WideRowsAbove = WideRowsAbove,
         Compress = Compress,
         FileStatistics = fileStatistics,
         TargetEdition = TargetEdition,

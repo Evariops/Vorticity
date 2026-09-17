@@ -68,9 +68,13 @@ internal sealed class IndexWriter : IDisposable
     /// <param name="budgetPerMille">The share of the data bytes all indexes together may take.</param>
     /// <param name="blockRows">Rows per block, 0 when the caller's batches are the blocks.</param>
     /// <param name="keyEncoder">The encoder of the policy's composite keys, or null.</param>
+    /// <param name="scratchDirectory">Where the locating builders' chunk runs spill, or null for the system's.</param>
+    /// <param name="scratchMemoryBytes">What those runs may hold in memory before they spill.</param>
+    /// <param name="wideRowsAbove">The row span above which a sorted run writes its rows at 64 bits.</param>
     internal IndexWriter(
         WritePolicy policy, DType schema, bool isTabular, int fieldCount, int budgetPerMille = 100, int blockRows = 0,
-        IKeyEncoder? keyEncoder = null)
+        IKeyEncoder? keyEncoder = null, string? scratchDirectory = null, long scratchMemoryBytes = DefaultScratchMemoryBytes,
+        long wideRowsAbove = uint.MaxValue)
     {
         _policy = policy;
         _isTabular = isTabular;
@@ -169,7 +173,32 @@ internal sealed class IndexWriter : IDisposable
 
             _refusals[field] = reason;
         }
+
+        // THE LOCATING BUILDERS SHARE ONE SCRATCH (13 §6.1): their chunk runs wait there for the
+        // merge, in memory up to its budget and in a file beyond. A write with no locating index
+        // makes none.
+        foreach (List<IndexBuilder> builders in _builders)
+        {
+            foreach (IndexBuilder builder in builders)
+            {
+                if (builder is KeyIndexBuilder locating)
+                {
+                    _scratch ??= new RunScratch(scratchMemoryBytes, scratchDirectory);
+                    locating.Scratch = _scratch;
+                    locating.BlockRows = blockRows;
+                    locating.WideRowsAbove = wideRowsAbove;
+                }
+            }
+        }
     }
+
+    private readonly RunScratch? _scratch;
+
+    /// <summary>The default memory the chunk runs may hold before they move to a file.</summary>
+    internal const long DefaultScratchMemoryBytes = 64L << 20;
+
+    /// <summary>The scratch the locating builders lay their chunk runs in, when there is one.</summary>
+    internal RunScratch? Scratch => _scratch;
 
     /// <summary>The builder a policy names for a column of <paramref name="dtype"/>, or why there is none.</summary>
     private static string? Explicit(IndexPolicy column, DType dtype, List<IndexBuilder> builders)
@@ -587,9 +616,17 @@ internal sealed class IndexWriter : IDisposable
     /// <param name="boundary">The first block the append writes.</param>
     /// <param name="row">Its first row.</param>
     /// <param name="previousEof">The old file's length, which the new directory records.</param>
-    internal void Continue(IReadOnlyList<IndexEntry> entries, int boundary, long row, long previousEof)
+    /// <param name="absorbed">
+    /// The old entries whose tail of runs was read back to be merged into the append's run
+    /// (13 §6.1: at most K runs per entry); null when none was.
+    /// </param>
+    /// <param name="absorbedScratch">Where those runs lie; the writer disposes it.</param>
+    internal void Continue(
+        IReadOnlyList<IndexEntry> entries, int boundary, long row, long previousEof,
+        List<AbsorbedEntry>? absorbed = null, RunScratch? absorbedScratch = null)
     {
         _previousEof = (ulong)previousEof;
+        _adopted = absorbedScratch;
         foreach (List<IndexBuilder> builders in _builders)
         {
             foreach (IndexBuilder builder in builders)
@@ -605,9 +642,58 @@ internal sealed class IndexWriter : IDisposable
                 continue;
             }
 
+            // A TAIL READ BACK IS MERGED ONLY BY THE BUILDER THAT CONTINUES THE ENTRY: same kind,
+            // column and options, the very test `Merged` applies. Without one, the runs stay listed.
+            int count = 0;
+            if (absorbed?.Find(a => Same(a.Entry, entry)) is { } tail && Continuing(entry) is { } builder)
+            {
+                builder.Absorbed = tail.Runs;
+                builder.AbsorbedScratch = absorbedScratch;
+                count = tail.Count;
+            }
+
             (_prior ??= []).Add(kept);
+            (_priorAbsorbed ??= []).Add(count);
         }
     }
+
+    /// <summary>The scratch an append handed over with the runs it read back.</summary>
+    private RunScratch? _adopted;
+
+    /// <summary>Per entry of <see cref="_prior"/>, how many of its last runs its builder merges.</summary>
+    private List<int>? _priorAbsorbed;
+
+    private static bool Same(IndexEntry a, IndexEntry b) =>
+        a.Kind == b.Kind && SamePath(a.ColumnPath, b.ColumnPath) && a.Options.AsSpan().SequenceEqual(b.Options);
+
+    /// <summary>The locating builder whose entry would continue <paramref name="old"/>, or null.</summary>
+    private KeyIndexBuilder? Continuing(IndexEntry old)
+    {
+        for (int field = 0; field < _builders.Length; field++)
+        {
+            if (!SamePath(ColumnPath(field), old.ColumnPath))
+            {
+                continue;
+            }
+
+            foreach (IndexBuilder builder in _builders[field])
+            {
+                if (builder is KeyIndexBuilder keys && keys.Kind == old.Kind
+                    && ExpectedOptions(field, keys).AsSpan().SequenceEqual(old.Options))
+                {
+                    return keys;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The options a locating entry of this slot is written with.</summary>
+    private byte[] ExpectedOptions(int field, KeyIndexBuilder keys) =>
+        KeyRunOptions.Entry(
+            keys.SegmentEntries, keys.CaseInsensitive, KeyColumns(field),
+            _keyFields[field] is null ? null : _keyEncoder!.Format);
 
     /// <summary>An old entry restricted to the runs that end by <paramref name="boundary"/>, or null.</summary>
     private static IndexEntry? Kept(IndexEntry entry, int boundary)
@@ -685,13 +771,24 @@ internal sealed class IndexWriter : IDisposable
         }
 
         List<IndexEntry> merged = [.. _entries];
-        foreach (IndexEntry old in prior)
+        for (int p = 0; p < prior.Count; p++)
         {
+            IndexEntry old = prior[p];
             int match = merged.FindIndex(e => Continues(old, e));
             if (match < 0)
             {
+                // No new entry, so nothing merged the runs read back: they stay listed.
                 merged.Add(old);
                 continue;
+            }
+
+            // The new entry's first run covers the tail its builder read back and merged.
+            int absorbed = _priorAbsorbed?[p] ?? 0;
+            if (absorbed > 0)
+            {
+                List<IndexRun> remaining = [.. old.Runs];
+                remaining.RemoveRange(remaining.Count - absorbed, absorbed);
+                old = old with { Runs = remaining };
             }
 
             IndexEntry current = merged[match];
@@ -1207,11 +1304,7 @@ internal sealed class IndexWriter : IDisposable
         }
 
         _entries.Add(new IndexEntry(
-            kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1),
-            KeyRunOptions.Entry(
-                keys.SegmentEntries, keys.CaseInsensitive, KeyColumns(field),
-                _keyFields[field] is null ? null : _keyEncoder!.Format),
-            runs));
+            kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), ExpectedOptions(field, keys), runs));
         _reports.Add(new IndexWriteReport(_paths[field], kind, IndexOutcome.Built, null, bytes, 0, runs.Count));
     }
 
@@ -1338,5 +1431,8 @@ internal sealed class IndexWriter : IDisposable
         _payloads = null;
         _keySlices?.Reset();
         _keySlices = null;
+        _scratch?.Dispose();
+        _adopted?.Dispose();
+        _adopted = null;
     }
 }

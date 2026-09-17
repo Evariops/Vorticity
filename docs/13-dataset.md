@@ -247,6 +247,32 @@ a file. A lookup reads at most K fence pages. The rule is the same as §5.2's an
 single-file mode stays: it is the format's own operation, it yields one Rust-readable file, it is
 tested, and it now scales.
 
+**As delivered (step 22).**
+- **The scratch** is `Writing/RunScratch`: rented one-mebibyte pages up to 64 MiB, then a temporary
+  file in `VortexWriteOptions.ScratchDirectory`, opened `DeleteOnClose`. A write without a locating
+  index makes none. A chunk run is laid raw, in windows of 4 096 entries: its key offsets and keys,
+  then its file rows (`long`) or its block-list offsets and file blocks (`uint`). No compression is
+  paid twice.
+- **The merge** is `Writing/RunMerge`: a heap of cursors, one window each, ordered by the key's
+  ordered integer or its bytes, then by row, or by the run's place for a postings key, whose lists
+  are then concatenated in block order. Past 64 runs it merges in passes, each laying its runs back
+  into the scratch. The output is cut at `segment_entries` into the same arrays as before, with rows
+  relative to the run's first row, at `u32` unless the run spans 2³² rows or more, at `u64` then; the
+  row array's dtype says which, and both readers take both.
+- **The last chunk keeps a run of its own** when the file's rows are not whole blocks, since an
+  append re-opens that chunk and drops its run; the merged run ends before it and stays.
+- **K = 4 at the append** (`Writing/RunAbsorb`). When the kept runs and the append's two would pass
+  K, the kept runs that end at the append's first block, with no gap between them, are read back —
+  index bytes, checksums held — laid raw in a scratch the writer takes over, and merged in front of
+  the new chunk runs; the builder that continues the entry is the one whose kind, column and options
+  match, which is the test the directory merge applies. Without such a builder, or when it is
+  abandoned, the old runs stay listed. A run before a gap is never merged: a merged run claims every
+  block of its range.
+- **What it costs, measured and stated.** "Merges them all into one" rewrites the entry's index
+  every K − 1 appends, so over n appends of one size the index bytes rewritten grow as n² / K, not as
+  n · log_K n. The logarithmic figure above holds only for appends that grow geometrically. A
+  workload of many appends belongs to the dataset (§5), whose compaction is tiered across objects.
+
 ### 6.2 The filter tree
 
 Bloom filters keep 10 §5.1's structure and bits. What changes is the **layout**: instead of one

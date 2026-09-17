@@ -197,7 +197,9 @@ public static class VortexFileIndexer
 
         IndexWriter indexes = new IndexWriter(
             policy, schema, isTabular: true, fields,
-            options?.IndexBudgetPerMille ?? VortexWriteOptions.Default.IndexBudgetPerMille, blockRows, options?.KeyEncoder);
+            options?.IndexBudgetPerMille ?? VortexWriteOptions.Default.IndexBudgetPerMille, blockRows, options?.KeyEncoder,
+            options?.ScratchDirectory, options?.ScratchMemoryBytes ?? IndexWriter.DefaultScratchMemoryBytes,
+            options?.WideRowsAbove ?? uint.MaxValue);
         try
         {
             indexes.Preserve(previous, previousEof);

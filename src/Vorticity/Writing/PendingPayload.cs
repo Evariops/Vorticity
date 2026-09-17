@@ -86,6 +86,56 @@ internal sealed class PendingPayload(
             (long)length * sizeof(uint),
             () => ArrayPool<uint>.Shared.Return(rented));
 
+    /// <summary>
+    /// A payload over the first <paramref name="length"/> words of a rented <see cref="ulong"/>
+    /// array, laid at 64 bits: a run's rows when it spans 2³² rows or more.
+    /// </summary>
+    /// <param name="rented">The rented array.</param>
+    /// <param name="length">The words it holds.</param>
+    /// <param name="compress">Whether to let the compressor bit-pack it.</param>
+    internal static PendingPayload RentedU64(ulong[] rented, int length, bool compress) =>
+        new PendingPayload(
+            (arena, types) =>
+            {
+                Buffers.VortexBuffer buffer = arena.AllocateUninitialized(
+                    length * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
+                System.Runtime.InteropServices.MemoryMarshal.AsBytes(rented.AsSpan(0, length)).CopyTo(bytes);
+                return arena.AddPrimitive(
+                    types.Primitive(PType.U64, Nullability.NonNullable), length,
+                    Validity.NonNullable, PType.U64, buffer);
+            },
+            compress,
+            (long)length * sizeof(ulong),
+            () => ArrayPool<ulong>.Shared.Return(rented));
+
+    /// <summary>
+    /// A payload over the first <paramref name="length"/> words of a rented <see cref="ulong"/>
+    /// array whose values all fit 32 bits, laid at 32 bits.
+    /// </summary>
+    /// <param name="rented">The rented array.</param>
+    /// <param name="length">The words it holds.</param>
+    /// <param name="compress">Whether to let the compressor bit-pack it.</param>
+    internal static PendingPayload NarrowedU32(ulong[] rented, int length, bool compress) =>
+        new PendingPayload(
+            (arena, types) =>
+            {
+                Buffers.VortexBuffer buffer = arena.AllocateUninitialized(
+                    length * sizeof(uint), sizeof(uint), out Span<byte> bytes);
+                Span<uint> words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes);
+                ReadOnlySpan<ulong> wide = rented.AsSpan(0, length);
+                for (int i = 0; i < wide.Length; i++)
+                {
+                    words[i] = checked((uint)wide[i]);
+                }
+
+                return arena.AddPrimitive(
+                    types.Primitive(PType.U32, Nullability.NonNullable), length,
+                    Validity.NonNullable, PType.U32, buffer);
+            },
+            compress,
+            (long)length * sizeof(uint),
+            () => ArrayPool<ulong>.Shared.Return(rented));
+
     private static int LayU32(CanonicalArena arena, DTypeArena types, uint[] words, int length)
     {
         Buffers.VortexBuffer buffer = arena.AllocateUninitialized(

@@ -961,7 +961,8 @@ internal sealed partial class SortedRunsSource : KeySource
                 requests.GetBuffer(keySlot),
                 rowSlot < 0 ? default : requests.GetBuffer(rowSlot),
                 entries,
-                run.RowLimit);
+                run.RowLimit,
+                rowSlot >= 0 && KeyRunOptions.WideRows(run.Meta, (index * Stride) + 1));
         }
 
         if (_file.ReadOptions.VerifyStatistics)
@@ -975,7 +976,8 @@ internal sealed partial class SortedRunsSource : KeySource
         return decoded;
     }
 
-    private RunSegment Decode(ScanContext context, VortexBuffer keyBlob, VortexBuffer rowBlob, int entries, long rowLimit)
+    private RunSegment Decode(
+        ScanContext context, VortexBuffer keyBlob, VortexBuffer rowBlob, int entries, long rowLimit, bool wideRows)
     {
         DTypeArena types = new DTypeArena();
         DType keyType = _layout.Shape != KeyShape.Bytes
@@ -1025,6 +1027,28 @@ internal sealed partial class SortedRunsSource : KeySource
         }
 
         context.ResetBatch();
+        if (wideRows)
+        {
+            // A run spanning 2³² rows or more writes them at 64 bits (13 §6.1).
+            DType u64 = types.Primitive(PType.U64, Nullability.NonNullable);
+            CanonicalNode wideNode = context.Canonical.GetNode(DecodeRoot(context, rowBlob, u64, entries));
+            if (wideNode.Kind != CanonicalKind.Primitive || wideNode.PType != PType.U64 || wideNode.Length != entries)
+            {
+                throw Malformed("its rows do not decode to one u64 per entry");
+            }
+
+            ulong[] wide = wideNode.Values.Cast<ulong>()[..entries].ToArray();
+            foreach (ulong row in wide)
+            {
+                if (row >= (ulong)rowLimit)
+                {
+                    throw Malformed($"it names row {row} of a run of {rowLimit}");
+                }
+            }
+
+            return new RunSegment(keys, offsets, null, entries, wide);
+        }
+
         CanonicalNode rowNode = context.Canonical.GetNode(DecodeRoot(context, rowBlob, u32, entries));
         if (rowNode.Kind != CanonicalKind.Primitive || rowNode.PType != PType.U32 || rowNode.Length != entries)
         {
@@ -1067,7 +1091,7 @@ internal sealed partial class SortedRunsSource : KeySource
 
             int order = _layout.Compare(KeyAt(segment, i - 1), key);
             bool ordered = order < 0
-                || (order == 0 && segment.Rows is { } rows && rows[i - 1] < rows[i]);
+                || (order == 0 && segment.HasRows && segment.RowAt(i - 1) < segment.RowAt(i));
             if (!ordered)
             {
                 throw Lie($"entries {i - 1} and {i} are out of order");
@@ -1101,7 +1125,7 @@ internal sealed partial class SortedRunsSource : KeySource
 
     /// <summary>An entry's file row; for keys without rows, the run's ordinal, which orders them.</summary>
     private static long RowAt(Run run, RunSegment segment, int index) =>
-        segment.Rows is { } rows ? run.FirstRow + rows[index] : run.Ordinal;
+        segment.HasRows ? run.FirstRow + segment.RowAt(index) : run.Ordinal;
 
     private ReadOnlySpan<byte> KeyAt(RunSegment segment, int index) =>
         segment.Offsets is { } offsets
