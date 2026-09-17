@@ -319,6 +319,71 @@ public sealed class BlockStatsTests
         }
     }
 
+    /// <summary>
+    /// The width histograms against a count by hand, raw and zigzag, over values of every width a
+    /// 32-bit lane can hold, with tails the lanes leave to the scalar loop (§4.1, bit-width row).
+    /// </summary>
+    [Theory]
+    [InlineData(PType.I32, 1)]
+    [InlineData(PType.I32, 7)]
+    [InlineData(PType.I32, 1_001)]
+    [InlineData(PType.U32, 3)]
+    [InlineData(PType.U32, 1_024)]
+    [InlineData(PType.I16, 513)]
+    public void WidthHistogramsMatchACountByHand(PType ptype, int length)
+    {
+        uint state = 12345;
+        CanonicalArena arena = new CanonicalArena();
+        DTypeArena types = new DTypeArena();
+        int width = ptype.ByteWidth();
+        VortexBuffer buffer = arena.Allocate(length * width, width, out Span<byte> bytes);
+        long[] values = new long[length];
+        for (int i = 0; i < length; i++)
+        {
+            state = (state * 1_103_515_245) + 12_345;
+            int shift = (int)(state >> 27) % 32;
+            long value = ptype switch
+            {
+                PType.U32 => (long)((ulong)state >> shift),
+                PType.I16 => (short)(state >> (16 + (shift % 16))) * (i % 2 == 0 ? 1 : -1),
+                _ => (int)(state >> shift) * (i % 3 == 0 ? -1 : 1),
+            };
+            values[i] = i % 97 == 5 ? (ptype == PType.U32 ? uint.MaxValue : -1) : value;
+            Write(ptype, bytes.Slice(i * width, width), values[i]);
+        }
+
+        int node = arena.AddPrimitive(types.Primitive(ptype, Nullability.NonNullable), length, Validity.NonNullable, ptype, buffer);
+        int[] actual = new int[BitPackWidths.Length];
+        BlockStatsPass.Widths(arena, node, 0, length, actual);
+
+        int bits = width * 8;
+        ulong mask = bits == 64 ? ulong.MaxValue : (1UL << bits) - 1;
+        int[] expected = new int[BitPackWidths.Length];
+        foreach (long value in values)
+        {
+            ulong raw = (ulong)value & mask;
+            expected[64 - System.Numerics.BitOperations.LeadingZeroCount(raw)]++;
+            if (ptype != PType.U32)
+            {
+                ulong sign = 0UL - ((raw >> (bits - 1)) & 1);
+                ulong zigzag = ((raw << 1) ^ sign) & mask;
+                expected[BitPackWidths.ZigZagOffset + 64 - System.Numerics.BitOperations.LeadingZeroCount(zigzag)]++;
+            }
+        }
+
+        Assert.Equal(expected, actual);
+    }
+
+    private static void Write(PType ptype, Span<byte> destination, long value)
+    {
+        switch (ptype)
+        {
+            case PType.I16: BinaryPrimitives.WriteInt16LittleEndian(destination, (short)value); break;
+            case PType.U32: BinaryPrimitives.WriteUInt32LittleEndian(destination, (uint)value); break;
+            default: BinaryPrimitives.WriteInt32LittleEndian(destination, (int)value); break;
+        }
+    }
+
     /// <summary>The row-by-row rule: the first event met decides, a NaN claims nothing.</summary>
     private static (bool? Sorted, bool? Strict) ScalarOrder(double[] values)
     {
