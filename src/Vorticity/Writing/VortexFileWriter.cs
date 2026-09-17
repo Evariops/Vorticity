@@ -211,7 +211,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
     private VortexFileWriter(
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
-        int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove)
+        int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
+        FenceShape fences)
     {
         _sink = sink;
         _schema = schema;
@@ -248,6 +249,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
             ? new IndexWriter(
                 indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder,
                 scratchDirectory, scratchMemoryBytes, wideRowsAbove)
+            {
+                Fences = fences,
+            }
             : null;
     }
 
@@ -312,7 +316,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
-            options.WideRowsAbove);
+            options.WideRowsAbove, options.Fences);
     }
 
     /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
@@ -838,8 +842,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
         _indexes?.EndOfData();
         _indexes?.Judge();
         await FlushIndexesAsync(cancellationToken).ConfigureAwait(false);
-        long indexStart = _sink.Position;
         _indexes?.Close(_columns, _chunkRows, _blockRows, dataEnd - interleaved);
+
+        // A long run's fence pages (13 §6.3), which name the regions just written.
+        if (_indexes is { } closed)
+        {
+            await closed.WriteFencePagesAsync(_sink, cancellationToken).ConfigureAwait(false);
+        }
+
+        long indexStart = _sink.Position;
 
         // The zones arrays are segments like any other and must be written BEFORE the footer that
         // records them.

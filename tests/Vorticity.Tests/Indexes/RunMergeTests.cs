@@ -70,13 +70,14 @@ public sealed class RunMergeTests
         await AssertWalkAsync(file, rows);
         await AssertDistinctAsync(file, rows);
 
-        // A key that occurs once: the pruner reads the one segment whose fences hold it, its keys
-        // and its rows, whatever the number of chunks.
+        // A key that occurs once: the pruner reads one fence page -- the run has 77 segments, past
+        // the 64 kept inline (13 §6.3) -- then the one segment whose fences hold it, its keys and
+        // its rows, whatever the number of chunks.
         long probe = K(12_345);
         VortexExpr equal = Expr.Eq(Expr.Field("k"), Expr.Literal(FilterLiteral.From(probe)));
         ScanPlan plan = await file.Scan().Where(equal).ExplainAsync();
         PruningStep locating = Assert.Single(plan.Pruning, step => step.Structure == "locating index");
-        Assert.Equal(2, locating.SegmentsRead);
+        Assert.Equal(3, locating.SegmentsRead);
         Assert.Equal(await OracleCountAsync(file, equal), await file.Scan().Where(equal).CountAsync());
 
         VortexExpr text = Expr.Eq(Expr.Field("s"), Expr.Literal(FilterLiteral.From(S(4_242))));

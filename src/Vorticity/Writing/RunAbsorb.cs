@@ -123,18 +123,26 @@ internal static class RunAbsorb
         VortexFile file, IndexEntry entry, IndexRun run, int stride, RunScratch scratch,
         CancellationToken cancellationToken)
     {
-        if (!KeyRunOptions.TryParseRun(run.OptionBytes, out List<KeySegment> segments)
-            || segments.Count * stride != run.Payload.Count
-            || run.PayloadDTypes.Count != run.Payload.Count
-            || run.Payload.Count == 0)
+        byte[] keyDType = KeyRunOptions.KeyDType(run);
+        if (keyDType.Length == 0)
         {
             return null;
         }
 
         bool hasRows = stride == KeyRunOptions.SortedStride;
         DTypeArena types = new DTypeArena();
-        DType keyType = DTypeFlatBuffers.Read(run.PayloadDTypes[0], types);
-        if (!KeyLayout.TryOf(keyType, out KeyLayout layout))
+        DType keyType;
+        try
+        {
+            keyType = DTypeFlatBuffers.Read(keyDType, types);
+        }
+        catch (VortexFormatException)
+        {
+            return null;
+        }
+
+        if (!KeyLayout.TryOf(keyType, out KeyLayout layout)
+            || !FenceTable.TryOpen(run, stride, layout, out FenceTable? table, out _))
         {
             return null;
         }
@@ -143,50 +151,50 @@ internal static class RunAbsorb
         using RawRunWriter writer = new RawRunWriter(
             scratch, hasRows, layout.Width, checked((int)run.FirstBlock), checked((int)run.BlockCount));
         using ScanContext context = file.CreateIndexContext();
-        for (int s = 0; s < segments.Count; s++)
+        try
         {
-            ulong expected = segments[s].Entries;
-            if (expected > int.MaxValue)
+            for (long s = 0; s < table!.SegmentCount; s++)
             {
-                return null;
-            }
+                Fence fence = await table.GetAsync(file.IndexSource, s, cancellationToken).ConfigureAwait(false);
+                if (fence.Bounds.Entries > int.MaxValue)
+                {
+                    return null;
+                }
 
-            int entries = (int)expected;
-            using SegmentRequestSet requests = new SegmentRequestSet(stride);
-            int[] slots = new int[stride];
-            for (int a = 0; a < stride; a++)
-            {
-                IndexSegment payload = run.Payload[(s * stride) + a];
-                slots[a] = requests.Add(new SegmentSpec(payload.Offset, payload.Length, payload.AlignmentExponent, 0, 0));
-            }
+                int entries = (int)fence.Bounds.Entries;
+                using SegmentRequestSet requests = new SegmentRequestSet(stride);
+                int[] slots = new int[stride];
+                for (int a = 0; a < stride; a++)
+                {
+                    IndexSegment payload = fence.Regions[a];
+                    slots[a] = requests.Add(new SegmentSpec(payload.Offset, payload.Length, payload.AlignmentExponent, 0, 0));
+                }
 
-            await file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            for (int a = 0; a < stride; a++)
-            {
-                if (!run.Payload[(s * stride) + a].Holds(requests.GetBuffer(slots[a]).Span))
+                await file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+                for (int a = 0; a < stride; a++)
+                {
+                    if (!fence.Regions[a].Holds(requests.GetBuffer(slots[a]).Span))
+                    {
+                        return null;
+                    }
+                }
+
+                if (!Lay(context, requests, slots, run, table.WideRows, entries, keyType, layout, hasRows, firstRow, types, writer))
                 {
                     return null;
                 }
             }
-
-            try
-            {
-                if (!Lay(context, requests, slots, run, s, entries, keyType, layout, hasRows, firstRow, types, writer))
-                {
-                    return null;
-                }
-            }
-            catch (VortexFormatException)
-            {
-                return null;
-            }
+        }
+        catch (VortexFormatException)
+        {
+            return null;
         }
 
         return writer.Finish();
     }
 
     private static bool Lay(
-        ScanContext context, SegmentRequestSet requests, int[] slots, IndexRun run, int segment, int entries,
+        ScanContext context, SegmentRequestSet requests, int[] slots, IndexRun run, bool wide, int entries,
         DType keyType, KeyLayout layout, bool hasRows, long firstRow, DTypeArena types, RawRunWriter writer)
     {
         context.ResetBatch();
@@ -201,7 +209,6 @@ internal static class RunAbsorb
 
         if (hasRows)
         {
-            bool wide = KeyRunOptions.WideRows(run, (segment * KeyRunOptions.SortedStride) + 1);
             PType width = wide ? PType.U64 : PType.U32;
             // The keys' arena is kept: the rows are decoded beside them.
             CanonicalNode rows = context.Canonical.GetNode(

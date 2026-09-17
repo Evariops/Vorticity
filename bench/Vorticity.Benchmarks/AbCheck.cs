@@ -165,7 +165,19 @@ internal static class AbCheck
                 continue;
             }
 
-            Measurement m = await MeasureAsync(theirs, ours, file).ConfigureAwait(false);
+            // A SCENARIO THAT DOES NOT FIT THE FILE SAYS SO, and the others still run: a keyed lookup
+            // on a file with no columns is a question without an answer, not a broken harness.
+            Measurement m;
+            try
+            {
+                m = await MeasureAsync(theirs, ours, file).ConfigureAwait(false);
+            }
+            catch (NotSupportedException unfit)
+            {
+                Console.Out.WriteLine($"  {name,-14} not run: {unfit.Message}");
+                continue;
+            }
+
             Console.Out.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"  {name,-14} {m.Before,8:F0}us {m.After,8:F0}us {m.Ratio.Median,13:F3} " +

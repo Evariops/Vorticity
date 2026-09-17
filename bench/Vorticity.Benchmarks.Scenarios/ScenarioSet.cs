@@ -21,6 +21,7 @@ using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.Keys;
 using Vorticity.Scan;
+using Vorticity.Types;
 using Vorticity.Writing;
 
 namespace Vorticity.Bench.Scenarios;
@@ -67,7 +68,8 @@ public static class ScenarioSet
         "take" => p => ScatteredTake(p, TakeCount, TakeStride),
         "filtered" => p => FilteredScan(p, BandLow, NarrowBand),
         "write" => ReadAndWrite,
-        "write-bloom" => p => ReadAndWriteIndexed(p, IndexPolicy.Bloom()),        "write-postings" => p => ReadAndWriteIndexed(p, IndexPolicy.Postings),
+        "write-bloom" => p => ReadAndWriteIndexed(p, IndexPolicy.Bloom()),
+        "write-postings" => p => ReadAndWriteIndexed(p, IndexPolicy.Postings),
         "write-sorted-runs" => p => ReadAndWriteIndexed(p, IndexPolicy.SortedRuns),
         "lookup-sorted-runs" => LookupSortedRuns,
         _ => null,
@@ -110,9 +112,16 @@ public static class ScenarioSet
         return found;
     }
 
+    /// <exception cref="NotSupportedException">The file's root is not a struct of columns.</exception>
     private static async Task<(byte[] Bytes, string Column, FilterLiteral[] Probes)> PrepareLookupAsync(string path)
     {
         await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
+        if (source.Schema.Kind != DTypeKind.Struct)
+        {
+            throw new NotSupportedException(
+                $"lookup-sorted-runs keys a named column, and this file's root is {source.Schema.Kind}");
+        }
+
         string column = string.Empty;
         for (int i = 0; i < source.Schema.FieldCount && column.Length == 0; i++)
         {

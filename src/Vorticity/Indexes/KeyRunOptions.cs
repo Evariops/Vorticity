@@ -65,6 +65,124 @@ internal static class KeyRunOptions
     internal static bool WideRows(IndexRun run, int payload) =>
         payload < run.PayloadDTypes.Count && run.PayloadDTypes[payload].AsSpan().SequenceEqual(WideRowsDType);
 
+    /// <summary>Whether a serialized dtype is the one 64-bit rows are written with.</summary>
+    /// <param name="dtype">The dtype's bytes.</param>
+    internal static bool IsWideRowsDType(ReadOnlySpan<byte> dtype) => dtype.SequenceEqual(WideRowsDType);
+
+    /// <summary>The version of a run's options whose segment table is in fence pages (13 §6.3).</summary>
+    private const uint PagedVersion = 2;
+
+    /// <summary>Serializes a paged run's options: its inline root and its arrays' dtypes.</summary>
+    /// <param name="root">The top page of the fence tree.</param>
+    /// <param name="dtypes">The serialized dtype of each array of a segment.</param>
+    internal static byte[] PagedRun(FencePage root, IReadOnlyList<byte[]> dtypes)
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            writer.WriteUInt32Always(1, PagedVersion);
+            using (ProtoWriter.MessageScope scope = writer.BeginMessage(3))
+            {
+                root.Write(ref writer);
+            }
+
+            foreach (byte[] dtype in dtypes)
+            {
+                writer.WriteBytesAlways(4, dtype);
+            }
+
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The serialized dtype of a run's keys array: the directory's, or a paged run's own; empty when
+    /// neither says.
+    /// </summary>
+    /// <param name="run">The run.</param>
+    internal static byte[] KeyDType(IndexRun run)
+    {
+        if (run.PayloadDTypes.Count > 0)
+        {
+            return run.PayloadDTypes[0];
+        }
+
+        try
+        {
+            ProtoReader reader = new ProtoReader(run.OptionBytes);
+            while (reader.TryReadTag(out int field, out ProtoWireType wire))
+            {
+                if (field == 4 && wire == ProtoWireType.LengthDelimited)
+                {
+                    return reader.ReadLengthDelimited().ToArray();
+                }
+
+                reader.SkipField(wire);
+            }
+        }
+        catch (VortexFormatException)
+        {
+            return [];
+        }
+
+        return [];
+    }
+
+    /// <summary>Parses a paged run's options; false for any other.</summary>
+    /// <param name="bytes">The run's options.</param>
+    /// <param name="stride">The arrays of a segment.</param>
+    /// <param name="layout">The keys' layout.</param>
+    /// <param name="root">The inline root.</param>
+    /// <param name="dtypes">The arrays' dtypes.</param>
+    internal static bool TryParsePagedRun(
+        ReadOnlySpan<byte> bytes, int stride, KeyLayout layout, out FencePage? root, out byte[][]? dtypes)
+    {
+        root = null;
+        dtypes = null;
+        try
+        {
+            ProtoReader reader = new ProtoReader(bytes);
+            uint version = 0;
+            FencePage? page = null;
+            List<byte[]> types = [];
+            while (reader.TryReadTag(out int field, out ProtoWireType wire))
+            {
+                switch (field)
+                {
+                    case 1 when wire == ProtoWireType.Varint:
+                        version = reader.ReadVarint32();
+                        break;
+                    case 3 when wire == ProtoWireType.LengthDelimited:
+                        page = FencePage.Read(reader.ReadMessage(), stride, null, layout);
+                        break;
+                    case 4 when wire == ProtoWireType.LengthDelimited:
+                        types.Add(reader.ReadLengthDelimited().ToArray());
+                        break;
+                    default:
+                        reader.SkipField(wire);
+                        break;
+                }
+            }
+
+            if (version != PagedVersion || page is null)
+            {
+                return false;
+            }
+
+            root = page;
+            dtypes = [.. types];
+            return true;
+        }
+        catch (VortexFormatException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>The stride of a kind, or 0 for a kind that is not a locating one.</summary>
     /// <param name="kind">The kind name.</param>
     internal static int StrideOf(string kind) => kind switch

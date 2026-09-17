@@ -199,7 +199,10 @@ public static class VortexFileIndexer
             policy, schema, isTabular: true, fields,
             options?.IndexBudgetPerMille ?? VortexWriteOptions.Default.IndexBudgetPerMille, blockRows, options?.KeyEncoder,
             options?.ScratchDirectory, options?.ScratchMemoryBytes ?? IndexWriter.DefaultScratchMemoryBytes,
-            options?.WideRowsAbove ?? uint.MaxValue);
+            options?.WideRowsAbove ?? uint.MaxValue)
+        {
+            Fences = options?.Fences ?? FenceShape.Default,
+        };
         try
         {
             indexes.Preserve(previous, previousEof);
@@ -280,6 +283,7 @@ public static class VortexFileIndexer
             indexes.Judge();
             await FlushAsync(indexes, sink, encodings, cancellationToken).ConfigureAwait(false);
             indexes.Close(columns, chunkRows, blockRows, file.FileLength);
+            await indexes.WriteFencePagesAsync(sink, cancellationToken).ConfigureAwait(false);
             return indexes;
         }
         catch

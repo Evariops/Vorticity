@@ -298,6 +298,29 @@ cover every object this format can hold. The run's `options` holds the root fenc
 it fits and otherwise a pointer to it; a lookup reads at most two fence pages before the two
 payload segments. Bounded, whatever the run's length.
 
+**As delivered (step 23).**
+- **The wire form** is 10 §4.2's amendment. A run of at most 64 segments keeps its table inline, as
+  before. A longer one has its root inline in its options, the root's child pages as its payload,
+  and pages of at most 64 KiB below.
+- **The writer** is `Writing/FenceTreeWriter`. It cuts each level into pages, and each page it
+  writes becomes one fence of the level above. The first level with at most 64 fences is the root.
+  A parent names its children by region and checksum, so the pages go out level by level after the
+  index writer closes, before the zone maps, and count as index bytes. A page always takes two
+  fences, so every level at least halves: a key larger than a page deepens the tree and never stops
+  it. The reader takes 64 levels, which a 64-bit count cannot pass.
+- **The reader** is `Indexes/FenceTable`, one per run, in memory for an inline table and paged
+  otherwise. It descends by key, by segment or by entry position and keeps the last 64 pages it
+  read. The key source and the pruner both use it, and so does the append that reads a run back
+  (§6.1). The pruner stops at a segment whose last key passes the key, so it reads no further
+  fence.
+- **What a fence costs, measured.** For `u64` keys at offsets near 10¹², a fence takes 74 bytes in
+  a sorted run and 98 in postings, not the 48 estimated above: each region carries an offset, a
+  length and a checksum. Past 2⁴⁴ it takes 76 and 101 bytes, and a 64 KiB page still holds 862 or
+  648 of them. Under a root of 64, two levels then hold 4.5 × 10¹² sorted entries and 3.4 × 10¹²
+  postings entries (`FenceTreeTests`).
+- **What a lookup reads, counted.** A synthetic run of 10⁸ entries reads one page, and one of 10¹⁰
+  entries reads two, whichever key is sought. A key past the run reads none.
+
 ### 6.4 External fragments, in commit objects, transient
 
 A **fragment** is one entry's runs over one block range of one object, in the format of the

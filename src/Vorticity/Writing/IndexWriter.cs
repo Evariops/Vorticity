@@ -13,6 +13,8 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Indexes;
@@ -1270,6 +1272,8 @@ internal sealed class IndexWriter : IDisposable
         }
 
         List<IndexRun> runs = [];
+        List<PagedRun>? paged = null;
+        int stride = KeyRunOptions.StrideOf(kind);
         long bytes = 0;
         foreach (KeyRun run in keys.Runs)
         {
@@ -1289,12 +1293,20 @@ internal sealed class IndexWriter : IDisposable
                 bytes += segment.Length;
             }
 
-            if (segments.Count == run.Payloads.Count)
+            if (segments.Count != run.Payloads.Count)
             {
-                runs.Add(new IndexRun(
-                    (ulong)run.FirstBlock, checked((uint)run.BlockCount), segments, dtypes,
-                    (ulong)run.Entries, KeyRunOptions.Run(run.Segments)));
+                continue;
             }
+
+            if (Fences.Pages(run.Segments.Count) && Paged(run, stride, segments, dtypes, runs) is { } pages)
+            {
+                (paged ??= []).Add(pages);
+                continue;
+            }
+
+            runs.Add(new IndexRun(
+                (ulong)run.FirstBlock, checked((uint)run.BlockCount), segments, dtypes,
+                (ulong)run.Entries, KeyRunOptions.Run(run.Segments)));
         }
 
         if (runs.Count == 0)
@@ -1306,6 +1318,111 @@ internal sealed class IndexWriter : IDisposable
         _entries.Add(new IndexEntry(
             kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), ExpectedOptions(field, keys), runs));
         _reports.Add(new IndexWriteReport(_paths[field], kind, IndexOutcome.Built, null, bytes, 0, runs.Count));
+        foreach (PagedRun pages in paged ?? [])
+        {
+            pages.Report = _reports.Count - 1;
+            (_paged ??= []).Add(pages);
+        }
+    }
+
+    // ------------------------------------------------------------------------------ fence pages
+
+    /// <summary>13 §6.3's bounds, lowered only by the tests that page a short run.</summary>
+    internal FenceShape Fences { get; init; } = FenceShape.Default;
+
+    /// <summary>The runs whose tables go to pages, in the order the pages are written; null until one does.</summary>
+    private List<PagedRun>? _paged;
+
+    /// <summary>The first of <see cref="_paged"/> whose root is not known yet.</summary>
+    private int _pagedNext;
+
+    /// <summary>A run listed once its fence pages are written.</summary>
+    private sealed class PagedRun(FenceTreeWriter tree, List<IndexRun> runs, IndexRun placeholder, byte[][] dtypes)
+    {
+        internal FenceTreeWriter Tree { get; } = tree;
+
+        /// <summary>The entry's runs, where <see cref="Placeholder"/> holds the run's place.</summary>
+        internal List<IndexRun> Runs { get; } = runs;
+
+        internal IndexRun Placeholder { get; } = placeholder;
+
+        /// <summary>The dtype of each array of a segment.</summary>
+        internal byte[][] DTypes { get; } = dtypes;
+
+        /// <summary>The entry's report, whose bytes the pages add to.</summary>
+        internal int Report { get; set; }
+    }
+
+    /// <summary>
+    /// A long run's pages to come, its place held in <paramref name="runs"/>; null when its segments'
+    /// arrays do not share one dtype each, and the run keeps its table inline.
+    /// </summary>
+    private PagedRun? Paged(KeyRun run, int stride, List<IndexSegment> segments, List<byte[]> dtypes, List<IndexRun> runs)
+    {
+        if (stride == 0 || segments.Count != stride * run.Segments.Count)
+        {
+            return null;
+        }
+
+        for (int i = stride; i < dtypes.Count; i++)
+        {
+            if (!dtypes[i].AsSpan().SequenceEqual(dtypes[i % stride]))
+            {
+                return null;
+            }
+        }
+
+        List<IndexSegment[]> regions = new List<IndexSegment[]>(run.Segments.Count);
+        for (int s = 0; s < run.Segments.Count; s++)
+        {
+            regions.Add(segments.GetRange(s * stride, stride).ToArray());
+        }
+
+        // The run holds its place with no payload, which no directory lists: `Directory` refuses to
+        // run before the pages are placed.
+        IndexRun placeholder = new IndexRun(
+            (ulong)run.FirstBlock, checked((uint)run.BlockCount), [], [], (ulong)run.Entries);
+        PagedRun pages = new PagedRun(
+            new FenceTreeWriter(Fences, run.Segments, regions), runs, placeholder, dtypes.GetRange(0, stride).ToArray());
+        runs.Add(placeholder);
+        return pages;
+    }
+
+    /// <summary>
+    /// Writes every fence page (13 §6.3), one level after the other, and lists each paged run once
+    /// its root is known. Called after <see cref="Close"/>, before the directory.
+    /// </summary>
+    /// <param name="sink">The sink the payloads went to.</param>
+    /// <param name="cancellationToken">Cancels the writes.</param>
+    internal async ValueTask WriteFencePagesAsync(ISegmentSink sink, CancellationToken cancellationToken)
+    {
+        while (_paged is not null && _pagedNext < _paged.Count)
+        {
+            PagedRun pages = _paged[_pagedNext];
+            while (pages.Tree.TryTake(out byte[] page))
+            {
+                long offset = sink.Position;
+                await sink.WriteAsync(page, cancellationToken).ConfigureAwait(false);
+                pages.Tree.Placed(IndexSegment.Of(offset, page, 0));
+            }
+
+            FencePage root = pages.Tree.Root!;
+            IndexSegment[] children = new IndexSegment[root.Count];
+            for (int i = 0; i < children.Length; i++)
+            {
+                children[i] = root.Regions[i][0];
+            }
+
+            int slot = pages.Runs.FindIndex(r => ReferenceEquals(r, pages.Placeholder));
+            pages.Runs[slot] = pages.Placeholder with
+            {
+                Payload = children,
+                Options = KeyRunOptions.PagedRun(root, pages.DTypes),
+            };
+            IndexWriteReport report = _reports[pages.Report];
+            _reports[pages.Report] = report with { Bytes = report.Bytes + pages.Tree.Bytes };
+            _pagedNext++;
+        }
     }
 
     /// <summary>
@@ -1398,6 +1515,11 @@ internal sealed class IndexWriter : IDisposable
         if (!Enabled && _preserved is not { Count: > 0 })
         {
             return null;
+        }
+
+        if (_paged is not null && _pagedNext < _paged.Count)
+        {
+            throw new InvalidOperationException("The fence pages are written before the directory that names them.");
         }
 
         bool defaultPolicy = _policy.Default == IndexPolicy.Auto && _policy.Columns.Count == 0;

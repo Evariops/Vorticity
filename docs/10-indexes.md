@@ -212,6 +212,35 @@ written as several segments with a per-segment min/max in the run's `options`, s
 two segments, not the run. This is the "zones do the job of B-tree leaves and zone maps the job of
 internal nodes" idea of #9024, applied through the directory rather than through a layout.
 
+*Amended by [13-dataset.md](13-dataset.md) §6.3, delivered at step 23: the segment table is
+bounded whatever the run's length.* A locating run of at most 64 segments keeps the version 1
+options above, and the directory lists its `stride` regions per segment. A longer run writes its
+table as **fence pages**: file regions of at most 64 KiB, each a protobuf message, arranged as a
+tree whose root is inlined in the run's options. The directory then lists the root's child pages
+as the run's payload, with no dtype per region.
+
+```
+message KeyRunOptions {              // version 2, a paged run
+  uint32 version = 1;                 // 2
+  FencePage root = 3;                 // level ≥ 1, at most 64 fences
+  repeated bytes stride_dtypes = 4;   // the serialized dtype of each array of a segment
+}
+message FencePage {
+  uint32 level = 1;                   // 0: its fences are segments; above: pages of level - 1
+  repeated Fence fences = 2;          // in key order
+}
+message Fence {
+  uint64 entries = 1; bytes min = 2; bytes max = 3;
+  repeated Segment regions = 4;       // level 0: the segment's arrays; above: the child page
+  uint64 segments = 5;                // above level 0: the segments under the child
+}
+```
+
+A page carries the XXH3-64 of its bytes in its parent's `Segment`, like any region (§4.1). A reader
+checks it, then the page's shape: the level its parent names, `stride` regions per segment, keys
+that never go down, and a segment count equal to the parent's. A page that fails claims nothing
+for its run in a pruner and makes a key source refuse.
+
 ### 4.3 Granularity and generations
 
 `block_len` is the zone length. A skipping index at block granularity has one filter per block; a

@@ -97,12 +97,18 @@ public sealed class LocatingIndexTests
             {
                 Assert.Equal(block, run.FirstBlock);
                 block = run.EndBlock;
-                Assert.True(KeyRunOptions.TryParseRun(run.OptionBytes, out List<KeySegment> segments));
-                Assert.Equal(KeyRunOptions.StrideOf(entry.Kind) * segments.Count, run.Payload.Count);
-                ulong inSegments = 0;
-                foreach (KeySegment segment in segments)
+
+                // Inline or in fence pages past 64 segments (13 §6.3): the same segments either way.
+                FenceTable table = Table(written.File, entry, run);
+                if (!table.Paged)
                 {
-                    inSegments += segment.Entries;
+                    Assert.Equal(KeyRunOptions.StrideOf(entry.Kind) * table.SegmentCount, run.Payload.Count);
+                }
+
+                ulong inSegments = 0;
+                for (long s = 0; s < table.SegmentCount; s++)
+                {
+                    inSegments += (await table.GetAsync(written.File.IndexSource, s, default)).Bounds.Entries;
                 }
 
                 Assert.Equal(run.EntryCount, inSegments);
@@ -123,9 +129,18 @@ public sealed class LocatingIndexTests
 
         // The small segments really cut the runs.
         IndexEntry name = Assert.Single(directory.Entries, e => written.File.Schema.GetFieldName((int)e.ColumnPath[0]) == "name");
-        Assert.True(KeyRunOptions.TryParseRun(name.Runs[0].OptionBytes, out List<KeySegment> nameSegments));
-        Assert.True(nameSegments.Count > 5);
+        Assert.True(Table(written.File, name, name.Runs[0]).SegmentCount > 5);
         Assert.Equal(written.Length, written.Report.Bytes.Total);
+    }
+
+    /// <summary>A run's segment table, whether inline or in pages.</summary>
+    private static FenceTable Table(VortexFile file, IndexEntry entry, IndexRun run)
+    {
+        Assert.True(KeyLayout.TryOf(file.Schema.GetField((int)entry.ColumnPath[0]), out KeyLayout layout));
+        Assert.True(
+            FenceTable.TryOpen(run, KeyRunOptions.StrideOf(entry.Kind), layout, out FenceTable? table, out string? reason),
+            reason);
+        return table!;
     }
 
     public static TheoryData<string> Filters() => [.. FilterTexts()];

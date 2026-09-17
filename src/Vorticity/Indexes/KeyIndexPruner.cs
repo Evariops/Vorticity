@@ -134,11 +134,10 @@ internal sealed class KeyIndexPruner
             List<Run> runs = [];
             foreach (IndexRun run in entry.Runs)
             {
-                if (KeyRunOptions.TryParseRun(run.OptionBytes, out List<KeySegment> segments)
-                    && run.Payload.Count == stride * segments.Count
+                if (FenceTable.TryOpen(run, stride, layout, out FenceTable? table, out _)
                     && run.EndBlock <= (ulong)blocks)
                 {
-                    runs.Add(new Run(run, segments));
+                    runs.Add(new Run(run, table!));
                 }
             }
 
@@ -168,7 +167,7 @@ internal sealed class KeyIndexPruner
     internal async ValueTask RefineAsync(VortexFile file, BlockMask live, CancellationToken cancellationToken)
     {
         using SegmentRequestSet requests = new SegmentRequestSet();
-        List<(Column Column, Run Run, int Segment, int[] Slots)> wanted = [];
+        List<(Column Column, Run Run, Fence Fence, int[] Slots)> wanted = [];
         foreach (Column column in _columns.Values)
         {
             foreach (Run run in column.Runs)
@@ -178,22 +177,34 @@ internal sealed class KeyIndexPruner
                     continue;
                 }
 
-                for (int segment = 0; segment < run.Segments.Count; segment++)
+                // THE SEGMENTS THAT MAY HOLD A KEY, found by a descent per key (13 §6.3): a page
+                // that does not read claims nothing for the run, which is then not covered.
+                List<Fence> fences;
+                int pagesBefore = run.Table.PagesRead;
+                try
                 {
-                    if (!column.SegmentMayHold(run.Segments[segment]))
-                    {
-                        continue;
-                    }
+                    fences = await column.CandidatesAsync(file.IndexSource, run.Table, cancellationToken).ConfigureAwait(false);
+                }
+                catch (VortexFormatException)
+                {
+                    continue;
+                }
+                finally
+                {
+                    Segments += run.Table.PagesRead - pagesBefore;
+                }
 
+                foreach (Fence fence in fences)
+                {
                     int[] slots = new int[column.Stride];
                     for (int array = 0; array < column.Stride; array++)
                     {
-                        IndexSegment payload = run.Meta.Payload[(segment * column.Stride) + array];
+                        IndexSegment payload = fence.Regions[array];
                         slots[array] = requests.Add(
                             new SegmentSpec(payload.Offset, payload.Length, payload.AlignmentExponent, 0, 0));
                     }
 
-                    wanted.Add((column, run, segment, slots));
+                    wanted.Add((column, run, fence, slots));
                 }
 
                 // Every run consulted starts as "proves every key absent"; the lookups below lift
@@ -212,11 +223,11 @@ internal sealed class KeyIndexPruner
 
             await file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             using ScanContext context = file.CreateIndexContext();
-            foreach ((Column column, Run run, int segment, int[] slots) in wanted)
+            foreach ((Column column, Run run, Fence fence, int[] slots) in wanted)
             {
                 context.ResetBatch();
-                if (!Intact(requests, slots, run.Meta, segment, column.Stride)
-                    || !column.Lookup(context, requests, slots, run, segment, live.BlockRows))
+                if (!Intact(requests, slots, fence)
+                    || !column.Lookup(context, requests, slots, run, fence, live.BlockRows))
                 {
                     column.Uncover(run.Meta);
                 }
@@ -236,11 +247,11 @@ internal sealed class KeyIndexPruner
     /// Whether the regions a lookup read are the ones written (13 §7); a lookup over torn bytes
     /// would prove a key absent from blocks that hold it.
     /// </summary>
-    private static bool Intact(SegmentRequestSet requests, int[] slots, IndexRun run, int segment, int stride)
+    private static bool Intact(SegmentRequestSet requests, int[] slots, Fence fence)
     {
         for (int array = 0; array < slots.Length; array++)
         {
-            if (!run.Payload[(segment * stride) + array].Holds(requests.GetBuffer(slots[array]).Span))
+            if (!fence.Regions[array].Holds(requests.GetBuffer(slots[array]).Span))
             {
                 return false;
             }
@@ -391,7 +402,13 @@ internal sealed class KeyIndexPruner
 
     // ------------------------------------------------------------------------------ state
 
-    private sealed record Run(IndexRun Meta, List<KeySegment> Segments);
+    private sealed record Run(IndexRun Meta, FenceTable Table);
+
+    /// <summary>A descent's comparison: a fence whose last key comes before the key.</summary>
+    private readonly struct KeyProbe(KeyLayout layout, byte[] key) : IFenceProbe
+    {
+        public bool Below(ReadOnlySpan<byte> max) => layout.Compare(max, key) < 0;
+    }
 
     /// <summary>One column's runs and, per literal, which blocks the runs prove it absent from.</summary>
     private sealed class Column
@@ -436,30 +453,52 @@ internal sealed class KeyIndexPruner
 
         internal int Stride => _rows ? KeyRunOptions.SortedStride : KeyRunOptions.PostingsStride;
 
-        /// <summary>Whether any of the column's keys may lie in the segment's range.</summary>
-        internal bool SegmentMayHold(KeySegment segment)
+        /// <summary>
+        /// The segments of <paramref name="table"/> whose range may hold one of the column's keys,
+        /// each once, in segment order: per key, a descent to the first segment whose last key does
+        /// not come before it, and the segments after it whose first key does not pass it.
+        /// </summary>
+        internal async ValueTask<List<Fence>> CandidatesAsync(
+            ISegmentSource source, FenceTable table, CancellationToken cancellationToken)
         {
-            if (segment.Entries == 0)
-            {
-                return false;
-            }
-
+            SortedDictionary<long, Fence> found = [];
             for (int i = 0; i < _keys.Length; i++)
             {
-                if (InRange(segment, _keys[i]) || InRange(segment, _otherZeros[i]))
+                foreach (byte[]? key in (byte[]?[])[_keys[i], _otherZeros[i]])
                 {
-                    return true;
+                    if (key is null)
+                    {
+                        continue;
+                    }
+
+                    long s = await table.LowerBoundAsync(source, new KeyProbe(_layout, key), cancellationToken).ConfigureAwait(false);
+                    for (; s < table.SegmentCount; s++)
+                    {
+                        Fence fence = await table.GetAsync(source, s, cancellationToken).ConfigureAwait(false);
+                        if (fence.Bounds.Entries == 0)
+                        {
+                            continue;
+                        }
+
+                        if (_layout.Compare(fence.Bounds.Min, key) > 0)
+                        {
+                            break;
+                        }
+
+                        found.TryAdd(s, fence);
+
+                        // A segment that ends past the key is the last that can hold it: the next
+                        // fence, perhaps on another page, is not read.
+                        if (_layout.Compare(fence.Bounds.Max, key) > 0)
+                        {
+                            break;
+                        }
+                    }
                 }
             }
 
-            return false;
+            return [.. found.Values];
         }
-
-        private bool InRange(KeySegment segment, byte[]? key) =>
-            key is not null
-            && (_layout.Shape == KeyShape.Bytes || (segment.Min.Length == _layout.Width && segment.Max.Length == _layout.Width))
-            && _layout.Compare(segment.Min, key) <= 0
-            && _layout.Compare(key, segment.Max) <= 0;
 
         /// <summary>Marks every block of the run absent for every encodable literal.</summary>
         internal void Cover(IndexRun run)
@@ -500,9 +539,9 @@ internal sealed class KeyIndexPruner
         /// Decodes one segment's arrays and marks, for every literal, the blocks that hold it.
         /// </summary>
         /// <returns>Whether the segment made sense.</returns>
-        internal bool Lookup(ScanContext context, SegmentRequestSet requests, int[] slots, Run run, int segment, long blockRows)
+        internal bool Lookup(ScanContext context, SegmentRequestSet requests, int[] slots, Run run, Fence fence, long blockRows)
         {
-            ulong expected = run.Segments[segment].Entries;
+            ulong expected = fence.Bounds.Entries;
             if (expected > int.MaxValue)
             {
                 return false;
@@ -530,7 +569,7 @@ internal sealed class KeyIndexPruner
                 if (_rows)
                 {
                     // A RUN SPANNING 2³² ROWS OR MORE WRITES THEM AT 64 BITS (13 §6.1); its dtype says so.
-                    bool wide = KeyRunOptions.WideRows(run.Meta, (segment * KeyRunOptions.SortedStride) + 1);
+                    bool wide = run.Table.WideRows;
                     PType width = wide ? PType.U64 : PType.U32;
                     int rowsNode = Decode(
                         context, requests.GetBuffer(slots[1]), types.Primitive(width, Nullability.NonNullable), entries);

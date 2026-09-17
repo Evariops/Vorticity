@@ -378,41 +378,20 @@ internal sealed partial class SortedRunsSource : KeySource
         for (int i = 0; i < runs.Length; i++)
         {
             IndexRun meta = entry.Runs[i];
-            if (!KeyRunOptions.TryParseRun(meta.OptionBytes, out List<KeySegment> segments)
-                || meta.Payload.Count != stride * segments.Count)
+            if (!FenceTable.TryOpen(meta, stride, layout, out FenceTable? table, out string? why))
             {
-                return (null, $"run {i} has a segment table that does not match its payload");
-            }
-
-            long[] starts = new long[segments.Count + 1];
-            for (int s = 0; s < segments.Count; s++)
-            {
-                KeySegment segment = segments[s];
-                bool widths = layout.Shape == KeyShape.Bytes
-                    || segment.Entries == 0
-                    || (segment.Min.Length == layout.Width && segment.Max.Length == layout.Width);
-                if (!widths || segment.Entries > int.MaxValue)
-                {
-                    return (null, $"run {i} has a segment whose bounds or size do not fit the column");
-                }
-
-                starts[s + 1] = starts[s] + (long)segment.Entries;
-            }
-
-            if (meta.EntryCount != 0 && meta.EntryCount != (ulong)starts[^1])
-            {
-                return (null, $"run {i} lists {meta.EntryCount} entries and its segments {starts[^1]}");
+                return (null, $"run {i}: {why}");
             }
 
             long firstRow = checked((long)(meta.FirstBlock * entry.BlockLength));
             long span = checked((long)(meta.BlockCount * entry.BlockLength));
             long limit = Math.Min(span, file.RowCount - firstRow);
-            if (limit < 0 || starts[^1] > limit)
+            if (limit < 0 || table!.Entries > limit)
             {
                 return (null, $"run {i} holds more entries than its blocks have rows");
             }
 
-            runs[i] = new Run(meta, segments.ToArray(), starts, firstRow, limit, i);
+            runs[i] = new Run(meta, table, firstRow, limit, i);
         }
 
         return (new SortedRunsSource(file, layout, storage, kind, runs, source), null);
@@ -782,51 +761,40 @@ internal sealed partial class SortedRunsSource : KeySource
     private async ValueTask<long> FirstAtOrAfterAsync(
         Run run, FilterLiteral key, long row, CancellationToken cancellationToken)
     {
-        KeySegment[] segments = run.Segments;
+        FenceTable table = run.Table;
         if (run.Count == 0)
         {
             return 0;
         }
 
         // The run's own range, from its options alone: most runs are excluded or included here.
-        if (CompareKey(LastMax(run), key) < 0)
+        if (CompareKey(table.LastMax, key) < 0)
         {
             return run.Count;
         }
 
-        if (CompareKey(FirstMin(run), key) > 0)
+        if (CompareKey(table.FirstMin, key) > 0)
         {
             return 0;
         }
 
-        int low = 0;
-        int high = segments.Length - 1;
-        while (low < high)
+        // The first segment whose last key does not come before the key: a binary search over the
+        // bounds in memory, or a descent through the fence pages (13 §6.3).
+        long low = await table.LowerBoundAsync(_file.IndexSource, new MaxProbe(this, key), cancellationToken).ConfigureAwait(false);
+        for (long s = low; s < table.SegmentCount; s++)
         {
-            int mid = (low + high) >>> 1;
-            if (segments[mid].Entries == 0 || CompareKey(segments[mid].Max, key) < 0)
-            {
-                low = mid + 1;
-            }
-            else
-            {
-                high = mid;
-            }
-        }
-
-        for (int s = low; s < segments.Length; s++)
-        {
-            if (segments[s].Entries == 0)
+            Fence fence = await table.GetAsync(_file.IndexSource, s, cancellationToken).ConfigureAwait(false);
+            if (fence.Bounds.Entries == 0)
             {
                 continue;
             }
 
-            if (s > low && CompareKey(segments[s].Min, key) > 0)
+            if (s > low && CompareKey(fence.Bounds.Min, key) > 0)
             {
-                return run.Starts[s];
+                return fence.Start;
             }
 
-            RunSegment segment = await SegmentAsync(run, s, cancellationToken).ConfigureAwait(false);
+            RunSegment segment = await SegmentAsync(run, fence, cancellationToken).ConfigureAwait(false);
             int first = 0;
             int last = segment.Count;
             while (first < last)
@@ -850,7 +818,7 @@ internal sealed partial class SortedRunsSource : KeySource
 
             if (first < segment.Count)
             {
-                return run.Starts[s] + first;
+                return fence.Start + first;
             }
         }
 
@@ -861,9 +829,9 @@ internal sealed partial class SortedRunsSource : KeySource
     private async ValueTask<(FilterLiteral Key, long Row)> EntryAsync(
         Run run, long position, CancellationToken cancellationToken)
     {
-        int s = SegmentOf(run, position);
-        RunSegment segment = await SegmentAsync(run, s, cancellationToken).ConfigureAwait(false);
-        int at = (int)(position - run.Starts[s]);
+        Fence fence = await run.Table.OfPositionAsync(_file.IndexSource, position, cancellationToken).ConfigureAwait(false);
+        RunSegment segment = await SegmentAsync(run, fence, cancellationToken).ConfigureAwait(false);
+        int at = (int)(position - fence.Start);
         ReadOnlySpan<byte> key = KeyAt(segment, at);
         FilterLiteral literal = _layout.Shape == KeyShape.Bytes ? FilterLiteral.From(key) : Literal(key);
         return (literal, RowAt(run, segment, at));
@@ -874,64 +842,42 @@ internal sealed partial class SortedRunsSource : KeySource
     {
         if (run.Current is null || position < run.CurrentStart || position >= run.CurrentStart + run.Current.Count)
         {
-            int s = SegmentOf(run, position);
-            run.Current = await SegmentAsync(run, s, cancellationToken).ConfigureAwait(false);
-            run.CurrentStart = run.Starts[s];
+            Fence fence = await run.Table.OfPositionAsync(_file.IndexSource, position, cancellationToken).ConfigureAwait(false);
+            run.Current = await SegmentAsync(run, fence, cancellationToken).ConfigureAwait(false);
+            run.CurrentStart = fence.Start;
         }
 
         run.Position = position;
     }
 
-    private static int SegmentOf(Run run, long position)
-    {
-        long[] starts = run.Starts;
-        int low = 0;
-        int high = starts.Length - 2;
-        while (low < high)
-        {
-            int mid = (low + high + 1) >>> 1;
-            if (starts[mid] <= position)
-            {
-                low = mid;
-            }
-            else
-            {
-                high = mid - 1;
-            }
-        }
-
-        // Empty segments share a start with their successor; the entry is in the last of them.
-        while (low + 1 < starts.Length - 1 && starts[low + 1] <= position)
-        {
-            low++;
-        }
-
-        return low;
-    }
-
     /// <summary>A decoded segment of a run: the run's own last one, the file's cache, or a read.</summary>
-    private ValueTask<RunSegment> SegmentAsync(Run run, int index, CancellationToken cancellationToken)
+    private ValueTask<RunSegment> SegmentAsync(Run run, Fence fence, CancellationToken cancellationToken)
     {
-        if (run.ProbeIndex == index && run.Probe is not null)
+        if (run.ProbeIndex == fence.Index && run.Probe is not null)
         {
             return new ValueTask<RunSegment>(run.Probe);
         }
 
-        IndexSegment keys = run.Meta.Payload[index * Stride];
+        IndexSegment keys = fence.Regions[0];
         if (_file.RunCache.TryGet(keys.Offset, out RunSegment cached))
         {
             run.Probe = cached;
-            run.ProbeIndex = index;
+            run.ProbeIndex = fence.Index;
             return new ValueTask<RunSegment>(cached);
         }
 
-        return LoadAsync(run, index, cancellationToken);
+        return LoadAsync(run, fence, cancellationToken);
     }
 
-    private async ValueTask<RunSegment> LoadAsync(Run run, int index, CancellationToken cancellationToken)
+    private async ValueTask<RunSegment> LoadAsync(Run run, Fence fence, CancellationToken cancellationToken)
     {
-        IndexSegment keys = run.Meta.Payload[index * Stride];
-        int entries = (int)run.Segments[index].Entries;
+        IndexSegment keys = fence.Regions[0];
+        if (fence.Bounds.Entries > int.MaxValue)
+        {
+            throw Malformed("a segment holds more entries than one array can");
+        }
+
+        int entries = (int)fence.Bounds.Entries;
         RunSegment decoded;
         using (SegmentRequestSet requests = new SegmentRequestSet(2))
         {
@@ -940,7 +886,7 @@ internal sealed partial class SortedRunsSource : KeySource
             int rowSlot = -1;
             if (HasRows)
             {
-                IndexSegment rows = run.Meta.Payload[(index * Stride) + 1];
+                IndexSegment rows = fence.Regions[1];
                 rowSlot = requests.Add(new SegmentSpec(rows.Offset, rows.Length, rows.AlignmentExponent, 0, 0));
             }
 
@@ -950,7 +896,7 @@ internal sealed partial class SortedRunsSource : KeySource
             // A WALK OVER TORN BYTES WOULD BE WRONG, NOT SLOW (13 §7): the source refuses, as it
             // does for a run that decodes to the wrong shape.
             if (!keys.Holds(requests.GetBuffer(keySlot).Span)
-                || (rowSlot >= 0 && !run.Meta.Payload[(index * Stride) + 1].Holds(requests.GetBuffer(rowSlot).Span)))
+                || (rowSlot >= 0 && !fence.Regions[1].Holds(requests.GetBuffer(rowSlot).Span)))
             {
                 throw Malformed("a segment's bytes do not match its checksum: it is torn or corrupt");
             }
@@ -962,17 +908,17 @@ internal sealed partial class SortedRunsSource : KeySource
                 rowSlot < 0 ? default : requests.GetBuffer(rowSlot),
                 entries,
                 run.RowLimit,
-                rowSlot >= 0 && KeyRunOptions.WideRows(run.Meta, (index * Stride) + 1));
+                rowSlot >= 0 && run.Table.WideRows);
         }
 
         if (_file.ReadOptions.VerifyStatistics)
         {
-            Verify(decoded, run.Segments[index]);
+            Verify(decoded, fence.Bounds);
         }
 
         decoded = _file.RunCache.Add(keys.Offset, decoded);
         run.Probe = decoded;
-        run.ProbeIndex = index;
+        run.ProbeIndex = fence.Index;
         return decoded;
     }
 
@@ -1132,32 +1078,6 @@ internal sealed partial class SortedRunsSource : KeySource
             ? segment.Keys.AsSpan(offsets[index], offsets[index + 1] - offsets[index])
             : segment.Keys.AsSpan(index * _layout.Width, _layout.Width);
 
-    private static byte[] FirstMin(Run run)
-    {
-        foreach (KeySegment segment in run.Segments)
-        {
-            if (segment.Entries > 0)
-            {
-                return segment.Min;
-            }
-        }
-
-        return [];
-    }
-
-    private static byte[] LastMax(Run run)
-    {
-        for (int s = run.Segments.Length - 1; s >= 0; s--)
-        {
-            if (run.Segments[s].Entries > 0)
-            {
-                return run.Segments[s].Max;
-            }
-        }
-
-        return [];
-    }
-
     /// <summary>Orders a key's bytes against a literal of the column's domain, in the total order.</summary>
     private int CompareKey(ReadOnlySpan<byte> entry, FilterLiteral key) =>
         _layout.Shape == KeyShape.Bytes
@@ -1193,24 +1113,22 @@ internal sealed partial class SortedRunsSource : KeySource
     };
 
     /// <summary>One run: its directory record, its segment table, and the merge's position in it.</summary>
-    private sealed class Run(IndexRun meta, KeySegment[] segments, long[] starts, long firstRow, long rowLimit, int ordinal)
+    private sealed class Run(IndexRun meta, FenceTable table, long firstRow, long rowLimit, int ordinal)
     {
         /// <summary>The run's place among the source's: the row a key without rows is ordered by.</summary>
         internal int Ordinal { get; } = ordinal;
 
         internal IndexRun Meta { get; } = meta;
 
-        internal KeySegment[] Segments { get; } = segments;
-
-        /// <summary>Each segment's first position, and the run's count last.</summary>
-        internal long[] Starts { get; } = starts;
+        /// <summary>The run's segments, in memory or in fence pages (13 §6.3).</summary>
+        internal FenceTable Table { get; } = table;
 
         internal long FirstRow { get; } = firstRow;
 
         /// <summary>One past the last row a relative row may name.</summary>
         internal long RowLimit { get; } = rowLimit;
 
-        internal long Count => Starts[^1];
+        internal long Count => Table.Entries;
 
         internal long Position { get; set; }
 
@@ -1220,6 +1138,12 @@ internal sealed partial class SortedRunsSource : KeySource
 
         internal RunSegment? Probe { get; set; }
 
-        internal int ProbeIndex { get; set; } = -1;
+        internal long ProbeIndex { get; set; } = -1;
+    }
+
+    /// <summary>A descent's comparison: a fence whose last key comes before the literal.</summary>
+    private readonly struct MaxProbe(SortedRunsSource source, FilterLiteral key) : IFenceProbe
+    {
+        public bool Below(ReadOnlySpan<byte> max) => source.CompareKey(max, key) < 0;
     }
 }

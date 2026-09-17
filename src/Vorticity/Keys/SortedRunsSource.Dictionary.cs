@@ -85,7 +85,7 @@ internal sealed partial class SortedRunsSource
 
                 KeySegment bounds = new KeySegment(
                     (ulong)values.Count, KeyBytesAt(values, layout, 0).ToArray(), KeyBytesAt(values, layout, values.Count - 1).ToArray());
-                Run run = new Run(meta, [bounds], [0, values.Count], start, flat.RowCount, runs.Count)
+                Run run = new Run(meta, FenceTable.InMemory([bounds], layout), start, flat.RowCount, runs.Count)
                 {
                     Probe = values,
                     ProbeIndex = 0,

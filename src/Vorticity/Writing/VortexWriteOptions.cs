@@ -114,6 +114,12 @@ public sealed class VortexWriteOptions
     /// </summary>
     internal long WideRowsAbove { get; init; } = uint.MaxValue;
 
+    /// <summary>
+    /// When a locating run's segment table goes to fence pages, and how large they are (13 §6.3);
+    /// lowered only by the tests that page a short run.
+    /// </summary>
+    internal FenceShape Fences { get; init; } = FenceShape.Default;
+
     /// <summary>A copy with the three things an append decides from the file.</summary>
     /// <param name="rowBlockSize">The file's block length.</param>
     /// <param name="indexes">The policy the append writes under.</param>
@@ -129,6 +135,7 @@ public sealed class VortexWriteOptions
         ScratchDirectory = ScratchDirectory,
         ScratchMemoryBytes = ScratchMemoryBytes,
         WideRowsAbove = WideRowsAbove,
+        Fences = Fences,
         Compress = Compress,
         FileStatistics = fileStatistics,
         TargetEdition = TargetEdition,

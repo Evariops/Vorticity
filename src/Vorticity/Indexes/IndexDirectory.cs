@@ -334,14 +334,7 @@ public sealed record IndexDirectory(
             writer.WriteUInt32Always(RunBlockCount, run.BlockCount);
             foreach (IndexSegment segment in run.Payload)
             {
-                using ProtoWriter.MessageScope payload = writer.BeginMessage(RunPayload);
-                writer.WriteUInt64Always(SegOffset, segment.Offset);
-                writer.WriteUInt32Always(SegLength, segment.Length);
-                writer.WriteUInt32(SegAlignment, segment.AlignmentExponent);
-                if (segment.Checksum is { } checksum)
-                {
-                    writer.WriteFixed64Always(SegChecksum, checksum);
-                }
+                WriteSegment(ref writer, RunPayload, segment);
             }
 
             foreach (byte[] dtype in run.PayloadDTypes)
@@ -633,7 +626,36 @@ public sealed record IndexDirectory(
         return new IndexRun(first, count, payload, dtypes, entries, options);
     }
 
-    private static IndexSegment ReadSegment(ProtoReader reader)
+    /// <summary>The bytes <see cref="WriteSegment"/> writes for <paramref name="segment"/>, its tag and length included.</summary>
+    /// <param name="segment">The region.</param>
+    internal static int SegmentBytes(IndexSegment segment)
+    {
+        int body = 1 + ProtoWire.VarintSize(segment.Offset)
+            + 1 + ProtoWire.VarintSize(segment.Length)
+            + (segment.AlignmentExponent == 0 ? 0 : 1 + ProtoWire.VarintSize(segment.AlignmentExponent))
+            + (segment.Checksum is null ? 0 : 1 + sizeof(ulong));
+        return 1 + ProtoWire.VarintSize((ulong)body) + body;
+    }
+
+    /// <summary>Writes a region as a <c>Segment</c> message in field <paramref name="field"/>.</summary>
+    /// <param name="writer">The writer.</param>
+    /// <param name="field">The enclosing message's field.</param>
+    /// <param name="segment">The region.</param>
+    internal static void WriteSegment(ref ProtoWriter writer, int field, IndexSegment segment)
+    {
+        using ProtoWriter.MessageScope payload = writer.BeginMessage(field);
+        writer.WriteUInt64Always(SegOffset, segment.Offset);
+        writer.WriteUInt32Always(SegLength, segment.Length);
+        writer.WriteUInt32(SegAlignment, segment.AlignmentExponent);
+        if (segment.Checksum is { } checksum)
+        {
+            writer.WriteFixed64Always(SegChecksum, checksum);
+        }
+    }
+
+    /// <summary>Reads a <c>Segment</c> message.</summary>
+    /// <param name="reader">The message's reader.</param>
+    internal static IndexSegment ReadSegment(ProtoReader reader)
     {
         ulong offset = 0;
         uint length = 0;
