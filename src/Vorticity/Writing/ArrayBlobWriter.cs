@@ -502,16 +502,7 @@ internal static class ArrayBlobWriter
                 // null row is zero, zero always fits, so a null is never a patch.
                 if (patching)
                 {
-                    for (int i = 0; i < count; i++)
-                    {
-                        ulong encoded = wide[i];
-                        if (encoded >= limit)
-                        {
-                            patchIndices[found] = start + i;
-                            patchValues[found] = encoded;
-                            found++;
-                        }
-                    }
+                    found = FindPatches(wide[..count], limit, start, patchIndices, patchValues, found);
                 }
 
                 if (blockBytes > 0)
@@ -587,6 +578,69 @@ internal static class ArrayBlobWriter
             wide[i] = BitPackPlan.Encode(
                 ulong.CreateTruncating(block[i]), plan.Transform, plan.Reference, elementBits);
         }
+    }
+
+    /// <summary>
+    /// The exceptions of one transformed block, found eight values at a time: an unsigned
+    /// <c>v ≥ 2^width</c> mask over two loads, and a scalar walk only of the eight that hold one.
+    /// </summary>
+    /// <remarks>
+    /// Exceptions are rare by construction — the chooser priced every one — so the common step is
+    /// two compares, an OR and a test. A found array that would overflow is left to the caller's
+    /// count check, which names both counts.
+    /// </remarks>
+    /// <returns>The patches found so far, this block's included.</returns>
+    private static int FindPatches(
+        ReadOnlySpan<ulong> block, ulong limit, int start, int[] indices, ulong[] values, int found)
+    {
+        const int Step = 8;
+        if (!Vector128.IsHardwareAccelerated)
+        {
+            return CollectPatches(block, limit, start, indices, values, found);
+        }
+
+        Vector128<ulong> bound = Vector128.Create(limit - 1);
+        ref ulong first = ref MemoryMarshal.GetReference(block);
+        int i = 0;
+        for (; i + Step <= block.Length; i += Step)
+        {
+            Vector128<ulong> any =
+                Vector128.GreaterThan(Vector128.LoadUnsafe(ref first, (nuint)i), bound)
+                | Vector128.GreaterThan(Vector128.LoadUnsafe(ref first, (nuint)(i + 2)), bound)
+                | Vector128.GreaterThan(Vector128.LoadUnsafe(ref first, (nuint)(i + 4)), bound)
+                | Vector128.GreaterThan(Vector128.LoadUnsafe(ref first, (nuint)(i + 6)), bound);
+            if (any == Vector128<ulong>.Zero)
+            {
+                continue;
+            }
+
+            found = CollectPatches(block.Slice(i, Step), limit, start + i, indices, values, found);
+        }
+
+        return CollectPatches(block[i..], limit, start + i, indices, values, found);
+    }
+
+    /// <summary>The scalar walk: every value at or above the limit, in order.</summary>
+    private static int CollectPatches(
+        ReadOnlySpan<ulong> block, ulong limit, int start, int[] indices, ulong[] values, int found)
+    {
+        for (int i = 0; i < block.Length; i++)
+        {
+            if (block[i] < limit)
+            {
+                continue;
+            }
+
+            if (found < indices.Length)
+            {
+                indices[found] = start + i;
+                values[found] = block[i];
+            }
+
+            found++;
+        }
+
+        return found;
     }
 
     /// <summary>The transform of a block that may hold nulls, row by row.</summary>

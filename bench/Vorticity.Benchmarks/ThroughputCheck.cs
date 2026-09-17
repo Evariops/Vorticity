@@ -769,7 +769,7 @@ internal static class ThroughputCheck
     [
         ("alp", 0.41),   // 3 passes, spread 0.40-0.41; was 0.47, -13.7%
         ("alp_no_patches", 0.62),   // 3 passes, spread 0.61-0.62; was 0.71, -13.1%
-        ("alp_patched_no_chunk_offsets", 0.55),   // 3 passes, spread 0.54-0.55; was 0.64, -14.0%
+        ("alp_patched_no_chunk_offsets", 0.53),   // 3 passes, spread 0.52-0.53; was 0.55, -3.2%
         ("alprd", 0.25),   // 3 passes, spread 0.23-0.25; was 0.30, -17.8%
         ("bool", 0.32),   // 3 passes; TENU à la main : --rebase proposait +2.5 %, et une référence ne monte jamais
         ("bool_bit_offset3", 0.42),   // 3 passes; TENU à la main : --rebase proposait +8.7 %, et une référence ne monte jamais
@@ -794,7 +794,7 @@ internal static class ThroughputCheck
         ("dict_u8_codes", 1.24),   // 3 passes, spread 1.18-1.24; was 1.72, -27.9%
         ("ext", 0.068),   // 3 passes, spread 0.063-0.068; was 0.070, -3.2%
         ("fastlanes_bitpacked", 0.73),   // 3 passes, spread 0.71-0.73; was 1.33, -45.0%. 7i : la transformation par registres à la charge
-        ("fastlanes_bitpacked_patched_no_chunk_offsets", 0.78),   // 3 passes, spread 0.75-0.78; was 1.14, -31.8%
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 0.64),   // 3 passes, spread 0.63-0.64; was 0.78, -18.3%. 7j : la détection des patches par registres
         ("fastlanes_delta", 0.18),   // 3 passes, spread 0.17-0.18; was 0.19, -2.8%
         ("fastlanes_for", 0.64),   // 3 passes, spread 0.61-0.64; was 0.88, -27.6%
         ("fastlanes_rle", 0.91),   // 3 passes, spread 0.88-0.91; was 0.93, -2.2%
