@@ -533,6 +533,32 @@ a take and the predicate is not evaluated; a larger one is pruned at block granu
 collisions. Kept as an option for very long keys; in practice §5.1 plus §6.1 cover the same
 queries at a fraction of the size, and this kind is measured before it is implemented.
 
+**Measured, and not implemented (step 31, 2026-09-17).** One column of 200 000 keys, 25 blocks,
+one run per entry; the sorted runs' payload is what the file holds, the Bloom's is what the report
+says, and the hash index is priced at its floor: eight bytes of hash and four of row, neither of
+which compresses (a hash is noise by construction, and the rows follow the hash order).
+
+| keys | `sorted.runs` (exact rows, ranges, cursors) | `hash.rows` (superset rows) | `bloom.sbbf` (maybe, per block) |
+|---|---|---|---|
+| `tenant/…/session/…`, 64 B | **3,69 B/entry** | 12 | 3,98 |
+| hex of a 64-bit counter, 64 B | **11,77** | 12 | 3,98 |
+| six bits of entropy a character, 64 B | 50,79 | 12 | **3,98** |
+| the same, 128 B | 98,76 | 12 | **3,98** |
+| `tenant/…` cut to 16 B (97 distinct) | **0,01** | 12 | — (under the policy's floor) |
+
+The kind is never the best answer. Where keys carry structure — the shape a key column has when
+anyone asks for a key index — the sorted keys compress **below** the hashes, and they are exact.
+Where the keys are incompressible, the hashes do win over the sorted runs, four to eight times
+over, but the Bloom is three times smaller again for the equality the hash index answers, and what
+the hash index adds over it — the rows rather than the blocks — is what the sorted runs give
+exactly, with the ranges and the cursors ([12-index-reads.md](12-index-reads.md) §4). So a third
+kind would buy a band between two structures, at the price of a format id, a builder, a probe, a
+source and the superset re-evaluation path.
+
+What would reopen it: a measured workload of row-level lookups on incompressible long keys, where
+block granularity is not enough and 50 to 100 bytes an entry is refused. The design above is what
+it would be implemented from.
+
 ### 6.4 `vorticity.postings.ngram3.v1` — trigram → blocks
 
 §6.1 with trigrams as keys: the locating form of §5.2, for `LIKE '%…%'` and `CONTAINS` at block
