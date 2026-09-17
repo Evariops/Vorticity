@@ -1,10 +1,25 @@
 // Open-time policy. Every field here exists to remove I/O: a supplied DType removes the dtype
 // segment from the second-read decision, a supplied FileLength removes the length probe, and a
-// raised InitialReadSize can only reduce round trips (PHASE1-CONTRACTS.md §7.1).
+// raised InitialReadSize can only reduce round trips (PHASE1-CONTRACTS.md §7.1). `TornTail` is the
+// one that can add I/O, and only on a file that would otherwise not open.
 using System;
 using Vorticity.Types;
 
 namespace Vorticity.File;
+
+/// <summary>What an open does with a file whose tail does not parse (docs/13-dataset.md §12).</summary>
+public enum VortexTornTailPolicy
+{
+    /// <summary>
+    /// The default: a file that begins as a Vortex file and whose tail does not parse opens at the
+    /// last whole version before it -- what a torn append leaves -- and says so in
+    /// <see cref="VortexFile.TornTail"/>.
+    /// </summary>
+    ReadPrevious = 0,
+
+    /// <summary>The tail must parse, or the open fails.</summary>
+    Refuse = 1,
+}
 
 /// <summary>Options for <see cref="VortexFile.OpenAsync(string, VortexOpenOptions, System.Threading.CancellationToken)"/>.</summary>
 public sealed class VortexOpenOptions
@@ -77,4 +92,29 @@ public sealed class VortexOpenOptions
             _read = value;
         }
     }
+
+    /// <summary>
+    /// What to do with a file whose tail does not parse: open the last whole version before it, the
+    /// default, or refuse.
+    /// </summary>
+    /// <remarks>
+    /// An in-place append is not atomic (docs/11-write-strategy.md §3.8): a tear leaves the old file
+    /// whole before the torn bytes. Reading that version is safe -- it is a file that was complete
+    /// -- and <see cref="VortexFile.TornTail"/> says it happened. Finding it walks back from the end
+    /// for an end-of-file record, so it costs reads in proportion to the torn bytes; a file that does
+    /// not begin with the Vortex magic is refused without the walk.
+    /// </remarks>
+    public VortexTornTailPolicy TornTail { get; init; }
+
+    /// <summary>These options for the first <paramref name="fileLength"/> bytes, refusing a torn tail there.</summary>
+    /// <param name="fileLength">The prefix's length.</param>
+    internal VortexOpenOptions ForPrefix(long fileLength) => new VortexOpenOptions
+    {
+        DType = DType,
+        FileLength = fileLength,
+        InitialReadSize = InitialReadSize,
+        LeaveSourceOpen = LeaveSourceOpen,
+        Read = Read,
+        TornTail = VortexTornTailPolicy.Refuse,
+    };
 }

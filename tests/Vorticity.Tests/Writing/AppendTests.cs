@@ -237,7 +237,21 @@ public sealed class AppendTests
                 stream.SetLength(after - 37);
             }
 
-            await Assert.ThrowsAnyAsync<Exception>(async () => await VortexFile.OpenAsync(path));
+            // The torn file opens at the version before the append and says so (13 §12); refusing
+            // is an option, and nothing is written behind the tear.
+            await using (VortexFile torn = await VortexFile.OpenAsync(path))
+            {
+                Assert.Equal((after - 37, before), (torn.TornTail!.FileLength, torn.TornTail.ValidLength));
+                Assert.Equal(before, torn.FileLength);
+                Assert.Equal(rows, await RowsOf(torn));
+            }
+
+            await Assert.ThrowsAsync<VortexFormatException>(async () => await VortexFile.OpenAsync(
+                path, new VortexOpenOptions { TornTail = VortexTornTailPolicy.Refuse }));
+            VortexFormatException refused = await Assert.ThrowsAsync<VortexFormatException>(
+                async () => await VortexFileWriter.AppendAsync(path));
+            Assert.Contains("torn tail", refused.Message, StringComparison.Ordinal);
+
             VortexRepairResult repaired = await VortexFileRepair.RepairAsync(path);
             Assert.True(repaired.Truncated);
             Assert.Equal(before, repaired.Length);

@@ -459,6 +459,11 @@ appended; the old postscript becomes dead bytes. Three rules make it exact:
 An append is not atomic on its own: the caller is single-writer and flushes; a torn append leaves
 the file's tail invalid. The directory records the previous end of file, and `vxdump --repair`
 truncates a torn file to the last valid postscript found by scanning back for the EOF marker.
+
+*Since step 25 (13 §12), a torn file opens without repair.* The open finds that same postscript,
+reads the version it ends, and reports the tear in `VortexFile.TornTail`.
+`VortexOpenOptions.TornTail = Refuse` keeps the old failure. An append, an indexing pass or a
+sidecar refuses a torn file until it is repaired.
 Object stores that cannot append (S3) take the sidecar path of [10-indexes.md](10-indexes.md) §8
 or a rewrite.
 

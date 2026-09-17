@@ -153,6 +153,13 @@ internal static class Program
             .Append("rows      ").Append(Text(file.RowCount)).Append('\n')
             .Append("tabular   ").Append(file.IsTabular ? "yes" : "no").Append('\n')
             .Append("identity  ").Append(file.Identity is { } identity ? identity.ToString("N") : "none").Append('\n');
+        if (file.TornTail is { } torn)
+        {
+            // The version read is the last whole one: say how much follows it, and why it did not open.
+            output.Append("torn      ").Append(Text(torn.FileLength - torn.ValidLength))
+                .Append(" bytes after the last whole version, of ").Append(Text(torn.FileLength))
+                .Append(" (").Append(torn.Reason).Append("); --repair truncates them\n");
+        }
     }
 
     private static void Schema(StringBuilder output, VortexFile file)

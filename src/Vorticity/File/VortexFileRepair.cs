@@ -7,6 +7,10 @@
 // truncates to the first prefix that opens. The old directory's `previous_eof` is not needed to
 // find it -- the torn directory could not be read anyway -- and the walk also finds the file of an
 // append that tore after its postscript but before its last flush.
+//
+// THE SAME WALK OPENS A TORN FILE WITHOUT REPAIRING IT (13 §12, step 25): `VortexFile.OpenAsync`
+// falls back to the prefix it finds, reads it as the file, and records the tear in
+// `VortexFile.TornTail`. Nothing is written; the repair stays the caller's decision.
 using System;
 using System.Buffers.Binary;
 using System.IO;
@@ -23,6 +27,12 @@ namespace Vorticity.File;
 /// <param name="Length">Its length after.</param>
 /// <param name="Truncated">Whether bytes were cut.</param>
 public sealed record VortexRepairResult(long OriginalLength, long Length, bool Truncated);
+
+/// <summary>A file opened at the last whole version before a torn tail.</summary>
+/// <param name="FileLength">The file's length on disk.</param>
+/// <param name="ValidLength">The length of the version read: the bytes after it are the torn ones.</param>
+/// <param name="Reason">Why the tail did not open.</param>
+public sealed record VortexTornTail(long FileLength, long ValidLength, string Reason);
 
 /// <summary>Truncates a file whose tail a torn append left invalid.</summary>
 public static class VortexFileRepair
@@ -77,42 +87,92 @@ public static class VortexFileRepair
                 return length;
             }
 
-            // Walk back window by window; a marker may straddle two windows, so they overlap.
-            int magicLength = VortexFileFormat.MagicBytes.Length;
-            long high = length;
-            while (high > VortexFileFormat.EofSize)
+            long end = await PreviousEndAsync(source, length, cancellationToken).ConfigureAwait(false);
+            if (end > 0)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                long low = Math.Max(0, high - Window);
-                int size = (int)(high - low);
-                long found;
-                using (SegmentOwner owner = await source.ReadRangeAsync(low, size, 1, cancellationToken).ConfigureAwait(false))
-                {
-                    found = LastMarker(owner.Buffer, low, length);
-                }
-
-                if (found > 0)
-                {
-                    if (await OpensAsync(source, found, cancellationToken).ConfigureAwait(false))
-                    {
-                        return found;
-                    }
-
-                    // Not a file end after all: keep walking below it.
-                    high = found - 1;
-                    continue;
-                }
-
-                if (low == 0)
-                {
-                    break;
-                }
-
-                high = low + magicLength;
+                return end;
             }
         }
 
         throw new VortexFormatException($"{path} holds no valid Vortex file at any length: nothing to repair to.");
+    }
+
+    /// <summary>
+    /// The end of the longest proper prefix of <paramref name="source"/> that opens as a Vortex file,
+    /// or -1 when none does.
+    /// </summary>
+    /// <param name="source">The file.</param>
+    /// <param name="length">Its length.</param>
+    /// <param name="cancellationToken">Cancels the walk.</param>
+    internal static async ValueTask<long> PreviousEndAsync(ISegmentSource source, long length, CancellationToken cancellationToken)
+    {
+        // Walk back window by window; a marker may straddle two windows, so they overlap.
+        int magicLength = VortexFileFormat.MagicBytes.Length;
+        long high = length;
+        while (high > VortexFileFormat.EofSize)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            long low = Math.Max(0, high - Window);
+            int size = (int)(high - low);
+            long found;
+            using (SegmentOwner owner = await source.ReadRangeAsync(low, size, 1, cancellationToken).ConfigureAwait(false))
+            {
+                found = LastMarker(owner.Buffer, low, length);
+            }
+
+            if (found > 0)
+            {
+                if (await OpensAsync(source, found, cancellationToken).ConfigureAwait(false))
+                {
+                    return found;
+                }
+
+                // Not a file end after all: keep walking below it.
+                high = found - 1;
+                continue;
+            }
+
+            if (low == 0)
+            {
+                break;
+            }
+
+            high = low + magicLength;
+        }
+
+        return -1;
+    }
+
+    /// <summary>Refuses to write behind a torn tail: what would follow it would follow garbage.</summary>
+    /// <param name="path">The file.</param>
+    /// <param name="file">The file, opened.</param>
+    /// <param name="what">What was asked: "an append", "an index".</param>
+    /// <exception cref="VortexFormatException">The file opened at a version before a torn tail.</exception>
+    internal static void ThrowIfTorn(string path, VortexFile file, string what)
+    {
+        if (file.TornTail is { } torn)
+        {
+            throw new VortexFormatException(
+                $"{path} has a torn tail: the {torn.FileLength - torn.ValidLength} bytes after its last whole " +
+                $"version do not parse ({torn.Reason}). {what} is written behind a whole file only; " +
+                "VortexFileRepair.RepairAsync truncates the torn bytes.");
+        }
+    }
+
+    /// <summary>Whether <paramref name="source"/> begins with the Vortex magic, as every file this format writes does.</summary>
+    /// <param name="source">The file.</param>
+    /// <param name="length">Its length.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    internal static async ValueTask<bool> BeginsAsVortexAsync(ISegmentSource source, long length, CancellationToken cancellationToken)
+    {
+        int magicLength = VortexFileFormat.MagicBytes.Length;
+        if (length < VortexFileFormat.EofSize + magicLength)
+        {
+            return false;
+        }
+
+        using SegmentOwner head = await source.ReadRangeAsync(0, magicLength, 1, cancellationToken).ConfigureAwait(false);
+        return head.Buffer.Span.SequenceEqual(VortexFileFormat.MagicBytes);
     }
 
     /// <summary>
@@ -141,9 +201,14 @@ public static class VortexFileRepair
     {
         try
         {
-            PrefixSource prefix = new PrefixSource(source, length);
-            VortexFile file = await VortexFile.OpenAsync(prefix, new VortexOpenOptions { LeaveSourceOpen = true }, cancellationToken)
-                .ConfigureAwait(false);
+            PrefixSource prefix = new PrefixSource(source, length, ownsInner: false);
+            VortexOpenOptions options = new VortexOpenOptions
+            {
+                LeaveSourceOpen = true,
+                FileLength = length,
+                TornTail = VortexTornTailPolicy.Refuse,
+            };
+            VortexFile file = await VortexFile.OpenAsync(prefix, options, cancellationToken).ConfigureAwait(false);
             await file.DisposeAsync().ConfigureAwait(false);
             return true;
         }
@@ -158,7 +223,10 @@ public static class VortexFileRepair
     }
 
     /// <summary>The first <c>length</c> bytes of a source, as if the file ended there.</summary>
-    private sealed class PrefixSource(ISegmentSource inner, long length) : ISegmentSource
+    /// <param name="inner">The whole file.</param>
+    /// <param name="length">Where the prefix ends.</param>
+    /// <param name="ownsInner">Whether disposing the prefix disposes the file.</param>
+    internal sealed class PrefixSource(ISegmentSource inner, long length, bool ownsInner) : ISegmentSource
     {
         public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken) => new ValueTask<long>(length);
 
@@ -189,7 +257,7 @@ public static class VortexFileRepair
             return inner.ReadRangeAsync(offset, (int)Math.Min(length1, length - offset), alignment, cancellationToken);
         }
 
-        public ValueTask DisposeAsync() => default;
+        public ValueTask DisposeAsync() => ownsInner ? inner.DisposeAsync() : default;
 
         private void Check(SegmentSpec spec)
         {

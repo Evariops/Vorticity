@@ -60,6 +60,7 @@ public static class VortexFileIndexer
             VortexFile file = await VortexFile.OpenAsync(path, cancellationToken).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))
             {
+                VortexFileRepair.ThrowIfTorn(path, file, "An index");
                 length = file.FileLength;
                 FileStream tail = new FileStream(scratch, FileMode.CreateNew, FileAccess.Write, FileShare.None);
                 StreamSegmentSink sink = new StreamSegmentSink(tail, ownsStream: true, length);
@@ -132,6 +133,7 @@ public static class VortexFileIndexer
         VortexFile file = await VortexFile.OpenAsync(path, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
         {
+            VortexFileRepair.ThrowIfTorn(path, file, "A sidecar");
             FileStream stream = new FileStream(sidecarPath, FileMode.Create, FileAccess.Write, FileShare.None);
             StreamSegmentSink sink = new StreamSegmentSink(stream, ownsStream: true);
             await using (sink.ConfigureAwait(false))

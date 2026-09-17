@@ -142,15 +142,90 @@ public sealed partial class VortexFile : IAsyncDisposable
         return OpenCoreAsync(source, options, ownsSource: !options.LeaveSourceOpen, cancellationToken);
     }
 
+    /// <summary>
+    /// Opens the file, or, when its tail does not parse and the policy allows it, the last whole
+    /// version before the tear (13 §12). The source is disposed on failure when the file would own it.
+    /// </summary>
     private static async ValueTask<VortexFile> OpenCoreAsync(
         ISegmentSource source, VortexOpenOptions options, bool ownsSource, CancellationToken cancellationToken)
+    {
+        try
+        {
+            try
+            {
+                return await OpenTailAsync(source, options, ownsSource, fileLength: -1, cancellationToken).ConfigureAwait(false);
+            }
+            catch (VortexFormatException torn) when (options.TornTail == VortexTornTailPolicy.ReadPrevious)
+            {
+                VortexFile? previous = await OpenPreviousAsync(source, options, ownsSource, torn, cancellationToken).ConfigureAwait(false);
+                if (previous is null)
+                {
+                    throw;
+                }
+
+                return previous;
+            }
+        }
+        catch
+        {
+            if (ownsSource)
+            {
+                try
+                {
+                    await source.DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // Ignored: the open is already failing, and its diagnosis is worth more.
+                }
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The last whole version of a file whose tail did not parse, or null when the file does not
+    /// begin as a Vortex file or no prefix of it opens.
+    /// </summary>
+    private static async ValueTask<VortexFile?> OpenPreviousAsync(
+        ISegmentSource source, VortexOpenOptions options, bool ownsSource, VortexFormatException torn,
+        CancellationToken cancellationToken)
+    {
+        long length = options.FileLength >= 0
+            ? options.FileLength
+            : await source.GetLengthAsync(cancellationToken).ConfigureAwait(false);
+        if (!await VortexFileRepair.BeginsAsVortexAsync(source, length, cancellationToken).ConfigureAwait(false))
+        {
+            return null;
+        }
+
+        long end = await VortexFileRepair.PreviousEndAsync(source, length, cancellationToken).ConfigureAwait(false);
+        if (end <= 0)
+        {
+            return null;
+        }
+
+        // The prefix owns the source when the file would have: the file disposes the prefix.
+        VortexFileRepair.PrefixSource prefix = new VortexFileRepair.PrefixSource(source, end, ownsInner: ownsSource);
+        VortexFile file = await OpenTailAsync(prefix, options.ForPrefix(end), ownsSource, end, cancellationToken).ConfigureAwait(false);
+        file.TornTail = new VortexTornTail(length, end, torn.Message);
+        return file;
+    }
+
+    /// <summary>Parses the tail of the file as it stands; leaves the source to the caller on failure.</summary>
+    private static async ValueTask<VortexFile> OpenTailAsync(
+        ISegmentSource source, VortexOpenOptions options, bool ownsSource, long fileLength, CancellationToken cancellationToken)
     {
         SegmentOwner? tail = null;
         try
         {
-            long fileLength = options.FileLength >= 0
-                ? options.FileLength
-                : await source.GetLengthAsync(cancellationToken).ConfigureAwait(false);
+            if (fileLength < 0)
+            {
+                fileLength = options.FileLength >= 0
+                    ? options.FileLength
+                    : await source.GetLengthAsync(cancellationToken).ConfigureAwait(false);
+            }
 
             if (fileLength < VortexFileFormat.EofSize)
             {
@@ -229,18 +304,6 @@ public sealed partial class VortexFile : IAsyncDisposable
             catch (Exception)
             {
                 // Ignored: the open is already failing.
-            }
-
-            if (ownsSource)
-            {
-                try
-                {
-                    await source.DisposeAsync().ConfigureAwait(false);
-                }
-                catch (Exception)
-                {
-                    // Ignored: the open is already failing.
-                }
             }
 
             throw;
@@ -945,6 +1008,31 @@ public sealed partial class VortexFile : IAsyncDisposable
             return FileIdentity.Find(_metadataKeysUtf8, _metadataSegments, _tail.Buffer.Span, _tailOffset);
         }
     }
+
+    /// <summary>
+    /// When the file's tail did not parse and the open fell back to the last whole version before
+    /// it (<see cref="VortexOpenOptions.TornTail"/>): the file's length, the version's, and why;
+    /// <see langword="null"/> for a file that opened as it stands.
+    /// </summary>
+    /// <remarks>
+    /// Such a file reads as the version it was before the torn append, and everything it answers is
+    /// that version's: rows, statistics, indexes, <see cref="FileLength"/>. An append or an
+    /// indexing pass refuses it; <see cref="VortexFileRepair.RepairAsync"/> truncates the torn bytes.
+    /// Kept beside the file rather than in it, so that a file that opened whole pays nothing.
+    /// </remarks>
+    public VortexTornTail? TornTail
+    {
+        get => TornTails.TryGetValue(this, out VortexTornTail? torn) ? torn : null;
+        private set
+        {
+            if (value is not null)
+            {
+                TornTails.AddOrUpdate(this, value);
+            }
+        }
+    }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<VortexFile, VortexTornTail> TornTails = [];
 
     /// <summary>The arena that owns <see cref="Schema"/>'s nodes. Lives as long as the file.</summary>
     public DTypeArena Types => _schema.Arena;

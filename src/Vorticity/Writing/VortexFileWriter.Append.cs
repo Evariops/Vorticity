@@ -95,6 +95,7 @@ public sealed partial class VortexFileWriter
         VortexFile file = await VortexFile.OpenAsync(path, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
         {
+            VortexFileRepair.ThrowIfTorn(path, file, "An append");
             plan = await AppendPlan.ReadAsync(file, options, cancellationToken).ConfigureAwait(false);
         }
 

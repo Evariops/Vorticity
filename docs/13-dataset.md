@@ -618,6 +618,25 @@ also records the critical path. Data objects are written through the store by a 
 | identity | none | `uid` + store token | `uid` per postscript write, store token, writer-computed XXH3-128 |
 | S3 | none | a client in the repository | **not this library**; `IObjectStore` only |
 
+**As delivered (step 25): the torn-tail fallback.**
+- **When it applies.** `VortexFile.OpenAsync` falls back when the tail does not parse (a
+  `VortexFormatException`) and the file begins with the Vortex magic. It then walks back from the
+  end for an end-of-file record whose prefix opens, which is `VortexFileRepair`'s walk, and opens
+  that prefix as the file.
+- **What it says.** `VortexFile.TornTail` gives the file's length, the version's length and the
+  tail's error. The version reads as itself: rows, statistics, indexes, `FileLength`. `vxdump`
+  prints the tear. The field lives in a weak table beside the file, so a whole file pays nothing
+  for it.
+- **What it costs.** A whole file opens with no read more. A file that is not Vortex is refused
+  after one more read of four bytes. The walk reads in proportion to the torn bytes; it is a
+  recovery path, not a read path.
+- **What it refuses.** `VortexOpenOptions.TornTail = Refuse` keeps the failure, and so does a file
+  with no whole version before its tail. An in-place append, an in-place indexing pass and a
+  sidecar all refuse a torn file and name `VortexFileRepair.RepairAsync`: nothing is written
+  behind garbage.
+- **What it does not use.** The new directory's `previous_eof` is never read: it is in the torn
+  bytes. The walk finds the old end-of-file record, which the append never overwrote.
+
 ## 13. The algorithms considered
 
 ### A. Metadata structure
