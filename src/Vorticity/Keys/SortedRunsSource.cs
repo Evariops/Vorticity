@@ -916,6 +916,11 @@ internal sealed partial class SortedRunsSource : KeySource
                 run.RowLimit);
         }
 
+        if (_file.ReadOptions.VerifyStatistics)
+        {
+            Verify(decoded, run.Segments[index]);
+        }
+
         decoded = _file.RunCache.Add(keys.Offset, decoded);
         run.Probe = decoded;
         run.ProbeIndex = index;
@@ -989,6 +994,41 @@ internal sealed partial class SortedRunsSource : KeySource
 
         return new RunSegment(keys, offsets, rows, entries);
     }
+
+    /// <summary>
+    /// The Class II checks <see cref="VortexReadOptions.VerifyStatistics"/> asks for
+    /// (docs/12-index-reads.md §13): a segment's entries in `(key, row)` order — keys strictly
+    /// ascending in a run without rows, where a key is unique — and every key inside the bounds
+    /// the directory states for the segment. Without the option a lie gives a wrong walk and never
+    /// a fault; with it, the walk refuses to go on.
+    /// </summary>
+    private void Verify(RunSegment segment, KeySegment declared)
+    {
+        for (int i = 0; i < segment.Count; i++)
+        {
+            ReadOnlySpan<byte> key = KeyAt(segment, i);
+            if (_layout.Compare(key, declared.Min) < 0 || _layout.Compare(key, declared.Max) > 0)
+            {
+                throw Lie($"entry {i} lies outside the bounds the directory states for its segment");
+            }
+
+            if (i == 0)
+            {
+                continue;
+            }
+
+            int order = _layout.Compare(KeyAt(segment, i - 1), key);
+            bool ordered = order < 0
+                || (order == 0 && segment.Rows is { } rows && rows[i - 1] < rows[i]);
+            if (!ordered)
+            {
+                throw Lie($"entries {i - 1} and {i} are out of order");
+            }
+        }
+    }
+
+    private static VortexFormatException Lie(string what) =>
+        new VortexFormatException($"A key index run segment does not hold what it claims: {what}.");
 
     /// <summary>Payload arrays per segment of this source's runs.</summary>
     private int Stride => HasRows ? KeyRunOptions.SortedStride : KeyRunOptions.PostingsStride;
