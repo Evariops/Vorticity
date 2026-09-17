@@ -151,6 +151,50 @@ public sealed class BlockStatsTests
     }
 
     /// <summary>
+    /// The same, with enough rows to take the lanes: zeros of both signs and NaNs at every lane
+    /// position, so a vector minimum that did not order the zeros, or let a NaN through, shows.
+    /// </summary>
+    [Theory]
+    [InlineData(PType.F32, true)]
+    [InlineData(PType.F32, false)]
+    [InlineData(PType.F64, true)]
+    [InlineData(PType.F64, false)]
+    public void SignedZerosAndNaNsAreHandledInTheLanes(PType ptype, bool negativeFirst)
+    {
+        const int length = 67;
+        for (int negative = 0; negative < 8; negative++)
+        {
+            double[] values = new double[length];
+            for (int i = 0; i < length; i++)
+            {
+                values[i] = i % 5 == 3 ? double.NaN : (negativeFirst ? 0.0 : -0.0);
+            }
+
+            values[negative] = negativeFirst ? -0.0 : 0.0;
+            values[length - 1 - negative] = negativeFirst ? -0.0 : 0.0;
+
+            CanonicalArena arena = new CanonicalArena();
+            DTypeArena types = new DTypeArena();
+            int width = ptype.ByteWidth();
+            VortexBuffer buffer = arena.Allocate(length * width, width, out Span<byte> bytes);
+            for (int i = 0; i < length; i++)
+            {
+                Write(ptype, bytes.Slice(i * width, width), values[i]);
+            }
+
+            int node = arena.AddPrimitive(types.Primitive(ptype, Nullability.NonNullable), length, Validity.NonNullable, ptype, buffer);
+            BlockStats stats = default;
+            BlockStatsPass.Accumulate(arena, node, 0, length, ref stats);
+
+            Assert.True(stats.HasBounds);
+            Assert.True(double.IsNegative(stats.Min.FloatValue), $"{ptype} at {negative}: min {stats.Min.FloatValue}");
+            Assert.False(double.IsNegative(stats.Max.FloatValue), $"{ptype} at {negative}: max {stats.Max.FloatValue}");
+            Assert.Equal(0.0, stats.Min.FloatValue);
+            Assert.Equal(0.0, stats.Max.FloatValue);
+        }
+    }
+
+    /// <summary>
     /// The constant form is summarized without materializing the column it exists to not build.
     /// </summary>
     [Fact]

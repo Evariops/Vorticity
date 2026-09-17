@@ -1876,7 +1876,8 @@ internal static class BlockStatsPass
 
         if (mask.AllValid)
         {
-            for (int i = 0; i < values.Length; i++)
+            int i = FloatLanes(values, ref min, ref max, ref any);
+            for (; i < values.Length; i++)
             {
                 T value = values[i];
                 if (T.IsNaN(value))
@@ -1914,6 +1915,67 @@ internal static class BlockStatsPass
         {
             stats.MergeFloat(double.CreateTruncating(min), double.CreateTruncating(max));
         }
+    }
+
+    /// <summary>
+    /// The bounds of an all-valid float range, a register at a time (docs/11-write-strategy.md
+    /// §4.1, "floats with NaN"): a NaN lane is replaced by the neutral element -- +∞ for the
+    /// minimum, -∞ for the maximum -- before `Min` and `Max`, which then follow <c>Math.Min</c>'s
+    /// rule on the two zeros.
+    /// </summary>
+    /// <returns>Where the scalar tail starts.</returns>
+    /// <remarks>
+    /// Two accumulators per extreme, as <see cref="Bounds{T}"/> has, for its reason: the loop is
+    /// latency-bound. Whether any lane held a number is an OR of the self-equality masks, reduced
+    /// once at the end.
+    /// </remarks>
+    private static int FloatLanes<T>(ReadOnlySpan<T> values, ref T min, ref T max, ref bool any)
+        where T : unmanaged, IFloatingPointIeee754<T>
+    {
+        int lanes = Vector128<T>.IsSupported ? Vector128<T>.Count : 0;
+        if (!Vector128.IsHardwareAccelerated || lanes == 0 || values.Length < lanes * 2)
+        {
+            return 0;
+        }
+
+        ref T head = ref MemoryMarshal.GetReference(values);
+        Vector128<T> positive = Vector128.Create(T.PositiveInfinity);
+        Vector128<T> negative = Vector128.Create(T.NegativeInfinity);
+        Vector128<T> lowA = positive;
+        Vector128<T> lowB = positive;
+        Vector128<T> highA = negative;
+        Vector128<T> highB = negative;
+        Vector128<T> numbers = Vector128<T>.Zero;
+        int step = lanes * 2;
+        int i = 0;
+        for (; i + step <= values.Length; i += step)
+        {
+            Vector128<T> a = Vector128.LoadUnsafe(ref head, (nuint)i);
+            Vector128<T> b = Vector128.LoadUnsafe(ref head, (nuint)(i + lanes));
+            Vector128<T> realA = Vector128.Equals(a, a);
+            Vector128<T> realB = Vector128.Equals(b, b);
+            numbers |= realA | realB;
+            lowA = Vector128.Min(lowA, Vector128.ConditionalSelect(realA, a, positive));
+            lowB = Vector128.Min(lowB, Vector128.ConditionalSelect(realB, b, positive));
+            highA = Vector128.Max(highA, Vector128.ConditionalSelect(realA, a, negative));
+            highB = Vector128.Max(highB, Vector128.ConditionalSelect(realB, b, negative));
+        }
+
+        if (numbers == Vector128<T>.Zero)
+        {
+            return i;
+        }
+
+        any = true;
+        Vector128<T> low = Vector128.Min(lowA, lowB);
+        Vector128<T> high = Vector128.Max(highA, highB);
+        for (int lane = 0; lane < lanes; lane++)
+        {
+            min = Smaller(min, low.GetElement(lane));
+            max = Larger(max, high.GetElement(lane));
+        }
+
+        return i;
     }
 
     /// <summary>F16, widened to <see cref="float"/> - exactly, since every Half has one.</summary>
