@@ -653,6 +653,16 @@ ALP. Order of magnitude on a `u32` block: the fused pass at ~2 to 3 ns per value
 | throughput | `--throughput --write --check`, the references lowered behind each stage; the five-configuration probe of WRITE-ARCHITECTURE.md §1.2 in `bench/` |
 | SIMD | every kernel run under `DOTNET_EnableHWIntrinsic=0` in the suite, results identical |
 
+**As delivered (step 34), on the three rows that had no test.** The Bloom row's Parquet half is
+`ParquetBloomVectorTests` against the `parquet` crate's own `Sbbf` (10 §10 says how). The
+allocations row's wide schema is `WriteAllocationTests.AThousandColumnsCostAThousandStatesAndOneScratch`,
+which measures a hundred columns and a thousand of the same 64 rows and divides the difference:
+**19 484 bytes a column**, a seventh of §3.7's ~130 KiB scratch, and unchanged at 512 rows a column,
+which is the shape §3.7 claims. Of that, 13 366 is the writer's own state, 5 806 is `Auto`'s index
+state and its abandoned Bloom builder, 312 the compressor. The throughput row's probe is
+`bench/Vorticity.Benchmarks -- --probe`, the five configurations of WRITE-ARCHITECTURE.md §1.2 at
+the median of five.
+
 ### 5.3 Targets
 
 Measured on the corpus, single thread, M4 Pro, against the Rust numbers of §1; **projections from

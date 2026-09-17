@@ -31,6 +31,11 @@ anyhow = "1"
 # Only for `FutureExt::catch_unwind`: several 0.86.1 writer limitations surface as panics
 # rather than errors, and one unsupported recipe must not take the whole corpus run down.
 futures-lite = "2"
+# Ground truth for the Parquet-compatible Bloom variant (docs/10-indexes.md §10): the filter our
+# `BloomHash.XxHash64` writes must be bit-identical to a Parquet SBBF over the same keys, and the
+# only honest way to say that is to build one with Parquet's own implementation. Default features
+# off, so this pulls the format crate and not arrow; `bloom_filter::Sbbf` needs nothing else.
+parquet = { version = "=60.0.0", default-features = false }
 
 [profile.release]
 opt-level = 1

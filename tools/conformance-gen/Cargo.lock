@@ -596,6 +596,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "futures-lite",
+ "parquet",
  "pco",
  "serde",
  "serde_json",
@@ -1752,6 +1753,24 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "parquet"
+version = "60.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8af83d2940bc0510f9aef86d865f56fdc6095f87ab115ac885a80b7c5226d3ba"
+dependencies = [
+ "ahash",
+ "bytes",
+ "chrono",
+ "half",
+ "hashbrown 0.17.1",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "seq-macro",
+ "twox-hash",
 ]
 
 [[package]]

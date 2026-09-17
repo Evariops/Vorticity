@@ -213,6 +213,13 @@ internal static class Program
                 check, only, tpPasses, Array.IndexOf(args, "--rebase") >= 0).ConfigureAwait(false);
         }
 
+        if (args.Length > 0 && args[0] == "--probe")
+        {
+            // The decomposition of WRITE-ARCHITECTURE.md §1.2: one line per file, five columns.
+            string[] probed = [.. args[1..].Where(a => !a.StartsWith("--", StringComparison.Ordinal))];
+            return await WriteProbe.RunAsync(probed, CancellationToken.None).ConfigureAwait(false);
+        }
+
         if (args.Length > 1 && args[0] == "--profile")
         {
             double seconds = args.Length > 2 && double.TryParse(
@@ -387,6 +394,9 @@ internal static class Program
                                      --write           read back out to a discarding sink, ~8 min
                                      --recalibrate N   as above
           --ffi-check              rows AND decoded values agree with the reference, < 1 s
+          --probe [name…]          the write, decomposed: scan, serialize, transit, compress,
+                                     five configurations a file, median of five
+                                     (WRITE-ARCHITECTURE.md §1.2)
           --profile <name> [secs]  one scenario in a bare loop, for dotnet-trace
           --ab <dir> <file> [name…] two builds of the library in one process
                                      --after <dir>     judge a commit against its parent, not HEAD

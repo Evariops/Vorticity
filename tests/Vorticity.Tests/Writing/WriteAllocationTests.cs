@@ -26,10 +26,12 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.Scan;
 using Vorticity.Tests.Scan;
+using Vorticity.Types;
 using Vorticity.Writing;
 using Xunit;
 
@@ -267,6 +269,152 @@ public sealed class WriteAllocationTests
 
         Console.Out.Write(report.ToString());
         Assert.True(over.Count == 0, string.Join("\n", over) + "\n" + report);
+    }
+
+    /// <summary>Columns of the narrow and the wide schema of the axis below.</summary>
+    private const int NarrowColumns = 100;
+
+    private const int WideColumns = 1_000;
+
+    /// <summary>Rows each column of that axis holds, small so that state outweighs data.</summary>
+    private const int WideRows = 64;
+
+    /// <summary>
+    /// What one more column adds, in bytes: the ceiling that says the cost is a STATE and not a
+    /// scratch. The block scratch of 11 §3.7 is ~130 KiB and measured here is **19 484 B**, a
+    /// seventh of it, so the claim holds with room; the ceiling is set just above the measurement
+    /// as a ratchet, not as a target.
+    /// </summary>
+    /// <remarks>
+    /// THE BREAKDOWN, measured the same way at 64 and at 512 rows a column (2026-09-17), because a
+    /// number this size deserves to be named rather than merely bounded:
+    /// <list type="bullet">
+    /// <item>13 366 B is the writer's own per-column state, and it does not move with the rows —
+    /// identical at 64 and at 512, which is the shape claim this axis exists to make;</item>
+    /// <item>+5 806 B when `Auto` is on: the index writer's per-column arrays and the Bloom builder
+    /// it abandons at the first block (10 §5.5);</item>
+    /// <item>+312 B for the compressor.</item>
+    /// </list>
+    /// A thousand columns therefore cost about 19 MB to write once, against 130 KiB of scratch.
+    /// </remarks>
+    private const double PerColumnCeiling = 22_000.0;
+
+    /// <summary>The wide schema's own ratchet, in bytes. Measured at 19 003 288 B.</summary>
+    private const long WideCeiling = 20_000_000;
+
+    /// <summary>
+    /// The schema axis of 11 §3.7: "a schema of a thousand columns costs a thousand small states
+    /// and one scratch, not a thousand scratches".
+    /// </summary>
+    /// <remarks>
+    /// MARGINAL, NOT TOTAL, because the claim is about the shape of the cost rather than its size.
+    /// A per-file ceiling on a thousand columns would pass the day it was set whatever the shape,
+    /// so this measures a hundred columns and a thousand of the same rows and divides the
+    /// difference by the nine hundred: that number is what one column costs, and it is compared to
+    /// what one scratch costs. Sixty-four rows a column, so that a column's data (512 bytes) does
+    /// not drown its state.
+    /// <para>
+    /// `Auto` is on, as everywhere else in this file, so each column also carries the index
+    /// writer's per-column state and the Bloom builder it abandons at the first block. That is part
+    /// of what a column costs and belongs inside the ceiling.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AThousandColumnsCostAThousandStatesAndOneScratch()
+    {
+        ReleaseOnlyCeilings.Require();
+        Decoders.EnsureRegistered();
+
+        long narrow = await MeasureWide(NarrowColumns);
+        long wide = await MeasureWide(WideColumns);
+        double perColumn = (double)(wide - narrow) / (WideColumns - NarrowColumns);
+        string report = string.Create(
+            CultureInfo.InvariantCulture,
+            $"WIDE SCHEMA: {NarrowColumns} columns {narrow} B, {WideColumns} columns {wide} B, " +
+            $"{perColumn:F0} B per column ({WideRows} rows each)\n");
+        Console.Out.Write(report);
+
+        Assert.True(
+            perColumn <= PerColumnCeiling,
+            string.Create(
+                CultureInfo.InvariantCulture,
+                $"one column costs {perColumn:F0} B against a ceiling of {PerColumnCeiling:F0}\n{report}"));
+        Assert.True(
+            wide <= WideCeiling,
+            string.Create(CultureInfo.InvariantCulture, $"{wide} B against a ceiling of {WideCeiling}\n{report}"));
+    }
+
+    /// <summary>The floor of several writes of a schema of <paramref name="columns"/> i64 columns.</summary>
+    /// <param name="columns">The columns.</param>
+    private static async Task<long> MeasureWide(int columns)
+    {
+        for (int i = 0; i < Warmup; i++)
+        {
+            await WriteWide(columns);
+        }
+
+        long floor = long.MaxValue;
+        for (int i = 0; i < Runs; i++)
+        {
+            long before = GC.GetTotalAllocatedBytes(precise: true);
+            await WriteWide(columns);
+            floor = Math.Min(floor, GC.GetTotalAllocatedBytes(precise: true) - before);
+        }
+
+        return floor;
+    }
+
+    /// <summary>Writes one batch of a schema of <paramref name="columns"/> i64 columns.</summary>
+    /// <param name="columns">The columns.</param>
+    /// <remarks>
+    /// The arena and its buffers are built OUTSIDE the measured region for the previous file's
+    /// reason: this axis is about the writer, and materializing a thousand canonical columns is the
+    /// caller's cost. What is measured is the write of an already-built batch.
+    /// </remarks>
+    private static async Task WriteWide(int columns)
+    {
+        (DType schema, CanonicalArena arena, int root) = Wide(columns);
+        await using VortexFileWriter writer = VortexFileWriter.Create(new NullSink(), schema);
+        using (RecordBatch batch = new RecordBatch(arena, root, 0))
+        {
+            await writer.WriteAsync(batch, CancellationToken.None);
+        }
+
+        await writer.CompleteAsync(CancellationToken.None);
+    }
+
+    /// <summary>A struct of <paramref name="columns"/> i64 columns of <see cref="WideRows"/> rows.</summary>
+    /// <param name="columns">The columns.</param>
+    private static (DType Schema, CanonicalArena Arena, int Root) Wide(int columns)
+    {
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        string[] names = new string[columns];
+        DType[] fields = new DType[columns];
+        for (int column = 0; column < columns; column++)
+        {
+            names[column] = string.Create(CultureInfo.InvariantCulture, $"c{column:D4}");
+            fields[column] = i64;
+        }
+
+        DType schema = types.Struct(names, fields, Nullability.NonNullable);
+        CanonicalArena arena = new CanonicalArena();
+        int[] children = new int[columns];
+        for (int column = 0; column < columns; column++)
+        {
+            VortexBuffer buffer = arena.Allocate(WideRows * sizeof(long), sizeof(long), out Span<byte> bytes);
+            Span<long> values = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(bytes);
+            for (int row = 0; row < WideRows; row++)
+            {
+                // Values a chooser cannot fold away: a constant column would cost nothing to write
+                // and the axis would measure an empty writer.
+                values[row] = ((long)column * 7_919L) + (row * 104_729L);
+            }
+
+            children[column] = arena.AddPrimitive(i64, WideRows, Validity.NonNullable, PType.I64, buffer);
+        }
+
+        return (schema, arena, arena.AddStruct(schema, WideRows, Validity.NonNullable, children));
     }
 
     /// <summary>Rewrites one file through a discarding sink and returns the floor and its rows.</summary>

@@ -1055,6 +1055,15 @@ migration changes a payload byte.
   `WriteAllocationTests`; `Auto`'s cost on the write axis measured and bounded before it is the
   default.
 
+**As delivered (step 34), on the last clause of the false-positive row.** The Parquet-compatible
+variant is now checked against Parquet's own filter and not against our reading of its
+specification: `tools/conformance-gen/examples/gen_parquet_bloom_vectors.rs` builds each bitset with
+the `parquet` crate's `Sbbf` — its xxHash64 at seed 0, its block choice, its eight salts in its
+order, its sizing — over keys given as bytes, and `ParquetBloomVectorTests` reproduces every byte
+with `BloomHash.XxHash64` at 1, 8 and 64 blocks over INT32, INT64, DOUBLE and BYTE_ARRAY keys
+(26 cases). It also reads Parquet's bytes back and finds every key, and asserts that the default
+hash does **not** produce those bits, so the variant keeps a reason to exist.
+
 ---
 
 ## 11. Open questions
