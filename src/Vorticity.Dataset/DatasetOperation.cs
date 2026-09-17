@@ -16,6 +16,15 @@ namespace Vorticity.Dataset;
 /// <summary>What a commit intends. Re-applied as is after a rebase (§8.2).</summary>
 public abstract record DatasetOperation
 {
+    /// <summary>The level it acts on (§5.2); 0, where appends land, unless it says otherwise.</summary>
+    /// <remarks>
+    /// On the operation rather than in the committer, because a rebase re-applies the operation to
+    /// a version whose levels have moved: an indexer's fragment belongs to the object it was built
+    /// against, and which level that object sits in is part of naming it. A compaction says it per
+    /// input and per output instead, since reading one level and writing another is what it is.
+    /// </remarks>
+    public int Level { get; init; }
+
     /// <summary>Adds one data object to the dataset.</summary>
     /// <param name="Key">Its sort key in the tree.</param>
     /// <param name="Entry">What the leaf entry will say.</param>
@@ -32,11 +41,18 @@ public abstract record DatasetOperation
     public sealed record AddObject(ReadOnlyMemory<byte> Key, ObjectEntry Entry) : DatasetOperation;
 
     /// <summary>Replaces objects by the outputs of a compaction (§5.3).</summary>
-    /// <param name="Inputs">The keys of the objects consumed.</param>
-    /// <param name="Outputs">The objects produced, with their keys.</param>
+    /// <param name="Inputs">The objects consumed, each with the level it sits in.</param>
+    /// <param name="Outputs">The objects produced, each with the level it goes to.</param>
+    /// <remarks>
+    /// THE LEVELS ARE PER INPUT because a leveled compaction reads two of them: the objects of
+    /// level <c>i</c> and the objects of level <c>i + 1</c> whose key ranges they overlap (§5.2).
+    /// Splitting that into one operation per level would split §8.2's row 5 with it — "an input is
+    /// missing: the outputs are garbage" has to abandon the whole compaction, and two operations
+    /// can abandon separately.
+    /// </remarks>
     public sealed record ReplaceObjects(
-        IReadOnlyList<ReadOnlyMemory<byte>> Inputs,
-        IReadOnlyList<(ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Outputs) : DatasetOperation;
+        IReadOnlyList<(int Level, ReadOnlyMemory<byte> Key)> Inputs,
+        IReadOnlyList<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Outputs) : DatasetOperation;
 
     /// <summary>Attaches an index fragment to an object (§6.4).</summary>
     /// <param name="Key">The object's sort key.</param>

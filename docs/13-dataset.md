@@ -314,6 +314,12 @@ Without a merge policy, the number of objects a lookup touches is the number of 
 bound of §2.3 is only true if compaction holds an invariant, so the invariant is specified here
 and `Explain` reports every violation of it as a lag, with the count.
 
+*As delivered (step 41a): `DatasetScanBuilder.ExplainAsync` returns a `DatasetPlan` — the version,
+the objects per level, the **lag**, whether a clustering key is declared, and what the walk would
+read and skip — without opening a data object. A level 0 above its ceiling of eight is reported and
+**never refused**: compaction is the user's background job and "a library never stalls a writer"
+(§5.3). A test appends eleven objects on purpose, reads a lag of 3, and gets all 1 100 rows.*
+
 ### 5.2 The invariant
 
 - **Level 0** holds the appended objects as they came, overlapping in key. At most **8**.
@@ -327,6 +333,32 @@ and `Explain` reports every violation of it as a lag, with the count.
   them; this is output-sensitive, not bounded, and the dataset says so in `Explain`.
 - **Inside every object, at most K = 4 runs per index entry**, and in a single file appended in
   place the same rule holds (§6.1).
+
+**As delivered (step 41a): the levels, without the policy that fills them.** A version names **one
+tree per level**, not one tree: `DatasetLevels`, read from the header's list, which already carried
+several. A commit applies a sorted batch of changes **per level** (§4.3) and writes a `CommitLevel`
+for each occupied one; a level nobody filled stays an empty tree at its own number, because a
+level's number *is* its meaning — its target size, its place in the lookup bound, what a compaction
+of the level below writes into.
+
+An operation says which level it acts on. A compaction says it **per input and per output**, because
+a leveled compaction reads two levels at once — the objects of level `i` and the objects of level
+`i + 1` whose key ranges they overlap — and splitting that into one operation per level would split
+§8.2's row 5 with it: "an input is missing: the outputs are garbage" has to abandon the whole
+compaction, and two operations abandon separately.
+
+A scan merges the levels into one key order. With a single level the walk keeps §6.6's O(log N)
+`Rows(a, b)`, testing a subtree's row sum before descending into it; across levels the row offsets
+are not known until the merge has produced them — an object of level 1 may sit between two objects
+of level 0 — so the range is applied per entry and the cost is the objects rather than the rows.
+Bounded either way, and the difference is stated rather than hidden.
+
+The one inline budget of §3 is shared and spent from the top down: level 0 is the level every lookup
+descends and the one an append touches, so it gets the room first.
+
+**What is not here:** the policy that decides when to compact and the compaction itself (step 41b).
+Until then a dataset has one level and the machinery above is exercised by moving objects between
+levels by hand, through the very `ReplaceObjects` a compactor will use.
 
 ### 5.3 What a compaction does
 

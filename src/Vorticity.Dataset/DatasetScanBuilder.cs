@@ -292,6 +292,58 @@ public sealed class DatasetScanBuilder
     private static bool Comparable(FilterLiteral left, FilterLiteral right) =>
         left.Kind == right.Kind && left.Kind != FilterLiteralKind.Null;
 
+    /// <summary>
+    /// What the scan would read, and what §5.2's invariant costs it, without reading a data object.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the reads of the tree.</param>
+    /// <returns>The plan.</returns>
+    /// <remarks>
+    /// §5.1 asks for exactly one thing here: "`Explain` reports every violation of it as a lag,
+    /// with the count". A dataset whose level 0 has outgrown its ceiling still answers every
+    /// question correctly and answers them by touching more objects, and the only honest way to
+    /// surface that is a number a caller can read — not a refusal, because compaction is the user's
+    /// background job (§5.3).
+    /// </remarks>
+    public async ValueTask<DatasetPlan> ExplainAsync(CancellationToken cancellationToken = default)
+    {
+        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanBuilder counted = new DatasetScanBuilder(_dataset)
+        {
+            _filter = _filter,
+            _projection = _projection,
+            _indexes = _indexes,
+            _summaries = _summaries,
+            _from = _from,
+            _to = _to,
+            _metrics = metrics,
+        };
+
+        long objects = 0;
+        long rows = 0;
+        await foreach (PositionedObject held in counted.WalkAsync(cancellationToken).ConfigureAwait(false))
+        {
+            objects++;
+            rows += held.Entry.Rows;
+        }
+
+        DatasetLevels levels = _dataset.Levels;
+        long[] byLevel = new long[Math.Max(levels.Count, 1)];
+        for (int level = 0; level < byLevel.Length; level++)
+        {
+            byLevel[level] = levels[level].Entries;
+        }
+
+        return new DatasetPlan(
+            _dataset.Version,
+            byLevel,
+            levels.LagAtLevelZero(),
+            _dataset.ClusteringKeyPaths.Count > 0,
+            objects,
+            rows,
+            metrics.ObjectsSkipped,
+            metrics.SubtreesSkipped);
+    }
+
     /// <summary>The objects this scan will read, in key order, each with its first row.</summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The objects.</returns>
@@ -354,3 +406,29 @@ public sealed class DatasetScanBuilder
 /// <param name="Entry">Its leaf entry, summaries included.</param>
 /// <param name="FirstRow">Its first row among the dataset's, in the tree's order.</param>
 public readonly record struct PositionedObject(ObjectEntry Entry, long FirstRow);
+
+/// <summary>What a dataset scan would read, and what it costs (§5.1).</summary>
+/// <param name="Version">The version it would read.</param>
+/// <param name="ObjectsByLevel">How many objects each level holds, level 0 first (§5.2).</param>
+/// <param name="Lag">
+/// The objects level 0 holds above its ceiling: zero when §5.2's invariant holds, and otherwise the
+/// number of extra objects every key lookup has to touch until compaction catches up.
+/// </param>
+/// <param name="IsClustered">
+/// Whether a clustering key is declared. Without one, levels are size tiers and a lookup touches
+/// every object the summaries cannot refute: "output-sensitive, not bounded, and the dataset says
+/// so in `Explain`" (§5.2).
+/// </param>
+/// <param name="Objects">The objects the scan would open.</param>
+/// <param name="Rows">Their rows, before the filter.</param>
+/// <param name="ObjectsSkipped">Objects whose own summaries refuted the predicate.</param>
+/// <param name="SubtreesSkipped">Child pages a node's summaries refuted, unread (§4.2).</param>
+public sealed record DatasetPlan(
+    ulong Version,
+    IReadOnlyList<long> ObjectsByLevel,
+    long Lag,
+    bool IsClustered,
+    long Objects,
+    long Rows,
+    long ObjectsSkipped,
+    long SubtreesSkipped);

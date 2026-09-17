@@ -99,17 +99,17 @@ public sealed class VortexDataset : IAsyncDisposable
     private readonly DTypeArena _types = new DTypeArena();
     private readonly ObjectCache _objects;
     private CommitHeader _header;
-    private DatasetTree _tree;
+    private DatasetLevels _levels;
     private CommitPageSource _pages;
 
     private VortexDataset(
-        IObjectStore store, DatasetOptions options, CommitHeader header, DatasetTree tree, CommitPageSource pages)
+        IObjectStore store, DatasetOptions options, CommitHeader header, DatasetLevels levels, CommitPageSource pages)
     {
         _store = store;
         _options = options;
         _objects = new ObjectCache(store, options.MaxOpenObjects);
         _header = header;
-        _tree = tree;
+        _levels = levels;
         _pages = pages;
         Schema = header.Schema.IsEmpty
             ? default
@@ -123,14 +123,29 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The dataset's schema.</summary>
     public DType Schema { get; }
 
-    /// <summary>The rows of every object it holds.</summary>
-    public long RowCount => _tree.Rows;
+    /// <summary>The rows of every object it holds, over every level.</summary>
+    public long RowCount => _levels.Rows;
 
-    /// <summary>The data objects it holds.</summary>
-    public long ObjectCount => _tree.Entries;
+    /// <summary>The data objects it holds, over every level.</summary>
+    public long ObjectCount => _levels.Entries;
 
-    /// <summary>The levels of its tree: 0 when it is empty, 1 when one leaf page holds it all.</summary>
-    public int Depth => _tree.Depth;
+    /// <summary>Its levels (§5.2), where level 0 is the one an append lands in.</summary>
+    public DatasetLevels Levels => _levels;
+
+    /// <summary>Where this version's tree pages are read from, for a caller walking the levels.</summary>
+    public IPageSource Pages => _pages;
+
+    /// <summary>The levels of level 0's tree: 0 when it is empty, 1 when one leaf page holds it all.</summary>
+    public int Depth => _levels[0].Depth;
+
+    /// <summary>
+    /// How far this version is from §5.2's invariant: the objects level 0 holds above its ceiling.
+    /// </summary>
+    /// <remarks>
+    /// Reported, never refused (§5.3): compaction is the user's background job and a library never
+    /// stalls a writer. A non-zero lag is a read bound that has degraded and says by how much.
+    /// </remarks>
+    public long Lag => _levels.LagAtLevelZero();
 
     /// <summary>The seed every boundary of its trees is decided under (§4.1).</summary>
     public ulong Seed => _header.Seed;
@@ -204,7 +219,7 @@ public sealed class VortexDataset : IAsyncDisposable
             store,
             (options ?? new DatasetOptions()) with { Seed = commit.Header.Seed },
             commit.Header,
-            DatasetCommitter.TreeOf(commit.Header),
+            DatasetLevels.Of(commit.Header),
             pages);
     }
 
@@ -224,7 +239,7 @@ public sealed class VortexDataset : IAsyncDisposable
         pages.Inline(commit.Header);
         pages.Know(version, commit.HeaderEnd);
         _header = commit.Header;
-        _tree = DatasetCommitter.TreeOf(commit.Header);
+        _levels = DatasetLevels.Of(commit.Header);
         _pages = pages;
         return version;
     }
@@ -339,15 +354,16 @@ public sealed class VortexDataset : IAsyncDisposable
         return result.Version;
     }
 
-    /// <summary>Every data object of this version, in key order.</summary>
+    /// <summary>Every data object of this version, over every level, in key order.</summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The entries.</returns>
     public async IAsyncEnumerable<ObjectEntry> ObjectsAsync(
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        await foreach (TreeEntry entry in _tree.EnumerateAsync(_pages, cancellationToken).ConfigureAwait(false))
+        await foreach (PositionedObject held in
+            WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
         {
-            yield return ObjectEntry.FromBytes(entry.Value.Span);
+            yield return held.Entry;
         }
     }
 
@@ -397,10 +413,10 @@ public sealed class VortexDataset : IAsyncDisposable
             return false;
         };
 
-        await foreach (PositionedEntry positioned in
-            _tree.WalkAsync(_pages, from, to, descend, cancellationToken).ConfigureAwait(false))
+        await foreach ((TreeEntry held, long firstRow) in
+            EntriesAsync(from, to, descend, cancellationToken).ConfigureAwait(false))
         {
-            ObjectEntry entry = ObjectEntry.FromBytes(positioned.Entry.Value.Span);
+            ObjectEntry entry = ObjectEntry.FromBytes(held.Value.Span);
             if (metrics is { } counters)
             {
                 counters.ObjectsConsidered++;
@@ -416,7 +432,100 @@ public sealed class VortexDataset : IAsyncDisposable
                 continue;
             }
 
-            yield return new PositionedObject(entry, positioned.FirstRow);
+            yield return new PositionedObject(entry, firstRow);
+        }
+    }
+
+    /// <summary>
+    /// Every level's entries, merged into one key order, each with its first row in the dataset.
+    /// </summary>
+    /// <param name="from">The first row to reach.</param>
+    /// <param name="to">One past the last.</param>
+    /// <param name="descend">Whether a subtree is worth reading, or null to read all of them.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <remarks>
+    /// ONE LEVEL IS THE FAST PATH AND IT IS NOT AN OPTIMISATION. A single level's own walk tests a
+    /// subtree's ROW SUM before descending into it, so `Rows(a, b)` costs O(log N) there (§6.6).
+    /// Across levels the row offsets are not known until the merge has produced them — an object of
+    /// level 1 may sit between two objects of level 0 — so the range is applied per entry instead,
+    /// and the cost is the objects rather than the rows. Bounded either way, and the difference is
+    /// stated rather than hidden. A k-way merge over ≤ 8 + L cursors is what §6.6 prices anyway.
+    /// </remarks>
+    private async IAsyncEnumerable<(TreeEntry Entry, long FirstRow)> EntriesAsync(
+        long from,
+        long to,
+        Func<InternalEntry, bool>? descend,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        List<DatasetTree> trees = [];
+        foreach ((int _, DatasetTree tree) in _levels.Occupied())
+        {
+            trees.Add(tree);
+        }
+
+        if (trees.Count <= 1)
+        {
+            DatasetTree only = trees.Count == 1 ? trees[0] : DatasetTree.Empty;
+            await foreach (PositionedEntry positioned in
+                only.WalkAsync(_pages, from, to, descend, cancellationToken).ConfigureAwait(false))
+            {
+                yield return (positioned.Entry, positioned.FirstRow);
+            }
+
+            yield break;
+        }
+
+        IAsyncEnumerator<PositionedEntry>[] walks = new IAsyncEnumerator<PositionedEntry>[trees.Count];
+        bool[] live = new bool[trees.Count];
+        try
+        {
+            for (int i = 0; i < trees.Count; i++)
+            {
+                walks[i] = trees[i]
+                    .WalkAsync(_pages, 0, long.MaxValue, descend, cancellationToken)
+                    .GetAsyncEnumerator(cancellationToken);
+                live[i] = await walks[i].MoveNextAsync().ConfigureAwait(false);
+            }
+
+            long row = 0;
+            while (true)
+            {
+                int smallest = -1;
+                for (int i = 0; i < walks.Length; i++)
+                {
+                    if (live[i]
+                        && (smallest < 0
+                            || TreePage.Compare(
+                                walks[i].Current.Entry.Key.Span, walks[smallest].Current.Entry.Key.Span) < 0))
+                    {
+                        smallest = i;
+                    }
+                }
+
+                if (smallest < 0)
+                {
+                    yield break;
+                }
+
+                TreeEntry entry = walks[smallest].Current.Entry;
+                if (row < to && row + entry.Rows > from)
+                {
+                    yield return (entry, row);
+                }
+
+                row += entry.Rows;
+                live[smallest] = await walks[smallest].MoveNextAsync().ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            foreach (IAsyncEnumerator<PositionedEntry>? walk in walks)
+            {
+                if (walk is not null)
+                {
+                    await walk.DisposeAsync().ConfigureAwait(false);
+                }
+            }
         }
     }
 

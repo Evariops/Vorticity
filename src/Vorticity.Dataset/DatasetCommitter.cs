@@ -51,17 +51,21 @@ public sealed record CommitOptions
 /// <summary>What a commit did.</summary>
 /// <param name="Version">The version created.</param>
 /// <param name="Key">Its commit object's key.</param>
-/// <param name="Tree">The tree that version names.</param>
+/// <param name="Levels">The trees that version names, one per level (§5.2).</param>
 /// <param name="Outcomes">What each operation decided, in the caller's order.</param>
 /// <param name="Attempts">How many times the writer had to rebase, 1 when it won first time.</param>
 /// <param name="Pages">A source that can read the new version's pages, new and old.</param>
 public sealed record CommitResult(
     ulong Version,
     string Key,
-    DatasetTree Tree,
+    DatasetLevels Levels,
     IReadOnlyList<OperationOutcome> Outcomes,
     int Attempts,
-    IPageSource Pages);
+    IPageSource Pages)
+{
+    /// <summary>Level 0's tree, where appends land.</summary>
+    public DatasetTree Tree => Levels[0];
+}
 
 /// <summary>Creates versions of a dataset, one conditional creation at a time.</summary>
 public static class DatasetCommitter
@@ -91,28 +95,35 @@ public static class DatasetCommitter
             // 1. The latest version, in one request (§8.3).
             (ulong parent, CommitObject? commit) = await LatestAsync(store, cancellationToken).ConfigureAwait(false);
             CommitPageSource pages = new CommitPageSource(store);
-            DatasetTree tree = DatasetTree.Empty;
+            DatasetLevels levels = DatasetLevels.Empty;
             CommitHeader template = options.Template ?? new CommitHeader { Version = 1 };
             if (commit is not null)
             {
                 template = commit.Header;
                 pages.Inline(commit.Header);
                 pages.Know(parent, commit.HeaderEnd);
-                tree = TreeOf(commit.Header);
+                levels = DatasetLevels.Of(commit.Header);
             }
 
-            // 2. The operations, re-applied to whatever is there now (§8.2).
-            (List<TreeChange> changes, List<OperationOutcome> outcomes) =
-                await ApplyAsync(tree, operations, pages, cancellationToken).ConfigureAwait(false);
+            // 2. The operations, re-applied to whatever is there now (§8.2), a batch per level.
+            (Dictionary<int, List<TreeChange>> changes, List<OperationOutcome> outcomes) =
+                await ApplyAsync(levels, operations, pages, cancellationToken).ConfigureAwait(false);
 
             ulong version = parent + 1;
             CommitObjectBuilder builder = new CommitObjectBuilder(version);
             pages.Writing(builder, version);
-            DatasetTree next = changes.Count == 0
-                ? tree
-                : await tree
-                    .CommitAsync(changes, options.NewRule(), options.NewFold(), pages, builder, cancellationToken)
-                    .ConfigureAwait(false);
+            DatasetLevels next = levels;
+            foreach ((int level, List<TreeChange> batch) in changes)
+            {
+                if (batch.Count > 0)
+                {
+                    next = next.With(
+                        level,
+                        await next[level]
+                            .CommitAsync(batch, options.NewRule(), options.NewFold(), pages, builder, cancellationToken)
+                            .ConfigureAwait(false));
+                }
+            }
 
             CommitHeader header = template with
             {
@@ -120,13 +131,7 @@ public static class DatasetCommitter
                 Parent = parent,
                 Seed = options.Seed,
                 CreatedAtUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                Levels = next.IsEmpty
-                    ? []
-                    : [new CommitLevel(0, next.Entries, next.Root, Inline(builder, pages, next))
-                    {
-                        Depth = next.Depth,
-                        Rows = next.Rows,
-                    }],
+                Levels = LevelsOf(next, builder, pages),
             };
 
             // 3. One conditional creation (§8.1).
@@ -170,6 +175,7 @@ public static class DatasetCommitter
     /// <param name="builder">The commit being built, which holds the pages it just wrote.</param>
     /// <param name="pages">The source, which holds every page this commit read or was handed.</param>
     /// <param name="tree">The new tree.</param>
+    /// <param name="budget">What is left of the header's inline room; spent by what this inlines.</param>
     /// <returns>The pages to inline, top first.</returns>
     /// <remarks>
     /// ONLY THE PAGES ALREADY IN HAND — the ones this commit wrote, the ones its predecessor's
@@ -180,10 +186,9 @@ public static class DatasetCommitter
     /// commit's descent finds it there.
     /// </remarks>
     private static IReadOnlyList<InlinedPage> Inline(
-        CommitObjectBuilder builder, CommitPageSource pages, DatasetTree tree)
+        CommitObjectBuilder builder, CommitPageSource pages, DatasetTree tree, ref long budget)
     {
         List<InlinedPage> inlined = [];
-        long bytes = 0;
         Queue<(PageReference Reference, int Level)> queue = new Queue<(PageReference, int)>();
         queue.Enqueue((tree.Root, tree.Depth));
         while (queue.Count > 0)
@@ -195,14 +200,13 @@ public static class DatasetCommitter
                 continue;
             }
 
-
-            if (bytes + page.Length > InlineBudget)
+            if (page.Length > budget)
             {
                 break;
             }
 
             inlined.Add(new InlinedPage(reference, page));
-            bytes += page.Length;
+            budget -= page.Length;
             if (level > 1)
             {
                 foreach (InternalEntry entry in TreePage.ReadInternal(page))
@@ -221,37 +225,51 @@ public static class DatasetCommitter
     /// </summary>
     private const int InlineBudget = 192 << 10;
 
-    /// <summary>The tree a header names, at level 0.</summary>
+    /// <summary>The tree a header names at level 0, where appends land.</summary>
     /// <param name="header">The header.</param>
-    /// <returns>The tree, empty when the header names no level.</returns>
+    /// <returns>The tree, empty when the header names no level 0.</returns>
+    public static DatasetTree TreeOf(CommitHeader header) => DatasetLevels.Of(header)[0];
+
+    /// <summary>What a header records for each occupied level, with the pages it can inline.</summary>
+    /// <param name="levels">The version's trees.</param>
+    /// <param name="builder">The commit being built, which holds the pages it just wrote.</param>
+    /// <param name="pages">The source, which holds every page this commit read or was handed.</param>
     /// <remarks>
-    /// One level for now: §5's levels arrive with compaction, and the header already carries a list
-    /// so that adding them changes this line and nothing else.
+    /// ONE INLINE BUDGET, SHARED, and spent from the top down: level 0 is the one every lookup
+    /// descends and the one an append touches, so it gets the room first. A level whose top does
+    /// not fit is read in one request instead, which is §9.1's "0 up to ~650 objects, 1 up to
+    /// ~400 000" starting one step further along for that level alone.
     /// </remarks>
-    public static DatasetTree TreeOf(CommitHeader header)
+    private static IReadOnlyList<CommitLevel> LevelsOf(
+        DatasetLevels levels, CommitObjectBuilder builder, CommitPageSource pages)
     {
-        ArgumentNullException.ThrowIfNull(header);
-        foreach (CommitLevel level in header.Levels)
+        List<CommitLevel> recorded = [];
+        long budget = InlineBudget;
+        foreach ((int level, DatasetTree tree) in levels.Occupied())
         {
-            if (level.Level == 0 && level.Top.Exists)
+            IReadOnlyList<InlinedPage> inlined = Inline(builder, pages, tree, ref budget);
+            recorded.Add(new CommitLevel(level, tree.Entries, tree.Root, inlined)
             {
-                return new DatasetTree(level.Top, level.Depth, level.Entries, level.Rows);
-            }
+                Depth = tree.Depth,
+                Rows = tree.Rows,
+            });
         }
 
-        return DatasetTree.Empty;
+        return recorded;
     }
 
-    /// <summary>Re-applies the operations to the tree as it is now, by §8.2's rules.</summary>
-    private static async ValueTask<(List<TreeChange> Changes, List<OperationOutcome> Outcomes)> ApplyAsync(
-        DatasetTree tree,
-        IReadOnlyList<DatasetOperation> operations,
-        IPageSource pages,
-        CancellationToken cancellationToken)
+    /// <summary>Re-applies the operations to the levels as they are now, by §8.2's rules.</summary>
+    private static async ValueTask<(Dictionary<int, List<TreeChange>> Changes, List<OperationOutcome> Outcomes)>
+        ApplyAsync(
+            DatasetLevels levels,
+            IReadOnlyList<DatasetOperation> operations,
+            IPageSource pages,
+            CancellationToken cancellationToken)
     {
-        // Sorted and unique by key, which is what a batch has to be; an operation that touches a key
-        // another already touched sees the pending value, so two fragments on one object both land.
-        SortedDictionary<byte[], TreeChange> changes = new SortedDictionary<byte[], TreeChange>(KeyOrder.Instance);
+        // Sorted and unique by key WITHIN A LEVEL, which is what a batch has to be; an operation
+        // that touches a key another already touched sees the pending value, so two fragments on
+        // one object both land. One batch per level, because one tree per level (§4.3).
+        Dictionary<int, SortedDictionary<byte[], TreeChange>> changes = [];
         Dictionary<string, ObjectEntry?> pending = new Dictionary<string, ObjectEntry?>(StringComparer.Ordinal);
         List<OperationOutcome> outcomes = new List<OperationOutcome>(operations.Count);
 
@@ -261,7 +279,7 @@ public static class DatasetCommitter
             {
                 case DatasetOperation.AddObject add:
                 {
-                    ObjectEntry? current = await CurrentAsync(add.Key).ConfigureAwait(false);
+                    ObjectEntry? current = await CurrentAsync(add.Level, add.Key).ConfigureAwait(false);
                     if (current is { } held && held.Uid == add.Entry.Uid)
                     {
                         // The winner already added this very object: the same uid is the same bytes.
@@ -269,14 +287,14 @@ public static class DatasetCommitter
                         break;
                     }
 
-                    Put(add.Key, add.Entry);
+                    Put(add.Level, add.Key, add.Entry);
                     outcomes.Add(OperationOutcome.Applied);
                     break;
                 }
 
                 case DatasetOperation.AddFragment fragment:
                 {
-                    ObjectEntry? current = await CurrentAsync(fragment.Key).ConfigureAwait(false);
+                    ObjectEntry? current = await CurrentAsync(fragment.Level, fragment.Key).ConfigureAwait(false);
                     if (current is not { } entry || entry.Uid != fragment.Uid)
                     {
                         // The object is gone, or it is not the object the fragment was built
@@ -292,14 +310,14 @@ public static class DatasetCommitter
                         break;
                     }
 
-                    Put(fragment.Key, entry.With(fragment.Fragment));
+                    Put(fragment.Level, fragment.Key, entry.With(fragment.Fragment));
                     outcomes.Add(OperationOutcome.Applied);
                     break;
                 }
 
                 case DatasetOperation.DropFragment drop:
                 {
-                    ObjectEntry? current = await CurrentAsync(drop.Key).ConfigureAwait(false);
+                    ObjectEntry? current = await CurrentAsync(drop.Level, drop.Key).ConfigureAwait(false);
                     if (current is not { } entry)
                     {
                         outcomes.Add(OperationOutcome.Dropped);
@@ -321,7 +339,7 @@ public static class DatasetCommitter
                         }
                     }
 
-                    Put(drop.Key, entry with { Fragments = kept });
+                    Put(drop.Level, drop.Key, entry with { Fragments = kept });
                     outcomes.Add(OperationOutcome.Applied);
                     break;
                 }
@@ -329,9 +347,9 @@ public static class DatasetCommitter
                 case DatasetOperation.ReplaceObjects replace:
                 {
                     bool complete = true;
-                    foreach (ReadOnlyMemory<byte> input in replace.Inputs)
+                    foreach ((int level, ReadOnlyMemory<byte> input) in replace.Inputs)
                     {
-                        complete &= await CurrentAsync(input).ConfigureAwait(false) is not null;
+                        complete &= await CurrentAsync(level, input).ConfigureAwait(false) is not null;
                     }
 
                     if (!complete)
@@ -342,14 +360,14 @@ public static class DatasetCommitter
                         break;
                     }
 
-                    foreach (ReadOnlyMemory<byte> input in replace.Inputs)
+                    foreach ((int level, ReadOnlyMemory<byte> input) in replace.Inputs)
                     {
-                        Remove(input);
+                        Remove(level, input);
                     }
 
-                    foreach ((ReadOnlyMemory<byte> key, ObjectEntry entry) in replace.Outputs)
+                    foreach ((int level, ReadOnlyMemory<byte> key, ObjectEntry entry) in replace.Outputs)
                     {
-                        Put(key, entry);
+                        Put(level, key, entry);
                     }
 
                     outcomes.Add(OperationOutcome.Applied);
@@ -362,31 +380,53 @@ public static class DatasetCommitter
             }
         }
 
-        return ([.. changes.Values], outcomes);
-
-        async ValueTask<ObjectEntry?> CurrentAsync(ReadOnlyMemory<byte> key)
+        Dictionary<int, List<TreeChange>> batches = [];
+        foreach ((int level, SortedDictionary<byte[], TreeChange> sorted) in changes)
         {
-            string text = Convert.ToHexString(key.Span);
+            batches[level] = [.. sorted.Values];
+        }
+
+        return (batches, outcomes);
+
+        async ValueTask<ObjectEntry?> CurrentAsync(int level, ReadOnlyMemory<byte> key)
+        {
+            string text = Named(level, key);
             if (pending.TryGetValue(text, out ObjectEntry? held))
             {
                 return held;
             }
 
-            TreeEntry? entry = await tree.FindAsync(key, pages, cancellationToken).ConfigureAwait(false);
+            TreeEntry? entry = await levels[level].FindAsync(key, pages, cancellationToken).ConfigureAwait(false);
             return entry is { } found ? ObjectEntry.FromBytes(found.Value.Span) : null;
         }
 
-        void Put(ReadOnlyMemory<byte> key, ObjectEntry entry)
+        void Put(int level, ReadOnlyMemory<byte> key, ObjectEntry entry)
         {
-            changes[key.ToArray()] = TreeChange.Put(key, entry.ToBytes(), entry.Rows);
-            pending[Convert.ToHexString(key.Span)] = entry;
+            Batch(level)[key.ToArray()] = TreeChange.Put(key, entry.ToBytes(), entry.Rows);
+            pending[Named(level, key)] = entry;
         }
 
-        void Remove(ReadOnlyMemory<byte> key)
+        void Remove(int level, ReadOnlyMemory<byte> key)
         {
-            changes[key.ToArray()] = TreeChange.Remove(key);
-            pending[Convert.ToHexString(key.Span)] = null;
+            Batch(level)[key.ToArray()] = TreeChange.Remove(key);
+            pending[Named(level, key)] = null;
         }
+
+        SortedDictionary<byte[], TreeChange> Batch(int level)
+        {
+            if (!changes.TryGetValue(level, out SortedDictionary<byte[], TreeChange>? batch))
+            {
+                batch = new SortedDictionary<byte[], TreeChange>(KeyOrder.Instance);
+                changes[level] = batch;
+            }
+
+            return batch;
+        }
+
+        // A key is unique inside a level and a compaction moves one object from one level to
+        // another, so the pending map is keyed by both: the same key at two levels is two objects.
+        static string Named(int level, ReadOnlyMemory<byte> key) =>
+            level.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + Convert.ToHexString(key.Span);
     }
 
     /// <summary>`memcmp` order over keys, which is the tree's (06).</summary>

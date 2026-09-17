@@ -296,16 +296,16 @@ public sealed class DatasetFuzzTests
                 {
                     // A compaction: one or two inputs, one output at the first input's key.
                     int inputs = Math.Min(1 + random.Next(2), seen.Count);
-                    List<ReadOnlyMemory<byte>> taken = [];
+                    List<(int Level, ReadOnlyMemory<byte> Key)> taken = [];
                     for (int n = 0; n < inputs; n++)
                     {
-                        taken.Add(seen[random.Next(seen.Count)].Key);
+                        taken.Add((0, seen[random.Next(seen.Count)].Key));
                     }
 
                     int output = 200 + random.Next(50);
                     await EnsureObjectAsync(store, output, 0);
                     batch.Add(new DatasetOperation.ReplaceObjects(
-                        taken, [(Key(output), Object(output, 0))]));
+                        taken, [(0, Key(output), Object(output, 0))]));
                     break;
                 }
             }
@@ -509,7 +509,7 @@ public sealed class DatasetFuzzTests
 
                 case DatasetOperation.ReplaceObjects replace:
                 {
-                    foreach (ReadOnlyMemory<byte> input in replace.Inputs)
+                    foreach ((int _, ReadOnlyMemory<byte> input) in replace.Inputs)
                     {
                         if (!_entries.ContainsKey(Hex(input)))
                         {
@@ -519,12 +519,12 @@ public sealed class DatasetFuzzTests
                         }
                     }
 
-                    foreach (ReadOnlyMemory<byte> input in replace.Inputs)
+                    foreach ((int _, ReadOnlyMemory<byte> input) in replace.Inputs)
                     {
                         _entries.Remove(Hex(input));
                     }
 
-                    foreach ((ReadOnlyMemory<byte> key, ObjectEntry entry) in replace.Outputs)
+                    foreach ((int _, ReadOnlyMemory<byte> key, ObjectEntry entry) in replace.Outputs)
                     {
                         _entries[Hex(key)] = entry;
                     }

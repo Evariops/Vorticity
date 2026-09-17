@@ -43,6 +43,26 @@ public sealed class RebaseMatrixTests
     private static PageReference Fragment(int i) =>
         new PageReference(1, 64 + i, 32, (UInt128)i << 64 | 0xF7A6);
 
+    /// <summary>A compaction at level 0, which is where these rows of §8.2 all happen.</summary>
+    /// <param name="inputs">The objects it consumes.</param>
+    /// <param name="outputs">The objects it produces.</param>
+    private static DatasetOperation Replace(int[] inputs, params (int Key, int Version)[] outputs)
+    {
+        List<(int Level, ReadOnlyMemory<byte> Key)> consumed = [];
+        foreach (int input in inputs)
+        {
+            consumed.Add((0, Key(input)));
+        }
+
+        List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> produced = [];
+        foreach ((int key, int version) in outputs)
+        {
+            produced.Add((0, Key(key), Object(key, version)));
+        }
+
+        return new DatasetOperation.ReplaceObjects(consumed, produced);
+    }
+
     [Fact]
     public async Task AnUncontendedCommitIsThreeDependentRequests()
     {
@@ -125,8 +145,7 @@ public sealed class RebaseMatrixTests
         await DatasetCommitter.CommitAsync(store, [Add(1), Add(2)], Options(), default);
 
         // A compaction replaces object 1 by an output of its own.
-        DatasetOperation compaction = new DatasetOperation.ReplaceObjects(
-            [Key(1)], [(Key(1), Object(1, version: 9))]);
+        DatasetOperation compaction = Replace([1], (1, 9));
         await DatasetCommitter.CommitAsync(store, [compaction], Options(), default);
 
         // The indexer was working against the OLD uid.
@@ -148,14 +167,12 @@ public sealed class RebaseMatrixTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await DatasetCommitter.CommitAsync(store, [Add(1), Add(2), Add(3)], Options(), default);
 
-        DatasetOperation first = new DatasetOperation.ReplaceObjects(
-            [Key(1), Key(2)], [(Key(1), Object(1, version: 5))]);
+        DatasetOperation first = Replace([1, 2], (1, 5));
         CommitResult winner = await DatasetCommitter.CommitAsync(store, [first], Options(), default);
         Assert.Equal([OperationOutcome.Applied], winner.Outcomes);
         Assert.Equal(2, winner.Tree.Entries);
 
-        DatasetOperation overlapping = new DatasetOperation.ReplaceObjects(
-            [Key(2), Key(3)], [(Key(2), Object(2, version: 6))]);
+        DatasetOperation overlapping = Replace([2, 3], (2, 6));
         CommitResult loser = await DatasetCommitter.CommitAsync(store, [overlapping], Options(), default);
 
         Assert.Equal([OperationOutcome.Abandoned], loser.Outcomes);
@@ -172,8 +189,7 @@ public sealed class RebaseMatrixTests
         await DatasetCommitter.CommitAsync(store, [Add(1), Add(2)], Options(), default);
 
         // The compactor read version 1 and decided to fold objects 1 and 2 into one.
-        DatasetOperation compaction = new DatasetOperation.ReplaceObjects(
-            [Key(1), Key(2)], [(Key(1), Object(1, version: 4))]);
+        DatasetOperation compaction = Replace([1, 2], (1, 4));
 
         // Meanwhile an append lands.
         await DatasetCommitter.CommitAsync(store, [Add(3)], Options(), default);
