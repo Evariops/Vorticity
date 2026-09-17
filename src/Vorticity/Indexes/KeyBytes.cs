@@ -104,6 +104,27 @@ internal readonly record struct KeyLayout(KeyShape Shape, int Width, PType PType
         }
     }
 
+    /// <summary>
+    /// A fixed-width key as an unsigned integer in the same total order as <see cref="Compare"/>,
+    /// and one-to-one: two different keys never share one.
+    /// </summary>
+    /// <param name="key">A key of this layout, whose shape is not <see cref="KeyShape.Bytes"/>.</param>
+    internal ulong SortKey(ReadOnlySpan<byte> key)
+    {
+        if (Shape == KeyShape.Float)
+        {
+            return TotalFloat(key);
+        }
+
+        Span<byte> wide = stackalloc byte[sizeof(ulong)];
+        wide.Clear();
+        key.CopyTo(wide);
+        ulong value = BinaryPrimitives.ReadUInt64LittleEndian(wide);
+
+        // Two's complement orders like the unsigned value once its sign bit is flipped.
+        return Shape == KeyShape.Signed ? value ^ (1UL << ((Width * 8) - 1)) : value;
+    }
+
     private static int CompareMagnitude(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right)
     {
         for (int i = left.Length - 1; i >= 0; i--)

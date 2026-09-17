@@ -17,7 +17,9 @@
 // re-interned. The two tables trade places at every chunk, so their buffers are grown once.
 using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Numerics;
 using Vorticity.Indexes;
 
 namespace Vorticity.Writing;
@@ -248,8 +250,135 @@ internal sealed class ChunkKeys : IDisposable
         }
 
         ArrayPool<bool>.Shared.Return(used);
-        ranked.AsSpan(0, count).Sort(new ByKey(this, layout));
+
+        // The sort keys are the table's own buffer, grown once to the largest chunk, as the log is.
+        if (_order.Length < count)
+        {
+            _order = new ulong[BitOperations.RoundUpToPowerOf2((uint)count)];
+        }
+
+        if (layout.Shape == KeyShape.Bytes)
+        {
+            SortBytes(ranked.AsSpan(0, count), _order.AsSpan(0, count), 0, layout);
+            return count;
+        }
+
+        // A FIXED WIDTH SORTS AS INTEGERS: the layout maps each key one-to-one onto an unsigned
+        // integer in its total order, so the primitive sort -- no comparer, no byte reads per
+        // comparison -- gives the order the comparer would, ties being impossible. On a million
+        // i32 keys with 100 000 distinct, the comparer's sort was most of a sorted-runs write.
+        for (int i = 0; i < count; i++)
+        {
+            _order[i] = layout.SortKey(KeyBytes(ranked[i]));
+        }
+
+        _order.AsSpan(0, count).Sort(ranked.AsSpan(0, count));
         return count;
+    }
+
+    private ulong[] _order = [];
+
+    /// <summary>Below this many ids, a run is sorted by the comparer.</summary>
+    private const int SmallRun = 16;
+
+    /// <summary>
+    /// Sorts <paramref name="ids"/>, whose keys agree on their first <paramref name="offset"/>
+    /// bytes, bytewise: eight bytes at a time as big-endian integers, the runs that tie sorted again
+    /// on the next eight.
+    /// </summary>
+    /// <remarks>
+    /// THE COMPARER'S ORDER, WITHOUT ITS COST. A window is the key's bytes from
+    /// <paramref name="offset"/>, zero-padded past its end, so a smaller window is a smaller key and
+    /// only equal windows need more: keys that go on past the window are sorted on the next one, and
+    /// keys that all end inside it differ only by trailing zeros, which the comparer orders by
+    /// length. Keys are distinct, so the order is total and the same as one comparer sort's -- which
+    /// on a composite key, whose row encoding repeats its leading column's bytes across whole
+    /// chunks, cost more than half of the write.
+    /// <paramref name="windows"/> is indexed like <paramref name="ids"/>, so a nested sort
+    /// overwrites only the entries of its own run.
+    /// </remarks>
+    private void SortBytes(Span<int> ids, Span<ulong> windows, int offset, KeyLayout layout)
+    {
+        if (ids.Length <= SmallRun)
+        {
+            ids.Sort(new ByKey(this, layout));
+            return;
+        }
+
+        // A window every key shares -- a composite key's padding, its leading column's value in a
+        // run of it -- is skipped rather than sorted: the loop moves to the next one.
+        int next;
+        bool longer;
+        while (true)
+        {
+            longer = false;
+            next = offset + sizeof(ulong);
+            bool shared = true;
+            for (int i = 0; i < ids.Length; i++)
+            {
+                ReadOnlySpan<byte> key = KeyBytes(ids[i]);
+                windows[i] = Window(key, offset);
+                shared &= windows[i] == windows[0];
+                longer |= key.Length > next;
+            }
+
+            if (!shared)
+            {
+                break;
+            }
+
+            if (!longer)
+            {
+                ids.Sort(new ByKey(this, layout));
+                return;
+            }
+
+            offset = next;
+        }
+
+        windows.Sort(ids);
+        for (int start = 0; start < ids.Length;)
+        {
+            int end = start + 1;
+            bool runLonger = KeyBytes(ids[start]).Length > next;
+            while (end < ids.Length && windows[end] == windows[start])
+            {
+                runLonger |= KeyBytes(ids[end]).Length > next;
+                end++;
+            }
+
+            if (end - start > 1)
+            {
+                if (runLonger)
+                {
+                    SortBytes(ids[start..end], windows[start..end], next, layout);
+                }
+                else
+                {
+                    ids[start..end].Sort(new ByKey(this, layout));
+                }
+            }
+
+            start = end;
+        }
+    }
+
+    /// <summary>Bytes <c>[offset, offset + 8)</c> of a key, zero-padded past its end, as a big-endian integer.</summary>
+    private static ulong Window(ReadOnlySpan<byte> key, int offset)
+    {
+        if (key.Length >= offset + sizeof(ulong))
+        {
+            return BinaryPrimitives.ReadUInt64BigEndian(key.Slice(offset, sizeof(ulong)));
+        }
+
+        Span<byte> padded = stackalloc byte[sizeof(ulong)];
+        padded.Clear();
+        if (offset < key.Length)
+        {
+            key[offset..].CopyTo(padded);
+        }
+
+        return BinaryPrimitives.ReadUInt64BigEndian(padded);
     }
 
     private readonly struct ByKey(ChunkKeys table, KeyLayout layout) : IComparer<int>
