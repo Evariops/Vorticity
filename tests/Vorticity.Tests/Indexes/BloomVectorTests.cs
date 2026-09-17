@@ -292,6 +292,42 @@ public sealed class BloomVectorTests
         Assert.InRange(rate, 0.0, 0.02);
     }
 
+    /// <summary>
+    /// The probe against §5.1's rule spelled out, on a filter dense enough that both answers are
+    /// common, and every bit a lane can name among the probes.
+    /// </summary>
+    [Fact]
+    public void TheProbeAnswersTheRuleWordByWord()
+    {
+        uint[] salts = [0x47b6137b, 0x44974d91, 0x8824ad5b, 0xa2b7289d, 0x705495c7, 0x2df1424b, 0x9efc4947, 0x5c6bfb31];
+        uint[] words = new uint[4 * SplitBlockBloom.WordsPerBlock];
+        ulong state = 0x9E3779B97F4A7C15UL;
+        for (int i = 0; i < 200; i++)
+        {
+            state = (state * 6_364_136_223_846_793_005UL) + 1_442_695_040_888_963_407UL;
+            SplitBlockBloom.Insert(words, state);
+        }
+
+        int present = 0;
+        for (int i = 0; i < 20_000; i++)
+        {
+            state = (state * 6_364_136_223_846_793_005UL) + 1_442_695_040_888_963_407UL;
+            int block = (int)(((state >> 32) * 4UL) >> 32);
+            bool expected = true;
+            for (int w = 0; w < 8; w++)
+            {
+                uint bit = 1u << (int)(((uint)state * salts[w]) >> 27);
+                expected &= (words[(block * 8) + w] & bit) != 0;
+            }
+
+            bool actual = SplitBlockBloom.Contains(words, state);
+            Assert.Equal(expected, actual);
+            present += actual ? 1 : 0;
+        }
+
+        Assert.InRange(present, 100, 19_900);
+    }
+
     private static void BitConverterWrite(Span<byte> destination, long value) =>
         System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(destination, value);
 

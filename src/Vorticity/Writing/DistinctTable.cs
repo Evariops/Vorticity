@@ -174,12 +174,6 @@ internal sealed class DistinctTable
         // of a bool, a byte or a short can never be smaller than the column, so a table over one
         // is a hash and a probe per row for a verdict the chooser reaches without it. The end-of-
         // refactor measurement priced that at ×6 to ×9,5 on the bool family.
-        // NO TABLE BELOW THREE BYTES OF WIDTH, and it is arithmetic, not policy: a column of `w`
-        // bytes has at most 2^(8w) distinct values, so its codes are `w` bytes wide too -- as wide
-        // as the values they replace -- and the entries and the framing come on top. A dictionary
-        // of a bool, a byte or a short can never be smaller than the column, so a table over one
-        // is a hash and a probe per row for a verdict the chooser reaches without it. The end-of-
-        // refactor measurement priced that at ×6 to ×9,5 on the bool family.
         CanonicalKind.Bool => null,
         CanonicalKind.Primitive => node.PType.ByteWidth() <= 2
             ? null
