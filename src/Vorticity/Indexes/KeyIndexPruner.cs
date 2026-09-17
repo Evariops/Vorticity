@@ -13,6 +13,7 @@
 // arrays, a keys array of the wrong type or length -- claims nothing for its blocks.
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -421,6 +422,15 @@ internal sealed class KeyIndexPruner
         private readonly byte[]?[] _otherZeros;
         private readonly bool[][] _absent;
 
+        /// <summary>
+        /// The keys the filter asks for, in the runs' own order, with their sort keys: the
+        /// merge-join's left side (docs/11-write-strategy.md §4.3). Built at the first segment.
+        /// </summary>
+        private (int Literal, byte[] Key, ulong Sort)[]? _sorted;
+
+        /// <summary>One segment's matches: per literal, the entries equal to its key.</summary>
+        private readonly List<(int Literal, int Low, int High)> _matches = [];
+
         internal Column(
             bool rows, KeyLayout layout, DType storage, List<Run> runs, List<FilterLiteral> literals, int blocks, bool fold)
         {
@@ -579,17 +589,15 @@ internal sealed class KeyIndexPruner
                         return false;
                     }
 
-                    for (int i = 0; i < _keys.Length; i++)
+                    foreach ((int literal, int low, int high) in Match(keyNode))
                     {
                         if (wide)
                         {
-                            MarkRows(i, _keys[i], keyNode, rows.Values.Cast<ulong>(), firstBlock, blockRows);
-                            MarkRows(i, _otherZeros[i], keyNode, rows.Values.Cast<ulong>(), firstBlock, blockRows);
+                            MarkRows(literal, low, high, rows.Values.Cast<ulong>(), firstBlock, blockRows);
                         }
                         else
                         {
-                            MarkRows(i, _keys[i], keyNode, rows.Values.Cast<uint>(), firstBlock, blockRows);
-                            MarkRows(i, _otherZeros[i], keyNode, rows.Values.Cast<uint>(), firstBlock, blockRows);
+                            MarkRows(literal, low, high, rows.Values.Cast<uint>(), firstBlock, blockRows);
                         }
                     }
 
@@ -613,10 +621,9 @@ internal sealed class KeyIndexPruner
                 }
 
                 ReadOnlySpan<uint> blocks = lists.Values.Cast<uint>();
-                for (int i = 0; i < _keys.Length; i++)
+                foreach ((int literal, int low, int high) in Match(keyNode))
                 {
-                    MarkPostings(i, _keys[i], keyNode, starts, blocks, firstBlock);
-                    MarkPostings(i, _otherZeros[i], keyNode, starts, blocks, firstBlock);
+                    MarkPostings(literal, low, high, starts, blocks, firstBlock);
                 }
 
                 return true;
@@ -638,14 +645,8 @@ internal sealed class KeyIndexPruner
                 : keys.Kind == CanonicalKind.Primitive && keys.PType == _layout.PType);
 
         private void MarkPostings(
-            int literal, byte[]? key, CanonicalNode keys, ReadOnlySpan<uint> starts, ReadOnlySpan<uint> blocks, ulong firstBlock)
+            int literal, int lo, int hi, ReadOnlySpan<uint> starts, ReadOnlySpan<uint> blocks, ulong firstBlock)
         {
-            if (key is null)
-            {
-                return;
-            }
-
-            (int lo, int hi) = Range(keys, key);
             for (int k = lo; k < hi; k++)
             {
                 for (uint p = starts[k]; p < starts[k + 1]; p++)
@@ -656,14 +657,8 @@ internal sealed class KeyIndexPruner
         }
 
         private void MarkRows(
-            int literal, byte[]? key, CanonicalNode keys, ReadOnlySpan<uint> rows, ulong firstBlock, long blockRows)
+            int literal, int lo, int hi, ReadOnlySpan<uint> rows, ulong firstBlock, long blockRows)
         {
-            if (key is null)
-            {
-                return;
-            }
-
-            (int lo, int hi) = Range(keys, key);
             for (int e = lo; e < hi; e++)
             {
                 Present(literal, firstBlock + (ulong)(rows[e] / blockRows));
@@ -671,14 +666,8 @@ internal sealed class KeyIndexPruner
         }
 
         private void MarkRows(
-            int literal, byte[]? key, CanonicalNode keys, ReadOnlySpan<ulong> rows, ulong firstBlock, long blockRows)
+            int literal, int lo, int hi, ReadOnlySpan<ulong> rows, ulong firstBlock, long blockRows)
         {
-            if (key is null)
-            {
-                return;
-            }
-
-            (int lo, int hi) = Range(keys, key);
             for (int e = lo; e < hi; e++)
             {
                 Present(literal, firstBlock + (rows[e] / (ulong)blockRows));
@@ -694,15 +683,128 @@ internal sealed class KeyIndexPruner
             }
         }
 
+        /// <summary>The filter's keys in the runs' order, each with its sort key.</summary>
+        /// <remarks>
+        /// A float's second zero is a key of its own here, pointing at the same literal: two
+        /// entries a run may hold separately, one answer to give.
+        /// </remarks>
+        private (int Literal, byte[] Key, ulong Sort)[] Sorted()
+        {
+            if (_sorted is { } built)
+            {
+                return built;
+            }
+
+            List<(int Literal, byte[] Key, ulong Sort)> pairs = [];
+            for (int i = 0; i < _keys.Length; i++)
+            {
+                foreach (byte[]? key in (byte[]?[])[_keys[i], _otherZeros[i]])
+                {
+                    if (key is not null)
+                    {
+                        pairs.Add((i, key, _layout.Shape == KeyShape.Bytes ? 0 : _layout.SortKey(key)));
+                    }
+                }
+            }
+
+            pairs.Sort((a, b) => _layout.Shape == KeyShape.Bytes
+                ? _layout.Compare(a.Key, b.Key)
+                : a.Sort.CompareTo(b.Sort));
+            _sorted = [.. pairs];
+            return _sorted;
+        }
+
+        /// <summary>
+        /// The entries of one segment that hold the filter's keys, as ranges per literal
+        /// (docs/11-write-strategy.md §4.3).
+        /// </summary>
+        /// <remarks>
+        /// TWO SHAPES, AND THE COUNTS CHOOSE. A binary search per key costs
+        /// <c>2·keys·log₂(entries)</c> comparisons; walking the segment against the sorted keys
+        /// costs <c>entries + keys</c>. Measured on 122 segments of 8 192 entries: at ten keys the
+        /// searches take 0,03 ms and the walk 0,68; at a thousand the searches take 1,53 and the
+        /// walk 0,28. So the cheaper count runs, and both compare SORT KEYS — a fixed-width key is
+        /// one unsigned integer in the run's own order (<see cref="KeyLayout.SortKey"/>), which is
+        /// what took the same searches from 13,6 ms to 1,53.
+        /// </remarks>
+        /// <param name="keys">The segment's decoded keys.</param>
+        private List<(int Literal, int Low, int High)> Match(CanonicalNode keys)
+        {
+            _matches.Clear();
+            (int Literal, byte[] Key, ulong Sort)[] sorted = Sorted();
+            int entries = keys.Length;
+            if (sorted.Length == 0 || entries == 0)
+            {
+                return _matches;
+            }
+
+            long searches = 2L * sorted.Length * (64 - BitOperations.LeadingZeroCount((ulong)entries));
+            if (searches <= entries + sorted.Length)
+            {
+                foreach ((int literal, byte[] key, ulong _) in sorted)
+                {
+                    (int low, int high) = Range(keys, key);
+                    if (high > low)
+                    {
+                        _matches.Add((literal, low, high));
+                    }
+                }
+
+                return _matches;
+            }
+
+            int entry = 0;
+            int pair = 0;
+            while (entry < entries && pair < sorted.Length)
+            {
+                int sign = CompareAt(keys, entry, sorted[pair]);
+                if (sign < 0)
+                {
+                    entry++;
+                    continue;
+                }
+
+                if (sign > 0)
+                {
+                    pair++;
+                    continue;
+                }
+
+                int low = entry;
+                while (entry < entries && CompareAt(keys, entry, sorted[pair]) == 0)
+                {
+                    entry++;
+                }
+
+                _matches.Add((sorted[pair].Literal, low, entry));
+
+                // The keys the filter asks for may repeat -- an `IN` list is the caller's, and a
+                // float's two zeros are two keys of two literals -- so the next pair is offered the
+                // same entries rather than the ones after them.
+                entry = low;
+                pair++;
+            }
+
+            return _matches;
+        }
+
+        /// <summary>Entry <paramref name="index"/> against a key, in the run's order.</summary>
+        private int CompareAt(CanonicalNode keys, int index, (int Literal, byte[] Key, ulong Sort) pair) =>
+            _layout.Shape == KeyShape.Bytes
+                ? _layout.Compare(KeyAt(keys, index), pair.Key)
+                : _layout.SortKey(KeyAt(keys, index)).CompareTo(pair.Sort);
+
         /// <summary>The entries equal to <paramref name="key"/>: [lower bound, upper bound).</summary>
         private (int Low, int High) Range(CanonicalNode keys, byte[] key)
         {
+            (int Literal, byte[] Key, ulong Sort) wanted =
+                (0, key, _layout.Shape == KeyShape.Bytes ? 0 : _layout.SortKey(key));
             int low = 0;
             int high = keys.Length;
             while (low < high)
             {
                 int mid = (low + high) >>> 1;
-                if (_layout.Compare(KeyAt(keys, mid), key) < 0)
+                if (CompareAt(keys, mid, wanted) < 0)
                 {
                     low = mid + 1;
                 }
@@ -717,7 +819,7 @@ internal sealed class KeyIndexPruner
             while (low < high)
             {
                 int mid = (low + high) >>> 1;
-                if (_layout.Compare(KeyAt(keys, mid), key) <= 0)
+                if (CompareAt(keys, mid, wanted) <= 0)
                 {
                     low = mid + 1;
                 }

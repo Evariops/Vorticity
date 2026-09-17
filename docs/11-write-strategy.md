@@ -593,6 +593,21 @@ lanes, AND-compare), zone map min/max evaluation over many zones at once, postin
 (FastLanes), Swiss-table group compare and sorted merge-join for `IN (...)` against a run's keys.
 Writing the SIMD kernels once, for both sides, is part of the design.
 
+**As delivered (step 32): one of the five was written, and the measurement is why.** Each was
+priced at the driver before a line was written (BENCH-AUDIT.md R10), on a million-row file with a
+sorted-runs index over a key column.
+
+| kernel | verdict | the measurement |
+|---|---|---|
+| sorted merge-join for `IN (...)` | **written** | an `IN` of a thousand keys planned in **117 ms**; the comparisons were never the cost. 100 ms of it was the slice union, which re-sorted everything found so far on every literal — gathered and merged once, that is gone. The pruner's own matching was the rest: it compared keys through their bytes, where a fixed-width key is one unsigned integer in the run's order (`KeyLayout.SortKey`); on 122 segments of 8 192 entries, a thousand keys take 13,6 ms through the bytes and 1,53 through the sort keys. Above roughly `entries / 2log₂(entries)` keys the searches cost more than one walk of the segment, and the pruner then merges: 0,28 ms on the same shape. Together: **117 ms → 51** |
+| Bloom probe, eight lanes | not written | the probe is **3,21 ns scalar and 1,81 in two registers**, a real 1,8×. A filtered scan probes about 140 times per literal — a root, a level, the live blocks — so it saves 0,2 µs of a 7 ms scan: 0,003 %. It pays at a million probes a query, which is the dataset over many objects ([13-dataset.md](13-dataset.md)), not a file |
+| zone map min/max over many zones | not written | the zone step of a 1M-row filtered plan reads one segment of 3 124 bytes and decides 123 zones in **0,3 ms**, decode included. There is no register's worth of work to save in front of the decode that feeds it |
+| postings unpack | already vectorised | the payloads are ordinary arrays, and `FastLanes` unpacks them with the same kernels a column uses |
+| Swiss-table group compare | not written | the distinct table probes at **1,46 ns a row at a hundred distinct values and 1,88 at ten thousand**, which is where it runs at all: a dictionary's column. The ×2 this row promises would save at most 0,7 ns a row, five per cent of a `dict` write, for a rewrite of the table that hands out the codes. At a million distinct values it costs 24,7 ns a row, and that is DRAM, which no group compare fixes — and there the dictionary loses and the table does not run |
+
+What the `IN` measurement also found, and left to [10-indexes.md](10-indexes.md) §11's calibration:
+of the 51 ms that remain, about 39 are the two rank lookups a literal makes into the key source.
+
 ### 4.4 What SIMD does not fix
 
 Short-string hashing, table probing (a dependent load), FSST and zstd (scalar by nature; our FSST
