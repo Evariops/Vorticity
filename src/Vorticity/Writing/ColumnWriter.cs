@@ -624,6 +624,41 @@ internal sealed class ColumnWriter
         _seeded += blocks.Count;
     }
 
+    /// <summary>
+    /// Starts this column, and the child columns the seed names, from what an appended file's last
+    /// chunk was written as (docs/11-write-strategy.md §3.8): a memory that held, and the ingest
+    /// state its scheme reads, exactly as <see cref="Remember"/> would have left them.
+    /// </summary>
+    /// <param name="seed">The old chunk's plan.</param>
+    /// <remarks>
+    /// The children are created here rather than on the first batch, so that the seed needs no
+    /// field of its own: <see cref="Children"/> hands the first batch the same nodes.
+    /// </remarks>
+    internal void SeedPlan(PlanSeed seed)
+    {
+        if (seed.Scheme is { } scheme)
+        {
+            Memory = new PlanMemory(scheme, 1, 1);
+            _live = scheme == ColumnScheme.Dict;
+            _widthsLive = scheme == ColumnScheme.BitPacked && seed.WidthsServe;
+        }
+
+        PlanSeed?[] fields = seed.Fields;
+        if (fields.Length == 0)
+        {
+            return;
+        }
+
+        ColumnWriter[] children = Children(fields.Length);
+        for (int i = 0; i < fields.Length; i++)
+        {
+            if (fields[i] is { } field)
+            {
+                children[i].SeedPlan(field);
+            }
+        }
+    }
+
     /// <summary>Blocks taken from an existing file, which a child created later is given too.</summary>
     private int _seeded;
 

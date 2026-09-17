@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -144,6 +145,58 @@ public sealed class AppendTests
             Assert.Equal(expected, await file.Scan().Where(filter).CountAsync());
             List<string> rows = await FilteredRows(file, filter);
             Assert.Equal(expected, rows.Count);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task TheFirstAppendedChunkConsultsTheLastChunksPlan()
+    {
+        // §3.8: "plan memory is seeded from the last chunk's encoding tree". The cut falls on a
+        // block, so nothing is re-opened and re-priced, and the append is one block -- one chunk,
+        // the first -- which without the seed has no memory to consult and no distinct table.
+        Decoders.EnsureRegistered();
+        string path = TempPath();
+        try
+        {
+            WriteReport before = await WriteAsync(path, 0, 8_192);
+            WriteReport after;
+            long fromTable;
+            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path))
+            {
+                await FeedAsync(writer, 8_192, 8_192 + Block);
+                after = await writer.CompleteAsync();
+                fromTable = writer.ChunksFromTable;
+            }
+
+            Assert.Equal(new long[] { Block }, after.ChunkRows.Skip(after.ChunkRows.Count - 1));
+            int seeded = 0;
+            int dictionaries = 0;
+            for (int field = 0; field < Names.Length; field++)
+            {
+                string last = before.Columns[field].Encodings[^1];
+                ColumnWriteReport appended = after.Columns[field];
+                bool scheme = last is not ("" or nameof(ColumnScheme.None));
+                Assert.True(
+                    appended.PlansPriced == (scheme ? 1 : 0),
+                    $"{Names[field]}: last chunk {last}, {appended.PlansPriced} plans priced");
+                seeded += scheme ? 1 : 0;
+                dictionaries += last == nameof(ColumnScheme.Dict) && appended.Encodings[^1] == last ? 1 : 0;
+            }
+
+            // The sequence and the dictionary, at least; and each dictionary kept was read off the
+            // table the seed turned on.
+            Assert.Equal(nameof(ColumnScheme.Sequence), before.Columns[0].Encodings[^1]);
+            Assert.Equal(nameof(ColumnScheme.Dict), before.Columns[2].Encodings[^1]);
+            Assert.True(seeded >= 2, $"{seeded} columns seeded");
+            Assert.True(dictionaries >= 1);
+            Assert.Equal(dictionaries, fromTable);
+
+            await using VortexFile file = await VortexFile.OpenAsync(path);
+            Assert.Equal(8_192 + Block, file.RowCount);
         }
         finally
         {
@@ -484,7 +537,7 @@ public sealed class AppendTests
         ],
         Nullability.NonNullable);
 
-    private static async Task WriteAsync(string path, int start, int end, WritePolicy? policy = null)
+    private static async Task<WriteReport> WriteAsync(string path, int start, int end, WritePolicy? policy = null)
     {
         VortexWriteOptions options = new VortexWriteOptions
         {
@@ -495,7 +548,7 @@ public sealed class AppendTests
         };
         await using VortexFileWriter writer = VortexFileWriter.Create(path, Schema, options);
         await FeedAsync(writer, start, end);
-        await writer.CompleteAsync();
+        return await writer.CompleteAsync();
     }
 
     /// <summary>Rows <c>[start, end)</c> in ragged batches, so pieces and blocks never line up by accident.</summary>

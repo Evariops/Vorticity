@@ -15,6 +15,10 @@
 // for the zone map written again over the whole file, and the file statistics for the old rows'
 // bounds and order.
 //
+// THE LAST CHUNK'S PLAN IS REMEMBERED. Each column's last segment is fetched and its encoding tree
+// parsed -- nothing in it is decoded -- to seed the column's plan memory (`PlanSeed`), so the
+// appended rows keep the file's encodings unless their statistics say otherwise.
+//
 // WHAT THE WRITER READS, IT READS FROM ITS OWN SHAPE. The file must be a struct of columns, each a
 // chunked layout of flat segments (a zoned wrapper allowed), with the same chunks in every column
 // -- the shape this writer produces; anything else is refused and a rewrite is the answer.
@@ -163,6 +167,11 @@ public sealed partial class VortexFileWriter
         {
             _columnSegments[field].AddRange(plan.Columns[field].KeptSegments);
             _columns[field].Seed(plan.Columns[field].Blocks, Recut(plan.Columns[field].Strings, field));
+            if (plan.Seeds[field] is { } seed)
+            {
+                _columns[field].SeedPlan(seed);
+            }
+
             noZoneMap[field] = !plan.Columns[field].HasZones && plan.Boundary > 0;
         }
 
@@ -350,6 +359,9 @@ public sealed partial class VortexFileWriter
 
         internal required OldColumn[] Columns { get; init; }
 
+        /// <summary>Per column, the plan its last chunk was written with, or none.</summary>
+        internal required PlanSeed?[] Seeds { get; init; }
+
         internal required List<RecordBatch> Reopened { get; init; }
 
         internal required IReadOnlyList<IndexEntry> Entries { get; init; }
@@ -524,12 +536,64 @@ public sealed partial class VortexFileWriter
                 ArrayEncodings = encodings,
                 Segments = [.. file.SegmentSpecs],
                 Columns = columns,
+                Seeds = await SeedsAsync(file, schema, chunks, cancellationToken).ConfigureAwait(false),
                 Reopened = reopened,
                 Entries = directory?.Entries ?? [],
                 Policy = directory?.Policy,
                 BudgetPerMille = directory?.BudgetPerMille ?? IndexDirectory.DefaultBudgetPerMille,
                 Statistics = statistics,
             };
+        }
+
+        /// <summary>
+        /// Per column, the plan its last chunk was written with (docs/11-write-strategy.md §3.8):
+        /// one segment read per column, the chunk's encoding tree and nothing it points at.
+        /// </summary>
+        private static async ValueTask<PlanSeed?[]> SeedsAsync(
+            VortexFile file, DType schema, List<(LayoutNode Flat, long Start)>[] chunks,
+            CancellationToken cancellationToken)
+        {
+            PlanSeed?[] seeds = new PlanSeed?[chunks.Length];
+            for (int field = 0; field < chunks.Length; field++)
+            {
+                if (chunks[field].Count > 0)
+                {
+                    seeds[field] = await SeedAsync(
+                        file, chunks[field][^1].Flat, schema.GetField(field), cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            return seeds;
+        }
+
+        /// <summary>What one flat chunk of a column was written as.</summary>
+        /// <param name="file">The file.</param>
+        /// <param name="flat">The chunk's flat layout.</param>
+        /// <param name="dtype">The column's dtype.</param>
+        /// <param name="cancellationToken">Cancels the read.</param>
+        internal static async ValueTask<PlanSeed?> SeedAsync(
+            VortexFile file, LayoutNode flat, DType dtype, CancellationToken cancellationToken)
+        {
+            using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
+            int slot = context.Segments.Add(file.SegmentSpecs[checked((int)flat.Segments[0])]);
+            await file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
+            return Seed(context, flat, slot, dtype);
+        }
+
+        private static PlanSeed? Seed(ScanContext context, LayoutNode flat, int slot, DType dtype)
+        {
+            Buffers.VortexBuffer segment = context.Segments.GetBuffer(slot);
+            Arrays.Metadata.FlatLayoutMetadata metadata = Arrays.Metadata.FlatLayoutMetadata.Read(flat.Metadata);
+            if (metadata.HasArrayEncodingTree)
+            {
+                context.Decode.LoadBlob(metadata.ArrayEncodingTree, segment);
+            }
+            else
+            {
+                context.Decode.LoadBlob(segment);
+            }
+
+            return PlanSeed.Of(context.Nodes.Root, dtype);
         }
 
         /// <summary>Per column, the blocks a dictionary probe claimed.</summary>

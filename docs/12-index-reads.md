@@ -544,7 +544,8 @@ are reset with the batch that borrows from them. Rows with a null key are delive
 and so by no key-ordered scan. `ScanMetrics.Windows` and `WindowSplits` count the windows and the
 splits they touched. A window allocates its `RecordBatch` when it reads its splits whole; a window
 across a split boundary pays what the take push-down pays per partial split on that column's
-encoding. `Explain` does not yet report the source and the range (step 18). Measured on 65 536 rows
+encoding. `Explain` reports the source, the runs the range reaches and their entries since step 18
+(`ScanPlan.Order`). Measured on 65 536 rows
 in 64 splits (`--ratio-check`): a 1 % band of a sorted column in key order at **0,70×** the
 reference's filtered scan; 64 rows of an uncorrelated column at **1,40×** the reference's take of
 64 rows over 64 splits; the same band counted by the exact cover at **0,79×** the reference's scan.

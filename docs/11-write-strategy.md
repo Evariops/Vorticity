@@ -470,8 +470,13 @@ re-opened, and a comparison of the old maximum with the new minimum otherwise, a
 value unsorting the file. The index builders start at the boundary block and row; the old entries'
 runs that end by the boundary are listed again, merged into the new entry of the same kind, column
 and options (Bloom counts laid block by block, or run by run), and the dictionary probe is
-recomputed from the chunks' schemes. **Plan memory is not seeded** from the old encoding tree: the
-re-opened chunk is priced again, which costs one chunk's pricing. The repair is
+recomputed from the chunks' schemes. Plan memory is seeded from the last chunk's encoding tree (one
+segment read per column, `PlanSeed`): each column and struct field whose root is an encoding a
+scheme writes starts with that scheme as a memory that held, with the distinct table live under a
+dictionary and the width histograms under a bit-packing without a frame. A canonical chunk seeds
+nothing, so a short last chunk does not hold a large append canonical. A test reads every chunk of
+the corpus rewritten by this writer back through the seed and compares it with the `WriteReport`.
+The repair is
 `VortexFileRepair.RepairAsync` (and `vxdump --repair`): it walks back from the end for an EOF record
 whose prefix opens as a file, and truncates to it. `vxdump --indexes` prints the directory and
 `--explain "expr"` the plan and the count of a filtered scan. The acceptance test writes the same
