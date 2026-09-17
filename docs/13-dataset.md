@@ -214,6 +214,26 @@ An **internal entry** holds a page reference (§3) to a child and carries the un
 children's key ranges and summaries and the sum of their rows. Pruning happens at every level:
 a predicate that the node's summaries refute skips the whole subtree.
 
+**As delivered (step 39a), and what it leaves.** `ObjectEntry` carries the four things the commit
+protocol of §8 reasons about — the object's key, the `uid` its postscript holds, its rows and bytes,
+the writer's XXH3-128, and the fragments attached to it — and an internal entry carries the key
+range and the row sum. The **summaries** are not there yet, so nothing prunes a subtree from them;
+that is the rest of step 39, along with the mandatory run on the clustering key, `InKeyOrder` across
+objects and `Rows(a, b)`.
+
+`VortexDataset` is the surface: `CreateAsync`, `OpenAsync`, `RefreshAsync`, `AppendAsync` (one data
+object and one commit), `ImportAsync` (a file already in the store becomes a leaf **without a
+copy**, measured: the store grows by the commit objects alone), `ObjectsAsync` and `Scan()`. A data
+object is a plain Vortex file, so the scan over one object is the core's own scan, filter and
+indexes included; the dataset adds the order and, later, the pruning. Until a clustering key is
+declared, a leaf's key is §4.1's other option — **the object's first row position**, eight
+big-endian bytes, whose `memcmp` order is its numeric order — which keeps the dataset free of the
+0.x row-encoding package until it needs it.
+
+The acceptance is §14's and it is a comparison, never a chosen number: the same rows written into a
+dataset of four objects and into one file answer the same, unfiltered and filtered, with the index
+chain on and off.
+
 ### 4.3 Commits are paths, written as one object
 
 A commit is a **sorted batch of changes per level**: entries added, entries removed, descriptors

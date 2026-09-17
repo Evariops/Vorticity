@@ -115,6 +115,37 @@ public sealed class VortexWriteOptions
     /// </remarks>
     public Guid? Identity { get; init; }
 
+    /// <summary>These options with <see cref="Identity"/> pinned to <paramref name="identity"/>.</summary>
+    /// <param name="identity">The sixteen bytes the postscript will carry.</param>
+    /// <returns>A copy; these options are unchanged.</returns>
+    /// <remarks>
+    /// For a caller that mints the identity BEFORE the write and has to know it afterwards -- a
+    /// dataset naming its data object (13 §7) is the case this exists for, since it records the
+    /// identity in the leaf entry and cannot go back and read it out of the bytes it just streamed
+    /// into a store. It is a copy method rather than a record's `with` because these options are a
+    /// class, like every other options type of this library.
+    /// </remarks>
+    public VortexWriteOptions WithIdentity(Guid identity) => new VortexWriteOptions
+    {
+        Indexes = Indexes,
+        Profile = Profile,
+        EncodingHints = EncodingHints,
+        IndexBudgetPerMille = IndexBudgetPerMille,
+        KeyEncoder = KeyEncoder,
+        Identity = identity,
+        ScratchDirectory = ScratchDirectory,
+        ScratchMemoryBytes = ScratchMemoryBytes,
+        WideRowsAbove = WideRowsAbove,
+        Fences = Fences,
+        ElementStatistics = ElementStatistics,
+        Compress = Compress,
+        FileStatistics = FileStatistics,
+        StringBoundBytes = StringBoundBytes,
+        TargetEdition = TargetEdition,
+        RowBlockSize = RowBlockSize,
+        DataBlockTargetBytes = DataBlockTargetBytes,
+    };
+
     /// <summary>
     /// Where a locating index's chunk runs wait for their merge once they pass the memory budget,
     /// or null -- the default -- for the system's temporary directory.

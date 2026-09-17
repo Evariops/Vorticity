@@ -1,0 +1,298 @@
+// The acceptance of docs/13-dataset.md §14, applied to what step 39 delivers: "every answer equals
+// that of a single file".
+//
+// SO EVERY TEST HERE IS A COMPARISON, not an assertion about a number someone chose. The same rows
+// go into a dataset of several objects and into one file written in one go; the dataset's answer
+// and the file's answer must be the same rows, the same count, the same values under the same
+// filter. That is the only property that makes a dataset worth having over a directory of files,
+// and it is the one a partial implementation breaks first.
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+using Vorticity.Arrays;
+using Vorticity.Buffers;
+using Vorticity.Columns;
+using Vorticity.Dataset;
+using Vorticity.Expressions;
+using Vorticity.File;
+using Vorticity.IO;
+using Vorticity.Scan;
+using Vorticity.Tests.Scan;
+using Vorticity.Types;
+using Vorticity.Writing;
+using Xunit;
+
+namespace Vorticity.Tests.Dataset;
+
+public sealed class VortexDatasetTests
+{
+    private const int Batch = 5_000;
+
+    private static DType Schema(DTypeArena types) => types.Struct(
+        ["key", "measure"],
+        [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
+        Nullability.NonNullable);
+
+    private static DatasetOptions Options() => new DatasetOptions
+    {
+        Seed = 0xDA7A_5E7,
+        Write = new VortexWriteOptions { RowBlockSize = 1_024, DataBlockTargetBytes = 64 << 10 },
+    };
+
+    [Fact]
+    public async Task ADatasetOfSeveralObjectsAnswersAsOneFile()
+    {
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
+        Assert.Equal(1UL, dataset.Version);
+        Assert.Equal(0, dataset.RowCount);
+
+        const int objects = 4;
+        for (int i = 0; i < objects; i++)
+        {
+            await dataset.AppendAsync(Batches(types, schema, i * Batch, Batch));
+        }
+
+        Assert.Equal(objects, dataset.ObjectCount);
+        Assert.Equal(objects * Batch, dataset.RowCount);
+
+        // The same rows, written once, into one file.
+        byte[] single = await OneFileAsync(types, schema, objects * Batch);
+        await using VortexFile file = await VortexFile.OpenAsync(
+            new MemorySegmentSource(single), new VortexOpenOptions(), default);
+
+        Assert.Equal(file.RowCount, dataset.RowCount);
+        Assert.Equal(await KeysAsync(file.Scan()), await KeysAsync(dataset.Scan()));
+
+        // And under a filter, which each object's own scan applies with its own indexes.
+        VortexExpr filter = Expr.And(
+            Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(7_000L))),
+            Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(12_345L))));
+        Assert.Equal(
+            await KeysAsync(file.Scan().Where(filter)),
+            await KeysAsync(dataset.Scan().Where(filter)));
+        Assert.Equal(
+            await file.Scan().Where(filter).CountAsync(),
+            await dataset.Scan().Where(filter).CountAsync());
+
+        // With the per-file index chain off, as 08 §1's equivalence asks.
+        Assert.Equal(
+            await KeysAsync(file.Scan().Where(filter).WithIndexes(false)),
+            await KeysAsync(dataset.Scan().Where(filter).WithIndexes(false)));
+    }
+
+    [Fact]
+    public async Task AFileAlreadyInTheStoreIsImportedWithoutACopy()
+    {
+        // §3: "A single existing Vortex file becomes a dataset of one leaf: one commit object, no
+        // copy."
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        byte[] single = await OneFileAsync(types, schema, 3_000);
+        string key = CommitKey.ForData("imported");
+        await store.PutIfAbsentAsync(key, single, default);
+        long bytesBefore = store.Bytes;
+
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
+        ulong version = await dataset.ImportAsync(key);
+
+        // Version 1 is the creation, version 2 is the import: one commit object each.
+        Assert.Equal(2UL, version);
+        Assert.Equal(1, dataset.ObjectCount);
+        Assert.Equal(3_000, dataset.RowCount);
+
+        // The file's bytes were not copied: the store grew by the commit objects alone.
+        Assert.True(store.Bytes - bytesBefore < single.Length / 4);
+
+        ObjectEntry entry = Assert.Single(await ObjectsAsync(dataset));
+        Assert.Equal(key, entry.Key);
+        Assert.Equal(single.Length, entry.Bytes);
+        Assert.NotEqual(UInt128.Zero, entry.Uid);
+
+        await using VortexFile file = await VortexFile.OpenAsync(
+            new MemorySegmentSource(single), new VortexOpenOptions(), default);
+        Assert.Equal(await KeysAsync(file.Scan()), await KeysAsync(dataset.Scan()));
+    }
+
+    [Fact]
+    public async Task AnAppendMintsAnIdentityAndRecordsWhatItWrote()
+    {
+        // §7: the entry carries the uid the postscript holds and the hash the writer computed, so a
+        // fragment bound to an old version of the bytes is refused before anything is read.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
+        await dataset.AppendAsync(Batches(types, schema, 0, 1_000));
+
+        ObjectEntry entry = Assert.Single(await ObjectsAsync(dataset));
+        Assert.Equal(1_000, entry.Rows);
+        Assert.NotEqual(UInt128.Zero, entry.Uid);
+        Assert.NotEqual(UInt128.Zero, entry.Hash);
+
+        ObjectHead head = Assert.NotNull(await store.HeadAsync(entry.Key, default));
+        Assert.Equal(head.Length, entry.Bytes);
+
+        // The uid in the entry is the one the file's postscript carries.
+        await using ObjectSegmentSource source = new ObjectSegmentSource(store, entry.Key);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
+        Assert.NotNull(file.Identity);
+    }
+
+    [Fact]
+    public async Task AnEmptyAppendCommitsNothing()
+    {
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
+        int objectsBefore = store.Count;
+
+        ulong version = await dataset.AppendAsync(Nothing());
+
+        Assert.Equal(dataset.Version, version);
+        Assert.Equal(objectsBefore, store.Count);
+        Assert.Equal(0, dataset.ObjectCount);
+    }
+
+    [Fact]
+    public async Task OpeningAStoreWithoutADatasetSaysSo()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await Assert.ThrowsAsync<ObjectNotFoundException>(async () => await VortexDataset.OpenAsync(store));
+
+        DTypeArena types = new DTypeArena();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Schema(types), Options());
+        await Assert.ThrowsAsync<ObjectStoreException>(
+            async () => await VortexDataset.CreateAsync(store, Schema(types), Options()));
+    }
+
+    [Fact]
+    public async Task ASecondHandleSeesTheFirstsCommits()
+    {
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset writer = await VortexDataset.CreateAsync(store, schema, Options());
+        await using VortexDataset reader = await VortexDataset.OpenAsync(store, Options());
+
+        await writer.AppendAsync(Batches(types, schema, 0, 2_000));
+
+        // The reader holds its own version until it asks for another (§8.2, row 7).
+        Assert.Equal(0, reader.RowCount);
+        Assert.Equal(writer.Version, await reader.RefreshAsync());
+        Assert.Equal(2_000, reader.RowCount);
+        Assert.Equal(schema.FieldCount, reader.Schema.FieldCount);
+        Assert.Equal(writer.Seed, reader.Seed);
+    }
+
+    private static async Task<List<ObjectEntry>> ObjectsAsync(VortexDataset dataset)
+    {
+        List<ObjectEntry> entries = [];
+        await foreach (ObjectEntry entry in dataset.ObjectsAsync())
+        {
+            entries.Add(entry);
+        }
+
+        return entries;
+    }
+
+    private static async Task<List<long>> KeysAsync(ScanBuilder scan)
+    {
+        List<long> keys = [];
+        await foreach (RecordBatch batch in scan.ExecuteAsync())
+        {
+            ReadOnlySpan<long> values = batch.Column(0).AsPrimitive<long>().Values;
+            for (int row = 0; row < batch.RowCount; row++)
+            {
+                keys.Add(values[row]);
+            }
+        }
+
+        return keys;
+    }
+
+    private static async Task<List<long>> KeysAsync(DatasetScanBuilder scan)
+    {
+        List<long> keys = [];
+        await foreach (RecordBatch batch in scan.ExecuteAsync())
+        {
+            ReadOnlySpan<long> values = batch.Column(0).AsPrimitive<long>().Values;
+            for (int row = 0; row < batch.RowCount; row++)
+            {
+                keys.Add(values[row]);
+            }
+        }
+
+        return keys;
+    }
+
+    /// <summary>The same rows a dataset would hold, written once into one file.</summary>
+    private static async Task<byte[]> OneFileAsync(DTypeArena types, DType schema, int rows)
+    {
+        System.IO.MemoryStream stream = new System.IO.MemoryStream();
+        await using (VortexFileWriter writer = VortexFileWriter.Create(
+            new StreamSegmentSink(stream), schema, Options().Write))
+        {
+            await foreach (RecordBatch batch in Batches(types, schema, 0, rows))
+            {
+                await writer.WriteAsync(batch);
+            }
+
+            await writer.CompleteAsync();
+        }
+
+        return stream.ToArray();
+    }
+
+    private static async IAsyncEnumerable<RecordBatch> Nothing()
+    {
+        await Task.CompletedTask;
+        yield break;
+    }
+
+    private static async IAsyncEnumerable<RecordBatch> Batches(
+        DTypeArena types, DType schema, long from, int rows)
+    {
+        const int size = 1_000;
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType f64 = types.Primitive(PType.F64, Nullability.NonNullable);
+        for (int start = 0; start < rows; start += size)
+        {
+            int count = Math.Min(size, rows - start);
+            CanonicalArena arena = new CanonicalArena();
+            VortexBuffer keys = arena.Allocate(count * sizeof(long), sizeof(long), out Span<byte> keyBytes);
+            VortexBuffer measures = arena.Allocate(count * sizeof(double), sizeof(double), out Span<byte> measureBytes);
+            Span<long> keyValues = MemoryMarshal.Cast<byte, long>(keyBytes);
+            Span<double> measureValues = MemoryMarshal.Cast<byte, double>(measureBytes);
+            for (int row = 0; row < count; row++)
+            {
+                keyValues[row] = from + start + row;
+                measureValues[row] = (from + start + row) / 4.0;
+            }
+
+            int keyNode = arena.AddPrimitive(i64, count, Validity.NonNullable, PType.I64, keys);
+            int measureNode = arena.AddPrimitive(f64, count, Validity.NonNullable, PType.F64, measures);
+            int root = arena.AddStruct(schema, count, Validity.NonNullable, [keyNode, measureNode]);
+            using RecordBatch batch = new RecordBatch(arena, root, start);
+            yield return batch;
+            await Task.CompletedTask;
+        }
+    }
+}

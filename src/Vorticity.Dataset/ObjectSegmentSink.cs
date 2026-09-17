@@ -44,6 +44,12 @@ public sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     private byte[] _buffer;
     private int _length;
 
+    /// <summary>
+    /// The content hash of §7, which "costs nothing at write time" because the writer sees every
+    /// byte it emits — so it is appended as the bytes go by rather than computed from the buffer.
+    /// </summary>
+    private readonly System.IO.Hashing.XxHash128 _hash = new System.IO.Hashing.XxHash128();
+
     /// <summary>The bytes written, which survives the buffer's release so the object's size does.</summary>
     private long _written;
     private bool _committed;
@@ -78,6 +84,9 @@ public sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     /// <summary>Whether the sink is closed to further writes: its writer disposed it.</summary>
     public bool IsClosed => _closed;
 
+    /// <summary>The XXH3-128 of everything written so far, which §7 records in the leaf entry.</summary>
+    public UInt128 ContentHash => _hash.GetCurrentHashAsUInt128();
+
     /// <inheritdoc/>
     public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
     {
@@ -103,6 +112,7 @@ public sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         }
 
         data.Span.CopyTo(_buffer.AsSpan(_length));
+        _hash.Append(data.Span);
         _length = (int)wanted;
         _written = wanted;
         return ValueTask.CompletedTask;
