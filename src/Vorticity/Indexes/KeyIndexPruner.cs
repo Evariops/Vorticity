@@ -215,7 +215,8 @@ internal sealed class KeyIndexPruner
             foreach ((Column column, Run run, int segment, int[] slots) in wanted)
             {
                 context.ResetBatch();
-                if (!column.Lookup(context, requests, slots, run, segment, live.BlockRows))
+                if (!Intact(requests, slots, run.Meta, segment, column.Stride)
+                    || !column.Lookup(context, requests, slots, run, segment, live.BlockRows))
                 {
                     column.Uncover(run.Meta);
                 }
@@ -229,6 +230,23 @@ internal sealed class KeyIndexPruner
                 live.Kill(block);
             }
         }
+    }
+
+    /// <summary>
+    /// Whether the regions a lookup read are the ones written (13 §7); a lookup over torn bytes
+    /// would prove a key absent from blocks that hold it.
+    /// </summary>
+    private static bool Intact(SegmentRequestSet requests, int[] slots, IndexRun run, int segment, int stride)
+    {
+        for (int array = 0; array < slots.Length; array++)
+        {
+            if (!run.Payload[(segment * stride) + array].Holds(requests.GetBuffer(slots[array]).Span))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool AnyLive(BlockMask live, IndexRun run)

@@ -27,9 +27,22 @@
 //     uint64 entry_count = 5;          // docs/12-index-reads.md §14's amendment
 //     bytes options = 6;               // the per-segment bounds 10 §4.2 puts "in the run's options"
 //   }
-//   message Segment { uint64 offset = 1; uint32 length = 2; uint32 alignment_exponent = 3; }
+//   message Segment {
+//     uint64 offset = 1; uint32 length = 2; uint32 alignment_exponent = 3;
+//     fixed64 checksum = 4;            // version 2: the XXH3-64 of the region's bytes
+//   }
+//
+// VERSION 2 CHECKS WHAT IT READS (docs/13-dataset.md §7, step 20 of IMPL-PLAN.md's plan, 21). The
+// segment is `[2][message][u64 XXH3-64 of everything before it]`, and every payload region carries
+// the XXH3-64 of its bytes. A directory whose trailer does not match is refused whole, like a stale
+// one; a region whose bytes do not match makes its entry claim nothing for the blocks it covers,
+// and a key source that needs it is refused. Until then a zeroed Bloom filter was well formed and
+// dropped rows (10 §5.1). The reader keeps version 1, which has neither -- the fixture the Rust
+// forge writes is one -- and hashes nothing it does not read.
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.IO.Hashing;
 using System.Text;
 using Vorticity.Serialization.Protobuf;
 
@@ -39,7 +52,28 @@ namespace Vorticity.Indexes;
 /// <param name="Offset">Absolute file offset.</param>
 /// <param name="Length">Length in bytes.</param>
 /// <param name="AlignmentExponent">The region's alignment is <c>1 &lt;&lt; AlignmentExponent</c>.</param>
-public readonly record struct IndexSegment(ulong Offset, uint Length, byte AlignmentExponent);
+/// <param name="Checksum">
+/// The XXH3-64 of the region's bytes, or null for a region a version 1 directory lists.
+/// </param>
+public readonly record struct IndexSegment(ulong Offset, uint Length, byte AlignmentExponent, ulong? Checksum = null)
+{
+    /// <summary>A region of <paramref name="bytes"/>, checksummed.</summary>
+    /// <param name="offset">Where the bytes were written.</param>
+    /// <param name="bytes">The bytes.</param>
+    /// <param name="alignmentExponent">Their alignment.</param>
+    /// <returns>The region.</returns>
+    internal static IndexSegment Of(long offset, ReadOnlySpan<byte> bytes, byte alignmentExponent) =>
+        new IndexSegment((ulong)offset, (uint)bytes.Length, alignmentExponent, XxHash3.HashToUInt64(bytes));
+
+    /// <summary>
+    /// Whether <paramref name="bytes"/> are the region's: the right length and, when the region is
+    /// checksummed, the right hash.
+    /// </summary>
+    /// <param name="bytes">What a read returned for the region.</param>
+    /// <returns><see langword="false"/> for a torn or corrupt region.</returns>
+    public bool Holds(ReadOnlySpan<byte> bytes) =>
+        bytes.Length == Length && (Checksum is not { } expected || XxHash3.HashToUInt64(bytes) == expected);
+}
 
 /// <summary>
 /// One immutable run: the filters or keys that cover a contiguous range of blocks
@@ -102,8 +136,14 @@ public sealed record IndexDirectory(
     /// <summary>The postscript metadata key the directory is stored under.</summary>
     public const string MetadataKey = "vorticity.index";
 
-    /// <summary>The one version this library writes and reads.</summary>
-    internal const byte FormatVersion = 1;
+    /// <summary>The version this library writes: checksummed.</summary>
+    internal const byte FormatVersion = 2;
+
+    /// <summary>The version before checksums, which the reader still takes.</summary>
+    internal const byte LegacyVersion = 1;
+
+    /// <summary>The trailer of a version 2 directory: the XXH3-64 of the bytes before it.</summary>
+    private const int ChecksumSize = sizeof(ulong);
 
     /// <summary>The default index budget, which is not written.</summary>
     internal const int DefaultBudgetPerMille = 100;
@@ -150,6 +190,7 @@ public sealed record IndexDirectory(
     private const int SegOffset = 1;
     private const int SegLength = 2;
     private const int SegAlignment = 3;
+    private const int SegChecksum = 4;
     private const int PolicyDefault = 1;
     private const int PolicyColumns = 2;
     private const int PolicyKeys = 3;
@@ -205,7 +246,11 @@ public sealed record IndexDirectory(
                 writer.WriteStringAlways(DirArrayEncodings, id);
             }
 
-            return writer.WrittenSpan.ToArray();
+            ReadOnlySpan<byte> body = writer.WrittenSpan;
+            byte[] bytes = new byte[body.Length + ChecksumSize];
+            body.CopyTo(bytes);
+            BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(body.Length), XxHash3.HashToUInt64(body));
+            return bytes;
         }
         finally
         {
@@ -293,6 +338,10 @@ public sealed record IndexDirectory(
                 writer.WriteUInt64Always(SegOffset, segment.Offset);
                 writer.WriteUInt32Always(SegLength, segment.Length);
                 writer.WriteUInt32(SegAlignment, segment.AlignmentExponent);
+                if (segment.Checksum is { } checksum)
+                {
+                    writer.WriteFixed64Always(SegChecksum, checksum);
+                }
             }
 
             foreach (byte[] dtype in run.PayloadDTypes)
@@ -325,17 +374,33 @@ public sealed record IndexDirectory(
         out IndexDirectory? directory, out string? reason)
     {
         directory = null;
-        if (bytes.IsEmpty || bytes[0] != FormatVersion)
+        if (bytes.IsEmpty || bytes[0] is not (FormatVersion or LegacyVersion))
         {
             reason = bytes.IsEmpty
                 ? "the directory segment is empty"
-                : $"directory format version {bytes[0]} is not the {FormatVersion} this reader knows";
+                : $"directory format version {bytes[0]} is not one this reader knows ({LegacyVersion} or {FormatVersion})";
             return false;
+        }
+
+        byte version = bytes[0];
+        ReadOnlySpan<byte> body = bytes[1..];
+        if (version == FormatVersion)
+        {
+            // THE TRAILER FIRST: a torn or corrupt directory is refused before a byte of it is
+            // believed, which is what the row count alone could never promise.
+            if (bytes.Length < 1 + ChecksumSize
+                || XxHash3.HashToUInt64(bytes[..^ChecksumSize]) != BinaryPrimitives.ReadUInt64LittleEndian(bytes[^ChecksumSize..]))
+            {
+                reason = "the directory's checksum does not match its bytes: it is torn or corrupt";
+                return false;
+            }
+
+            body = bytes[1..^ChecksumSize];
         }
 
         try
         {
-            return TryParseBody(bytes[1..], fileRowCount, dataEnd, out directory, out reason);
+            return TryParseBody(body, version, fileRowCount, dataEnd, out directory, out reason);
         }
         catch (VortexFormatException e)
         {
@@ -348,7 +413,7 @@ public sealed record IndexDirectory(
     }
 
     private static bool TryParseBody(
-        ReadOnlySpan<byte> body, ulong fileRowCount, ulong dataEnd,
+        ReadOnlySpan<byte> body, byte expectedVersion, ulong fileRowCount, ulong dataEnd,
         out IndexDirectory? directory, out string? reason)
     {
         directory = null;
@@ -403,9 +468,9 @@ public sealed record IndexDirectory(
             }
         }
 
-        if (version != FormatVersion)
+        if (version != expectedVersion)
         {
-            reason = $"the directory declares version {version}, not {FormatVersion}";
+            reason = $"the directory declares version {version}, not the {expectedVersion} of its first byte";
             return false;
         }
 
@@ -573,6 +638,7 @@ public sealed record IndexDirectory(
         ulong offset = 0;
         uint length = 0;
         uint alignment = 0;
+        ulong? checksum = null;
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
             switch (field)
@@ -586,6 +652,9 @@ public sealed record IndexDirectory(
                 case SegAlignment when wire == ProtoWireType.Varint:
                     alignment = reader.ReadVarint32();
                     break;
+                case SegChecksum when wire == ProtoWireType.Fixed64:
+                    checksum = reader.ReadFixed64();
+                    break;
                 default:
                     reader.SkipField(wire);
                     break;
@@ -594,7 +663,7 @@ public sealed record IndexDirectory(
 
         // An exponent past a byte is out of range; RunsAreSound refuses anything above 16, so
         // saturating here cannot turn a bad value into an accepted one.
-        return new IndexSegment(offset, length, (byte)Math.Min(alignment, byte.MaxValue));
+        return new IndexSegment(offset, length, (byte)Math.Min(alignment, byte.MaxValue), checksum);
     }
 
     private static WritePolicy ReadPolicy(ProtoReader reader)

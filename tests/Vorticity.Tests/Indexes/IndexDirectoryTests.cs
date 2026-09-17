@@ -73,6 +73,63 @@ public sealed class IndexDirectoryTests
     }
 
     [Fact]
+    public void VersionTwoChecksItsTrailerAndCarriesARegionsChecksum()
+    {
+        // 13 §7 (step 21): `[2][message][XXH3-64 of both]`, and a checksum per region.
+        byte[] region = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+        IndexSegment checksummed = IndexSegment.Of(512, region, 6);
+        IndexDirectory written = new IndexDirectory(
+            Rows, 0, WritePolicy.None,
+            [new IndexEntry(IndexKinds.BloomSbbf, [0u], 8_192, [], [new IndexRun(0, 1, [checksummed], [])])]);
+        byte[] bytes = written.ToBytes();
+        Assert.Equal(IndexDirectory.FormatVersion, bytes[0]);
+
+        Assert.True(IndexDirectory.TryParse(bytes, Rows, DataEnd, out IndexDirectory? read, out string? reason), reason);
+        IndexSegment back = read!.Entries[0].Runs[0].Payload[0];
+        Assert.Equal(checksummed, back);
+        Assert.NotNull(back.Checksum);
+        Assert.True(back.Holds(region));
+        Assert.False(back.Holds([1, 2, 3, 4, 5, 6, 7, 8, 0]));
+        Assert.False(back.Holds(region.AsSpan(1)));
+
+        // A region a legacy directory lists is only held to its length.
+        Assert.True(new IndexSegment(512, 9, 6).Holds([0, 0, 0, 0, 0, 0, 0, 0, 0]));
+
+        // Every byte of the directory is under the trailer: one flipped bit refuses it whole.
+        for (int at = 0; at < bytes.Length; at++)
+        {
+            byte[] torn = (byte[])bytes.Clone();
+            torn[at] ^= 0x10;
+            Assert.False(IndexDirectory.TryParse(torn, Rows, DataEnd, out IndexDirectory? none, out string? why), $"byte {at}");
+            Assert.Null(none);
+            Assert.NotNull(why);
+        }
+    }
+
+    [Fact]
+    public void VersionOneIsStillReadWithoutChecksums()
+    {
+        // The fixture the Rust forge writes is version 1: no trailer, no checksum per region.
+        IndexDirectory written = new IndexDirectory(
+            Rows, 0, WritePolicy.None,
+            [new IndexEntry(IndexKinds.BloomSbbf, [0u], 8_192, [], [new IndexRun(0, 1, [new IndexSegment(512, 9, 6)], [])])]);
+        byte[] v2 = written.ToBytes();
+        byte[] v1 = v2[..^8];
+        v1[0] = IndexDirectory.LegacyVersion;
+
+        // The message's own version field says 2, so a relabelled directory is refused...
+        Assert.False(IndexDirectory.TryParse(v1, Rows, DataEnd, out _, out string? mismatch));
+        Assert.Contains("version", mismatch, StringComparison.Ordinal);
+
+        // ...and one whose field says 1 too is read, its regions unchecked.
+        int field = Array.IndexOf(v1, (byte)0x08, 1);
+        Assert.Equal(IndexDirectory.FormatVersion, v1[field + 1]);
+        v1[field + 1] = IndexDirectory.LegacyVersion;
+        Assert.True(IndexDirectory.TryParse(v1, Rows, DataEnd, out IndexDirectory? read, out string? reason), reason);
+        Assert.Null(read!.Entries[0].Runs[0].Payload[0].Checksum);
+    }
+
+    [Fact]
     public void TheSamePolicySerializesToTheSameBytes()
     {
         // Overrides live in a dictionary; the bytes must not depend on its iteration order.

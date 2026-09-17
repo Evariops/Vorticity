@@ -371,6 +371,12 @@ pinned identity makes two writes of the same batches byte-identical again, which
 11 §2's determinism and 10 §7.3's `Fastest` promise now take. A strict Rust 0.86.1 reader opens
 every such file: the cross-check reads 854 of them.
 
+**As delivered (step 21, the checksums of the file's own indexes).** The in-file index directory is
+version 2 ([10-indexes.md](10-indexes.md) §4.1): an XXH3-64 trailer over the directory, and an
+XXH3-64 per payload region, computed by the writer from the blob it holds. A reader verifies what it
+reads and nothing else; a region that fails claims nothing, and a key source that needs it refuses.
+The fragments and commit objects of §3 will carry the same per-region checksum when they exist.
+
 ## 8. The commit protocol
 
 ### 8.1 A commit is one conditional creation

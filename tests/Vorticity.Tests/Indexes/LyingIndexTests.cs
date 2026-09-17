@@ -18,9 +18,11 @@
 //     order across the seam — and a run's rows are replaced by another run's. The walk without
 //     VerifyStatistics may be wrong and must not fault; with it, it must refuse.
 //
-// WHAT NO READER CAN CATCH is a well-formed Bloom filter whose bits are wrong: the format has no
-// checksum (10 §5.1). The campaigns here hold such payloads to "no fault", which is all the format
-// allows anyone to promise.
+// SINCE STEP 21 THE DIRECTORY CARRIES A CHECKSUM PER REGION (13 §7), so a region whose bytes are
+// not the ones written claims nothing, and a key source refuses it: a zeroed Bloom filter no longer
+// drops a row. What no reader can catch is a liar who forges the checksums too; the structured lies
+// above do exactly that, and hold such a file to "no fault", or to a refusal under
+// VerifyStatistics, which is all anyone can promise.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -38,6 +40,7 @@ using Vorticity.Indexes;
 using Vorticity.IO;
 using Vorticity.Keys;
 using Vorticity.Scan;
+using Vorticity.Serialization.Schemas;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -99,14 +102,21 @@ public sealed class LyingIndexTests
     }
 
     [Fact]
-    public async Task SwappedKeysAreAWrongWalkWithoutVerificationAndARefusalWithIt()
+    public async Task SwappedKeysAreRefusedByTheirChecksumsAndAForgedSwapByVerification()
     {
         Decoders.EnsureRegistered();
         byte[] original = await WriteAsync(0);
         (IndexSegment a, IndexSegment b) = await SwappablePairAsync(original, keys: true);
-        byte[] bytes = Swap(original, a, b);
+        byte[] swapped = Swap(original, a, b);
 
-        // Without verification the walk is whatever the lie says, and it ends.
+        // The checksums of the directory catch the swap, whatever the option (13 §7): the regions'
+        // bytes are not the ones written.
+        await Assert.ThrowsAsync<VortexFormatException>(() => WalkAsync(swapped, "id", verify: false));
+        await Assert.ThrowsAsync<VortexFormatException>(() => WalkAsync(swapped, "id", verify: true));
+
+        // A liar who forges the checksums as well tells a Class II lie. Without verification the
+        // walk is whatever the lie says, and it ends.
+        byte[] bytes = await ForgeChecksumsAsync(swapped, (a, b.Checksum), (b, a.Checksum));
         List<long> walked = await WalkAsync(bytes, "id", verify: false);
         Assert.NotEmpty(walked);
 
@@ -116,6 +126,41 @@ public sealed class LyingIndexTests
         // And the untouched file walks clean under the same option.
         List<long> honest = await WalkAsync(original, "id", verify: true);
         Assert.Equal(Rows, honest.Count);
+    }
+
+    [Fact]
+    public async Task AZeroedFilterIsCaughtByItsChecksumAndCostsNoRow()
+    {
+        // 10 §5.1: "a zeroed filter would drop rows", and no structural check can see it. The bits
+        // of every block filter of `f` are zeroed, the array framing kept: a well-formed filter that
+        // says every value is absent.
+        Decoders.EnsureRegistered();
+        byte[] original = await WriteAsync(0);
+        List<IndexSegment> filters = await FiltersAsync(original, column: 3);
+        Assert.NotEmpty(filters);
+        byte[] zeroed = (byte[])original.Clone();
+        foreach (IndexSegment filter in filters)
+        {
+            ZeroBits(zeroed, filter);
+        }
+
+        VortexExpr present = Expr.Eq(Expr.Field("f"), Expr.Literal(FilterLiteral.From(12.5)));
+        long expected = await CountAsync(original, present, indexes: false);
+        Assert.True(expected > 0);
+
+        // The checksums refuse the zeroed regions: the filter claims nothing, no row is lost.
+        Assert.Equal(expected, await CountAsync(zeroed, present, indexes: true));
+
+        // The same zeroed bits under forged checksums drop the rows: what the checksum is for.
+        (IndexSegment, ulong?)[] forgedSums = new (IndexSegment, ulong?)[filters.Count];
+        for (int i = 0; i < filters.Count; i++)
+        {
+            forgedSums[i] = (filters[i], System.IO.Hashing.XxHash3.HashToUInt64(
+                zeroed.AsSpan(checked((int)filters[i].Offset), checked((int)filters[i].Length))));
+        }
+
+        byte[] forged = await ForgeChecksumsAsync(zeroed, forgedSums);
+        Assert.True(await CountAsync(forged, present, indexes: true) < expected);
     }
 
     [Fact]
@@ -297,6 +342,101 @@ public sealed class LyingIndexTests
                 bytes.AsSpan(start, length).Fill(random.Next(2) == 0 ? (byte)0 : (byte)0xFF);
                 return;
         }
+    }
+
+    /// <summary>
+    /// The file with its directory rewritten in place, the named regions' checksums replaced: the
+    /// liar who knows the format. The directory keeps its length, since a checksum is a fixed64.
+    /// </summary>
+    private static async Task<byte[]> ForgeChecksumsAsync(byte[] bytes, params (IndexSegment Segment, ulong? Checksum)[] changes)
+    {
+        await using MemorySegmentSource source = new MemorySegmentSource(bytes);
+        await using VortexFile file = await VortexFile.OpenAsync(source, Options(false), CancellationToken.None);
+        Assert.True(file.TryGetMetadataIndex(IndexDirectory.MetadataKeyUtf8, out int index));
+        SegmentSpec spec = file.GetMetadataSegment(index);
+        IndexDirectory? directory = await file.ReadIndexDirectoryAsync();
+        Assert.NotNull(directory);
+
+        // The helper is only honest if a directory re-serializes to its own bytes.
+        Span<byte> stored = bytes.AsSpan(checked((int)spec.Offset), checked((int)spec.Length));
+        Assert.True(directory.ToBytes().AsSpan().SequenceEqual(stored), "a read directory does not re-serialize to its bytes");
+
+        IndexSegment Replace(IndexSegment segment)
+        {
+            foreach ((IndexSegment target, ulong? checksum) in changes)
+            {
+                if (target.Offset == segment.Offset)
+                {
+                    return segment with { Checksum = checksum };
+                }
+            }
+
+            return segment;
+        }
+
+        List<IndexEntry> entries = [];
+        foreach (IndexEntry entry in directory.Entries)
+        {
+            List<IndexRun> runs = [];
+            foreach (IndexRun run in entry.Runs)
+            {
+                runs.Add(run with { Payload = [.. System.Linq.Enumerable.Select(run.Payload, Replace)] });
+            }
+
+            entries.Add(entry with { Runs = runs });
+        }
+
+        byte[] rewritten = (directory with { Entries = entries }).ToBytes();
+        Assert.Equal(stored.Length, rewritten.Length);
+        byte[] forged = (byte[])bytes.Clone();
+        rewritten.CopyTo(forged, checked((int)spec.Offset));
+        return forged;
+    }
+
+    /// <summary>Every Bloom filter region of one top-level column, at every resolution.</summary>
+    private static async Task<List<IndexSegment>> FiltersAsync(byte[] bytes, uint column)
+    {
+        await using MemorySegmentSource source = new MemorySegmentSource(bytes);
+        await using VortexFile file = await VortexFile.OpenAsync(source, Options(false), CancellationToken.None);
+        IndexDirectory? directory = await file.ReadIndexDirectoryAsync();
+        Assert.NotNull(directory);
+        List<IndexSegment> filters = [];
+        foreach (IndexEntry entry in directory.Entries)
+        {
+            if (entry.Kind == IndexKinds.BloomSbbf && entry.ColumnPath is [var path] && path == column)
+            {
+                foreach (IndexRun run in entry.Runs)
+                {
+                    filters.AddRange(run.Payload);
+                }
+            }
+        }
+
+        return filters;
+    }
+
+    /// <summary>
+    /// Zeroes an array blob's buffers and keeps its framing: the flatbuffer and its length, at the
+    /// blob's end (02 §5.1), stay as written.
+    /// </summary>
+    private static void ZeroBits(byte[] bytes, IndexSegment blob)
+    {
+        Span<byte> region = bytes.AsSpan(checked((int)blob.Offset), checked((int)blob.Length));
+        int flatbuffer = checked((int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(region[^4..]));
+        region[..(region.Length - 4 - flatbuffer)].Clear();
+    }
+
+    private static async Task<long> CountAsync(byte[] bytes, VortexExpr filter, bool indexes)
+    {
+        await using MemorySegmentSource source = new MemorySegmentSource(bytes);
+        await using VortexFile file = await VortexFile.OpenAsync(source, Options(false), CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().Where(filter).WithIndexes(indexes).ExecuteAsync())
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
     }
 
     private static byte[] Swap(byte[] original, IndexSegment a, IndexSegment b)

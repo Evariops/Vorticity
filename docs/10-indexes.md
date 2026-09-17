@@ -172,6 +172,20 @@ A directory is written whenever the policy asked for anything, even if every bui
 abandoned: it carries the policy an append will reuse, and "asked, nothing survived" must not
 read as "never asked".
 
+**As delivered (step 21, version 2 — [13-dataset.md](13-dataset.md) §7).** The writer writes
+version 2: the version byte, the message whose `version` field says 2, then the XXH3-64 of both as
+an 8-byte little-endian trailer. `Segment` gains `fixed64 checksum = 4`, the XXH3-64 of the
+region's bytes, computed from the blob the writer has in hand. The reader checks the trailer before
+it believes a byte: one flipped bit refuses the directory whole, as a stale one is. It then holds
+every region it reads to its checksum (`IndexSegment.Holds`), and a region that fails costs what a
+malformed payload already cost: the Bloom and key pruners make no claim for the blocks it covers,
+and a key source refuses with a `VortexFormatException`. The read cost is one XXH3-64 per region
+read, cached regions excepted; nothing reads a region to check it. Version 1 is still read, without
+checksums: the forged fixture of §10 is one. The price on disk is 8 bytes per directory and 9 per
+region. The test the format could not pass before now passes: a Bloom filter whose bits are zeroed
+and whose framing is kept drops no row, and the same file with forged checksums does, which is what
+the checksum is for (`LyingIndexTests.AZeroedFilterIsCaughtByItsChecksumAndCostsNoRow`).
+
 ### 4.2 Runs of ordinary arrays
 
 Each payload segment is an array blob in the format of a `vortex.flat` segment
@@ -298,7 +312,9 @@ literal only when it converts exactly into the column's type (an integer past 2�
 a non-integral float, an out-of-range integer: no claim), asks for both zeros when the literal is
 a zero, and asks for nothing on a NaN. A payload that is not the `u32` array its entry declares
 makes no claim for the blocks it covers. What no reader can catch is a well-formed filter whose
-bits are wrong: the format carries no checksum, and a zeroed filter would drop rows. The
+bits are wrong: the format carries no checksum, and a zeroed filter would drop rows. *Since
+step 21 the format carries one per region (§4.1's version 2), and a zeroed filter claims nothing;
+only a liar who forges the checksums too is beyond a reader.* The
 budget measured on the test fixture — 1,18 MiB of filters at 1 % against 0,50 MiB of ALP and
 bit-packed data for 1 024 distinct keys per block — is the case the default budget refuses.
 

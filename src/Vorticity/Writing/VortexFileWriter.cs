@@ -565,8 +565,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable
                 long before = _sink.Position;
                 long aligned = await PadAsync(cancellationToken).ConfigureAwait(false);
                 await _sink.WriteAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
-                IndexSegment segment = new IndexSegment(
-                    (ulong)aligned, (uint)blob.Length, (byte)VortexLimits.MaxAlignmentExponent);
+                IndexSegment segment = IndexSegment.Of(
+                    aligned, blob.Memory.Span, (byte)VortexLimits.MaxAlignmentExponent);
                 indexes.Placed(payload!, segment, _sink.Position - before, _sink.Position);
             }
         }

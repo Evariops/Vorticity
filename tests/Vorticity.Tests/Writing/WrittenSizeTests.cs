@@ -125,15 +125,16 @@ public sealed class WrittenSizeTests
         // répertoire et ne bouge pas.
         // +72 or +96 B (step 20) : l'identité du fichier dans chaque postscript (13 §7) -- 16 octets
         // de valeur, la clé et le segment de l'entrée, et le rembourrage qu'ils déplacent.
-        ("types/utf8_nonnull_r8193", 16_894),    // 17 chunks in, 17 zones; +96 B since the file statistics segment (11a); +138 B, the dictionary probe (12e); +72 B, the identity (20)
-        ("types/utf8_nullable_r8193", 17_374),   // 17 chunks in, 17 zones; +96 B, same; +138 B, same; +72 B, same
+        // +8 B (step 21) : le trailer XXH3-64 du répertoire d'index, sur les fichiers qui en portent un.
+        ("types/utf8_nonnull_r8193", 16_902),    // 17 chunks in, 17 zones; +96 B since the file statistics segment (11a); +138 B, the dictionary probe (12e); +72 B, the identity (20); +8 B, the directory checksum (21)
+        ("types/utf8_nullable_r8193", 17_382),   // 17 chunks in, 17 zones; +96 B, same; +138 B, same; +72 B, same; +8 B, same
         // 4 700 -> 3 756 (-20,1 %) le 2026-09-15, WRITE-AUDIT.md W-31 : la copie du reste reporte
         // ne materialise plus que les octets que les vues nomment, donc le tas ecrit ne porte plus
         // les chaines des blocs deja emis. Verifie par bench/crosscheck.sh : 854 fichiers relus par
         // Vortex Rust, scalaire par scalaire. C'est le seul des quatre qui bouge -- les trois autres
         // n'ont pas de VarBinView dans leur chemin d'ecriture.
         ("encodings/fsst", 4_004),               // 8 chunks in, 8 zones; +96 B, same; +96 B, the identity (20)
-        ("encodings/dict", 3_126),               // 8 chunks in, 8 zones; +96 B, same; +138 B, the dictionary probe (12e); +72 B, the identity (20)
+        ("encodings/dict", 3_134),               // 8 chunks in, 8 zones; +96 B, same; +138 B, the dictionary probe (12e); +72 B, the identity (20); +8 B, the directory checksum (21)
     ];
 
     [Fact]

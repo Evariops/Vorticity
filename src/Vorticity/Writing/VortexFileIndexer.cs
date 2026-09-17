@@ -338,7 +338,7 @@ public static class VortexFileIndexer
                 }
 
                 await sink.WriteAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
-                IndexSegment segment = new IndexSegment((ulong)aligned, (uint)blob.Length, (byte)VortexLimits.MaxAlignmentExponent);
+                IndexSegment segment = IndexSegment.Of(aligned, blob.Memory.Span, (byte)VortexLimits.MaxAlignmentExponent);
                 indexes.Placed(payload!, segment, sink.Position - before, sink.Position);
             }
         }

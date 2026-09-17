@@ -358,6 +358,15 @@ public struct ProtoWriter : IDisposable
         _position += sizeof(ulong);
     }
 
+    /// <summary>Writes a <c>fixed64</c> field even when 0.</summary>
+    public void WriteFixed64Always(int fieldNumber, ulong value)
+    {
+        WriteTag(fieldNumber, ProtoWireType.Fixed64);
+        EnsureCapacity(sizeof(ulong));
+        BinaryPrimitives.WriteUInt64LittleEndian(new Span<byte>(_buffer!, _position, sizeof(ulong)), value);
+        _position += sizeof(ulong);
+    }
+
     /// <summary>Writes a <c>bytes</c> field even when empty.</summary>
     public void WriteBytesAlways(int fieldNumber, ReadOnlySpan<byte> value)
     {

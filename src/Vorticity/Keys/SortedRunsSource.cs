@@ -946,6 +946,15 @@ internal sealed partial class SortedRunsSource : KeySource
 
             await _file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             Diagnostics.VortexEventSource.RunsRead(requests.Count);
+
+            // A WALK OVER TORN BYTES WOULD BE WRONG, NOT SLOW (13 §7): the source refuses, as it
+            // does for a run that decodes to the wrong shape.
+            if (!keys.Holds(requests.GetBuffer(keySlot).Span)
+                || (rowSlot >= 0 && !run.Meta.Payload[(index * Stride) + 1].Holds(requests.GetBuffer(rowSlot).Span)))
+            {
+                throw Malformed("a segment's bytes do not match its checksum: it is torn or corrupt");
+            }
+
             using ScanContext context = _file.CreateIndexContext();
             decoded = Decode(
                 context,

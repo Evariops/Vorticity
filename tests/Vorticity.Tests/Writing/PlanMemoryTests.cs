@@ -159,11 +159,12 @@ public sealed class PlanMemoryTests
             Assert.Equal(0, withoutTable);
             // The bytes the reference chooser's dictionaries make, whether the table or a walk built
             // them: pinned so that a table that served a different dictionary would show here first.
-            // 35 847 since the file's identity (step 20). 35 775 since Auto became the default
+            // 35 855 since the directory's checksum trailer (step 21); 35 847 since the file's
+            // identity (step 20). 35 775 since Auto became the default
             // (12e): the column is a dictionary, so the file carries its dict.probe entry and the
             // directory that lists it. 35 636 since the file statistics segment (11a); 35 540
             // before it.
-            Assert.Equal(35_847, new FileInfo(path).Length);
+            Assert.Equal(35_855, new FileInfo(path).Length);
         }
         finally
         {

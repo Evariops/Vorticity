@@ -197,7 +197,12 @@ internal sealed class BloomPruner
                 using ScanContext context = file.CreateIndexContext();
                 foreach ((Level candidate, int run, int slot) in wanted)
                 {
-                    candidate.Loaded[run] = Decode(context, requests.GetBuffer(slot), candidate, run);
+                    // A REGION WHOSE BYTES ARE NOT THE ONES WRITTEN CLAIMS NOTHING (13 §7): a filter
+                    // with its bits zeroed decodes perfectly and would kill every block it covers.
+                    VortexBuffer bytes = requests.GetBuffer(slot);
+                    candidate.Loaded[run] = candidate.Entry.Runs[run].Payload[0].Holds(bytes.Span)
+                        ? Decode(context, bytes, candidate, run)
+                        : null;
                 }
             }
 
