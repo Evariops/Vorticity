@@ -10,6 +10,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Hashing;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -326,6 +327,44 @@ public sealed class BloomVectorTests
         }
 
         Assert.InRange(present, 100, 19_900);
+    }
+
+    /// <summary>
+    /// The inlined short paths of XxHash3 against the library, at every length the writer hands
+    /// them: 1 to 3, 4, 8 and 9 to 16 bytes, over random inputs and the all-zero and all-one ones.
+    /// </summary>
+    [Fact]
+    public void TheFixedWidthHashesAreXxHash3()
+    {
+        Random random = new Random(20260917);
+        byte[] buffer = new byte[16];
+        for (int round = 0; round < 20_000; round++)
+        {
+            if (round == 0)
+            {
+                Array.Fill(buffer, (byte)0);
+            }
+            else if (round == 1)
+            {
+                Array.Fill(buffer, (byte)0xFF);
+            }
+            else
+            {
+                random.NextBytes(buffer);
+            }
+
+            for (int length = 1; length <= 3; length++)
+            {
+                Assert.Equal(XxHash3.HashToUInt64(buffer.AsSpan(0, length)), XxHash3Fixed.Hash1To3(buffer.AsSpan(0, length)));
+            }
+
+            Assert.Equal(XxHash3.HashToUInt64(buffer.AsSpan(0, 4)), XxHash3Fixed.Hash4(BitConverter.ToUInt32(buffer, 0)));
+            Assert.Equal(XxHash3.HashToUInt64(buffer.AsSpan(0, 8)), XxHash3Fixed.Hash8(BitConverter.ToUInt64(buffer, 0)));
+            for (int length = 9; length <= 16; length++)
+            {
+                Assert.Equal(XxHash3.HashToUInt64(buffer.AsSpan(0, length)), XxHash3Fixed.Hash9To16(buffer.AsSpan(0, length)));
+            }
+        }
     }
 
     private static void BitConverterWrite(Span<byte> destination, long value) =>

@@ -28,6 +28,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Compute;
@@ -254,9 +255,16 @@ internal sealed class BloomBuilder : IndexBuilder
         bool checks = AutoShare > 0 && BlockRows > 0;
         int end = start + count;
         int row = start;
+        bool inline = hash == BloomHash.XxHash3 && allValid && width <= 16;
         while (row < end)
         {
             int stop = Math.Min(end, row + CheckStride);
+            if (inline)
+            {
+                HashRows(values, width, row, stop, block);
+                row = stop;
+            }
+
             for (; row < stop; row++)
             {
                 if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
@@ -269,6 +277,54 @@ internal sealed class BloomBuilder : IndexBuilder
             {
                 return;
             }
+        }
+    }
+
+    /// <summary>
+    /// Rows <c>[start, stop)</c> of an all-valid fixed-width column, hashed by XxHash3's own short
+    /// path for the width, resolved once (docs/11-write-strategy.md §4.1, "hashing, fixed width").
+    /// </summary>
+    private static void HashRows(ReadOnlySpan<byte> values, int width, int start, int stop, HashSet64 block)
+    {
+        switch (width)
+        {
+            case 4:
+            {
+                ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(values)[start..stop];
+                foreach (uint word in words)
+                {
+                    block.Add(XxHash3Fixed.Hash4(word));
+                }
+
+                return;
+            }
+
+            case 8:
+            {
+                ReadOnlySpan<ulong> words = MemoryMarshal.Cast<byte, ulong>(values)[start..stop];
+                foreach (ulong word in words)
+                {
+                    block.Add(XxHash3Fixed.Hash8(word));
+                }
+
+                return;
+            }
+
+            case <= 3:
+                for (int row = start; row < stop; row++)
+                {
+                    block.Add(XxHash3Fixed.Hash1To3(values.Slice(row * width, width)));
+                }
+
+                return;
+
+            default:
+                for (int row = start; row < stop; row++)
+                {
+                    block.Add(XxHash3Fixed.Hash9To16(values.Slice(row * width, width)));
+                }
+
+                return;
         }
     }
 
