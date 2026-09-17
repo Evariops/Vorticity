@@ -19,6 +19,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -130,8 +131,11 @@ internal sealed class AlpPlan
         try
         {
         long? fill = null;
+        int done = mask.AllValid && Vector128.IsHardwareAccelerated
+            ? LanesDouble(values, encoded, e, f, indices, patches, ref patchCount, ref fill)
+            : 0;
 
-        for (int i = 0; i < rows; i++)
+        for (int i = done; i < rows; i++)
         {
             if (!mask.IsValid(i))
             {
@@ -202,8 +206,11 @@ internal sealed class AlpPlan
         try
         {
         int? fill = null;
+        int done = mask.AllValid && Vector128.IsHardwareAccelerated
+            ? LanesSingle(values, encoded, e, f, indices, patches, ref patchCount, ref fill)
+            : 0;
 
-        for (int i = 0; i < rows; i++)
+        for (int i = done; i < rows; i++)
         {
             if (!mask.IsValid(i))
             {
@@ -247,6 +254,105 @@ internal sealed class AlpPlan
             ArrayPool<int>.Shared.Return(indices);
             ArrayPool<float>.Shared.Return(patches);
         }
+    }
+
+    /// <summary>
+    /// The encode loop of an all-valid column, two doubles per step: scale, round, convert,
+    /// convert back, and compare the bit patterns, as the scalar loop does per row.
+    /// </summary>
+    /// <remarks>
+    /// THE SAME ARITHMETIC IN THE SAME ORDER, element-wise, so every lane rounds as the scalar row
+    /// would: the products are left to right, and <see cref="Vector128.ConvertToInt64(Vector128{double})"/>
+    /// saturates and sends a NaN to zero, which is <see cref="ToInt64(double)"/>. A lane that does
+    /// not come back is a patch; its integer is stored anyway and <see cref="FillGaps"/> overwrites it.
+    /// </remarks>
+    /// <returns>The rows handled: the largest multiple of two.</returns>
+    private static int LanesDouble(
+        ReadOnlySpan<double> values, Span<long> encoded, int e, int f,
+        int[] indices, double[] patches, ref int patchCount, ref long? fill)
+    {
+        int length = values.Length & ~1;
+        Vector128<double> scale = Vector128.Create(AlpTables.F10Double[e]);
+        Vector128<double> inverse = Vector128.Create(AlpTables.If10Double[f]);
+        Vector128<double> back = Vector128.Create(AlpTables.F10Double[f]);
+        Vector128<double> backInverse = Vector128.Create(AlpTables.If10Double[e]);
+        Vector128<double> sweet = Vector128.Create((double)((1UL << 52) + (1UL << 51)));
+        ref double source = ref MemoryMarshal.GetReference(values);
+        ref long destination = ref MemoryMarshal.GetReference(encoded);
+        int patched = patchCount;
+        for (int i = 0; i < length; i += 2)
+        {
+            Vector128<double> value = Vector128.LoadUnsafe(ref source, (nuint)i);
+            Vector128<long> integer = Vector128.ConvertToInt64((((value * scale) * inverse) + sweet) - sweet);
+            Vector128<double> decoded = (Vector128.ConvertToDouble(integer) * back) * backInverse;
+            integer.StoreUnsafe(ref destination, (nuint)i);
+            uint same = Vector128.Equals(decoded.AsInt64(), value.AsInt64()).ExtractMostSignificantBits();
+            if (same == 0b11 && fill.HasValue)
+            {
+                continue;
+            }
+
+            for (int lane = 0; lane < 2; lane++)
+            {
+                if ((same & (1u << lane)) != 0)
+                {
+                    fill ??= integer.GetElement(lane);
+                    continue;
+                }
+
+                indices[patched] = i + lane;
+                patches[patched] = value.GetElement(lane);
+                patched++;
+            }
+        }
+
+        patchCount = patched;
+        return length;
+    }
+
+    /// <summary>The single-precision form of <see cref="LanesDouble"/>, four floats per step.</summary>
+    /// <returns>The rows handled: the largest multiple of four.</returns>
+    private static int LanesSingle(
+        ReadOnlySpan<float> values, Span<int> encoded, int e, int f,
+        int[] indices, float[] patches, ref int patchCount, ref int? fill)
+    {
+        int length = values.Length & ~3;
+        Vector128<float> scale = Vector128.Create(AlpTables.F10Single[e]);
+        Vector128<float> inverse = Vector128.Create(AlpTables.If10Single[f]);
+        Vector128<float> back = Vector128.Create(AlpTables.F10Single[f]);
+        Vector128<float> backInverse = Vector128.Create(AlpTables.If10Single[e]);
+        Vector128<float> sweet = Vector128.Create((float)((1 << 23) + (1 << 22)));
+        ref float source = ref MemoryMarshal.GetReference(values);
+        ref int destination = ref MemoryMarshal.GetReference(encoded);
+        int patched = patchCount;
+        for (int i = 0; i < length; i += 4)
+        {
+            Vector128<float> value = Vector128.LoadUnsafe(ref source, (nuint)i);
+            Vector128<int> integer = Vector128.ConvertToInt32((((value * scale) * inverse) + sweet) - sweet);
+            Vector128<float> decoded = (Vector128.ConvertToSingle(integer) * back) * backInverse;
+            integer.StoreUnsafe(ref destination, (nuint)i);
+            uint same = Vector128.Equals(decoded.AsInt32(), value.AsInt32()).ExtractMostSignificantBits();
+            if (same == 0b1111 && fill.HasValue)
+            {
+                continue;
+            }
+
+            for (int lane = 0; lane < 4; lane++)
+            {
+                if ((same & (1u << lane)) != 0)
+                {
+                    fill ??= integer.GetElement(lane);
+                    continue;
+                }
+
+                indices[patched] = i + lane;
+                patches[patched] = value.GetElement(lane);
+                patched++;
+            }
+        }
+
+        patchCount = patched;
+        return length;
     }
 
     /// <summary>The branchless round-to-nearest of the reference: add the sweet spot and take it away.</summary>

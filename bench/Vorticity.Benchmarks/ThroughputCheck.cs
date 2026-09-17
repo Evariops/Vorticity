@@ -767,10 +767,10 @@ internal static class ThroughputCheck
     /// </remarks>
     private static readonly (string Encoding, double Reference)[] WriteReferences =
     [
-        ("alp", 0.53),   // 3 passes, spread 0.52-0.53; was 0.64, -17.7%
-        ("alp_no_patches", 0.79),   // 3 passes, spread 0.77-0.79; was 0.92, -14.5%
-        ("alp_patched_no_chunk_offsets", 0.71),   // 3 passes, spread 0.70-0.71; was 0.85, -16.8%
-        ("alprd", 0.30),   // 3 passes, spread 0.29-0.30; was 0.30, -0.9%
+        ("alp", 0.47),   // 3 passes, spread 0.45-0.47; was 0.53, -11.0%
+        ("alp_no_patches", 0.71),   // 3 passes, spread 0.68-0.71; was 0.79, -10.0%
+        ("alp_patched_no_chunk_offsets", 0.64),   // 3 passes, spread 0.61-0.64; was 0.71, -9.5%
+        ("alprd", 0.25),   // 3 passes, spread 0.23-0.25; was 0.30, -17.8%
         ("bool", 0.32),   // 3 passes; TENU à la main : --rebase proposait +2.5 %, et une référence ne monte jamais
         ("bool_bit_offset3", 0.42),   // 3 passes; TENU à la main : --rebase proposait +8.7 %, et une référence ne monte jamais
         ("bool_bit_offset7", 0.43),   // 3 passes; TENU à la main : --rebase proposait +5.0 %, et une référence ne monte jamais

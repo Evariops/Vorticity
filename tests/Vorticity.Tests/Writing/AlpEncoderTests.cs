@@ -162,6 +162,92 @@ public sealed class AlpEncoderTests
         }
     }
 
+    /// <summary>
+    /// The plan's integers and patches against the rule spelled out per row, at the exponents the
+    /// plan chose: the conversion saturates, a NaN converts to zero, a patched row holds the first
+    /// encoded integer. Edge values sit at every position a lane can put them, and the length leaves
+    /// a tail.
+    /// </summary>
+    [Theory]
+    [InlineData(1_023)]
+    [InlineData(1_024)]
+    public void TheEncodedRowsAreTheRulesExactly(int length)
+    {
+        double[] edges =
+        [
+            -0.0, double.NaN, double.PositiveInfinity, double.NegativeInfinity, 9.2233720368547758E18,
+            -9.2233720368547758E18, 1e300, double.Epsilon, 123456789.123, -2.5, 0.5,
+        ];
+        double[] doubles = new double[length];
+        float[] singles = new float[length];
+        for (int i = 0; i < length; i++)
+        {
+            doubles[i] = i % 5 == 1 ? edges[(i / 5) % edges.Length] : Math.Round(-40.0 + (i * 0.37), 2);
+            singles[i] = i % 5 == 2 ? (float)edges[(i / 5) % edges.Length] : MathF.Round(-40f + (i * 0.25f), 2);
+        }
+
+        using ColumnFixture fixture = new ColumnFixture();
+        AlpPlan? wide = AlpPlan.TryBuild(fixture.Arena, DoubleNode(fixture, doubles), length * sizeof(double) * 4L);
+        Assert.NotNull(wide);
+        List<int> expectedPatches = [];
+        long[] expected = new long[length];
+        long? fill = null;
+        for (int i = 0; i < length; i++)
+        {
+            double x = doubles[i] * AlpTables.F10Double[wide.ExponentE] * AlpTables.If10Double[wide.ExponentF];
+            x = (x + 6755399441055744.0) - 6755399441055744.0;
+            long integer = double.IsNaN(x) ? 0 : (long)x;
+            double back = integer * AlpTables.F10Double[wide.ExponentF] * AlpTables.If10Double[wide.ExponentE];
+            if (BitConverter.DoubleToInt64Bits(back) == BitConverter.DoubleToInt64Bits(doubles[i]))
+            {
+                expected[i] = integer;
+                fill ??= integer;
+            }
+            else
+            {
+                expectedPatches.Add(i);
+            }
+        }
+
+        foreach (int patched in expectedPatches)
+        {
+            expected[patched] = fill ?? 0;
+        }
+
+        Assert.Equal(expectedPatches, wide.PatchIndices);
+        Assert.Equal(expected, MemoryMarshal.Cast<byte, long>(wide.Encoded).ToArray());
+
+        AlpPlan? narrow = AlpPlan.TryBuild(fixture.Arena, SingleNode(fixture, singles), length * sizeof(float) * 4L);
+        Assert.NotNull(narrow);
+        expectedPatches.Clear();
+        int[] expectedNarrow = new int[length];
+        int? fillNarrow = null;
+        for (int i = 0; i < length; i++)
+        {
+            float x = singles[i] * AlpTables.F10Single[narrow.ExponentE] * AlpTables.If10Single[narrow.ExponentF];
+            x = (x + 12582912f) - 12582912f;
+            int integer = float.IsNaN(x) ? 0 : (int)x;
+            float back = integer * AlpTables.F10Single[narrow.ExponentF] * AlpTables.If10Single[narrow.ExponentE];
+            if (BitConverter.SingleToInt32Bits(back) == BitConverter.SingleToInt32Bits(singles[i]))
+            {
+                expectedNarrow[i] = integer;
+                fillNarrow ??= integer;
+            }
+            else
+            {
+                expectedPatches.Add(i);
+            }
+        }
+
+        foreach (int patched in expectedPatches)
+        {
+            expectedNarrow[patched] = fillNarrow ?? 0;
+        }
+
+        Assert.Equal(expectedPatches, narrow.PatchIndices);
+        Assert.Equal(expectedNarrow, MemoryMarshal.Cast<byte, int>(narrow.Encoded).ToArray());
+    }
+
     private static void AssertRoundTrip(double[] values)
     {
         using ColumnFixture fixture = new ColumnFixture();
