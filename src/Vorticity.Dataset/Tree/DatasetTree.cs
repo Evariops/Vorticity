@@ -71,17 +71,29 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
     /// <param name="sink">Where the pages go.</param>
     /// <returns>The tree.</returns>
     /// <exception cref="ArgumentException">The entries are not sorted, or hold a duplicate key.</exception>
-    public static DatasetTree Build(IReadOnlyList<TreeEntry> entries, IBoundaryRule rule, IPageSink sink)
+    public static DatasetTree Build(IReadOnlyList<TreeEntry> entries, IBoundaryRule rule, IPageSink sink) =>
+        Build(entries, rule, NoSummary.Instance, sink);
+
+    /// <summary>Builds a tree from every entry, in key order (§14's rebuild oracle).</summary>
+    /// <param name="entries">The entries, sorted by key and unique.</param>
+    /// <param name="rule">The boundary rule.</param>
+    /// <param name="fold">What a page's summary is, from what it holds (§4.2).</param>
+    /// <param name="sink">Where the pages go.</param>
+    /// <returns>The tree.</returns>
+    /// <exception cref="ArgumentException">The entries are not sorted, or hold a duplicate key.</exception>
+    public static DatasetTree Build(
+        IReadOnlyList<TreeEntry> entries, IBoundaryRule rule, ISummaryFold fold, IPageSink sink)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentNullException.ThrowIfNull(rule);
+        ArgumentNullException.ThrowIfNull(fold);
         ArgumentNullException.ThrowIfNull(sink);
         if (entries.Count == 0)
         {
             return Empty;
         }
 
-        PageEmitter leaves = new PageEmitter(rule.Fresh(), sink, leaf: true);
+        PageEmitter leaves = new PageEmitter(rule.Fresh(), fold, sink, leaf: true);
         long rows = 0;
         for (int i = 0; i < entries.Count; i++)
         {
@@ -97,7 +109,7 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
         }
 
         leaves.Flush();
-        return OverLevels(leaves.Emitted, rule, sink, entries.Count, rows, depth: 1);
+        return OverLevels(leaves.Emitted, rule, fold, sink, entries.Count, rows, depth: 1);
     }
 
     /// <summary>Applies a sorted batch of changes, reusing every page it does not have to rewrite.</summary>
@@ -108,15 +120,34 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The new tree.</returns>
     /// <exception cref="ArgumentException">The changes are not sorted, or hold a duplicate key.</exception>
+    public ValueTask<DatasetTree> CommitAsync(
+        IReadOnlyList<TreeChange> changes,
+        IBoundaryRule rule,
+        IPageSource source,
+        IPageSink sink,
+        CancellationToken cancellationToken) =>
+        CommitAsync(changes, rule, NoSummary.Instance, source, sink, cancellationToken);
+
+    /// <summary>Applies a sorted batch of changes, reusing every page it does not have to rewrite.</summary>
+    /// <param name="changes">The changes, sorted by key and unique.</param>
+    /// <param name="rule">The boundary rule, the same one the tree was built under.</param>
+    /// <param name="fold">What a page's summary is, from what it holds (§4.2).</param>
+    /// <param name="source">Where the old pages are read from.</param>
+    /// <param name="sink">Where the new pages go.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The new tree.</returns>
+    /// <exception cref="ArgumentException">The changes are not sorted, or hold a duplicate key.</exception>
     public async ValueTask<DatasetTree> CommitAsync(
         IReadOnlyList<TreeChange> changes,
         IBoundaryRule rule,
+        ISummaryFold fold,
         IPageSource source,
         IPageSink sink,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(changes);
         ArgumentNullException.ThrowIfNull(rule);
+        ArgumentNullException.ThrowIfNull(fold);
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(sink);
         for (int i = 1; i < changes.Count; i++)
@@ -144,7 +175,7 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
                 }
             }
 
-            return Build(fresh, rule, sink);
+            return Build(fresh, rule, fold, sink);
         }
 
         // THE LEVELS ABOVE THE LEAVES, read once: a level's pages are described by the entries of
@@ -152,7 +183,7 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
         List<List<InternalEntry>> descriptors = await DescribeAsync(source, cancellationToken).ConfigureAwait(false);
 
         // Level 0: the leaves. Untouched pages are reused without being read.
-        PageEmitter emitter = new PageEmitter(rule.Fresh(), sink, leaf: true);
+        PageEmitter emitter = new PageEmitter(rule.Fresh(), fold, sink, leaf: true);
         List<InternalEntry> pages = descriptors[0];
         long added = 0;
         int change = 0;
@@ -195,13 +226,13 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
         int depth = 1;
         for (int above = 1; above < descriptors.Count && level.Count > 1; above++)
         {
-            level = Rewrite(descriptors[above], descriptors[above - 1], level, rule, sink);
+            level = Rewrite(descriptors[above], descriptors[above - 1], level, rule, fold, sink);
             depth++;
         }
 
         while (level.Count > 1)
         {
-            level = Chunk(level, rule, sink);
+            level = Chunk(level, rule, fold, sink);
             depth++;
         }
 
@@ -266,32 +297,89 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
         IPageSource source,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        await foreach (PositionedEntry positioned in
+            WalkAsync(source, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+        {
+            yield return positioned.Entry;
+        }
+    }
+
+    /// <summary>
+    /// The entries a walk keeps: those whose rows meet <c>[from, to)</c>, and those whose ancestors
+    /// a predicate could not rule out.
+    /// </summary>
+    /// <param name="source">Where the pages are read from.</param>
+    /// <param name="from">The first row of the dataset to reach, in the tree's own order.</param>
+    /// <param name="to">One past the last; <see cref="long.MaxValue"/> for all of them.</param>
+    /// <param name="descend">
+    /// Whether a subtree is worth reading, from its node's summaries (§4.2); null to read all of
+    /// them. A node the predicate refutes costs no read at all, which is the whole point of the
+    /// summary: <em>"a predicate that the node's summaries refute skips the whole subtree"</em>.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The entries, in key order, each with its first row in the dataset.</returns>
+    /// <remarks>
+    /// TWO SKIPS, ONE WALK, because they are the same walk: a node is not descended into when its
+    /// rows fall outside the range or when its summaries refute the predicate, and both decisions
+    /// are made from the parent's entry, before the child page is read. The row skip is what §6.6
+    /// prices at O(log N) for <c>Rows(a, b)</c> -- "the insertion-order tree, nodes carrying row
+    /// sums" -- and with the first-row-position key of §4.1 this IS that tree, since key order and
+    /// insertion order are then the same order.
+    /// </remarks>
+    public async IAsyncEnumerable<PositionedEntry> WalkAsync(
+        IPageSource source,
+        long from,
+        long to,
+        Func<InternalEntry, bool>? descend,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(source);
-        if (IsEmpty)
+        ArgumentOutOfRangeException.ThrowIfNegative(from);
+        if (IsEmpty || to <= from)
         {
             yield break;
         }
 
-        Stack<(PageReference Reference, int Level)> stack = new Stack<(PageReference, int)>();
-        stack.Push((Root, Depth));
+        Stack<(PageReference Reference, int Level, long Row)> stack = new Stack<(PageReference, int, long)>();
+        stack.Push((Root, Depth, 0));
         while (stack.Count > 0)
         {
-            (PageReference reference, int level) = stack.Pop();
+            (PageReference reference, int level, long row) = stack.Pop();
             ReadOnlyMemory<byte> bytes = await source.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false);
             if (level == 1)
             {
                 foreach (TreeEntry entry in TreePage.ReadLeaf(bytes))
                 {
-                    yield return entry;
+                    if (row < to && row + entry.Rows > from)
+                    {
+                        yield return new PositionedEntry(entry, row);
+                    }
+
+                    row += entry.Rows;
                 }
 
                 continue;
             }
 
+            // Pushed in reverse so that popping walks the children in key order, which means each
+            // child's first row is reached by SUBTRACTING from the page's end rather than adding
+            // from its start: the same arithmetic, and no array to hold the offsets in.
             IReadOnlyList<InternalEntry> page = TreePage.ReadInternal(bytes);
+            long at = row;
+            for (int i = 0; i < page.Count; i++)
+            {
+                at += page[i].Rows;
+            }
+
             for (int i = page.Count - 1; i >= 0; i--)
             {
-                stack.Push((page[i].Child, level - 1));
+                long start = at - page[i].Rows;
+                if (start < to && at > from && (descend is null || descend(page[i])))
+                {
+                    stack.Push((page[i].Child, level - 1, start));
+                }
+
+                at = start;
             }
         }
     }
@@ -462,15 +550,17 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
     /// <param name="oldChildren">The descriptors of the level below's old pages, in order.</param>
     /// <param name="children">The level below's new descriptors, in order.</param>
     /// <param name="rule">The boundary rule.</param>
+    /// <param name="fold">What a page's summary is.</param>
     /// <param name="sink">Where the pages go.</param>
     private static List<InternalEntry> Rewrite(
         List<InternalEntry> oldPages,
         List<InternalEntry> oldChildren,
         List<InternalEntry> children,
         IBoundaryRule rule,
+        ISummaryFold fold,
         IPageSink sink)
     {
-        PageEmitter emitter = new PageEmitter(rule.Fresh(), sink, leaf: false);
+        PageEmitter emitter = new PageEmitter(rule.Fresh(), fold, sink, leaf: false);
         int cursor = 0;
         int oldCursor = 0;
         for (int i = 0; i < oldPages.Count; i++)
@@ -532,9 +622,10 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
     }
 
     /// <summary>Chunks a level's entries into pages.</summary>
-    private static List<InternalEntry> Chunk(List<InternalEntry> entries, IBoundaryRule rule, IPageSink sink)
+    private static List<InternalEntry> Chunk(
+        List<InternalEntry> entries, IBoundaryRule rule, ISummaryFold fold, IPageSink sink)
     {
-        PageEmitter emitter = new PageEmitter(rule.Fresh(), sink, leaf: false);
+        PageEmitter emitter = new PageEmitter(rule.Fresh(), fold, sink, leaf: false);
         foreach (InternalEntry entry in entries)
         {
             emitter.Add(entry);
@@ -546,11 +637,17 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
 
     /// <summary>Builds the levels above a set of leaf pages until one page is left.</summary>
     private static DatasetTree OverLevels(
-        List<InternalEntry> level, IBoundaryRule rule, IPageSink sink, long entries, long rows, int depth)
+        List<InternalEntry> level,
+        IBoundaryRule rule,
+        ISummaryFold fold,
+        IPageSink sink,
+        long entries,
+        long rows,
+        int depth)
     {
         while (level.Count > 1)
         {
-            level = Chunk(level, rule, sink);
+            level = Chunk(level, rule, fold, sink);
             depth++;
         }
 
@@ -580,14 +677,17 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
     private sealed class PageEmitter
     {
         private readonly IBoundaryRule _rule;
+        private readonly ISummaryFold _fold;
         private readonly IPageSink _sink;
         private readonly bool _leaf;
         private readonly List<TreeEntry> _leaves = [];
         private readonly List<InternalEntry> _internals = [];
+        private readonly List<ReadOnlyMemory<byte>> _summaries = [];
 
-        internal PageEmitter(IBoundaryRule rule, IPageSink sink, bool leaf)
+        internal PageEmitter(IBoundaryRule rule, ISummaryFold fold, IPageSink sink, bool leaf)
         {
             _rule = rule;
+            _fold = fold;
             _sink = sink;
             _leaf = leaf;
             _rule.Reset();
@@ -602,6 +702,7 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
         internal void Add(TreeEntry entry)
         {
             _leaves.Add(entry);
+            _summaries.Add(_fold.OfLeaf(entry));
             if (_rule.IsBoundary(entry.Key.Span, entry.Bytes))
             {
                 Cut();
@@ -611,6 +712,7 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
         internal void Add(InternalEntry entry)
         {
             _internals.Add(entry);
+            _summaries.Add(entry.Summary);
             if (_rule.IsBoundary(entry.MinKey.Span, entry.Bytes))
             {
                 Cut();
@@ -639,6 +741,7 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
 
         private void Cut()
         {
+            ReadOnlyMemory<byte> summary = _fold.Union(_summaries);
             if (_leaf)
             {
                 long rows = 0;
@@ -648,7 +751,7 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
                 }
 
                 PageReference reference = _sink.WritePage(TreePage.WriteLeaf(_leaves));
-                Emitted.Add(new InternalEntry(_leaves[0].Key, _leaves[^1].Key, rows, reference));
+                Emitted.Add(new InternalEntry(_leaves[0].Key, _leaves[^1].Key, rows, reference, summary));
                 _leaves.Clear();
             }
             else
@@ -660,10 +763,12 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
                 }
 
                 PageReference reference = _sink.WritePage(TreePage.WriteInternal(_internals));
-                Emitted.Add(new InternalEntry(_internals[0].MinKey, _internals[^1].MaxKey, rows, reference));
+                Emitted.Add(new InternalEntry(
+                    _internals[0].MinKey, _internals[^1].MaxKey, rows, reference, summary));
                 _internals.Clear();
             }
 
+            _summaries.Clear();
             _rule.Reset();
         }
     }

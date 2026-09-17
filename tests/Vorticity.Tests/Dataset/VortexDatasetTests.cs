@@ -111,8 +111,19 @@ public sealed class VortexDatasetTests
         Assert.Equal(1, dataset.ObjectCount);
         Assert.Equal(3_000, dataset.RowCount);
 
-        // The file's bytes were not copied: the store grew by the commit objects alone.
-        Assert.True(store.Bytes - bytesBefore < single.Length / 4);
+        // THE FILE'S BYTES WERE NOT COPIED, and this says it exactly rather than by a threshold
+        // somebody chose: the store grew by the commit objects, to the byte. A copy would have added
+        // `single.Length` on top, and a chosen ceiling would only have said "not much more".
+        long commits = 0;
+        foreach (string commit in await store.ListAsync(CommitKey.Prefix, null, 100, default))
+        {
+            commits += Assert.NotNull(await store.HeadAsync(commit, default)).Length;
+        }
+
+        Assert.Equal(commits, store.Bytes - bytesBefore);
+        Assert.Equal(3, store.Count);
+        Console.Out.Write(FormattableString.Invariant(
+            $"IMPORT WITHOUT A COPY: a {single.Length}-byte file became a dataset for {commits} bytes of commit objects, and the store holds {store.Count} objects.\n"));
 
         ObjectEntry entry = Assert.Single(await ObjectsAsync(dataset));
         Assert.Equal(key, entry.Key);

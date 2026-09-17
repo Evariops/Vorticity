@@ -29,18 +29,36 @@ public readonly record struct TreeEntry(ReadOnlyMemory<byte> Key, ReadOnlyMemory
         + TreePage.VarintBytes((ulong)Value.Length) + Value.Length;
 }
 
+/// <summary>One entry and where its rows start in the dataset.</summary>
+/// <param name="Entry">The entry.</param>
+/// <param name="FirstRow">
+/// The position of its first row among all the level's rows, which is what answers
+/// <c>Rows(a, b)</c> (§6.6) without any object being opened.
+/// </param>
+public readonly record struct PositionedEntry(TreeEntry Entry, long FirstRow);
+
 /// <summary>One child page, as an internal page carries it.</summary>
 /// <param name="MinKey">The smallest key of the subtree.</param>
 /// <param name="MaxKey">Its largest.</param>
 /// <param name="Rows">The rows of every object under it.</param>
 /// <param name="Child">Where the child page lies and what it hashes to.</param>
+/// <param name="Summary">
+/// The union of the subtree's summaries (§4.2), serialized by the layer above and folded by an
+/// <see cref="ISummaryFold"/>. Empty when the tree summarises nothing, which is what makes a
+/// predicate over it answer "may match" and prune no subtree.
+/// </param>
 public readonly record struct InternalEntry(
-    ReadOnlyMemory<byte> MinKey, ReadOnlyMemory<byte> MaxKey, long Rows, PageReference Child)
+    ReadOnlyMemory<byte> MinKey,
+    ReadOnlyMemory<byte> MaxKey,
+    long Rows,
+    PageReference Child,
+    ReadOnlyMemory<byte> Summary = default)
 {
     /// <summary>The bytes this entry takes in an internal page.</summary>
     internal int Bytes =>
         TreePage.VarintBytes((ulong)MinKey.Length) + MinKey.Length
         + TreePage.VarintBytes((ulong)MaxKey.Length) + MaxKey.Length
         + TreePage.VarintBytes((ulong)Rows)
-        + PageReference.Bytes;
+        + PageReference.Bytes
+        + TreePage.VarintBytes((ulong)Summary.Length) + Summary.Length;
 }

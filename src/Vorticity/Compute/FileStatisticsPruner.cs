@@ -8,10 +8,15 @@
 // same code, under the same rule (docs/08-semantics.md §1: only a positive proof prunes). What has
 // no file statistic answers "may match": a nested path, a non-struct root, a field whose bound is
 // of a kind no filter literal can hold, a file with no statistics segment at all.
+//
+// THE SAME QUESTION IS ASKED WITHOUT A FILE by a dataset's node, which holds the same three
+// aggregates for an object it has not opened (docs/13-dataset.md §4.2). So the bounds and the
+// asking both live in `Vorticity.Scan.ColumnSummaries`, and this file is the caller who happens
+// to have a file open.
 using System;
-using System.Collections.Generic;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.Scan;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 
@@ -36,64 +41,14 @@ internal static class FileStatisticsPruner
             return true;
         }
 
-        DType schema = file.Schema;
-        if (schema.Kind != DTypeKind.Struct)
-        {
-            // A non-struct root's one statistic is typed against the whole file, and a filter names
-            // fields: nothing to bind a bound to.
-            return true;
-        }
-
-        List<string> paths = [];
-        filter.CollectFields(paths);
-        if (paths.Count == 0)
-        {
-            return true;
-        }
-
-        FileStatistics statistics = file.Statistics;
-        List<ZoneColumn> columns = [];
-        HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
-        for (int i = 0; i < paths.Count; i++)
-        {
-            string path = paths[i];
-            if (!seen.Add(path) || path.Contains('.', StringComparison.Ordinal))
-            {
-                // A nested field has no entry: the statistics are shallow, one per top-level field.
-                continue;
-            }
-
-            int index = schema.IndexOfField(System.Text.Encoding.UTF8.GetBytes(path));
-            if (index < 0 || index >= statistics.FieldCount)
-            {
-                continue;
-            }
-
-            FieldStatistics field = statistics.GetField(index);
-            FilterLiteral min = default;
-            FilterLiteral max = default;
-            bool hasMin = field.HasMin && TryLiteral(field.Min, out min);
-            bool hasMax = field.HasMax && TryLiteral(field.Max, out max);
-            bool exact = (!field.HasMin || field.MinPrecision == StatPrecision.Exact)
-                && (!field.HasMax || field.MaxPrecision == StatPrecision.Exact);
-            bool hasNulls = field.TryGetNullCount(out ulong nulls) && nulls <= long.MaxValue;
-            if (!hasMin && !hasMax && !hasNulls)
-            {
-                continue;
-            }
-
-            ZoneBounds bounds = ZoneBounds.Create(
-                min, hasMin, max, hasMax, exact, hasNulls ? (long)nulls : 0, hasNulls);
-            columns.Add(new ZoneColumn(Expr.Field(path), file.RowCount, file.RowCount, [bounds]));
-        }
-
-        if (columns.Count == 0)
-        {
-            return true;
-        }
-
-        ZonePruner pruner = new ZonePruner(filter, columns.ToArray());
-        return pruner.MayMatch(new RowRange(0, file.RowCount));
+        // ONE IMPLEMENTATION, and this is the caller who holds a file rather than kept bounds: the
+        // summaries of the fields the filter names, asked of the same pruner a dataset asks
+        // (Vorticity.Scan.ColumnSummaries). A non-struct root, a nested path, a field with no
+        // statistic and a bound of a kind no literal holds all fall out of `Of` as absences, and an
+        // absence licenses nothing.
+        SummaryPruner pruner = new SummaryPruner(filter);
+        return !pruner.ReadsColumns
+            || pruner.MayMatch(ColumnSummaries.Of(file, pruner.Paths), file.RowCount);
     }
 
     /// <summary>

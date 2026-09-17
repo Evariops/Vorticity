@@ -85,6 +85,7 @@ public static class TreePage
             at = WriteVarint(at, (ulong)entry.Rows);
             entry.Child.Write(at);
             at = at[PageReference.Bytes..];
+            at = WriteBytes(at, entry.Summary.Span);
         }
 
         return at.IsEmpty ? page : throw new CommitFormatException("An internal page was mis-sized.");
@@ -166,7 +167,8 @@ public static class TreePage
 
             PageReference child = PageReference.Read(page.Span[at..]);
             at += PageReference.Bytes;
-            entries.Add(new InternalEntry(min, max, rows, child));
+            ReadOnlyMemory<byte> summary = ReadBytes(page, ref at);
+            entries.Add(new InternalEntry(min, max, rows, child, summary));
         }
 
         if (at != page.Length)

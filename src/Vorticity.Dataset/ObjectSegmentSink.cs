@@ -87,6 +87,17 @@ public sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     /// <summary>The XXH3-128 of everything written so far, which §7 records in the leaf entry.</summary>
     public UInt128 ContentHash => _hash.GetCurrentHashAsUInt128();
 
+    /// <summary>The bytes written so far, until <see cref="CommitAsync"/> or <see cref="Discard"/>.</summary>
+    /// <remarks>
+    /// SO THAT THE SUMMARIES COST NO REQUEST. §4.2's leaf entry carries the object's bounds, and the
+    /// only place they exist is the file's own statistics segment — which is in this buffer, right
+    /// now, and would otherwise be read back out of the store by an extra dependent request per
+    /// append, against a budget (§9.1) counted in exactly those. A caller reads them here, through a
+    /// <c>MemorySegmentSource</c>, and is done before the put. Empty once the buffer is released,
+    /// which is why this is not a property to hold on to.
+    /// </remarks>
+    public ReadOnlyMemory<byte> Written => _buffer.AsMemory(0, _length);
+
     /// <inheritdoc/>
     public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
     {

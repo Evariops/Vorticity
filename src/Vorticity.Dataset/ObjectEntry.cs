@@ -1,11 +1,13 @@
 // What a leaf entry says about one data object - docs/13-dataset.md §4.2, the parts the protocol of
 // §8 needs to reason about.
 //
-// WHY IT IS NOT ALL OF §4.2 YET. That section lists the key range, the object's key, size and row
-// count, its identity, its bounded summaries and its index descriptor. The tree needs none of them
+// WHAT IT CARRIES AND WHY. §4.2 lists the key range, the object's key, size and row count, its
+// identity, its bounded summaries and its index descriptor. The tree itself needs none of them
 // (13 §4.1: the boundary rule looks at the KEY alone), and the commit protocol needs four: which
 // object the entry is, whether it is still the same object, how many rows it has, and which
-// fragments have been attached to it. The summaries are the dataset's business and arrive with it.
+// fragments have been attached to it. The SUMMARIES are here for a different reader: the scan, which
+// must decide whether to open this object at all, and the parent node, which folds them into the
+// union that lets it skip the whole subtree.
 //
 // CANONICAL, like a page and for the same reason: a leaf entry is inside a content-addressed page,
 // so two encodings of one entry would be two trees. Varints, in order, no optional fields.
@@ -28,13 +30,19 @@ namespace Vorticity.Dataset;
 /// The index fragments attached to it (§6.4), in the order they were attached; at most K after
 /// fragment compaction.
 /// </param>
+/// <param name="Summaries">
+/// Its bounded summaries (§4.2): per summarised column, <c>min</c>, <c>max</c> and
+/// <c>null_count</c>, over the first 32 columns by default, so that the entry has a bounded size
+/// whatever the schema.
+/// </param>
 public sealed record ObjectEntry(
     string Key,
     UInt128 Uid,
     long Rows,
     long Bytes,
     UInt128 Hash,
-    IReadOnlyList<PageReference> Fragments)
+    IReadOnlyList<PageReference> Fragments,
+    ObjectSummaries Summaries)
 {
     /// <summary>An entry with no fragment yet.</summary>
     /// <param name="key">The object's key.</param>
@@ -42,8 +50,23 @@ public sealed record ObjectEntry(
     /// <param name="rows">Its rows.</param>
     /// <param name="bytes">Its bytes.</param>
     /// <param name="hash">Its content hash.</param>
-    public ObjectEntry(string key, UInt128 uid, long rows, long bytes, UInt128 hash)
-        : this(key, uid, rows, bytes, hash, [])
+    /// <param name="summaries">Its bounded summaries, or null for none.</param>
+    public ObjectEntry(
+        string key, UInt128 uid, long rows, long bytes, UInt128 hash, ObjectSummaries? summaries = null)
+        : this(key, uid, rows, bytes, hash, [], summaries ?? ObjectSummaries.Empty)
+    {
+    }
+
+    /// <summary>An entry with fragments and no summaries.</summary>
+    /// <param name="key">The object's key.</param>
+    /// <param name="uid">Its identity.</param>
+    /// <param name="rows">Its rows.</param>
+    /// <param name="bytes">Its bytes.</param>
+    /// <param name="hash">Its content hash.</param>
+    /// <param name="fragments">The fragments attached to it.</param>
+    public ObjectEntry(
+        string key, UInt128 uid, long rows, long bytes, UInt128 hash, IReadOnlyList<PageReference> fragments)
+        : this(key, uid, rows, bytes, hash, fragments, ObjectSummaries.Empty)
     {
     }
 
@@ -74,9 +97,11 @@ public sealed record ObjectEntry(
     public byte[] ToBytes()
     {
         byte[] key = Encoding.UTF8.GetBytes(Key);
+        byte[] summaries = Summaries.ToBytes();
         int bytes = TreePage.VarintBytes((ulong)key.Length) + key.Length
             + 16 + TreePage.VarintBytes((ulong)Rows) + TreePage.VarintBytes((ulong)Bytes) + 16
-            + TreePage.VarintBytes((ulong)Fragments.Count) + (Fragments.Count * PageReference.Bytes);
+            + TreePage.VarintBytes((ulong)Fragments.Count) + (Fragments.Count * PageReference.Bytes)
+            + TreePage.VarintBytes((ulong)summaries.Length) + summaries.Length;
         byte[] value = new byte[bytes];
         Span<byte> at = value;
         at = Write(at, (ulong)key.Length);
@@ -93,7 +118,51 @@ public sealed record ObjectEntry(
             at = at[PageReference.Bytes..];
         }
 
+        at = Write(at, (ulong)summaries.Length);
+        summaries.CopyTo(at);
+        at = at[summaries.Length..];
         return at.IsEmpty ? value : throw new CommitFormatException("An object entry was mis-sized.");
+    }
+
+    /// <summary>The summaries an entry's bytes carry, without the rest of the entry being built.</summary>
+    /// <param name="value">The entry's bytes, as a leaf page holds them.</param>
+    /// <returns>Just the summaries' bytes, a slice of <paramref name="value"/>.</returns>
+    /// <exception cref="CommitFormatException">The bytes are not an entry.</exception>
+    /// <remarks>
+    /// What <see cref="ISummaryFold.OfLeaf"/> needs and all it needs. The fields before the
+    /// summaries are varints and fixed-width hashes, so reaching them is a skip rather than a parse,
+    /// and no string, list or entry is allocated to get at them.
+    /// </remarks>
+    public static ReadOnlyMemory<byte> SummaryOf(ReadOnlyMemory<byte> value)
+    {
+        ReadOnlySpan<byte> span = value.Span;
+        int at = 0;
+        Skip(span, ref at, (long)Read(span, ref at));
+        Skip(span, ref at, 16);
+        Read(span, ref at);
+        Read(span, ref at);
+        Skip(span, ref at, 16);
+        Skip(span, ref at, (long)Read(span, ref at) * PageReference.Bytes);
+        int length = (int)Math.Min(Read(span, ref at), int.MaxValue);
+        Skip(span, ref at, length);
+        return value.Slice(at - length, length);
+    }
+
+    /// <summary>Moves past <paramref name="bytes"/> bytes, or says the entry is not one.</summary>
+    /// <remarks>
+    /// The count is a LONG because it comes from a varint in bytes this code did not write: a
+    /// fragment count near <c>2^32</c> times a reference's size overflows an int, and an overflow
+    /// that wraps to a small positive number is a skip that lands somewhere plausible. Widening is
+    /// cheaper than reasoning about which wrap is harmless.
+    /// </remarks>
+    private static void Skip(ReadOnlySpan<byte> value, ref int at, long bytes)
+    {
+        if (bytes < 0 || at + bytes > value.Length)
+        {
+            throw new CommitFormatException("An object entry is cut short.");
+        }
+
+        at += (int)bytes;
     }
 
     /// <summary>Reads an entry written by <see cref="ToBytes"/>.</summary>
@@ -128,12 +197,20 @@ public sealed record ObjectEntry(
             at += PageReference.Bytes;
         }
 
+        int summaries = checked((int)Read(value, ref at));
+        if (at + summaries > value.Length)
+        {
+            throw new CommitFormatException("An object entry's summaries run past its bytes.");
+        }
+
+        ObjectSummaries bounds = ObjectSummaries.FromBytes(value.Slice(at, summaries));
+        at += summaries;
         if (at != value.Length)
         {
             throw new CommitFormatException($"An object entry has {value.Length - at} bytes left over.");
         }
 
-        return new ObjectEntry(key, uid, rows, bytes, hash, references);
+        return new ObjectEntry(key, uid, rows, bytes, hash, references, bounds);
     }
 
     private static Span<byte> Write(Span<byte> destination, ulong value)

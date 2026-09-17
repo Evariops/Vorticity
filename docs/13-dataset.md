@@ -214,25 +214,60 @@ An **internal entry** holds a page reference (§3) to a child and carries the un
 children's key ranges and summaries and the sum of their rows. Pruning happens at every level:
 a predicate that the node's summaries refute skips the whole subtree.
 
-**As delivered (step 39a), and what it leaves.** `ObjectEntry` carries the four things the commit
-protocol of §8 reasons about — the object's key, the `uid` its postscript holds, its rows and bytes,
-the writer's XXH3-128, and the fragments attached to it — and an internal entry carries the key
-range and the row sum. The **summaries** are not there yet, so nothing prunes a subtree from them;
-that is the rest of step 39, along with the mandatory run on the clustering key, `InKeyOrder` across
-objects and `Rows(a, b)`.
+**As delivered (step 39a).** `ObjectEntry` carries what the commit protocol of §8 reasons about —
+the object's key, the `uid` its postscript holds, its rows and bytes, the writer's XXH3-128, and the
+fragments attached to it.
 
 `VortexDataset` is the surface: `CreateAsync`, `OpenAsync`, `RefreshAsync`, `AppendAsync` (one data
 object and one commit), `ImportAsync` (a file already in the store becomes a leaf **without a
-copy**, measured: the store grows by the commit objects alone), `ObjectsAsync` and `Scan()`. A data
-object is a plain Vortex file, so the scan over one object is the core's own scan, filter and
-indexes included; the dataset adds the order and, later, the pruning. Until a clustering key is
-declared, a leaf's key is §4.1's other option — **the object's first row position**, eight
+copy**, measured: the store grows by the commit objects **to the byte**), `ObjectsAsync` and
+`Scan()`. A data object is a plain Vortex file, so the scan over one object is the core's own scan,
+filter and indexes included; the dataset adds the order and the pruning below. Until a clustering
+key is declared, a leaf's key is §4.1's other option — **the object's first row position**, eight
 big-endian bytes, whose `memcmp` order is its numeric order — which keeps the dataset free of the
 0.x row-encoding package until it needs it.
 
+**As delivered (step 39b): the summaries, and what they let the walk skip.** A leaf entry now carries
+`min`, `max` and `null_count` per summarised column — the first 32 top-level columns by default, or
+`DatasetOptions.SummaryColumns` — and an internal entry carries their union. The bounds are the
+object's own file statistics (02 §3, the segment 11 §6.3 prunes a whole file with), read out of the
+buffer the sink still holds, **before** the put: they cost the append no request, which is the only
+currency §9.1 counts.
+
+The union is **intersection-shaped**, and that is the one thing in this section a reader must get
+right. A part that says nothing about a column leaves the parent with nothing to say about it, so a
+column travels up only when every child carries it, and a bound only when every child has that
+bound. Keeping a bound because the other child was silent would prune a subtree that holds the
+answer. Precision travels the same way: `min(min A, min B)` is the true minimum of `A ∪ B` only
+while both were true minima, so one `vortex.bounded_min` turns the union inexact and takes the
+`min == max ⇒ constant` shortcut off with it.
+
+Asking the question is the **core's** job, not a second implementation of it:
+`Vorticity.Scan.ColumnSummary` and `SummaryPruner` are a public seam onto the zone pruner, and
+`VortexFile.MayMatch` is now the same call with the file's own statistics — one implementation of
+08 §1, two callers. A dataset's node is the caller that has no file.
+
+| what the walk skips | on what | shown by |
+|---|---|---|
+| a whole subtree, unread | the node's union refutes the predicate | `DatasetScanMetrics.SubtreesSkipped` |
+| an object, unopened | its own summaries refute it | `ObjectsSkipped` |
+| an object outside `Rows(a, b)` | the row sums, at every level | `ObjectsConsidered` |
+| an open, repeated | the object is immutable (§3), so it stays open | `CacheHits` |
+
+Measured, not asserted: a filter inside one of eight objects opens **1** object with the summaries
+and **8** with `WithSummaries(false)`, for the same 100 rows; a tree of depth 3 over sixteen objects
+answers an impossible filter by skipping **2 subtrees** and considering **0 objects**.
+
+`Rows(a, b)` (§6.6) is the same walk with the row sums as its test, so an object outside the range
+is neither read nor counted. With the first-row-position key this tree *is* the insertion-order
+tree: key order and insertion order are the same order.
+
+**What step 39 still leaves:** the mandatory run on the clustering key (§6.1), and `InKeyOrder` with
+its terminals across objects (§6.6).
+
 The acceptance is §14's and it is a comparison, never a chosen number: the same rows written into a
-dataset of four objects and into one file answer the same, unfiltered and filtered, with the index
-chain on and off.
+dataset of several objects and into one file answer the same, unfiltered and filtered, with the
+index chain on and off — and now with the summaries consulted and ignored.
 
 ### 4.3 Commits are paths, written as one object
 
@@ -508,6 +543,18 @@ bounded. Three answers, stated so that nobody expects a fourth:
   nothing new here.
 - A global secondary index over the dataset is excluded, as §13.D says: every compaction would
   rewrite it.
+
+**As delivered (step 39b), two rows of the table.** `Rows(a, b)` is `DatasetScanBuilder.Rows(from,
+to)`: one walk of the tree that tests a node's row sum before descending into it, so a subtree
+outside the range costs no read and an object outside it is never opened — O(log N) plus the objects
+the range touches, and the per-object range is handed to the core's own `ScanBuilder.Rows`. The
+first row of the table, the in-order walk of a level, is the same walk with no range; children are
+**not** prefetched in parallel yet, so its cost is one dependent read per page rather than one per
+level.
+
+`ORDER BY x LIMIT k` and `InKeyOrder` across objects are not delivered: they need the mandatory run
+of §6.1 on the level-0 objects, which is what remains of step 39. The summaries the first of them
+prunes by are in place (§4.2).
 
 ## 7. Identity and integrity
 

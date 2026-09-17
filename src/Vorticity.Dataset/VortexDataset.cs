@@ -5,10 +5,16 @@
 // WHAT THIS STEP DELIVERS, and what it leaves to the next. Creation, opening, the import of a file
 // that is already in the store WITHOUT copying it (§3: "A single existing Vortex file becomes a
 // dataset of one leaf: one commit object, no copy"), an append that writes one data object and one
-// commit, and a scan that reads every object in key order and hands its batches on. What it does
-// not do yet: the mandatory run on the clustering key, the summaries a scan prunes with, the
-// cursors and `InKeyOrder` across objects, and `Rows(a, b)`. They are the rest of the plan's step
-// 39, and each of them needs the leaf entry to carry more than it carries here (§4.2).
+// commit, a scan that reads the objects in key order while SKIPPING the ones its summaries refute
+// and the subtrees a node's summaries refute (§4.2), `Rows(a, b)` through the tree's row sums
+// (§6.6), and a cache that keeps the immutable data objects open across scans. What it does not do
+// yet: the mandatory run on the clustering key (§6.1) and `InKeyOrder` with its terminals across
+// objects, which is the rest of the plan's step 39.
+//
+// WHERE THE SUMMARIES COME FROM, and the reason it costs nothing. A data object's bounds are its own
+// file statistics (02 §3), which the writer has just computed and which sit in the buffer the sink
+// still holds. So an append reads them out of MEMORY, before the put, rather than opening the object
+// it just wrote: §9.1 counts dependent round trips, and this is one that does not have to happen.
 //
 // THE KEY, FOR NOW, IS THE FIRST ROW POSITION -- §4.1's own alternative: "ordered by the clustering
 // key when the dataset declares one and by first row position otherwise". Eight big-endian bytes,
@@ -23,6 +29,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Columns;
 using Vorticity.File;
+using Vorticity.IO;
 using Vorticity.Scan;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
@@ -44,6 +51,31 @@ public sealed record DatasetOptions
 
     /// <summary>The most bytes one appended data object may buffer before the store takes it.</summary>
     public long MaxObjectBytes { get; init; } = ObjectSegmentSink.DefaultMaxBytes;
+
+    /// <summary>The columns §4.2 summarises, or null for the first <see cref="SummaryColumnLimit"/>.</summary>
+    public IReadOnlyList<string>? SummaryColumns { get; init; }
+
+    /// <summary>How many columns an entry summarises when none are declared (§4.2: 32).</summary>
+    public int SummaryColumnLimit { get; init; } = ColumnSummary.DefaultLimit;
+
+    /// <summary>How many data objects stay open between scans.</summary>
+    /// <remarks>
+    /// A data object is immutable (§3), so an open handle on one can never go stale; the only reason
+    /// to close it is to bound the file descriptors and the parsed footers a reader holds.
+    /// </remarks>
+    public int MaxOpenObjects { get; init; } = 8;
+
+    /// <summary>The boundary rule, or null for the prolly rule at the header's chunker settings.</summary>
+    /// <remarks>
+    /// §4.1 puts the chunker's settings in the header so that every writer of a dataset agrees on
+    /// where pages end, and <see langword="null"/> is how a handle reads them from there. A rule
+    /// given HERE overrides them, which is what the B+tree comparison of §13.J and a test that wants
+    /// a deep tree from few objects both need — and it is then the caller's business to give the
+    /// same rule to every writer of that dataset, since only the prolly settings travel in the
+    /// header. Two writers under two rules still produce a correct tree; they produce different
+    /// pages for the same keys, which costs §4.1's history independence and nothing else.
+    /// </remarks>
+    public IBoundaryRule? Rule { get; init; }
 }
 
 /// <summary>A versioned dataset over an object store.</summary>
@@ -52,6 +84,7 @@ public sealed class VortexDataset : IAsyncDisposable
     private readonly IObjectStore _store;
     private readonly DatasetOptions _options;
     private readonly DTypeArena _types = new DTypeArena();
+    private readonly ObjectCache _objects;
     private CommitHeader _header;
     private DatasetTree _tree;
     private CommitPageSource _pages;
@@ -61,6 +94,7 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         _store = store;
         _options = options;
+        _objects = new ObjectCache(store, options.MaxOpenObjects);
         _header = header;
         _tree = tree;
         _pages = pages;
@@ -80,6 +114,9 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>The data objects it holds.</summary>
     public long ObjectCount => _tree.Entries;
+
+    /// <summary>The levels of its tree: 0 when it is empty, 1 when one leaf page holds it all.</summary>
+    public int Depth => _tree.Depth;
 
     /// <summary>The seed every boundary of its trees is decided under (§4.1).</summary>
     public ulong Seed => _header.Seed;
@@ -197,7 +234,8 @@ public sealed class VortexDataset : IAsyncDisposable
                 .OpenAsync(source, new VortexOpenOptions(), cancellationToken).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))
             {
-                entry = new ObjectEntry(objectKey, Identity(file), file.RowCount, head.Length, UInt128.Zero);
+                entry = new ObjectEntry(
+                    objectKey, Identity(file), file.RowCount, head.Length, UInt128.Zero, Summaries(file));
             }
         }
 
@@ -242,12 +280,16 @@ public sealed class VortexDataset : IAsyncDisposable
 
         long bytes = sink.Position;
         UInt128 hash = sink.ContentHash;
+
+        // Before the put, out of the buffer the sink still holds: the bounds §4.2 asks the entry to
+        // carry cost no request at all this way.
+        ObjectSummaries summaries = await SummariesAsync(sink.Written, cancellationToken).ConfigureAwait(false);
         if (await sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
         {
             throw new ObjectStoreException($"'{key}' was taken; a fresh uid cannot collide (13 §3).");
         }
 
-        ObjectEntry entry = new ObjectEntry(key, Uid(identity), rows, bytes, hash);
+        ObjectEntry entry = new ObjectEntry(key, Uid(identity), rows, bytes, hash, summaries);
         return await ApplyAsync(
             [new DatasetOperation.AddObject(KeyOf(RowCount), entry)], cancellationToken).ConfigureAwait(false);
     }
@@ -281,36 +323,117 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>The builder.</returns>
     public DatasetScanBuilder Scan() => new DatasetScanBuilder(this);
 
-    /// <inheritdoc/>
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    /// <summary>A scan over the dataset's rows <c>[from, to)</c>, in the tree's order (§6.6).</summary>
+    /// <param name="from">The first row, inclusive.</param>
+    /// <param name="to">One past the last.</param>
+    /// <returns>The builder.</returns>
+    public DatasetScanBuilder Rows(long from, long to) => new DatasetScanBuilder(this).Rows(from, to);
 
-    /// <summary>Opens one of the dataset's data objects as a Vortex file.</summary>
-    /// <param name="entry">Its leaf entry.</param>
-    /// <param name="cancellationToken">Cancels the open.</param>
-    /// <returns>The file and the source under it, which the caller disposes.</returns>
-    internal async ValueTask<(VortexFile File, ObjectSegmentSource Source)> OpenObjectAsync(
-        ObjectEntry entry, CancellationToken cancellationToken)
+    /// <inheritdoc/>
+    public ValueTask DisposeAsync() => _objects.DisposeAsync();
+
+    /// <summary>
+    /// The objects a walk keeps: those inside <c>[from, to)</c> whose summaries, and their
+    /// ancestors', do not refute the predicate.
+    /// </summary>
+    /// <param name="pruner">The predicate, prepared once, or null to keep every object.</param>
+    /// <param name="from">The first row of the dataset to reach.</param>
+    /// <param name="to">One past the last.</param>
+    /// <param name="metrics">Counters to fill, or null.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The objects, in key order.</returns>
+    internal async IAsyncEnumerable<PositionedObject> WalkAsync(
+        SummaryPruner? pruner,
+        long from,
+        long to,
+        DatasetScanMetrics? metrics,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        ObjectSegmentSource source = new ObjectSegmentSource(_store, entry.Key);
-        try
+        Func<InternalEntry, bool>? descend = pruner is null ? null : node =>
         {
-            VortexFile file = await VortexFile
-                .OpenAsync(source, new VortexOpenOptions(), cancellationToken).ConfigureAwait(false);
-            return (file, source);
-        }
-        catch
+            if (node.Summary.IsEmpty
+                || ObjectSummaries.FromBytes(node.Summary.Span).MayMatch(pruner, node.Rows))
+            {
+                return true;
+            }
+
+            if (metrics is { } counters)
+            {
+                counters.SubtreesSkipped++;
+            }
+
+            return false;
+        };
+
+        await foreach (PositionedEntry positioned in
+            _tree.WalkAsync(_pages, from, to, descend, cancellationToken).ConfigureAwait(false))
         {
-            await source.DisposeAsync().ConfigureAwait(false);
-            throw;
+            ObjectEntry entry = ObjectEntry.FromBytes(positioned.Entry.Value.Span);
+            if (metrics is { } counters)
+            {
+                counters.ObjectsConsidered++;
+            }
+
+            if (pruner is not null && !entry.Summaries.MayMatch(pruner, entry.Rows))
+            {
+                if (metrics is { } skipped)
+                {
+                    skipped.ObjectsSkipped++;
+                }
+
+                continue;
+            }
+
+            yield return new PositionedObject(entry, positioned.FirstRow);
         }
     }
 
-    private static CommitOptions Commit(DatasetOptions options, CommitHeader template) => new CommitOptions
+    /// <summary>Borrows one of the dataset's data objects, open (§3: they are immutable).</summary>
+    /// <param name="key">Its key in the store.</param>
+    /// <param name="cancellationToken">Cancels the open.</param>
+    /// <returns>A lease the caller disposes when it is done reading.</returns>
+    internal ValueTask<ObjectLease> RentAsync(string key, CancellationToken cancellationToken) =>
+        _objects.RentAsync(key, cancellationToken);
+
+    /// <summary>The bounds §4.2 asks an entry to carry, read out of a file's own statistics.</summary>
+    /// <param name="file">The data object, open.</param>
+    private ObjectSummaries Summaries(VortexFile file) =>
+        ObjectSummaries.Of(file, _options.SummaryColumns, _options.SummaryColumnLimit);
+
+    /// <summary>The same, read out of bytes that have not reached the store yet.</summary>
+    /// <param name="bytes">The whole file, as the sink still holds it.</param>
+    /// <param name="cancellationToken">Cancels the parse.</param>
+    private async ValueTask<ObjectSummaries> SummariesAsync(
+        ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
     {
-        Seed = template.Seed == 0 ? options.Seed : template.Seed,
-        Template = template,
-        MaxAttempts = options.MaxAttempts,
-    };
+        MemorySegmentSource source = new MemorySegmentSource(bytes);
+        VortexFile file = await VortexFile
+            .OpenAsync(source, new VortexOpenOptions(), cancellationToken).ConfigureAwait(false);
+        await using (file.ConfigureAwait(false))
+        {
+            return Summaries(file);
+        }
+    }
+
+    private static CommitOptions Commit(DatasetOptions options, CommitHeader template)
+    {
+        ulong seed = template.Seed == 0 ? options.Seed : template.Seed;
+        return new CommitOptions
+        {
+            Seed = seed,
+            Template = template,
+            MaxAttempts = options.MaxAttempts,
+            Rule = options.Rule ?? RuleOf(template.Chunker, seed),
+        };
+    }
+
+    /// <summary>The rule a header's chunker settings name, or null for the defaults.</summary>
+    /// <param name="chunker">The settings the header carries (§4.1).</param>
+    /// <param name="seed">The dataset's seed.</param>
+    private static IBoundaryRule? RuleOf(ChunkerSettings chunker, ulong seed) =>
+        chunker.MinBytes > 0 && chunker.TargetBytes > 0 && chunker.MaxBytes > 0
+            ? new ProllyBoundaryRule(seed, chunker.MinBytes, chunker.TargetBytes, chunker.MaxBytes)
+            : null;
 
     /// <summary>The tree key of an object that starts at row <paramref name="row"/>.</summary>
     /// <param name="row">Its first row in the dataset.</param>

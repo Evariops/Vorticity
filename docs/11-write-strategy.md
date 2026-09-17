@@ -742,6 +742,12 @@ why the zone map's `zone_len` stays 8 192 whatever the chunk shape.
 - **File-level pruning**: `VortexFile.MayMatch(expr)` answers from the footer's file statistics
   and the file-level Bloom generation without reading a data segment; an engine over many files
   calls it before opening a scan.
+  **As delivered (step 39b), the door for the engine that has no file.** A caller holding an
+  engine's own cache of bounds — 13 §4.2's dataset node is exactly that — asks the same question
+  through `Vorticity.Scan.ColumnSummary` and `SummaryPruner`, and `MayMatch` is now that call
+  with the file's own statistics. One implementation of 08 §1, two callers: the second
+  implementation this would otherwise have grown is the one that could disagree about the only
+  rule whose failure silently loses rows.
 
 ### 6.4 Explain
 

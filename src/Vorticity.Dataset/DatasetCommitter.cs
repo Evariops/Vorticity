@@ -36,9 +36,16 @@ public sealed record CommitOptions
     /// <summary>The boundary rule, or null for the prolly rule at this dataset's seed.</summary>
     public IBoundaryRule? Rule { get; init; }
 
+    /// <summary>What a node's summary is, or null for the one the object entries carry (§4.2).</summary>
+    public ISummaryFold? Fold { get; init; }
+
     /// <summary>A rule in its starting state.</summary>
     /// <returns>The rule.</returns>
     public IBoundaryRule NewRule() => Rule?.Fresh() ?? new ProllyBoundaryRule(Seed);
+
+    /// <summary>The fold this commit folds its pages' summaries with.</summary>
+    /// <returns>The fold.</returns>
+    public ISummaryFold NewFold() => Fold ?? ObjectSummaryFold.Instance;
 }
 
 /// <summary>What a commit did.</summary>
@@ -103,7 +110,8 @@ public static class DatasetCommitter
             pages.Writing(builder, version);
             DatasetTree next = changes.Count == 0
                 ? tree
-                : await tree.CommitAsync(changes, options.NewRule(), pages, builder, cancellationToken)
+                : await tree
+                    .CommitAsync(changes, options.NewRule(), options.NewFold(), pages, builder, cancellationToken)
                     .ConfigureAwait(false);
 
             CommitHeader header = template with
