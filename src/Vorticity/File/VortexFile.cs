@@ -124,7 +124,19 @@ public sealed partial class VortexFile : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(options);
         MemoryMappedSegmentSource source = MemoryMappedSegmentSource.Open(path);
-        return OpenCoreAsync(source, options, ownsSource: true, cancellationToken);
+        ValueTask<VortexFile> open = OpenCoreAsync(source, options, ownsSource: true, cancellationToken);
+        return options.Read.IndexSidecarPath is null ? open : RememberTokenAsync(open, path);
+    }
+
+    /// <summary>
+    /// The store token of a file opened from a path for a sidecar (13 §7): the binding of a file
+    /// without an identity, taken at the open.
+    /// </summary>
+    private static async ValueTask<VortexFile> RememberTokenAsync(ValueTask<VortexFile> open, string path)
+    {
+        VortexFile file = await open.ConfigureAwait(false);
+        Indexes.IndexSidecar.RememberToken(file, path);
+        return file;
     }
 
     /// <summary>Opens a Vortex file over an already-constructed segment source.</summary>

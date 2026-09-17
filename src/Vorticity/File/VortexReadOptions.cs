@@ -72,9 +72,11 @@ public sealed class VortexReadOptions
     /// </summary>
     /// <remarks>
     /// Opt-in, so that a file without a directory costs nothing for being probed. A sidecar whose
-    /// recorded length or SHA-256 is not the file's is refused as stale, with the reason in
-    /// <see cref="VortexFile.IndexDirectoryRefusal"/>; checking the hash reads the whole file once,
-    /// on the first index read. <c>VortexFileIndexer.WriteSidecarAsync</c> writes one.
+    /// recorded length or identity is not the file's (docs/13-dataset.md §7) is refused as stale,
+    /// with the reason in <see cref="VortexFile.IndexDirectoryRefusal"/>; both come from the tail the
+    /// open read, so binding reads no byte of the file. A file written without an identity is bound
+    /// by its store token instead -- its length and modification time, taken when it is opened from a
+    /// path -- which is a heuristic. <c>VortexFileIndexer.WriteSidecarAsync</c> writes one.
     /// </remarks>
     public string? IndexSidecarPath { get; init; }
 

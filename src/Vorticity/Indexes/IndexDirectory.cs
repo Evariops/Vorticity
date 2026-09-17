@@ -157,8 +157,31 @@ public sealed record IndexDirectory(
     /// <summary>For a sidecar: the length of the file it indexes (field 7); 0 in a file's own directory.</summary>
     public ulong FileLength { get; init; }
 
-    /// <summary>For a sidecar: the SHA-256 of the file it indexes (field 8); null in a file's own directory.</summary>
-    public byte[]? FileSha256 { get; init; }
+    /// <summary>
+    /// For a sidecar: the identity of the version of the file it indexes (field 10,
+    /// docs/13-dataset.md §7), the binding a reader checks without reading the file; null for a
+    /// file written without one.
+    /// </summary>
+    public Guid? FileIdentity { get; init; }
+
+    /// <summary>
+    /// For a sidecar: the store's token for the file when it was indexed (field 11), an opaque
+    /// string -- on a file system, its length and modification time. The binding of a file without
+    /// an identity, and a heuristic there.
+    /// </summary>
+    public string? FileToken { get; init; }
+
+    /// <summary>
+    /// For a sidecar: the XXH3-128 of the file's bytes, computed by the indexer that read them
+    /// (field 12). No reader computes it; <c>vxdump --verify</c> does.
+    /// </summary>
+    public UInt128? FileHash { get; init; }
+
+    /// <summary>
+    /// Whether the directory carried a SHA-256 of its file (field 8, before step 26), which this
+    /// reader no longer computes: such a sidecar binds by nothing it checks.
+    /// </summary>
+    internal bool LegacySha256 { get; init; }
 
     /// <summary>
     /// For a sidecar: the array encodings its payloads name, by index (field 9) -- a sidecar's
@@ -174,8 +197,11 @@ public sealed record IndexDirectory(
     private const int DirEntries = 5;
     private const int DirBudget = 6;
     private const int DirFileLength = 7;
-    private const int DirFileSha256 = 8;
+    private const int DirLegacySha256 = 8;
     private const int DirArrayEncodings = 9;
+    private const int DirFileIdentity = 10;
+    private const int DirFileToken = 11;
+    private const int DirFileHash = 12;
     private const int EntryKind = 1;
     private const int EntryColumnPath = 2;
     private const int EntryBlockLen = 3;
@@ -236,14 +262,27 @@ public sealed record IndexDirectory(
             }
 
             writer.WriteUInt64(DirFileLength, FileLength);
-            if (FileSha256 is { } sha)
-            {
-                writer.WriteBytes(DirFileSha256, sha);
-            }
-
             foreach (string id in ArrayEncodings ?? [])
             {
                 writer.WriteStringAlways(DirArrayEncodings, id);
+            }
+
+            Span<byte> sixteen = stackalloc byte[16];
+            if (FileIdentity is { } identity)
+            {
+                identity.TryWriteBytes(sixteen);
+                writer.WriteBytesAlways(DirFileIdentity, sixteen);
+            }
+
+            if (FileToken is { } token)
+            {
+                writer.WriteStringAlways(DirFileToken, token);
+            }
+
+            if (FileHash is { } hash)
+            {
+                BinaryPrimitives.WriteUInt128LittleEndian(sixteen, hash);
+                writer.WriteBytesAlways(DirFileHash, sixteen);
             }
 
             ReadOnlySpan<byte> body = writer.WrittenSpan;
@@ -418,7 +457,10 @@ public sealed record IndexDirectory(
         List<IndexEntry> entries = [];
         uint budget = DefaultBudgetPerMille;
         ulong fileLength = 0;
-        byte[]? sha = null;
+        bool legacySha = false;
+        Guid? identity = null;
+        string? token = null;
+        UInt128? hash = null;
         List<string>? encodings = null;
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
@@ -430,11 +472,23 @@ public sealed record IndexDirectory(
                 case DirFileLength when wire == ProtoWireType.Varint:
                     fileLength = reader.ReadVarint();
                     break;
-                case DirFileSha256 when wire == ProtoWireType.LengthDelimited:
-                    sha = reader.ReadLengthDelimited().ToArray();
+                case DirLegacySha256 when wire == ProtoWireType.LengthDelimited:
+                    reader.ReadLengthDelimited();
+                    legacySha = true;
                     break;
                 case DirArrayEncodings when wire == ProtoWireType.LengthDelimited:
                     (encodings ??= []).Add(Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
+                    break;
+                case DirFileIdentity when wire == ProtoWireType.LengthDelimited:
+                    ReadOnlySpan<byte> value = reader.ReadLengthDelimited();
+                    identity = value.Length == 16 ? new Guid(value) : null;
+                    break;
+                case DirFileToken when wire == ProtoWireType.LengthDelimited:
+                    token = Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    break;
+                case DirFileHash when wire == ProtoWireType.LengthDelimited:
+                    ReadOnlySpan<byte> digest = reader.ReadLengthDelimited();
+                    hash = digest.Length == 16 ? BinaryPrimitives.ReadUInt128LittleEndian(digest) : null;
                     break;
                 case DirVersion when wire == ProtoWireType.Varint:
                     version = reader.ReadVarint32();
@@ -487,7 +541,10 @@ public sealed record IndexDirectory(
         {
             BudgetPerMille = (int)Math.Min(budget, int.MaxValue),
             FileLength = fileLength,
-            FileSha256 = sha,
+            FileIdentity = identity,
+            FileToken = token,
+            FileHash = hash,
+            LegacySha256 = legacySha,
             ArrayEncodings = encodings,
         };
         reason = null;

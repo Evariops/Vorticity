@@ -4,12 +4,22 @@
 //   "VXIX"                        magic
 //   run payloads                  array blobs, aligned like a data file's segments
 //   directory                     the IndexDirectory message, version byte first, with the indexed
-//                                 file's length and SHA-256 and the sidecar's own encoding table
+//                                 file's length, identity, store token and XXH3-128, and the
+//                                 sidecar's own encoding table
 //   u64 directory offset, u32 directory length, u32 version, "VXIX"      the trailer, 20 bytes
 //
-// THE SIDECAR IS BOUND TO ONE FILE, BYTE FOR BYTE. A file rewritten under the same name would make
-// every run a lie about rows it no longer has, so the directory records the file's length and hash
-// and a mismatch refuses the sidecar whole -- an index is a hint, and a stale one is none.
+// THE SIDECAR IS BOUND TO ONE VERSION OF ONE FILE (13 §7, step 26). A file rewritten under the same
+// name would make every run a lie about rows it no longer has, so a mismatch refuses the sidecar
+// whole -- an index is a hint, and a stale one is none. The binding is what a reader can check
+// without reading the file: its length and its identity, which every write and every append mints
+// anew, from the tail the open already holds. A file without an identity -- written by another
+// writer -- is bound by the store's token instead, its length and modification time on a file
+// system, which is a heuristic and is said to be one. The SHA-256 that bound a sidecar before this
+// step made every open read the whole file; a sidecar that carries only that binds by nothing a
+// reader checks, and is refused.
+//
+// THE FILE'S HASH IS THE INDEXER'S. It reads the whole file to index it anyway, so it records the
+// XXH3-128 of the bytes; no reader computes it, and `vxdump --verify` compares it offline.
 //
 // ITS PAYLOADS NAME THEIR OWN ENCODINGS. A payload is an array blob whose nodes name encodings by
 // index into a footer's table; the data file's footer is not the sidecar's to extend, so the
@@ -17,7 +27,8 @@
 using System;
 using System.Buffers.Binary;
 using System.IO;
-using System.Security.Cryptography;
+using System.IO.Hashing;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
@@ -94,20 +105,13 @@ internal static class IndexSidecar
                 }
             }
 
-            if (directory!.FileLength != (ulong)file.FileLength || directory.FileSha256 is not { Length: 32 } expected)
+            if (Unbound(directory!, file) is { } stale)
             {
                 await source.DisposeAsync().ConfigureAwait(false);
-                return (null, null, $"the sidecar indexes a file of {directory.FileLength} bytes, not this one of {file.FileLength}: it is stale");
+                return (null, null, stale);
             }
 
-            byte[] actual = await HashAsync(file.Segments, file.FileLength, cancellationToken).ConfigureAwait(false);
-            if (!actual.AsSpan().SequenceEqual(expected))
-            {
-                await source.DisposeAsync().ConfigureAwait(false);
-                return (null, null, "the sidecar's SHA-256 is not this file's: it is stale");
-            }
-
-            if (directory.ArrayEncodings is null)
+            if (directory!.ArrayEncodings is null)
             {
                 await source.DisposeAsync().ConfigureAwait(false);
                 return (null, null, "the sidecar carries no encoding table for its payloads");
@@ -142,10 +146,72 @@ internal static class IndexSidecar
             : ((long)offset, (int)size, null);
     }
 
-    /// <summary>The SHA-256 of a whole file, read a mebibyte at a time.</summary>
-    internal static async ValueTask<byte[]> HashAsync(ISegmentSource source, long length, CancellationToken cancellationToken)
+    /// <summary>
+    /// Why <paramref name="directory"/> does not describe <paramref name="file"/>, or null when it
+    /// does: the length, then the identity, or the store's token for a file without one. Nothing of
+    /// the file is read.
+    /// </summary>
+    /// <param name="directory">The sidecar's directory.</param>
+    /// <param name="file">The file it is offered for.</param>
+    internal static string? Unbound(IndexDirectory directory, File.VortexFile file)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        if (directory.FileLength != (ulong)file.FileLength)
+        {
+            return $"the sidecar indexes a file of {directory.FileLength} bytes, not this one of {file.FileLength}: it is stale";
+        }
+
+        if (directory.FileIdentity is { } identity)
+        {
+            return file.Identity == identity
+                ? null
+                : $"the sidecar indexes the version {identity:N} of the file, and this is {(file.Identity is { } other ? other.ToString("N") : "a file without an identity")}: it is stale";
+        }
+
+        if (directory.FileToken is { } token)
+        {
+            if (TokenOf(file) is not { } current)
+            {
+                return "the sidecar binds a file without an identity by its store token, and this file was not opened from a path that gives one";
+            }
+
+            return string.Equals(current, token, StringComparison.Ordinal)
+                ? null
+                : $"the sidecar was written for the store token {token}, and the file's is {current}: it is stale (a heuristic for a file without an identity)";
+        }
+
+        return directory.LegacySha256
+            ? "the sidecar binds its file by a SHA-256, which a reader no longer computes (13 §7): rebuild it"
+            : "the sidecar names neither the file's identity nor its store token";
+    }
+
+    /// <summary>The store token of the file at <paramref name="path"/>: its length and modification time.</summary>
+    /// <param name="path">A file on a file system.</param>
+    internal static string TokenOf(string path)
+    {
+        FileInfo info = new FileInfo(path);
+        return FormattableString.Invariant($"fs:{info.Length}:{info.LastWriteTimeUtc.Ticks}");
+    }
+
+    /// <summary>
+    /// The store tokens of files opened from a path while a sidecar was asked for, taken at the
+    /// open. A file opened otherwise has none, and pays nothing for the table.
+    /// </summary>
+    private static readonly ConditionalWeakTable<File.VortexFile, string> Tokens = [];
+
+    /// <summary>Records the store token of a file opened from <paramref name="path"/>.</summary>
+    /// <param name="file">The open file.</param>
+    /// <param name="path">Where it was opened from.</param>
+    internal static void RememberToken(File.VortexFile file, string path) => Tokens.AddOrUpdate(file, TokenOf(path));
+
+    private static string? TokenOf(File.VortexFile file) => Tokens.TryGetValue(file, out string? token) ? token : null;
+
+    /// <summary>The XXH3-128 of a whole file, read a mebibyte at a time.</summary>
+    /// <param name="source">The file.</param>
+    /// <param name="length">Its length.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    internal static async ValueTask<UInt128> HashAsync(ISegmentSource source, long length, CancellationToken cancellationToken)
+    {
+        XxHash128 hash = new XxHash128();
         for (long at = 0; at < length; at += 1 << 20)
         {
             int size = (int)Math.Min(1 << 20, length - at);
@@ -153,8 +219,8 @@ internal static class IndexSidecar
             Append(hash, chunk.Buffer);
         }
 
-        return hash.GetHashAndReset();
+        return hash.GetCurrentHashAsUInt128();
     }
 
-    private static void Append(IncrementalHash hash, VortexBuffer buffer) => hash.AppendData(buffer.Span);
+    private static void Append(XxHash128 hash, VortexBuffer buffer) => hash.Append(buffer.Span);
 }

@@ -465,6 +465,20 @@ pinned identity makes two writes of the same batches byte-identical again, which
 11 §2's determinism and 10 §7.3's `Fastest` promise now take. A strict Rust 0.86.1 reader opens
 every such file: the cross-check reads 854 of them.
 
+**As delivered (step 26, the sidecar bound by identity).**
+- **What the sidecar records.** Its directory records the file's length, its identity, the
+  store's token (`fs:<length>:<modification ticks>` on a file system) and the XXH3-128 of its
+  bytes, computed by the indexer. The SHA-256 is gone.
+- **How a reader binds it.** It compares the length and the identity, both from the tail the open
+  already read, so binding reads no byte of the file; a test counts the requests. A file without
+  an identity is bound by the token, taken at an open by path when a sidecar is asked for. A touch
+  breaks that binding, and so does an open that has no path; both are refused with the reason.
+- **What no reader sees.** A byte changed in place keeps the length and the identity, so every
+  reader check passes. `vxdump --sidecar P --verify` compares the recorded hash, reports the
+  mismatch and exits with 6.
+- **Scope.** The sidecar itself is retired by §6.4 when the dataset's fragments exist (step 42).
+  This step moves its binding to the one this document keeps.
+
 **As delivered (step 21, the checksums of the file's own indexes).** The in-file index directory is
 version 2 ([10-indexes.md](10-indexes.md) §4.1): an XXH3-64 trailer over the directory, and an
 XXH3-64 per payload region, computed by the writer from the blob it holds. A reader verifies what it

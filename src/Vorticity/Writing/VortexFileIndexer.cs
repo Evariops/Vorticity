@@ -143,9 +143,13 @@ public static class VortexFileIndexer
                     ComponentKind.Array, options?.TargetEdition ?? EditionRegistry.Newest);
                 using IndexWriter indexes = await BuildAsync(
                     file, sink, policy, options, encodings, [], 0, cancellationToken).ConfigureAwait(false);
-                byte[] sha = await IndexSidecar.HashAsync(file.Segments, file.FileLength, cancellationToken).ConfigureAwait(false);
+                // THE BINDING (13 §7): the identity when the file has one, the store's token always,
+                // and the hash of the bytes, which this pass is the one to compute.
+                UInt128 hash = await IndexSidecar.HashAsync(file.Segments, file.FileLength, cancellationToken).ConfigureAwait(false);
+                SidecarBinding binding = new SidecarBinding(
+                    file.FileLength, file.Identity, IndexSidecar.TokenOf(path), hash, [.. encodings.Ids]);
                 long offset = sink.Position;
-                byte[] directory = indexes.Directory(file.RowCount, (file.FileLength, sha, [.. encodings.Ids]))!;
+                byte[] directory = indexes.Directory(file.RowCount, binding)!;
                 await sink.WriteAsync(directory, cancellationToken).ConfigureAwait(false);
                 await sink.WriteAsync(IndexSidecar.Trailer(offset, directory.Length), cancellationToken).ConfigureAwait(false);
                 await sink.FlushAsync(cancellationToken).ConfigureAwait(false);

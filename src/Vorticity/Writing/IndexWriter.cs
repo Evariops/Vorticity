@@ -23,6 +23,14 @@ using Vorticity.Types.Serialization;
 
 namespace Vorticity.Writing;
 
+/// <summary>What binds a sidecar to the version of the file it indexes (docs/13-dataset.md §7).</summary>
+/// <param name="Length">The file's length.</param>
+/// <param name="Identity">Its identity, when it has one.</param>
+/// <param name="Token">The store's token for it, when the store gives one.</param>
+/// <param name="Hash">The XXH3-128 of its bytes.</param>
+/// <param name="Encodings">The encodings the sidecar's payloads name.</param>
+internal sealed record SidecarBinding(long Length, Guid? Identity, string? Token, UInt128 Hash, IReadOnlyList<string> Encodings);
+
 /// <summary>Builds the indexes of one file and the directory that lists them.</summary>
 internal sealed class IndexWriter : IDisposable
 {
@@ -1429,8 +1437,8 @@ internal sealed class IndexWriter : IDisposable
     /// and since `Auto` became the default it would have cost every file of a sorted or numeric
     /// schema a hundred and fifty bytes for that nothing.
     /// </remarks>
-    /// <param name="sidecar">For a sidecar: the indexed file's length and hash, and the payloads' encoding table.</param>
-    internal byte[]? Directory(long rowCount, (long Length, byte[] Sha256, IReadOnlyList<string> Encodings)? sidecar = null)
+    /// <param name="sidecar">For a sidecar: what binds it to the indexed file, and the payloads' encoding table.</param>
+    internal byte[]? Directory(long rowCount, SidecarBinding? sidecar = null)
     {
         if (!Enabled && _preserved is not { Count: > 0 })
         {
@@ -1450,7 +1458,9 @@ internal sealed class IndexWriter : IDisposable
             {
                 BudgetPerMille = _budgetPerMille,
                 FileLength = (ulong)(sidecar?.Length ?? 0),
-                FileSha256 = sidecar?.Sha256,
+                FileIdentity = sidecar?.Identity,
+                FileToken = sidecar?.Token,
+                FileHash = sidecar?.Hash,
                 ArrayEncodings = sidecar?.Encodings,
             }.ToBytes();
     }

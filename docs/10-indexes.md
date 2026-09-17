@@ -670,6 +670,19 @@ that compacts runs.
   length or SHA-256 mismatch refuses it as stale, and the hash costs one read of the file at the
   first index read. Payloads are then read from the sidecar and decoded against its table
   (`VortexFile.IndexSource`, `CreateIndexContext`).
+- **Sidecar, amended at step 26 (13 §7).** The binding no longer reads the file.
+  - **Fields.** Field 8 is not written, and a sidecar that carries only it is refused with a
+    reason: rebuild it. Three fields replace it:
+    - `file_identity = 10`, the sixteen bytes of the file's `vorticity.identity`;
+    - `file_token = 11`, the store's token, `fs:<length>:<modification ticks>` on a file system;
+    - `file_hash = 12`, the XXH3-128 of the file's bytes, computed by the indexer, which reads the
+      file whole anyway.
+  - **Reader.** The reader checks the length, then the identity, both from the tail the open
+    already holds. It checks the token only for a file without an identity, and that token is
+    taken when the file is opened from a path with a sidecar asked for. It never computes the hash.
+  - **`vxdump`.** `vxdump --sidecar P --verify` does: it checks every region the directory lists
+    against its checksum, and the file's bytes against the recorded hash. It exits with 6 when one
+    fails.
 
 **A key source needs a complete index.** Found by the append tests: a pruner can use runs that cover
 part of the file (a block no run covers is live), but a cursor over them misses the other blocks'
