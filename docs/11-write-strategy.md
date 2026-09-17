@@ -392,8 +392,8 @@ This replaces bucketed signatures and periodic re-pricing with a control that co
 measures the one thing that matters. An FSST symbol table is still trained per chunk (sharing one
 was measured at 4,3 % of output size, `bench/PLAN.md:62`); what is remembered is the decision,
 not the table. A caller may pin a plan per column (`EncodingHint`), which is the same mechanism
-with the tolerance set to infinity, and an appended file seeds the memory from its last chunk
-(§3.8).
+with the tolerance set to infinity (delivered at step 29, §7.1), and an appended file seeds the
+memory from its last chunk (§3.8).
 
 #### 3.4.4 Cascade with context
 
@@ -755,6 +755,26 @@ the sink's requests equal the segment source's, exactly.
   transit at all.
 - `VortexFileWriter.Append(path, options?)`: §3.8; the policy comes from the file when omitted.
 - `EncodingHint` per column, for callers who know.
+
+*As delivered (step 29).*
+- `VortexFileWriter.PreferredBatchRows` is the file's block length, 8 192 by default, and 1 when
+  `RowBlockSize` is null, where every batch is its own chunk. A batch of a multiple of it carrying
+  at least `DataBlockTargetBytes` is written where it lies; anything else waits in the transit
+  arena for the rows that complete its last block.
+- `VortexWriteOptions.EncodingHints` maps a column path — `WritePolicy`'s paths: a top-level
+  column, a `.`-separated path through structs, or the empty path for a file whose root is not a
+  struct — to a `VortexEncodingHint`: `Auto`, `Canonical`, `RunEnd`, `Dictionary`, `BitPacked`,
+  `Fsst`, `Alp`, `Sequence`, `Zstd`. The names are the chooser's schemes, not the wire ids.
+- It is §3.4.3's mechanism with the tolerance set to infinity: the column's plan memory starts
+  pinned, so the hinted scheme is priced on every chunk's own statistics — the first included,
+  where an unpinned column has no memory yet — and nothing else is. A chunk the scheme cannot
+  describe is priced in full and the next chunk is offered the hint again; the pin is never
+  replaced by what a chunk was written as. What the statistics answer for nothing still comes
+  first: a progression is written as one whatever the hint says.
+- A hint naming nothing in the schema throws at `Create`. An index is a hint whose absence costs
+  no correctness and is reported (10 §7.1); an encoding hint that silently did nothing would have
+  no channel to say so. A write with `Compress` off prices nothing, so a hint changes nothing.
+- No hint is byte for byte the write without one.
 
 ### 7.2 Reading
 

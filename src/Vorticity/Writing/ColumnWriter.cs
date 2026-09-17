@@ -473,7 +473,12 @@ internal sealed class ColumnWriter
     /// <param name="Scheme">The plan's scheme.</param>
     /// <param name="Predicted">The chooser's bytes for it.</param>
     /// <param name="Actual">The buffer bytes the encoder wrote for it.</param>
-    internal readonly record struct PlanMemory(ColumnScheme Scheme, long Predicted, long Actual)
+    /// <param name="Pinned">
+    /// Whether the caller pinned the scheme (<see cref="VortexEncodingHint"/>): the same mechanism
+    /// with the tolerance set to infinity (docs/11 §3.4.3), so the memory holds whatever the bytes
+    /// did and is never replaced by what a chunk was written as.
+    /// </param>
+    internal readonly record struct PlanMemory(ColumnScheme Scheme, long Predicted, long Actual, bool Pinned = false)
     {
         /// <summary>§3.4.3's <c>plan_tolerance</c>: five per cent, as a ratio of the prediction.</summary>
         private const long TolerancePercent = 5;
@@ -491,9 +496,9 @@ internal sealed class ColumnWriter
         /// will hold, framing excluded on both sides, and a scheme with no buffer holds trivially.
         /// </remarks>
         internal bool WithinTolerance =>
-            Predicted == 0
+            Pinned || (Predicted == 0
                 ? Actual == 0
-                : Math.Abs(Actual - Predicted) * 100 <= Predicted * TolerancePercent;
+                : Math.Abs(Actual - Predicted) * 100 <= Predicted * TolerancePercent);
     }
 
     /// <summary>The memory of the last chunk written, or none for the first.</summary>
@@ -585,7 +590,13 @@ internal sealed class ColumnWriter
             }
         }
 
-        Memory = priced ? new PlanMemory(plan.Scheme, plan.PredictedBytes, actualBytes) : null;
+        // A PINNED MEMORY IS NOT REPLACED: the caller's scheme is offered to every chunk, and a
+        // chunk it could not describe -- priced in full, written as something else -- does not
+        // withdraw it (docs/11 §3.4.3).
+        if (Memory is not { Pinned: true })
+        {
+            Memory = priced ? new PlanMemory(plan.Scheme, plan.PredictedBytes, actualBytes) : null;
+        }
 
         // THE TABLE'S CONSUMER FOR THE NEXT CHUNK, decided here and nowhere else. The end-of-refactor
         // measurement settled the rule the other way round from the spec's first reading: the table
@@ -811,6 +822,33 @@ internal sealed class ColumnWriter
             }
         }
     }
+
+    /// <summary>
+    /// Pins the scheme this column is written with, whatever its chunks cost
+    /// (<see cref="VortexEncodingHint"/>, docs/11 §3.4.3).
+    /// </summary>
+    /// <remarks>
+    /// Set before the first batch, because the ingest state the scheme reads starts with it: a
+    /// pinned dictionary needs the distinct table live on the column's first rows, which
+    /// <see cref="Remember"/> would only turn on after a chunk had held.
+    /// </remarks>
+    /// <param name="scheme">The scheme.</param>
+    internal void Pin(ColumnScheme scheme)
+    {
+        // NO NUMBERS: a pin is not a measurement, and the tolerance a prediction of nothing against
+        // a byte count of none would fail is exactly what `Pinned` sets to infinity.
+        Memory = new PlanMemory(scheme, Predicted: 0, Actual: -1, Pinned: true);
+        _live = scheme == ColumnScheme.Dict;
+        _widthsLive = scheme == ColumnScheme.BitPacked;
+    }
+
+    /// <summary>
+    /// Child <paramref name="index"/> of <paramref name="count"/>, creating the nodes if the first
+    /// batch has not yet: what a path resolved against the schema walks down.
+    /// </summary>
+    /// <param name="index">The child.</param>
+    /// <param name="count">How many children this node has.</param>
+    internal ColumnWriter Descend(int index, int count) => Children(count)[index];
 
     /// <summary>Blocks taken from an existing file, which a child created later is given too.</summary>
     private int _seeded;

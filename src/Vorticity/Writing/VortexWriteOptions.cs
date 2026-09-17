@@ -9,6 +9,7 @@
 // edition is a frozen set of component ids, so naming one is the only way to say "any Vortex from
 // version N onward can read this".
 using System;
+using System.Collections.Generic;
 using Vorticity.Editions;
 using Vorticity.Indexes;
 
@@ -55,6 +56,27 @@ public sealed class VortexWriteOptions
 
     /// <summary>How much the writer does beyond the data. Default <see cref="WriteProfile.Default"/>.</summary>
     public WriteProfile Profile { get; init; } = WriteProfile.Default;
+
+    /// <summary>
+    /// The scheme to write a column with, by column path, for callers who know
+    /// (docs/11-write-strategy.md §7.1, §3.4.3).
+    /// </summary>
+    /// <remarks>
+    /// PLAN MEMORY WITH THE TOLERANCE SET TO INFINITY, which is what §3.4.3 calls it: the hinted
+    /// scheme is priced on every chunk's own statistics and written when it still applies, and
+    /// nothing else is priced. A chunk the scheme cannot describe — a bit-packing on a chunk of
+    /// nulls, a dictionary whose table gave up — is priced in full, and the next chunk is offered
+    /// the hint again. Bounds, run counts and steps still come first: a progression is written as
+    /// one whatever the hint says, because §3.4.1 answers it for nothing and no scheme beats it.
+    /// <para>
+    /// The paths are <see cref="WritePolicy"/>'s: a top-level column, or a <c>.</c>-separated path
+    /// through structs. A path that names nothing in the schema throws at
+    /// <see cref="VortexFileWriter.Create(ISegmentSink, Types.DType, VortexWriteOptions)"/>: an
+    /// index is a hint whose absence costs nothing and is reported, while an encoding hint that
+    /// silently did nothing would have no channel to say so.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyDictionary<string, VortexEncodingHint>? EncodingHints { get; init; }
 
     /// <summary>
     /// The bytes the file's indexes may occupy together, as a share of the data bytes, in parts per
@@ -135,6 +157,7 @@ public sealed class VortexWriteOptions
     {
         Indexes = indexes,
         Profile = Profile,
+        EncodingHints = EncodingHints,
         IndexBudgetPerMille = budgetPerMille,
         KeyEncoder = KeyEncoder,
         Identity = Identity,

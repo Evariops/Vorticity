@@ -238,7 +238,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
         int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
-        FenceShape fences, bool elementStatistics)
+        FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, VortexEncodingHint>? hints)
     {
         _sink = sink;
         _elementStatistics = elementStatistics;
@@ -272,6 +272,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             };
         }
 
+        if (hints is not null)
+        {
+            Pin(hints);
+        }
+
         _indexes = IndexWriter.Asks(indexes)
             ? new IndexWriter(
                 indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder,
@@ -285,6 +290,130 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
     /// <summary>How many rows have been written.</summary>
     public long RowCount => _rowCount;
+
+    /// <summary>
+    /// The row count a caller should batch in multiples of (docs/11-write-strategy.md §7.1): a
+    /// batch of a multiple of it, carrying at least
+    /// <see cref="VortexWriteOptions.DataBlockTargetBytes"/> bytes, is written where it lies and
+    /// pays no transit copy at all.
+    /// </summary>
+    /// <remarks>
+    /// The file's block length, 8 192 by default, because a chunk is a whole number of blocks
+    /// (§3.1) and a batch that is not one has to wait in transit for the rows that complete its
+    /// last block. With <see cref="VortexWriteOptions.RowBlockSize"/> null every batch is its own
+    /// chunk and nothing waits, which is what 1 says.
+    /// </remarks>
+    public int PreferredBatchRows => _rowBlock > 0 ? _rowBlock : 1;
+
+    /// <summary>
+    /// Whether any batch has waited in the transit arena, which is what
+    /// <see cref="PreferredBatchRows"/> exists to avoid.
+    /// </summary>
+    internal bool Buffered => _transit is not null;
+
+    /// <summary>
+    /// Pins the scheme of every column the caller named (docs/11 §7.1, §3.4.3), before the first
+    /// batch, since the ingest state a scheme reads starts with it.
+    /// </summary>
+    /// <param name="hints">The hints, by column path.</param>
+    /// <exception cref="ArgumentException">A hint names no column of the schema.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A hint is not one of the defined values.</exception>
+    private void Pin(IReadOnlyDictionary<string, VortexEncodingHint> hints)
+    {
+        foreach ((string path, VortexEncodingHint hint) in hints)
+        {
+            if (hint == VortexEncodingHint.Auto)
+            {
+                continue;
+            }
+
+            if (!TryDescend(path, out ColumnWriter? column))
+            {
+                throw new ArgumentException(
+                    $"The encoding hint '{path}' names no column of this schema.", nameof(hints));
+            }
+
+            column!.Pin(hint switch
+            {
+                VortexEncodingHint.Canonical => ColumnScheme.None,
+                VortexEncodingHint.RunEnd => ColumnScheme.RunEnd,
+                VortexEncodingHint.Dictionary => ColumnScheme.Dict,
+                VortexEncodingHint.BitPacked => ColumnScheme.BitPacked,
+                VortexEncodingHint.Fsst => ColumnScheme.Fsst,
+                VortexEncodingHint.Alp => ColumnScheme.Alp,
+                VortexEncodingHint.Sequence => ColumnScheme.Sequence,
+                VortexEncodingHint.Zstd => ColumnScheme.Zstd,
+                _ => throw new ArgumentOutOfRangeException(
+                    nameof(hints), hint, "not a defined encoding hint"),
+            });
+        }
+    }
+
+    /// <summary>
+    /// The column state a path names, creating the nodes under it: a top-level column, a
+    /// <c>.</c>-separated path through structs and the extensions around them, or the empty path
+    /// for the one column of a file whose root is not a struct.
+    /// </summary>
+    /// <param name="path">The path, as <see cref="WritePolicy"/> spells it.</param>
+    /// <param name="column">The column's ingest state.</param>
+    private bool TryDescend(string path, out ColumnWriter? column)
+    {
+        column = null;
+        if (!_isTabular)
+        {
+            if (path.Length > 0)
+            {
+                return false;
+            }
+
+            column = _columns[0];
+            return true;
+        }
+
+        // A top-level name that holds a dot is that column, as the scan reads it.
+        int top = _schema.IndexOfField(path);
+        if (top >= 0)
+        {
+            column = _columns[top];
+            return true;
+        }
+
+        string[] names = path.Split('.');
+        int first = _schema.IndexOfField(names[0]);
+        if (first < 0)
+        {
+            return false;
+        }
+
+        ColumnWriter writer = _columns[first];
+        DType dtype = _schema.GetField(first);
+        for (int i = 1; i < names.Length; i++)
+        {
+            // An extension is a node of its own in the tree, with the storage as its only child.
+            while (dtype.Kind == DTypeKind.Extension)
+            {
+                writer = writer.Descend(0, 1);
+                dtype = dtype.StorageType;
+            }
+
+            if (dtype.Kind != DTypeKind.Struct)
+            {
+                return false;
+            }
+
+            int field = dtype.IndexOfField(names[i]);
+            if (field < 0)
+            {
+                return false;
+            }
+
+            writer = writer.Descend(field, dtype.FieldCount);
+            dtype = dtype.GetField(field);
+        }
+
+        column = writer;
+        return true;
+    }
 
     /// <summary>The schema every batch must match.</summary>
     public DType Schema => _schema;
@@ -343,7 +472,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
-            options.WideRowsAbove, options.Fences, options.ElementStatistics);
+            options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints);
     }
 
     /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
