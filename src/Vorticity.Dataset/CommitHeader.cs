@@ -61,6 +61,16 @@ public sealed record CommitLevel(int Level, long Entries, PageReference Top, IRe
         : this(level, entries, top, [])
     {
     }
+
+    /// <summary>The tree's levels under <see cref="Top"/>; 1 when the top is a leaf page.</summary>
+    /// <remarks>
+    /// Recorded rather than derived: a reader that walks the tree needs it before it has read a
+    /// page, and a page does not say how far it is from the leaves.
+    /// </remarks>
+    public int Depth { get; init; }
+
+    /// <summary>The rows of every object under it.</summary>
+    public long Rows { get; init; }
 }
 
 /// <summary>A commit object's header.</summary>
@@ -121,6 +131,8 @@ public sealed record CommitHeader
         internal const int Entries = 2;
         internal const int Top = 3;
         internal const int Inlined = 4;
+        internal const int Depth = 5;
+        internal const int Rows = 6;
     }
 
     internal static class InlinedField
@@ -129,15 +141,14 @@ public sealed record CommitHeader
         internal const int Bytes = 2;
     }
 
-    /// <summary>
-    /// Writes the header, rebasing every reference this commit owns by <paramref name="pagesStart"/>.
-    /// </summary>
+    /// <summary>Writes the header.</summary>
     /// <param name="writer">The destination.</param>
-    /// <param name="pagesStart">
-    /// Where the pages region begins, which is what a builder adds to the relative offsets it handed
-    /// out. Pass 0 for the measuring pass.
-    /// </param>
-    internal void Write(ref ProtoWriter writer, long pagesStart)
+    /// <remarks>
+    /// Every offset it carries is relative to its object's pages region, exactly as the offsets
+    /// inside a page are (see <see cref="PageReference"/>), so nothing here depends on where the
+    /// header ends and the header can be written once.
+    /// </remarks>
+    internal void Write(ref ProtoWriter writer)
     {
         writer.WriteUInt64(Field.Version, Version);
         writer.WriteUInt64(Field.Parent, Parent);
@@ -163,7 +174,7 @@ public sealed record CommitHeader
         writer.WriteInt64(Field.CreatedAt, CreatedAtUnixMilliseconds);
         foreach (CommitLevel level in Levels)
         {
-            WriteLevel(ref writer, level, pagesStart);
+            WriteLevel(ref writer, level);
         }
     }
 
@@ -229,22 +240,24 @@ public sealed record CommitHeader
         }
     }
 
-    private void WriteLevel(ref ProtoWriter writer, CommitLevel level, long pagesStart)
+    private static void WriteLevel(ref ProtoWriter writer, CommitLevel level)
     {
         ProtoWriter inner = new ProtoWriter();
         try
         {
             inner.WriteInt32(LevelField.Level, level.Level);
             inner.WriteInt64(LevelField.Entries, level.Entries);
+            inner.WriteInt32(LevelField.Depth, level.Depth);
+            inner.WriteInt64(LevelField.Rows, level.Rows);
             Span<byte> reference = stackalloc byte[PageReference.Bytes];
-            Rebase(level.Top, pagesStart).Write(reference);
+            level.Top.Write(reference);
             inner.WriteBytes(LevelField.Top, reference);
             foreach (InlinedPage page in level.Inlined)
             {
                 ProtoWriter inlined = new ProtoWriter();
                 try
                 {
-                    Rebase(page.Reference, pagesStart).Write(reference);
+                    page.Reference.Write(reference);
                     inlined.WriteBytes(InlinedField.Reference, reference);
                     inlined.WriteBytes(InlinedField.Bytes, page.Bytes.Span);
                     inner.WriteBytes(LevelField.Inlined, inlined.WrittenSpan);
@@ -262,23 +275,6 @@ public sealed record CommitHeader
             inner.Dispose();
         }
     }
-
-    /// <summary>
-    /// Turns a reference this commit owns from relative to absolute; leaves every other alone.
-    /// </summary>
-    /// <param name="reference">The reference.</param>
-    /// <param name="pagesStart">Where this object's pages region begins.</param>
-    /// <remarks>
-    /// A reference whose version is this commit's was handed out by this builder and carries an
-    /// offset relative to the pages region, because the region's place is not known until the
-    /// header is sized. A reference to an older version is already absolute in ITS object and must
-    /// not be touched — that is §3's "a commit references the pages it did not change where they
-    /// already are".
-    /// </remarks>
-    private PageReference Rebase(PageReference reference, long pagesStart) =>
-        reference.Version == Version && reference.Exists
-            ? reference with { Offset = reference.Offset + pagesStart }
-            : reference;
 
     /// <summary>Reads a header written by <see cref="Write"/>.</summary>
     /// <param name="bytes">The header's bytes.</param>
@@ -455,6 +451,8 @@ public sealed record CommitHeader
     {
         int level = 0;
         long entries = 0;
+        int depth = 0;
+        long rows = 0;
         PageReference top = PageReference.None;
         List<InlinedPage> inlined = [];
         ProtoReader reader = new ProtoReader(bytes);
@@ -468,6 +466,12 @@ public sealed record CommitHeader
                 case (LevelField.Entries, ProtoWireType.Varint):
                     entries = (long)reader.ReadVarint();
                     break;
+                case (LevelField.Depth, ProtoWireType.Varint):
+                    depth = (int)reader.ReadVarint();
+                    break;
+                case (LevelField.Rows, ProtoWireType.Varint):
+                    rows = (long)reader.ReadVarint();
+                    break;
                 case (LevelField.Top, ProtoWireType.LengthDelimited):
                     top = PageReference.Read(reader.ReadLengthDelimited());
                     break;
@@ -480,7 +484,7 @@ public sealed record CommitHeader
             }
         }
 
-        return new CommitLevel(level, entries, top, inlined);
+        return new CommitLevel(level, entries, top, inlined) { Depth = depth, Rows = rows };
     }
 
     private static InlinedPage ReadInlined(ReadOnlySpan<byte> bytes)

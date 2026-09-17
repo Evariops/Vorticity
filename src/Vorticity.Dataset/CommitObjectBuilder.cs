@@ -67,6 +67,25 @@ public sealed class CommitObjectBuilder : IPageSink
     /// <remarks>The tree's seam onto this builder: a page it emits is a page of this commit.</remarks>
     PageReference IPageSink.WritePage(ReadOnlySpan<byte> page) => AddPage(page);
 
+    /// <summary>The bytes of a page this builder holds, for a caller that wants to inline it.</summary>
+    /// <param name="reference">The reference this builder handed out.</param>
+    /// <param name="page">Receives its bytes.</param>
+    /// <returns>Whether this builder wrote that page.</returns>
+    public bool TryGetPage(PageReference reference, out ReadOnlyMemory<byte> page)
+    {
+        for (int i = 0; i < _pageReferences.Count; i++)
+        {
+            if (_pageReferences[i] == reference)
+            {
+                page = _pages[i];
+                return true;
+            }
+        }
+
+        page = default;
+        return false;
+    }
+
     /// <summary>Adds an index fragment (§6.4) and returns the reference that will name it.</summary>
     /// <param name="fragment">Its bytes; copied.</param>
     /// <returns>A reference with this commit's version and an offset this builder will rebase.</returns>
@@ -103,17 +122,10 @@ public sealed class CommitObjectBuilder : IPageSink
                 $"The header commits version {header.Version} and the builder version {_version}.");
         }
 
-        int headerLength = Measure(header);
+        byte[] headerBytes = Serialize(header);
+        int headerLength = headerBytes.Length;
         long pagesStart = CommitFormat.PreambleBytes + headerLength;
-        byte[] headerBytes = Serialize(header, pagesStart);
-        if (headerBytes.Length != headerLength)
-        {
-            throw new CommitFormatException(
-                $"The header measured {headerLength} bytes and serialized to {headerBytes.Length}: " +
-                "a page reference is not fixed-width.");
-        }
-
-        byte[] table = BuildTable(pagesStart);
+        byte[] table = BuildTable();
         long tableOffset = pagesStart + _pageBytes + _fragmentBytes;
         long length = tableOffset + table.Length + CommitFormat.TrailerBytes;
         if (length > int.MaxValue)
@@ -154,28 +166,12 @@ public sealed class CommitObjectBuilder : IPageSink
         return bytes;
     }
 
-    /// <summary>The header's length, from a pass whose offsets are not yet known.</summary>
-    /// <param name="header">The header.</param>
-    private static int Measure(CommitHeader header)
+    private static byte[] Serialize(CommitHeader header)
     {
         ProtoWriter writer = new ProtoWriter();
         try
         {
-            header.Write(ref writer, 0);
-            return writer.Length;
-        }
-        finally
-        {
-            writer.Dispose();
-        }
-    }
-
-    private static byte[] Serialize(CommitHeader header, long pagesStart)
-    {
-        ProtoWriter writer = new ProtoWriter();
-        try
-        {
-            header.Write(ref writer, pagesStart);
+            header.Write(ref writer);
             return writer.WrittenSpan.ToArray();
         }
         finally
@@ -185,21 +181,20 @@ public sealed class CommitObjectBuilder : IPageSink
     }
 
     /// <summary>The table of §3: what this object holds, pages then fragments.</summary>
-    /// <param name="pagesStart">Where the pages region begins.</param>
-    private byte[] BuildTable(long pagesStart)
+    /// <remarks>Offsets are relative to the pages region, as every offset of this format is.</remarks>
+    private byte[] BuildTable()
     {
         ProtoWriter writer = new ProtoWriter();
         try
         {
             foreach (PageReference reference in _pageReferences)
             {
-                WriteEntry(ref writer, CommitTable.Field.Page, reference with { Offset = reference.Offset + pagesStart });
+                WriteEntry(ref writer, CommitTable.Field.Page, reference);
             }
 
             foreach (PageReference reference in _fragmentReferences)
             {
-                WriteEntry(
-                    ref writer, CommitTable.Field.Fragment, reference with { Offset = reference.Offset + pagesStart });
+                WriteEntry(ref writer, CommitTable.Field.Fragment, reference);
             }
 
             return writer.WrittenSpan.ToArray();

@@ -86,17 +86,17 @@ public sealed class CommitObjectTests
         Assert.Equal(bytes.Length, commit.Length);
         Assert.NotNull(commit.Trailer);
 
-        // The references this builder handed out came back ABSOLUTE: the same hash and length, an
-        // offset past the header.
+        // The references this builder handed out are relative to the pages region, which is what
+        // keeps a page's bytes independent of where its object put them.
         PageReference top = commit.Header.Levels[0].Top;
         Assert.Equal(first.Hash, top.Hash);
         Assert.Equal(first.Length, top.Length);
-        Assert.Equal(commit.HeaderEnd, top.Offset);
+        Assert.Equal(0, top.Offset);
         Assert.Equal(Page(1, 300), commit.Page(bytes, top).ToArray());
 
         PageReference below = commit.Header.Levels[1].Top;
         Assert.Equal(second.Hash, below.Hash);
-        Assert.Equal(commit.HeaderEnd + 300, below.Offset);
+        Assert.Equal(300, below.Offset);
         Assert.Equal(Page(2, 120), commit.Page(bytes, below).ToArray());
 
         // The foreign reference passed through untouched.
@@ -112,7 +112,7 @@ public sealed class CommitObjectTests
         Assert.Equal([top, below], commit.Table.Pages);
         PageReference recorded = Assert.Single(commit.Table.Fragments);
         Assert.Equal(fragment.Hash, recorded.Hash);
-        Assert.Equal(commit.HeaderEnd + 300 + 120, recorded.Offset);
+        Assert.Equal(300 + 120, recorded.Offset);
         Assert.Equal(Page(3, 64), commit.Page(bytes, recorded).ToArray());
     }
 
@@ -171,7 +171,7 @@ public sealed class CommitObjectTests
         PageReference top = commit.Header.Levels[0].Top;
 
         byte[] flipped = [.. bytes];
-        flipped[(int)top.Offset + 17] ^= 0xFF;
+        flipped[(int)(commit.HeaderEnd + top.Offset) + 17] ^= 0xFF;
 
         CommitObject reopened = CommitObject.Open(flipped, flipped.Length);
         CommitFormatException refused = Assert.Throws<CommitFormatException>(
@@ -254,8 +254,8 @@ public sealed class CommitObjectTests
 
         // The last page lies past the open read and is fetched by its reference, checked on arrival.
         PageReference last = commit.Header.Levels[0].Top;
-        Assert.True(last.Offset > CommitFormat.OpenBytes);
-        byte[] page = await CommitObject.ReadPageAsync(store, key, last, default);
+        Assert.True(commit.HeaderEnd + last.Offset > CommitFormat.OpenBytes);
+        byte[] page = await CommitObject.ReadPageAsync(store, key, last, commit.HeaderEnd, default);
         Assert.Equal(Page(39, 16 << 10), page);
         Assert.Equal(2, store.Requests);
     }
@@ -273,11 +273,11 @@ public sealed class CommitObjectTests
         PageReference absolute = commit.Header.Levels[0].Top;
 
         byte[] flipped = [.. bytes];
-        flipped[(int)absolute.Offset] ^= 0x01;
+        flipped[(int)(commit.HeaderEnd + absolute.Offset)] ^= 0x01;
         await store.PutIfAbsentAsync(key, flipped, default);
 
         await Assert.ThrowsAsync<CommitFormatException>(
-            async () => await CommitObject.ReadPageAsync(store, key, absolute, default));
+            async () => await CommitObject.ReadPageAsync(store, key, absolute, commit.HeaderEnd, default));
     }
 
     [Fact]

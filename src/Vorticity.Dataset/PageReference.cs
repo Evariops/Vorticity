@@ -20,9 +20,23 @@ namespace Vorticity.Dataset;
 
 /// <summary>Where a page lies and what it must hash to.</summary>
 /// <param name="Version">The commit object that holds it; 0 is "no page".</param>
-/// <param name="Offset">Its offset inside that object.</param>
+/// <param name="Offset">
+/// Its offset from the start of that object's PAGES REGION, which is one past its header.
+/// </param>
 /// <param name="Length">Its bytes.</param>
 /// <param name="Hash">XXH3-128 of its bytes.</param>
+/// <remarks>
+/// WHY THE OFFSET IS RELATIVE, decided at step 38 after the absolute form failed. An internal page
+/// holds its children's references, so an absolute offset would have to be known before the page's
+/// bytes exist — and the page's bytes decide the header's length, which decides where the pages
+/// region starts, which decides the absolute offsets. The circle is real and it is not the one the
+/// header's own references broke: those are patched at layout time, a page's are baked into content
+/// that is then hashed. Relative offsets cut it, and they buy something the absolute form could
+/// never have: a page's bytes no longer depend on where its object put it, so two identical trees
+/// written into two commit objects are identical byte for byte, which is what 13 §4.1 promises and
+/// what §14's oracle compares. The reader adds the region's start, which is the header's length and
+/// lies in the object's first sixteen bytes.
+/// </remarks>
 public readonly record struct PageReference(ulong Version, long Offset, int Length, UInt128 Hash)
 {
     /// <summary>The reference that names no page.</summary>

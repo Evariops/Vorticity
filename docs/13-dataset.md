@@ -582,6 +582,34 @@ commits (§5.3), not by the tree.
 
 Every case is a row of the rebase matrix test (§14).
 
+**As delivered (step 38).** `DatasetCommitter.CommitAsync` is the loop above: `List`, open the
+winner, re-apply, `PutIfAbsent`, repeat. The operations are the four this section names
+(`AddObject`, `AddFragment`, `DropFragment`, `ReplaceObjects`) and each carries its own answer to a
+moved ground, so the matrix's rows are branches you can point at: an add whose `uid` is already
+there is `AlreadyThere`, a fragment whose object is gone or whose `uid` changed is `Dropped`, a
+replacement whose input is missing is `Abandoned`. A writer that loses `MaxAttempts` times is told
+to use a coordinator rather than to try harder, in the exception's own words.
+
+Two measurements, on the counting store:
+
+- **An uncontended commit is three dependent requests**, as §8.1 says: the `List`, the header, the
+  creation.
+- **A rebase iteration is three as well, not `depth + 2`**, because §3's inlining pays for itself: a
+  commit's header carries the pages it wrote **and the ones it had read on the way**, which are the
+  levels above the leaves, so the next commit's descent finds them in a header it has already read.
+  On a tree of 400 objects and depth 3, a commit after another makes **one** ranged read.
+
+Two decisions the prose did not settle:
+
+- **A page reference's offset is relative to its object's pages region**, not absolute. An internal
+  page holds its children's references, so an absolute offset would have to exist before the page's
+  bytes do, and the page's bytes decide the header's length, which decides where the pages begin.
+  Relative offsets cut that circle and buy history independence in the byte sense: two identical
+  trees written into two commit objects are identical page for page. A reader adds the region's
+  start, which is in the object's first sixteen bytes and is remembered per version.
+- **A commit inlines what it already holds and never reads a page to inline it.** Reading one to
+  make the next commit cheaper would trade the thing §8.1 counts for the thing it does not.
+
 ### 8.3 Finding the latest version in one request
 
 Commit keys sort newest first (§3), so `List("commit/", max: 1)` is the whole discovery. It needs a

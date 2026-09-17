@@ -190,13 +190,14 @@ public sealed class CommitObject
                 $"This object is version {Header.Version} and the reference names version {reference.Version}.");
         }
 
-        if (reference.Offset < HeaderEnd || reference.Offset + reference.Length > bytes.Length)
+        long at = HeaderEnd + reference.Offset;
+        if (reference.Offset < 0 || at + reference.Length > bytes.Length)
         {
             throw new CommitFormatException(
                 $"The page at {reference.Offset}+{reference.Length} does not lie inside the object.");
         }
 
-        ReadOnlySpan<byte> page = bytes.Slice((int)reference.Offset, reference.Length);
+        ReadOnlySpan<byte> page = bytes.Slice((int)at, reference.Length);
         UInt128 hash = XxHash128.HashToUInt128(page);
         if (hash != reference.Hash)
         {
@@ -207,15 +208,51 @@ public sealed class CommitObject
         return page;
     }
 
+    /// <summary>The offset one past an object's header, which every page offset is relative to.</summary>
+    /// <param name="store">The store.</param>
+    /// <param name="key">The object's key.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>Where the pages region starts.</returns>
+    /// <exception cref="CommitFormatException">The object is not a commit object.</exception>
+    /// <remarks>
+    /// Sixteen bytes: the magic, the format and the header's length. A reader that holds a commit
+    /// already knows this and should not ask; a reader following a reference into an OLDER commit
+    /// asks once per version and remembers.
+    /// </remarks>
+    public static async ValueTask<long> PagesStartAsync(
+        IObjectStore store, string key, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        using ObjectRange range = await store
+            .GetRangeAsync(key, 0, CommitFormat.PreambleBytes, cancellationToken).ConfigureAwait(false);
+        if (range.Length < CommitFormat.PreambleBytes)
+        {
+            throw new CommitFormatException($"'{key}' is {range.Length} bytes and holds no preamble.");
+        }
+
+        ReadOnlySpan<byte> preamble = range.Bytes.Span;
+        if (!preamble[..8].SequenceEqual(CommitFormat.Magic))
+        {
+            throw new CommitFormatException($"'{key}' does not start with a commit object's magic.");
+        }
+
+        return CommitFormat.PreambleBytes + BinaryPrimitives.ReadUInt32LittleEndian(preamble[12..]);
+    }
+
     /// <summary>Reads one page through the store, checking it against its reference.</summary>
     /// <param name="store">The store.</param>
     /// <param name="key">The key of the object the reference names.</param>
-    /// <param name="reference">The reference.</param>
+    /// <param name="reference">The reference, whose offset is relative to the pages region.</param>
+    /// <param name="pagesStart">Where that object's pages region starts (<see cref="PagesStartAsync"/>).</param>
     /// <param name="cancellationToken">Cancels the read.</param>
     /// <returns>The page's bytes.</returns>
     /// <exception cref="CommitFormatException">The page does not hash to what the reference says.</exception>
     public static async ValueTask<byte[]> ReadPageAsync(
-        IObjectStore store, string key, PageReference reference, CancellationToken cancellationToken)
+        IObjectStore store,
+        string key,
+        PageReference reference,
+        long pagesStart,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(store);
         if (!reference.Exists)
@@ -224,7 +261,8 @@ public sealed class CommitObject
         }
 
         using ObjectRange range = await store
-            .GetRangeAsync(key, reference.Offset, reference.Length, cancellationToken).ConfigureAwait(false);
+            .GetRangeAsync(key, pagesStart + reference.Offset, reference.Length, cancellationToken)
+            .ConfigureAwait(false);
         if (range.Length != reference.Length)
         {
             throw new CommitFormatException(
