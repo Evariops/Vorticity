@@ -432,6 +432,11 @@ zero for `Writing/` rather than being raised.
 
 ### 3.8 Appending to an existing file
 
+*Amended by [13-dataset.md](13-dataset.md) §6.1 and §12: this in-place append stays as the
+single-file mode beside the dataset. It keeps at most K = 4 runs per index entry and merges them
+past that, mints a new identity at every postscript (13 §7), and the reader falls back to
+`previous_eof` on a torn tail instead of failing.*
+
 `VortexFileWriter.Append(path)` opens the file, reads its footer, and continues it: the old
 segments stay where they are and keep their ids; new blocks are numbered from the old row count
 (blocks are counted from row 0, so their boundaries are the same they would have been in one

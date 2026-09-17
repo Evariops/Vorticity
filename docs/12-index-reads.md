@@ -490,6 +490,10 @@ shapes now.
 
 ## 6. Key-ordered delivery from the scan
 
+*Amended by [13-dataset.md](13-dataset.md) §6.6: across the objects of a dataset, key-ordered
+delivery on the clustering key is a k-way merge of at most 8 + L cursors, bounded; on any other
+column it is output-sensitive, one cursor per object the summaries cannot refute.*
+
 `ScanBuilder.InKeyOrder(string path, bool descending = false)` makes the scan deliver its rows in
 the key order of `path` instead of file order. It composes with `Project` and `Where` and is
 mutually exclusive with `Rows` and `Take`, as those two are with each other

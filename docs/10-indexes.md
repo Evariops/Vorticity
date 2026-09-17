@@ -207,6 +207,10 @@ first, and a finer filter is only probed for blocks still live. This is #7939's 
 zone maps" without a change to `vortex.zoned`: the zone map stays what upstream reads, the coarse
 maps are ours, out of tree.
 
+*Amended by [13-dataset.md](13-dataset.md) §6.2: the generations are laid out as a filter tree of
+fan-out 16, each node's children contiguous behind it, so that a probe descends and never reads
+the per-block table whole.*
+
 ---
 
 ## 5. Skipping indexes
@@ -401,6 +405,10 @@ runs. A rewrite compacts runs into one per generation.
 
 ### 6.2 `vorticity.sorted.runs.v1` — value → rows, exact, in log-structured runs
 
+*Amended by [13-dataset.md](13-dataset.md) §6.1: the per-chunk runs are spilled and merged at
+`CompleteAsync` into one run per entry, with hierarchical fences and a checksum per segment, and
+at most K = 4 runs stay in flux after appends. A lookup no longer probes one run per chunk.*
+
 Per chunk, a run of `keys` sorted with their **row positions** (`u32` when the file has under
 2³² rows): a sort of one chunk's rows, O(chunk log chunk) in time and one chunk in memory, in
 flux. A probe locates `v` in each overlapping run (a per-run min/max in `options` skips most), and
@@ -552,6 +560,10 @@ kind abandons cleanly, whole, with a reason in the report.
 
 ## 8. Indexing a file that already exists, and appending to one
 
+*Amended by [13-dataset.md](13-dataset.md) §6.4 and §7: the sidecar is retired. A post-hoc index
+on a store that cannot append is a fragment inside a commit object, bound by identity, never by a
+content hash on the read path.*
+
 Three ways, none touching a data byte:
 
 1. **Append** ([11-write-strategy.md](11-write-strategy.md) §3.8): new blocks, new runs, a new
@@ -594,6 +606,253 @@ keys, and the exact cover counted the old rows only after an append whose builde
 abandoned. `SortedRunsSource` now refuses an entry whose runs do not cover every block, with the
 reason; the same rule refuses a dictionary probe over a column some of whose chunks are not
 dictionaries, which step 15's source had accepted.
+
+### 8.1 Proposal: immutable data, incremental index fragments, one manifest *(2026-09-17, proposed, not implemented)*
+
+This second draft replaces the first one written the same day, which kept both mistakes named in
+§8.1.1.
+
+**Superseded the same day by [13-dataset.md](13-dataset.md)**, which keeps the diagnosis of §8.1.1
+and challenges the rest point by point (its §13.I): this draft still pays, on the read path, for
+the number of objects, of commits, of appends, of blocks and of fragments. It stays here as the
+record of what was weighed.
+
+**Priorities, in this order.**
+1. **No wrong answer** under any interleaving of writers, indexers and readers.
+2. **No read-path cost that grows with the data.**
+3. **No coordination on the read path.**
+4. **Every change incremental.**
+
+The project is unpublished, so breaking changes to what §8 delivered are accepted: everything is
+rebuilt.
+
+#### 8.1.1 The design error
+
+Vortex exists to read a few ranges out of a very large object. As delivered, the sidecar checks
+its binding by hashing **the whole data file** at the first index read, so using the index of a
+10 GB object on S3 first downloads the 10 GB. That is the opposite of the format's premise. A
+faster hash (XXH3) would reduce the CPU, not the bytes read.
+
+**The two causes.**
+1. *The data file is treated as mutable.* An append writes into the same file under the same name,
+   so an index outside the file has to prove which content it describes.
+2. *An index outside the file is one object, bound by content.* Any change rewrites it whole, and
+   proving the binding means reading the content.
+
+**What follows from them.**
+
+| # | problem | consequence |
+|---|---|---|
+| P1 | full-content hash on the read path | cost proportional to the data |
+| P2 | an append does not maintain the external index | it goes stale silently: refused, so safe, but lost |
+| P3 | the external index has a fixed name and is written in place | a torn or mismatched index is caught only by the hash |
+| P4 | an append writes its postscript last, in the same file | a reader that opens during an append fails on the torn tail |
+| P5 | no checksum on the index directory itself | corruption is caught only by the structural checks |
+| P6 | a single writer by convention only | two appenders corrupt the file |
+| P7 | an external index is all or nothing | no incremental update, no progressive build, no partial rebuild |
+
+A stale index is not merely slower: a filter or a run built before new rows says "absent" where
+the value now is, and the scan skips rows. The binding is a correctness matter.
+
+#### 8.1.2 Principles
+
+1. **A committed data object is immutable.** Changing the data means committing new objects;
+   no byte of a committed object is ever rewritten.
+2. **An index is derived data, made of immutable fragments.** Each fragment covers one block range
+   of one data object. An index grows, shrinks and is rebuilt by adding and removing fragments.
+3. **One small manifest per version is the only commit point.** Everything it references is
+   immutable, so a reader holding a manifest has a snapshot: no locks, no waiting.
+4. **The read path never reads bytes in proportion to the data.**
+5. **Binding is by identity, obtained from bytes the reader reads anyway** (the store's metadata,
+   the data object's tail). A content hash is an offline `verify` operation, never a read-path
+   step.
+6. **Everything derived can be rebuilt from the data objects alone.**
+
+#### 8.1.3 The objects (the word "sidecar" is retired)
+
+A **dataset** is a prefix (a directory, or an S3 key prefix). It holds three kinds of object:
+
+| object | key | content | mutable |
+|---|---|---|---|
+| data object | `<prefix>/data/<uuid>.vortex` | a plain Vortex file, readable by Rust; may embed indexes as today (§3) | never |
+| index fragment | `<prefix>/index/<uuid>.vxix` | the runs of one entry (kind, column path, options) over one block range of one data object, then a footer: the entry's description, its runs' segment tables, an XXH3-64 of the footer | never |
+| manifest | `<prefix>/manifest/<version, 20 digits>.vxm` | the version, its parent, the data objects in row order with their identity (§8.1.4), and for each object the index entries with their fragment references (key, size, XXH3-64, block ranges), the write policy, an XXH3-64 of the manifest | never |
+
+- A single existing Vortex file becomes a dataset of one data object: a manifest referencing it,
+  with no copy.
+- The in-file index of §3 stays. It is an **embedded fragment**, committed with its data by the
+  file's postscript, and a manifest may reference it as such.
+- What §8 called a sidecar was one fragment plus an embedded manifest, bound by content hash. It
+  is removed.
+
+#### 8.1.4 The identity of a data object
+
+A manifest records, for every data object, its key, its size and a **version token**:
+- **Written by Vorticity:** a 16-byte random `uid` in a postscript metadata entry
+  (`vorticity.identity`) placed immediately before the postscript. The 65 535-byte tail read at
+  open always covers it, so checking it costs **no request**.
+- **Given by the store, when it gives one:** the S3 `VersionId` (versioned bucket) or `ETag`,
+  returned by the `GET` of the tail at no cost; on a local file system, the file id with its size
+  and modification time.
+
+At open, the reader checks the size and whatever tokens the manifest recorded against what the
+tail read returned.
+- Data objects are committed under unique keys and never rewritten, so a mismatch means an
+  out-of-band change. The data object is refused, and the scan of that version fails with that
+  reason: the data is not what the manifest describes.
+- A foreign Vortex file (no `uid`) is bound by the store token alone. On a local file system,
+  where that token is only a heuristic, the limit is stated in the manifest and `verify` is the
+  remedy.
+- **`verify`**, offline: an XXH3-128 (`System.IO.Hashing.XxHash128`) of each object, recorded in
+  the manifest when the dataset asks for it. XXH3 guards against accident, not forgery.
+
+#### 8.1.5 Changing a dataset
+
+- **Adding rows, on every store.** The rows go into a **new data object**, with its embedded
+  indexes, and a new manifest lists the old objects plus the new one. The 10 GB object is not
+  touched. Small appends make small objects, which compaction merges (§8.1.7).
+- **Indexing incrementally.** An indexer builds fragments for (data object, block range): a new
+  kind, a new column, or blocks not yet covered.
+  - The work is resumable and parallel by range, and each batch of fragments is one commit.
+  - Partial coverage is already correct (§8, "a key source needs a complete index"): a pruner uses
+    the blocks a fragment covers and keeps the others live, and a key source waits until the
+    coverage is complete. A 10 GB object can therefore be indexed progressively without ever
+    answering wrong.
+- **Rebuilding.** A commit removes an entry's fragments; the indexer builds them again, under a
+  new policy if it changed.
+- **Out of scope:** deleting or updating rows (deletion vectors, row-level updates). That is table
+  format territory; see decision 5.
+
+#### 8.1.6 The commit, and concurrency
+
+**A commit is the creation of `manifest/<N+1>` if it does not exist.**
+- S3: `PUT` with `If-None-Match: *`, which is atomic.
+- Local file system: write a temporary file, flush it, then create the final name without
+  overwriting (a hard link, or `File.Move` without overwrite), then flush the directory.
+
+**A writer:**
+1. reads manifest `N`;
+2. writes its new objects under fresh keys: data objects, fragments;
+3. tries to create `N+1` with parent `N`.
+
+If `N+1` already exists, the writer reads it and **rebases**:
+- Additions commute. Row numbers are per data object, so a fragment never depends on its object's
+  place in the dataset. The writer re-applies its additions on top and tries `N+2`.
+- An addition that references an object the new version removed (by compaction) is dropped. Its
+  object becomes garbage.
+
+No lease is needed: put-if-absent linearizes the commits, and a stale writer simply fails its
+creation.
+
+**A reader:**
+1. finds the latest version: it reads the `manifest/_latest` hint (written after each commit,
+   best effort, possibly stale), then probes `N+1`, `N+2`… with `HEAD` until one is missing;
+2. reads that manifest;
+3. opens data objects and fragments lazily.
+
+Everything it reads is immutable: a snapshot, with no lock.
+
+**Garbage collection (`vacuum`).** It deletes the objects no manifest within the retention window
+references, then the manifests older than the window, keeping the latest. The window must exceed
+the longest reader and writer lifetime. A reader that outlives it loses objects; that is reported,
+never answered wrong.
+
+**Interleavings.**
+
+| interleaving | result |
+|---|---|
+| a reader opens during any commit | the previous version, whole |
+| two writers commit | one creates `N+1`, the other rebases onto `N+2`; nothing is lost |
+| a crash before the commit | orphan objects, collected; no version names them |
+| an indexer and a compaction race | the fragment for a removed object is dropped at rebase |
+| a torn or corrupt fragment or manifest | its XXH3-64 refuses it: the fragment's entry is ignored, the manifest's version is not readable |
+| a data object changed out of band | its token mismatches; that version is refused with the reason |
+
+#### 8.1.7 Compaction and rebuild
+
+- **Data.** Small data objects are merged into larger ones, and the commit replaces their
+  references. A large object is rewritten only on request.
+- **Indexes.** The fragments of one entry are merged:
+  - sorted runs by a streaming k-way merge;
+  - postings by the same merge;
+  - Bloom filters by OR when their sizes match, and from the data blocks otherwise.
+- **Triggers:** thresholds on the number of fragments and of small objects. Compaction runs in the
+  background and commits like any writer.
+- **API:** `VortexDataset.CompactAsync`, `RebuildIndexesAsync(policy, scope)`, `VacuumAsync`,
+  `VerifyAsync`, and `vxdump` verbs for each.
+
+#### 8.1.8 The read-path invariant, and how it is held
+
+Opening a version costs:
+- the `_latest` hint and the probes, a few small requests;
+- the manifest (kilobytes);
+- per data object touched, the tail read of today;
+- per index used, a fragment footer and the payload ranges the query needs.
+
+None of these grows with the data. A **counting object store** in the tests asserts it: the bytes
+and requests of "open, then a point query through an index" are identical over a 1 GB and a 10 GB
+data object (a sparse or synthetic object, since only the bytes read matter).
+
+#### 8.1.9 What stays and what goes
+
+- **Stays:** in-file indexes at write time, as embedded fragments; the entry formats of §5 and §6;
+  the partial-coverage rules; the three-class hint policy (08 §5).
+- **Goes:**
+  - the sidecar;
+  - the directory's `file_length`, `file_sha256` and `array_encodings` fields, since a fragment
+    carries its own encoding table;
+  - post-hoc indexing by rewriting the file's tail, replaced by fragments;
+  - in-place append (11 §3.8), see decision 1.
+- **Added:** an XXH3-64 checksum to every directory, fragment and manifest.
+
+#### 8.1.10 The store abstraction
+
+`IObjectStore` with five operations:
+- `GetRange`, which returns the version token with the bytes;
+- `Head`;
+- `PutIfAbsent`;
+- `Delete`;
+- `List(prefix)`, used by `vacuum` only, never on the read path.
+
+It has three implementations:
+- the local file system;
+- an in-memory store, with injectable latency, failures and crashes, for the tests;
+- S3, see decision 3.
+
+#### 8.1.11 Tests before it is called done
+
+- **An interleaving fuzzer** over the in-memory store: seeded schedules of readers, writers,
+  indexers, compactions and vacuums, with crashes injected between any two store calls.
+  - Every read answers what a scan with indexes off answers on the same version.
+  - Every version inside the retention window references only existing objects.
+- **Progressive indexing:** at every intermediate commit, answers equal those without indexes.
+- **The rebase matrix:** every pair of concurrent operations.
+- **Tampering:** a data object replaced out of band with the same size, a fragment or a manifest
+  torn at every byte, a fragment of another object.
+- **The counting store:** the invariant of §8.1.8.
+- **Compaction equivalence:** the same answers before and after.
+- **Rust:** every data object remains a plain Vortex file that Rust 0.86.1 reads (cross-check).
+
+#### 8.1.12 Decisions left open
+
+1. **In-place append (11 §3.8).**
+   - Recommended: remove it. One model, the dataset, on every store, and one proof.
+   - Or keep it as a single-file mode without a manifest, with its known limits (P4, P6).
+2. **Manifests.**
+   - Recommended: a full manifest per version, as long as it stays under about a megabyte.
+   - Or a checkpoint plus deltas (Delta style) beyond that. Measure before choosing.
+3. **The S3 client.** The rule of a single first-party dependency excludes the AWS SDK.
+   - Recommended: a minimal client in the repository (SigV4, ranged `GET`, conditional `PUT`,
+     `HEAD`, `DELETE`, `LIST`).
+   - Or an adapter package outside the core.
+4. **Retention:** a duration (recommended: 24 hours by default), a number of versions, or both.
+5. **Scope.** This is a small table format, limited to appends, indexes and compaction.
+   - Deletes and updates stay out.
+   - Adopting Iceberg or Delta as the manifest layer, with Vortex files as their data files, is
+     the alternative. It should be weighed before building our own, and upstream's plans checked.
+6. **Identity in every file.** Recommended: always written. It costs about 40 bytes and no
+   request, and §7.3's promise that `Profile = Fastest` is byte-identical to the pre-index writer
+   is dropped with it.
 
 ---
 
