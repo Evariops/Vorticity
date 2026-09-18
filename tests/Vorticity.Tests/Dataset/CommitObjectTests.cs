@@ -117,6 +117,31 @@ public sealed class CommitObjectTests
     }
 
     [Fact]
+    public void AFragmentAddedBeforeAPageIsWhereItsReferenceSays()
+    {
+        // The order a real indexing commit adds things in (step 42b): the fragment first, because
+        // its reference goes into the leaf entry that a page written after it holds. Every reference
+        // handed out is final, whatever follows it.
+        CommitObjectBuilder builder = new CommitObjectBuilder(9);
+        PageReference fragment = builder.AddFragment(Page(5, 80));
+        PageReference page = builder.AddPage(Page(6, 200));
+        PageReference later = builder.AddFragment(Page(7, 40));
+        byte[] bytes = builder.Build(new CommitHeader
+        {
+            Version = 9,
+            Parent = 8,
+            Levels = [new CommitLevel(0, 1, page)],
+        });
+
+        CommitObject commit = CommitObject.Open(bytes);
+        Assert.Equal((0L, 80L, 280L), (fragment.Offset, page.Offset, later.Offset));
+        Assert.Equal(Page(5, 80), commit.Page(bytes, fragment).ToArray());
+        Assert.Equal(Page(6, 200), commit.Page(bytes, commit.Header.Levels[0].Top).ToArray());
+        Assert.Equal(Page(7, 40), commit.Page(bytes, later).ToArray());
+        Assert.Equal([fragment, later], commit.Table.Fragments);
+    }
+
+    [Fact]
     public void AnObjectTruncatedAtEveryByteIsRefusedWithAReason()
     {
         (byte[] bytes, _, _, _, _, _) = Build();

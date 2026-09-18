@@ -569,12 +569,15 @@ public sealed class VortexDataset : IAsyncDisposable
         }
     }
 
-    /// <summary>Borrows one of the dataset's data objects, open (§3: they are immutable).</summary>
-    /// <param name="key">Its key in the store.</param>
-    /// <param name="cancellationToken">Cancels the open.</param>
+    /// <summary>
+    /// Borrows one of the dataset's data objects, open with the index fragments its entry names
+    /// (§3: the objects are immutable; §6.4: their fragments are not).
+    /// </summary>
+    /// <param name="entry">Its leaf entry, as this version holds it.</param>
+    /// <param name="cancellationToken">Cancels the reads and the open.</param>
     /// <returns>A lease the caller disposes when it is done reading.</returns>
-    internal ValueTask<ObjectLease> RentAsync(string key, CancellationToken cancellationToken) =>
-        _objects.RentAsync(key, cancellationToken);
+    internal ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken) =>
+        _objects.RentAsync(entry, _pages, cancellationToken);
 
     /// <summary>Starts one data object: a fresh identity, the sink that will hold it, its writer.</summary>
     /// <returns>The draft, whose writer the caller drives and completes.</returns>

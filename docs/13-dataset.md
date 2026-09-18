@@ -650,6 +650,36 @@ fragment compaction) and the sidecar's retirement are the steps after it.
   counted by `Explain`; a key source refuses one fragment over half the file, naming the blocks it
   covers, and walks the file once the second half is attached.
 
+**As delivered (step 42b): the dataset's half — fragments written in commit objects, by an indexer
+that commits once per block range.**
+
+- **`DatasetIndexer.IndexAsync(dataset, object, policy, rows?)`** reads the object's rows through its
+  plain view, builds the fragment, and commits one `AddFragment` — one batch, one commit, as the
+  paragraph above asks. The object comes from the dataset's own walk, which knows its level and its
+  leaf key. An object without an identity, one imported from another writer, is refused: its
+  fragment would bind by the store's token, which its entry does not carry yet.
+- **The operation carries the bytes, and the commit that lands writes them.** `AddFragment` held a
+  reference, whose version is the version that writes it — which a rebase decides, not the indexer.
+  The committer now opens its commit object before re-applying the operations, writes each applied
+  fragment into it, and names it in the entry. An attempt that loses throws both away.
+- **The commit object's body is laid out in the order things are added.** §3's table says pages,
+  then fragments. But an indexing commit writes the fragment BEFORE the leaf page that names it, and
+  the step-36 builder took a fragment's offset at its addition while laying every fragment after
+  every page: right only until a page followed a fragment, which every indexing commit does, and a
+  reference hashed into a page cannot be moved. The body is now one sequence and every offset is
+  final when handed out; an object built pages-first is byte for byte what it was.
+- **A fragment is its content.** "Already there" (§8.2, row 3) compares bytes — a length and a hash —
+  since a fragment not yet committed has no reference to compare; and a drop removes the fragment
+  of those bytes wherever it lies, which a rebuild and a fragment compaction both mean. Two indexers
+  of one range write one fragment: the fragment is a function of the object, the policy and the
+  range, and the test holds the second at `AlreadyThere`.
+- **An object is opened with its fragments.** The object cache keys a handle by the object and its
+  fragments' hashes: the object is immutable, its fragments are not, and a file reads its index
+  directory once. A new fragment is a new view, never a stale handle. The fragments are read from
+  their commit objects by reference and checked against it; one whose bytes do not match fails the
+  read with the reason, as a torn page does — step 43's tamper tests decide whether a scan should
+  rather proceed without it.
+
 ### 6.5 Which structure for which column
 
 The read bound depends on choosing by cardinality, which the writer knows exactly (11 §3.2.2).
@@ -865,6 +895,10 @@ commits (§5.3), not by the tree.
 | reader, anything | the reader holds a root; everything it references is immutable |
 
 Every case is a row of the rebase matrix test (§14).
+
+*Rows 3 and 4 with real fragments since step 42b: the second indexer's commit object holds no
+fragment bytes, which the test reads back; and a fragment is its content, so "present in the
+winner's leaf" means the same bytes, wherever the winner wrote them (§6.4).*
 
 **As delivered (step 40): what the fuzzer found in row 1.** "Both objects land in level 0" was true
 of the intention and false of the bytes. A tree's keys are unique, and an object's key was what
@@ -1305,6 +1339,12 @@ of §9.1. Where the two still differ under latency:
   halves of §5.2 are asserted after every step, not at the end. The seeded run does 16 compactions
   across 4 levels.*
 - **Progressive indexing**: at every intermediate commit, answers equal those without indexes.
+  *As delivered (step 42b): `DatasetIndexingTests` indexes four clustered objects in two halves
+  each, one commit per half, and after every commit asks five questions with the indexes and the
+  summaries on and off. The key-ordered read on the fragments' column is refused before the eighth
+  commit and exact after it. The interleaving fuzzer schedules the real indexer too: two handles
+  appending and indexing block ranges from stale views, every read after every step equal to the
+  scan without indexes.*
 - **Merge equivalence**: a run merged at `CompleteAsync` answers as the chunk runs did; a file
   appended in place `n` times answers as one written once, and holds ≤ K runs per entry.
 - **The two tree oracles**: incremental edits against a rebuild from scratch, byte for byte, on

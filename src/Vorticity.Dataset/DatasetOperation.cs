@@ -57,12 +57,22 @@ public abstract record DatasetOperation
     /// <summary>Attaches an index fragment to an object (§6.4).</summary>
     /// <param name="Key">The object's sort key.</param>
     /// <param name="Uid">The identity the fragment was built against (§7).</param>
-    /// <param name="Fragment">Where the fragment lies.</param>
-    public sealed record AddFragment(ReadOnlyMemory<byte> Key, UInt128 Uid, PageReference Fragment) : DatasetOperation;
+    /// <param name="Fragment">
+    /// The fragment's bytes, which the commit that applies this writes into its own commit object.
+    /// </param>
+    /// <remarks>
+    /// THE BYTES, NOT A REFERENCE, and a rebase is why. A reference names the version that wrote the
+    /// fragment, and which version that is depends on how many writers won before this one: the
+    /// reference is minted by the commit that finally lands, where the fragment is actually written.
+    /// </remarks>
+    public sealed record AddFragment(ReadOnlyMemory<byte> Key, UInt128 Uid, ReadOnlyMemory<byte> Fragment) : DatasetOperation;
 
     /// <summary>Drops an index fragment from an object.</summary>
     /// <param name="Key">The object's sort key.</param>
-    /// <param name="Fragment">The fragment to drop.</param>
+    /// <param name="Fragment">
+    /// The fragment to drop, matched by its content — length and hash — wherever it lies
+    /// (<see cref="ObjectEntry.Holds(PageReference)"/>).
+    /// </param>
     public sealed record DropFragment(ReadOnlyMemory<byte> Key, PageReference Fragment) : DatasetOperation;
 }
 

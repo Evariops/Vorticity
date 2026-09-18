@@ -40,8 +40,13 @@ public sealed class RebaseMatrixTests
     private static DatasetOperation Add(int i, int version = 0) =>
         new DatasetOperation.AddObject(Key(i), Object(i, version));
 
-    private static PageReference Fragment(int i) =>
-        new PageReference(1, 64 + i, 32, (UInt128)i << 64 | 0xF7A6);
+    /// <summary>The bytes of an indexer's fragment: a commit writes them and names where they lie.</summary>
+    private static ReadOnlyMemory<byte> Fragment(int i)
+    {
+        byte[] bytes = new byte[32];
+        bytes.AsSpan().Fill((byte)(0xA0 + i));
+        return bytes;
+    }
 
     /// <summary>A compaction at level 0, which is where these rows of §8.2 all happen.</summary>
     /// <param name="inputs">The objects it consumes.</param>
@@ -134,7 +139,16 @@ public sealed class RebaseMatrixTests
         Assert.Equal([OperationOutcome.AlreadyThere], loser.Outcomes);
 
         TreeEntry entry = Assert.NotNull(await loser.Tree.FindAsync(Key(1), loser.Pages, default));
-        Assert.Single(ObjectEntry.FromBytes(entry.Value.Span).Fragments);
+        PageReference named = Assert.Single(ObjectEntry.FromBytes(entry.Value.Span).Fragments);
+
+        // The winner's commit object holds the fragment where its entry says; the loser's holds none.
+        using ObjectRange won = await store.GetRangeAsync(winner.Key, 0, 1 << 20, default);
+        CommitObject written = CommitObject.Open(won.Bytes.Span, won.Length);
+        Assert.Equal([named], written.Table.Fragments);
+        Assert.Equal(Fragment(7).ToArray(), written.Page(won.Bytes.Span, named).ToArray());
+
+        using ObjectRange lost = await store.GetRangeAsync(loser.Key, 0, 1 << 20, default);
+        Assert.Empty(CommitObject.Open(lost.Bytes.Span, lost.Length).Table.Fragments);
     }
 
     [Fact]

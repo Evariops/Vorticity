@@ -255,7 +255,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     /// <summary>Opens one object's scan and takes its first batch.</summary>
     private async ValueTask OpenAsync(MergeObject next)
     {
-        ObjectLease lease = await _dataset.RentAsync(next.Entry.Key, _cancellationToken).ConfigureAwait(false);
+        ObjectLease lease = await _dataset.RentAsync(next.Entry, _cancellationToken).ConfigureAwait(false);
         _opened?.Invoke(lease);
         MergeInput input = new MergeInput(lease, next.Entry.Key, next.Rank, _paths, _fields);
         try

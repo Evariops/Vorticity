@@ -136,14 +136,62 @@ public sealed record ObjectEntry(
     public ObjectEntry With(PageReference fragment) =>
         this with { Fragments = [.. Fragments, fragment] };
 
-    /// <summary>Whether a fragment with this reference is already attached.</summary>
-    /// <param name="fragment">The reference.</param>
-    /// <returns>Whether the entry holds it.</returns>
+    /// <summary>Whether a fragment of the same content as this reference's is attached.</summary>
+    /// <param name="fragment">A reference: its length and hash name the content, wherever it lies.</param>
+    /// <returns>Whether the entry holds such a fragment.</returns>
+    /// <remarks>
+    /// A FRAGMENT IS ITS CONTENT. The same index bytes written by two commits are one fragment
+    /// twice, which is why an entry never holds them twice (§8.2, row 3); and a drop means "the
+    /// fragment with these bytes", which a rebuild or a fragment compaction asks for without caring
+    /// which commit happened to write them.
+    /// </remarks>
     public bool Holds(PageReference fragment)
     {
         foreach (PageReference held in Fragments)
         {
-            if (held == fragment)
+            if (SameContent(held, fragment))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The entry without the fragment of this reference's content.</summary>
+    /// <param name="fragment">A reference naming the content.</param>
+    /// <returns>The new entry.</returns>
+    public ObjectEntry Without(PageReference fragment)
+    {
+        List<PageReference> kept = new List<PageReference>(Fragments.Count);
+        foreach (PageReference held in Fragments)
+        {
+            if (!SameContent(held, fragment))
+            {
+                kept.Add(held);
+            }
+        }
+
+        return this with { Fragments = kept };
+    }
+
+    private static bool SameContent(PageReference left, PageReference right) =>
+        left.Length == right.Length && left.Hash == right.Hash;
+
+    /// <summary>Whether a fragment of exactly these bytes is already attached, wherever it lies.</summary>
+    /// <param name="fragment">The fragment's bytes.</param>
+    /// <returns>Whether the entry holds them.</returns>
+    /// <remarks>
+    /// By content, because a fragment not yet committed has no reference to compare: §8.2's third
+    /// row — "the second finds the fragment present in the winner's leaf, drops its own" — asks
+    /// whether the same index is there, not whether it was written by the same commit.
+    /// </remarks>
+    public bool Holds(ReadOnlySpan<byte> fragment)
+    {
+        UInt128 hash = System.IO.Hashing.XxHash128.HashToUInt128(fragment);
+        foreach (PageReference held in Fragments)
+        {
+            if (held.Length == fragment.Length && held.Hash == hash)
             {
                 return true;
             }

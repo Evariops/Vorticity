@@ -9,11 +9,19 @@
 // as many bytes as the first, and that is CHECKED rather than trusted: a length that moved would
 // mean a reference is not fixed-width after all, and the object would name pages that are not there.
 //
-// WHAT A REFERENCE HANDED OUT HERE MEANS. `AddPage` returns a reference whose version is this
-// commit's and whose offset is RELATIVE to the pages region. `Build` makes it absolute. A reference
-// to another version -- a page an older commit wrote and this one did not change -- is already
-// absolute and passes through untouched, which is what makes §4.3's "every page the commit did not
-// change is referenced where it already lies" one line of code rather than a bookkeeping problem.
+// WHAT A REFERENCE HANDED OUT HERE MEANS. `AddPage` and `AddFragment` return a reference whose
+// version is this commit's and whose offset is RELATIVE to the body, the region after the header;
+// the reader adds the body's start, which the header's length gives. A reference to another version
+// -- a page an older commit wrote and this one did not change -- names that version's body and
+// passes through untouched, which is what makes §4.3's "every page the commit did not change is
+// referenced where it already lies" one line of code rather than a bookkeeping problem.
+//
+// THE BODY IS LAID OUT IN THE ORDER THINGS ARE ADDED, so an offset is final the moment it is handed
+// out. It has to be: a fragment's reference goes into its object's leaf entry, and that entry into a
+// page this same commit writes AFTER the fragment -- and a reference already hashed into a page
+// cannot be moved. The first layout put every fragment after every page, with an offset taken at
+// the fragment's addition: right only while no page followed a fragment, which every real indexing
+// commit does (step 42b). An object built pages first, fragments after, is byte for byte the same.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -28,10 +36,9 @@ public sealed class CommitObjectBuilder : IPageSink
     private readonly ulong _version;
     private readonly List<byte[]> _pages = [];
     private readonly List<PageReference> _pageReferences = [];
-    private readonly List<byte[]> _fragments = [];
     private readonly List<PageReference> _fragmentReferences = [];
-    private long _pageBytes;
-    private long _fragmentBytes;
+    private readonly List<byte[]> _body = [];
+    private long _bodyBytes;
 
     /// <summary>Starts a commit object for <paramref name="version"/>.</summary>
     /// <param name="version">The version this object commits; never 0.</param>
@@ -49,17 +56,17 @@ public sealed class CommitObjectBuilder : IPageSink
     public int PageCount => _pages.Count;
 
     /// <summary>The fragments added so far.</summary>
-    public int FragmentCount => _fragments.Count;
+    public int FragmentCount => _fragmentReferences.Count;
 
     /// <summary>Adds a tree page and returns the reference that will name it.</summary>
     /// <param name="page">Its bytes; copied.</param>
-    /// <returns>A reference with this commit's version and an offset this builder will rebase.</returns>
+    /// <returns>A reference with this commit's version and its final offset in the body.</returns>
     public PageReference AddPage(ReadOnlySpan<byte> page)
     {
-        PageReference reference = new PageReference(_version, _pageBytes, page.Length, XxHash128.HashToUInt128(page));
-        _pages.Add(page.ToArray());
+        byte[] held = page.ToArray();
+        PageReference reference = Append(held);
+        _pages.Add(held);
         _pageReferences.Add(reference);
-        _pageBytes += page.Length;
         return reference;
     }
 
@@ -88,18 +95,24 @@ public sealed class CommitObjectBuilder : IPageSink
 
     /// <summary>Adds an index fragment (§6.4) and returns the reference that will name it.</summary>
     /// <param name="fragment">Its bytes; copied.</param>
-    /// <returns>A reference with this commit's version and an offset this builder will rebase.</returns>
+    /// <returns>A reference with this commit's version and its final offset in the body.</returns>
     /// <remarks>
-    /// Fragments lie after the pages, so their offsets are rebased by the pages region's start AND
-    /// by the pages' own bytes; a caller never computes either.
+    /// Final when returned, whatever is added after it: the leaf entry that names the fragment goes
+    /// into a page this commit writes later, and that page hashes the reference as it is now.
     /// </remarks>
     public PageReference AddFragment(ReadOnlySpan<byte> fragment)
     {
-        PageReference reference = new PageReference(
-            _version, _pageBytes + _fragmentBytes, fragment.Length, XxHash128.HashToUInt128(fragment));
-        _fragments.Add(fragment.ToArray());
+        PageReference reference = Append(fragment.ToArray());
         _fragmentReferences.Add(reference);
-        _fragmentBytes += fragment.Length;
+        return reference;
+    }
+
+    /// <summary>Puts bytes at the end of the body and names where they lie.</summary>
+    private PageReference Append(byte[] bytes)
+    {
+        PageReference reference = new PageReference(_version, _bodyBytes, bytes.Length, XxHash128.HashToUInt128(bytes));
+        _body.Add(bytes);
+        _bodyBytes += bytes.Length;
         return reference;
     }
 
@@ -126,7 +139,7 @@ public sealed class CommitObjectBuilder : IPageSink
         int headerLength = headerBytes.Length;
         long pagesStart = CommitFormat.PreambleBytes + headerLength;
         byte[] table = BuildTable();
-        long tableOffset = pagesStart + _pageBytes + _fragmentBytes;
+        long tableOffset = pagesStart + _bodyBytes;
         long length = tableOffset + table.Length + CommitFormat.TrailerBytes;
         if (length > int.MaxValue)
         {
@@ -139,16 +152,10 @@ public sealed class CommitObjectBuilder : IPageSink
         headerBytes.CopyTo(destination[CommitFormat.PreambleBytes..]);
 
         int at = (int)pagesStart;
-        foreach (byte[] page in _pages)
+        foreach (byte[] held in _body)
         {
-            page.CopyTo(destination[at..]);
-            at += page.Length;
-        }
-
-        foreach (byte[] fragment in _fragments)
-        {
-            fragment.CopyTo(destination[at..]);
-            at += fragment.Length;
+            held.CopyTo(destination[at..]);
+            at += held.Length;
         }
 
         table.CopyTo(destination[at..]);
@@ -181,7 +188,7 @@ public sealed class CommitObjectBuilder : IPageSink
     }
 
     /// <summary>The table of §3: what this object holds, pages then fragments.</summary>
-    /// <remarks>Offsets are relative to the pages region, as every offset of this format is.</remarks>
+    /// <remarks>Offsets are relative to the body, as every offset of this format is.</remarks>
     private byte[] BuildTable()
     {
         ProtoWriter writer = new ProtoWriter();

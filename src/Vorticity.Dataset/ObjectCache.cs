@@ -6,7 +6,9 @@
 // parse of a footer (02 §3): one dependent round trip and some CPU, per object, per scan. A dataset
 // scan that answers a hundred point queries over eight objects pays that eight hundred times
 // without a cache and eight times with one. §9.1 counts dependent round trips and nothing else,
-// which is the reason this exists and the reason it is keyed by object rather than by anything finer.
+// which is the reason this exists and the reason it is keyed by object rather than by anything finer
+// -- by object and the index fragments it is opened with, since step 42b, because an object's bytes
+// never change and its fragments do.
 //
 // REFERENCE-COUNTED, NOT JUST LRU, because two scans may hold the same object at once and one of
 // them finishing must not close the file the other is reading. An object with no lease goes to the
@@ -18,6 +20,8 @@
 // prefetch of §6.6 ("children prefetched in parallel"), which is a different thing and is not here.
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.File;
@@ -49,17 +53,23 @@ internal sealed class ObjectCache : IAsyncDisposable
     /// <summary>How many rents had to open the object.</summary>
     internal long Misses { get; private set; }
 
-    /// <summary>Opens an object, or hands back the handle already open on it.</summary>
-    /// <param name="key">The object's key in the store.</param>
-    /// <param name="cancellationToken">Cancels the open.</param>
+    /// <summary>
+    /// Opens an object with the index fragments its entry names, or hands back the handle already
+    /// open on that view of it.
+    /// </summary>
+    /// <param name="entry">The object's leaf entry: its key, and the fragments attached to it (§6.4).</param>
+    /// <param name="pages">Where the fragments are read: the commit objects that wrote them.</param>
+    /// <param name="cancellationToken">Cancels the reads and the open.</param>
     /// <returns>A lease the caller disposes when it is done reading.</returns>
-    internal async ValueTask<ObjectLease> RentAsync(string key, CancellationToken cancellationToken)
+    internal async ValueTask<ObjectLease> RentAsync(
+        ObjectEntry entry, CommitPageSource pages, CancellationToken cancellationToken)
     {
+        string handle = HandleOf(entry);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_open.TryGetValue(key, out Held? held))
+            if (_open.TryGetValue(handle, out Held? held))
             {
                 Hits++;
                 held.Leases++;
@@ -69,16 +79,24 @@ internal sealed class ObjectCache : IAsyncDisposable
                     held.Idle = null;
                 }
 
-                return new ObjectLease(this, key, held.File, cached: true);
+                return new ObjectLease(this, handle, held.File, cached: true);
             }
 
             Misses++;
-            ObjectSegmentSource source = new ObjectSegmentSource(_store, key);
+            ReadOnlyMemory<byte>[] fragments = new ReadOnlyMemory<byte>[entry.Fragments.Count];
+            for (int i = 0; i < fragments.Length; i++)
+            {
+                fragments[i] = await pages.ReadFragmentAsync(entry.Fragments[i], cancellationToken).ConfigureAwait(false);
+            }
+
+            VortexOpenOptions options = fragments.Length == 0
+                ? new VortexOpenOptions()
+                : new VortexOpenOptions { Read = new VortexReadOptions { IndexFragments = fragments } };
+            ObjectSegmentSource source = new ObjectSegmentSource(_store, entry.Key);
             VortexFile file;
             try
             {
-                file = await VortexFile
-                    .OpenAsync(source, new VortexOpenOptions(), cancellationToken).ConfigureAwait(false);
+                file = await VortexFile.OpenAsync(source, options, cancellationToken).ConfigureAwait(false);
             }
             catch
             {
@@ -86,9 +104,9 @@ internal sealed class ObjectCache : IAsyncDisposable
                 throw;
             }
 
-            _open[key] = new Held(file, source) { Leases = 1 };
+            _open[handle] = new Held(file, source) { Leases = 1 };
             await EvictAsync().ConfigureAwait(false);
-            return new ObjectLease(this, key, file, cached: false);
+            return new ObjectLease(this, handle, file, cached: false);
         }
         finally
         {
@@ -148,6 +166,31 @@ internal sealed class ObjectCache : IAsyncDisposable
             _gate.Release();
             _gate.Dispose();
         }
+    }
+
+    /// <summary>What one open view of an object is kept under: the object, and the fragments it holds.</summary>
+    /// <param name="entry">The object's leaf entry.</param>
+    /// <returns>The object's key, followed by its fragments' hashes when it has any.</returns>
+    /// <remarks>
+    /// A DATA OBJECT IS IMMUTABLE, ITS FRAGMENTS ARE NOT (§6.4). An indexer attaches one in a later
+    /// commit, and a file reads its index directory once and keeps it; so a new set of fragments is a
+    /// new view of the same bytes — a second open, never a stale handle — and the view it replaces
+    /// ages out of the cache like any idle object.
+    /// </remarks>
+    private static string HandleOf(ObjectEntry entry)
+    {
+        if (entry.Fragments.Count == 0)
+        {
+            return entry.Key;
+        }
+
+        StringBuilder handle = new StringBuilder(entry.Key);
+        foreach (PageReference fragment in entry.Fragments)
+        {
+            handle.Append('#').Append(fragment.Hash.ToString("x32", CultureInfo.InvariantCulture));
+        }
+
+        return handle.ToString();
     }
 
     /// <summary>Closes idle objects, oldest first, until the cache is within its capacity.</summary>

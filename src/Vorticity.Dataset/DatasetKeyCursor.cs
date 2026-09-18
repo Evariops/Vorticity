@@ -92,7 +92,7 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
                 .WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
             {
                 ObjectLease lease = await dataset
-                    .RentAsync(held.Entry.Key, cancellationToken).ConfigureAwait(false);
+                    .RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
                 leases.Add(lease);
                 KeyCursor? cursor = await key.TryOpenAsync(lease.File, cancellationToken).ConfigureAwait(false);
                 if (cursor is null)

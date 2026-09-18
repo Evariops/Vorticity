@@ -105,12 +105,14 @@ public static class DatasetCommitter
                 levels = DatasetLevels.Of(commit.Header);
             }
 
-            // 2. The operations, re-applied to whatever is there now (§8.2), a batch per level.
-            (Dictionary<int, List<TreeChange>> changes, List<OperationOutcome> outcomes) =
-                await ApplyAsync(levels, operations, pages, cancellationToken).ConfigureAwait(false);
-
+            // 2. The operations, re-applied to whatever is there now (§8.2), a batch per level. The
+            // commit object exists before they are applied, because an indexer's fragment is written
+            // into it and its entry names it there (§6.4); a lost attempt throws both away.
             ulong version = parent + 1;
             CommitObjectBuilder builder = new CommitObjectBuilder(version);
+            (Dictionary<int, List<TreeChange>> changes, List<OperationOutcome> outcomes) =
+                await ApplyAsync(levels, operations, pages, builder, cancellationToken).ConfigureAwait(false);
+
             pages.Writing(builder, version);
             DatasetLevels next = levels;
             foreach ((int level, List<TreeChange> batch) in changes)
@@ -259,11 +261,17 @@ public static class DatasetCommitter
     }
 
     /// <summary>Re-applies the operations to the levels as they are now, by §8.2's rules.</summary>
+    /// <param name="levels">The trees of the version this attempt builds on.</param>
+    /// <param name="operations">What to do.</param>
+    /// <param name="pages">Where the trees' pages are read.</param>
+    /// <param name="builder">The attempt's commit object, which receives the fragments applied.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
     private static async ValueTask<(Dictionary<int, List<TreeChange>> Changes, List<OperationOutcome> Outcomes)>
         ApplyAsync(
             DatasetLevels levels,
             IReadOnlyList<DatasetOperation> operations,
             IPageSource pages,
+            CommitObjectBuilder builder,
             CancellationToken cancellationToken)
     {
         // Sorted and unique by key WITHIN A LEVEL, which is what a batch has to be; an operation
@@ -303,14 +311,17 @@ public static class DatasetCommitter
                         break;
                     }
 
-                    if (entry.Holds(fragment.Fragment))
+                    if (entry.Holds(fragment.Fragment.Span))
                     {
-                        // Another indexer got there first with the same fragment (§8.2, row 3).
+                        // Another indexer got there first with the same fragment (§8.2, row 3): its
+                        // bytes are not written a second time.
                         outcomes.Add(OperationOutcome.AlreadyThere);
                         break;
                     }
 
-                    Put(fragment.Level, fragment.Key, entry.With(fragment.Fragment));
+                    // Written into this commit object, and named where it lies (§6.4).
+                    PageReference written = builder.AddFragment(fragment.Fragment.Span);
+                    Put(fragment.Level, fragment.Key, entry.With(written));
                     outcomes.Add(OperationOutcome.Applied);
                     break;
                 }
@@ -330,16 +341,7 @@ public static class DatasetCommitter
                         break;
                     }
 
-                    List<PageReference> kept = [];
-                    foreach (PageReference held in entry.Fragments)
-                    {
-                        if (held != drop.Fragment)
-                        {
-                            kept.Add(held);
-                        }
-                    }
-
-                    Put(drop.Level, drop.Key, entry with { Fragments = kept });
+                    Put(drop.Level, drop.Key, entry.Without(drop.Fragment));
                     outcomes.Add(OperationOutcome.Applied);
                     break;
                 }

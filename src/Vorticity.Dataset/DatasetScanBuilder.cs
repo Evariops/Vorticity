@@ -231,7 +231,7 @@ public sealed class DatasetScanBuilder
 
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
-            ObjectLease lease = await _dataset.RentAsync(held.Entry.Key, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await _dataset.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
@@ -252,7 +252,7 @@ public sealed class DatasetScanBuilder
         long rows = 0;
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
-            ObjectLease lease = await _dataset.RentAsync(held.Entry.Key, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await _dataset.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
@@ -275,7 +275,7 @@ public sealed class DatasetScanBuilder
     {
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
-            ObjectLease lease = await _dataset.RentAsync(held.Entry.Key, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await _dataset.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
@@ -333,7 +333,7 @@ public sealed class DatasetScanBuilder
                 continue;
             }
 
-            ObjectLease lease = await _dataset.RentAsync(held.Entry.Key, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await _dataset.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);

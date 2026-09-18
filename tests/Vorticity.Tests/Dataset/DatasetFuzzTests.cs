@@ -29,6 +29,9 @@ using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Dataset;
+using Vorticity.Expressions;
+using Vorticity.File;
+using Vorticity.Indexes;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -141,7 +144,7 @@ public sealed class DatasetFuzzTests
         for (int i = 0; i < expected.Count; i++)
         {
             Assert.Equal(expected[i].Key, held[i].Key);
-            Assert.Equal(expected[i].Entry, held[i].Entry);
+            Assert.Equal(expected[i].Entry, ByContent(held[i].Entry));
         }
 
         // And every leaf points at an object the store holds (§14's second invariant), for every
@@ -250,6 +253,90 @@ public sealed class DatasetFuzzTests
         Assert.Equal(expected, withIndexes);
     }
 
+    [Fact]
+    public async Task AScheduleOfRealAppendsAndIndexersAnswersAsWithoutIndexes()
+    {
+        // §14 names indexers among what the schedule interleaves, and since step 42b they are the
+        // real one: two handles, each appending or indexing a block range of an object AS IT LAST
+        // SAW THE DATASET, in a seeded order. A stale indexer rebases like any writer (§8.2); every
+        // read after every step must equal the scan with indexes and summaries off.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = types.Struct(
+            ["key", "measure"],
+            [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
+            Nullability.NonNullable);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DatasetOptions options = new DatasetOptions
+        {
+            Seed = Seed,
+            Write = new VortexWriteOptions
+            {
+                RowBlockSize = 128,
+                DataBlockTargetBytes = 8 << 10,
+                Indexes = WritePolicy.None,
+            },
+        };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options);
+        await using VortexDataset second = await VortexDataset.OpenAsync(store, options);
+        VortexDataset[] handles = [dataset, second];
+        WritePolicy policy = WritePolicy.None
+            .For("key", IndexPolicy.SortedRuns.AsRequired())
+            .For("measure", IndexPolicy.Bloom(falsePositivePpm: 100));
+        VortexWriteOptions build = new VortexWriteOptions { IndexBudgetPerMille = 1_000 };
+        RowRange[] ranges = [new RowRange(0, 300), new RowRange(0, 128), new RowRange(128, 300)];
+
+        Random random = new Random(11);
+        long rows = 0;
+        Dictionary<OperationOutcome, int> outcomes = [];
+        for (int step = 0; step < 24; step++)
+        {
+            VortexDataset handle = handles[random.Next(2)];
+            List<PositionedObject> seen = [];
+            await foreach (PositionedObject held in handle.Scan().ObjectsAsync())
+            {
+                seen.Add(held);
+            }
+
+            if (seen.Count == 0 || random.Next(3) == 0)
+            {
+                await handle.AppendAsync(Batches(types, schema, rows, 300));
+                rows += 300;
+            }
+            else
+            {
+                PositionedObject target = seen[random.Next(seen.Count)];
+                IndexingResult result = await DatasetIndexer.IndexAsync(
+                    handle, target, policy, ranges[random.Next(ranges.Length)], build);
+                outcomes[result.Outcome] = outcomes.GetValueOrDefault(result.Outcome) + 1;
+            }
+
+            // The other handle stays where it was half of the time: its next step is stale.
+            if (random.Next(2) == 0)
+            {
+                await handles[0].RefreshAsync();
+                await handles[1].RefreshAsync();
+            }
+
+            await dataset.RefreshAsync();
+            foreach (VortexExpr question in (VortexExpr[])[
+                Expr.Eq(Expr.Field("key"), Expr.Literal(FilterLiteral.From(rows / 2))),
+                Expr.Eq(Expr.Field("measure"), Expr.Literal(FilterLiteral.From(0.3))),
+                Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(rows / 3)))])
+            {
+                Assert.Equal(
+                    await KeysAsync(dataset.Scan().Where(question).WithIndexes(false).WithSummaries(false)),
+                    await KeysAsync(dataset.Scan().Where(question)));
+            }
+        }
+
+        Assert.Equal(rows, dataset.RowCount);
+        Assert.True(outcomes.GetValueOrDefault(OperationOutcome.Applied) > 3, "the schedule must index something");
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET FUZZ INDEXERS: {dataset.ObjectCount} objects, {outcomes.GetValueOrDefault(OperationOutcome.Applied)} fragments applied, {outcomes.GetValueOrDefault(OperationOutcome.AlreadyThere)} already there, {outcomes.GetValueOrDefault(OperationOutcome.Dropped)} dropped.\n"));
+    }
+
     /// <summary>One writer's next batch, built from the dataset as it is right now.</summary>
     private static async Task<List<DatasetOperation>> PrepareAsync(MemoryObjectStore store, Random random)
     {
@@ -280,15 +367,15 @@ public sealed class DatasetFuzzTests
                 {
                     // An indexer: a fragment against the object as this writer sees it.
                     (ReadOnlyMemory<byte> key, ObjectEntry entry) = seen[random.Next(seen.Count)];
-                    batch.Add(new DatasetOperation.AddFragment(key, entry.Uid, Fragment(random.Next(8))));
+                    batch.Add(new DatasetOperation.AddFragment(key, entry.Uid, FragmentBytes(random.Next(8))));
                     break;
                 }
 
                 case 2:
                 {
-                    // The same indexer, dropping one.
+                    // The same indexer, dropping one: by its content, wherever a commit wrote it.
                     (ReadOnlyMemory<byte> key, ObjectEntry entry) = seen[random.Next(seen.Count)];
-                    batch.Add(new DatasetOperation.DropFragment(key, Fragment(random.Next(8))));
+                    batch.Add(new DatasetOperation.DropFragment(key, Content(FragmentBytes(random.Next(8)))));
                     break;
                 }
 
@@ -375,8 +462,32 @@ public sealed class DatasetFuzzTests
     private static DatasetOperation Add(int i, int version) =>
         new DatasetOperation.AddObject(Key(i), Object(i, version));
 
-    private static PageReference Fragment(int i) =>
-        new PageReference(1, 64 + i, 32, ((UInt128)(uint)i << 64) | 0xF7A6);
+    /// <summary>The bytes of one of eight fragments an indexer may write.</summary>
+    private static ReadOnlyMemory<byte> FragmentBytes(int i)
+    {
+        byte[] bytes = new byte[32 + i];
+        bytes.AsSpan().Fill((byte)(0x40 + i));
+        return bytes;
+    }
+
+    /// <summary>
+    /// A fragment as its content: the length and hash a reference carries, with no place. What the
+    /// model can know of a fragment, since only the commit that lands decides where it is written.
+    /// </summary>
+    private static PageReference Content(ReadOnlyMemory<byte> fragment) =>
+        new PageReference(0, 0, fragment.Length, System.IO.Hashing.XxHash128.HashToUInt128(fragment.Span));
+
+    /// <summary>An entry with its fragments reduced to their content, as the model holds them.</summary>
+    private static ObjectEntry ByContent(ObjectEntry entry)
+    {
+        List<PageReference> contents = new List<PageReference>(entry.Fragments.Count);
+        foreach (PageReference fragment in entry.Fragments)
+        {
+            contents.Add(new PageReference(0, 0, fragment.Length, fragment.Hash));
+        }
+
+        return entry with { Fragments = contents };
+    }
 
     private static async Task<List<long>> KeysAsync(DatasetScanBuilder scan)
     {
@@ -476,12 +587,14 @@ public sealed class DatasetFuzzTests
 
                 case DatasetOperation.AddFragment fragment:
                 {
+                    // "the second finds the fragment present in the winner's leaf, drops its own";
+                    // where the first one was written, the model neither knows nor needs.
                     string key = Hex(fragment.Key);
                     if (_entries.TryGetValue(key, out ObjectEntry? held)
                         && held.Uid == fragment.Uid
-                        && !held.Holds(fragment.Fragment))
+                        && !held.Holds(Content(fragment.Fragment)))
                     {
-                        _entries[key] = held.With(fragment.Fragment);
+                        _entries[key] = held.With(Content(fragment.Fragment));
                     }
 
                     break;
@@ -495,7 +608,7 @@ public sealed class DatasetFuzzTests
                         List<PageReference> kept = [];
                         foreach (PageReference reference in held.Fragments)
                         {
-                            if (reference != drop.Fragment)
+                            if (reference.Length != drop.Fragment.Length || reference.Hash != drop.Fragment.Hash)
                             {
                                 kept.Add(reference);
                             }

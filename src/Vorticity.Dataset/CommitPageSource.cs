@@ -112,15 +112,7 @@ public sealed class CommitPageSource : IPageSource
         }
 
         string key = CommitKey.For(reference.Version);
-        if (!_starts.TryGetValue(reference.Version, out long start))
-        {
-            // One sixteen-byte read per version, remembered: the pages region's start, which every
-            // page offset of that object is relative to.
-            Reads++;
-            start = await CommitObject.PagesStartAsync(_store, key, cancellationToken).ConfigureAwait(false);
-            _starts[reference.Version] = start;
-        }
-
+        long start = await StartAsync(reference.Version, key, cancellationToken).ConfigureAwait(false);
         Reads++;
         byte[] page = await CommitObject
             .ReadPageAsync(_store, key, reference, start, cancellationToken).ConfigureAwait(false);
@@ -129,6 +121,39 @@ public sealed class CommitPageSource : IPageSource
         // the descent that looks a key up and the merge that rewrites its leaf are the same page.
         _known[reference] = page;
         return page;
+    }
+
+    /// <summary>The bytes of an index fragment (§6.4), read where its reference says and checked against it.</summary>
+    /// <param name="reference">The fragment's reference, from its object's leaf entry.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The fragment.</returns>
+    /// <remarks>
+    /// NOT KEPT, unlike a page. A fragment is read once per open of its object, and the object cache
+    /// keeps the open file that holds it; keeping it here as well would hold its bytes twice for as
+    /// long as this version is read, and a fragment is index bytes, not a 128 KiB page.
+    /// </remarks>
+    public async ValueTask<ReadOnlyMemory<byte>> ReadFragmentAsync(
+        PageReference reference, CancellationToken cancellationToken)
+    {
+        string key = CommitKey.For(reference.Version);
+        long start = await StartAsync(reference.Version, key, cancellationToken).ConfigureAwait(false);
+        Reads++;
+        return await CommitObject
+            .ReadPageAsync(_store, key, reference, start, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Where a version's body starts: one sixteen-byte read per version, remembered.</summary>
+    private async ValueTask<long> StartAsync(ulong version, string key, CancellationToken cancellationToken)
+    {
+        if (!_starts.TryGetValue(version, out long start))
+        {
+            // Every offset of that object is relative to it, pages and fragments alike.
+            Reads++;
+            start = await CommitObject.PagesStartAsync(_store, key, cancellationToken).ConfigureAwait(false);
+            _starts[version] = start;
+        }
+
+        return start;
     }
 
     private static ReadOnlyMemory<byte> Check(PageReference reference, ReadOnlyMemory<byte> page)

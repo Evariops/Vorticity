@@ -189,7 +189,7 @@ public static class DatasetCompactor
         long rows = 0;
         foreach (CompactionInput input in job.Inputs)
         {
-            ObjectLease lease = await dataset.RentAsync(input.Entry.Key, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await dataset.RentAsync(input.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 await foreach (RecordBatch batch in lease.File.Scan()
