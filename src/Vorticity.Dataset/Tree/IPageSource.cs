@@ -12,6 +12,10 @@ using System.Threading.Tasks;
 namespace Vorticity.Dataset;
 
 /// <summary>Reads tree pages by reference.</summary>
+/// <remarks>
+/// <b>Thread safety.</b> An implementation must answer several reads in flight at once: a walk
+/// prefetches a window of sibling pages in parallel (13 §6.6, "children prefetched in parallel").
+/// </remarks>
 public interface IPageSource
 {
     /// <summary>Reads one page and checks it against its reference.</summary>
@@ -64,10 +68,13 @@ public sealed class MemoryPageStore : IPageSource, IPageSink
     }
 
     /// <summary>How many pages were read through <see cref="ReadPageAsync"/>.</summary>
-    public long Reads { get; private set; }
+    /// <remarks>Counted atomically: a walk reads a window of siblings at once.</remarks>
+    public long Reads => Interlocked.Read(ref _reads);
+
+    private long _reads;
 
     /// <summary>Forgets the read count, not the pages.</summary>
-    public void ResetReads() => Reads = 0;
+    public void ResetReads() => Interlocked.Exchange(ref _reads, 0);
 
     /// <summary>Takes a page already known, under the reference that names it.</summary>
     /// <param name="reference">The reference.</param>
@@ -94,7 +101,7 @@ public sealed class MemoryPageStore : IPageSource, IPageSink
             throw new CommitFormatException($"No page at {reference}.");
         }
 
-        Reads++;
+        Interlocked.Increment(ref _reads);
         return new ValueTask<ReadOnlyMemory<byte>>(page);
     }
 }

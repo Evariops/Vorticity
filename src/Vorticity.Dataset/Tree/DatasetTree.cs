@@ -65,6 +65,12 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
     /// <summary>Whether it holds nothing.</summary>
     public bool IsEmpty => Depth == 0;
 
+    /// <summary>
+    /// How many pages a walk reads ahead of the one it is on (<see cref="WalkAsync"/>): the round
+    /// trips a walk over siblings saves, against the pages an early stop may have read for nothing.
+    /// </summary>
+    public const int PrefetchWindow = 8;
+
     /// <summary>Builds a tree from every entry, in key order (§14's rebuild oracle).</summary>
     /// <param name="entries">The entries, sorted by key and unique.</param>
     /// <param name="rule">The boundary rule.</param>
@@ -340,46 +346,78 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
             yield break;
         }
 
-        Stack<(PageReference Reference, int Level, long Row)> stack = new Stack<(PageReference, int, long)>();
-        stack.Push((Root, Depth, 0));
-        while (stack.Count > 0)
+        // THE NEXT PAGES ARE ALREADY IN FLIGHT (§6.6: "children prefetched in parallel"). The stack's
+        // top is the walk's future in order, so the pages it names are read a window ahead: a walk
+        // over siblings pays one dependent round trip per window rather than one per page. A
+        // bounded window rather than every child, because a walk that stops early -- `ORDER BY key
+        // LIMIT k` -- must not have read six hundred pages to deliver ten rows: it has read at most a
+        // window more than it used.
+        List<(PageReference Reference, int Level, long Row, Task<ReadOnlyMemory<byte>>? Read)> stack = [(Root, Depth, 0, null)];
+        try
         {
-            (PageReference reference, int level, long row) = stack.Pop();
-            ReadOnlyMemory<byte> bytes = await source.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false);
-            if (level == 1)
+            while (stack.Count > 0)
             {
-                foreach (TreeEntry entry in TreePage.ReadLeaf(bytes))
+                for (int ahead = stack.Count - 1; ahead >= Math.Max(0, stack.Count - PrefetchWindow); ahead--)
                 {
-                    if (row < to && row + entry.Rows > from)
+                    if (stack[ahead].Read is null)
                     {
-                        yield return new PositionedEntry(entry, row);
+                        stack[ahead] = stack[ahead] with
+                        {
+                            Read = source.ReadPageAsync(stack[ahead].Reference, cancellationToken).AsTask(),
+                        };
+                    }
+                }
+
+                (_, int level, long row, Task<ReadOnlyMemory<byte>>? read) = stack[^1];
+                stack.RemoveAt(stack.Count - 1);
+                ReadOnlyMemory<byte> bytes = await read!.ConfigureAwait(false);
+                if (level == 1)
+                {
+                    foreach (TreeEntry entry in TreePage.ReadLeaf(bytes))
+                    {
+                        if (row < to && row + entry.Rows > from)
+                        {
+                            yield return new PositionedEntry(entry, row);
+                        }
+
+                        row += entry.Rows;
                     }
 
-                    row += entry.Rows;
+                    continue;
                 }
 
-                continue;
-            }
-
-            // Pushed in reverse so that popping walks the children in key order, which means each
-            // child's first row is reached by SUBTRACTING from the page's end rather than adding
-            // from its start: the same arithmetic, and no array to hold the offsets in.
-            IReadOnlyList<InternalEntry> page = TreePage.ReadInternal(bytes);
-            long at = row;
-            for (int i = 0; i < page.Count; i++)
-            {
-                at += page[i].Rows;
-            }
-
-            for (int i = page.Count - 1; i >= 0; i--)
-            {
-                long start = at - page[i].Rows;
-                if (start < to && at > from && (descend is null || descend(page[i])))
+                // Pushed in reverse so that popping walks the children in key order, which means
+                // each child's first row is reached by SUBTRACTING from the page's end rather than
+                // adding from its start: the same arithmetic, and no array to hold the offsets in.
+                IReadOnlyList<InternalEntry> page = TreePage.ReadInternal(bytes);
+                long at = row;
+                for (int i = 0; i < page.Count; i++)
                 {
-                    stack.Push((page[i].Child, level - 1, start));
+                    at += page[i].Rows;
                 }
 
-                at = start;
+                for (int i = page.Count - 1; i >= 0; i--)
+                {
+                    long start = at - page[i].Rows;
+                    if (start < to && at > from && (descend is null || descend(page[i])))
+                    {
+                        stack.Add((page[i].Child, level - 1, start, null));
+                    }
+
+                    at = start;
+                }
+            }
+        }
+        finally
+        {
+            // A walk stopped early leaves reads in flight: each is observed, so that one that fails
+            // after nobody wants it is not an unobserved exception.
+            foreach ((_, _, _, Task<ReadOnlyMemory<byte>>? pending) in stack)
+            {
+                _ = pending?.ContinueWith(
+                    static read => read.Exception, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
             }
         }
     }

@@ -870,6 +870,15 @@ and count on the clustering key in O((8 + L) log n) — is not delivered: the da
 `CountAsync` opens every object the summaries keep. The note of step 39c above says "the fourth" and
 describes the terminals, which are the §6.6 third answer at k = 1, not that row.
 
+*The first row's "children prefetched in parallel", since 2026-09-18 (debt 4).*
+`DatasetTree.WalkAsync` reads the pages named by the top of its stack, the walk's future in order,
+`PrefetchWindow` (8) ahead. A walk over siblings pays about one dependent round trip per window
+instead of one per page. A walk that stops early has read at most a window more than it used, which
+is why the window is bounded rather than every child of a page. Both page sources take concurrent
+reads. Measured with a 2 ms store latency, a cold walk over the 48 leaves of a two-level tree of
+40 000 objects: 51 requests in **8 dependent steps**, against 51 when every read waits for the
+previous one.
+
 *Both covered since 2026-09-18 (debts 11 and 12 of the closing plan).*
 - **The cursor.** `DatasetKeyCursor` opens an object's cursor only once it could hold the next key,
   its leaf key being its exact minimum, as `KeyOrderedMerge` does. A seek goes further, level by

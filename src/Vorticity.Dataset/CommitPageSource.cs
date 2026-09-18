@@ -10,7 +10,7 @@
 // AND EVERY PAGE IS CHECKED against the reference that sent the reader here, wherever it came from:
 // that is §7's rule and it is the only defence a torn or misdirected page meets.
 using System;
-using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.IO.Hashing;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,10 +21,14 @@ namespace Vorticity.Dataset;
 public sealed class CommitPageSource : IPageSource
 {
     private readonly IObjectStore _store;
-    private readonly Dictionary<PageReference, ReadOnlyMemory<byte>> _known = [];
+    // CONCURRENT, because a walk reads a window of siblings at once (DatasetTree.WalkAsync): the
+    // pages it caches and the pages regions it learns arrive from several reads in flight. Two reads
+    // of one page or one region race to the same bytes, and either may keep them.
+    private readonly ConcurrentDictionary<PageReference, ReadOnlyMemory<byte>> _known = [];
 
     /// <summary>Per version, where its pages region starts. Asked once, remembered.</summary>
-    private readonly Dictionary<ulong, long> _starts = [];
+    private readonly ConcurrentDictionary<ulong, long> _starts = [];
+    private long _reads;
     private CommitObjectBuilder? _builder;
     private ulong _building;
     private byte[]? _built;
@@ -40,7 +44,7 @@ public sealed class CommitPageSource : IPageSource
     }
 
     /// <summary>How many pages were read through the store rather than found in hand.</summary>
-    public long Reads { get; private set; }
+    public long Reads => Interlocked.Read(ref _reads);
 
     /// <summary>
     /// The version this source reads for, which a missing commit object is reported against (§10);
@@ -149,7 +153,7 @@ public sealed class CommitPageSource : IPageSource
         try
         {
             long start = await StartAsync(reference.Version, key, cancellationToken).ConfigureAwait(false);
-            Reads++;
+            Interlocked.Increment(ref _reads);
             return await CommitObject
                 .ReadPageAsync(_store, key, reference, start, cancellationToken).ConfigureAwait(false);
         }
@@ -165,7 +169,7 @@ public sealed class CommitPageSource : IPageSource
         if (!_starts.TryGetValue(version, out long start))
         {
             // Every offset of that object is relative to it, pages and fragments alike.
-            Reads++;
+            Interlocked.Increment(ref _reads);
             start = await CommitObject.PagesStartAsync(_store, key, cancellationToken).ConfigureAwait(false);
             _starts[version] = start;
         }

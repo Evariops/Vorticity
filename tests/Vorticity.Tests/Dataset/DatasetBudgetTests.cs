@@ -127,6 +127,51 @@ public sealed class DatasetBudgetTests
     }
 
     [Fact]
+    public async Task AWalkPrefetchesItsSiblingsAWindowAtATime()
+    {
+        // §6.6's first row, "an in-order walk of a level's tree, children prefetched in parallel"
+        // (debt 4 of the closing plan). A cold walk over every leaf of a two-level tree: the leaves
+        // are read a window ahead, so the dependent steps are about one per window, not one per
+        // leaf -- while the requests, which a total counts, are still one per leaf.
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        List<DatasetOperation> operations = new List<DatasetOperation>(40_000);
+        for (int i = 0; i < 40_000; i++)
+        {
+            operations.Add(Add(i));
+        }
+
+        await DatasetCommitter.CommitAsync(store, operations, Options(), default);
+
+        // A latency, because a store that answers synchronously never has two requests in flight
+        // and every request is its own step whatever the walk does -- the same reason the next test
+        // injects one.
+        inner.Latency = TimeSpan.FromMilliseconds(2);
+        store.Reset();
+        (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, default);
+        CommitObject found = Assert.IsType<CommitObject>(commit);
+        CommitPageSource pages = new CommitPageSource(store) { Reading = version };
+        pages.Know(version, found.HeaderEnd);
+        DatasetTree tree = DatasetCommitter.TreeOf(found.Header);
+        Assert.Equal(2, tree.Depth);
+
+        long entries = 0;
+        await foreach (TreeEntry entry in tree.EnumerateAsync(pages, default))
+        {
+            entries++;
+        }
+
+        Assert.Equal(40_000, entries);
+        long leaves = pages.Reads - 1;
+        long steps = store.DependentSteps;
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET WALK: {leaves} leaves read in {store.Requests} requests and {steps} dependent steps, a window of {DatasetTree.PrefetchWindow}.\n"));
+        Assert.True(leaves > 3 * DatasetTree.PrefetchWindow, $"only {leaves} leaves: the tree is too small to show a window");
+        Assert.True(steps <= 4 + (leaves / DatasetTree.PrefetchWindow * 2), $"{steps} dependent steps for {leaves} leaves");
+        Assert.True(steps < leaves / 2, $"{steps} dependent steps for {leaves} leaves is a sequential walk");
+    }
+
+    [Fact]
     public async Task TheDependentStepsAreTheCriticalPathAndNotTheRequestCount()
     {
         // §9.2, invariant 3: "the in-memory store injects a latency λ and no CPU cost; a cold
