@@ -124,6 +124,73 @@ public sealed class DatasetIndexingTests
     }
 
     [Fact]
+    public async Task MoreThanKFragmentsAreBundledIntoOneAndAnswerTheSame()
+    {
+        // §6.4: "An entry with more than K fragments is compacted by merging them (index bytes only)
+        // into one fragment in a new commit". Eight one-block fragments on one object, K = 4.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await dataset.AppendAsync(ObjectRows(types, schema, 0));
+        PositionedObject target = Assert.Single(await ObjectsAsync(dataset));
+        for (int block = 0; block < PerObject / BlockRows; block++)
+        {
+            RowRange one = new RowRange(block * BlockRows, (block + 1) * BlockRows);
+            Assert.Equal(OperationOutcome.Applied, (await DatasetIndexer.IndexAsync(dataset, target, Policy, one, Build)).Outcome);
+        }
+
+        List<long> ordered = await IdsInOrderAsync(dataset);
+        await AssertAnswersAsync(dataset);
+
+        CompactionPlan plan = await dataset.PlanCompactionAsync();
+        Assert.Equal(1, plan.FragmentedObjects);
+        Assert.Equal(CompactionTrigger.Fragments, plan.Job!.Trigger);
+
+        CompactionResult bundled = Assert.IsType<CompactionResult>(await dataset.CompactAsync());
+        Assert.Equal(CompactionTrigger.Fragments, bundled.Trigger);
+        Assert.Equal(OperationOutcome.Applied, bundled.Outcome);
+        Assert.Equal(0, bundled.Rows);
+
+        // One fragment, which carries the eight containers byte for byte: its size is theirs, plus
+        // an alignment and a table.
+        PositionedObject held = Assert.Single(await ObjectsAsync(dataset));
+        PageReference bundle = Assert.Single(held.Entry.Fragments);
+        ReadOnlyMemory<byte> bytes = await dataset.ReadFragmentAsync(bundle, default);
+        Assert.True(FragmentBundle.IsBundle(bytes.Span));
+        Assert.Equal(8, FragmentBundle.Unpack(bytes).Count);
+        Assert.InRange(bundled.BytesOut, bundled.BytesIn, bundled.BytesIn + (9 * 64) + (8 * 16) + 12);
+
+        // Read as it was: every entry's eight runs, from the bundle's eight parts.
+        await using (ObjectLease lease = await dataset.RentAsync(held.Entry, default))
+        {
+            IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync())!;
+            Assert.All(lease.File.IndexFragmentRefusals, Assert.Null);
+            Assert.Equal(3, directory.Entries.Count);
+            Assert.Equal((1, 8, 8), (directory.Entries[0].Runs.Count, directory.Entries[1].Runs.Count, directory.Entries[2].Runs.Count));
+        }
+
+        Assert.Equal(ordered, await IdsInOrderAsync(dataset));
+        await AssertAnswersAsync(dataset);
+        Assert.Null((await dataset.PlanCompactionAsync()).Job);
+
+        // More fragments on top of the bundle, past K again: the next bundle flattens it.
+        foreach (RowRange again in (RowRange[])[
+            new RowRange(0, 2 * BlockRows), new RowRange(2 * BlockRows, 4 * BlockRows),
+            new RowRange(4 * BlockRows, 6 * BlockRows), new RowRange(6 * BlockRows, PerObject)])
+        {
+            await DatasetIndexer.IndexAsync(dataset, target, WritePolicy.None.For("tag", IndexPolicy.Bloom(falsePositivePpm: 1_000)), again, Build);
+        }
+
+        Assert.NotNull(await dataset.CompactAsync());
+        PageReference flat = Assert.Single(Assert.Single(await ObjectsAsync(dataset)).Entry.Fragments);
+        Assert.Equal(12, FragmentBundle.Unpack(await dataset.ReadFragmentAsync(flat, default)).Count);
+        Assert.Equal(ordered, await IdsInOrderAsync(dataset));
+        await AssertAnswersAsync(dataset);
+    }
+
+    [Fact]
     public async Task TwoIndexersOfOneRangeWriteOneFragment()
     {
         // §8.2, row 3, with the real indexer: the same rows under the same policy are the same
@@ -250,6 +317,17 @@ public sealed class DatasetIndexingTests
         }
 
         return keys;
+    }
+
+    private static async Task<List<long>> IdsInOrderAsync(VortexDataset dataset)
+    {
+        List<long> ids = [];
+        await foreach (RecordBatch batch in dataset.Scan().InKeyOrder("id").ExecuteAsync())
+        {
+            ids.AddRange(batch.Column("id"u8).AsPrimitive<long>().Values.ToArray());
+        }
+
+        return ids;
     }
 
     private static async Task<long> CountRowsAsync(DatasetScanBuilder scan)

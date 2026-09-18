@@ -233,8 +233,8 @@ public sealed record CompactionJob(
 /// <param name="Job">The compaction to run, or null when nothing is over its bound.</param>
 /// <param name="FragmentedObjects">
 /// Objects carrying more than <see cref="CompactionOptions.MaxFragments"/> index fragments. §5.3
-/// names that trigger next to the other two, but it is a fragment compaction (§6.4) that reads
-/// index bytes only: counted here, executed with the fragments of step 42.
+/// names that trigger next to the other two; it is a fragment compaction (§6.4), which reads index
+/// bytes only, and it is planned once neither of the two that move data is due.
 /// </param>
 public sealed record CompactionPlan(
     ulong Version,

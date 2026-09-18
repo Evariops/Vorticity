@@ -579,6 +579,13 @@ public sealed class VortexDataset : IAsyncDisposable
     internal ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken) =>
         _objects.RentAsync(entry, _pages, cancellationToken);
 
+    /// <summary>The bytes of one of this version's index fragments (§6.4), checked against its reference.</summary>
+    /// <param name="reference">The fragment's reference, from an object's leaf entry.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The fragment: a container, or a bundle of them.</returns>
+    internal ValueTask<ReadOnlyMemory<byte>> ReadFragmentAsync(PageReference reference, CancellationToken cancellationToken) =>
+        _pages.ReadFragmentAsync(reference, cancellationToken);
+
     /// <summary>Starts one data object: a fresh identity, the sink that will hold it, its writer.</summary>
     /// <returns>The draft, whose writer the caller drives and completes.</returns>
     /// <remarks>

@@ -83,13 +83,16 @@ internal sealed class ObjectCache : IAsyncDisposable
             }
 
             Misses++;
-            ReadOnlyMemory<byte>[] fragments = new ReadOnlyMemory<byte>[entry.Fragments.Count];
-            for (int i = 0; i < fragments.Length; i++)
+            // A compacted fragment is a bundle of containers (§6.4): each goes to the reader as the
+            // fragment it was.
+            List<ReadOnlyMemory<byte>> fragments = [];
+            foreach (PageReference reference in entry.Fragments)
             {
-                fragments[i] = await pages.ReadFragmentAsync(entry.Fragments[i], cancellationToken).ConfigureAwait(false);
+                ReadOnlyMemory<byte> fragment = await pages.ReadFragmentAsync(reference, cancellationToken).ConfigureAwait(false);
+                fragments.AddRange(FragmentBundle.Unpack(fragment));
             }
 
-            VortexOpenOptions options = fragments.Length == 0
+            VortexOpenOptions options = fragments.Count == 0
                 ? new VortexOpenOptions()
                 : new VortexOpenOptions { Read = new VortexReadOptions { IndexFragments = fragments } };
             ObjectSegmentSource source = new ObjectSegmentSource(_store, entry.Key);

@@ -405,7 +405,8 @@ are then ordered, its outputs are sorted by construction, and the writer never l
 append whose run the budget would refuse is refused as an append, with the reason.
 
 Triggers: level 0 above 8 objects; a level above its size; an entry above K fragments (that one
-is a fragment compaction, §6.4, and reads index bytes only). Compaction runs as a client of the
+is a fragment compaction, §6.4, and reads index bytes only — since step 42c planned last, after the
+two that move data, which drop an object's fragments with it). Compaction runs as a client of the
 same commit protocol as any writer (§8) and is the user's background job: **a library never stalls
 a writer**; a level-0 count above 8 degrades the read bound and is reported, never refused.
 Contention between writers is not the tree's problem either: when many processes append, one
@@ -679,6 +680,32 @@ that commits once per block range.**
   their commit objects by reference and checked against it; one whose bytes do not match fails the
   read with the reason, as a torn page does — step 43's tamper tests decide whether a scan should
   rather proceed without it.
+
+**As delivered (step 42c): "compacted by merging them (index bytes only) into one fragment" — a
+bundle of the containers, not a rebuilt index.**
+
+- **Why not merge the runs.** Two kinds cannot be merged from their own bytes into one run. A Bloom
+  tree's upper filters are sized from the exact union of their blocks' hashes, which the leaf
+  filters do not give back. And a run's payload — fence pages, filter-tree children — holds offsets
+  into its own container, which a copy into another would have to find and rewrite kind by kind.
+  What this paragraph asks for is a cost: one fragment, one ranged read, index bytes only.
+- **So the fragment is a bundle.** `FragmentBundle` copies the K containers as they are, one after
+  another, each on the 64-byte alignment its regions assume, behind a table of offsets and lengths:
+  `VXFB`, the parts, the table, a trailer. The object cache splits it back and hands each part to the
+  reader as the fragment it was, where 42a's rules apply unchanged. A bundle of bundles is flat.
+  Nothing is decoded and no offset is rewritten.
+- **The trigger.** `CompactionPolicy` plans a `Fragments` job once neither trigger that moves data
+  is due, since those drop an object's fragments with the object. `DatasetCompactor` swaps each
+  object's fragments for their bundle in one commit, by content, which keeps it right under a
+  rebase: an indexer's fragment attached meanwhile stays, and a second identical compaction finds
+  the same bundle there.
+- **Measured on one object indexed in eight one-block commits**, K = 4: one fragment of the eight
+  containers' bytes plus alignment and a table; every entry read back with its eight runs; the
+  key-ordered read and five questions answered as before; nothing due afterwards. Four more
+  fragments on top, and the next bundle holds twelve flat parts.
+- **What it leaves.** An entry indexed by n ranges keeps n runs where a rebuild would write one: a
+  pruner reads them in the bundle's one read, and a cursor merges them as it merges any runs.
+  Rebuilding them into one run is a data read, which is §10's rebuild, not this.
 
 ### 6.5 Which structure for which column
 

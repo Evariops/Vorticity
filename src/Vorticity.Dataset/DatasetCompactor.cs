@@ -82,6 +82,11 @@ public static class DatasetCompactor
             throw new ArgumentException("A compaction reads at least one object (13 §5.3).", nameof(job));
         }
 
+        if (job.Trigger == CompactionTrigger.Fragments)
+        {
+            return await BundleAsync(dataset, job, cancellationToken).ConfigureAwait(false);
+        }
+
         bool merge = job.Style == CompactionStyle.Leveled;
         ClusteringKey? key = dataset.Key;
         if (merge)
@@ -180,6 +185,64 @@ public static class DatasetCompactor
                     "Declare the clustering key on a non-nullable column.");
             }
         }
+    }
+
+    /// <summary>
+    /// §6.4's fragment compaction: each object's fragments bundled into one, index bytes only, and
+    /// swapped for it in one commit.
+    /// </summary>
+    /// <remarks>
+    /// THE SWAP IS BY CONTENT, which is what makes it safe under a rebase (§8.2). An indexer that
+    /// attached a fragment meanwhile keeps it: only the fragments read here are dropped. A second
+    /// compaction of the same fragments finds them gone and the same bundle there. A compaction of
+    /// the object's DATA meanwhile dropped every fragment with it, and the bundle is dropped too.
+    /// </remarks>
+    private static async ValueTask<CompactionResult> BundleAsync(
+        VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
+    {
+        List<DatasetOperation> operations = [];
+        long bytesIn = 0;
+        long bytesOut = 0;
+        foreach (CompactionInput input in job.Inputs)
+        {
+            List<ReadOnlyMemory<byte>> fragments = new List<ReadOnlyMemory<byte>>(input.Entry.Fragments.Count);
+            foreach (PageReference reference in input.Entry.Fragments)
+            {
+                fragments.Add(await dataset.ReadFragmentAsync(reference, cancellationToken).ConfigureAwait(false));
+                bytesIn += reference.Length;
+                operations.Add(new DatasetOperation.DropFragment(input.Key, reference) { Level = input.Level });
+            }
+
+            byte[] bundle = FragmentBundle.Pack(fragments);
+            bytesOut += bundle.Length;
+            operations.Add(new DatasetOperation.AddFragment(input.Key, input.Entry.Uid, bundle) { Level = input.Level });
+        }
+
+        CommitResult commit = await dataset.CommitAsync(operations, cancellationToken).ConfigureAwait(false);
+
+        // What became of the bundles, the one operation per object that writes something.
+        OperationOutcome outcome = OperationOutcome.Applied;
+        for (int i = 0; i < operations.Count; i++)
+        {
+            if (operations[i] is DatasetOperation.AddFragment && commit.Outcomes[i] != OperationOutcome.Applied)
+            {
+                outcome = commit.Outcomes[i];
+                break;
+            }
+        }
+
+        return new CompactionResult(
+            commit.Version,
+            job.FromLevel,
+            job.ToLevel,
+            job.Trigger,
+            job.Style,
+            job.Inputs.Count,
+            job.Inputs.Count,
+            0,
+            bytesIn,
+            bytesOut,
+            outcome);
     }
 
     /// <summary>§5.3's concatenation: each input's rows, in its own order, one after another.</summary>

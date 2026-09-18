@@ -108,7 +108,25 @@ public static class CompactionPolicy
             }
         }
 
-        return null;
+        // THE THIRD TRIGGER, LAST: an object carrying more than K fragments (§6.4). It reads index
+        // bytes only and rewrites no row, so it waits for the two that move data -- which would
+        // drop the object's fragments with the object anyway.
+        List<CompactionInput> fragmented = [];
+        foreach (List<CompactionInput> level in levels)
+        {
+            foreach (CompactionInput input in level)
+            {
+                if (input.Entry.Fragments.Count > settings.MaxFragments)
+                {
+                    fragmented.Add(input);
+                }
+            }
+        }
+
+        return fragmented.Count == 0
+            ? null
+            : new CompactionJob(
+                fragmented[0].Level, fragmented[0].Level, style, CompactionTrigger.Fragments, fragmented, 0, 0);
     }
 
     /// <summary>The job that empties <paramref name="from"/> into the level above it.</summary>
