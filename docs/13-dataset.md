@@ -295,6 +295,13 @@ compaction's k-way merge needed exactly it — "these rows of that batch". It ga
 aliasing the buffers, and says so: a true window is a second traversal of every canonical kind and
 nothing measured yet asks for it. The second seam is still missing, and with it step 39d.*
 
+*Step 39d did not need the second one. The merge compares rows by their row encoding (06), as the
+compaction's does, and never reads a value as a literal. What it needed instead is a seam nobody had
+named: a `Select` without the key leaves a merge nothing to compare, so the key is read on top of
+the selection and dropped before a batch is handed on — the trim the scan already performs on a
+filter's columns, now public as `RecordBatch.Project(Projection)`, which copies no value. §6.6 says
+what the read costs.*
+
 The acceptance is §14's and it is a comparison, never a chosen number: the same rows written into a
 dataset of several objects and into one file answer the same, unfiltered and filtered, with the
 index chain on and off — and now with the summaries consulted and ignored.
@@ -677,6 +684,60 @@ is what makes the skip legal: a summary `min` at or below the true minimum that 
 best cannot be hiding a winner.
 
 What is **not** delivered is `InKeyOrder` as batches across objects; §4.2's note says what it needs.
+
+**As delivered (step 39d): the second row, whole, and the last.** `DatasetScanBuilder.InKeyOrder(path,
+descending)` reads each object through the core's own `InKeyOrder` — its run or its sorted column,
+with the builder's filter and projection — and merges them with `KeyOrderedMerge`, the merge §5.3's
+compaction writes with: one merge, whether it writes objects or reads rows. `ORDER BY x LIMIT k` is
+that read and a consumer that stops.
+
+**An object is opened when it could hold the next row, not before.** The objects are offered in the
+order of a lower bound on their keys, and one is opened only once its bound is at or below the
+smallest key an open input holds. The bound of this table follows without a line of code of its
+own: a level's objects are key-disjoint (§5.2), so the next one's minimum lies above everything the
+current one still holds, and a level above 0 costs one cursor at a time. Measured on the same rows
+three ways: **4** cursors over four interleaved objects of level 0; **1** over the six key-disjoint
+objects of level 1 a compaction made of them; **3** once two objects of level 0 sit on top — 2 + L.
+And a consumer that stops after `k` rows has opened no object whose minimum lies past the k-th key:
+`LIMIT 10` opens **1** object of 4, in either direction, and `LIMIT 300`, which crosses one boundary,
+opens **2**. `DatasetPlan.Cursors` states the bound before the read; `DatasetScanMetrics.Cursors`
+measures it after.
+
+**Where the bound comes from.** On the clustering key, upward, the tree already is that order: a
+leaf key is the object's encoded minimum, exact (§4.1), and the walk is lazy, so a consumer that
+stops early stops the walk too and a subtree past the k-th key is never read. Anywhere else — another
+column, or downward — the kept objects are collected and sorted by their summaries' bound: the leaf
+pages are read, the objects are not opened. On another column every kept object may be open at
+once, output-sensitive as the last row of the table says, and `Explain` counts them.
+
+**A float has no bound.** A zone's min and max exclude NaN (08 §2), while the key order puts a
+negative NaN first and a positive one last (12 §4.4): a float's summary is not a bound in the key
+order, and a descending merge that trusted one would deliver the positive NaN after the largest
+number. Float objects are therefore opened before the first row; upward on the clustering key the
+tree's minimum — the run's first key, NaN included — is the bound. A bound that lies anyway is
+refused: an object whose first row lies below the bound it was ordered by raises
+`VortexFormatException` rather than deliver a wrong order.
+
+**Ties follow the dataset's order when a reader asks.** Each object carries a rank, its place in
+the walk, negated downward, and of two rows with one key the lower rank goes first — which makes a
+descending read the exact reverse of an ascending one, as in a file (12 §6). The compaction does
+not ask, and was measured not to want it: ranked ties cut a run at every key two interleaved inputs
+share, and on the randomised stream of the compaction tests the first compaction then wrote its 493
+rows as 3 objects and 21 641 bytes instead of 2 and 16 609. With its ties unranked and its inputs
+ranked by the job's order, the compaction reproduces the previous one step for step — the same
+objects in and out, the same bytes read and written, all sixteen compactions of that stream — while
+now opening its inputs on demand.
+
+Without summaries (`WithSummaries(false)`) no object has a bound and every one is opened before a
+row goes out: the eager merge, which every test reads beside the lazy one and requires to answer the
+same.
+
+**What this row does not cover yet.** `DatasetKeyCursor` still opens one cursor per object of every
+level: the bound holds for `InKeyOrder`, not for the cursor, whose seek would have to reach, in each
+level above 0, the one object that can hold the sought key. And the fourth row of the table — rank
+and count on the clustering key in O((8 + L) log n) — is not delivered: the dataset has no rank, and
+`CountAsync` opens every object the summaries keep. The note of step 39c above says "the fourth" and
+describes the terminals, which are the §6.6 third answer at k = 1, not that row.
 
 ## 7. Identity and integrity
 
@@ -1226,6 +1287,11 @@ of §9.1. Where the two still differ under latency:
   the same rows sorted before a byte of them was written, into one file: the compaction's output is
   compared against it row by row, key and measure. The first two await `InKeyOrder` across objects
   (step 39d).*
+  *Step 39d: the first two, in `DatasetKeyOrderTests`. `InKeyOrder` is read over the interleaved
+  objects of level 0, over the key-disjoint level 1 a compaction made of them, and over both levels
+  once level 0 is filled again; both directions, with the summaries and without, against the same
+  rows sorted before they were written. `LIMIT k` is a consumer that stops, and the test counts the
+  objects it opened.*
 - **Tampering**: an object replaced out of band at equal size, a page, a root and a fragment torn
   at every byte, a fragment of another object.
 - **Rust**: every data object, including compaction outputs, remains a plain file that 0.86.1

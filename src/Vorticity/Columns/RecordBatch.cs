@@ -13,6 +13,8 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using Vorticity.Arrays;
 using Vorticity.Compute;
+using Vorticity.Layouts;
+using Vorticity.Scan;
 using Vorticity.Types;
 
 namespace Vorticity.Columns;
@@ -323,6 +325,54 @@ public sealed class RecordBatch : IDisposable
         {
             ArrayPool<int>.Shared.Return(rows);
         }
+    }
+
+    /// <summary>A batch over the same rows holding only the columns <paramref name="projection"/> names.</summary>
+    /// <param name="projection">
+    /// The columns, compiled against <em>this batch's</em> schema with <see cref="Projection.Parse"/>.
+    /// Compiled once, it serves every batch of a stream that shares the schema.
+    /// </param>
+    /// <returns>The projected batch, which the caller disposes.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>What it is for.</b> A consumer that needs a column to do its own work and was not asked
+    /// for it drops it before handing the batch on: a k-way merge across the objects of a dataset
+    /// compares rows by their key whatever the caller selected (docs/13-dataset.md §6.6). The scan
+    /// already does exactly this for the columns a filter needed (docs/03-architecture.md §3.4,
+    /// "Where then Project"), and this is that step reachable from outside the scan rather than a
+    /// second copy of it.
+    /// </para>
+    /// <para>
+    /// <b>What it costs: no value.</b> Every kept column's node is reused as it is and only the
+    /// struct nodes above them are rebuilt, so the cost is the fields, whatever the row count.
+    /// </para>
+    /// <para>
+    /// <b>Lifetime.</b> As for <see cref="Window"/>: the projection lives in this batch's arena, is
+    /// valid until this batch is disposed or its successor is decoded, and disposing it releases
+    /// nothing.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentException">The projection names fields and the batch's root is not a struct.</exception>
+    /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
+    public RecordBatch Project(Projection projection)
+    {
+        ThrowIfDisposed();
+        if (projection.IsAll)
+        {
+            return new RecordBatch(_arena, _root, _startRow);
+        }
+
+        if (!_isTabular)
+        {
+            throw new ArgumentException(
+                "Only a batch whose root is a struct has columns to project.", nameof(projection));
+        }
+
+        DType target = projection.ProjectedSchema(_schema, new DTypeArena());
+        FieldMask read = FieldMask.All;
+        FieldMask keep = projection.RootMask;
+        int root = ProjectionTrim.Apply(_arena, _root, in read, in keep, target);
+        return new RecordBatch(_arena, root, _startRow);
     }
 
     /// <summary>

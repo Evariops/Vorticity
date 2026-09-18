@@ -1,11 +1,12 @@
 // The ordered walk across a dataset's objects - docs/13-dataset.md §6.6: "a k-way merge of the
 // level-0 objects, through their runs, and of the levels", at a cost of "≤ 8 + L cursors, bounded".
 //
-// THE COUNT IS THE CLAIM, so `Cursors` reports it and a test reads it. What makes it bounded is not
-// this file but §5's invariant: level 0 holds at most a handful of objects because compaction keeps
-// it that way, and the levels above are key-disjoint. Until compaction exists (step 41) a dataset's
-// level 0 grows with every append, and so does this number -- which is exactly why the number is
-// surfaced rather than asserted: it is the thing compaction will be judged by.
+// THE COUNT IS THE CLAIM, so `Cursors` reports it and a test reads it -- and it is ONE PER OBJECT,
+// of every level. §6.6's "≤ 8 + L" needs what `KeyOrderedMerge` does for `InKeyOrder` since step
+// 39d: an object opened only once it could hold the next key, so that a key-disjoint level costs one
+// cursor. A cursor adds the SEEK, which would have to reach, in each level above 0, the one object
+// that can hold the sought key rather than open every object below it. Not done, and surfaced
+// rather than asserted: this number is what that work will be judged by.
 //
 // A LINEAR SCAN, NOT A HEAP, and deliberately. Choosing the smallest of k keys costs k comparisons
 // here and log k with a heap, and k is bounded by a small constant; a heap would add the bookkeeping

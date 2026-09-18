@@ -566,6 +566,14 @@ so a key column with nulls is refused up front and the rewritten row count is ch
 inputs' at the end. Both are gaps of this section, not of the dataset's, and closing the first is
 what would let a composite-keyed dataset compact.
 
+**A third caller since 13's step 39d: the dataset's own `InKeyOrder`.** `DatasetScanBuilder.InKeyOrder`
+runs this over each object and merges the results, so the contract above becomes the dataset's: it
+drives one column, a row whose key is null is not delivered, and it excludes `Rows`. Two properties
+travel up by construction. Ties come in row order within a file, and across objects in the dataset's
+order, so a descending read is still the exact reverse of an ascending one. And a `Select` that leaves
+the key out is honoured: the merge compares rows by the key, reads it on top of the selection and
+drops it with `RecordBatch.Project` before a batch goes out.
+
 ---
 
 ## 7. The expression model gains three predicates

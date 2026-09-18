@@ -18,11 +18,18 @@
 // first object that holds a row; `MinAsync` and `MaxAsync` skip an object whose own summary cannot
 // beat the best so far, which is §6.6's "`ORDER BY x LIMIT k` prunes by the summaries" at k = 1.
 //
-// WHAT IT DOES NOT DO YET: deliver BATCHES in the key order of a clustering key across objects
-// (`InKeyOrder`, §6.6). `DatasetKeyCursor` already walks the keys in that order; making record
-// batches of them needs a batch that is a window over another's buffers, and a per-row read of a
-// column as a filter literal — both of which live inside the core's scan and neither of which is
-// public. 13 §4.2 records that, so the seam is asked for where it belongs rather than copied here.
+// KEY ORDER ACROSS OBJECTS IS THE COMPACTION'S MERGE, READ INSTEAD OF WRITTEN (§6.6). `InKeyOrder`
+// runs the core's own `InKeyOrder` over each object — its run or its sorted column, with this
+// builder's filter and projection — and `KeyOrderedMerge` merges them, the very merge a compaction
+// writes its outputs with (§5.3). What a dataset adds is the order the objects are OFFERED in: on the
+// clustering key, the tree's own order, whose leaf key is the exact encoded minimum, walked lazily so
+// a consumer that stops early stops the walk too; on any other column, or backwards, the objects the
+// summaries keep, sorted by the bound their summaries give. `ORDER BY x LIMIT k` is that read and a
+// consumer that stops: an object is opened only once it could hold the next row.
+//
+// THE KEY COLUMN IS READ WHATEVER `Select` SAYS, because a merge compares rows by it, and dropped
+// before a batch is handed on (`RecordBatch.Project`) — the scan's own "where then project" for a
+// filter's columns, applied one level up.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -31,7 +38,9 @@ using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Keys;
+using Vorticity.RowEncoding;
 using Vorticity.Scan;
+using Vorticity.Types;
 
 namespace Vorticity.Dataset;
 
@@ -56,6 +65,13 @@ public sealed class DatasetScanMetrics
 
     /// <summary>Rents the object cache answered without opening anything.</summary>
     public long CacheHits { get; internal set; }
+
+    /// <summary>
+    /// The most data objects the scan read at once: one in the tree's order, and under
+    /// <see cref="DatasetScanBuilder.InKeyOrder"/> the inputs the merge held open — §6.6's
+    /// "≤ 8 + L cursors", measured.
+    /// </summary>
+    public int Cursors { get; internal set; }
 }
 
 /// <summary>Builds a scan over every object of one version of a dataset.</summary>
@@ -68,6 +84,9 @@ public sealed class DatasetScanBuilder
     private bool _summaries = true;
     private long _from;
     private long _to = long.MaxValue;
+    private bool _rowsSet;
+    private string? _orderPath;
+    private bool _descending;
     private DatasetScanMetrics? _metrics;
 
     internal DatasetScanBuilder(VortexDataset dataset) => _dataset = dataset;
@@ -95,6 +114,7 @@ public sealed class DatasetScanBuilder
     /// <param name="to">One past the last.</param>
     /// <returns>This builder.</returns>
     /// <exception cref="ArgumentOutOfRangeException">The range is negative or inverted.</exception>
+    /// <exception cref="InvalidOperationException"><see cref="InKeyOrder"/> was already set.</exception>
     /// <remarks>
     /// Answered through the tree's row sums, so an object outside the range is neither opened nor
     /// counted and a subtree outside it is never read: O(log N) plus the objects the range touches.
@@ -103,8 +123,62 @@ public sealed class DatasetScanBuilder
     {
         ArgumentOutOfRangeException.ThrowIfNegative(from);
         ArgumentOutOfRangeException.ThrowIfLessThan(to, from);
+        if (_orderPath is not null)
+        {
+            throw new InvalidOperationException(
+                "A key-ordered scan walks the objects' key sources; it cannot also select rows by position (12 §6).");
+        }
+
         _from = from;
         _to = to;
+        _rowsSet = true;
+        return this;
+    }
+
+    /// <summary>
+    /// Delivers the rows in the key order of <paramref name="path"/>, across every object the scan
+    /// reads (12 §6, 13 §6.6).
+    /// </summary>
+    /// <param name="path">The column, <c>.</c>-separated for a nested field.</param>
+    /// <param name="descending">Whether the largest key comes first, ties then in the exact reverse order.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// <para>
+    /// Each object is read by the core's own <c>InKeyOrder</c> with this builder's filter and
+    /// projection, and the objects are merged: batches in key order, consecutive batches in key
+    /// order, and equal keys in the dataset's order — the tree's order of the objects, then each
+    /// one's row order. A batch holds a run of one object's rows, so objects whose keys interleave
+    /// give batches as short as one row.
+    /// </para>
+    /// <para>
+    /// <b>What it costs</b> depends on the column. On the dataset's clustering key an object is
+    /// opened only once it could hold the next row: the inputs held open are level 0's objects and
+    /// one per level above it (§6.6: "≤ 8 + L cursors, bounded"), and a consumer that stops after
+    /// <c>k</c> rows has never opened an object whose minimum lies past the k-th key — which is
+    /// <c>ORDER BY key LIMIT k</c>. On any other column every object the summaries keep may be open
+    /// at once: output-sensitive, as §6.6 says. <see cref="ExplainAsync"/> states the bound before
+    /// reading; <see cref="DatasetScanMetrics.Cursors"/> measures it after.
+    /// </para>
+    /// <para>
+    /// <b>A row whose key is null is in no key source and is not delivered</b> (12 §6). An object
+    /// with no source for the column — no run on it and no sorted column — is refused when the merge
+    /// reaches it, as the core refuses a file. Mutually exclusive with <see cref="Rows"/>, as in the
+    /// core.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentException"><paramref name="path"/> names no column of the dataset.</exception>
+    /// <exception cref="InvalidOperationException"><see cref="Rows"/> was already set.</exception>
+    public DatasetScanBuilder InKeyOrder(string path, bool descending = false)
+    {
+        _ = ClusteringKey.Resolve(_dataset.Schema, path);
+        if (_rowsSet)
+        {
+            throw new InvalidOperationException(
+                "A key-ordered scan walks the objects' key sources; it cannot also select rows by position (12 §6).");
+        }
+
+        _orderPath = path;
+        _descending = descending;
         return this;
     }
 
@@ -145,6 +219,16 @@ public sealed class DatasetScanBuilder
     public async IAsyncEnumerable<RecordBatch> ExecuteAsync(
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        if (_orderPath is { } path)
+        {
+            await foreach (RecordBatch run in MergedAsync(path, cancellationToken).ConfigureAwait(false))
+            {
+                yield return run;
+            }
+
+            yield break;
+        }
+
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
             ObjectLease lease = await _dataset.RentAsync(held.Entry.Key, cancellationToken).ConfigureAwait(false);
@@ -315,15 +399,25 @@ public sealed class DatasetScanBuilder
             _summaries = _summaries,
             _from = _from,
             _to = _to,
+            _rowsSet = _rowsSet,
+            _orderPath = _orderPath,
+            _descending = _descending,
             _metrics = metrics,
         };
 
         long objects = 0;
         long rows = 0;
+        List<long> keptByLevel = [];
         await foreach (PositionedObject held in counted.WalkAsync(cancellationToken).ConfigureAwait(false))
         {
             objects++;
             rows += held.Entry.Rows;
+            while (keptByLevel.Count <= held.Level)
+            {
+                keptByLevel.Add(0);
+            }
+
+            keptByLevel[held.Level]++;
         }
 
         DatasetLevels levels = _dataset.Levels;
@@ -341,8 +435,57 @@ public sealed class DatasetScanBuilder
             objects,
             rows,
             metrics.ObjectsSkipped,
-            metrics.SubtreesSkipped);
+            metrics.SubtreesSkipped,
+            _orderPath,
+            CursorBound(objects, keptByLevel));
     }
+
+    /// <summary>The most objects the scan will hold open at once, stated before any is read.</summary>
+    /// <param name="objects">The objects it will read.</param>
+    /// <param name="keptByLevel">How many of them each level holds.</param>
+    /// <remarks>
+    /// One in the tree's order, where objects are read one after another. Key-ordered on the
+    /// clustering key, level 0's objects and one per level above it — §6.6's "≤ 8 + L cursors",
+    /// which §5.2's invariant bounds and `Lag` reports the excess of. On any other column, every
+    /// object: the summaries give no disjointness to lean on.
+    /// </remarks>
+    private long CursorBound(long objects, List<long> keptByLevel)
+    {
+        if (objects == 0)
+        {
+            return 0;
+        }
+
+        if (_orderPath is not { } path)
+        {
+            return 1;
+        }
+
+        if (!_summaries || !RidesDisjointLevels(path))
+        {
+            return objects;
+        }
+
+        long cursors = keptByLevel.Count > 0 ? keptByLevel[0] : 0;
+        for (int level = 1; level < keptByLevel.Count; level++)
+        {
+            if (keptByLevel[level] > 0)
+            {
+                cursors++;
+            }
+        }
+
+        return cursors;
+    }
+
+    /// <summary>
+    /// Whether a merge on <paramref name="path"/> reads the key-disjoint objects of a level one after
+    /// another: on the clustering key, upward by the tree's exact minima, downward by summary maxima
+    /// that the key order respects.
+    /// </summary>
+    private bool RidesDisjointLevels(string path) =>
+        IsClusteringKey(path)
+        && (!_descending || HasKeyOrderBounds(ClusteringKey.Resolve(_dataset.Schema, path)));
 
     /// <summary>The objects this scan will read, in key order, each with its first row.</summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
@@ -367,11 +510,203 @@ public sealed class DatasetScanBuilder
         if (_metrics is { } metrics)
         {
             metrics.ObjectsOpened++;
+            metrics.Cursors = Math.Max(metrics.Cursors, 1);
             if (lease.WasCached)
             {
                 metrics.CacheHits++;
             }
         }
+    }
+
+    /// <summary>The key-ordered read: every kept object's own key-ordered scan, merged (§6.6).</summary>
+    /// <param name="path">The key column.</param>
+    /// <param name="cancellationToken">Cancels the walk, the opens and the reads.</param>
+    private async IAsyncEnumerable<RecordBatch> MergedAsync(
+        string path, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // The key is read whatever the projection says, and dropped before a batch goes out.
+        string[] selected = _projection ?? [];
+        bool drop = _projection is not null && !Covers(selected, path);
+        Projection? kept = null;
+        KeyOrderedMerge merge = new KeyOrderedMerge(
+            _dataset,
+            MergeObjectsAsync(path, cancellationToken),
+            [path],
+            _descending,
+            rankedTies: true,
+            file => OrderedOf(file, path, drop),
+            RecordOpen,
+            cancellationToken);
+        await using (merge.ConfigureAwait(false))
+        {
+            try
+            {
+                while (await merge.MoveNextAsync().ConfigureAwait(false))
+                {
+                    RecordBatch run = merge.Current;
+                    if (!drop)
+                    {
+                        yield return run;
+                        continue;
+                    }
+
+                    kept ??= Projection.Parse(run.Schema, selected);
+                    RecordBatch projected = run.Project(kept.Value);
+                    try
+                    {
+                        yield return projected;
+                    }
+                    finally
+                    {
+                        projected.Dispose();
+                    }
+                }
+            }
+            finally
+            {
+                if (_metrics is { } metrics)
+                {
+                    metrics.Cursors = Math.Max(metrics.Cursors, merge.MostOpen);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The objects the merge reads, in the order of a lower bound on their keys, each with the rank
+    /// its ties go by.
+    /// </summary>
+    /// <param name="path">The key column.</param>
+    /// <param name="cancellationToken">Cancels the walk.</param>
+    /// <remarks>
+    /// ON THE CLUSTERING KEY, UPWARD, THE TREE ALREADY IS THAT ORDER: a leaf key is the encoded
+    /// minimum of the object, exact (§4.1), and the walk hands the objects over as it reads them —
+    /// so a consumer that stops early stops the walk too, and a subtree past the k-th key is never
+    /// read. Anywhere else the kept objects are collected and sorted by their summaries' bound: the
+    /// leaf pages are read, the objects are not opened.
+    /// </remarks>
+    private async IAsyncEnumerable<MergeObject> MergeObjectsAsync(
+        string path, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        if (!_summaries || (!_descending && IsClusteringKey(path)))
+        {
+            // Without summaries there is no bound to lean on, and every object is opened before a
+            // row goes out: the eager merge, which is what a lazy one must answer the same as.
+            long ordinal = 0;
+            await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+            {
+                ReadOnlyMemory<byte> bound = _summaries ? VortexDataset.OrderOf(held.TreeKey) : default;
+                yield return new MergeObject(held.Entry, bound, _descending ? -ordinal : ordinal);
+                ordinal++;
+            }
+
+            yield break;
+        }
+
+        DType dtype = ClusteringKey.Resolve(_dataset.Schema, path);
+        RowSortField field = KeyOrderedMerge.Field(_descending);
+        List<MergeObject> objects = [];
+        long position = 0;
+        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+        {
+            ReadOnlyMemory<byte> bound = SummaryBound(held.Entry.Summaries, path, dtype, field, _descending);
+            objects.Add(new MergeObject(held.Entry, bound, _descending ? -position : position));
+            position++;
+        }
+
+        objects.Sort(static (left, right) =>
+        {
+            int order = left.Bound.Span.SequenceCompareTo(right.Bound.Span);
+            return order != 0 ? order : left.Rank.CompareTo(right.Rank);
+        });
+        foreach (MergeObject held in objects)
+        {
+            yield return held;
+        }
+    }
+
+    /// <summary>Whether <paramref name="path"/> is the dataset's whole clustering key.</summary>
+    private bool IsClusteringKey(string path) =>
+        _dataset.Key is { IsComposite: false } key && string.Equals(key.Paths[0], path, StringComparison.Ordinal);
+
+    /// <summary>
+    /// A summary's bound on a column, encoded as the merge compares keys: its minimum upward, its
+    /// maximum downward. Empty when the summary gives none that the key order respects.
+    /// </summary>
+    /// <remarks>
+    /// ONLY WHERE THE ZONE STATISTICS AND THE KEY ORDER AGREE: integers, booleans, strings and
+    /// bytes — a truncated string bound stays a bound, its maximum being rounded up (step 19). A
+    /// FLOAT HAS NONE: its zone min and max exclude NaN (08 §2), while the key order puts a negative
+    /// NaN first and a positive one last (12 §4.4), so an object holding one has a key outside its
+    /// own summary. Such objects are opened before the merge emits anything, which is correct and is
+    /// the output-sensitive cost §6.6 states. A decimal's bound is not relied on either.
+    /// </remarks>
+    private static ReadOnlyMemory<byte> SummaryBound(
+        ObjectSummaries summaries, string path, DType dtype, RowSortField field, bool descending)
+    {
+        if (!HasKeyOrderBounds(dtype) || !summaries.TryGet(path, out ColumnSummary column))
+        {
+            return default;
+        }
+
+        bool known = descending ? column.HasMax : column.HasMin;
+        FilterLiteral bound = descending ? column.Max : column.Min;
+        if (!known || bound.Kind == FilterLiteralKind.Null)
+        {
+            return default;
+        }
+
+        return RowEncoder.EncodeKey([bound], [dtype], [field]);
+    }
+
+    /// <summary>Whether a column's summary bounds are bounds in the key order (see <see cref="SummaryBound"/>).</summary>
+    private static bool HasKeyOrderBounds(DType dtype) => dtype.Kind switch
+    {
+        DTypeKind.Primitive => !dtype.PType.IsFloat(),
+        DTypeKind.Bool or DTypeKind.Utf8 or DTypeKind.Binary => true,
+        _ => false,
+    };
+
+    /// <summary>Whether a projection already reads <paramref name="path"/>, itself or through an ancestor.</summary>
+    private static bool Covers(string[] projection, string path)
+    {
+        foreach (string selected in projection)
+        {
+            if (string.Equals(selected, path, StringComparison.Ordinal)
+                || (path.StartsWith(selected, StringComparison.Ordinal)
+                    && path.Length > selected.Length
+                    && path[selected.Length] == '.'))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>One object's own key-ordered scan, carrying this builder's filter and projection.</summary>
+    /// <param name="file">One data object.</param>
+    /// <param name="path">The key column.</param>
+    /// <param name="withKey">Whether the key must be read on top of the projection.</param>
+    private ScanBuilder OrderedOf(VortexFile file, string path, bool withKey)
+    {
+        ScanBuilder scan = file.Scan();
+        if (_filter is { } filter)
+        {
+            scan = scan.Where(filter);
+        }
+
+        if (_projection is { } projection)
+        {
+            scan = scan.Project(projection);
+            if (withKey)
+            {
+                scan = scan.Project(path);
+            }
+        }
+
+        scan = scan.InKeyOrder(path, _descending);
+        return _indexes ? scan : scan.WithIndexes(false);
     }
 
     /// <summary>The file's own scan, carrying this builder's filter, projection and row range.</summary>
@@ -405,7 +740,14 @@ public sealed class DatasetScanBuilder
 /// <summary>One data object and where its rows start in the dataset.</summary>
 /// <param name="Entry">Its leaf entry, summaries included.</param>
 /// <param name="FirstRow">Its first row among the dataset's, in the tree's order.</param>
-public readonly record struct PositionedObject(ObjectEntry Entry, long FirstRow);
+public readonly record struct PositionedObject(ObjectEntry Entry, long FirstRow)
+{
+    /// <summary>The level whose tree holds it (§5.2); level 0 is the one an append lands in.</summary>
+    public int Level { get; init; }
+
+    /// <summary>Its key in that tree: what orders it, then its uid (§4.1).</summary>
+    internal ReadOnlyMemory<byte> TreeKey { get; init; }
+}
 
 /// <summary>What a dataset scan would read, and what it costs (§5.1).</summary>
 /// <param name="Version">The version it would read.</param>
@@ -423,6 +765,12 @@ public readonly record struct PositionedObject(ObjectEntry Entry, long FirstRow)
 /// <param name="Rows">Their rows, before the filter.</param>
 /// <param name="ObjectsSkipped">Objects whose own summaries refuted the predicate.</param>
 /// <param name="SubtreesSkipped">Child pages a node's summaries refuted, unread (§4.2).</param>
+/// <param name="Order">The column a key-ordered scan delivers its rows by, or null for the tree's order.</param>
+/// <param name="Cursors">
+/// The most objects the scan will hold open at once: one in the tree's order; key-ordered on the
+/// clustering key, level 0's objects and one per level above it (§6.6: "≤ 8 + L cursors"); on any
+/// other column, every object it would open.
+/// </param>
 public sealed record DatasetPlan(
     ulong Version,
     IReadOnlyList<long> ObjectsByLevel,
@@ -431,4 +779,6 @@ public sealed record DatasetPlan(
     long Objects,
     long Rows,
     long ObjectsSkipped,
-    long SubtreesSkipped);
+    long SubtreesSkipped,
+    string? Order,
+    long Cursors);

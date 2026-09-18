@@ -2,14 +2,14 @@
 // of immutable object, and every answer it gives must equal the answer a single file would give
 // (§14's acceptance).
 //
-// WHAT THIS STEP DELIVERS, and what it leaves to the next. Creation, opening, the import of a file
-// that is already in the store WITHOUT copying it (§3: "A single existing Vortex file becomes a
-// dataset of one leaf: one commit object, no copy"), an append that writes one data object and one
-// commit, a scan that reads the objects in key order while SKIPPING the ones its summaries refute
-// and the subtrees a node's summaries refute (§4.2), `Rows(a, b)` through the tree's row sums
-// (§6.6), and a cache that keeps the immutable data objects open across scans. What it does not do
-// yet: the mandatory run on the clustering key (§6.1) and `InKeyOrder` with its terminals across
-// objects, which is the rest of the plan's step 39.
+// WHAT IT HOLDS. Creation, opening, the import of a file that is already in the store WITHOUT
+// copying it (§3: "A single existing Vortex file becomes a dataset of one leaf: one commit object,
+// no copy"), an append that writes one data object and one commit, a scan that reads the objects in
+// key order while SKIPPING the ones its summaries refute and the subtrees a node's summaries refute
+// (§4.2), `Rows(a, b)` through the tree's row sums (§6.6), and a cache that keeps the immutable data
+// objects open across scans. The key-ordered read across objects is `DatasetScanBuilder.InKeyOrder`
+// over `KeyOrderedMerge`; the walk below hands it each object's level and tree key, which on the
+// clustering key is the exact lower bound the merge opens objects by.
 //
 // WHERE THE SUMMARIES COME FROM, and the reason it costs nothing. A data object's bounds are its own
 // file statistics (02 §3), which the writer has just computed and which sit in the buffer the sink
@@ -107,6 +107,9 @@ internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<
 /// <summary>A versioned dataset over an object store.</summary>
 public sealed class VortexDataset : IAsyncDisposable
 {
+    /// <summary>The bytes of the uid that ends every tree key (<see cref="KeyOf"/>).</summary>
+    private const int UidBytes = 16;
+
     private readonly IObjectStore _store;
     private readonly DatasetOptions _options;
     private readonly DTypeArena _types = new DTypeArena();
@@ -439,7 +442,7 @@ public sealed class VortexDataset : IAsyncDisposable
             return false;
         };
 
-        await foreach ((TreeEntry held, long firstRow) in
+        await foreach ((TreeEntry held, long firstRow, int level) in
             EntriesAsync(from, to, descend, cancellationToken).ConfigureAwait(false))
         {
             ObjectEntry entry = ObjectEntry.FromBytes(held.Value.Span);
@@ -458,9 +461,17 @@ public sealed class VortexDataset : IAsyncDisposable
                 continue;
             }
 
-            yield return new PositionedObject(entry, firstRow);
+            yield return new PositionedObject(entry, firstRow) { Level = level, TreeKey = held.Key };
         }
     }
+
+    /// <summary>What orders an object in its tree: its tree key without the uid that ends it.</summary>
+    /// <param name="treeKey">The key, as <see cref="KeyOf"/> made it.</param>
+    /// <returns>
+    /// The row-encoded minimum of the clustering key, exact (§4.1), or the first row position when
+    /// the dataset declares none.
+    /// </returns>
+    internal static ReadOnlyMemory<byte> OrderOf(ReadOnlyMemory<byte> treeKey) => treeKey[..^UidBytes];
 
     /// <summary>
     /// Every level's entries, merged into one key order, each with its first row in the dataset.
@@ -477,25 +488,28 @@ public sealed class VortexDataset : IAsyncDisposable
     /// and the cost is the objects rather than the rows. Bounded either way, and the difference is
     /// stated rather than hidden. A k-way merge over ≤ 8 + L cursors is what §6.6 prices anyway.
     /// </remarks>
-    private async IAsyncEnumerable<(TreeEntry Entry, long FirstRow)> EntriesAsync(
+    private async IAsyncEnumerable<(TreeEntry Entry, long FirstRow, int Level)> EntriesAsync(
         long from,
         long to,
         Func<InternalEntry, bool>? descend,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
         List<DatasetTree> trees = [];
-        foreach ((int _, DatasetTree tree) in _levels.Occupied())
+        List<int> levels = [];
+        foreach ((int level, DatasetTree tree) in _levels.Occupied())
         {
             trees.Add(tree);
+            levels.Add(level);
         }
 
         if (trees.Count <= 1)
         {
             DatasetTree only = trees.Count == 1 ? trees[0] : DatasetTree.Empty;
+            int level = trees.Count == 1 ? levels[0] : 0;
             await foreach (PositionedEntry positioned in
                 only.WalkAsync(_pages, from, to, descend, cancellationToken).ConfigureAwait(false))
             {
-                yield return (positioned.Entry, positioned.FirstRow);
+                yield return (positioned.Entry, positioned.FirstRow, level);
             }
 
             yield break;
@@ -536,7 +550,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 TreeEntry entry = walks[smallest].Current.Entry;
                 if (row < to && row + entry.Rows > from)
                 {
-                    yield return (entry, row);
+                    yield return (entry, row, levels[smallest]);
                 }
 
                 row += entry.Rows;
@@ -746,7 +760,7 @@ public sealed class VortexDataset : IAsyncDisposable
         UInt128 unique = entry.Uid != UInt128.Zero
             ? entry.Uid
             : System.IO.Hashing.XxHash128.HashToUInt128(System.Text.Encoding.UTF8.GetBytes(entry.Key));
-        byte[] key = new byte[prefix.Length + 16];
+        byte[] key = new byte[prefix.Length + UidBytes];
         prefix.CopyTo(key);
         BinaryPrimitives.WriteUInt64BigEndian(key.AsSpan(prefix.Length), (ulong)(unique >> 64));
         BinaryPrimitives.WriteUInt64BigEndian(key.AsSpan(prefix.Length + 8), (ulong)unique);

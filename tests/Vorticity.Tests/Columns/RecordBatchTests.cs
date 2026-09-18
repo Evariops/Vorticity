@@ -5,6 +5,7 @@ using System.Text;
 using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.File;
+using Vorticity.Scan;
 using Vorticity.Types;
 using Xunit;
 
@@ -308,6 +309,63 @@ public sealed class RecordBatchTests
 
         batch.Dispose();
         Assert.Throws<ObjectDisposedException>(() => batch.Window(0, 1));
+    }
+
+    [Fact]
+    public void ProjectKeepsTheNamedColumnsAndCopiesNoValue()
+    {
+        // The seam a dataset's key-ordered merge needs (docs/13-dataset.md §6.6): it compares rows
+        // by a key column the caller may not have selected, and drops that column before handing
+        // the batch on — the step the scan performs for a filter's columns, from outside the scan.
+        using ColumnFixture f = new ColumnFixture();
+        DType i64 = f.Types.Primitive(PType.I64, Nullability.NonNullable);
+        DType i32 = f.Types.Primitive(PType.I32, Nullability.NonNullable);
+        int keys = f.Int64Node([10L, 20L, 30L], Validity.NonNullable);
+        int c = f.Int32Node([1, 2, 3], Validity.NonNullable);
+        int d = f.Int32Node([4, 5, 6], Validity.NonNullable);
+        DType inner = f.Types.Struct(["c", "d"], [i32, i32], Nullability.NonNullable);
+        int nested = f.Arena.AddStruct(inner, 3, Validity.NonNullable, [c, d]);
+        DType schema = f.Types.Struct(["key", "inner"], [i64, inner], Nullability.NonNullable);
+        RecordBatch batch = f.Batch(
+            f.Arena.AddStruct(schema, 3, Validity.NonNullable, [keys, nested]), startRow: 70);
+
+        using RecordBatch dropped = batch.Project(Projection.Parse(batch.Schema, ["inner"]));
+        Assert.Equal(f.Types.Struct(["inner"], [inner], Nullability.NonNullable), dropped.Schema);
+        Assert.Equal(3, dropped.RowCount);
+        Assert.Equal(70L, dropped.StartRow);
+        Assert.Equal([4, 5, 6], dropped.Column(0).AsStruct().GetField("d"u8).AsPrimitive<int>().Values.ToArray());
+
+        // A nested leaf: the struct above it is rebuilt around that one field.
+        using RecordBatch leaf = batch.Project(Projection.Parse(batch.Schema, ["key", "inner.d"]));
+        DType narrowed = f.Types.Struct(["d"], [i32], Nullability.NonNullable);
+        Assert.Equal(f.Types.Struct(["key", "inner"], [i64, narrowed], Nullability.NonNullable), leaf.Schema);
+        Assert.Equal([10L, 20L, 30L], leaf.Column(0).AsPrimitive<long>().Values.ToArray());
+        Assert.Equal([4, 5, 6], leaf.Column(1).AsStruct().GetField(0).AsPrimitive<int>().Values.ToArray());
+
+        // No value is copied: the kept columns are the source's own nodes.
+        CanonicalNode root = leaf.Arena.GetNode(leaf.RootIndex);
+        Assert.Equal(keys, root.GetFieldIndex(0));
+        Assert.Equal(d, leaf.Arena.GetNode(root.GetFieldIndex(1)).GetFieldIndex(0));
+
+        // Everything is the batch itself, and the source is untouched by any of it.
+        using RecordBatch all = batch.Project(Projection.All);
+        Assert.Equal(schema, all.Schema);
+        Assert.Equal(schema, batch.Schema);
+        Assert.Equal([10L, 20L, 30L], batch.Column(0).AsPrimitive<long>().Values.ToArray());
+    }
+
+    [Fact]
+    public void ProjectRefusesAColumnlessBatchAndADisposedOne()
+    {
+        using ColumnFixture f = new ColumnFixture();
+        RecordBatch batch = f.Batch(f.Int32Node([1, 2, 3], Validity.NonNullable));
+        DType table = f.Types.Struct(
+            ["a"], [f.Types.Primitive(PType.I32, Nullability.NonNullable)], Nullability.NonNullable);
+
+        Assert.Throws<ArgumentException>(() => batch.Project(Projection.Parse(table, ["a"])));
+
+        batch.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => batch.Project(Projection.All));
     }
 
     private static bool[] Bits(VortexColumn column)

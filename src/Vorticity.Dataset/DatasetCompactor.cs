@@ -2,17 +2,12 @@
 // key when there is one (the row encoding compares by memcmp, 06), a concatenation otherwise, and
 // the writer builds the embedded indexes of the outputs once".
 //
-// THE MERGE EMITS RUNS, NOT ROWS. At every step one input holds the smallest key; the rows it may
-// emit before another input takes over are the ones at or below the smallest key the others are
-// holding. That is a contiguous window of its current batch, so the merge writes windows of
-// batches rather than rows: k comparisons per window instead of per row, and the writer keeps
-// receiving batches of a useful size. `RecordBatch.Window` is the seam this needs and the reason
-// it was made public -- 13 §4.2 already named it as one of the two things the core did not expose.
-//
-// THE COMPARATOR IS THE ROW ENCODING, for one reason: it is the order the tree, the runs and the
-// seeks already use (06's memcmp order), so a merge cannot disagree with the sources it merges. A
-// per-dtype comparison written here would be a second order, and the first time the two differed
-// the dataset would hold an object whose own run says it is sorted and whose rows are not.
+// THE MERGE IS `KeyOrderedMerge`, the one a key-ordered scan reads with (§6.6): runs of rows rather
+// than rows, compared by the row encoding, an input opened only once it could hold the next row. The
+// inputs are offered by their leaf keys, which on the clustering key are their exact minima (§4.1),
+// so the key-disjoint objects of the destination level are read one after another rather than held
+// open together. What stays here is what only a WRITER needs of a run: its first and last keys, so
+// that a roll never splits a key across two outputs.
 //
 // READING AN INPUT IN KEY ORDER IS `InKeyOrder`, which is §5.3's own sentence: "the compaction
 // reads each input in key order through that run, the permuted read InKeyOrder already performs".
@@ -28,13 +23,11 @@
 // have.
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Arrays;
 using Vorticity.Columns;
-using Vorticity.RowEncoding;
 using Vorticity.Scan;
-using Vorticity.Types;
 using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
@@ -96,32 +89,19 @@ public static class DatasetCompactor
             Check(key, job);
         }
 
-        List<ObjectLease> leases = [];
         ObjectStream outputs = new ObjectStream(dataset, job.TargetBytes, job.FirstRow);
         long rows;
         try
         {
-            foreach (CompactionInput input in job.Inputs)
-            {
-                leases.Add(await dataset.RentAsync(input.Entry.Key, cancellationToken).ConfigureAwait(false));
-            }
-
             rows = merge
-                ? await MergeAsync(leases, key!, outputs, cancellationToken).ConfigureAwait(false)
-                : await ConcatenateAsync(leases, outputs, cancellationToken).ConfigureAwait(false);
+                ? await MergeAsync(dataset, job, key!, outputs, cancellationToken).ConfigureAwait(false)
+                : await ConcatenateAsync(dataset, job, outputs, cancellationToken).ConfigureAwait(false);
             await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
         }
         catch
         {
             await outputs.AbandonAsync().ConfigureAwait(false);
             throw;
-        }
-        finally
-        {
-            foreach (ObjectLease lease in leases)
-            {
-                await lease.DisposeAsync().ConfigureAwait(false);
-            }
         }
 
         if (rows != job.Rows)
@@ -204,17 +184,21 @@ public static class DatasetCompactor
 
     /// <summary>§5.3's concatenation: each input's rows, in its own order, one after another.</summary>
     private static async ValueTask<long> ConcatenateAsync(
-        List<ObjectLease> leases, ObjectStream outputs, CancellationToken cancellationToken)
+        VortexDataset dataset, CompactionJob job, ObjectStream outputs, CancellationToken cancellationToken)
     {
         long rows = 0;
-        foreach (ObjectLease lease in leases)
+        foreach (CompactionInput input in job.Inputs)
         {
-            await foreach (RecordBatch batch in lease.File.Scan()
-                .ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+            ObjectLease lease = await dataset.RentAsync(input.Entry.Key, cancellationToken).ConfigureAwait(false);
+            await using (lease.ConfigureAwait(false))
             {
-                await outputs.RollIfFullAsync(cancellationToken).ConfigureAwait(false);
-                await outputs.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
-                rows += batch.RowCount;
+                await foreach (RecordBatch batch in lease.File.Scan()
+                    .ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    await outputs.RollIfFullAsync(cancellationToken).ConfigureAwait(false);
+                    await outputs.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
+                    rows += batch.RowCount;
+                }
             }
         }
 
@@ -223,230 +207,54 @@ public static class DatasetCompactor
 
     /// <summary>§5.3's k-way merge, one run of rows at a time.</summary>
     private static async ValueTask<long> MergeAsync(
-        List<ObjectLease> leases,
+        VortexDataset dataset,
+        CompactionJob job,
         ClusteringKey key,
         ObjectStream outputs,
         CancellationToken cancellationToken)
     {
-        MergeInput?[] inputs = new MergeInput?[leases.Count];
-        long rows = 0;
-        try
+        // Offered by leaf key, which is the encoded minimum and then the uid — the order of an exact
+        // lower bound, so an input is opened only once it could hold the next row — and ranked by
+        // the job's own order, which is who takes a tie among inputs holding the same key.
+        List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
+        for (int i = 0; i < job.Inputs.Count; i++)
         {
-            for (int i = 0; i < inputs.Length; i++)
+            CompactionInput input = job.Inputs[i];
+            inputs.Add((input.Key, new MergeObject(input.Entry, VortexDataset.OrderOf(input.Key), i)));
+        }
+
+        inputs.Sort(static (left, right) => left.Key.Span.SequenceCompareTo(right.Key.Span));
+
+        string path = key.Paths[0];
+        KeyOrderedMerge merge = new KeyOrderedMerge(
+            dataset,
+            inputs.Select(static held => held.Object).ToAsyncEnumerable(),
+            key.Paths,
+            descending: false,
+            rankedTies: false,
+            file => file.Scan().InKeyOrder(path),
+            opened: null,
+            cancellationToken);
+        long rows = 0;
+        await using (merge.ConfigureAwait(false))
+        {
+            while (await merge.MoveNextAsync().ConfigureAwait(false))
             {
-                MergeInput input = new MergeInput(leases[i], key);
-                inputs[i] = input;
-                await input.StartAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            while (true)
-            {
-                int smallest = -1;
-                for (int i = 0; i < inputs.Length; i++)
-                {
-                    if (inputs[i]!.IsLive
-                        && (smallest < 0 || inputs[i]!.Key.SequenceCompareTo(inputs[smallest]!.Key) < 0))
-                    {
-                        smallest = i;
-                    }
-                }
-
-                if (smallest < 0)
-                {
-                    return rows;
-                }
-
-                // The rows this input may emit before another one takes over: those at or below the
-                // smallest key the others hold. Ties go to this input, which keeps the output
-                // non-decreasing whichever way they fall.
-                int limit = -1;
-                for (int i = 0; i < inputs.Length; i++)
-                {
-                    if (i != smallest
-                        && inputs[i]!.IsLive
-                        && (limit < 0 || inputs[i]!.Key.SequenceCompareTo(inputs[limit]!.Key) < 0))
-                    {
-                        limit = i;
-                    }
-                }
-
-                MergeInput chosen = inputs[smallest]!;
-                if (outputs.WantsRoll && !outputs.HoldsKey(chosen.Key))
+                if (outputs.WantsRoll && !outputs.HoldsKey(merge.FirstKey))
                 {
                     // Never split a key across two objects: two outputs sharing a boundary value
                     // would have overlapping ranges, and §5.2 asks a level for disjoint ones.
                     await outputs.RollAsync(cancellationToken).ConfigureAwait(false);
                 }
 
-                int count = limit < 0 ? chosen.Remaining : chosen.RunUpTo(inputs[limit]!.Key);
-                outputs.Note(chosen.KeyAt(chosen.Row + count - 1));
-                rows += count;
-                await chosen.EmitAsync(count, outputs, cancellationToken).ConfigureAwait(false);
-            }
-        }
-        finally
-        {
-            foreach (MergeInput? input in inputs)
-            {
-                if (input is not null)
-                {
-                    await input.DisposeAsync().ConfigureAwait(false);
-                }
-            }
-        }
-    }
-
-    /// <summary>One input of the merge: its batches in key order, and its keys row-encoded.</summary>
-    private sealed class MergeInput : IAsyncDisposable
-    {
-        private readonly ObjectLease _lease;
-        private readonly ClusteringKey _key;
-        private readonly RowSortField[] _fields;
-        private IAsyncEnumerator<RecordBatch>? _batches;
-        private RecordBatch? _batch;
-        private RowKeys? _keys;
-        private int _row;
-
-        internal MergeInput(ObjectLease lease, ClusteringKey key)
-        {
-            _lease = lease;
-            _key = key;
-            _fields = new RowSortField[key.Paths.Count];
-            Array.Fill(_fields, RowSortField.Ascending);
-        }
-
-        /// <summary>Whether it still holds a row.</summary>
-        internal bool IsLive => _batch is not null;
-
-        /// <summary>Its current row within its current batch.</summary>
-        internal int Row => _row;
-
-        /// <summary>The rows left in its current batch.</summary>
-        internal int Remaining => _batch is null ? 0 : _batch.RowCount - _row;
-
-        /// <summary>Its current key, row-encoded (06).</summary>
-        internal ReadOnlySpan<byte> Key => _keys!.Row(_row);
-
-        /// <summary>The encoded key of one row of its current batch.</summary>
-        /// <param name="row">The row, within the batch.</param>
-        /// <returns>Its key.</returns>
-        internal ReadOnlySpan<byte> KeyAt(int row) => _keys!.Row(row);
-
-        internal ValueTask StartAsync(CancellationToken cancellationToken)
-        {
-            _batches = _lease.File.Scan()
-                .InKeyOrder(_key.Paths[0])
-                .ExecuteAsync()
-                .GetAsyncEnumerator(cancellationToken);
-            return NextAsync();
-        }
-
-        /// <summary>How many rows from here on are at or below <paramref name="limit"/>.</summary>
-        /// <param name="limit">The smallest key another input is holding.</param>
-        /// <returns>At least one, since this input holds the smallest key of all.</returns>
-        internal int RunUpTo(ReadOnlySpan<byte> limit)
-        {
-            int end = _row;
-            while (end < _batch!.RowCount && _keys!.Row(end).SequenceCompareTo(limit) <= 0)
-            {
-                end++;
-            }
-
-            return end - _row;
-        }
-
-        /// <summary>Writes <paramref name="count"/> rows to the outputs and steps over them.</summary>
-        /// <param name="count">The run's length.</param>
-        /// <param name="outputs">Where the rows go.</param>
-        /// <param name="cancellationToken">Cancels the write.</param>
-        internal async ValueTask EmitAsync(
-            int count, ObjectStream outputs, CancellationToken cancellationToken)
-        {
-            RecordBatch batch = _batch!;
-            if (_row == 0 && count == batch.RowCount)
-            {
-                // The whole batch is the run: no window, no gather, the batch goes straight through.
-                await outputs.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
-            }
-            else
-            {
-                RecordBatch window = batch.Window(_row, count);
-                try
-                {
-                    await outputs.WriteAsync(window, cancellationToken).ConfigureAwait(false);
-                }
-                finally
-                {
-                    window.Dispose();
-                }
-            }
-
-            _row += count;
-            if (_row >= batch.RowCount)
-            {
-                await NextAsync().ConfigureAwait(false);
+                outputs.Note(merge.LastKey);
+                RecordBatch run = merge.Current;
+                rows += run.RowCount;
+                await outputs.WriteAsync(run, cancellationToken).ConfigureAwait(false);
             }
         }
 
-        public async ValueTask DisposeAsync()
-        {
-            _keys?.Dispose();
-            _keys = null;
-            _batch = null;
-            if (_batches is not null)
-            {
-                await _batches.DisposeAsync().ConfigureAwait(false);
-                _batches = null;
-            }
-        }
-
-        /// <summary>Takes the next batch and row-encodes its keys.</summary>
-        private async ValueTask NextAsync()
-        {
-            _keys?.Dispose();
-            _keys = null;
-            _batch = null;
-            _row = 0;
-            while (await _batches!.MoveNextAsync().ConfigureAwait(false))
-            {
-                RecordBatch batch = _batches.Current;
-                if (batch.RowCount == 0)
-                {
-                    continue;
-                }
-
-                _batch = batch;
-                _keys = RowEncoder.Encode(batch.Arena, Columns(batch, _key.Paths), _fields);
-                return;
-            }
-        }
-
-        /// <summary>The canonical node of each key column of a batch.</summary>
-        private static int[] Columns(RecordBatch batch, IReadOnlyList<string> paths)
-        {
-            int[] columns = new int[paths.Count];
-            for (int i = 0; i < paths.Count; i++)
-            {
-                DType at = batch.Schema;
-                int node = batch.RootIndex;
-                foreach (string segment in paths[i].Split('.'))
-                {
-                    int field = at.IndexOfField(segment);
-                    if (field < 0)
-                    {
-                        throw new ArgumentException(
-                            $"'{paths[i]}' names no column of the object's schema.", nameof(paths));
-                    }
-
-                    node = batch.Arena.GetNode(node).GetFieldIndex(field);
-                    at = at.GetField(field);
-                }
-
-                columns[i] = node;
-            }
-
-            return columns;
-        }
+        return rows;
     }
 
     /// <summary>The objects a compaction writes, rolled at the destination level's size (§5.3).</summary>

@@ -190,7 +190,11 @@ public sealed class ClusteringKey
     }
 
     /// <summary>The dtype of a <c>.</c>-separated path against a struct schema.</summary>
-    private static DType Resolve(DType schema, string path)
+    /// <param name="schema">The schema.</param>
+    /// <param name="path">The column.</param>
+    /// <returns>Its dtype.</returns>
+    /// <exception cref="ArgumentException">The path names no column of the schema.</exception>
+    internal static DType Resolve(DType schema, string path)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         DType at = schema;
