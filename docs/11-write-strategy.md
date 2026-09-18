@@ -934,3 +934,95 @@ split-block Bloom filters (`parquet-format` `BloomFilter.md`); XXH3 (`Cyan4973/x
 `doc/xxhash_spec.md`, and `System.IO.Hashing.XxHash3` in `dotnet/runtime`); Swiss tables
 (`hashbrown`); log-structured runs (O'Neil et al., 1996).
 Intrinsics: `System.Runtime.Intrinsics` reference assembly, .NET 11.0.100-rc.1.
+
+## État — the closing audit *(2026-09-18, step 44)*
+
+Every section checked against the code of the day. ✅ delivered · ❌ rejected by a measurement ·
+⤳ out of scope, superseded or deferred by a written decision · ⬜ open, with its owner. Where the
+body above says otherwise, **this section is the one that is true**; the body is the design as it
+was argued, and several of its mechanisms were replaced on the way by something the measurements
+preferred. Code paths are under `src/Vorticity/`, test paths under `tests/Vorticity.Tests/`.
+
+| § | status | where |
+|---|---|---|
+| 2 The target | ✅ in substance; two rows ⤳ (below) | `Writing/VortexFileWriter.cs:561` (ingest before copy) |
+| 3.0 `ColumnWriter` per leaf | ✅ | `Writing/ColumnWriter.cs:41`; `Writing/ChunkStats.cs` |
+| 3.1 Blocks, not batches | ✅ | `Writing/VortexFileWriter.cs:306` `PreferredBatchRows`, `:603` whole blocks |
+| 3.2 The fused pass | ✅, field set amended | `Writing/BlockStats.cs:45`; `Writing/BlockStatsPass.cs` |
+| 3.2.1 Hashing | ✅ amended | `Writing/KeyHash.cs`; `Indexes/XxHash3Fixed.cs` |
+| 3.2.2 The distinct table | ✅ amended (R2, R5a-2, R5b-1, R6, R9) | `Writing/DistinctTable.cs:58`; `Writing/ColumnWriter.cs:608` |
+| 3.2.3 The second sweep | ⤳ superseded, same bytes | `Writing/BitPackPlan.cs:330` `FramedWidths` — an exact walk replaced the bound and its sweep (step 30) |
+| 3.2.4 Nested columns | ✅ | `Writing/ColumnWriter.cs`; tests `Writing/ListElementStatisticsTests.cs` |
+| 3.3 Merging | ✅ | `Writing/ZoneMapWriter.cs`; `Writing/BlockStats.cs` `Merge`; `Writing/BloomTreeWriter.cs`; `Writing/KeyIndexBuilder.cs:132` |
+| 3.4.1–3.4.3 Choose | ✅ (order amended at step 30) | `Writing/ColumnCompressor.cs`; `Writing/ColumnWriter.cs` plan memory; tests `Writing/ChooserDifferentialTests.cs`, `Writing/PlanMemoryTests.cs` |
+| 3.4.4 Cascade | ✅ partial; two rows ⤳ (below) | `Writing/Cascade.cs` |
+| 3.5 Encode once | ✅ partial; "never from a concatenation" ⤳ (below) | `Writing/ArrayBlobWriter.cs`; `Writing/AlpEncoder.cs` |
+| 3.6 Emit | ✅ | `Writing/VortexFileWriter.cs` `CompleteAsync`; `Writing/WriteReport.cs` |
+| 3.7 Memory | ✅ measured (19 484 B per column, step 34); the dispatch clause ⤳ (below) | tests `Writing/WriteAllocationTests.cs` |
+| 3.8 Appending | ✅ | `Writing/VortexFileWriter.Append.cs:90`; `Writing/PlanSeed.cs`; `File/VortexFileRepair.cs`; tests `Writing/AppendTests.cs`, `File/TornTailTests.cs` |
+| 4.1, 4.2 Write kernels | ✅ 7a–7d, 7h–7k, 7m; ❌ 7e, 7f, 7g, 7l, 7n | IMPL-PLAN.md §4, step 7 |
+| 4.3 Read side | ✅ merge-join; ❌ three by measurement (step 32) | `Indexes/KeyIndexPruner.cs` |
+| 5.1, 5.2 Guarantees, gates | ✅ | tests `Writing/WrittenSizeTests.cs`, `Indexes/ParquetBloomVectorTests.cs`; `bench/gate.sh` |
+| 5.3 Targets | ⬜ three of ten, owner the write axis (below) | — |
+| 6.1–6.4 Reading | ✅ | `Compute/ZonePruningPlan.cs:56`; `Compute/BlockMask.cs`; `Scan/ScanBuilder.cs:477` `ExplainAsync` |
+| 7.1–7.3 Surface | ✅ | `Writing/VortexWriteOptions.cs:92`, `:116` `EncodingHints`, `:127` `IndexBudgetPerMille`; `Writing/VortexEncodingHint.cs` |
+| 8 Staging | ✅ | IMPL-PLAN.md §1, steps 1–8, 12, 17 |
+| 9 Not in the target | ⤳ | zero-decode rewrite: REMAINING-PLAN debt 7 |
+| 10 Open questions | decided (below) | — |
+
+**The mechanisms the body describes and the code does not have**, each replaced by a measured
+choice:
+- §3.2's field table: `run_boundaries` is a count, not a 1 KiB bitmap; one `_delta` with a broken
+  flag replaces `delta_min`/`delta_max`; the width histograms are per block on the `ColumnWriter`,
+  counted only where a zigzag or zero-reference packing is held; there are no block stamps, no
+  `inline_count` and **no hash buffer**. `BlockStats` is 56 bytes, not ~200 (§3.0).
+- §3.2.1: strings of 16 bytes or less are folded and mixed, not XxHash3-hashed (`KeyHash`); the
+  Bloom builder hashes its own rows and `ChunkKeys` its own — the "hash once, never rehash" of the
+  body was not built.
+- §3.2.2: linear probing, not Swiss control bytes (7f withdrew them); no table at all at width ≤ 2;
+  codes are `int`; a fixed cap of 2²⁰ entries, not a writer budget; postings come from `ChunkKeys`,
+  not from restamps. The table's liveness was **reversed** at R6: it runs only under a remembered
+  dictionary that held, not on every chunk priced in full.
+- §3.2.3: no bound and no second sweep; the framed histogram comes from the ingest at reference 0
+  and from an exact walk otherwise.
+- §3.3: the Bloom's hashes go into an exact set and a generation is sized from the union; filters go
+  out as a tree at generation close. Runs merge into one per entry, at most K = 4 after appends.
+- §3.4.1–§3.4.2: trials run only when no exact verdict won; run-end does not compete priced in full;
+  the dictionary is priced by its layer at byte width (R9) — all decided at step 30 (§10).
+- §3.5: packed output is a `byte[]`, not a view on an arena buffer; the FoR histogram is not fused
+  into the pack.
+- §3.6: the order is index runs (between chunks) and fence pages, then zone maps, then statistics,
+  then the directory.
+- §3.7's scratch row (hash buffers, bitmap, FoR bias buffer, per-block table) was not built.
+- §5.1: "sampling exists nowhere" — ALP's exponent search and FSST's training sample; neither is a
+  statistic a contract rests on.
+- §3.8, §6.3: "or a sidecar" — retired at step 42d (10 §8).
+- §6.3: the synchronous `MayMatch` reads statistics only; the Bloom check is `MayMatchAsync`.
+- §7.1: `Fastest` forces `WritePolicy.None` and nothing else; `IndexBudgetBytes` is
+  `IndexBudgetPerMille` = 100; `PreferredBatchRows` is an instance property, the block length.
+- §4.2, §4.3: `FastLanes.cs:357` is now `:204`; the inline gather ×2 was withdrawn by 7n; the
+  "39 ms in two rank lookups" was the per-block `ProvesAbsent` slot search, fixed at step 33.
+- §2: the corpus bytes moved at R5b-1 and R6 (10 084 008 → 10 063 664), not only for the zone map.
+
+**Deferred, with the reason and the owner.**
+- §2, §3.5, "never from a concatenation": emission still concatenates the pending batches
+  (`Writing/VortexFileWriter.cs:763`, `:810`, `:986`). Removing it is the remedy of WRITE-AUDIT
+  **W-36** (the bytes depend on the batching), which moves the bytes of every file written from
+  batches not aligned to blocks: the write axis owns it, with the crosscheck.
+- §3.4.4: the ALP-integers and offsets rows have no cascade context. Each would move bytes; the
+  write axis owns them, measured like every other scheme.
+- §3.7, §5.2, "dispatch goes to zero in `Writing/`": three calls remain, named in
+  `Compute/PerRowDispatchTests.cs` against WRITE-AUDIT W-11 and W-13, which own them.
+- §5.3: the targets were projections "to be replaced by measurements". The write-only split was
+  never measured; by the round-trip proxy of `--throughput --write`, seven hold and three do not —
+  `variant` (3.48, held by `ConstantForm`, parked as Z1b), `onpair` (≈ 31.7 ms against 30) and
+  "none above ×2", which `variant` breaks. The write axis owns them; the references are BENCH-AUDIT
+  B28's, and raising the unreachable ones is the owner's decision.
+
+**§10, each question.** The constant's wire form, run-end priced and competing, trials under
+`best`, `for_margin`, the 5 % plan tolerance, bounded string bounds off by default — all decided at
+step 30 (IMPL-PLAN §1.34). The XxHash3 source — the `System.IO.Hashing` package, decided 2026-09-15.
+The index budget's default and `Auto`'s share — the share decided at step 33 (20 ‰); the file budget,
+`IndexBudgetPerMille` = 100, is **a product default**: how much of a file a caller trades for
+pruning is a storage-against-reads choice per deployment. Two decisions the list never carried are
+added here: the distinct table's liveness reversed at R6 (above), and W-36, open on the write axis.

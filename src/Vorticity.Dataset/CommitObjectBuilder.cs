@@ -1,13 +1,10 @@
 // Assembles one commit object - docs/13-dataset.md §3 and §4.3: "those pages are laid out inside
 // the commit object with the header and the fragments ... One PutIfAbsent creates the commit".
 //
-// THE ORDER OF OPERATIONS, and why the header is written twice. A page's offset is only known once
-// the header's length is, and the header holds the page's offset: that is circular, and the circle
-// is broken by making every page reference a fixed 36 bytes (see CommitHeader). So this builder
-// collects the pages, serializes the header once with the pages region at zero to learn its length,
-// then serializes it again with the region where it really starts. The second pass produces exactly
-// as many bytes as the first, and that is CHECKED rather than trusted: a length that moved would
-// mean a reference is not fixed-width after all, and the object would name pages that are not there.
+// WHY THE HEADER IS SERIALIZED ONCE. A page's absolute offset is only known once the header's
+// length is, and the header holds the page's offset: that circle is not broken by a second pass
+// but avoided, because no offset in the header is absolute (step 38). Every reference is relative
+// to the body, so the header's bytes do not depend on its own length.
 //
 // WHAT A REFERENCE HANDED OUT HERE MEANS. `AddPage` and `AddFragment` return a reference whose
 // version is this commit's and whose offset is RELATIVE to the body, the region after the header;
@@ -123,8 +120,7 @@ public sealed class CommitObjectBuilder : IPageSink
     /// <returns>The object's bytes, ready for one <see cref="IObjectStore.PutIfAbsentAsync"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="header"/> is null.</exception>
     /// <exception cref="CommitFormatException">
-    /// The header names a version other than this builder's, or it does not serialize to a stable
-    /// length.
+    /// The header names a version other than this builder's, or the object would be past 2 GiB.
     /// </exception>
     public byte[] Build(CommitHeader header)
     {

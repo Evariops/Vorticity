@@ -1013,3 +1013,88 @@ D. B. Johnson, *Generalized selection and ranking: sorted matrices*, SIAM Journa
 1996, as cited in 10 §12. Vectorised byte search: `MemoryExtensions.IndexOf` and `StartsWith` over
 `ReadOnlySpan<byte>` in `dotnet/runtime` (`SpanHelpers.Byte.cs`). Inexact statistics:
 `vortex-array/src/expr/stats/precision.rs` at 0.86.1, as quoted in 08 §1.
+
+## État — the closing audit *(2026-09-18, step 44)*
+
+Every section checked against the code of the day, not against its notes. ✅ delivered ·
+❌ rejected by a measurement · ⤳ out of scope or deferred by a written decision · ⬜ open. Where
+the body or an "as delivered" note above says otherwise, **this section is the one that is true**;
+the text above is kept as the record of what was decided when. Code paths are under
+`src/Vorticity/` and test paths under `tests/Vorticity.Tests/` unless a project is named.
+
+| § | status | where |
+|---|---|---|
+| 1 Inventory | ✅ | every "after" row exists (below) |
+| 2 Two models | ✅ | `Scan/ScanBuilder.cs:274` `InKeyOrder`, `Keys/KeyCursorBuilder.cs:72` `Distinct` |
+| 3 Sources of order | ✅ | `Keys/KeyPlan.cs:9`; `Keys/SortedColumnSource.cs`; `Keys/SortedRunsSource.cs:51`; `Keys/SortedRunsSource.Dictionary.cs:39`; refusal `Keys/KeyCursorBuilder.cs:149` |
+| 4, 4.1–4.5 The cursor | ✅ | `Keys/KeyCursor.cs:21`; `Keys/KeyOrder.cs:32`; tests `Keys/KeyCursorTests.cs`, `Keys/SortedRunsCursorTests.cs` |
+| 4.6 Composite keys | ✅ | `Vorticity.RowEncoding/RowKeyEncoder.cs:26`; `Writing/VortexWriteOptions.cs:138`; tests `Keys/CompositeKeyTests.cs` |
+| 5.1 `AnyAsync` | ✅ | `Scan/TerminalScan.cs:86` |
+| 5.2 `CountAsync` | ✅ | `Compute/ZonePruner.cs:84` `MustMatch`; `Scan/TerminalTiers.cs:12`; `Scan/TerminalScan.cs:103` exact cover |
+| 5.3 `MinAsync` / `MaxAsync` | ✅, one clause ⤳ | `Scan/TerminalScan.cs:314`, exact cover at `:328`; resolution 4's "`Explain` says so" is not delivered: `ScanPlan` plans a count and an order, not an extreme — deferred until a consumer asks |
+| 5.4 `Distinct` | ✅ | `Keys/KeyCursorBuilder.cs:72`; `Keys/SortedRunsSource.Dictionary.cs:39` |
+| 6 Key-ordered delivery | ✅ | `Scan/ScanBuilder.cs:274`, `:308` (composite); `Scan/KeyOrderedBatches.cs:51` (the null tail) |
+| 7 Three predicates | ✅ | `Expressions/VortexExpr.cs:493-518`; `Compute/BytePattern.cs`; `ILIKE` ⤳ (§13) |
+| 8.1 Listing | ✅ | `File/VortexFile.Indexes.cs:164` `Indexes`; `File/VortexOpenOptions.cs:118` `PreloadIndexes`; `Scan/ScanBuilder.cs:368` `WithIndexes`, `:477` `ExplainAsync` |
+| 8.2, 8.3 | ✅ | `docs/09-contracts.md` §1; `Indexes/LyingIndexTests.cs` |
+| 9 Inside the reader | ✅ (shape amended) | `Indexes/IndexRunCache.cs:60`; `Keys/ExactCover.cs:30` |
+| 10 Costs | ✅ as statements, two corrected below | — |
+| 11 Tests | ✅, two narrowed (below) | — |
+| 12 Staging | ✅ | IMPL-PLAN.md §1, steps 9–18 |
+| 13 Open questions | decided or open by decision (below) | — |
+| 14 Amendments to 10, 11 | ✅ | 10 §4.1, §6.2, §6.5, §11; 11 §6.1, §7.2 |
+
+**Delivered at this audit.** §3 promised that a lying `is_sorted` "is caught because
+`VerifyStatistics` validates it", and nothing did: only the runs were verified. Under the option a
+`SortedColumn` source now checks every zone it decodes — the leading nulls where the null count
+puts them, the entries non-null, not NaN and in IEEE order, inside the zone's stated bounds and
+ordered against its neighbours' — and refuses the walk
+(`Keys/SortedColumnSource.cs:414`). `Keys/SortedColumnLieTests.cs` forges the lie in the data of a
+canonical column and asserts a walk without the option (no fault) and a refusal with it; the five
+operators of `KeyCursorTests` run under both settings, so a truthful column is never refused.
+
+**What the text above says that is no longer true.**
+- §1 and §3: "sidecar" — retired at step 42d; post-hoc indexes are fragments (10 §8).
+- §5.2 (10b note): "the exact-cover tier waits for a source; `CountTiers`" — delivered at step 13;
+  the switch is `TerminalTiers`, five flags.
+- §5.3 (10c note): "the third [resolution] excepted until an ordered source exists" — delivered
+  (`Scan/TerminalScan.cs:328`).
+- §5.4 and §10: "the postings keys of each run — a few hundred bytes per chunk" holds for
+  `Postings`, not for `Dictionary`: a flat chunk is one segment, so reading its `values` child reads
+  the chunk (538 604 B for `label`, IMPL-PLAN §1.37). The remedy moves bytes of every dictionary
+  file and is deferred to the write axis (REMAINING-PLAN debt 5, IMPL-PLAN §1.59).
+- §6: "rows with a null key are delivered by no source", and the "second caller" and "third
+  caller" paragraphs — since IMPL-PLAN §1.57 a single key column's nulls come **last** in both
+  directions, a composite key drives `InKeyOrder(paths)` in a file, a dataset and the compactor;
+  only a composite tuple holding a null is still refused, by name
+  (`Vorticity.Dataset/DatasetCompactor.cs:17`). The step-14 ratios are dated: the ratchets are
+  0.701, 1.148 and 0.759 (`bench/Vorticity.Benchmarks/RatioCheck.cs:368-370`).
+- §4.5, §10, §13: `select(i)` is `O(r² log² n)` as delivered (§9's note), not `O(r log² n)`;
+  immaterial at r ≤ 4.
+- §3, §8.1: `Explain()` is `ExplainAsync()` on both builders; §8.1 lacks the composite
+  `InKeyOrder(IReadOnlyList<string>, bool)` row.
+- §7: the n-gram Bloom's ASCII case-folding option is delivered (`Indexes/IndexPolicy.cs:176`);
+  only the `ILIKE` predicate waits.
+
+**§11, narrowed and said so.** The walk equivalence over files appended in 2, 3 and 11 pieces is
+held by `Writing/AppendTests.cs` (cursor equality after appending and post-hoc indexing) and
+`Indexes/RunMergeTests.cs` (≤ K runs), not by an oracle walk per piece count. `StringMatchTests`
+runs on one string column with pruning on and off; the `WithIndexes(false)` arm is
+`Indexes/TrigramIndexTests.cs`. The cost ratchets are the key-order group of `--ratio-check`, not
+of `--throughput --check`.
+
+**§13, each question.**
+1. The composite encoder's home — decided at step 16 (`VortexWriteOptions.KeyEncoder`).
+2. A ceiling on `InKeyOrder`'s splits per window — **open by decision**: the operation is correct
+   and its cost is reported (`ScanMetrics.WindowSplits`, `OrderPlan`); a cap would refuse an answer
+   the caller asked for. Reopened by a consumer's report, not by a guess.
+3. `SortedRuns` under `Auto` — **decided: never**. `Auto` builds only what is cheap
+   (`Indexes/AutoIndexTests.cs`); an ordered source is asked for by name.
+4. `Distinct` with no source — **decided: refused**, naming `IndexPolicy.Postings`
+   (`Keys/KeyCursorBuilder.cs:150`); a bounded hash set would need a cap somebody guessed.
+5. `EndsWith`, regular expressions, case folding — **out of scope, decided** (IMPL-PLAN §1.22):
+   each needs a structure of its own; a product choice, not a gap.
+6. The selection algorithm — **open by decision**: nothing asks for faster, and r ≤ 4 since
+   step 22.
+7. `IndexCacheBytes` at 64 MiB — calibrated at step 33: it bounds what an open file holds
+   (`File/VortexReadOptions.cs:12`).

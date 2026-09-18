@@ -11,10 +11,11 @@
 //
 // AND A SUFFIX, WHICH IS NOT DECORATION. At level 0 the objects OVERLAP -- two appends may both
 // start at the same key -- while a tree's keys must be unique. So the leaf key is the encoded
-// minimum followed by the object's first row position, eight big-endian bytes. The row encoding is
+// minimum followed by the object's uid, sixteen big-endian bytes, which VortexDataset.KeyOf appends
+// (step 40: a first-row suffix let a rebase add one object twice). The row encoding is
 // self-delimiting, so two different minima differ inside their encodings and the suffix never
-// decides; two equal minima fall through to the suffix, which is unique and deterministic. The
-// order the tree walks is therefore the key order, with insertion order as the tie-break.
+// decides; two equal minima fall through to the suffix, which is unique and a function of the
+// object. The order the tree walks is therefore the key order, with the uid as the tie-break.
 //
 // WHAT THE MINIMUM COSTS: one seek on the object's own key cursor, which the mandatory run serves.
 // An object with no such cursor -- an imported file this dataset did not write, with no run and no

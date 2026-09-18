@@ -38,15 +38,22 @@ public sealed class KeyCursorTests
     private const int Nulls = 500;
 
     [Theory]
-    [InlineData("strict_i64")]
-    [InlineData("dups_u32")]
-    [InlineData("nulls_i32")]
-    [InlineData("floats_f64")]
-    [InlineData("keys_utf8")]
-    public async Task TheFiveOperatorsLandWhereTheOracleSaysAndTheWalkIsExactlyTheEntries(string column)
+    [InlineData("strict_i64", false)]
+    [InlineData("dups_u32", false)]
+    [InlineData("nulls_i32", false)]
+    [InlineData("floats_f64", false)]
+    [InlineData("keys_utf8", false)]
+    [InlineData("strict_i64", true)]
+    [InlineData("dups_u32", true)]
+    [InlineData("nulls_i32", true)]
+    [InlineData("floats_f64", true)]
+    [InlineData("keys_utf8", true)]
+    public async Task TheFiveOperatorsLandWhereTheOracleSaysAndTheWalkIsExactlyTheEntries(string column, bool verify)
     {
+        // Under VerifyStatistics every zone a seek decodes is checked (docs/12 §3): a truthful
+        // column must land exactly where it does without the check.
         Decoders.EnsureRegistered();
-        await using Written written = await Written.CreateAsync();
+        await using Written written = await Written.CreateAsync(verify);
         List<FilterLiteral> oracle = Oracle(column);
 
         await using KeyCursor cursor = await written.File.Keys(column).OpenAsync();
@@ -67,14 +74,17 @@ public sealed class KeyCursorTests
     }
 
     [Theory]
-    [InlineData("strict_i64")]
-    [InlineData("dups_u32")]
-    [InlineData("nulls_i32")]
-    [InlineData("keys_utf8")]
-    public async Task AFullWalkEqualsTheMaterializedColumnInOrderAndReversesExactly(string column)
+    [InlineData("strict_i64", false)]
+    [InlineData("dups_u32", false)]
+    [InlineData("nulls_i32", false)]
+    [InlineData("keys_utf8", false)]
+    [InlineData("strict_i64", true)]
+    [InlineData("nulls_i32", true)]
+    [InlineData("keys_utf8", true)]
+    public async Task AFullWalkEqualsTheMaterializedColumnInOrderAndReversesExactly(string column, bool verify)
     {
         Decoders.EnsureRegistered();
-        await using Written written = await Written.CreateAsync();
+        await using Written written = await Written.CreateAsync(verify);
         List<FilterLiteral> oracle = Oracle(column);
 
         await using KeyCursor cursor = await written.File.Keys(column).OpenAsync();
@@ -684,12 +694,16 @@ public sealed class KeyCursorTests
 
         internal VortexFile File { get; }
 
-        internal static async Task<Written> CreateAsync()
+        internal static async Task<Written> CreateAsync(bool verify = false)
         {
             string path = System.IO.Path.Combine(
                 System.IO.Path.GetTempPath(), $"vorticity-keys-{Guid.NewGuid():N}.vortex");
             await WriteAsync(path);
-            return new Written(path, await VortexFile.OpenAsync(path, CancellationToken.None));
+            VortexOpenOptions options = new VortexOpenOptions
+            {
+                Read = new VortexReadOptions { VerifyStatistics = verify },
+            };
+            return new Written(path, await VortexFile.OpenAsync(path, options, CancellationToken.None));
         }
 
         public async ValueTask DisposeAsync()

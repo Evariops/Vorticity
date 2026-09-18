@@ -396,7 +396,87 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         _column = FilterEvaluator.Resolve(_context.Canonical, root, _field, (int)(end - start));
         _loadedStart = start;
         _loadedEnd = end;
+
+        if (_file.ReadOptions.VerifyStatistics)
+        {
+            Verify(zone, start, end);
+        }
     }
+
+    /// <summary>
+    /// The Class II checks <see cref="VortexReadOptions.VerifyStatistics"/> asks for
+    /// (docs/12-index-reads.md §3): the loaded zone's leading rows null exactly as the null count
+    /// says, its entries non-null and in IEEE key order, inside the zone's own stated bounds, and
+    /// ordered against its neighbours' — at or after the previous zone's minimum, at or before the
+    /// next zone's maximum, which holds however much a bound was widened. Without the option a lie
+    /// gives a wrong walk and never a fault; with it, the walk refuses to go on.
+    /// </summary>
+    private void Verify(int zone, long start, long end)
+    {
+        ZoneBounds own = _zones.Bounds(zone);
+        FilterLiteral previous = FilterLiteral.Null;
+        for (long row = start; row < end; row++)
+        {
+            FilterLiteral key = Literal(row);
+            if (row < _firstRow)
+            {
+                if (key.Kind != FilterLiteralKind.Null)
+                {
+                    throw Lie($"row {row} holds a value where the null count puts a null");
+                }
+
+                continue;
+            }
+
+            if (key.Kind != KeyKind || (key.Kind == FilterLiteralKind.Float && double.IsNaN(key.FloatValue)))
+            {
+                throw Lie($"row {row} holds a null or a NaN, which no sorted column has among its entries");
+            }
+
+            if (previous.Kind != FilterLiteralKind.Null && Compare(previous, key) > 0)
+            {
+                throw Lie($"row {row} is below row {row - 1}");
+            }
+
+            if (Outside(own, key))
+            {
+                throw Lie($"row {row} lies outside the bounds its zone states");
+            }
+
+            previous = key;
+        }
+
+        long first = Math.Max(start, _firstRow);
+        if (first >= end)
+        {
+            return;
+        }
+
+        if (zone > 0 && zone - 1 >= ZoneOf(_firstRow))
+        {
+            ZoneBounds before = _zones.Bounds(zone - 1);
+            if (before.HasMin && before.Min.Kind == KeyKind && Compare(before.Min, Literal(first)) > 0)
+            {
+                throw Lie($"row {first} is below the minimum zone {zone - 1} states");
+            }
+        }
+
+        if (zone + 1 < _zoneCount)
+        {
+            ZoneBounds after = _zones.Bounds(zone + 1);
+            if (after.HasMax && after.Max.Kind == KeyKind && Compare(Literal(end - 1), after.Max) > 0)
+            {
+                throw Lie($"row {end - 1} is above the maximum zone {zone + 1} states");
+            }
+        }
+    }
+
+    private static bool Outside(ZoneBounds bounds, FilterLiteral key) =>
+        (bounds.HasMin && bounds.Min.Kind == key.Kind && Compare(key, bounds.Min) < 0)
+        || (bounds.HasMax && bounds.Max.Kind == key.Kind && Compare(key, bounds.Max) > 0);
+
+    private static VortexFormatException Lie(string what) =>
+        new VortexFormatException($"A column whose statistics say it is sorted does not hold what they claim: {what}.");
 
     /// <summary>The comparison domain of a column, or none when it has no key order.</summary>
     /// <remarks>

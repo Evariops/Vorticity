@@ -1151,8 +1151,9 @@ internal static class ColumnCompressor
             }
         }
 
-        // Bit-packing: exact, patches included. Frame of reference's histogram is its own sweep
-        // until stage R5 fuses it into the pack (§3.2.3).
+        // Bit-packing: exact, patches included. Frame of reference's histogram comes from the
+        // ingest when the reference is zero and from its own walk otherwise (BitPackPlan; 11 §3.2.3
+        // as delivered: the bound and its second sweep were superseded by the exact walk).
         bool integers = node.Kind == CanonicalKind.Primitive && node.PType.IsInteger();
         BitPackPlan? packed = null;
         if (Allows(target, "fastlanes.bitpacked") && !(measured && integers && !stats.HasBounds))

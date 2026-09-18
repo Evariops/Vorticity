@@ -292,7 +292,10 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <remarks>
     /// The file is opened to learn what the entry must say — its rows and its identity — and its
     /// bytes are never read again, let alone rewritten. A file with no identity (one this library
-    /// did not write) is bound by the store's token instead, as §7 allows.
+    /// did not write) enters with a zero uid: it is scanned like any other, its tree key stands on
+    /// its object key, and it cannot be indexed by fragment until a compaction rewrites it with an
+    /// identity (docs/13-dataset.md §7, "as delivered"). A file whose schema is not the dataset's is
+    /// refused (§15.4).
     /// </remarks>
     public async ValueTask<ulong> ImportAsync(string objectKey, CancellationToken cancellationToken = default)
     {
@@ -309,6 +312,16 @@ public sealed class VortexDataset : IAsyncDisposable
                 .OpenAsync(source, new VortexOpenOptions(), cancellationToken).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))
             {
+                // §15.4: until schema evolution is decided, every object has the dataset's schema,
+                // and one with another is refused here rather than failing the first scan.
+                if (!Schema.IsDefault && file.Schema != Schema)
+                {
+                    throw new ArgumentException(
+                        $"The object '{objectKey}' has a schema other than the dataset's; a dataset " +
+                        "holds objects of one schema (docs/13-dataset.md §15.4).",
+                        nameof(objectKey));
+                }
+
                 entry = new ObjectEntry(
                     objectKey, Identity(file), file.RowCount, head.Length, UInt128.Zero, Summaries(file));
                 treeKey = await TreeKeyAsync(file, entry, RowCount, cancellationToken).ConfigureAwait(false);

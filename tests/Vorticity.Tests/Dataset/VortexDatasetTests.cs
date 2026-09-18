@@ -136,6 +136,34 @@ public sealed class VortexDatasetTests
     }
 
     [Fact]
+    public async Task AFileOfAnotherSchemaIsRefusedAtImportAndNothingIsCommitted()
+    {
+        // §15.4: "an object with another [schema] is refused" — at the import that would add it,
+        // not at the first scan that would trip over it. A nullable key is another schema.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        DType other = types.Struct(
+            ["key", "measure"],
+            [types.Primitive(PType.I64, Nullability.Nullable), types.Primitive(PType.F64, Nullability.NonNullable)],
+            Nullability.NonNullable);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        byte[] single = await OneFileAsync(types, schema, 1_000);
+        string key = CommitKey.ForData("foreign");
+        await store.PutIfAbsentAsync(key, single, default);
+
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, other, Options());
+        ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(
+            async () => await dataset.ImportAsync(key));
+        Assert.Contains("schema", refused.Message, StringComparison.Ordinal);
+
+        Assert.Equal(1UL, dataset.Version);
+        Assert.Equal(0, dataset.ObjectCount);
+        Assert.Single(await store.ListAsync(CommitKey.Prefix, null, 100, default));
+    }
+
+    [Fact]
     public async Task AnAppendMintsAnIdentityAndRecordsWhatItWrote()
     {
         // §7: the entry carries the uid the postscript holds and the hash the writer computed, so a

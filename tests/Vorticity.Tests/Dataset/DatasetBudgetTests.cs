@@ -20,11 +20,19 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
+using Vorticity.Arrays;
+using Vorticity.Buffers;
+using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
+using Vorticity.Indexes;
 using Vorticity.Scan;
+using Vorticity.Tests.Scan;
+using Vorticity.Types;
+using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -75,6 +83,7 @@ public sealed class DatasetBudgetTests
     [InlineData(1)]
     [InlineData(1_000)]
     [InlineData(100_000)]
+    [InlineData(1_000_000)]
     public async Task APointLookupCostsTheSameWhateverTheObjectCount(int objects)
     {
         // §9.2, invariant 1, on the axis a single-file test cannot see. The numbers are printed
@@ -265,5 +274,119 @@ public sealed class DatasetBudgetTests
         Assert.Equal(3, steps[0]);
         Assert.Equal(3, steps[1]);
         Assert.InRange(steps[2], 3, 4);
+    }
+
+    [Fact]
+    public async Task AnEqualityOnANonClusteringColumnCostsAConstantPlusOneTermPerUnrefutedObject()
+    {
+        // §9.2, invariant 2: "an equality lookup through a Bloom or a sorted run on a non-clustering
+        // column costs at most R′ requests plus a term proportional to the objects the summaries
+        // could not refute", with the constant part asserted across object counts. REAL objects
+        // here, because the term is what opening an object and asking its Bloom costs, which no
+        // synthetic leaf has. Two layouts of the same values: DISJOINT, where every object's
+        // `measure` range is its own and the summaries refute all but the one that holds the key;
+        // and INTERLEAVED, where every range spans the whole column, the summaries refute nothing,
+        // and each object's Bloom does. The difference between the two, per refuted object, is the
+        // term; it must be one number whatever the count.
+        //
+        // WHAT THIS DOES NOT SHOW: these objects are smaller than an open's first read, so the term
+        // is the open's cost and says nothing about the bytes a Bloom saves inside an object. That
+        // is the single-file half of the matrix, ReadBudgetTests, on sparse files of 1.31 and
+        // 13.1 GiB (§9.2's step 27 note).
+        Decoders.EnsureRegistered();
+        int[] counts = [4, 16, 48];
+        long[] constant = new long[counts.Length];
+        double[] term = new double[counts.Length];
+        for (int at = 0; at < counts.Length; at++)
+        {
+            (long disjoint, long opened) = await EqualityLookupAsync(counts[at], interleaved: false);
+            (long interleaved, long all) = await EqualityLookupAsync(counts[at], interleaved: true);
+            Assert.Equal(1, opened);
+            Assert.Equal(counts[at], all);
+            constant[at] = disjoint;
+            term[at] = (double)(interleaved - disjoint) / (counts[at] - 1);
+        }
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET BUDGET, INVARIANT 2: over {counts[0]}, {counts[1]} and {counts[2]} objects an equality on a Bloom-indexed column cost {constant[0]}, {constant[1]} and {constant[2]} requests when the summaries refute the rest, and {term[0]:F2}, {term[1]:F2} and {term[2]:F2} requests per object they cannot refute.\n"));
+
+        Assert.Equal(constant[0], constant[1]);
+        Assert.Equal(constant[0], constant[2]);
+        Assert.True(term[0] >= 1, "an object the summaries cannot refute costs at least its open");
+        Assert.Equal(term[0], term[1]);
+        Assert.Equal(term[0], term[2]);
+    }
+
+    /// <summary>
+    /// A cold equality on <c>measure</c> over <paramref name="objects"/> real objects, and what it
+    /// cost: the requests after the dataset is open, and the objects the summaries left to open.
+    /// </summary>
+    private static async Task<(long Requests, long Opened)> EqualityLookupAsync(int objects, bool interleaved)
+    {
+        const int rows = 256;
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType schema = types.Struct(["key", "measure"], [i64, i64], Nullability.NonNullable);
+        DatasetOptions options = new DatasetOptions
+        {
+            Seed = Seed,
+            ClusteringKey = ["key"],
+            Write = new VortexWriteOptions
+            {
+                RowBlockSize = 128,
+                Indexes = WritePolicy.None
+                    .For("key", IndexPolicy.SortedRuns.AsRequired())
+                    .For("measure", IndexPolicy.Bloom(falsePositivePpm: 100)),
+            },
+        };
+
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using (VortexDataset writer = await VortexDataset.CreateAsync(store, schema, options))
+        {
+            for (int o = 0; o < objects; o++)
+            {
+                long[] keys = new long[rows];
+                long[] measures = new long[rows];
+                for (int r = 0; r < rows; r++)
+                {
+                    keys[r] = ((long)o * rows) + r;
+                    measures[r] = 2L * (interleaved ? ((long)r * objects) + o : ((long)o * rows) + r);
+                }
+
+                await writer.AppendAsync(OneBatch(types, schema, keys, measures));
+            }
+        }
+
+        // The key is in object `objects / 2`, row 100, in both layouts; nothing else holds it.
+        long sought = 2L * (interleaved ? (100L * objects) + (objects / 2) : ((long)(objects / 2) * rows) + 100);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, options);
+        store.Reset();
+        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        long found = await dataset.Scan()
+            .Where(Expr.Eq(Expr.Field("measure"), Expr.Literal(FilterLiteral.From(sought))))
+            .WithMetrics(metrics)
+            .CountAsync();
+        Assert.Equal(1, found);
+        return (store.Requests, metrics.ObjectsOpened);
+    }
+
+    private static async IAsyncEnumerable<RecordBatch> OneBatch(
+        DTypeArena types, DType schema, long[] keys, long[] measures)
+    {
+        await Task.Yield();
+        CanonicalArena arena = new CanonicalArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        int key = arena.AddPrimitive(i64, keys.Length, Validity.NonNullable, PType.I64, Buffer(arena, keys));
+        int measure = arena.AddPrimitive(i64, measures.Length, Validity.NonNullable, PType.I64, Buffer(arena, measures));
+        int root = arena.AddStruct(schema, keys.Length, Validity.NonNullable, [key, measure]);
+        yield return new RecordBatch(arena, root, 0);
+    }
+
+    private static VortexBuffer Buffer(CanonicalArena arena, long[] values)
+    {
+        VortexBuffer buffer = arena.Allocate(values.Length * sizeof(long), sizeof(long), out Span<byte> bytes);
+        MemoryMarshal.Cast<long, byte>(values).CopyTo(bytes);
+        return buffer;
     }
 }

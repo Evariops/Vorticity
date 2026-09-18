@@ -1648,3 +1648,152 @@ articles on prolly trees and its `prolly` package; Auvolat and Taïani, *Merkle 
 the AT Protocol repository specification, for the MST in production. Normalised content-defined
 chunking: Xia et al., *FastCDC*, 2016. Hedged requests: Dean and Barroso, *The Tail at Scale*,
 2013. Secondary orders as copies: ClickHouse projections, Lance.
+
+## État — the closing audit *(2026-09-18, step 44)*
+
+Every section checked against the code of the day. ✅ delivered · ❌ rejected by a measurement ·
+⤳ out of scope or deferred by a written decision · ⬜ open. Where the body or a note above says
+otherwise, **this section is the one that is true**; the text above is the record of what was
+decided when. Paths are under `src/Vorticity.Dataset/`, tests under
+`tests/Vorticity.Tests/Dataset/`, unless another project is named.
+
+| § | status | where |
+|---|---|---|
+| 0, 1, 2 | ✅; §9.1's "in parallel" ⤳ (below) | the rows below |
+| 3 Objects and keys | ✅; the header's `WritePolicy` ⤳ (below) | `CommitFormat.cs`; `CommitKey.cs`; `CommitObjectBuilder.cs:100`; tests `CommitObjectTests.cs`, `CommitKeyTests.cs` |
+| 4.1 The prolly tree | ✅ | `Tree/BoundaryRule.cs:67`; `Tree/DatasetTree.cs`; tests `DatasetTreeTests.cs:112`, `:176`, `:314`, `:335` |
+| 4.2 What a node carries | ✅; three fields ⤳ (below) | `ObjectEntry.cs`; `ObjectSummaries.cs`; `Vorticity/Scan/ColumnSummary.cs:52`; tests `DatasetSummaryTests.cs` |
+| 4.3 Commits are paths | ✅; re-chunked page reuse ⤳ (below) | `Tree/DatasetTree.cs`; tests `DatasetTreeTests.cs:240` |
+| 5.1, 5.2 Levels, the invariant | ✅ | `DatasetLevels.cs:152`; `CompactionPlan.cs:74`, `:117` `MaxLevels`; tests `DatasetCompactionTests.cs:94`, `DatasetLevelTests.cs` |
+| 5.3 A compaction | ✅; zero-decode rewrite ⤳ debt 7 | `DatasetCompactor.cs:74`; `KeyOrderedMerge.cs:152` |
+| 5.4 The price | ✅ **measured at this audit** (below) | tests `DatasetCompactionTests.cs:156` |
+| 6.1–6.3 Runs, filter tree, fences | ✅ | the core: `Vorticity/Writing/KeyIndexBuilder.cs:132`, `Vorticity/Indexes/BloomIndexOptions.cs:44`, `Vorticity/Indexes/FenceTable.cs` |
+| 6.4 Fragments | ✅; an identity-less object ⤳ (below) | `Vorticity/Writing/VortexFileIndexer.cs:165`; `DatasetIndexer.cs:63`, `:97`; `FragmentBundle.cs:27`; tests `DatasetIndexingTests.cs` |
+| 6.5 Which structure | ✅ | `Vorticity/Writing/BloomBuilder.cs` (the symmetric rule) |
+| 6.6 Order beyond the lookup | ✅ rows 1–4, 6; row 5 ✅ for one non-float column | `DatasetScanBuilder.cs:193`, `:291`; `DatasetKeyCursor.cs:37`; `VortexDataset.cs:486` `RankAsync`; `Tree/DatasetTree.cs:72`; tests `DatasetKeyOrderTests.cs` |
+| 7 Identity and integrity | ✅; foreign objects ⤳ (below) | `Vorticity/File/FileIdentity.cs:29`; `DatasetVerifier.cs:81` |
+| 8.1–8.3 The commit protocol | ✅ | `DatasetCommitter.cs:80`; `DatasetOperation.cs`; tests `RebaseMatrixTests.cs` |
+| 9.1 Round trips | ✅; parallel object opens ⤳ (below) | `CommitPageSource.cs`; `Tree/DatasetTree.cs:72` |
+| 9.2 The two invariants | ✅ **completed at this audit** (below) | tests `DatasetBudgetTests.cs`; `Vorticity.Tests/Indexes/ReadBudgetTests.cs` |
+| 10 Lifecycle | ✅ | `DatasetVacuum.cs:92`; `DatasetVerifier.cs:81`; `DatasetIndexer.cs:97`; `VortexDataset.cs:454` `RepackAsync`; tests `DatasetVacuumTests.cs`, `DatasetVerifyTests.cs` |
+| 11 The store | ✅; multipart ⤳ (below); S3 ⤳ | `IObjectStore.cs`; `FileObjectStore.cs`; `MemoryObjectStore.cs`; `CountingObjectStore.cs`; tests `ObjectStoreContractTests.cs` |
+| 12 What stays | ✅ | `Vorticity/File/VortexFileRepair.cs`; `Vorticity.Tests/File/TornTailTests.cs` |
+| 13.A–M | ✅ as decided; 13.E's node-level Bloom pointer ⤳ (§4.2 below) | — |
+| 14 Tests | ✅ (map below) | — |
+| 15 Decisions left open | below | — |
+| 16 Staging | stages 1–4 ✅; stage 5, the S3 client, ⤳ (IMPL-PLAN §1.22) | — |
+
+**Delivered at this audit.**
+- **§15.4 held at the import.** `ImportAsync` took a file of any schema, and the first scan would
+  have tripped over it. It is refused now, naming §15.4, and nothing is committed
+  (`VortexDataset.cs:317`; `VortexDatasetTests.cs:139`).
+- **§5.4 measured.** A stream of 64 appends of random key ranges, drained after each, at F = 4 over
+  four levels (three crossings): **leveled rewrites 7.58× the rows appended, tiered 2.87×** — the
+  spec's F/2 per crossing (6 at F = 4) and "about L×" (3). The test asserts the design's bounds,
+  `(F + 1) × crossings` and `crossings`, and prints the bytes (`DatasetCompactionTests.cs:156`).
+  Step 41's exit criterion, which asked for this, is met here.
+- **§9.2 completed.** Invariant 1 reaches **10⁶ objects**: depth 3, 4 requests in 4 dependent
+  steps, 2 pages below the header — the "4 reads at a million" of §4.1. Invariant 2 has its test:
+  over 4, 16 and 48 real objects an equality on a Bloom-indexed, non-clustering column costs **4
+  requests** when the summaries refute the rest, and **4 more per object they cannot refute**, the
+  same number at every count (`DatasetBudgetTests.cs:279`). `DatasetBudgetTests` joined the
+  ratchets of `bench/gate.sh`, which step 40 had promised.
+
+**Narrowed, and why.** The size axis is 1.31 and 13.1 GiB (step 27's `ReadBudgetTests`), not
+100 GiB: the files are sparse and the claim is that nothing scales with the length, which two
+decades show as well as three. B is printed, not asserted equal: the pages' share of B is
+`depth × 256 KiB` by the forced boundary and moves with depth, which the count axis already pins.
+Invariant 2's objects are smaller than an open's first read, so its term is the open's cost; the
+bytes a Bloom saves inside an object are the single-file half. The fuzzer injects its crashes after
+a put ("one in five"), not between any two store calls: a crash before a put leaves nothing, and
+the one after it is the only one that can leave an orphan or a duplicate.
+
+**What the text above says that is no longer true.**
+- §3 (step 36): "serialized once to measure it, then again … the builder checks that the second
+  pass is the same length", and "relative until `Build`" — the header is serialized once, and a
+  reference stays relative to the body for ever; the reader adds the body's start (step 38). The
+  builder's own comment said the same and is corrected.
+- §4.2 (39a) and (39c): the leaf key's suffix is the object's **uid**, sixteen bytes, not its first
+  row position (step 40, where a first-row suffix let a rebase add an object twice); `ClusteringKey`'s
+  comment is corrected.
+- §6.6 (39b), (39c): "children are not prefetched yet" and "one `KeyCursor` per level-0 object" —
+  since debts 4, 11 and 12 the walk reads eight pages ahead and the cursor opens an object only when
+  it can hold the next key; the later notes say so, the earlier sentences stay as history.
+- §8.2 (step 38): "the four operations" — five, with `Repack` (`DatasetOperation.cs:93`).
+- §9.2 (step 27): "with the indexes in an identity-bound sidecar … 114 807 bytes" and the SHA-256
+  that "turns that into 1 157 against 11 525 requests" — the sidecar is retired; the test now reads a
+  fragment, and the figures are printed rather than pinned.
+- §6.1 (step 22): a chunk run within the 64 MiB budget stays as the builder's arrays and is laid
+  raw only past it; not every chunk run "is laid raw".
+- §4.1: the dataset's seed is **8 bytes** (`CommitHeader.Seed`, a `ulong`), not 16; it keys the
+  boundary rule's hash and nothing asks for more.
+
+**Deferred by decision, each with its reason.**
+- §3: the header's `WritePolicy` field exists and no writer sets it. The policy travels in each
+  object's own directory, where an append and an indexer read it; a dataset-wide default in the
+  header would be a second source of truth. Kept as a reserved field.
+- §4.2, §7, §13.E: the leaf entry carries no store token and no pointer to the object's file-level
+  filter, and a fragment reference is a `PageReference` — XXH3-128, no block range. The block range
+  is inside the fragment's own directory, which a reader opens anyway; the filter root is inside the
+  object's, and the summaries are what refutes an object without opening it. An object with no
+  identity (an import this library did not write) is scanned like any other and **cannot be indexed
+  by fragment until a compaction rewrites it with one**; the indexer refuses it by name
+  (`DatasetIndexingTests.cs:291`), and verify checks its length and reports it among the
+  `Unhashed` (`DatasetVerifier.cs:309`). "A foreign object is hashed once, by the
+  indexer" is therefore not delivered: a token in the entry is a page-format change, and the day an
+  import without identity must be indexed in place is the day it is worth it.
+- §4.3: a page whose content equals one already read after re-chunking is not reused by hash; only
+  the untouched, boundary-aligned pages are. The saving is a page per edit at most; not measured,
+  not built.
+- §6.6 row 5: the count by entries serves one non-float clustering column (`KeyRange.cs:54`); a
+  composite or float key falls back to opening the objects the summaries keep, correctly, and
+  `RankAsync` refuses a composite key by name, pointing at a count on the leading column
+  (`VortexDataset.cs:486`). The count reads every in-range leaf entry rather than internal row sums,
+  which costs the entries' pages and no object open.
+- §9.1, §13.L: data objects are opened one at a time (`ObjectCache.cs:17`), by decision: it makes a
+  double open impossible without a second map of opens in flight, and a scan consumes objects in
+  order. What the spec's "in parallel" buys is covered for the tree by the prefetch window; for the
+  objects it waits for a scan that reads more than one at once.
+- §11: `PutIfAbsentAsync` takes the whole object, so a multipart upload is out of reach of the
+  interface; `ObjectSegmentSink` buffers up to 1 GiB. The S3 library is not this one (§0); the
+  interface grows a streaming put when that library needs it.
+- Debt 3 of the plan: the `O(depth)` descent of a commit — four reads at a million objects, as
+  measured above; a step of its own past ~10⁷ objects (IMPL-PLAN §1.59).
+
+**§14, where each acceptance lives.** The counting matrix — `DatasetBudgetTests.cs` (both
+invariants, 1 to 10⁶ objects) and `Vorticity.Tests/Indexes/ReadBudgetTests.cs` (size). The
+interleaving fuzzer — `DatasetFuzzTests.cs:71`, `:161`. The rebase matrix — `RebaseMatrixTests.cs`
+rows 1–5 and 7; row 6, vacuum, is `DatasetVacuumTests.cs:97` and the fuzzer's lifecycle schedule.
+§5.2's invariant — `DatasetCompactionTests.cs:94`. Progressive indexing —
+`DatasetIndexingTests.cs:52`. Merge equivalence — `Vorticity.Tests/Indexes/RunMergeTests.cs`,
+against an oracle. The two tree oracles — `DatasetTreeTests.cs:112`, `:176`, `:314`. Order —
+`DatasetKeyOrderTests.cs:43`, `:79`, `:133`. Tampering — `DatasetVerifyTests.cs:53` to `:163`.
+Rust — `bench/crosscheck.sh` reads 16 compacted objects among its 854.
+
+**§15, each decision.**
+1. Prolly against B+tree — decided: prolly (§13.J).
+2. The constants — **open by design**, as the spec says: "defaults to measure against".
+   Where each stands:
+
+   | constant | default | measured? |
+   |---|---|---|
+   | `F` | 10, `CompactionPlan.cs:74` | the amplification it implies, at F = 4 (above) |
+   | level-0 ceiling | 8, `DatasetLevels.cs:152` | no |
+   | K runs per entry in a file | 4, `Vorticity/Writing/KeyIndexBuilder.cs:132` | its cost, n²/K (step 22) |
+   | K fragments per entry | 4 (`CompactionOptions.DefaultMaxFragments`) | no |
+   | filter-tree fan-out | 16, `Vorticity/Indexes/BloomIndexOptions.cs:44` | reads counted (step 24) |
+   | summarised columns | 32, `Vorticity/Scan/ColumnSummary.cs:52` | no |
+   | pages 64 / 128 / 256 KiB | `Tree/BoundaryRule.cs:67` | the mean page (step 37); the cap under injected latency, no |
+   | repack threshold | 0.25, `DatasetVacuum.cs` | one third live on the test data (43c) |
+   | header inline budget | 192 KiB, `DatasetCommitter.cs:247` | step 40 |
+   | prefetch window | 8, `Tree/DatasetTree.cs:72` | debt 4 |
+
+   A default without a measurement is a product setting until a workload says otherwise; none is a
+   correctness question, and each is a `CompactionOptions` or `DatasetOptions` field.
+3. A clustering key chosen by `Auto` — **open, recommended no**: the key fixes the write
+   amplification the user pays (§5.4), which is theirs to choose.
+4. Schema evolution — **open, a product decision** on which changes to allow; until then one schema
+   per dataset, now held at the import too (above).
+5. Deletes and updates — **out of scope, decided** (IMPL-PLAN §1.22).
+6. A commit coordinator — **outside the library, decided** (IMPL-PLAN §1.22); the protocol is
+   correct without one.

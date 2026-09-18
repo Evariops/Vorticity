@@ -36,7 +36,7 @@ public sealed class IndexWriteTests
     private static readonly string[] Statuses = ["open", "closed", "pending", "void"];
 
     [Fact]
-    public async Task TheDefaultsWriteNoDirectory()
+    public async Task WritePolicyNoneWritesNoDirectory()
     {
         Decoders.EnsureRegistered();
         (byte[] bytes, WriteReport report) = await WriteAsync(Options());
@@ -128,7 +128,7 @@ public sealed class IndexWriteTests
     }
 
     [Fact]
-    public async Task AKindNotBuiltYetIsReportedAbandonedWithItsReason()
+    public async Task AnIndexAbandonedEverywhereIsReportedWithItsReasonAndKeepsItsPolicy()
     {
         Decoders.EnsureRegistered();
         WritePolicy policy = WritePolicy.None

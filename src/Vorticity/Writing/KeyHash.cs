@@ -15,8 +15,8 @@
 // fixed-width value takes. Above that, XxHash3-64: dedicated paths under 128 and 240 bytes, a
 // vectorised stripe loop beyond, the hash upstream's Bloom filter uses, from the one first-party
 // package docs/03-architecture.md §1 admits. A Bloom filter needs XxHash3 on EVERY value, short
-// ones included, so when the block hash buffer of §3.2.1 arrives the short arm will be conditioned
-// on whether a filter is live rather than on the length alone -- a reason to keep both arms here.
+// ones included, which is why it hashes its own rows (BloomBuilder) rather than borrowing these:
+// the shared block hash buffer of 11 §3.2.1 was not built, and this arm serves the distinct table.
 //
 // WHAT THE SHORT ARM DOES NOT FIX, recorded because it was guessed wrong twice before it was
 // isolated: `struct` and `varbin` are 3 % to 6 % slower under XxHash3 than under the FNV-1a this

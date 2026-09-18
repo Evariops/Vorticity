@@ -150,6 +150,64 @@ public sealed class DatasetCompactionTests
             $"DATASET COMPACTION STREAM: {compactions} compaction(s) over {appended.Count} appended rows left {dataset.ObjectCount} object(s) across {dataset.Levels.Count} level(s), lag 0.\n"));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheWriteAmplificationIsMeasuredOverAStreamThatReachesSeveralLevels(bool leveled)
+    {
+        // §5.4, "the price, stated": leveled rewrites a row about F/2 times per level it crosses,
+        // tiered about once. Measured in ROWS, which is what the sentence counts: the rows every
+        // compaction rewrote, over the rows appended, with compaction drained after every append —
+        // the steady state of a dataset whose compactor keeps up.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(
+            store, schema, leveled ? Clustered() : Unclustered());
+
+        const int fanout = 4;
+        CompactionOptions options = Options(target: 2 << 10) with { Fanout = fanout };
+        Random random = new Random(0xA3F1);
+        long appended = 0;
+        long rewritten = 0;
+        long bytesIn = 0;
+        long bytesOut = 0;
+        for (int round = 0; round < 64; round++)
+        {
+            int count = 50 + random.Next(100);
+            await dataset.AppendAsync(Shuffled(types, schema, random.Next(1_000_000), count, random.Next()));
+            appended += count;
+            while (await dataset.CompactAsync(options) is { } step)
+            {
+                Assert.Equal(OperationOutcome.Applied, step.Outcome);
+                rewritten += step.Rows;
+                bytesIn += step.BytesIn;
+                bytesOut += step.BytesOut;
+            }
+        }
+
+        int levels = dataset.Levels.Count;
+        double amplification = (double)rewritten / appended;
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET WRITE AMPLIFICATION ({(leveled ? "leveled" : "tiered")}, F = {fanout}): {rewritten} rows rewritten for {appended} appended, {amplification:F2}x over {levels} level(s); {bytesIn} bytes read, {bytesOut} written.\n"));
+
+        Assert.True(levels >= 3, $"the stream must cross at least two levels; it reached {levels}");
+        Assert.Equal(appended, dataset.RowCount);
+        Assert.True(amplification >= 1.0, "every row but level 0's few has been rewritten at least once");
+
+        // The bounds are the design's, not chosen: a tiered crossing rewrites a row exactly once,
+        // so no row is rewritten more often than there are levels above level 0; a leveled crossing
+        // rewrites the level's overlapping objects, F/2 on average (the spec's number) and at most
+        // F + 1 times the rows that arrived. Measured on 2026-09-18: 7.58x leveled, 2.87x tiered,
+        // over three crossings at F = 4.
+        int crossings = levels - 1;
+        Assert.True(
+            leveled ? amplification <= (fanout + 1) * crossings : amplification <= crossings,
+            $"{amplification:F2}x over {crossings} crossing(s) exceeds what the policy can rewrite");
+    }
+
     [Fact]
     public async Task ASeekOpensLevelZeroAndOneObjectPerLevelAbove()
     {

@@ -1176,3 +1176,93 @@ Parquet Bloom filter: `apache/parquet-format` `BloomFilter.md` (split-block, xxH
 XXH3: `Cyan4973/xxHash` `doc/xxhash_spec.md`; the .NET implementation is
 `System.IO.Hashing.XxHash3` in `dotnet/runtime` (MIT).
 Log-structured runs: O'Neil, Cheng, Gawlick, O'Neil, *The log-structured merge-tree*, 1996.
+
+## État — the closing audit *(2026-09-18, step 44)*
+
+Every section checked against the code of the day. ✅ delivered · ❌ rejected by a measurement ·
+⤳ out of scope or superseded by a written decision · ⬜ open. Where the body or a note above says
+otherwise, **this section is the one that is true**; the text above is the record of what was
+decided when. Code paths are under `src/Vorticity/`, test paths under `tests/Vorticity.Tests/`.
+**No requirement of this document is open in the code**; what the audit found is text.
+
+| § | status | where |
+|---|---|---|
+| 1, 2 | ✅ | `Indexes/IndexKinds.cs` (the six kinds); `Indexes/SplitBlockBloom.cs:44` |
+| 3.1 Rust reads an indexed file | ✅ | `bench/crosscheck.sh`; `Writing/RoundTripSweepTests.cs` rotates the policies |
+| 3.2 The postscript entry | ✅ | `Indexes/IndexDirectory.cs:152`; `File/FileIdentity.cs:29` |
+| 3.3 Carriers not used | ✅ as a decision | the sidecar row is history (below) |
+| 4.1 Directory | ✅ | `Indexes/IndexDirectory.cs:421` `TryParse`; `File/VortexFile.Indexes.cs:148` refusal; tests `Indexes/IndexDirectoryTests.cs`, `Indexes/LyingIndexTests.cs` |
+| 4.2, 4.3 Runs, generations | ✅ | `Indexes/FenceTable.cs`; `Writing/BloomTreeWriter.cs:91`; `Indexes/BloomIndexOptions.cs:44` (fan-out 16) |
+| 5.1 `bloom.sbbf.v1` | ✅ | `Indexes/SplitBlockBloom.cs`; `Writing/BloomBuilder.cs`; `Indexes/BloomPruner.cs`; tests `Indexes/BloomVectorTests.cs`, `Indexes/ParquetBloomVectorTests.cs` |
+| 5.2 `bloom.ngram3.v1` | ✅ | `Indexes/Trigrams.cs:45`; `Indexes/IndexPolicy.cs:231` |
+| 5.3 `dict.probe.v1` | ✅ | `Writing/IndexWriter.cs:1404`; `Indexes/KeyIndexPruner.cs:155`; its cost is debt 5 (below) |
+| 5.4 The file-level filter | ✅ | `Indexes/BloomPruner.cs:149`; `Scan/VortexFilePruningExtensions.cs:55` `MayMatchAsync` |
+| 5.5 `Auto` by default | ✅ | `Writing/VortexWriteOptions.cs:92`; `Writing/IndexWriter.cs:66`; tests `Indexes/AutoIndexTests.cs` |
+| 6.1, 6.2, 6.4 Locating indexes | ✅ | `Writing/KeyIndexBuilder.cs:132` (K = 4); `Writing/RunMerge.cs`; `Keys/SortedRunsSource.cs:51`; tests `Indexes/RunMergeTests.cs`, `Indexes/LocatingIndexTests.cs` |
+| 6.3 `hash.rows.v1` | ❌ | measured and withdrawn at step 31 (IMPL-PLAN §1.35) |
+| 6.5, 6.6 | ✅ | `Indexes/IKeyEncoder.cs`; `Compute/ZonePruningPlan.cs`; tests `Keys/CompositeKeyTests.cs` |
+| 7.1–7.3 Writing an index | ✅ | `Writing/IndexWriter.cs`; `Writing/WriteReport.cs`; tests `Writing/IndexWriteTests.cs`, `Writing/IndexAllocationTests.cs` |
+| 8 Existing files, appends | ✅ | `Writing/VortexFileWriter.Append.cs:90`; `Writing/VortexFileIndexer.cs:66`, `:165` `BuildFragmentAsync`; `Indexes/IndexContainer.cs:142` `Unbound`; `File/VortexReadOptions.cs:89` `IndexFragments`; `File/VortexFile.Indexes.cs:349`; tests `Writing/AppendTests.cs`, `Indexes/FragmentBindingTests.cs`, `Indexes/IndexFragmentTests.cs` |
+| 8.1 The 2026-09-17 proposal | ⤳ superseded by 13 | per item below |
+| 9 Editions | ✅; migrations ⤳ | conditional on an upstream id (IMPL-PLAN §1.22) |
+| 10 Tests | ✅ | the list below says where each lives |
+| 11 Open questions | all decided | below |
+
+**What the text above says that is no longer true.**
+- §3.3, §8 (way 3, the step-17 "Sidecar" bullet, the step-26 bullets), §8.1.1: the sidecar —
+  `file.vortex.idx`, `WriteSidecarAsync`, `IndexSidecarPath`, `vxdump --sidecar`, the SHA-256 of
+  the file — is gone (step 42d). Post-hoc indexes for a store that cannot append are fragments in a
+  commit object (13 §6.4); `vxdump --fragment P --verify` checks one. A container naming only the
+  retired field 8 is refused as binding neither identity nor token
+  (`Indexes/IndexContainer.cs:168`).
+- §4.1's proto block: field 8 (`file_sha256`) is retired and never reused; fields 7 and 9 serve
+  fragments; fields 10–12 (`file_identity`, `file_token`, `file_hash`) and `Segment.checksum = 4`
+  exist and are not in the block (`Indexes/IndexDirectory.cs:207-227`).
+- §4.1 (12a): "a directory is written whenever the policy asked for anything" — under `Auto` an
+  empty directory is not written; it is when it lists something or the policy is the caller's own
+  (`Writing/IndexWriter.cs:1490`).
+- §4.2, §6.1, §6.2 (12c): one run **per chunk** and a table that "becomes the run" — since step 22
+  the chunk runs are merged into one run per entry, and a run past 64 segments keeps its table as
+  fence pages.
+- §5.1 (12b): "one entry per resolution … the packed `n_blocks` table" — since step 24, one entry per
+  column holding a filter tree; options version 2.
+- §5.2, §6.4, §6.6: the "prerequisite" predicates exist (`Expressions/VortexExpr.cs:493-510`).
+- §5.4: the file filter is the root of each run's tree, built from the exact set; the API is
+  `MayMatchAsync`.
+- §5.5, §7.2, §7.3: `IndexBudgetBytes` is `IndexBudgetPerMille` = 100, a share of the data bytes
+  (`Writing/VortexWriteOptions.cs:127`).
+- §7.1 (12a): "the default is `WritePolicy.None`" — it is `Auto` since 12e; "a kind this writer
+  does not build yet" — every kind is built; the test once named for it is now
+  `AnIndexAbandonedEverywhereIsReportedWithItsReasonAndKeepsItsPolicy`.
+- §7.1: `VortexFileWriter.Append(path)` is `AppendAsync(path, options, ct)`.
+- §7.2, which has no note: builders are owned by `IndexWriter`, not by the `ColumnWriter`; the
+  Bloom hashes its own rows and the key builder keeps its own `ChunkKeys` (no shared hash buffer,
+  11 §3.2.1); runs are written between chunks, not at `CompleteAsync`.
+- §8: `previous_eof` is written and not read; the repair walks back to an EOF marker
+  (`File/VortexFileRepair.cs`).
+- §8 (42a): the parameterless `IndexSource` and `CreateIndexContext()` are gone; per-origin forms
+  exist (`File/VortexFile.Indexes.cs:88-106`).
+- §10: "the fuzzer owns this" — `Indexes/LyingIndexTests.cs`, `Indexes/BloomTreeTests.cs` and
+  `Indexes/FenceTreeTests.cs` own it; "`WriteAllocationTests` gets one row per kind" is
+  `Writing/IndexAllocationTests.cs`.
+
+**§8.1, item by item.** 8.1.1 — addressed: no hash on the read path, the torn tail, checked
+directories, the commit protocol, fragments over block ranges. 8.1.2 — delivered through 13, except
+principle 1 for a single file, which keeps its in-place append (13 §12). 8.1.3 — superseded: no
+`index/*.vxix` and no `manifest/`; commit objects under `commit/` and fragments inside them
+(`Vorticity.Dataset/CommitKey.cs`, `FragmentBundle.cs`). 8.1.4 — delivered (`File/FileIdentity.cs`),
+S3's `VersionId` ⤳ with the S3 client. 8.1.5 — `VortexDataset.AppendAsync`, `DatasetIndexer`.
+8.1.6 — put-if-absent and rebase delivered; the `_latest` probes replaced by one `List` (13 §8.3).
+8.1.7 — compaction and `DatasetIndexer.RebuildAsync`; fragment merge is a bundle (13 §6.4); the
+`vxdump` verbs ⤳, 13 does not ask for them. 8.1.8 — `CountingObjectStore`, `DatasetBudgetTests`.
+8.1.9 — as 13 §12. 8.1.10 — `IObjectStore`, three stores; S3 ⤳. 8.1.11 — 13 §14's tests.
+8.1.12 — the six decisions, each resolved by 13 §13.I.
+
+**§11, each question.** The `Auto` thresholds — decided at step 33 (20 ‰, `min_distinct` 8). The
+file's index budget, which the question also names — `IndexBudgetPerMille` = 100 since 12a, **a
+product default, not a calibration**: how much of a file a caller trades for pruning is a
+storage-against-reads choice per deployment. `dict.probe` as a kind — decided at step 33, read by the
+pruner. A multi-column Bloom — refused at step 33; `ForKey(…, SortedRuns)` answers the question. A
+public probe — answered by 12 §5.1. The default `k` — the tree fan-out, 16, a format version rather
+than a default; `Auto` builds a tree (`Indexes/IndexPolicy.cs:75`). The hash dependency —
+`System.IO.Hashing`, decided 2026-09-15.
