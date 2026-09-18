@@ -180,8 +180,10 @@ it believes a byte: one flipped bit refuses the directory whole, as a stale one 
 every region it reads to its checksum (`IndexSegment.Holds`), and a region that fails costs what a
 malformed payload already cost: the Bloom and key pruners make no claim for the blocks it covers,
 and a key source refuses with a `VortexFormatException`. The read cost is one XXH3-64 per region
-read, cached regions excepted; nothing reads a region to check it. Version 1 is still read, without
-checksums: the forged fixture of §10 is one. The price on disk is 8 bytes per directory and 9 per
+read, cached regions excepted; nothing reads a region to check it. Version 1 was still read, without
+checksums, for "the forged fixture of §10". *Corrected 2026-09-18: that fixture never existed (see
+§10), nothing has written version 1 since step 21, and the reader now refuses it like any unknown
+version, with its reason; the file reads without the index.* The price on disk is 8 bytes per directory and 9 per
 region. The test the format could not pass before now passes: a Bloom filter whose bits are zeroed
 and whose framing is kept drops no row, and the same file with forged checksums does, which is what
 the checksum is for (`LyingIndexTests.AZeroedFilterIsCaughtByItsChecksumAndCostsNoRow`).
@@ -1081,6 +1083,13 @@ migration changes a payload byte.
   a postings index, a sorted run and a deliberately invalid entry; `verify_forged` reads it with a
   strict 0.86.1 session and compares every scalar. This is the test of §3.1 and it runs in
   `bench/crosscheck.sh`.
+  *As delivered, and corrected 2026-09-18.* No Rust forge writes an index directory:
+  `tools/conformance-gen` forges only `negative/unknown_*_id` and `legacy/stats_layout`. The test of
+  §3.1 is delivered the other way round, and more widely. `bench/crosscheck.sh` hands Rust 0.86.1 the
+  whole corpus as this library writes it, every file with a directory. The policies rotate: Bloom at
+  three resolutions, postings, sorted runs cut into small segments, n-gram kinds, and `Auto` with
+  payload regions between the data chunks. Appends, indexing after the fact and compacted objects are
+  among them. 854 files are read and compared scalar by scalar.
 - **Equivalence property.** For each kind, on generated data: every supported predicate, indexes on
   and off, identical row sets ([08-semantics.md](08-semantics.md) §1's harness), on a file written
   once and on the same rows written then appended in two, three and eleven pieces.

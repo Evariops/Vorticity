@@ -326,6 +326,13 @@ public sealed class VortexWriteOptions
     /// (`vortex-file-0.86.1/src/strategy.rs`). Every emitted chunk but the last is a multiple of
     /// it.
     /// </para>
+    /// <para>
+    /// WRITE ATOMICITY changes with it, and the contract says so: a batch handed to
+    /// <c>WriteAsync</c> is no longer guaranteed to have reached the sink when the call returns.
+    /// Rows are held until a block fills or <c>CompleteAsync</c> runs. Nothing about durability
+    /// changes -- the sink was never flushed per batch -- but a caller reading the sink's position
+    /// to infer progress sees it move in blocks. <c>null</c> restores one chunk per call exactly.
+    /// </para>
     /// </remarks>
     public int? RowBlockSize { get; init; } = 8192;
 
@@ -358,20 +365,4 @@ public sealed class VortexWriteOptions
     /// </para>
     /// </remarks>
     public long? DataBlockTargetBytes { get; init; } = 1L << 20;
-
-    /// <summary>
-    /// WRITE ATOMICITY, which <see cref="RowBlockSize"/> changes and which the contract has to say
-    /// out loud: a batch handed to <c>WriteAsync</c> is no longer guaranteed to have reached the
-    /// sink when the call returns.
-    /// </summary>
-    /// <remarks>
-    /// Before repartitioning, one <c>WriteAsync</c> was one chunk and its segments were with the
-    /// sink before the returned task completed. With accumulation, rows are held in the writer
-    /// until a block fills or <c>CompleteAsync</c> runs. Nothing about durability changes -- the
-    /// sink was never flushed per batch either -- but a caller that was reading the sink's position
-    /// to infer progress will see it move in blocks. Setting <see cref="RowBlockSize"/> to
-    /// <c>null</c> restores one chunk per call exactly.
-    /// </remarks>
-    internal const string AtomicityNote =
-        "WriteAsync buffers rows until a block fills; CompleteAsync flushes the remainder.";
 }

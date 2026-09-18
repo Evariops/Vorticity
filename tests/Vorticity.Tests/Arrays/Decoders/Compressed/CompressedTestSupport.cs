@@ -19,7 +19,7 @@ using Vorticity.Types;
 
 namespace Vorticity.Tests.Arrays.Decoders.Compressed;
 
-/// <summary>Registers the compressed decoders, plus stand-ins for the canonical ones.</summary>
+/// <summary>Registers the compressed decoders; the canonical ones are the table's own.</summary>
 internal static class TestDecoders
 {
     private static readonly object Gate = new();
@@ -52,11 +52,6 @@ internal static class TestDecoders
             Register(AlpRdDecoder.Instance);
             Register(FsstDecoder.Instance);
             Register(OnPairDecoder.Instance);
-
-            Register(new StubPrimitiveDecoder());
-            Register(new StubBoolDecoder());
-            Register(new StubVarBinViewDecoder());
-            Register(new StubConstantDecoder());
         }
     }
 
@@ -213,15 +208,6 @@ internal sealed class DecodeHarness : IDisposable
         return harness;
     }
 
-    /// <summary>Builds a harness over raw segment bytes and an explicit encoding table.</summary>
-    internal static DecodeHarness LoadRaw(byte[] segment, string[] specs)
-    {
-        TestDecoders.EnsureRegistered();
-        DecodeHarness harness = new(new ScanContext(specs));
-        harness.LoadSegment(segment);
-        return harness;
-    }
-
     /// <summary>Decodes the loaded root at the given dtype and length.</summary>
     internal int DecodeRoot(DType dtype, int length) =>
         Scan.Decode.DecodeRoot(Scan.Nodes.Root, dtype, length);
@@ -275,122 +261,5 @@ internal sealed class DecodeHarness : IDisposable
             VortexBuffer.FromPinned(
                 pinned.AsSpan(offset, segment.Length), VortexLimits.MaxAlignmentExponent),
             Scan.ArrayEncodings);
-    }
-}
-
-/// <summary>Minimal <c>vortex.primitive</c>: one values buffer and an optional validity child.</summary>
-internal sealed class StubPrimitiveDecoder : ArrayDecoder
-{
-    public override ReadOnlySpan<byte> IdUtf8 => "vortex.primitive"u8;
-
-    public override ArrayEncodingId EncodingId => ArrayEncodingId.Primitive;
-
-    public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
-    {
-        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, "vortex.primitive");
-        Validity validity = context.DecodeValidity(in node, 0, dtype.Nullability, length);
-        return context.Canonical.AddPrimitive(
-            dtype, length, validity, dtype.PType, node.GetBuffer(0));
-    }
-}
-
-/// <summary>Minimal <c>vortex.bool</c>: one bitmap buffer, a bit offset and optional validity.</summary>
-internal sealed class StubBoolDecoder : ArrayDecoder
-{
-    public override ReadOnlySpan<byte> IdUtf8 => "vortex.bool"u8;
-
-    public override ArrayEncodingId EncodingId => ArrayEncodingId.Bool;
-
-    public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
-    {
-        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, "vortex.bool");
-        BoolMetadata metadata = node.Metadata.IsEmpty
-            ? new BoolMetadata(0)
-            : BoolMetadata.Read(node.Metadata);
-        Validity validity = context.DecodeValidity(in node, 0, dtype.Nullability, length);
-        return context.Canonical.AddBool(
-            dtype, length, validity, node.GetBuffer(0), (int)metadata.Offset);
-    }
-}
-
-/// <summary>Minimal <c>vortex.varbinview</c>: data buffers first, views LAST.</summary>
-internal sealed class StubVarBinViewDecoder : ArrayDecoder
-{
-    public override ReadOnlySpan<byte> IdUtf8 => "vortex.varbinview"u8;
-
-    public override ArrayEncodingId EncodingId => ArrayEncodingId.VarBinView;
-
-    public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
-    {
-        if (node.BufferCount < 1)
-        {
-            throw new VortexFormatException("vortex.varbinview needs at least a views buffer.");
-        }
-
-        int dataCount = node.BufferCount - 1;
-        VortexBuffer[] data = new VortexBuffer[dataCount];
-        for (int i = 0; i < dataCount; i++)
-        {
-            data[i] = node.GetBuffer(i);
-        }
-
-        Validity validity = context.DecodeValidity(in node, 0, dtype.Nullability, length);
-        return context.Canonical.AddVarBinView(
-            dtype, length, validity, node.GetBuffer(dataCount), data);
-    }
-}
-
-/// <summary>
-/// Minimal <c>vortex.constant</c>: the protobuf <c>ScalarValue</c> is BUFFER 0 (contract §0a C1).
-/// Only the Bool and Primitive cases the compressed tests need are implemented.
-/// </summary>
-internal sealed class StubConstantDecoder : ArrayDecoder
-{
-    public override ReadOnlySpan<byte> IdUtf8 => "vortex.constant"u8;
-
-    public override ArrayEncodingId EncodingId => ArrayEncodingId.Constant;
-
-    public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
-    {
-        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, "vortex.constant");
-        TypedScalar scalar = TypedScalarReader.Read(
-            node.GetBuffer(0).Span, dtype, context.Scalars, context.Types);
-
-        Validity validity = scalar.IsNull
-            ? Validity.AllInvalid
-            : Validity.FromNullability(dtype.Nullability);
-
-        if (dtype.Kind == DTypeKind.Bool)
-        {
-            int bytes = (length + 7) / 8;
-            if (bytes == 0)
-            {
-                return context.Canonical.AddBool(dtype, length, validity, VortexBuffer.Empty, 0);
-            }
-
-            VortexBuffer bits = context.Canonical.Allocate(bytes, 8, out Span<byte> bitmap);
-            if (!scalar.IsNull && scalar.AsBool)
-            {
-                bitmap.Fill(0xFF);
-            }
-
-            return context.Canonical.AddBool(dtype, length, validity, bits, 0);
-        }
-
-        int width = dtype.PType.ByteWidth();
-        int total = width * length;
-        if (total == 0)
-        {
-            return context.Canonical.AddPrimitive(
-                dtype, length, validity, dtype.PType, VortexBuffer.Empty);
-        }
-
-        VortexBuffer values = context.Canonical.Allocate(total, width, out Span<byte> destination);
-        if (!scalar.IsNull)
-        {
-            scalar.WriteTo(destination, dtype.PType);
-        }
-
-        return context.Canonical.AddPrimitive(dtype, length, validity, dtype.PType, values);
     }
 }

@@ -50,9 +50,9 @@ public sealed class ScanIoTests
         // Every field's own segments, from the layout tree - not guessed from offsets.
         HashSet<uint>[] perField = new HashSet<uint>[fieldCount];
 
-        // The subset a Phase 1 read actually needs: the zones child of a vortex.zoned layout is
-        // never read, because Phase 1 does not prune (contract §11.3). Asserting against the whole
-        // subtree would demand I/O the design deliberately skips.
+        // The subset an unfiltered read actually needs: the zones child of a vortex.zoned layout is
+        // read only by pruning, which an unfiltered scan does not run (contract §11.3). Asserting
+        // against the whole subtree would demand I/O the design deliberately skips.
         HashSet<uint>[] read = new HashSet<uint>[fieldCount];
         for (int k = 0; k < fieldCount; k++)
         {

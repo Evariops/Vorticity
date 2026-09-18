@@ -75,12 +75,6 @@ internal readonly struct OrderI64 : IRowOrdering<ulong>
     public static ulong ToOrdered(ulong raw) => raw ^ 0x8000_0000_0000_0000ul;
 }
 
-/// <inheritdoc cref="OrderI8"/>
-internal readonly struct OrderI128 : IRowOrdering<UInt128>
-{
-    public static UInt128 ToOrdered(UInt128 raw) => raw ^ (UInt128.One << 127);
-}
-
 /// <summary>
 /// IEEE 754, made totally ordered: a non-negative gets its sign bit set, a negative gets every bit
 /// flipped. Negatives then descend as their magnitude grows, <c>-0.0</c> lands just below

@@ -31,9 +31,6 @@ internal sealed class NullCountAccumulator
     /// </summary>
     internal HashSet<string> AmbiguousPaths { get; } = new HashSet<string>(StringComparer.Ordinal);
 
-    /// <summary><see langword="true"/> when at least one path is ambiguous.</summary>
-    internal bool Ambiguous => AmbiguousPaths.Count > 0;
-
     /// <summary>The accumulated counts, keyed by path.</summary>
     internal IReadOnlyDictionary<string, long> Counts => _counts;
 

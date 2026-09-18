@@ -245,7 +245,7 @@ internal sealed class BitPackPlan
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong Frame(ulong bits, ulong reference, int elementBits) =>
-        unchecked(bits - reference) & WidthMask(elementBits);
+        unchecked(bits - reference) & BitWords.Mask(elementBits);
 
     /// <summary>
     /// <c>(v &lt;&lt; 1) ^ (v &gt;&gt; (bits - 1))</c> with an arithmetic right shift: the sign bit
@@ -259,17 +259,10 @@ internal sealed class BitPackPlan
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong ZigZag(ulong bits, int elementBits)
     {
-        ulong width = WidthMask(elementBits);
+        ulong width = BitWords.Mask(elementBits);
         ulong sign = 0UL - ((bits >> (elementBits - 1)) & 1);
         return ((bits << 1) ^ sign) & width;
     }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ulong WidthMask(int elementBits) =>
-        elementBits == 64 ? ulong.MaxValue : (1UL << elementBits) - 1;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int BitLength(ulong value) => 64 - BitOperations.LeadingZeroCount(value);
 
     /// <summary>
     /// Both width histograms in one walk, with the physical type resolved before the walk starts.

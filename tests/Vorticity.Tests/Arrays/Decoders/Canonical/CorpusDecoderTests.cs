@@ -16,8 +16,6 @@ namespace Vorticity.Tests.Arrays.Decoders.Canonical;
 
 public sealed class CorpusDecoderTests
 {
-    static CorpusDecoderTests() => CanonicalDecoders.RegisterAll();
-
     public static TheoryData<string> Entries()
     {
         TheoryData<string> data = new TheoryData<string>();

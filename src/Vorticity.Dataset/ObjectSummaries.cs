@@ -489,42 +489,7 @@ public sealed class ObjectSummaries : IEquatable<ObjectSummaries>
         }
     }
 
-    private static Span<byte> WriteVarint(Span<byte> destination, ulong value)
-    {
-        int at = 0;
-        while (value >= 0x80)
-        {
-            destination[at++] = (byte)(value | 0x80);
-            value >>= 7;
-        }
+    private static Span<byte> WriteVarint(Span<byte> destination, ulong value) => TreePage.WriteVarint(destination, value);
 
-        destination[at++] = (byte)value;
-        return destination[at..];
-    }
-
-    private static ulong ReadVarint(ReadOnlySpan<byte> value, ref int at)
-    {
-        ulong result = 0;
-        int shift = 0;
-        while (true)
-        {
-            if (at >= value.Length)
-            {
-                throw new CommitFormatException("A node's summaries end inside a varint.");
-            }
-
-            byte b = value[at++];
-            result |= (ulong)(b & 0x7F) << shift;
-            if ((b & 0x80) == 0)
-            {
-                return result;
-            }
-
-            shift += 7;
-            if (shift > 63)
-            {
-                throw new CommitFormatException("A varint of more than ten bytes is not a varint.");
-            }
-        }
-    }
+    private static ulong ReadVarint(ReadOnlySpan<byte> value, ref int at) => TreePage.ReadVarint(value, ref at, "A node's summary");
 }

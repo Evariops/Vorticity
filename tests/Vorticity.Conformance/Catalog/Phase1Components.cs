@@ -88,8 +88,6 @@ internal static class Phase1Components
                           !ArrayDecoderTable.IsImplemented(ArrayEncodingId.Bool) &&
                           !ArrayDecoderTable.IsImplemented(ArrayEncodingId.Struct);
 
-        CanonicalDecoders.RegisterAll();
-
         Register(BitPackedDecoder.Instance);
         Register(ByteBoolDecoder.Instance);
         Register(DictDecoder.Instance);

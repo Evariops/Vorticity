@@ -13,8 +13,6 @@ namespace Vorticity.Tests.Arrays.Decoders.Canonical;
 
 public sealed class DecoderGuardTests
 {
-    static DecoderGuardTests() => CanonicalDecoders.RegisterAll();
-
     private static byte[] I32(params int[] values)
     {
         byte[] bytes = new byte[values.Length * 4];

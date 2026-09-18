@@ -195,7 +195,9 @@ public static class TreePage
         return bytes;
     }
 
-    private static Span<byte> WriteVarint(Span<byte> destination, ulong value)
+    /// <summary>Writes an unsigned LEB128 varint; the rest of <paramref name="destination"/>.</summary>
+    /// <remarks>The one varint writer of the dataset's canonical encodings: pages and summaries.</remarks>
+    internal static Span<byte> WriteVarint(Span<byte> destination, ulong value)
     {
         int at = 0;
         while (value >= 0x80)
@@ -215,7 +217,12 @@ public static class TreePage
         return destination[value.Length..];
     }
 
-    private static ulong ReadVarint(ReadOnlySpan<byte> page, ref int at)
+    /// <summary>Reads an unsigned LEB128 varint at <paramref name="at"/>, bounds-checked.</summary>
+    /// <param name="page">The bytes.</param>
+    /// <param name="at">Where it starts; moved past it.</param>
+    /// <param name="what">What the bytes are, for the message when they end inside the varint.</param>
+    /// <exception cref="CommitFormatException">The bytes end inside it, or it runs past ten bytes.</exception>
+    internal static ulong ReadVarint(ReadOnlySpan<byte> page, ref int at, string what = "A page")
     {
         ulong value = 0;
         int shift = 0;
@@ -223,7 +230,7 @@ public static class TreePage
         {
             if (at >= page.Length)
             {
-                throw new CommitFormatException("A page ends inside a varint.");
+                throw new CommitFormatException($"{what} ends inside a varint.");
             }
 
             byte b = page[at++];

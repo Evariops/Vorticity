@@ -155,7 +155,7 @@ internal sealed class CorpusColumns : IAsyncDisposable
         switch (IdOf(layoutIds, node))
         {
             case "vortex.zoned":
-                // Child 0 is the data, child 1 the zone map. Phase 1 does not prune.
+                // Child 0 is the data, child 1 the zone map, which only pruning reads.
                 return Decode(file, context, layoutIds, node.GetChild(0), dtype, depth + 1);
 
             case "vortex.flat":

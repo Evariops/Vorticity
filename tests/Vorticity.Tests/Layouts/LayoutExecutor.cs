@@ -30,8 +30,6 @@ internal static class LayoutExecutor
             return;
         }
 
-        CanonicalDecoders.RegisterAll();
-
         Register(BitPackedDecoder.Instance);
         Register(ByteBoolDecoder.Instance);
         Register(DictDecoder.Instance);

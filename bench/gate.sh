@@ -17,11 +17,12 @@
 #
 # * `--throughput <touched families>`, which C7 proposed. B8 measured that narrow form at +29% on
 #   `fsst` against the full run -- a stable bias, not dispersion -- which puts it OVER its ceiling
-#   on a healthy repository. A gate that cries wolf gets disabled. `--gate.sh --throughput` runs the
+#   on a healthy repository. A gate that cries wolf gets disabled. `gate.sh --throughput` runs the
 #   FULL axis (54 s) for when the corpus is present and you want it.
 # * The BenchmarkDotNet classes. They are a direction, not a gate (§4.2), and 59 seconds of them
 #   would double this script for a number nobody can fail on.
-# * `--throughput --write`, 8 minutes, and it has no ratchet table yet (§3.2).
+# * `--throughput --write --check`, about 90 s with its second-process confirmation (B19); its
+#   reference table exists since B14, and the exit chain of IMPL-PLAN.md §3 runs it apart.
 # * The Rust cross-check, which needs cargo and a minute: `gate.sh --crosscheck` adds it, and
 #   `bench/crosscheck.sh` runs it alone.
 #

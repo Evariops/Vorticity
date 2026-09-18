@@ -5,8 +5,8 @@
 // WHAT IS HELD: a fragment records the file's length, identity, store token and XXH3-128; reading it
 // reads no byte of the file beyond the tail the open already took; a file rewritten at the same
 // length is refused by its identity, without a hash; a file without an identity is bound by its
-// store token, which a touch breaks and a source without a path cannot give; a fragment that binds
-// only by a SHA-256 is refused with the reason; and a byte changed under an unchanged identity passes
+// store token, which a touch breaks and a source without a path cannot give; a fragment that names
+// neither is refused with the reason; and a byte changed under an unchanged identity passes
 // every reader check and fails the recorded hash, which is what `VerifyIndexesAsync` compares.
 using System;
 using System.IO;
@@ -61,7 +61,6 @@ public sealed class FragmentBindingTests
 
         Assert.StartsWith("fs:", recorded.FileToken, StringComparison.Ordinal);
         Assert.Equal(XxHash128.HashToUInt128(await System.IO.File.ReadAllBytesAsync(temp.Path)), recorded.FileHash);
-        Assert.False(recorded.LegacySha256);
 
         // Reading it reads nothing of the file past the open's own tail.
         CountingSource source = new CountingSource(MemoryMappedSegmentSource.Open(temp.Path));
@@ -147,7 +146,7 @@ public sealed class FragmentBindingTests
     }
 
     [Fact]
-    public async Task AFragmentBoundOnlyByASha256IsRefusedWithItsReason()
+    public async Task AFragmentThatNamesNeitherIdentityNorTokenIsRefusedWithItsReason()
     {
         Decoders.EnsureRegistered();
         using Temp temp = new Temp();
@@ -156,9 +155,7 @@ public sealed class FragmentBindingTests
         await using VortexFile file = await VortexFile.OpenAsync(temp.Path);
 
         Assert.Null(IndexContainer.Unbound(recorded, file));
-        IndexDirectory legacy = recorded with { FileIdentity = null, FileToken = null, LegacySha256 = true };
-        Assert.Contains("SHA-256", IndexContainer.Unbound(legacy, file), StringComparison.Ordinal);
-        IndexDirectory nothing = legacy with { LegacySha256 = false };
+        IndexDirectory nothing = recorded with { FileIdentity = null, FileToken = null };
         Assert.Contains("neither", IndexContainer.Unbound(nothing, file), StringComparison.Ordinal);
     }
 

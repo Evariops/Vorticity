@@ -20,10 +20,11 @@
 // is made of and the case §2.4 says Z1b conditions Z2 for. The arms are expected to differ in
 // magnitude across them, not in sign.
 //
-// THE CONSTANT ARMS MODEL THE FORM, they do not call it -- it does not exist yet, and building it
-// is Z1b-c. That is the same thing `VarBinFormBenchmarks` does for the offsets form, and it is
-// sound for the same reason: what is being priced is the memory traffic and the per-row work each
-// shape implies, and both are fully determined by the shape.
+// THE CONSTANT ARMS MODEL THE FORM, they do not call it. They were written before the form existed,
+// and it now exists only behind `VortexReadOptions.ConstantForm` (Z1b-c2b), so the model is still
+// what the bench prices. That is the same thing `VarBinFormBenchmarks` does for the offsets form, and
+// it is sound for the same reason: what is being priced is the memory traffic and the per-row work
+// each shape implies, and both are fully determined by the shape.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;

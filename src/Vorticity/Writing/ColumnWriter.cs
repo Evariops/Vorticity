@@ -555,10 +555,11 @@ internal sealed class ColumnWriter
     /// Records what the chunk just written was encoded as, against what it was priced at.
     /// </summary>
     /// <remarks>
-    /// STORED, NOT YET CONSULTED: this commit lays the accounting down and proves it costs nothing
-    /// — every byte identical — before the next one lets the chooser short-circuit on it and the
-    /// table go dead on it. A plan that was never priced (a child a scheme invented, the reference
-    /// chooser's) leaves no memory, because a memory whose prediction is zero can never hold.
+    /// The chooser consults it for the next chunk (<see cref="Memory"/>): a plan that held within
+    /// tolerance is offered first, and the distinct table and the width histograms run only where
+    /// that plan will read them (below). A plan that was never priced (a child a scheme invented,
+    /// the reference chooser's) leaves no memory, because a memory whose prediction is zero can
+    /// never hold.
     /// </remarks>
     /// <param name="plan">The plan the encoder just wrote.</param>
     /// <param name="actualBytes">The buffer bytes it produced, this column's subtree included.</param>

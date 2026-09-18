@@ -29,9 +29,6 @@ internal static class PcoPageDecoder
     /// <summary>Values per batch. Also the size of the buffers in <see cref="PcoBatchScratch"/>.</summary>
     internal const int BatchSize = 256;
 
-    /// <summary>Interleaved ANS states.</summary>
-    private const int Interleaving = 4;
-
     /// <summary>Decodes a page of 64-bit latents.</summary>
     /// <param name="chunk">The chunk's metadata.</param>
     /// <param name="page">The page's bytes.</param>

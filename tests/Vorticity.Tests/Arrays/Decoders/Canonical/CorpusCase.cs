@@ -4,8 +4,8 @@
 // in this component is pointed at real bytes. What this file does NOT do is the value-by-value
 // conformance sweep of contract §14 - that belongs to the conformance component. It reads exactly
 // the files whose root layout is a single `vortex.flat` leaf covering the whole schema, which makes
-// the array blob reachable without a layout reader (wave D1 is a later wave), and compares the
-// decoded rows against the sidecar.
+// the array blob reachable without a layout reader -- these tests hold the decoders apart from the
+// layouts -- and compares the decoded rows against the sidecar.
 using System;
 using System.Collections.Generic;
 using System.IO;

@@ -78,7 +78,6 @@ internal static class Decoders
             }
 
             _done = true;
-            CanonicalDecoders.RegisterAll();
             Register(BitPackedDecoder.Instance);
             Register(ByteBoolDecoder.Instance);
             Register(DictDecoder.Instance);

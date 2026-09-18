@@ -13,10 +13,10 @@ namespace Vorticity.Tests.Arrays.Decoders.Canonical;
 internal static class CorpusEntries
 {
     /// <summary>
-    /// The 137 corpus entries this build decodes on its own. 85 of them need only the fourteen
-    /// canonical encodings; the other 52 also reach one of the nine compressed ones, and moved here
-    /// from <see cref="UnsupportedCorpusEntries"/> when wave C2 was wired into
-    /// <see cref="Vorticity.Arrays.ArrayDecoderTable"/>.
+    /// The 137 single-flat-leaf corpus entries. 85 of them need only the fourteen canonical
+    /// encodings; the other 52 also reach a compressed one. Every single-flat-leaf entry of the
+    /// corpus decodes: the list of those that did not emptied as the decoders landed, and went with
+    /// the cleanup of 2026-09-18.
     /// </summary>
     internal static readonly string[] All =
     [
@@ -165,22 +165,5 @@ internal static class CorpusEntries
         "encodings/zigzag_r1",
         "encodings/zigzag_r1023",
         "encodings/zigzag_r1025",
-    ];
-}
-
-internal static class UnsupportedCorpusEntries
-{
-    /// <summary>
-    /// The single-flat-leaf corpus entries whose array tree still reaches an encoding this build
-    /// does not implement: vortex.patched (in-memory only upstream), and
-    /// parquet_variant, pco, variant and zstd_buffers (deferred upstream to Vortex 1.1).
-    /// Decoding one must raise VortexUnsupportedException naming the id - never a wrong value, an
-    /// out-of-bounds read or a different exception type (contract §2.3).
-    /// </summary>
-    internal static readonly string[] All =
-    [
-        // EMPTY, and that is the finding: every single-flat-leaf corpus entry now decodes.
-        // `vortex.variant` and `vortex.parquet.variant` were the last eight entries here, and the
-        // list's whole value was that an entry had to be MOVED by hand when a decoder landed.
     ];
 }

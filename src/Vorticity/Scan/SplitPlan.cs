@@ -178,7 +178,8 @@ internal sealed class SplitPlan
 
             case LayoutEncodingId.Zoned:
             case LayoutEncodingId.Stats:
-                // Child 0 is the data; the zones child informs pruning, which Phase 1 does not do.
+                // Child 0 is the data; the zones child informs pruning, which reads it through its
+                // own path before the splits are planned.
                 if (node.ChildCount >= 1)
                 {
                     LayoutNode data = node.GetChild(0);

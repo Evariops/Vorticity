@@ -66,7 +66,6 @@ internal static class Program
             return 2;
         }
 
-        CanonicalDecoders.RegisterAll();
         string[] seeds = Directory.GetFiles(corpus, "*.vortex", SearchOption.AllDirectories);
         Array.Sort(seeds, StringComparer.Ordinal);
         if (seeds.Length == 0)

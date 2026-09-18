@@ -1,15 +1,15 @@
 // The levels of docs/13-dataset.md §5.2, and the reporting §5.1 asks of them.
 //
 // WHAT A LEVEL IS FOR, in one sentence from §5.1: "without a merge policy, the number of objects a
-// lookup touches is the number of appends". Levels are how that stops being true, and until a
-// compaction policy exists (step 41b) what this file holds is the MACHINERY: a tree per level, a
+// lookup touches is the number of appends". Levels are how that stops being true. What this file
+// holds is the MACHINERY, apart from the policy (`DatasetCompactionTests`): a tree per level, a
 // commit that writes several of them, a walk that merges them into one key order, and the lag §5.1
 // requires to be reported rather than refused.
 //
-// THE ACCEPTANCE IS STILL §14's. Moving an object from level 0 to level 1 is what a compaction
-// does; the rows it holds must not change because of where its entry sits. So the tests below move
-// objects between levels by hand, through the same `ReplaceObjects` a compactor will use, and
-// compare the answers against the same rows in one file.
+// THE ACCEPTANCE IS §14's. Moving an object from level 0 to level 1 is what a compaction does; the
+// rows it holds must not change because of where its entry sits. So the tests below move objects
+// between levels by hand, through the same `ReplaceObjects` the compactor uses, and compare the
+// answers against the same rows in one file.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;

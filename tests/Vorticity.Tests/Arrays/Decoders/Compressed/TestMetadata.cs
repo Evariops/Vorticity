@@ -125,21 +125,6 @@ internal static class TestMetadata
         }
     }
 
-    internal static byte[] BoolOffset(uint offset)
-    {
-        BoolMetadata value = new(offset);
-        ProtoWriter writer = new();
-        try
-        {
-            BoolMetadata.Write(ref writer, in value);
-            return writer.WrittenSpan.ToArray();
-        }
-        finally
-        {
-            writer.Dispose();
-        }
-    }
-
     /// <summary>
     /// <c>vortex.decimal</c> metadata. It is never optional in practice: the storage width is the
     /// stride of the values buffer, and an absent field means <c>I8</c>, which the decoder rejects
@@ -252,18 +237,6 @@ internal static class TestMetadata
         AlpRdBody(
             new AlpRdMetadata(
                 rightBitWidth, (uint)dictionary.Length, dictionary.Length, leftPartsPType, null),
-            dictionary);
-
-    /// <summary><c>vortex.alprd</c> metadata whose declared dict_len differs from what it carries.</summary>
-    /// <param name="rightBitWidth">Width of the right parts, in bits.</param>
-    /// <param name="leftPartsPType">Physical type of the left-parts child.</param>
-    /// <param name="dictionaryLength">The declared dict_len.</param>
-    /// <param name="dictionary">The entries actually written.</param>
-    internal static byte[] AlpRdRaw(
-        uint rightBitWidth, PType leftPartsPType, uint dictionaryLength, params uint[] dictionary) =>
-        AlpRdBody(
-            new AlpRdMetadata(
-                rightBitWidth, dictionaryLength, dictionary.Length, leftPartsPType, null),
             dictionary);
 
     /// <summary><c>vortex.alprd</c> metadata with a patch descriptor.</summary>

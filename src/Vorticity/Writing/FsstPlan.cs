@@ -211,7 +211,8 @@ internal sealed class FsstPlan
 
     private static int Width(long maximum) => IndexPType(maximum).ByteWidth();
 
-    private static bool IsValid(CanonicalArena arena, CanonicalNode node, int row)
+    /// <summary>Whether row <paramref name="row"/> of a canonical varbinview node holds a value.</summary>
+    internal static bool IsValid(CanonicalArena arena, CanonicalNode node, int row)
     {
         Validity validity = node.Validity;
         switch (validity.Kind)
@@ -232,7 +233,8 @@ internal sealed class FsstPlan
         }
     }
 
-    private static ReadOnlySpan<byte> ValueOf(CanonicalNode node, int row)
+    /// <summary>The bytes of row <paramref name="row"/> of a canonical varbinview node: inline or in a data buffer.</summary>
+    internal static ReadOnlySpan<byte> ValueOf(CanonicalNode node, int row)
     {
         ReadOnlySpan<byte> view = node.Views.Span.Slice(row * 16, 16);
         uint size = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view);

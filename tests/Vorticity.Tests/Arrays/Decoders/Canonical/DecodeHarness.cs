@@ -13,11 +13,7 @@ internal sealed class DecodeHarness : IDisposable
 {
     private readonly List<PinnedSegment> _segments = new List<PinnedSegment>();
 
-    internal DecodeHarness()
-    {
-        CanonicalDecoders.RegisterAll();
-        Scan = new ScanContext(TestEncodings.Ids);
-    }
+    internal DecodeHarness() => Scan = new ScanContext(TestEncodings.Ids);
 
     internal ScanContext Scan { get; }
 

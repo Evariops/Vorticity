@@ -1,11 +1,12 @@
 // vortex.zoned - vortex-layout-0.86.1/src/layouts/zoned/{mod.rs,reader.rs}. Zero segments, exactly
 // two children: 0 = data (the node's own dtype), 1 = zones (one row of aggregates per zone).
 //
-// PHASE 1 DOES NO PRUNING (docs/01-scope.md §3). The zone map's SHAPE is parsed and exposed through
-// LayoutNode.TryGetZoneMap; the zones child is never read, because nothing consumes it and reading
-// it would be I/O spent on a pruning pass that does not exist yet. Reading the data child alone is
-// exactly what upstream does when zone_len == 0 or an aggregate cannot be resolved, so this is a
-// path upstream already takes, not a new one.
+// THE DATA PATH READS THE DATA CHILD ALONE. The zone map's SHAPE is parsed and exposed through
+// LayoutNode.TryGetZoneMap, and pruning reads the zones child through its own path, before the
+// scan decides which splits to read (`ZonePruningPlan`, docs/11 §6). A split that is read needs
+// only its data, so this reader never touches the zones. Reading the data child alone is exactly
+// what upstream does when zone_len == 0 or an aggregate cannot be resolved, so this is a path
+// upstream already takes, not a new one.
 using System;
 
 using Vorticity.Arrays;

@@ -79,13 +79,6 @@ internal sealed class RawBytes
         _length += 8;
     }
 
-    internal void Zeros(int count)
-    {
-        Ensure(count);
-        _buffer.AsSpan(_length, count).Clear();
-        _length += count;
-    }
-
     internal byte[] ToArray() => _buffer.AsSpan(0, _length).ToArray();
 
     private void Ensure(int extra)

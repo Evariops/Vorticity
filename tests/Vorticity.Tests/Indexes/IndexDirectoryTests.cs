@@ -107,26 +107,22 @@ public sealed class IndexDirectoryTests
     }
 
     [Fact]
-    public void VersionOneIsStillReadWithoutChecksums()
+    public void AVersionOneDirectoryIsRefusedWithItsReason()
     {
-        // The fixture the Rust forge writes is version 1: no trailer, no checksum per region.
+        // Version 1 had no trailer and no checksum per region. Nothing has written it since step 21,
+        // and the Rust forge fixture that was said to be one never existed: it is refused like any
+        // unknown version, and the file reads without its index, which is a hint.
         IndexDirectory written = new IndexDirectory(
             Rows, 0, WritePolicy.None,
             [new IndexEntry(IndexKinds.BloomSbbf, [0u], 8_192, [], [new IndexRun(0, 1, [new IndexSegment(512, 9, 6)], [])])]);
-        byte[] v2 = written.ToBytes();
-        byte[] v1 = v2[..^8];
-        v1[0] = IndexDirectory.LegacyVersion;
-
-        // The message's own version field says 2, so a relabelled directory is refused...
-        Assert.False(IndexDirectory.TryParse(v1, Rows, DataEnd, out _, out string? mismatch));
-        Assert.Contains("version", mismatch, StringComparison.Ordinal);
-
-        // ...and one whose field says 1 too is read, its regions unchecked.
+        byte[] v1 = written.ToBytes()[..^8];
+        v1[0] = 1;
         int field = Array.IndexOf(v1, (byte)0x08, 1);
-        Assert.Equal(IndexDirectory.FormatVersion, v1[field + 1]);
-        v1[field + 1] = IndexDirectory.LegacyVersion;
-        Assert.True(IndexDirectory.TryParse(v1, Rows, DataEnd, out IndexDirectory? read, out string? reason), reason);
-        Assert.Null(read!.Entries[0].Runs[0].Payload[0].Checksum);
+        v1[field + 1] = 1;
+
+        Assert.False(IndexDirectory.TryParse(v1, Rows, DataEnd, out IndexDirectory? read, out string? reason));
+        Assert.Null(read);
+        Assert.Contains("version 1", reason, StringComparison.Ordinal);
     }
 
     [Fact]

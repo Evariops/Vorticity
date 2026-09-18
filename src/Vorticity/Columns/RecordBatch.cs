@@ -396,9 +396,6 @@ public sealed class RecordBatch : IDisposable
         _context?.ResetBatch();
     }
 
-    /// <summary><see langword="true"/> once <see cref="Dispose"/> has run.</summary>
-    internal bool IsDisposed => _disposed;
-
     /// <summary>The arena every column view indexes into.</summary>
     /// <remarks>
     /// Public so a consumer outside this assembly - the writer, the row encoder - can address

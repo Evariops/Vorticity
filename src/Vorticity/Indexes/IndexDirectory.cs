@@ -37,8 +37,10 @@
 // the XXH3-64 of its bytes. A directory whose trailer does not match is refused whole, like a stale
 // one; a region whose bytes do not match makes its entry claim nothing for the blocks it covers,
 // and a key source that needs it is refused. Until then a zeroed Bloom filter was well formed and
-// dropped rows (10 §5.1). The reader keeps version 1, which has neither -- the fixture the Rust
-// forge writes is one -- and hashes nothing it does not read.
+// dropped rows (10 §5.1). The reader hashes nothing it does not read. Version 1, which had neither,
+// is refused like any unknown version, with the reason: nothing has written it since step 21, the
+// Rust forge fixture that was said to be one never existed, and an index is a hint a file reads
+// correctly without.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -149,11 +151,8 @@ public sealed record IndexDirectory(
     /// <summary>The postscript metadata key the directory is stored under.</summary>
     public const string MetadataKey = "vorticity.index";
 
-    /// <summary>The version this library writes: checksummed.</summary>
+    /// <summary>The version this library writes and reads: checksummed.</summary>
     internal const byte FormatVersion = 2;
-
-    /// <summary>The version before checksums, which the reader still takes.</summary>
-    internal const byte LegacyVersion = 1;
 
     /// <summary>The trailer of a version 2 directory: the XXH3-64 of the bytes before it.</summary>
     private const int ChecksumSize = sizeof(ulong);
@@ -191,12 +190,6 @@ public sealed record IndexDirectory(
     public UInt128? FileHash { get; init; }
 
     /// <summary>
-    /// Whether the directory carried a SHA-256 of its file (field 8, before step 26), which this
-    /// reader no longer computes: such a container binds by nothing it checks.
-    /// </summary>
-    internal bool LegacySha256 { get; init; }
-
-    /// <summary>
     /// For a fragment: the array encodings its payloads name, by index (field 9) -- a fragment's
     /// payloads cannot use the data file's footer, which it does not rewrite.
     /// </summary>
@@ -210,7 +203,9 @@ public sealed record IndexDirectory(
     private const int DirEntries = 5;
     private const int DirBudget = 6;
     private const int DirFileLength = 7;
-    private const int DirLegacySha256 = 8;
+
+    // Field 8 was the file's SHA-256 until step 26 (13 §7); it is retired and never reused, and a
+    // reader skips it like any unknown field.
     private const int DirArrayEncodings = 9;
     private const int DirFileIdentity = 10;
     private const int DirFileToken = 11;
@@ -428,33 +423,26 @@ public sealed record IndexDirectory(
         out IndexDirectory? directory, out string? reason)
     {
         directory = null;
-        if (bytes.IsEmpty || bytes[0] is not (FormatVersion or LegacyVersion))
+        if (bytes.IsEmpty || bytes[0] != FormatVersion)
         {
             reason = bytes.IsEmpty
                 ? "the directory segment is empty"
-                : $"directory format version {bytes[0]} is not one this reader knows ({LegacyVersion} or {FormatVersion})";
+                : $"directory format version {bytes[0]} is not the {FormatVersion} this reader knows";
             return false;
         }
 
-        byte version = bytes[0];
-        ReadOnlySpan<byte> body = bytes[1..];
-        if (version == FormatVersion)
+        // THE TRAILER FIRST: a torn or corrupt directory is refused before a byte of it is
+        // believed, which is what the row count alone could never promise.
+        if (bytes.Length < 1 + ChecksumSize
+            || XxHash3.HashToUInt64(bytes[..^ChecksumSize]) != BinaryPrimitives.ReadUInt64LittleEndian(bytes[^ChecksumSize..]))
         {
-            // THE TRAILER FIRST: a torn or corrupt directory is refused before a byte of it is
-            // believed, which is what the row count alone could never promise.
-            if (bytes.Length < 1 + ChecksumSize
-                || XxHash3.HashToUInt64(bytes[..^ChecksumSize]) != BinaryPrimitives.ReadUInt64LittleEndian(bytes[^ChecksumSize..]))
-            {
-                reason = "the directory's checksum does not match its bytes: it is torn or corrupt";
-                return false;
-            }
-
-            body = bytes[1..^ChecksumSize];
+            reason = "the directory's checksum does not match its bytes: it is torn or corrupt";
+            return false;
         }
 
         try
         {
-            return TryParseBody(body, version, fileRowCount, dataEnd, out directory, out reason);
+            return TryParseBody(bytes[1..^ChecksumSize], FormatVersion, fileRowCount, dataEnd, out directory, out reason);
         }
         catch (VortexFormatException e)
         {
@@ -479,7 +467,6 @@ public sealed record IndexDirectory(
         List<IndexEntry> entries = [];
         uint budget = DefaultBudgetPerMille;
         ulong fileLength = 0;
-        bool legacySha = false;
         Guid? identity = null;
         string? token = null;
         UInt128? hash = null;
@@ -493,10 +480,6 @@ public sealed record IndexDirectory(
                     break;
                 case DirFileLength when wire == ProtoWireType.Varint:
                     fileLength = reader.ReadVarint();
-                    break;
-                case DirLegacySha256 when wire == ProtoWireType.LengthDelimited:
-                    reader.ReadLengthDelimited();
-                    legacySha = true;
                     break;
                 case DirArrayEncodings when wire == ProtoWireType.LengthDelimited:
                     (encodings ??= []).Add(Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
@@ -566,7 +549,6 @@ public sealed record IndexDirectory(
             FileIdentity = identity,
             FileToken = token,
             FileHash = hash,
-            LegacySha256 = legacySha,
             ArrayEncodings = encodings,
         };
         reason = null;

@@ -97,7 +97,7 @@ internal sealed class BloomPruner
         {
             bool trigrams = entry.Kind == IndexKinds.BloomNgram3;
             if ((!trigrams && entry.Kind != IndexKinds.BloomSbbf) || entry.BlockLength != (ulong)blockRows
-                || !TryResolve(schema, entry.ColumnPath, out string path, out DType dtype)
+                || !KeyIndexPruner.TryResolve(schema, entry.ColumnPath, out string path, out DType dtype)
                 || !(trigrams ? matches : equalities).Contains(path)
                 || !BloomIndexOptions.TryParse(entry.Options, out BloomIndexOptions? options))
             {
@@ -489,32 +489,6 @@ internal sealed class BloomPruner
             default:
                 break;
         }
-    }
-
-    private static bool TryResolve(DType schema, IReadOnlyList<uint> fields, out string path, out DType dtype)
-    {
-        path = string.Empty;
-        dtype = schema;
-        if (fields.Count == 0)
-        {
-            // The root column of a non-struct file, which a filter cannot name.
-            return false;
-        }
-
-        List<string> names = [];
-        foreach (uint field in fields)
-        {
-            if (dtype.Kind != DTypeKind.Struct || field >= (uint)dtype.FieldCount)
-            {
-                return false;
-            }
-
-            names.Add(dtype.GetFieldName((int)field));
-            dtype = dtype.GetField((int)field);
-        }
-
-        path = string.Join('.', names);
-        return true;
     }
 
     // ------------------------------------------------------------------------------ state

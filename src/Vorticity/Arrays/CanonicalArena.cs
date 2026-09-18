@@ -52,10 +52,11 @@ public enum CanonicalKind : byte
     /// could have said no -- reads **6,5 % FASTER**, because one cache line is re-read where 512 KiB
     /// were walked.
     /// <para>
-    /// NOTHING PRODUCES THIS YET. Z1b-c2a adds the storage so that the shape exists and the five
-    /// exhaustive switches are forced to name it; Z1b-c2b makes the canonicalizer emit it behind an
-    /// internal switch. The five arms therefore throw, and the throw is unreachable by construction
-    /// rather than by argument -- no code path can build one.
+    /// PRODUCED ONLY BEHIND AN INTERNAL SWITCH. `ConstantCanonicalizer` emits it when
+    /// `VortexReadOptions.ConstantForm` is on (Z1b-c2b), which only `ConstantFormTests` does; the
+    /// default path still tiles. The consumers that have their arm -- the filter, the slice, the
+    /// concatenation, the rewrap, the writer's passes, `VortexColumn`'s typed primitive path --
+    /// handle it; the ones that do not yet are what keeps the switch off (Z1b-c2c2, 89 tests).
     /// </para>
     /// </remarks>
     Constant = 9,

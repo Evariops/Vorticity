@@ -16,11 +16,11 @@
 // still holds. So an append reads them out of MEMORY, before the put, rather than opening the object
 // it just wrote: §9.1 counts dependent round trips, and this is one that does not have to happen.
 //
-// THE KEY, FOR NOW, IS THE FIRST ROW POSITION -- §4.1's own alternative: "ordered by the clustering
-// key when the dataset declares one and by first row position otherwise". Eight big-endian bytes,
-// whose `memcmp` order is their numeric order, so the tree needs no row encoding and the dataset
-// needs no dependency on the 0.x package that provides it. A declared clustering key changes this
-// line and the entry's key range, and nothing else in this file.
+// THE KEY IS THE CLUSTERING KEY'S ENCODED MINIMUM when the dataset declares one, and the first row
+// position otherwise -- §4.1's two cases. The minimum is the row encoding of the object's smallest
+// key, read off its mandatory run (`ClusteringKey.MinimumAsync`); the position is eight big-endian
+// bytes, whose `memcmp` order is their numeric order. Either is followed by the object's uid, which
+// makes the key unique (`KeyOf`).
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;

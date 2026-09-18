@@ -267,41 +267,8 @@ internal sealed class ZstdPlan
     /// <summary>Denominator of <see cref="MarginNumerator"/>.</summary>
     private const int MarginDenominator = 10;
 
-    // Copied verbatim from FsstPlan rather than shared: both are private helpers over the same
-    // canonical shape, and the duplication is two small methods against a refactor of a file this
-    // change has no other reason to touch.
-    private static bool IsValid(CanonicalArena arena, CanonicalNode node, int row)
-    {
-        Validity validity = node.Validity;
-        switch (validity.Kind)
-        {
-            case ValidityKind.NonNullable:
-            case ValidityKind.AllValid:
-                return true;
-            case ValidityKind.AllInvalid:
-                return false;
-            default:
-            {
-                CanonicalNode bits = arena.GetNode(validity.CanonicalNodeIndex);
-                int bit = bits.BitOffset + row;
-                ReadOnlySpan<byte> span = bits.Bits.Span;
-                return (uint)(bit >> 3) < (uint)span.Length
-                    && (span[bit >> 3] & (1 << (bit & 7))) != 0;
-            }
-        }
-    }
+    // The row helpers are FsstPlan's: both plans walk the same canonical shape.
+    private static bool IsValid(CanonicalArena arena, CanonicalNode node, int row) => FsstPlan.IsValid(arena, node, row);
 
-    private static ReadOnlySpan<byte> ValueOf(CanonicalNode node, int row)
-    {
-        ReadOnlySpan<byte> view = node.Views.Span.Slice(row * 16, 16);
-        uint size = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view);
-        if (size <= 12)
-        {
-            return view.Slice(4, (int)size);
-        }
-
-        uint buffer = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
-        uint offset = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
-        return node.GetDataBuffer((int)buffer).Span.Slice((int)offset, (int)size);
-    }
+    private static ReadOnlySpan<byte> ValueOf(CanonicalNode node, int row) => FsstPlan.ValueOf(node, row);
 }

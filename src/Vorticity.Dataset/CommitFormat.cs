@@ -14,8 +14,8 @@
 //   8          format version, little-endian u32      4
 //   12         header length, little-endian u32       4
 //   16         header, proto3                         headerLength
-//   ...        pages, back to back                    (addressed by reference, never scanned)
-//   ...        fragments, back to back                (§6.4; empty until step 42)
+//   ...        pages and fragments, back to back      (in the order they were added -- step 42b;
+//                                                     addressed by reference, never scanned)
 //   ...        table, proto3                          (what the object holds, for verify and repack)
 //   length-32  table offset, u64                      8
 //   length-24  table length, u32                      4

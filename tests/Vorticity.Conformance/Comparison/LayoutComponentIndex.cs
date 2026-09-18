@@ -2,10 +2,10 @@
 //
 // The manifest's `array_ids` pools every encoding a file contains, wherever it sits. Four corpus
 // files (types/decimal18_4_{nonnull,nullable}_r8193 and types/timestamp_ms_{nonnull,nullable}_r8193)
-// use an encoding Phase 1 does not decode - vortex.decimal_byte_parts, vortex.datetimeparts - and
-// use it ONLY inside the zone map of their vortex.zoned layout. Their data columns are entirely
-// decodable, and ZonedLayoutReader never reads the zones child: "nothing consumes it and reading it
-// would be I/O spent on a pruning pass that does not exist yet."
+// used an encoding Phase 1 did not decode - vortex.decimal_byte_parts, vortex.datetimeparts - and
+// use it ONLY inside the zone map of their vortex.zoned layout. Both are decoded today; the split
+// stays because it is a property of the READ PATH, not of the decoder table: ZonedLayoutReader never
+// reads the zones child, which only pruning reads, through its own path.
 //
 // So "out of scope" splits in two, and the acceptance criterion - "fails with a named component
 // rather than a wrong answer" - is met by both halves:
@@ -34,7 +34,7 @@ internal sealed class LayoutComponentIndex
     /// <summary>Ids an unfiltered scan decodes: layout ids and array ids on the data path.</summary>
     internal HashSet<string> OnTheDataPath { get; }
 
-    /// <summary>Ids that appear only inside a zone map, which Phase 1 never decodes.</summary>
+    /// <summary>Ids that appear only inside a zone map, which an unfiltered scan never decodes.</summary>
     internal HashSet<string> InZoneMapsOnly { get; }
 
     /// <summary>Builds the index from a sidecar's `layout` line.</summary>

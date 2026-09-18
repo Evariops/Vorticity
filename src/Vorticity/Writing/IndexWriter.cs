@@ -1447,9 +1447,6 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
-    private void NotYet(int field, string kind) =>
-        Abandoned(field, kind, "this writer does not build this kind yet");
-
     /// <summary>
     /// A column's path: its field for a top-level column, its fields for a nested one; empty for the
     /// root and for a composite key, whose columns are in its options.

@@ -9,7 +9,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Runtime.CompilerServices;
 using System.Text.Json;
 
 namespace Vorticity.Tests.Layouts;
@@ -101,11 +100,10 @@ internal sealed class SidecarZoneMap
 /// <summary>The golden corpus, located and parsed once.</summary>
 internal static class LayoutCorpus
 {
-    private static readonly Lazy<string> RootLazy = new Lazy<string>(() => FindRoot());
     private static readonly Lazy<LayoutCorpusEntry[]> EntriesLazy = new Lazy<LayoutCorpusEntry[]>(Load);
 
     /// <summary>Absolute path of <c>tests/Vorticity.Conformance/corpus</c>.</summary>
-    internal static string Root => RootLazy.Value;
+    internal static string Root => Vorticity.Tests.File.CorpusManifest.Root;
 
     /// <summary>Every manifest record, in manifest order.</summary>
     internal static LayoutCorpusEntry[] Entries => EntriesLazy.Value;
@@ -317,32 +315,6 @@ internal static class LayoutCorpus
             default:
                 return new SidecarDType { Kind = kind, Nullable = nullable };
         }
-    }
-
-    private static string FindRoot([CallerFilePath] string callerFilePath = "")
-    {
-        // Two independent starting points so the corpus is found both from the real test project's
-        // output directory and from a check project whose bin/ is outside the repo.
-        string?[] starts = [System.IO.Path.GetDirectoryName(callerFilePath), AppContext.BaseDirectory];
-        foreach (string? start in starts)
-        {
-            string? directory = start;
-            while (!string.IsNullOrEmpty(directory))
-            {
-                string candidate = System.IO.Path.Combine(
-                    directory, "tests", "Vorticity.Conformance", "corpus");
-                if (System.IO.File.Exists(System.IO.Path.Combine(candidate, "manifest.json")))
-                {
-                    return candidate;
-                }
-
-                directory = System.IO.Path.GetDirectoryName(directory);
-            }
-        }
-
-        throw new InvalidOperationException(
-            "Could not locate tests/Vorticity.Conformance/corpus from " +
-            $"'{callerFilePath}' or '{AppContext.BaseDirectory}'.");
     }
 
     private static LayoutCorpusEntry[] Load()

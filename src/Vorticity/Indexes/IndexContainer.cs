@@ -21,8 +21,8 @@
 // without reading the file: its length and its identity, which every write and every append mints
 // anew, from the tail the open already holds. A file without an identity -- written by another
 // writer -- is bound by the store's token instead, its length and modification time on a file
-// system, which is a heuristic and is said to be one. A container that binds only by the SHA-256 of
-// step 17 binds by nothing a reader checks, and is refused.
+// system, which is a heuristic and is said to be one. A container that names neither binds by
+// nothing a reader checks, and is refused.
 //
 // THE FILE'S HASH IS THE INDEXER'S, when it knows it: no reader computes it, and `vxdump --verify`
 // compares it offline.
@@ -165,9 +165,7 @@ internal static class IndexContainer
                 : $"the fragment was written for the store token {token}, and the file's is {current}: it is stale (a heuristic for a file without an identity)";
         }
 
-        return directory.LegacySha256
-            ? "the fragment binds its file by a SHA-256, which a reader no longer computes (13 §7): rebuild it"
-            : "the fragment names neither the file's identity nor its store token";
+        return "the fragment names neither the file's identity nor its store token";
     }
 
     /// <summary>The store token of the file at <paramref name="path"/>: its length and modification time.</summary>
