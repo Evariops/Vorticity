@@ -472,9 +472,10 @@ public sealed class BloomTreeTests
     {
         using SegmentRequestSet requests = new SegmentRequestSet(1);
         int slot = requests.Add(new SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
-        await file.IndexSource.ReadManyAsync(requests, CancellationToken.None);
+        // The file's own runs: origin 0.
+        await file.IndexSourceOf(0).ReadManyAsync(requests, CancellationToken.None);
         Assert.True(region.Holds(requests.GetBuffer(slot).Span));
-        using ScanContext context = file.CreateIndexContext();
+        using ScanContext context = file.CreateIndexContext(0);
         context.Decode.LoadBlob(requests.GetBuffer(slot));
         ArrayNode root = context.Nodes.Root;
         int node = context.Decode.DecodeRoot(in root, Types.Primitive(PType.U32, Nullability.NonNullable), words);

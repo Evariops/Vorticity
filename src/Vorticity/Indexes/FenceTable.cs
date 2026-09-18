@@ -456,7 +456,7 @@ internal sealed class FenceTable
     internal bool WideRows => _stride == KeyRunOptions.SortedStride && KeyRunOptions.IsWideRowsDType(DTypeOf(1));
 
     /// <summary>Segment <paramref name="index"/>.</summary>
-    /// <param name="source">Where the file's index regions are read: <c>VortexFile.IndexSource</c>.</param>
+    /// <param name="source">Where the run's regions are read: <c>VortexFile.IndexSourceOf(run)</c>.</param>
     /// <param name="index">The segment's place in the run.</param>
     /// <param name="cancellationToken">Cancels the page reads.</param>
     internal ValueTask<Fence> GetAsync(ISegmentSource source, long index, CancellationToken cancellationToken)

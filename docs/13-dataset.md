@@ -616,6 +616,40 @@ only the indexes of objects nobody has rewritten, at most K fragments per entry,
 The sidecar of 10 §8 is one fragment in one commit object: it is not a separate thing any more,
 and the word is retired.
 
+**As delivered (step 42a): the core's half — a fragment is built over a range, and read beside the
+file's own index.** The dataset's half (commit objects that carry fragments, the indexer, the cache,
+fragment compaction) and the sidecar's retirement are the steps after it.
+
+- **The container is the sidecar's**, which step 42 found already position-independent: `VXIX`, the
+  payloads, a directory that carries the binding and its own encoding table, a trailer — every offset
+  counting from its first byte. A fragment may hold several entries, one per index its policy names;
+  the reader treats each entry on its own, which is §6.4's "one entry's runs" read at the entry.
+- **Built over a range.** `VortexFileIndexer.BuildFragmentAsync(file, policy, rows, storeToken?,
+  contentHash?)` indexes whole blocks of an open file into bytes, bound by the file's identity, or by
+  the store's token for a file written without one; the content hash is recorded when the caller
+  knows it — a dataset's entry does — and computed by nobody. The builders are numbered from the
+  range's first block. Fed a range without that, a sorted run fails loudly ("row 286 is before the
+  run's first row 4096"), but a Bloom tree claims blocks 0 to 7 for the filters of blocks 4 to 11 —
+  the silent case, which a test keeps. A dictionary probe describes the file's chunks, not the rows
+  read, so a range writes it whole.
+- **Read beside the file's own index.** `VortexReadOptions.IndexFragments` attaches fragments at
+  the open. Each is bound like a sidecar, then added to the directory the file names, entry by
+  entry, by one rule — an entry's identity is its kind, column, block length and options, byte for
+  byte. The file's own entry of an identity stays the file's. The same identity across fragments
+  joins its runs when their blocks are disjoint, which is how two halves become one source. An
+  overlap is left out, since a key walk would meet the keys twice. `VortexFile.IndexFragmentRefusals`
+  says, per fragment, what was left out and why. Nothing fails the open.
+- **Every run knows its origin.** Offsets inside a payload — fence pages, filter-tree children —
+  cannot be rebased without rewriting it, so no run is rebased: `IndexRun.Origin` names the source
+  its offsets count in and the encoding table its payloads name, and the dozen read sites of the
+  index path read and decode per origin, one batch per origin where they batched per file.
+- **The run cache is keyed by origin.** Two fragments' first segments lie at the same offset of
+  their own bytes, and a cache keyed by the offset alone answered the second fragment's run with
+  the first one's keys — measured by the test that walks across both: `[0, 0, 15, 15, …]`.
+- **What 10 §8 asks, held.** A fragment over blocks 4 to 11 prunes those eight blocks and no other,
+  counted by `Explain`; a key source refuses one fragment over half the file, naming the blocks it
+  covers, and walks the file once the second half is attached.
+
 ### 6.5 Which structure for which column
 
 The read bound depends on choosing by cardinality, which the writer knows exactly (11 §3.2.2).

@@ -51,24 +51,51 @@ public sealed record VortexIndexInfo(
 public sealed partial class VortexFile
 {
     // Benign race, as for the layout tree: two first readers may both parse, and the results are
-    // equal. The pair is published as one object so a reader never sees a directory from one parse
+    // equal. The state is published as one object so a reader never sees a directory from one parse
     // and a refusal from another.
-    private sealed record IndexState(IndexDirectory? Directory, string? Refusal, ISegmentSource? Sidecar = null);
+    private sealed record IndexState(
+        IndexDirectory? Directory,
+        string? Refusal,
+        IReadOnlyList<IndexOrigin> Origins,
+        IReadOnlyList<string?> FragmentRefusals);
+
+    /// <summary>Where one origin's index bytes are read, and the encoding table its payloads name.</summary>
+    /// <param name="Source">The file itself, its sidecar, or a fragment (docs/13-dataset.md §6.4).</param>
+    /// <param name="Encodings">The array encodings its payloads name; null for the file's own footer.</param>
+    /// <param name="Owned">Whether the file disposes the source with itself.</param>
+    private sealed record IndexOrigin(ISegmentSource Source, IReadOnlyList<string>? Encodings, bool Owned);
 
     /// <summary>
-    /// Where the index payloads are read from: the file itself, or its sidecar once
-    /// <see cref="ReadIndexDirectoryAsync"/> took the directory from one.
+    /// Where a run's regions are read: the file itself, its sidecar, or the fragment it came from.
     /// </summary>
-    internal ISegmentSource IndexSource => _indexState?.Sidecar ?? _source;
+    /// <param name="run">A run of the directory <see cref="ReadIndexDirectoryAsync"/> returned.</param>
+    /// <returns>The source its offsets count in.</returns>
+    internal ISegmentSource IndexSourceOf(IndexRun run) => IndexSourceOf(run.Origin);
+
+    /// <summary>Where the regions of the runs of one origin are read.</summary>
+    /// <param name="origin">A run's <see cref="IndexRun.Origin"/>.</param>
+    /// <returns>The source their offsets count in.</returns>
+    internal ISegmentSource IndexSourceOf(int origin) => OriginOf(origin).Source;
 
     /// <summary>
-    /// A context to decode index payloads in: over the file's encoding table, or over the sidecar's
-    /// own (docs/10-indexes.md §8).
+    /// A context to decode a run's payloads in: over the file's encoding table, or over the table the
+    /// run's sidecar or fragment carries (docs/10-indexes.md §8, docs/13-dataset.md §6.4).
     /// </summary>
-    internal ScanContext CreateIndexContext() =>
-        _indexState is { Sidecar: not null, Directory.ArrayEncodings: { } ids }
+    /// <param name="run">A run of the directory <see cref="ReadIndexDirectoryAsync"/> returned.</param>
+    /// <returns>The context, which the caller disposes.</returns>
+    internal ScanContext CreateIndexContext(IndexRun run) => CreateIndexContext(run.Origin);
+
+    /// <summary>A context to decode the payloads of the runs of one origin in.</summary>
+    /// <param name="origin">A run's <see cref="IndexRun.Origin"/>.</param>
+    /// <returns>The context, which the caller disposes.</returns>
+    internal ScanContext CreateIndexContext(int origin) =>
+        OriginOf(origin).Encodings is { } ids
             ? new ScanContext(ids.ToArray(), ReadOptions)
             : new ScanContext(this, ScanContext.MetadataCapacity);
+
+    private IndexOrigin OriginOf(int origin) =>
+        (_indexState ?? throw new InvalidOperationException("A run is read before the directory that lists it."))
+        .Origins[origin];
 
     private IndexState? _indexState;
     private IndexRunCache? _runCache;
@@ -94,16 +121,27 @@ public sealed partial class VortexFile
 
     /// <summary>
     /// Whether the postscript names an index directory at all, or the read options name a sidecar
-    /// to take one from (<see cref="VortexReadOptions.IndexSidecarPath"/>).
+    /// to take one from (<see cref="VortexReadOptions.IndexSidecarPath"/>) or fragments to add
+    /// (<see cref="VortexReadOptions.IndexFragments"/>).
     /// </summary>
     public bool HasIndexDirectory =>
-        TryGetMetadataIndex(IndexDirectory.MetadataKeyUtf8, out _) || ReadOptions.IndexSidecarPath is not null;
+        TryGetMetadataIndex(IndexDirectory.MetadataKeyUtf8, out _)
+        || ReadOptions.IndexSidecarPath is not null
+        || ReadOptions.IndexFragments.Count > 0;
 
     /// <summary>
     /// Why the file's index directory was not used, when it was present and refused; otherwise
     /// <see langword="null"/>. Meaningful after <see cref="ReadIndexDirectoryAsync"/>.
     /// </summary>
     public string? IndexDirectoryRefusal => _indexState?.Refusal;
+
+    /// <summary>
+    /// Why each fragment of <see cref="VortexReadOptions.IndexFragments"/> was not used, in the
+    /// order they were given: <see langword="null"/> for one whose every entry was taken, otherwise
+    /// the reason it was refused whole or the entries that were left out. Empty before
+    /// <see cref="ReadIndexDirectoryAsync"/>, and when no fragment was given.
+    /// </summary>
+    public IReadOnlyList<string?> IndexFragmentRefusals => _indexState?.FragmentRefusals ?? [];
 
     /// <summary>
     /// What the file's indexes are, once its directory has been read -- by a scan, by
@@ -221,36 +259,90 @@ public sealed partial class VortexFile
             return known.Directory;
         }
 
+        IndexState state = await ReadIndexStateAsync(cancellationToken).ConfigureAwait(false);
+        if (Interlocked.CompareExchange(ref _indexState, state, null) is not null)
+        {
+            // Another reader won the race; its sources are the ones kept.
+            await DisposeIndexSourcesAsync(state).ConfigureAwait(false);
+        }
+
+        return _indexState!.Directory;
+    }
+
+    /// <summary>The directory the file names, then every fragment the read options add to it (13 §6.4).</summary>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    private async ValueTask<IndexState> ReadIndexStateAsync(CancellationToken cancellationToken)
+    {
+        (IndexDirectory? named, string? refusal, IndexOrigin origin) =
+            await ReadNamedDirectoryAsync(cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<ReadOnlyMemory<byte>> blobs = ReadOptions.IndexFragments;
+        if (blobs.Count == 0)
+        {
+            return new IndexState(named, refusal, [origin], []);
+        }
+
+        List<IndexOrigin> origins = new List<IndexOrigin>(blobs.Count + 1) { origin };
+        List<IndexDirectory?> fragments = new List<IndexDirectory?>(blobs.Count);
+        string?[] refusals = new string?[blobs.Count];
+        for (int i = 0; i < blobs.Count; i++)
+        {
+            // Bound like a sidecar, by the identity or the store token the fragment records: a
+            // fragment of another object, or of another version of this one, is refused whole.
+            MemorySegmentSource source = new MemorySegmentSource(blobs[i]);
+            (IndexDirectory? fragment, string? why) = await IndexSidecar
+                .ReadAsync(source, blobs[i].Length, this, "fragment", cancellationToken).ConfigureAwait(false);
+            origins.Add(new IndexOrigin(source, fragment?.ArrayEncodings, Owned: true));
+            fragments.Add(fragment);
+            refusals[i] = why;
+        }
+
+        IndexDirectory? merged = IndexFragmentMerge.Merge(named, fragments, refusals, (ulong)RowCount, EntryName);
+        return new IndexState(merged, refusal, origins, refusals);
+    }
+
+    /// <summary>The file's own directory, else the sidecar the read options name, else none.</summary>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    private async ValueTask<(IndexDirectory? Directory, string? Refusal, IndexOrigin Origin)> ReadNamedDirectoryAsync(
+        CancellationToken cancellationToken)
+    {
+        IndexOrigin file = new IndexOrigin(_source, null, Owned: false);
         if (!TryGetMetadataIndex(IndexDirectory.MetadataKeyUtf8, out int index))
         {
             // No directory of its own: the sidecar, when the caller named one (§8).
             if (ReadOptions.IndexSidecarPath is not { } sidecar)
             {
-                _indexState = new IndexState(null, null);
-                return null;
+                return (null, null, file);
             }
 
             (ISegmentSource? source, IndexDirectory? found, string? why) =
                 await IndexSidecar.OpenAsync(sidecar, this, cancellationToken).ConfigureAwait(false);
-            IndexState opened = new IndexState(found, why, source);
-            if (Interlocked.CompareExchange(ref _indexState, opened, null) is not null && source is not null)
-            {
-                // Another reader won the race; its sidecar is the one kept.
-                await source.DisposeAsync().ConfigureAwait(false);
-            }
-
-            return _indexState!.Directory;
+            return source is null
+                ? (null, why, file)
+                : (found, why, new IndexOrigin(source, found?.ArrayEncodings, Owned: true));
         }
 
         // A run lies before the directory: runs go out before the zone maps, the directory after
         // the statistics (§7.2), so the directory's own offset bounds every run from above.
         SegmentSpec spec = GetMetadataSegment(index);
         using SegmentOwner owner = await ReadMetadataAsync(index, cancellationToken).ConfigureAwait(false);
-        IndexState state = IndexDirectory.TryParse(
+        return IndexDirectory.TryParse(
             owner.Buffer.Span, (ulong)RowCount, spec.Offset, out IndexDirectory? directory, out string? reason)
-            ? new IndexState(directory, null)
-            : new IndexState(null, reason);
-        _indexState = state;
-        return state.Directory;
+            ? (directory, null, file)
+            : (null, reason, file);
+    }
+
+    /// <summary>An entry as a refusal names it: its kind and its column.</summary>
+    private string EntryName(IndexEntry entry) => $"{entry.Kind} on '{ColumnOf(entry)}'";
+
+    /// <summary>Closes the sidecar and fragment sources a state opened; the file's own is not its to close.</summary>
+    private static async ValueTask DisposeIndexSourcesAsync(IndexState state)
+    {
+        foreach (IndexOrigin origin in state.Origins)
+        {
+            if (origin.Owned)
+            {
+                await origin.Source.DisposeAsync().ConfigureAwait(false);
+            }
+        }
     }
 }

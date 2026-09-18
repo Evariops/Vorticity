@@ -192,8 +192,7 @@ internal sealed class KeyIndexPruner
     /// <param name="cancellationToken">Cancels the reads.</param>
     internal async ValueTask RefineAsync(VortexFile file, BlockMask live, CancellationToken cancellationToken)
     {
-        using SegmentRequestSet requests = new SegmentRequestSet();
-        List<(Column Column, Run Run, Fence Fence, int[] Slots)> wanted = [];
+        using IndexBatches<(Column Column, Run Run, Fence Fence, int[] Slots)> batches = new();
         foreach (Column column in _columns.Values)
         {
             if (column.DictionaryPath is { } dictionary)
@@ -215,7 +214,7 @@ internal sealed class KeyIndexPruner
                 int pagesBefore = run.Table.PagesRead;
                 try
                 {
-                    fences = await column.CandidatesAsync(file.IndexSource, run.Table, cancellationToken).ConfigureAwait(false);
+                    fences = await column.CandidatesAsync(file.IndexSourceOf(run.Meta), run.Table, cancellationToken).ConfigureAwait(false);
                 }
                 catch (VortexFormatException)
                 {
@@ -226,17 +225,18 @@ internal sealed class KeyIndexPruner
                     Segments += run.Table.PagesRead - pagesBefore;
                 }
 
+                IndexBatches<(Column Column, Run Run, Fence Fence, int[] Slots)>.Batch batch = batches.For(run.Meta);
                 foreach (Fence fence in fences)
                 {
                     int[] slots = new int[column.Stride];
                     for (int array = 0; array < column.Stride; array++)
                     {
                         IndexSegment payload = fence.Regions[array];
-                        slots[array] = requests.Add(
+                        slots[array] = batch.Requests.Add(
                             new SegmentSpec(payload.Offset, payload.Length, payload.AlignmentExponent, 0, 0));
                     }
 
-                    wanted.Add((column, run, fence, slots));
+                    batch.Wanted.Add((column, run, fence, slots));
                 }
 
                 // Every run consulted starts as "proves every key absent"; the lookups below lift
@@ -245,17 +245,23 @@ internal sealed class KeyIndexPruner
             }
         }
 
-        if (requests.Count > 0)
+        foreach ((int origin, IndexBatches<(Column Column, Run Run, Fence Fence, int[] Slots)>.Batch batch) in batches.ByOrigin)
         {
+            SegmentRequestSet requests = batch.Requests;
+            if (requests.Count == 0)
+            {
+                continue;
+            }
+
             Segments += requests.Count;
             for (int i = 0; i < requests.Count; i++)
             {
                 Bytes += requests.GetSpec(i).Length;
             }
 
-            await file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            using ScanContext context = file.CreateIndexContext();
-            foreach ((Column column, Run run, Fence fence, int[] slots) in wanted)
+            await file.IndexSourceOf(origin).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            using ScanContext context = file.CreateIndexContext(origin);
+            foreach ((Column column, Run run, Fence fence, int[] slots) in batch.Wanted)
             {
                 context.ResetBatch();
                 if (!Intact(requests, slots, fence)

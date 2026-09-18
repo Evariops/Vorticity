@@ -107,6 +107,19 @@ public sealed record IndexRun(
 
     /// <summary>One past the last block covered.</summary>
     public ulong EndBlock => FirstBlock + BlockCount;
+
+    /// <summary>
+    /// Where the run's bytes are read: 0 for the directory the file names (its own, or a sidecar),
+    /// then one per fragment attached at the open, in the order they were given
+    /// (docs/13-dataset.md §6.4).
+    /// </summary>
+    /// <remarks>
+    /// Every offset a run holds counts from the start of its origin: its payload regions, and the
+    /// fence pages and filter-tree children its payload points at. That is what makes a fragment the
+    /// same bytes wherever it is stored, and why a reader keeps the origin rather than rebasing the
+    /// run: the offsets inside a payload cannot be moved without rewriting it.
+    /// </remarks>
+    internal int Origin { get; init; }
 }
 
 /// <summary>One index over one column.</summary>

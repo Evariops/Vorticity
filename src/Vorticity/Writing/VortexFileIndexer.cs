@@ -12,8 +12,14 @@
 // before the copy leaves the file as it was; one that dies during it leaves a tail
 // `VortexFileRepair` removes.
 //
-// THE SIDECAR. The same runs and directory in `file.vortex.idx`, for stores that cannot append:
-// the directory carries the file's length and SHA-256, and the encoding table the payloads use.
+// THE SIDECAR AND THE FRAGMENT. The same runs and directory in a container of their own -- a file
+// beside the data (`file.vortex.idx`) for stores that cannot append, or bytes a dataset keeps in a
+// commit object (docs/13-dataset.md §6.4) -- bound to the file by its identity or its store token,
+// and carrying the encoding table its payloads name. Every offset in it counts from its own start,
+// so one writer serves both. A fragment may cover a block RANGE rather than the file: its builders
+// are numbered from the range's first block, which an append learns from `Continue` and a range has
+// to be told -- fed without it, a run's blocks would contradict its `FirstBlock`, an index that is
+// wrong and says nothing.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -33,6 +39,15 @@ using Vorticity.Types;
 using Vorticity.Types.Serialization;
 
 namespace Vorticity.Writing;
+
+/// <summary>An index fragment (docs/13-dataset.md §6.4), and what building it did.</summary>
+/// <param name="Bytes">
+/// The container: runs, a directory bound to the file, a trailer. A reader takes it with
+/// <see cref="VortexReadOptions.IndexFragments"/>; every offset in it counts from its first byte, so
+/// it may be stored anywhere.
+/// </param>
+/// <param name="Reports">What became of every index the policy asked for.</param>
+public sealed record IndexFragment(ReadOnlyMemory<byte> Bytes, IReadOnlyList<IndexWriteReport> Reports);
 
 /// <summary>Builds indexes over a file that already exists (docs/10-indexes.md §8).</summary>
 public static class VortexFileIndexer
@@ -78,7 +93,8 @@ public static class VortexFileIndexer
                         ? await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false)
                         : null;
                     using IndexWriter indexes = await BuildAsync(
-                        file, sink, policy, options, encodings, previous?.Entries ?? [], length, cancellationToken).ConfigureAwait(false);
+                        file, sink, policy, options, encodings, previous?.Entries ?? [], length,
+                        new RowRange(0, file.RowCount), cancellationToken).ConfigureAwait(false);
                     reports = [.. indexes.Reports];
                     await WriteTailAsync(file, sink, indexes, encodings, options?.Identity, cancellationToken).ConfigureAwait(false);
                     await sink.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -134,34 +150,110 @@ public static class VortexFileIndexer
         await using (file.ConfigureAwait(false))
         {
             VortexFileRepair.ThrowIfTorn(path, file, "A sidecar");
+            // THE BINDING (13 §7): the identity when the file has one, the store's token always,
+            // and the hash of the bytes, which this pass is the one to compute.
+            UInt128 hash = await IndexSidecar.HashAsync(file.Segments, file.FileLength, cancellationToken).ConfigureAwait(false);
             FileStream stream = new FileStream(sidecarPath, FileMode.Create, FileAccess.Write, FileShare.None);
             StreamSegmentSink sink = new StreamSegmentSink(stream, ownsStream: true);
             await using (sink.ConfigureAwait(false))
             {
-                await sink.WriteAsync(IndexSidecar.Magic.ToArray(), cancellationToken).ConfigureAwait(false);
-                EncodingDictionary encodings = new EncodingDictionary(
-                    ComponentKind.Array, options?.TargetEdition ?? EditionRegistry.Newest);
-                using IndexWriter indexes = await BuildAsync(
-                    file, sink, policy, options, encodings, [], 0, cancellationToken).ConfigureAwait(false);
-                // THE BINDING (13 §7): the identity when the file has one, the store's token always,
-                // and the hash of the bytes, which this pass is the one to compute.
-                UInt128 hash = await IndexSidecar.HashAsync(file.Segments, file.FileLength, cancellationToken).ConfigureAwait(false);
-                SidecarBinding binding = new SidecarBinding(
-                    file.FileLength, file.Identity, IndexSidecar.TokenOf(path), hash, [.. encodings.Ids]);
-                long offset = sink.Position;
-                byte[] directory = indexes.Directory(file.RowCount, binding)!;
-                await sink.WriteAsync(directory, cancellationToken).ConfigureAwait(false);
-                await sink.WriteAsync(IndexSidecar.Trailer(offset, directory.Length), cancellationToken).ConfigureAwait(false);
-                await sink.FlushAsync(cancellationToken).ConfigureAwait(false);
-                return [.. indexes.Reports];
+                return await WriteContainerAsync(
+                    file, sink, policy, new RowRange(0, file.RowCount), IndexSidecar.TokenOf(path), hash, options,
+                    cancellationToken).ConfigureAwait(false);
             }
         }
     }
 
-    /// <summary>Feeds every row to the builders and writes their runs to <paramref name="sink"/>.</summary>
+    /// <summary>
+    /// Indexes the rows <paramref name="rows"/> of <paramref name="file"/> under
+    /// <paramref name="policy"/> into a fragment (docs/13-dataset.md §6.4), leaving the file
+    /// untouched; a reader adds it to the file's own index with
+    /// <see cref="VortexReadOptions.IndexFragments"/>.
+    /// </summary>
+    /// <param name="file">The file, open. It is read, never written.</param>
+    /// <param name="policy">What to build.</param>
+    /// <param name="rows">
+    /// The rows to index, whole blocks: from a block boundary to a block boundary, or to the file's
+    /// end. The whole file is <c>new RowRange(0, file.RowCount)</c>.
+    /// </param>
+    /// <param name="storeToken">
+    /// The store's token for the file, which binds the fragment to a file written without an identity
+    /// (13 §7); null to bind by the identity alone.
+    /// </param>
+    /// <param name="contentHash">
+    /// The XXH3-128 of the file's bytes when the caller knows it — a dataset's entry carries the one
+    /// its writer computed — recorded for verification; null to record none. No reader computes it.
+    /// </param>
+    /// <param name="options">As for <see cref="AppendIndexesAsync"/>.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The fragment's bytes, and what became of every index the policy asked for.</returns>
+    /// <remarks>
+    /// A fragment over a range covers only the blocks of that range: a pruner uses it there and leaves
+    /// every other block live, and a key source refuses the entry until fragments cover the whole file
+    /// (10 §8). A dictionary probe is not a function of the rows but of the file's chunks, so a range
+    /// writes it whole or not at all, never cut to the range.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The range is empty, past the file, or not whole blocks.</exception>
+    /// <exception cref="InvalidOperationException">The file has no identity and no store token was given.</exception>
+    /// <exception cref="VortexUnsupportedException">The file's layout is not one this can index.</exception>
+    public static async ValueTask<IndexFragment> BuildFragmentAsync(
+        VortexFile file,
+        WritePolicy policy,
+        RowRange rows,
+        string? storeToken = null,
+        UInt128? contentHash = null,
+        VortexWriteOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        ArgumentNullException.ThrowIfNull(policy);
+        if (file.Identity is null && storeToken is null)
+        {
+            throw new InvalidOperationException(
+                "A fragment is bound to its file by the file's identity, or by the store's token for a file " +
+                "written without one (13 §7): this file has no identity, and no token was given.");
+        }
+
+        MemoryStream bytes = new MemoryStream();
+        StreamSegmentSink sink = new StreamSegmentSink(bytes);
+        await using (sink.ConfigureAwait(false))
+        {
+            IReadOnlyList<IndexWriteReport> reports = await WriteContainerAsync(
+                file, sink, policy, rows, storeToken, contentHash, options, cancellationToken).ConfigureAwait(false);
+            return new IndexFragment(bytes.ToArray(), reports);
+        }
+    }
+
+    /// <summary>
+    /// Writes one container: the magic, the runs of <paramref name="rows"/>, the bound directory and
+    /// the trailer (docs/10-indexes.md §8, docs/13-dataset.md §6.4).
+    /// </summary>
+    private static async ValueTask<IReadOnlyList<IndexWriteReport>> WriteContainerAsync(
+        VortexFile file, StreamSegmentSink sink, WritePolicy policy, RowRange rows, string? token, UInt128? hash,
+        VortexWriteOptions? options, CancellationToken cancellationToken)
+    {
+        await sink.WriteAsync(IndexSidecar.Magic.ToArray(), cancellationToken).ConfigureAwait(false);
+        EncodingDictionary encodings = new EncodingDictionary(
+            ComponentKind.Array, options?.TargetEdition ?? EditionRegistry.Newest);
+        using IndexWriter indexes = await BuildAsync(
+            file, sink, policy, options, encodings, [], 0, rows, cancellationToken).ConfigureAwait(false);
+        SidecarBinding binding = new SidecarBinding(file.FileLength, file.Identity, token, hash, [.. encodings.Ids]);
+        long offset = sink.Position;
+        byte[] directory = indexes.Directory(file.RowCount, binding)!;
+        await sink.WriteAsync(directory, cancellationToken).ConfigureAwait(false);
+        await sink.WriteAsync(IndexSidecar.Trailer(offset, directory.Length), cancellationToken).ConfigureAwait(false);
+        await sink.FlushAsync(cancellationToken).ConfigureAwait(false);
+        return [.. indexes.Reports];
+    }
+
+    /// <summary>
+    /// Feeds the rows of <paramref name="range"/> to the builders and writes their runs to
+    /// <paramref name="sink"/>.
+    /// </summary>
     private static async ValueTask<IndexWriter> BuildAsync(
         VortexFile file, StreamSegmentSink sink, WritePolicy policy, VortexWriteOptions? options,
-        EncodingDictionary encodings, IReadOnlyList<IndexEntry> previous, long previousEof,
+        EncodingDictionary encodings, IReadOnlyList<IndexEntry> previous, long previousEof, RowRange range,
         CancellationToken cancellationToken)
     {
         DType schema = file.Schema;
@@ -201,6 +293,18 @@ public static class VortexFileIndexer
             }
         }
 
+        // A RANGE IS WHOLE BLOCKS (13 §6.4, "one block range of one object"): a run covers blocks,
+        // and a block cut in two would be claimed by two fragments or by neither.
+        bool whole = range.Start == 0 && range.End == rows;
+        if (!whole && (range.IsEmpty || range.End > rows || range.Start % blockRows != 0
+            || (range.End % blockRows != 0 && range.End != rows)))
+        {
+            throw new ArgumentOutOfRangeException(
+                "rows",
+                $"A fragment indexes whole blocks of {blockRows} rows of a file of {rows}: " +
+                $"[{range.Start}, {range.End}) is not.");
+        }
+
         IndexWriter indexes = new IndexWriter(
             policy, schema, isTabular: true, fields,
             options?.IndexBudgetPerMille ?? VortexWriteOptions.Default.IndexBudgetPerMille, blockRows, options?.KeyEncoder,
@@ -212,6 +316,10 @@ public static class VortexFileIndexer
         try
         {
             indexes.Preserve(previous, previousEof);
+
+            // The builders' block numbers start where the range does: their runs then say which
+            // blocks of the FILE they cover, whatever part of it this pass reads.
+            indexes.Begin(checked((int)(range.Start / blockRows)), range.Start);
 
             // The columns as the dictionary probe and the first-block rule read them: a summary per
             // block, and the chunks that are dictionaries.
@@ -254,9 +362,19 @@ public static class VortexFileIndexer
             {
                 long start = chunks[c].Start;
                 long end = c + 1 < chunks.Count ? chunks[c + 1].Start : rows;
+
+                // Every chunk for the dictionary probe, which describes the file's layout and not
+                // the rows a pass reads; only the rows the range names for the builders.
                 chunkRows.Add(end - start);
+                long from = Math.Max(start, range.Start);
+                long to = Math.Min(end, range.End);
+                if (from >= to)
+                {
+                    continue;
+                }
+
                 await foreach (RecordBatch batch in file.Scan()
-                    .Rows(new RowRange(start, end))
+                    .Rows(new RowRange(from, to))
                     .WithPruning(false)
                     .WithIndexes(false)
                     .ExecuteAsync()
@@ -266,8 +384,9 @@ public static class VortexFileIndexer
                     (filled, block) = Feed(indexes, columns, batch, fieldNodes, blockRows, filled, block);
                 }
 
-                if (c + 1 == chunks.Count && filled > 0)
+                if (to == range.End && filled > 0)
                 {
+                    // The last block of the range, which only the end of the file can cut short.
                     indexes.CloseBlock(columns);
                     filled = 0;
                 }
@@ -279,8 +398,8 @@ public static class VortexFileIndexer
                     indexes.AddColumnBytes(field, file.SegmentSpecs[(int)own[c].Flat.Segments[0]].Length);
                 }
 
-                int firstBlock = checked((int)(start / blockRows));
-                indexes.CloseChunk(firstBlock, VortexFileWriter.ChunkBlocks(end - start, blockRows), start, end - start);
+                int firstBlock = checked((int)(from / blockRows));
+                indexes.CloseChunk(firstBlock, VortexFileWriter.ChunkBlocks(to - from, blockRows), from, to - from);
                 indexes.Judge();
                 await FlushAsync(indexes, sink, encodings, cancellationToken).ConfigureAwait(false);
             }

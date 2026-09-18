@@ -252,12 +252,12 @@ public sealed class FenceTreeTests
             Assert.Equal(expected.WideRows, table.WideRows);
             for (long s = 0; s < table.SegmentCount; s++)
             {
-                Fence got = await table.GetAsync(file.IndexSource, s, default);
-                Fence want = await expected.GetAsync(oracle.IndexSource, s, default);
+                Fence got = await table.GetAsync(file.IndexSourceOf(run), s, default);
+                Fence want = await expected.GetAsync(oracle.IndexSourceOf(inlineRun), s, default);
                 Assert.Equal((want.Index, want.Start), (got.Index, got.Start));
                 AssertSame(want.Bounds, got.Bounds);
                 Assert.Equal(want.Regions, got.Regions);
-                Assert.Equal(s, (await table.OfPositionAsync(file.IndexSource, got.Start, default)).Index);
+                Assert.Equal(s, (await table.OfPositionAsync(file.IndexSourceOf(run), got.Start, default)).Index);
             }
         }
 

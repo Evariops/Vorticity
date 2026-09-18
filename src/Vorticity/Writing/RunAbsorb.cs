@@ -150,12 +150,13 @@ internal static class RunAbsorb
         long firstRow = checked((long)(run.FirstBlock * entry.BlockLength));
         using RawRunWriter writer = new RawRunWriter(
             scratch, hasRows, layout.Width, checked((int)run.FirstBlock), checked((int)run.BlockCount));
-        using ScanContext context = file.CreateIndexContext();
+        using ScanContext context = file.CreateIndexContext(run);
+        ISegmentSource source = file.IndexSourceOf(run);
         try
         {
             for (long s = 0; s < table!.SegmentCount; s++)
             {
-                Fence fence = await table.GetAsync(file.IndexSource, s, cancellationToken).ConfigureAwait(false);
+                Fence fence = await table.GetAsync(source, s, cancellationToken).ConfigureAwait(false);
                 if (fence.Bounds.Entries > int.MaxValue)
                 {
                     return null;
@@ -170,7 +171,7 @@ internal static class RunAbsorb
                     slots[a] = requests.Add(new SegmentSpec(payload.Offset, payload.Length, payload.AlignmentExponent, 0, 0));
                 }
 
-                await file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+                await source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
                 for (int a = 0; a < stride; a++)
                 {
                     if (!fence.Regions[a].Holds(requests.GetBuffer(slots[a]).Span))

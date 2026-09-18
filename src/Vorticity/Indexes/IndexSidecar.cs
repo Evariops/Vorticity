@@ -76,45 +76,12 @@ internal static class IndexSidecar
         try
         {
             long length = await source.GetLengthAsync(cancellationToken).ConfigureAwait(false);
-            if (length < Magic.Length + TrailerSize)
+            (IndexDirectory? directory, string? reason) =
+                await ReadAsync(source, length, file, "sidecar", cancellationToken).ConfigureAwait(false);
+            if (directory is null)
             {
                 await source.DisposeAsync().ConfigureAwait(false);
-                return (null, null, "the sidecar is too short to hold a trailer");
-            }
-
-            long offset;
-            int size;
-            using (SegmentOwner trailer = await source.ReadRangeAsync(length - TrailerSize, TrailerSize, 1, cancellationToken).ConfigureAwait(false))
-            {
-                (offset, size, string? bad) = ReadTrailer(trailer.Buffer, length);
-                if (bad is not null)
-                {
-                    await source.DisposeAsync().ConfigureAwait(false);
-                    return (null, null, bad);
-                }
-            }
-
-            IndexDirectory? directory;
-            string? reason;
-            using (SegmentOwner bytes = await source.ReadRangeAsync(offset, size, 1, cancellationToken).ConfigureAwait(false))
-            {
-                if (!IndexDirectory.TryParse(bytes.Buffer.Span, (ulong)file.RowCount, (ulong)offset, out directory, out reason))
-                {
-                    await source.DisposeAsync().ConfigureAwait(false);
-                    return (null, null, "the sidecar's " + reason);
-                }
-            }
-
-            if (Unbound(directory!, file) is { } stale)
-            {
-                await source.DisposeAsync().ConfigureAwait(false);
-                return (null, null, stale);
-            }
-
-            if (directory!.ArrayEncodings is null)
-            {
-                await source.DisposeAsync().ConfigureAwait(false);
-                return (null, null, "the sidecar carries no encoding table for its payloads");
+                return (null, null, reason);
             }
 
             return (source, directory, null);
@@ -126,23 +93,82 @@ internal static class IndexSidecar
         }
     }
 
-    private static (long Offset, int Length, string? Reason) ReadTrailer(VortexBuffer trailer, long length)
+    /// <summary>
+    /// Reads the container's directory from any source holding it whole, refusing it with a reason
+    /// when it is not one, or is not this file's.
+    /// </summary>
+    /// <param name="source">The bytes, starting at the magic: a file, or a fragment's blob (13 §6.4).</param>
+    /// <param name="length">How long they are.</param>
+    /// <param name="file">The data object the index is offered for.</param>
+    /// <param name="what">What to call it in a refusal: "sidecar" or "fragment".</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The directory, or the reason it was refused.</returns>
+    /// <remarks>
+    /// THE CONTAINER IS POSITION-INDEPENDENT, which is what lets a fragment be the same bytes inside
+    /// a commit object (13 §12: "one fragment in one commit object; the word goes"). Every offset in
+    /// it is relative to its own start, so the reader needs a source that begins at the magic and
+    /// nothing else — not a path, not a length in some enclosing file.
+    /// </remarks>
+    internal static async ValueTask<(IndexDirectory? Directory, string? Reason)> ReadAsync(
+        ISegmentSource source, long length, File.VortexFile file, string what, CancellationToken cancellationToken)
+    {
+        if (length < Magic.Length + TrailerSize)
+        {
+            return (null, $"the {what} is too short to hold a trailer");
+        }
+
+        long offset;
+        int size;
+        using (SegmentOwner trailer = await source
+            .ReadRangeAsync(length - TrailerSize, TrailerSize, 1, cancellationToken).ConfigureAwait(false))
+        {
+            (offset, size, string? bad) = ReadTrailer(trailer.Buffer, length, what);
+            if (bad is not null)
+            {
+                return (null, bad);
+            }
+        }
+
+        IndexDirectory? directory;
+        string? reason;
+        using (SegmentOwner bytes = await source
+            .ReadRangeAsync(offset, size, 1, cancellationToken).ConfigureAwait(false))
+        {
+            if (!IndexDirectory.TryParse(
+                bytes.Buffer.Span, (ulong)file.RowCount, (ulong)offset, out directory, out reason))
+            {
+                return (null, $"the {what}'s " + reason);
+            }
+        }
+
+        if (Unbound(directory!, file, what) is { } stale)
+        {
+            return (null, stale);
+        }
+
+        return directory!.ArrayEncodings is null
+            ? (null, $"the {what} carries no encoding table for its payloads")
+            : (directory, null);
+    }
+
+    private static (long Offset, int Length, string? Reason) ReadTrailer(
+        VortexBuffer trailer, long length, string what)
     {
         ReadOnlySpan<byte> bytes = trailer.Span;
         if (!bytes[16..].SequenceEqual(Magic))
         {
-            return (0, 0, "the sidecar's trailer does not end with VXIX");
+            return (0, 0, $"the {what}'s trailer does not end with VXIX");
         }
 
         if (BinaryPrimitives.ReadUInt32LittleEndian(bytes[12..]) != Version)
         {
-            return (0, 0, "the sidecar's version is not one this library reads");
+            return (0, 0, $"the {what}'s version is not one this library reads");
         }
 
         ulong offset = BinaryPrimitives.ReadUInt64LittleEndian(bytes);
         uint size = BinaryPrimitives.ReadUInt32LittleEndian(bytes[8..]);
         return offset < (ulong)Magic.Length || offset + size > (ulong)(length - TrailerSize)
-            ? (0, 0, "the sidecar's trailer names a directory outside it")
+            ? (0, 0, $"the {what}'s trailer names a directory outside it")
             : ((long)offset, (int)size, null);
     }
 
@@ -153,35 +179,36 @@ internal static class IndexSidecar
     /// </summary>
     /// <param name="directory">The sidecar's directory.</param>
     /// <param name="file">The file it is offered for.</param>
-    internal static string? Unbound(IndexDirectory directory, File.VortexFile file)
+    /// <param name="what">What to call it in a refusal: "sidecar" or "fragment" (13 §6.4).</param>
+    internal static string? Unbound(IndexDirectory directory, File.VortexFile file, string what = "sidecar")
     {
         if (directory.FileLength != (ulong)file.FileLength)
         {
-            return $"the sidecar indexes a file of {directory.FileLength} bytes, not this one of {file.FileLength}: it is stale";
+            return $"the {what} indexes a file of {directory.FileLength} bytes, not this one of {file.FileLength}: it is stale";
         }
 
         if (directory.FileIdentity is { } identity)
         {
             return file.Identity == identity
                 ? null
-                : $"the sidecar indexes the version {identity:N} of the file, and this is {(file.Identity is { } other ? other.ToString("N") : "a file without an identity")}: it is stale";
+                : $"the {what} indexes the version {identity:N} of the file, and this is {(file.Identity is { } other ? other.ToString("N") : "a file without an identity")}: it is stale";
         }
 
         if (directory.FileToken is { } token)
         {
             if (TokenOf(file) is not { } current)
             {
-                return "the sidecar binds a file without an identity by its store token, and this file was not opened from a path that gives one";
+                return $"the {what} binds a file without an identity by its store token, and this file was not opened from a path that gives one";
             }
 
             return string.Equals(current, token, StringComparison.Ordinal)
                 ? null
-                : $"the sidecar was written for the store token {token}, and the file's is {current}: it is stale (a heuristic for a file without an identity)";
+                : $"the {what} was written for the store token {token}, and the file's is {current}: it is stale (a heuristic for a file without an identity)";
         }
 
         return directory.LegacySha256
-            ? "the sidecar binds its file by a SHA-256, which a reader no longer computes (13 §7): rebuild it"
-            : "the sidecar names neither the file's identity nor its store token";
+            ? $"the {what} binds its file by a SHA-256, which a reader no longer computes (13 §7): rebuild it"
+            : $"the {what} names neither the file's identity nor its store token";
     }
 
     /// <summary>The store token of the file at <paramref name="path"/>: its length and modification time.</summary>

@@ -43,13 +43,26 @@ internal sealed record RunSegment(byte[] Keys, int[]? Offsets, uint[]? Rows, int
     internal long RowAt(int index) => Rows is { } narrow ? narrow[index] : checked((long)WideRows![index]);
 }
 
-/// <summary>An LRU of decoded run segments, keyed by the file offset of their first payload.</summary>
+/// <summary>Where a decoded segment was read: its index origin, and the offset of its first payload there.</summary>
+/// <param name="Origin">
+/// The origin of the run it belongs to: 0 for the file's own directory, then one per attached
+/// fragment (docs/13-dataset.md §6.4).
+/// </param>
+/// <param name="Offset">The offset of the segment's first payload, within that origin.</param>
+/// <remarks>
+/// THE ORIGIN IS PART OF THE KEY because an offset is unique within one origin only: every fragment's
+/// offsets count from its own magic, so the first segments of two fragments sit at the same offset,
+/// and a cache keyed by the offset alone would hand one run the other's keys.
+/// </remarks>
+internal readonly record struct RunSegmentKey(int Origin, ulong Offset);
+
+/// <summary>An LRU of decoded run segments, keyed by where their first payload was read.</summary>
 internal sealed class IndexRunCache
 {
     private readonly long _budget;
     private readonly object _gate = new object();
-    private readonly Dictionary<ulong, LinkedListNode<(ulong Key, RunSegment Segment)>> _map = [];
-    private readonly LinkedList<(ulong Key, RunSegment Segment)> _order = new();
+    private readonly Dictionary<RunSegmentKey, LinkedListNode<(RunSegmentKey Key, RunSegment Segment)>> _map = [];
+    private readonly LinkedList<(RunSegmentKey Key, RunSegment Segment)> _order = new();
     private long _bytes;
 
     /// <param name="budget">The bytes it may hold.</param>
@@ -80,14 +93,14 @@ internal sealed class IndexRunCache
     }
 
     /// <summary>The segment stored under <paramref name="key"/>, now the most recent.</summary>
-    /// <param name="key">The file offset of the segment's first payload.</param>
+    /// <param name="key">Where the segment's first payload was read.</param>
     /// <param name="segment">The segment.</param>
     /// <returns>Whether it was held.</returns>
-    internal bool TryGet(ulong key, out RunSegment segment)
+    internal bool TryGet(RunSegmentKey key, out RunSegment segment)
     {
         lock (_gate)
         {
-            if (_map.TryGetValue(key, out LinkedListNode<(ulong Key, RunSegment Segment)>? node))
+            if (_map.TryGetValue(key, out LinkedListNode<(RunSegmentKey Key, RunSegment Segment)>? node))
             {
                 _order.Remove(node);
                 _order.AddFirst(node);
@@ -104,15 +117,15 @@ internal sealed class IndexRunCache
     /// Keeps <paramref name="segment"/> under <paramref name="key"/>, evicting the least recently
     /// used, and returns what the cache holds under the key -- the first insert wins a race.
     /// </summary>
-    /// <param name="key">The file offset of the segment's first payload.</param>
+    /// <param name="key">Where the segment's first payload was read.</param>
     /// <param name="segment">A freshly decoded segment.</param>
     /// <returns>The segment to use.</returns>
-    internal RunSegment Add(ulong key, RunSegment segment)
+    internal RunSegment Add(RunSegmentKey key, RunSegment segment)
     {
         long bytes = segment.Bytes;
         lock (_gate)
         {
-            if (_map.TryGetValue(key, out LinkedListNode<(ulong Key, RunSegment Segment)>? held))
+            if (_map.TryGetValue(key, out LinkedListNode<(RunSegmentKey Key, RunSegment Segment)>? held))
             {
                 _order.Remove(held);
                 _order.AddFirst(held);

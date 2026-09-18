@@ -1,6 +1,7 @@
 // Read-time policy. Carried on the open file and copied into every ScanContext, so it is immutable
 // and shared: docs/09-contracts.md §1 allows concurrent scans on one open file.
 using System;
+using System.Collections.Generic;
 
 namespace Vorticity.File;
 
@@ -79,6 +80,23 @@ public sealed class VortexReadOptions
     /// path -- which is a heuristic. <c>VortexFileIndexer.WriteSidecarAsync</c> writes one.
     /// </remarks>
     public string? IndexSidecarPath { get; init; }
+
+    /// <summary>
+    /// Index fragments built for this file (docs/13-dataset.md §6.4), each one whole container: the
+    /// runs and the directory an indexer wrote for a block range of the file, bound to it by its
+    /// identity. Empty by default.
+    /// </summary>
+    /// <remarks>
+    /// They are ADDED to the index the file names — its own directory, or its sidecar — entry by
+    /// entry. An entry the file already has, of the same kind, column, block length and options,
+    /// stays the file's; the same entry across fragments joins its runs when their blocks are
+    /// disjoint; an entry of other options is another entry. A fragment that is not this file's, or
+    /// an entry that overlaps blocks another fragment covers, is left out with the reason in
+    /// <see cref="VortexFile.IndexFragmentRefusals"/>, and never fails the open: an index is a hint
+    /// (docs/10-indexes.md §6.6). A fragment is decoded against its own encoding table, never the
+    /// file's footer, so the bytes are the same wherever they are stored.
+    /// </remarks>
+    public IReadOnlyList<ReadOnlyMemory<byte>> IndexFragments { get; init; } = [];
 
     /// <summary>
     /// THE INTERNAL SWITCH OF PERF-AUDIT-v2.md Z1b. Default <see langword="false"/>.

@@ -23,13 +23,15 @@ using Vorticity.Types.Serialization;
 
 namespace Vorticity.Writing;
 
-/// <summary>What binds a sidecar to the version of the file it indexes (docs/13-dataset.md §7).</summary>
+/// <summary>
+/// What binds a sidecar or a fragment to the version of the file it indexes (docs/13-dataset.md §7).
+/// </summary>
 /// <param name="Length">The file's length.</param>
 /// <param name="Identity">Its identity, when it has one.</param>
 /// <param name="Token">The store's token for it, when the store gives one.</param>
-/// <param name="Hash">The XXH3-128 of its bytes.</param>
-/// <param name="Encodings">The encodings the sidecar's payloads name.</param>
-internal sealed record SidecarBinding(long Length, Guid? Identity, string? Token, UInt128 Hash, IReadOnlyList<string> Encodings);
+/// <param name="Hash">The XXH3-128 of its bytes, when the indexer knows it; no reader computes it.</param>
+/// <param name="Encodings">The encodings the container's payloads name.</param>
+internal sealed record SidecarBinding(long Length, Guid? Identity, string? Token, UInt128? Hash, IReadOnlyList<string> Encodings);
 
 /// <summary>Builds the indexes of one file and the directory that lists them.</summary>
 internal sealed class IndexWriter : IDisposable
@@ -644,13 +646,7 @@ internal sealed class IndexWriter : IDisposable
     {
         _previousEof = (ulong)previousEof;
         _adopted = absorbedScratch;
-        foreach (List<IndexBuilder> builders in _builders)
-        {
-            foreach (IndexBuilder builder in builders)
-            {
-                builder.Start(boundary, row);
-            }
-        }
+        Begin(boundary, row);
 
         foreach (IndexEntry entry in entries)
         {
@@ -671,6 +667,31 @@ internal sealed class IndexWriter : IDisposable
 
             (_prior ??= []).Add(kept);
             (_priorAbsorbed ??= []).Add(count);
+        }
+    }
+
+    /// <summary>
+    /// Numbers the first block and row this pass is about to be fed, so its runs say which blocks of
+    /// the file they cover.
+    /// </summary>
+    /// <param name="firstBlock">The first block the caller will feed.</param>
+    /// <param name="firstRow">Its first row.</param>
+    /// <remarks>
+    /// EXTRACTED FROM <see cref="Continue"/> FOR THE RANGE INDEXER (13 §6.4: "an indexer works by
+    /// `(object, block range)`"). Continuing a file's indexes is two things at once — start the
+    /// builders at a block, and list the old entries trimmed at it — and a fragment over a range
+    /// wants only the first. They were welded together while the append was the only caller, and the
+    /// weld is what made "index blocks 40 to 80" impossible to ask for: <see cref="Continue"/> drops
+    /// every old run reaching past its boundary, which is right for a suffix and wrong for a range.
+    /// </remarks>
+    internal void Begin(int firstBlock, long firstRow)
+    {
+        foreach (List<IndexBuilder> builders in _builders)
+        {
+            foreach (IndexBuilder builder in builders)
+            {
+                builder.Start(firstBlock, firstRow);
+            }
         }
     }
 

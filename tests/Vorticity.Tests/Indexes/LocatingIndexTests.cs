@@ -108,7 +108,7 @@ public sealed class LocatingIndexTests
                 ulong inSegments = 0;
                 for (long s = 0; s < table.SegmentCount; s++)
                 {
-                    inSegments += (await table.GetAsync(written.File.IndexSource, s, default)).Bounds.Entries;
+                    inSegments += (await table.GetAsync(written.File.IndexSourceOf(run), s, default)).Bounds.Entries;
                 }
 
                 Assert.Equal(run.EntryCount, inSegments);

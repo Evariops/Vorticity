@@ -780,10 +780,11 @@ internal sealed partial class SortedRunsSource : KeySource
 
         // The first segment whose last key does not come before the key: a binary search over the
         // bounds in memory, or a descent through the fence pages (13 §6.3).
-        long low = await table.LowerBoundAsync(_file.IndexSource, new MaxProbe(this, key), cancellationToken).ConfigureAwait(false);
+        ISegmentSource source = _file.IndexSourceOf(run.Meta);
+        long low = await table.LowerBoundAsync(source, new MaxProbe(this, key), cancellationToken).ConfigureAwait(false);
         for (long s = low; s < table.SegmentCount; s++)
         {
-            Fence fence = await table.GetAsync(_file.IndexSource, s, cancellationToken).ConfigureAwait(false);
+            Fence fence = await table.GetAsync(source, s, cancellationToken).ConfigureAwait(false);
             if (fence.Bounds.Entries == 0)
             {
                 continue;
@@ -829,7 +830,7 @@ internal sealed partial class SortedRunsSource : KeySource
     private async ValueTask<(FilterLiteral Key, long Row)> EntryAsync(
         Run run, long position, CancellationToken cancellationToken)
     {
-        Fence fence = await run.Table.OfPositionAsync(_file.IndexSource, position, cancellationToken).ConfigureAwait(false);
+        Fence fence = await run.Table.OfPositionAsync(_file.IndexSourceOf(run.Meta), position, cancellationToken).ConfigureAwait(false);
         RunSegment segment = await SegmentAsync(run, fence, cancellationToken).ConfigureAwait(false);
         int at = (int)(position - fence.Start);
         ReadOnlySpan<byte> key = KeyAt(segment, at);
@@ -842,7 +843,7 @@ internal sealed partial class SortedRunsSource : KeySource
     {
         if (run.Current is null || position < run.CurrentStart || position >= run.CurrentStart + run.Current.Count)
         {
-            Fence fence = await run.Table.OfPositionAsync(_file.IndexSource, position, cancellationToken).ConfigureAwait(false);
+            Fence fence = await run.Table.OfPositionAsync(_file.IndexSourceOf(run.Meta), position, cancellationToken).ConfigureAwait(false);
             run.Current = await SegmentAsync(run, fence, cancellationToken).ConfigureAwait(false);
             run.CurrentStart = fence.Start;
         }
@@ -859,7 +860,7 @@ internal sealed partial class SortedRunsSource : KeySource
         }
 
         IndexSegment keys = fence.Regions[0];
-        if (_file.RunCache.TryGet(keys.Offset, out RunSegment cached))
+        if (_file.RunCache.TryGet(new RunSegmentKey(run.Meta.Origin, keys.Offset), out RunSegment cached))
         {
             run.Probe = cached;
             run.ProbeIndex = fence.Index;
@@ -890,7 +891,7 @@ internal sealed partial class SortedRunsSource : KeySource
                 rowSlot = requests.Add(new SegmentSpec(rows.Offset, rows.Length, rows.AlignmentExponent, 0, 0));
             }
 
-            await _file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            await _file.IndexSourceOf(run.Meta).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             Diagnostics.VortexEventSource.RunsRead(requests.Count);
 
             // A WALK OVER TORN BYTES WOULD BE WRONG, NOT SLOW (13 §7): the source refuses, as it
@@ -901,7 +902,7 @@ internal sealed partial class SortedRunsSource : KeySource
                 throw Malformed("a segment's bytes do not match its checksum: it is torn or corrupt");
             }
 
-            using ScanContext context = _file.CreateIndexContext();
+            using ScanContext context = _file.CreateIndexContext(run.Meta);
             decoded = Decode(
                 context,
                 requests.GetBuffer(keySlot),
@@ -916,7 +917,7 @@ internal sealed partial class SortedRunsSource : KeySource
             Verify(decoded, fence.Bounds);
         }
 
-        decoded = _file.RunCache.Add(keys.Offset, decoded);
+        decoded = _file.RunCache.Add(new RunSegmentKey(run.Meta.Origin, keys.Offset), decoded);
         run.Probe = decoded;
         run.ProbeIndex = fence.Index;
         return decoded;

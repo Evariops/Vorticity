@@ -195,8 +195,7 @@ internal sealed class BloomPruner
     /// <summary>Reads every root over a live block, in one read; returns the deepest root's level.</summary>
     private async ValueTask<int> LoadRootsAsync(VortexFile file, BlockMask live, CancellationToken cancellationToken)
     {
-        using SegmentRequestSet requests = new SegmentRequestSet();
-        List<(Tree Tree, int Slot)> wanted = [];
+        using IndexBatches<(Tree Tree, int Slot)> batches = new();
         foreach (Column column in _columns.Values)
         {
             foreach (Tree tree in column.Trees)
@@ -204,18 +203,20 @@ internal sealed class BloomPruner
                 if (tree.Root is null && AnyLive(live, (long)tree.Run.FirstBlock, (long)tree.Run.EndBlock))
                 {
                     IndexSegment root = tree.Run.Payload[0];
-                    wanted.Add((tree, requests.Add(new SegmentSpec(root.Offset, root.Length, root.AlignmentExponent, 0, 0))));
+                    IndexBatches<(Tree Tree, int Slot)>.Batch batch = batches.For(tree.Run);
+                    batch.Wanted.Add((tree, batch.Requests.Add(
+                        new SegmentSpec(root.Offset, root.Length, root.AlignmentExponent, 0, 0))));
                 }
             }
         }
 
-        if (wanted.Count > 0)
+        foreach ((int origin, IndexBatches<(Tree Tree, int Slot)>.Batch batch) in batches.ByOrigin)
         {
-            await ReadAsync(file, requests, cancellationToken).ConfigureAwait(false);
-            using ScanContext context = file.CreateIndexContext();
-            foreach ((Tree tree, int slot) in wanted)
+            await ReadAsync(file, origin, batch.Requests, cancellationToken).ConfigureAwait(false);
+            using ScanContext context = file.CreateIndexContext(origin);
+            foreach ((Tree tree, int slot) in batch.Wanted)
             {
-                VortexBuffer bytes = requests.GetBuffer(slot);
+                VortexBuffer bytes = batch.Requests.GetBuffer(slot);
                 uint[]? words = tree.Run.Payload[0].Holds(bytes.Span)
                     ? Decode(context, bytes, BloomTreeRun.RootWords(tree.Run.OptionBytes))
                     : null;
@@ -259,8 +260,7 @@ internal sealed class BloomPruner
     /// </summary>
     private async ValueTask LoadLevelAsync(VortexFile file, BlockMask live, int level, CancellationToken cancellationToken)
     {
-        using SegmentRequestSet requests = new SegmentRequestSet();
-        List<(Tree Tree, long Index, BloomNode Parent, int Slot)> wanted = [];
+        using IndexBatches<(Tree Tree, long Index, BloomNode Parent, int Slot)> batches = new();
         foreach (Column column in _columns.Values)
         {
             foreach (Tree tree in column.Trees)
@@ -285,40 +285,41 @@ internal sealed class BloomPruner
                     }
 
                     tree.Open(level + 1, index);
-                    int slot = requests.Add(new SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
-                    wanted.Add((tree, index, parent, slot));
+                    IndexBatches<(Tree Tree, long Index, BloomNode Parent, int Slot)>.Batch batch = batches.For(tree.Run);
+                    int slot = batch.Requests.Add(new SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+                    batch.Wanted.Add((tree, index, parent, slot));
                 }
             }
         }
 
-        if (wanted.Count == 0)
+        foreach ((int origin, IndexBatches<(Tree Tree, long Index, BloomNode Parent, int Slot)>.Batch batch) in batches.ByOrigin)
         {
-            return;
-        }
-
-        await ReadAsync(file, requests, cancellationToken).ConfigureAwait(false);
-        using ScanContext context = file.CreateIndexContext();
-        foreach ((Tree tree, long index, BloomNode parent, int slot) in wanted)
-        {
-            VortexBuffer bytes = requests.GetBuffer(slot);
-            ReadOnlySpan<uint> childWords = parent.ChildWords;
-            long total = 0;
-            foreach (uint child in childWords)
+            await ReadAsync(file, origin, batch.Requests, cancellationToken).ConfigureAwait(false);
+            using ScanContext context = file.CreateIndexContext(origin);
+            foreach ((Tree tree, long index, BloomNode parent, int slot) in batch.Wanted)
             {
-                total += child;
-            }
+                VortexBuffer bytes = batch.Requests.GetBuffer(slot);
+                ReadOnlySpan<uint> childWords = parent.ChildWords;
+                long total = 0;
+                foreach (uint child in childWords)
+                {
+                    total += child;
+                }
 
-            uint[]? words = parent.Children!.Value.Holds(bytes.Span) && total <= int.MaxValue
-                ? Decode(context, bytes, (int)total)
-                : null;
-            if (words is not null)
-            {
-                tree.Adopt(level, index, parent, words);
+                uint[]? words = parent.Children!.Value.Holds(bytes.Span) && total <= int.MaxValue
+                    ? Decode(context, bytes, (int)total)
+                    : null;
+                if (words is not null)
+                {
+                    tree.Adopt(level, index, parent, words);
+                }
             }
         }
     }
 
-    private async ValueTask ReadAsync(VortexFile file, SegmentRequestSet requests, CancellationToken cancellationToken)
+    /// <summary>Reads one origin's regions, counting them.</summary>
+    private async ValueTask ReadAsync(
+        VortexFile file, int origin, SegmentRequestSet requests, CancellationToken cancellationToken)
     {
         Segments += requests.Count;
         for (int i = 0; i < requests.Count; i++)
@@ -326,7 +327,7 @@ internal sealed class BloomPruner
             Bytes += requests.GetSpec(i).Length;
         }
 
-        await file.IndexSource.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+        await file.IndexSourceOf(origin).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

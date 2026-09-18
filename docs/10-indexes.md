@@ -770,6 +770,14 @@ that compacts runs.
     against its checksum, and the file's bytes against the recorded hash. It exits with 6 when one
     fails.
 
+- **The sidecar's container is the fragment's, since step 42a (13 §6.4).** One writer builds both:
+  `VortexFileIndexer.BuildFragmentAsync` writes the same container into bytes, over a block range
+  if asked, and `VortexReadOptions.IndexFragments` reads such bytes beside the file's own directory
+  instead of in place of it. `VortexFile.IndexSource` and `CreateIndexContext()` are gone: a file
+  may now read its index from several places at once, so every run names its origin
+  (`IndexRun.Origin`) and is read and decoded there. `IndexSidecarPath` stays until the sidecar is
+  retired.
+
 **A key source needs a complete index.** Found by the append tests: a pruner can use runs that cover
 part of the file (a block no run covers is live), but a cursor over them misses the other blocks'
 keys, and the exact cover counted the old rows only after an append whose builder the budget had
