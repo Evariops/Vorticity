@@ -384,6 +384,36 @@ internal static class FastLanes
     /// over a megabyte column instead of one. The broadcasts are a register move; the sweep is
     /// memory bandwidth.
     /// </para>
+    /// <para>
+    /// THREE SHAPES WERE MEASURED AGAINST THIS ONE on 2026-09-18 (PERF-GAPS.md E1), on 64 blocks at
+    /// widths 5, 10, 17 and 25 for u32 and 17, 33 and 52 for u64, interleaved in one process. All
+    /// three are recorded here so the next reader does not pay for them again.
+    /// </para>
+    /// <para>
+    /// <b>Lane groups outside, rows inside, the packed word carried in a register</b> -- upstream's
+    /// shape, and what "le mot reste en registre" asks for: <b>1.67x to 1.94x SLOWER</b>. Holding
+    /// the word costs a data-dependent branch per row (`is this still the word I have?`), re-reads
+    /// the shape table once per lane group instead of once per block, and moves the two mask
+    /// broadcasts inside the row loop. The loads it saves are all L1 hits -- the packed side of a
+    /// block is 1.3 kB -- so it trades free loads for real branches.
+    /// </para>
+    /// <para>
+    /// <b>The mask vectors precomputed once per run into an array</b>, indexed by row instead of
+    /// broadcast per row per block: <b>1.11x to 1.15x SLOWER</b>. `Vector128.Create(scalar)` is one
+    /// `dup` from a register; a 16-byte load from a table is worse. The broadcasts were already
+    /// free.
+    /// </para>
+    /// <para>
+    /// <b>The same loop with the shift and the masks as LITERALS</b> -- output deliberately wrong,
+    /// run only to price the mechanism -- reads <b>0.80x to 0.93x</b>. That is the whole ceiling of
+    /// a generator monomorphised by bit width, the C# answer to upstream's `seq_t!`: ten to twenty
+    /// per cent of the kernel, and only of the kernel. Reaching it means emitting code per (width,
+    /// row) pair -- shifts depend on the row, not on the width alone -- which is 64 widths x 4
+    /// element types x the rows of each, thousands of lines of generated source. NOT WRITTEN: the
+    /// axes where this library still loses to upstream are counted in milliseconds (`fsst` 7.2 ms,
+    /// `zstd` 7.1 ms) and this one in tens of microseconds. The measurement is the argument; if the
+    /// balance changes, the ceiling above is what to expect.
+    /// </para>
     /// </remarks>
     /// <typeparam name="T">The unsigned element type.</typeparam>
     /// <param name="packed">Exactly <c>blocks * lanes * bitWidth</c> words.</param>
@@ -656,19 +686,25 @@ internal static class FastLanes
                 nuint into = blockDestination + (nuint)shape.Destination;
                 int shift = shape.Shift;
                 int currentBits = shape.CurrentBits;
-                bool spills = shape.Spills;
+                // See `Unpack128`: the spill test is per ROW, so it is hoisted out of the lanes.
+                if (shape.Spills)
+                {
+                    for (int lane = 0; lane < lanes; lane += step)
+                    {
+                        Vector512<T> value = ShiftRight(
+                            Vector512.LoadUnsafe(ref source, current + (nuint)lane), shift) & low;
+                        value |= ShiftLeft(
+                            Vector512.LoadUnsafe(ref source, next + (nuint)lane) & high, currentBits);
+                        value.StoreUnsafe(ref destination, into + (nuint)lane);
+                    }
+
+                    continue;
+                }
 
                 for (int lane = 0; lane < lanes; lane += step)
                 {
                     Vector512<T> value = ShiftRight(
                         Vector512.LoadUnsafe(ref source, current + (nuint)lane), shift) & low;
-
-                    if (spills)
-                    {
-                        value |= ShiftLeft(
-                            Vector512.LoadUnsafe(ref source, next + (nuint)lane) & high, currentBits);
-                    }
-
                     value.StoreUnsafe(ref destination, into + (nuint)lane);
                 }
             }
@@ -701,19 +737,25 @@ internal static class FastLanes
                 nuint into = blockDestination + (nuint)shape.Destination;
                 int shift = shape.Shift;
                 int currentBits = shape.CurrentBits;
-                bool spills = shape.Spills;
+                // See `Unpack128`: the spill test is per ROW, so it is hoisted out of the lanes.
+                if (shape.Spills)
+                {
+                    for (int lane = 0; lane < lanes; lane += step)
+                    {
+                        Vector256<T> value = ShiftRight(
+                            Vector256.LoadUnsafe(ref source, current + (nuint)lane), shift) & low;
+                        value |= ShiftLeft(
+                            Vector256.LoadUnsafe(ref source, next + (nuint)lane) & high, currentBits);
+                        value.StoreUnsafe(ref destination, into + (nuint)lane);
+                    }
+
+                    continue;
+                }
 
                 for (int lane = 0; lane < lanes; lane += step)
                 {
                     Vector256<T> value = ShiftRight(
                         Vector256.LoadUnsafe(ref source, current + (nuint)lane), shift) & low;
-
-                    if (spills)
-                    {
-                        value |= ShiftLeft(
-                            Vector256.LoadUnsafe(ref source, next + (nuint)lane) & high, currentBits);
-                    }
-
                     value.StoreUnsafe(ref destination, into + (nuint)lane);
                 }
             }
@@ -746,19 +788,28 @@ internal static class FastLanes
                 nuint into = blockDestination + (nuint)shape.Destination;
                 int shift = shape.Shift;
                 int currentBits = shape.CurrentBits;
-                bool spills = shape.Spills;
+                // THE SPILL TEST IS A PROPERTY OF THE ROW, SO IT IS NOT IN THE LANE LOOP. Whether
+                // this row straddles two packed words is decided by `Row<T>`'s constructor and is
+                // the same for all 16 to 128 lanes; testing it inside meant one branch per vector
+                // iteration of the innermost loop of the encoding. Two loops, one test.
+                if (shape.Spills)
+                {
+                    for (int lane = 0; lane < lanes; lane += step)
+                    {
+                        Vector128<T> value = ShiftRight(
+                            Vector128.LoadUnsafe(ref source, current + (nuint)lane), shift) & low;
+                        value |= ShiftLeft(
+                            Vector128.LoadUnsafe(ref source, next + (nuint)lane) & high, currentBits);
+                        value.StoreUnsafe(ref destination, into + (nuint)lane);
+                    }
+
+                    continue;
+                }
 
                 for (int lane = 0; lane < lanes; lane += step)
                 {
                     Vector128<T> value = ShiftRight(
                         Vector128.LoadUnsafe(ref source, current + (nuint)lane), shift) & low;
-
-                    if (spills)
-                    {
-                        value |= ShiftLeft(
-                            Vector128.LoadUnsafe(ref source, next + (nuint)lane) & high, currentBits);
-                    }
-
                     value.StoreUnsafe(ref destination, into + (nuint)lane);
                 }
             }

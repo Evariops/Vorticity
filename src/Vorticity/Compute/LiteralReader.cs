@@ -57,22 +57,42 @@ internal static class LiteralReader
                 return true;
 
             case CanonicalKind.Primitive:
-                return TryReadPrimitive(node, row, out literal);
+                return TryReadPrimitive(node.PType, node.Values.Span, row, out literal);
 
             case CanonicalKind.VarBinView:
                 literal = FilterLiteral.From(ViewAt(node, row));
                 return true;
+
+            case CanonicalKind.Constant:
+                // Every row is the element, so the row index is already answered: read the element
+                // itself, as row 0 of a one-row values buffer. The validity check above was made
+                // against this node, which is where a nullable constant's per-row nulls live.
+                switch (node.DType.Kind)
+                {
+                    case DTypeKind.Primitive:
+                        return TryReadPrimitive(node.DType.PType, node.ConstantElement, 0, out literal);
+                    case DTypeKind.Utf8:
+                    case DTypeKind.Binary:
+                        literal = FilterLiteral.From(node.ConstantElement);
+                        return true;
+                    default:
+                        return false;
+                }
 
             default:
                 return false;
         }
     }
 
-    private static bool TryReadPrimitive(CanonicalNode node, int row, out FilterLiteral literal)
+    /// <summary>Reads one primitive value out of a values buffer, whatever node it came from.</summary>
+    /// <remarks>
+    /// Takes the BYTES rather than a node so the constant form can hand it an element: a constant
+    /// column's element is a one-row values buffer, and building a node to carry it would cost a
+    /// record per call for nothing.
+    /// </remarks>
+    private static bool TryReadPrimitive(
+        PType ptype, ReadOnlySpan<byte> bytes, int row, out FilterLiteral literal)
     {
-        PType ptype = node.PType;
-        ReadOnlySpan<byte> bytes = node.Values.Span;
-
         if (ptype.IsFloat())
         {
             double value = ptype switch

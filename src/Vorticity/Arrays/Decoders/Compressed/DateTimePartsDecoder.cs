@@ -57,7 +57,36 @@ public sealed class DateTimePartsDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false);
+    }
 
+    /// <summary>
+    /// The selection goes into the three parts, and the recomposition runs over the rows that come
+    /// back.
+    /// </summary>
+    /// <remarks>
+    /// PERF-GAPS.md E8, which REOPENS v2 R17. The recomposition is a per-row multiply-accumulate --
+    /// R1 measured it at 93,2% of this encoding's scan -- so a take that decoded the node whole paid
+    /// a million of them to deliver sixty-four. Nothing about the arithmetic changes: the three
+    /// parts are positional, row `i` of the output needs row `i` of each part and nothing else,
+    /// which is exactly what makes the selection pushable. `TakeSpecializationTests` holds this
+    /// answer to the default's.
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted, selective: true);
+    }
+
+    /// <inheritdoc/>
+    public override bool SelectsWithoutFullDecode => true;
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted, bool selective)
+    {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 3, Id);
         CanonicalSupport.RequireKind(dtype, DTypeKind.Extension, Id);
@@ -72,18 +101,22 @@ public sealed class DateTimePartsDecoder : ArrayDecoder
 
         // The array's nullability rides on `days` alone; the other two are always non-nullable.
         CanonicalNode days = DecodePart(
-            context, in node, 0, "days", metadata.DaysPType, dtype.Nullability, length);
+            context, in node, 0, "days", metadata.DaysPType, dtype.Nullability, length,
+            wanted, selective);
         CanonicalNode seconds = DecodePart(
-            context, in node, 1, "seconds", metadata.SecondsPType, Nullability.NonNullable, length);
+            context, in node, 1, "seconds", metadata.SecondsPType, Nullability.NonNullable, length,
+            wanted, selective);
         CanonicalNode subseconds = DecodePart(
-            context, in node, 2, "subseconds", metadata.SubsecondsPType, Nullability.NonNullable, length);
+            context, in node, 2, "subseconds", metadata.SubsecondsPType, Nullability.NonNullable,
+            length, wanted, selective);
 
-        int storageIndex = length == 0
+        int produced = selective ? wanted.Length : length;
+        int storageIndex = produced == 0
             ? context.Canonical.AddPrimitive(
                 storageDType, 0, days.Validity, PType.I64, VortexBuffer.Empty)
-            : Recompose(context, storageDType, length, divisor, days, seconds, subseconds);
+            : Recompose(context, storageDType, produced, divisor, days, seconds, subseconds);
 
-        return context.Canonical.AddExtension(dtype, length, storageIndex);
+        return context.Canonical.AddExtension(dtype, produced, storageIndex);
     }
 
     private static int Recompose(
@@ -136,11 +169,16 @@ public sealed class DateTimePartsDecoder : ArrayDecoder
         string name,
         PType ptype,
         Nullability nullability,
-        int length)
+        int length,
+        ReadOnlySpan<int> wanted,
+        bool selective)
     {
         DType childType = context.Types.Primitive(ptype, nullability);
-        int index = context.DecodeChild(in node, childIndex, childType, length);
+        int index = selective
+            ? context.DecodeChildSelected(in node, childIndex, childType, length, wanted)
+            : context.DecodeChild(in node, childIndex, childType, length);
         CanonicalNode child = context.Canonical.GetNode(index);
+        int produced = selective ? wanted.Length : length;
 
         if (child.Kind != CanonicalKind.Primitive)
         {
@@ -153,14 +191,14 @@ public sealed class DateTimePartsDecoder : ArrayDecoder
                 $"{Id}'s {name} child decoded as {child.PType.Name()}; {ptype.Name()} was declared.");
         }
 
-        if (child.Length != length)
+        if (child.Length != produced)
         {
-            CompressedThrow.ChildLength(Id, name, child.Length, length);
+            CompressedThrow.ChildLength(Id, name, child.Length, produced);
         }
 
-        // The kernels index `length` elements out of this buffer; a short one is a file defect, not
-        // a reason to read past the end.
-        CanonicalSupport.RequireExactBuffer(child.Values, length, ptype.ByteWidth(), $"{Id} {name}");
+        // The kernels index `produced` elements out of this buffer; a short one is a file defect,
+        // not a reason to read past the end.
+        CanonicalSupport.RequireExactBuffer(child.Values, produced, ptype.ByteWidth(), $"{Id} {name}");
         return child;
     }
 

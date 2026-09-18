@@ -243,8 +243,26 @@ public sealed class AlpRdDecoder : ArrayDecoder
         where TCode : unmanaged
     {
         ReadOnlySpan<TCode> codes = MemoryMarshal.Cast<byte, TCode>(left)[..length];
+
+        // THE DICTIONARY IS PRE-SHIFTED, ONCE, which is what upstream stores in the first place
+        // (`alp-0.0.4/src/alp_rd/mod.rs:647-675`, `alp_rd_combine_codes_inplace`: its table is
+        // already in the high bits). The dictionary holds at most eight entries and the loop below
+        // runs a million times, so the shift belongs here and not in the body. A code out of range
+        // still reaches `ThrowCode` unchanged: the table is only ever indexed after that test.
+        //
+        // ONE TABLE PER BRANCH, NOT ONE SHARED `ulong` TABLE, and that is not tidiness. C# masks a
+        // shift count by the operand's width -- `& 31` for `uint`, `& 63` for `ulong` -- so a file
+        // declaring `right_bit_width >= 32` on an f32 column makes `d << r` and
+        // `(uint)((ulong)d << r)` two DIFFERENT values. The bit width comes from the file, so that
+        // is not a hypothetical; each branch pre-shifts at exactly the width its body used to.
         if (isSingle)
         {
+            Span<uint> shifted = stackalloc uint[dictionary.Length];
+            for (int i = 0; i < dictionary.Length; i++)
+            {
+                shifted[i] = unchecked(dictionary[i] << rightBitWidth);
+            }
+
             ReadOnlySpan<uint> low = MemoryMarshal.Cast<byte, uint>(right)[..length];
             Span<uint> target = MemoryMarshal.Cast<byte, uint>(destination)[..length];
             for (int i = 0; i < length; i++)
@@ -255,10 +273,16 @@ public sealed class AlpRdDecoder : ArrayDecoder
                     ThrowCode(Row(i, wanted), code, dictionary.Length);
                 }
 
-                target[i] = unchecked((dictionary[(int)code] << rightBitWidth) | low[i]);
+                target[i] = unchecked(shifted[(int)code] | low[i]);
             }
 
             return;
+        }
+
+        Span<ulong> wideShifted = stackalloc ulong[dictionary.Length];
+        for (int i = 0; i < dictionary.Length; i++)
+        {
+            wideShifted[i] = unchecked((ulong)dictionary[i] << rightBitWidth);
         }
 
         ReadOnlySpan<ulong> wide = MemoryMarshal.Cast<byte, ulong>(right)[..length];
@@ -271,7 +295,7 @@ public sealed class AlpRdDecoder : ArrayDecoder
                 ThrowCode(Row(i, wanted), code, dictionary.Length);
             }
 
-            output[i] = unchecked(((ulong)dictionary[(int)code] << rightBitWidth) | wide[i]);
+            output[i] = unchecked(wideShifted[(int)code] | wide[i]);
         }
     }
 

@@ -27,7 +27,7 @@ use std::sync::OnceLock;
 use futures::StreamExt;
 use futures::pin_mut;
 use vortex::VortexSessionDefault;
-use vortex::array::Canonical;
+use vortex::array::RecursiveCanonical;
 use vortex::array::VortexSessionExecute;
 use vortex::buffer::Buffer;
 use vortex::scan::strict_sorted_buffer::StrictSortedBuffer;
@@ -106,9 +106,33 @@ pub unsafe extern "C" fn vxbench_scan_all(path: *const c_char) -> i64 {
 /// decompresses against one that does not, on every compressed encoding. That is not a small
 /// correction: on the 1M-row axis it is most of what the per-encoding ratios were measuring.
 ///
-/// `execute::<Canonical>` is upstream's own canonicalization, the same call its arrow conversion
-/// and its own `to_canonical` make. The result is dropped rather than accumulated: the decode has
-/// already happened by then, and holding a million rows of it would measure the allocator.
+/// `execute::<RecursiveCanonical>` AND NOT `execute::<Canonical>`, and the difference is the whole
+/// axis on every tabular file. `Canonical` runs `execute_until::<AnyCanonical>`, which STOPS as
+/// soon as the ROOT matches one of twelve kinds (`vortex-array-0.86.1/src/canonical.rs:616-629`,
+/// `:1233-1251`) -- and `Struct`, `Map`, `ListView` and `Variant` are all in that list. Upstream
+/// states the consequence outright: "canonicalization is shallow: children of canonical
+/// struct/list arrays may still be encoded" (`src/lib.rs:37-38`). So on a file whose root is a
+/// struct of encoded columns, or a variant over a constant, this call decoded NOTHING: it opened
+/// the file, split it, and returned. Measured on the corpus's `variant` file, that was 85 us
+/// against our 600 -- a ratio of 7,00 between a full decode and a file open.
+///
+/// `RecursiveCanonical` (`canonical.rs:788`, `:814-991`) is the one that "recursively execute[s]
+/// the array until all of its children are canonical", which is what our reader does by
+/// construction: `CanonicalArena` is the only representation it has, so every column of every batch
+/// is materialized. That is the like-for-like.
+///
+/// A COMMENT HERE USED TO CLAIM this was "the same call its arrow conversion makes". It is not:
+/// the arrow path is `into_arrow`, which executes each struct field in turn
+/// (`vortex-arrow-0.86.1/src/executor/struct_.rs:152-166`). That claim is what made the shallow
+/// call look defensible, so it is stated rather than quietly deleted.
+///
+/// ONE ASYMMETRY TO WATCH, and it is not live today: `Canonical` -- which this goes through first
+/// -- "will fully expand constant arrays" (`canonical.rs:616-620`). So does our reader, today.
+/// The day `ConstantForm` becomes our default, this call would charge Rust for an expansion we no
+/// longer pay, and the bench would be wrong in the other direction.
+///
+/// The result is dropped rather than accumulated: the decode has already happened by then, and
+/// holding a million rows of it would measure the allocator.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated C string for the duration of the call.
@@ -126,7 +150,7 @@ pub unsafe extern "C" fn vxbench_scan_canonical(path: *const c_char) -> i64 {
                 while let Some(array) = stream.next().await {
                     let array = array?;
                     rows += array.len() as i64;
-                    let _canonical: Canonical = array.execute(&mut ctx)?;
+                    let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
                 }
 
                 Ok(rows)
@@ -170,7 +194,7 @@ pub unsafe extern "C" fn vxbench_scan_canonical_threads(path: *const c_char, thr
             while let Some(array) = stream.next().await {
                 let array = array?;
                 rows += array.len() as i64;
-                let _canonical: Canonical = array.execute(&mut ctx)?;
+                let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
             }
 
             Ok(rows)
@@ -301,7 +325,7 @@ pub unsafe extern "C" fn vxbench_take(path: *const c_char, count: i64, stride: i
                 while let Some(array) = stream.next().await {
                     let array = array?;
                     rows += array.len() as i64;
-                    let _canonical: Canonical = array.execute(&mut ctx)?;
+                    let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
                 }
 
                 Ok(rows)
@@ -354,7 +378,7 @@ pub unsafe extern "C" fn vxbench_scan_filtered(
                 while let Some(array) = stream.next().await {
                     let array = array?;
                     rows += array.len() as i64;
-                    let _canonical: Canonical = array.execute(&mut ctx)?;
+                    let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
                 }
 
                 Ok(rows)
@@ -368,8 +392,13 @@ pub unsafe extern "C" fn vxbench_scan_filtered(
 /// THE PRECONDITION `--ffi-check` NEVER HAD. It compared row counts, and a row count is not
 /// evidence of a decode: upstream's lazy scan answers `len()` from metadata without materializing
 /// a byte, which is how a "0.96x" ratio came to compare a decode against an absence of one. Same
-/// rows, same order, same bytes is what this says instead -- and it proves, by construction, that
-/// `vxbench_scan_canonical` really canonicalizes.
+/// rows, same order, same bytes is what this says instead.
+///
+/// WHAT IT DOES NOT PROVE, and a comment here used to claim it did: that
+/// `vxbench_scan_canonical` canonicalizes. This walks `execute_scalar` row by row, which is a
+/// DIFFERENT PATH -- it reaches every value whatever the scan did or did not decode, so it stayed
+/// green for as long as that entry point was stopping at a canonical root without touching a
+/// child. The two are checked separately, and this one checks values.
 ///
 /// THE ENCODING IS A CONTRACT WITH THE .NET SIDE, byte for byte
 /// (bench/Vorticity.Benchmarks/Checksum.cs):

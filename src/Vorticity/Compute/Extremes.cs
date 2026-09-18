@@ -61,11 +61,40 @@ internal static class Extremes
             case CanonicalKind.VarBinView:
                 return Bytes(node, mask, rows, listed, wantMin, out bestRow);
 
+            case CanonicalKind.Constant:
+                // Every row holds the same value, so every valid row IS the minimum and the
+                // maximum: the answer is the first one, and `wantMin` does not enter into it.
+                return FirstValid(mask, rows, listed, count, out bestRow);
+
             default:
                 throw new NotSupportedException(
                     $"A {node.Kind} column has no minimum or maximum in the 1.0 filter scope " +
                     "(docs/01-scope.md F7).");
         }
+    }
+
+    /// <summary>The first row of the selection that is not null, for a column with one value.</summary>
+    private static bool FirstValid(
+        ValidityMask mask, ReadOnlySpan<int> rows, bool listed, int count, out int bestRow)
+    {
+        if (mask.AllValid)
+        {
+            bestRow = listed ? rows[0] : 0;
+            return true;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            int row = listed ? rows[i] : i;
+            if (mask.IsValid(row))
+            {
+                bestRow = row;
+                return true;
+            }
+        }
+
+        bestRow = -1;
+        return false;
     }
 
     private static bool Bool(

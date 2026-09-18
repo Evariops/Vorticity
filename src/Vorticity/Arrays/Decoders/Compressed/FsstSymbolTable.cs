@@ -199,12 +199,57 @@ internal readonly ref struct FsstDecodeTable
     private readonly ReadOnlySpan<byte> _symbols;
     private readonly ReadOnlySpan<byte> _widths;
     private readonly int _count;
+    private readonly bool _symbolsAreAscii;
 
     internal FsstDecodeTable(ReadOnlySpan<byte> symbols, ReadOnlySpan<byte> widths, int count)
     {
         _symbols = symbols;
         _widths = widths;
         _count = count;
+        _symbolsAreAscii = EveryEmittedByteIsAscii(symbols, widths, count);
+    }
+
+    /// <summary>
+    /// Whether every byte this table can emit from a SYMBOL is below 0x80.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE UTF-8 GUARANTEE, PRICED AT TWO KILOBYTES INSTEAD OF FIFTY-TWO MEGABYTES. Every byte of a
+    /// decoded heap comes from exactly one of two places: the first <c>width</c> bytes of some
+    /// symbol, or a raw byte written by the escape path. Nothing else writes it -- the eight-byte
+    /// store past a symbol's width is overwritten by the next symbol's store at
+    /// <c>written + width</c>, and the final symbols take the exact-copy tail, so no byte beyond
+    /// <c>written</c> survives. So "every symbol is ASCII and every escape byte is ASCII" implies
+    /// "the whole heap is ASCII", which implies valid UTF-8, with no sweep of the heap at all.
+    /// </para>
+    /// <para>
+    /// This is the same argument `ZstdDecoder` makes frame by frame, and it is worth as much: the
+    /// whole-heap `Utf8.IsValid` is <b>763 us of a 7 400 us `fsst` scan, 9.4 %</b>, measured by
+    /// short-circuiting it (bench/ab.sh, 2026-09-18). The guarantee is NOT weakened -- a table with
+    /// one high byte, or a stream with one high escape byte, falls back to the full sweep -- so
+    /// this is not the question PERF-GAPS.md D6 asks.
+    /// </para>
+    /// </remarks>
+    internal bool SymbolsAreAscii => _symbolsAreAscii;
+
+    private static bool EveryEmittedByteIsAscii(
+        ReadOnlySpan<byte> symbols, ReadOnlySpan<byte> widths, int count)
+    {
+        ulong high = 0;
+        for (int code = 0; code < count; code++)
+        {
+            // Only the first `width` bytes of a symbol are ever emitted; the rest of its u64 is
+            // padding that the next store covers, so it may hold anything.
+            int width = widths[code];
+            ReadOnlySpan<byte> symbol =
+                symbols.Slice(code * FsstSymbolTable.SymbolSize, FsstSymbolTable.SymbolSize);
+            for (int i = 0; i < width; i++)
+            {
+                high |= symbol[i];
+            }
+        }
+
+        return (high & 0x80) == 0;
     }
 
     /// <summary>
@@ -219,7 +264,13 @@ internal readonly ref struct FsstDecodeTable
     /// A code names a symbol the table does not hold, an escape is the last byte of the stream, or
     /// the output is too small for what the stream decodes to. The reference asserts all three.
     /// </exception>
-    internal int Decode(ReadOnlySpan<byte> codes, Span<byte> destination, string encodingId)
+    /// <param name="escapeBits">
+    /// Accumulates, by OR, every raw byte the escape path writes. With
+    /// <see cref="SymbolsAreAscii"/> it decides whether the heap needs a UTF-8 sweep at all: the
+    /// two together cover every byte the decode can produce.
+    /// </param>
+    internal int Decode(
+        ReadOnlySpan<byte> codes, Span<byte> destination, string encodingId, ref uint escapeBits)
     {
         ref byte output = ref MemoryMarshal.GetReference(destination);
         ref byte table = ref MemoryMarshal.GetReference(_symbols);
@@ -280,7 +331,9 @@ internal readonly ref struct FsstDecodeTable
                     return ThrowOverrun(encodingId, destination.Length);
                 }
 
-                destination[written++] = codes[++i];
+                byte raw = codes[++i];
+                escapeBits |= raw;
+                destination[written++] = raw;
                 i++;
                 continue;
             }
@@ -336,6 +389,15 @@ internal readonly ref struct FsstDecodeTable
             Unsafe.ReadUnaligned<ulong>(
                 ref Unsafe.Add(ref table, (uint)(code * FsstSymbolTable.SymbolSize))));
         uint width = Unsafe.Add(ref widths, (uint)code);
+
+        // THE PER-SYMBOL CODE CHECK STAYS, and it was priced: removing it entirely reads 0.904
+        // against 0.919-0.926 for the same tree with the check in (bench/ab.sh on `fsst` fullscan,
+        // 2026-09-18), so it is worth about 2 % of the axis -- inside the 3-5 % this measurement can
+        // see. It is a subtract and an or in the shadow of an eight-byte store, and upstream's
+        // `get_unchecked` buys that 2 % by decoding a corrupt code into a wrong value in silence.
+        // A generic flag could drop it for a full 255-symbol table, where no code CAN be absent;
+        // that is a second shape of the hottest loop in the library for a gain this bench cannot
+        // resolve, so it is written down rather than written.
         bad |= width - 1;
         return written + (int)width;
     }

@@ -202,7 +202,10 @@ public sealed class AlpDecoder : ArrayDecoder
             context.MarkNodeChecked(in node);
         }
 
-        CanonicalNode values = context.Canonical.GetNode(valuesIndex);
+        // The patch values are read as a SPAN below, so a constant child is expanded rather than
+        // refused: see `CanonicalSupport.RequirePrimitiveChild`.
+        CanonicalNode values = context.Canonical.GetNode(
+            CanonicalSupport.ExpandIfConstant(context, valuesIndex));
         if (values.Kind != CanonicalKind.Primitive)
         {
             CompressedThrow.ChildKind(Id, "patch_values", values.Kind, "a Primitive");

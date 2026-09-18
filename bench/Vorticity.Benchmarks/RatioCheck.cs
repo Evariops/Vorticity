@@ -340,34 +340,48 @@ internal static class RatioCheck
     /// `--recalibrate N` does the measuring: N passes, the max per axis, printed ready to paste.
     /// </para>
     /// <para>
-    /// `rewritten zoned, ours` is a ceiling of FIVE, and it is not a typo. The pair says what it was
-    /// built to say: our reader takes 990 us on bytes our writer produced against 610 us on the
-    /// reference's, while the Rust reader goes the other way, 1 315 us down to 195 us. The encoding
-    /// is not the problem -- the reference implementation reads our file nearly seven times faster
-    /// than it reads its own -- so this is our decoder on a scheme our writer likes. Written up as a
-    /// finding in BENCH-AUDIT.md §5.A.
+    /// EVERY REFERENCE BELOW WAS RESET ON 2026-09-18, and not because the code got faster: the
+    /// REFERENCE SIDE was measuring the wrong thing. `vxbench_scan_canonical` was calling
+    /// `execute::&lt;Canonical&gt;`, which stops as soon as the ROOT array matches one of twelve
+    /// canonical kinds -- `Struct`, `Map`, `ListView` and `Variant` among them -- so on every
+    /// tabular file Rust opened the file, split it, and decoded NOTHING, while we decoded every
+    /// column. The harness now calls `execute::&lt;RecursiveCanonical&gt;` on all four entry points
+    /// (scan, threaded scan, take, filtered scan); `tools/vxbench-rs/src/lib.rs` carries the whole
+    /// argument. Ratios on the affected axes therefore FELL, references with them: this is a
+    /// tightening, and the gate could not have gone red over it (a fall reports STALE, and only
+    /// `ratio.Low &gt; ceiling` fails).
+    /// </para>
+    /// <para>
+    /// `rewritten zoned, ours` WAS a ceiling of FIVE, and that entry is the clearest casualty. Its
+    /// note used to read: "our reader takes 990 us on bytes our writer produced against 610 us on
+    /// the reference's, while the Rust reader goes the other way, 1 315 us down to 195 us -- the
+    /// reference implementation reads our file nearly seven times faster than it reads its own".
+    /// It did not: those 195 us were an open and a split of three chunks, against 64 in the
+    /// reference's own file, which is why the number tracked the SPLIT COUNT and not the encoding.
+    /// Against a Rust that decodes, the axis reads 1.08. BENCH-AUDIT.md §5.A's finding rests on the
+    /// old number and is to be reread.
     /// </para>
     /// </remarks>
     private static readonly Dictionary<string, Reference> References = new()
     {
-        ["full scan"] = new(0.461, 2),   // 3 passes, spread 0.455-0.461; was 0.466, -1.0%
-        ["full scan, upstream lazy"] = new(0.467, 2),   // 3 passes, spread 0.449-0.468; HELD at 0.467: 3 passes peaked at 0.468, no loosening
-        ["projected scan, 1 of 5 columns"] = new(0.441, 9),   // 3 passes, spread 0.431-0.481; HELD at 0.441: 3 passes peaked at 0.481, no loosening
-        ["open to first batch"] = new(0.085, 10),   // 3 passes, spread 0.081-0.090; HELD at 0.085: 3 passes peaked at 0.090, no loosening
-        ["open, footer only"] = new(0.782, 25),   // 3 passes, spread 0.762-0.782; was 0.787, -0.6%
-        ["read and write back"] = new(0.478, 1),   // 3 passes, spread 0.473-0.478; was 1.027, -53.4%
-        ["filtered scan, 1% band"] = new(0.217, 10),   // 3 passes, spread 0.216-0.229; HELD at 0.217: 3 passes peaked at 0.229, no loosening
-        ["filtered scan, half the rows"] = new(0.313, 5),   // 3 passes, spread 0.306-0.313; was 0.325, -3.6%
-        ["scattered take, 64 of 64 splits"] = new(0.250, 3),   // 3 passes, spread 0.248-0.252; HELD at 0.250: 3 passes peaked at 0.252, no loosening
-        ["rewritten zoned, reference's"] = new(0.466, 2),   // 3 passes, spread 0.431-0.466; was 0.470, -0.9%
-        ["rewritten zoned, ours"] = new(5.325, 5),   // 3 passes, spread 4.669-5.337; HELD at 5.325: 3 passes peaked at 5.337, no loosening
-        ["rewritten high card, reference's"] = new(0.881, 27),   // 3 passes, spread 0.847-0.882; HELD at 0.881: 3 passes peaked at 0.882, no loosening
-        ["rewritten high card, ours"] = new(0.915, 21),   // 3 passes, spread 0.900-0.949; HELD at 0.915: 3 passes peaked at 0.949, no loosening
-        ["full scan, 1M table"] = new(0.060, 1),   // 3 passes, spread 0.060-0.060; was 0.068, -11.7%
-        ["projected scan, 1 of 50 columns"] = new(0.088, 8),   // 3 passes, spread 0.086-0.088; was 0.096, -8.2%
-        ["key order, sorted column, 1% band"] = new(0.701, 12),   // 3 passes, spread 0.677-0.706; HELD at 0.701: 3 passes peaked at 0.706, no loosening
-        ["key order, uncorrelated, 64 rows"] = new(1.148, 6),   // 3 passes, spread 1.124-1.148; was 1.404, -18.2%
-        ["count, exact cover, 1% band"] = new(0.759, 7),   // 3 passes, spread 0.733-0.759; was 0.785, -3.3%
+        ["full scan"] = new(0.339, 2),   // 3 passes, spread 0.329-0.339; was 0.461, -26.5% (harness: RecursiveCanonical)
+        ["full scan, upstream lazy"] = new(0.460, 2),   // 3 passes, spread 0.455-0.460; was 0.467, -1.5%
+        ["projected scan, 1 of 5 columns"] = new(0.441, 9),   // 3 passes, spread 0.435-0.446; HELD at 0.441: 3 passes peaked at 0.446, no loosening
+        ["open to first batch"] = new(0.085, 10),   // 3 passes, spread 0.084-0.085; HELD at 0.085: 3 passes peaked at 0.085, no loosening
+        ["open, footer only"] = new(0.776, 29),   // 3 passes, spread 0.750-0.776; was 0.782, -0.7%
+        ["read and write back"] = new(0.322, 1),   // 3 passes, spread 0.317-0.322; was 0.478, -32.6% (harness + W1.1/W1.2/W3.1)
+        ["filtered scan, 1% band"] = new(0.204, 10),   // 3 passes, spread 0.199-0.204; was 0.217, -6.0%
+        ["filtered scan, half the rows"] = new(0.274, 5),   // 3 passes, spread 0.271-0.274; was 0.313, -12.5%
+        ["scattered take, 64 of 64 splits"] = new(0.202, 3),   // 3 passes, spread 0.196-0.202; was 0.250, -19.1% (harness: take was shallow too)
+        ["rewritten zoned, reference's"] = new(0.330, 2),   // 3 passes, spread 0.329-0.330; was 0.466, -29.2% (harness)
+        ["rewritten zoned, ours"] = new(1.077, 1),   // 3 passes, spread 1.057-1.077; was 5.325, -79.8% (harness; see the note above)
+        ["rewritten high card, reference's"] = new(0.878, 26),   // 3 passes, spread 0.860-0.878; was 0.881, -0.3%
+        ["rewritten high card, ours"] = new(0.915, 20),   // 3 passes, spread 0.896-0.918; HELD at 0.915: 3 passes peaked at 0.918, no loosening
+        ["full scan, 1M table"] = new(0.058, 1),   // 3 passes, spread 0.054-0.058; was 0.060, -3.7%
+        ["projected scan, 1 of 50 columns"] = new(0.088, 10),   // 3 passes, spread 0.081-0.105; HELD at 0.088: 3 passes peaked at 0.105, no loosening
+        ["key order, sorted column, 1% band"] = new(0.683, 11),   // 3 passes, spread 0.671-0.683; was 0.701, -2.6%
+        ["key order, uncorrelated, 64 rows"] = new(1.148, 6),   // 3 passes, spread 1.058-1.339; HELD at 1.148: 3 passes peaked at 1.339, no loosening
+        ["count, exact cover, 1% band"] = new(0.759, 7),   // 3 passes, spread 0.725-0.759; HELD at 0.759: 3 passes peaked at 0.759, no loosening
     };
 
     /// <summary>

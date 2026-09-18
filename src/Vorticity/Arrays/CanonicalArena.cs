@@ -45,18 +45,36 @@ public enum CanonicalKind : byte
 
     /// <summary>One element and a row count: every row resolves to the same window.</summary>
     /// <remarks>
-    /// PERF-AUDIT-v2.md Z1b-c2a. `ConstantCanonicalizer` tiles today -- it writes the element once
-    /// and doubles it over the whole column, so a million rows of eight bytes cost eight megabytes
-    /// to say one number. `ConstantFormBenchmarks` priced the three arms: build **~3 900x** at eight
-    /// bytes and **~8 400x** at sixteen, a scattered take **60x**, and the consumer -- the arm that
-    /// could have said no -- reads **6,5 % FASTER**, because one cache line is re-read where 512 KiB
-    /// were walked.
+    /// PERF-AUDIT-v2.md Z1b-c2a. The alternative is to TILE -- write the element once and double it
+    /// over the whole column -- so a million rows of eight bytes cost eight megabytes to say one
+    /// number. `ConstantFormBenchmarks` priced the three arms: build **~3 900x** at eight bytes and
+    /// **~8 400x** at sixteen, a scattered take **60x**, and the consumer -- the arm that could have
+    /// said no -- reads **6,5 % FASTER**, because one cache line is re-read where 512 KiB were
+    /// walked.
     /// <para>
-    /// PRODUCED ONLY BEHIND AN INTERNAL SWITCH. `ConstantCanonicalizer` emits it when
-    /// `VortexReadOptions.ConstantForm` is on (Z1b-c2b), which only `ConstantFormTests` does; the
-    /// default path still tiles. The consumers that have their arm -- the filter, the slice, the
-    /// concatenation, the rewrap, the writer's passes, `VortexColumn`'s typed primitive path --
-    /// handle it; the ones that do not yet are what keeps the switch off (Z1b-c2c2, 89 tests).
+    /// THIS IS THE DEFAULT PATH SINCE 2026-09-18. `ConstantCanonicalizer` emits it whenever
+    /// `VortexReadOptions.ConstantForm` is on, and it is on unless a caller turns it off (Z1b-c2c2,
+    /// closed). A DECODER AUTHOR THEREFORE MEETS THIS KIND ON THE ORDINARY PATH, which is the whole
+    /// reason this paragraph is here: the previous wording said the default still tiled, and a
+    /// decoder written against it would not have grown its arm.
+    /// </para>
+    /// <para>
+    /// WHERE IT ENDS, and it is only two places: <see cref="CanonicalNode.Values"/> and the
+    /// `RequireMaterialized` sibling behind <see cref="CanonicalNode.Views"/>. Both promise a
+    /// contiguous array, which one element and a count cannot be, so both expand into a twin
+    /// memoized on the record. Everything else keeps the form -- and the filter does better than
+    /// keep it: `ComparisonKernels` answers a whole constant column from ONE comparison, `Extremes`
+    /// from none. A decoder that wants a side table as a span uses
+    /// <see cref="Decoders.Canonical.CanonicalSupport.ExpandIfConstant"/>.
+    /// </para>
+    /// <para>
+    /// COVERED DTYPES: primitive, utf8 and binary. NOT decimal, and that asymmetry is a loose end
+    /// rather than a decision -- the measurement above is at its best on sixteen bytes, which is a
+    /// decimal. `ConstantCanonicalizer.BuildDecimal` has no arm, and wiring one needs
+    /// <see cref="CanonicalArena.AddConstant"/> to carry `Storage`, `Precision` and `Scale`: it does not
+    /// today, so `MaterializeConstant` would read them at their defaults and `RequireExactLength`
+    /// would refuse `rows * 16` bytes against `rows * 1` expected. Noisy, so not dangerous -- but it
+    /// waits exactly where someone would go next.
     /// </para>
     /// </remarks>
     Constant = 9,
@@ -130,9 +148,11 @@ public readonly ref struct CanonicalNode
         {
             ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
 
-            // THE CONSTANT FORM MATERIALIZES HERE, AND ONLY HERE (PERF-AUDIT-v2.md Z1b-c2b2). This
-            // property promises a CONTIGUOUS span of `Length` values, and one element plus a count
-            // cannot honour that without expanding. Doing it at this one boundary is what spares the
+            // THE CONSTANT FORM MATERIALIZES HERE (PERF-AUDIT-v2.md Z1b-c2b2), and at the sibling
+            // boundary `RequireMaterialized` draws for a string column's views -- those two, and
+            // nowhere else. This property promises a CONTIGUOUS span of `Length` values, and one
+            // element plus a count cannot honour that without expanding. Doing it at a boundary
+            // rather than per consumer is what spares the
             // 171 local guards §2.4bis counted: every consumer that reads values -- the columns, the
             // comparison kernels, the literal reader, row encoding, the zone summariser -- goes
             // through here and needs no case of its own.
@@ -173,18 +193,18 @@ public readonly ref struct CanonicalNode
 
     /// <summary><c>Length * 16</c> bytes of Arrow-style views, 16-byte aligned.</summary>
     /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.VarBinView"/>.</exception>
-    public VortexBuffer Views => Require(CanonicalKind.VarBinView).BufferA;
+    public VortexBuffer Views => RequireMaterialized(CanonicalKind.VarBinView).BufferA;
 
     /// <summary>How many data buffers the views may reference.</summary>
     /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.VarBinView"/>.</exception>
-    public int DataBufferCount => Require(CanonicalKind.VarBinView).DataBufferCount;
+    public int DataBufferCount => RequireMaterialized(CanonicalKind.VarBinView).DataBufferCount;
 
     /// <summary>Data buffer <paramref name="index"/>.</summary>
     /// <param name="index">0-based, below <see cref="DataBufferCount"/>.</param>
     /// <exception cref="VortexFormatException">The kind is wrong or the index is out of range.</exception>
     public VortexBuffer GetDataBuffer(int index)
     {
-        ref readonly CanonicalRecord r = ref Require(CanonicalKind.VarBinView);
+        ref readonly CanonicalRecord r = ref RequireMaterialized(CanonicalKind.VarBinView);
         if ((uint)index >= (uint)r.DataBufferCount)
         {
             return ArraysThrow.BufferIndex(index, r.DataBufferCount);
@@ -289,6 +309,40 @@ public readonly ref struct CanonicalNode
         }
 
         return ref r;
+    }
+
+    /// <summary>
+    /// <see cref="Require"/>, except that a constant standing for <paramref name="kind"/> expands
+    /// into its materialized twin first.
+    /// </summary>
+    /// <remarks>
+    /// The same boundary <see cref="Values"/> draws, for the accessors that promise a CONTIGUOUS
+    /// array of something else -- the views of a string column. One element and a count cannot
+    /// honour that promise either, and a caller asking for views is asking for the expansion by
+    /// asking for the views.
+    /// </remarks>
+    private ref readonly CanonicalRecord RequireMaterialized(CanonicalKind kind)
+    {
+        ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
+        if (r.Kind != CanonicalKind.Constant)
+        {
+            if (r.Kind != kind)
+            {
+                ArraysThrow.Kind(r.Kind, kind.ToString());
+            }
+
+            return ref r;
+        }
+
+        // Taken AFTER the expansion: committing the twin's record may have grown the backing
+        // array, and `r` would then point at a block nobody reads any more.
+        ref readonly CanonicalRecord twin = ref _arena.RecordRef(_arena.MaterializeConstant(_index));
+        if (twin.Kind != kind)
+        {
+            ArraysThrow.Kind(twin.Kind, kind.ToString());
+        }
+
+        return ref twin;
     }
 }
 
@@ -493,14 +547,25 @@ public sealed class CanonicalArena
     /// <param name="element">The one value's bytes, in the canonical form its dtype implies.</param>
     /// <returns>The new node's index.</returns>
     /// <remarks>
+    /// <para>
     /// The element's WIDTH is kept in <c>FixedSize</c> rather than derived from the dtype, so that
-    /// one record shape serves a primitive (8 bytes), a decimal (16) and a view (16) without this
-    /// method having to know the table of widths. PERF-AUDIT-v2.md Z1b-c2a.
+    /// one record shape serves a primitive (8 bytes), a decimal (16) and a string of any length
+    /// without this method having to know the table of widths. PERF-AUDIT-v2.md Z1b-c2a.
+    /// </para>
+    /// <para>
+    /// FOR A STRING OR A BLOB THE ELEMENT IS THE VALUE ITSELF, not a 16-byte view of it. A view
+    /// names a buffer and an offset, which is a fact about a LAYOUT this node does not have; the
+    /// value is the fact that survives, and <c>MaterializeConstant</c> is where it becomes views
+    /// again. The empty string is then a legitimate element, which is why the emptiness check below
+    /// is asked of the dtype rather than of the span.
+    /// </para>
     /// </remarks>
-    /// <exception cref="VortexFormatException"><paramref name="element"/> is empty.</exception>
+    /// <exception cref="VortexFormatException">
+    /// <paramref name="element"/> is empty for a dtype whose values never are.
+    /// </exception>
     public int AddConstant(DType dtype, int length, Validity validity, ReadOnlySpan<byte> element)
     {
-        if (element.IsEmpty)
+        if (element.IsEmpty && dtype.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary))
         {
             ArraysThrow.Format("A constant node needs an element; none was given.");
         }
@@ -516,7 +581,7 @@ public sealed class CanonicalArena
 
     /// <summary>Expands a constant node into a materialized twin, once. PERF-AUDIT-v2.md Z1b-c2b2.</summary>
     /// <param name="nodeIndex">A node of kind <see cref="CanonicalKind.Constant"/>.</param>
-    /// <returns>The twin's index: a Primitive or Decimal node holding `Length` copies.</returns>
+    /// <returns>The twin's index: a Primitive, Decimal or VarBinView node holding `Length` copies.</returns>
     /// <remarks>
     /// Memoized on the record, so a caller that walks a column row by row through
     /// <c>PrimitiveColumn.this[int]</c> pays the expansion once rather than per access. The twin is
@@ -542,18 +607,71 @@ public sealed class CanonicalArena
         int rows = source.Length;
         Validity validity = source.Validity;
 
-        VortexBuffer values = AllocateUninitialized(
-            checked(rows * width), width, out Span<byte> writable);
-        Decoders.Compressed.RowKernels.Tile(writable, element);
+        int twin;
+        if (dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary)
+        {
+            twin = MaterializeConstantViews(dtype, rows, validity, element);
+        }
+        else
+        {
+            VortexBuffer values = AllocateUninitialized(
+                checked(rows * width), width, out Span<byte> writable);
+            Decoders.Compressed.RowKernels.Tile(writable, element);
 
-        int twin = dtype.Kind == DTypeKind.Decimal
-            ? AddDecimal(dtype, rows, validity, source.Storage, source.Precision, source.Scale, values)
-            : AddPrimitive(dtype, rows, validity, dtype.PType, values);
+            twin = dtype.Kind == DTypeKind.Decimal
+                ? AddDecimal(dtype, rows, validity, source.Storage, source.Precision, source.Scale, values)
+                : AddPrimitive(dtype, rows, validity, dtype.PType, values);
+        }
 
         // Re-taken after the Add: committing a record may have grown the backing array, so the
         // earlier `ref` can be pointing at a block nobody reads any more.
         RecordRefMutable(nodeIndex).Materialized = twin;
         return twin;
+    }
+
+    /// <summary>
+    /// The <see cref="DTypeKind.Utf8"/> and <see cref="DTypeKind.Binary"/> arm of
+    /// <see cref="MaterializeConstant"/>: <paramref name="rows"/> views over one copy of the value.
+    /// </summary>
+    /// <remarks>
+    /// ONE heap copy whatever the row count, because every row names the same bytes -- so the twin
+    /// costs sixteen bytes a row plus the value, not the value a row. A value of twelve bytes or
+    /// fewer rides inside its view and the heap buffer is not allocated at all, which is the common
+    /// case for the short strings a column turns out to be constant on.
+    /// </remarks>
+    private int MaterializeConstantViews(
+        DType dtype, int rows, Validity validity, ReadOnlySpan<byte> value)
+    {
+        const int ViewSize = Decoders.Canonical.CanonicalSupport.ViewSize;
+
+        VortexBuffer views = AllocateUninitialized(
+            checked(rows * ViewSize), ViewSize, out Span<byte> writable);
+        if (rows == 0)
+        {
+            return AddVarBinView(dtype, 0, validity, views, default);
+        }
+
+        Span<byte> first = writable[..ViewSize];
+        if (value.Length <= Decoders.Canonical.CanonicalSupport.MaxInlineViewLength)
+        {
+            // WriteInlineView leaves the bytes past the value untouched, so the first view is
+            // cleared before it is written and then tiled -- the zero-fill of one view rather than
+            // of the whole buffer.
+            first.Clear();
+            Decoders.Canonical.CanonicalSupport.WriteInlineView(first, value);
+            Decoders.Compressed.RowKernels.Tile(writable, first);
+            return AddVarBinView(dtype, rows, validity, views, default);
+        }
+
+        VortexBuffer data = AllocateUninitialized(value.Length, 1, out Span<byte> heap);
+        value.CopyTo(heap);
+        Decoders.Canonical.CanonicalSupport.WriteReferenceView(
+            first, value.Length, value, bufferIndex: 0, offset: 0);
+        Decoders.Compressed.RowKernels.Tile(writable, first);
+
+        Span<VortexBuffer> single = stackalloc VortexBuffer[1];
+        single[0] = data;
+        return AddVarBinView(dtype, rows, validity, views, single);
     }
 
     /// <summary>Adds a decimal node.</summary>
@@ -1302,6 +1420,18 @@ public sealed class CanonicalArena
         {
             Array.Resize(ref _records, Grow(_records.Length));
         }
+
+        // A RECORD ENTERS THIS ARENA WITHOUT A MEMO, whoever built it. `Materialized` names a node
+        // by INDEX, and an index means nothing outside the arena that issued it -- so a record
+        // arriving from `ReferenceFrom` or `CopyFrom`, which copy the struct wholesale and then fix
+        // up the other arena-local fields, carries a pointer into a numbering this arena does not
+        // share. That is not hypothetical: with the constant form on, a chunked struct's constant
+        // field came across with a stale twin, `MaterializeConstant` returned it from the memo, and
+        // a Primitive concat was handed the other arena's struct ROOT. Resetting here rather than at
+        // the two copy sites makes the invariant hold for a third one nobody has written yet; it
+        // costs one store, and no caller commits a record with a live memo anyway -- it is written
+        // through `RecordRefMutable` AFTER the commit that issued the index.
+        record.Materialized = -1;
 
         int index = _recordCount;
         _records[index] = record;

@@ -70,19 +70,11 @@ public readonly ref struct VortexColumn
 
     /// <summary>The all-null column view.</summary>
     /// <exception cref="InvalidOperationException">The column is not a Null column.</exception>
-    public NullColumn AsNull()
-    {
-        Require(CanonicalKind.Null);
-        return new NullColumn(_batch, _node);
-    }
+    public NullColumn AsNull() => new NullColumn(_batch, Require(CanonicalKind.Null));
 
     /// <summary>The boolean column view.</summary>
     /// <exception cref="InvalidOperationException">The column is not a Bool column.</exception>
-    public BoolColumn AsBool()
-    {
-        Require(CanonicalKind.Bool);
-        return new BoolColumn(_batch, _node);
-    }
+    public BoolColumn AsBool() => new BoolColumn(_batch, Require(CanonicalKind.Bool));
 
     /// <summary>
     /// The primitive column view. <typeparamref name="T"/> must match the column's
@@ -97,13 +89,8 @@ public readonly ref struct VortexColumn
     public PrimitiveColumn<T> AsPrimitive<T>()
         where T : unmanaged
     {
-        int index = Resolve(CanonicalKind.Primitive, out CanonicalNode node);
-        if (node.Kind != CanonicalKind.Primitive)
-        {
-            ColumnsThrow.WrongKind(node.Kind.ToString(), nameof(CanonicalKind.Primitive));
-        }
-
-        PType ptype = node.PType;
+        int index = Require(CanonicalKind.Primitive);
+        PType ptype = _batch.Node(index).PType;
         if (!PrimitiveColumn<T>.Matches(ptype))
         {
             ColumnsThrow.WrongElementType(ptype, typeof(T));
@@ -114,96 +101,93 @@ public readonly ref struct VortexColumn
 
     /// <summary>The decimal column view.</summary>
     /// <exception cref="InvalidOperationException">The column is not a Decimal column.</exception>
-    public DecimalColumn AsDecimal()
-    {
-        Require(CanonicalKind.Decimal);
-        return new DecimalColumn(_batch, _node);
-    }
+    public DecimalColumn AsDecimal() => new DecimalColumn(_batch, Require(CanonicalKind.Decimal));
 
     /// <summary>The binary column view; covers both <c>Utf8</c> and <c>Binary</c> dtypes.</summary>
     /// <exception cref="InvalidOperationException">The column is not a VarBinView column.</exception>
-    public BinaryColumn AsBinary()
-    {
-        Require(CanonicalKind.VarBinView);
-        return new BinaryColumn(_batch, _node);
-    }
+    public BinaryColumn AsBinary() => new BinaryColumn(_batch, Require(CanonicalKind.VarBinView));
 
     /// <summary>The struct column view.</summary>
     /// <exception cref="InvalidOperationException">The column is not a Struct column.</exception>
-    public StructColumn AsStruct()
-    {
-        Require(CanonicalKind.Struct);
-        return new StructColumn(_batch, _node);
-    }
+    public StructColumn AsStruct() => new StructColumn(_batch, Require(CanonicalKind.Struct));
 
     /// <summary>
     /// The variable-length list view. Both <c>vortex.list</c> and <c>vortex.listview</c> decode to
     /// the same canonical ListView form (Phase 1 contract §8.4).
     /// </summary>
     /// <exception cref="InvalidOperationException">The column is not a ListView column.</exception>
-    public ListColumn AsList()
-    {
-        Require(CanonicalKind.ListView);
-        return new ListColumn(_batch, _node);
-    }
+    public ListColumn AsList() => new ListColumn(_batch, Require(CanonicalKind.ListView));
 
     /// <summary>The fixed-size list view.</summary>
     /// <exception cref="InvalidOperationException">The column is not a FixedSizeList column.</exception>
-    public FixedSizeListColumn AsFixedSizeList()
-    {
-        Require(CanonicalKind.FixedSizeList);
-        return new FixedSizeListColumn(_batch, _node);
-    }
+    public FixedSizeListColumn AsFixedSizeList() =>
+        new FixedSizeListColumn(_batch, Require(CanonicalKind.FixedSizeList));
 
     /// <summary>The extension view: the four core temporal/uuid dtypes over a storage column.</summary>
     /// <exception cref="InvalidOperationException">The column is not an Extension column.</exception>
-    public ExtensionColumn AsExtension()
-    {
-        Require(CanonicalKind.Extension);
-        return new ExtensionColumn(_batch, _node);
-    }
+    public ExtensionColumn AsExtension() =>
+        new ExtensionColumn(_batch, Require(CanonicalKind.Extension));
 
     /// <summary>The canonical form this column decoded to.</summary>
-    public CanonicalKind Kind => _batch.Node(_node).Kind;
+    /// <remarks>
+    /// Never <see cref="CanonicalKind.Constant"/>. That kind is a physical shortcut inside the
+    /// arena -- one element and a row count instead of a million copies (PERF-AUDIT-v2.md Z1b) --
+    /// and NOT a canonical form a column can be in: a caller switching on this property is asking
+    /// what the column holds, not how the decoder chose to store it. So a constant column reports
+    /// the form its dtype stands for, and <see cref="StandsFor"/> is the one place that mapping
+    /// lives.
+    /// </remarks>
+    public CanonicalKind Kind => Reported(_batch.Node(_node));
 
     /// <summary>
-    /// Resolves the node this accessor should read, materializing a constant when the caller asks
-    /// for a form only the expanded column can give. PERF-AUDIT-v2.md Z1b-c2b2.
+    /// The canonical form a constant node stands for, which is what its dtype implies.
+    /// </summary>
+    /// <remarks>
+    /// It covers exactly what <c>CanonicalArena.MaterializeConstant</c> can build, because the two
+    /// are one promise: this says a caller may ask for that form, and that one has to deliver it.
+    /// Extending the constant form to another dtype means extending BOTH, in the same change.
+    /// </remarks>
+    private static CanonicalKind StandsFor(DType dtype) => dtype.Kind switch
+    {
+        DTypeKind.Primitive => CanonicalKind.Primitive,
+        DTypeKind.Decimal => CanonicalKind.Decimal,
+        DTypeKind.Utf8 or DTypeKind.Binary => CanonicalKind.VarBinView,
+        _ => CanonicalKind.Constant,
+    };
+
+    /// <summary>The kind this column presents, with the constant form resolved away.</summary>
+    private static CanonicalKind Reported(CanonicalNode node) =>
+        node.Kind == CanonicalKind.Constant ? StandsFor(node.DType) : node.Kind;
+
+    /// <summary>
+    /// Resolves the node a typed accessor should read, materializing a constant when the caller
+    /// asks for the form it stands for. PERF-AUDIT-v2.md Z1b-c2b2.
     /// </summary>
     /// <param name="kind">The kind the typed accessor needs.</param>
-    /// <param name="node">The resolved node.</param>
     /// <returns>The node index to hand the typed view -- the twin's, for a materialized constant.</returns>
     /// <remarks>
     /// A typed view hands out a CONTIGUOUS span, which one element and a count cannot be. So the
     /// constant form ends where a caller asks for one, and it ends ONCE: the twin is memoized on the
     /// record. Every path that never asks -- filter, take, prune, write back -- keeps the form, and
-    /// those are the paths the column was tiled for.
+    /// those are the paths the column was tiled for. The filter in particular does better than keep
+    /// it: `ComparisonKernels` answers a whole constant column from one comparison.
     /// </remarks>
-    private int Resolve(CanonicalKind kind, out CanonicalNode node)
-    {
-        node = _batch.Node(_node);
-        if (node.Kind == CanonicalKind.Constant &&
-            kind is CanonicalKind.Primitive or CanonicalKind.Decimal)
-        {
-            int twin = _batch.Arena.MaterializeConstant(_node);
-            node = _batch.Node(twin);
-            return twin;
-        }
-
-        return _node;
-    }
-
-    private CanonicalNode Require(CanonicalKind kind)
+    private int Require(CanonicalKind kind)
     {
         CanonicalNode node = _batch.Node(_node);
+        if (node.Kind == CanonicalKind.Constant && StandsFor(node.DType) == kind)
+        {
+            return _batch.Arena.MaterializeConstant(_node);
+        }
+
         if (node.Kind != kind)
         {
             // A caller asking a Utf8 column for AsPrimitive<int>() is a caller error, not a
             // malformed file (Phase 1 contract §1.4).
-            ColumnsThrow.WrongKind(node.Kind.ToString(), kind.ToString());
+            ColumnsThrow.WrongKind(Reported(node).ToString(), kind.ToString());
         }
 
-        return node;
+        return _node;
     }
 }
 

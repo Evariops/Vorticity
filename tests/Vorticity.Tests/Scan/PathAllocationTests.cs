@@ -171,7 +171,16 @@ public sealed class PathAllocationTests
         // opens the file and reads one batch, so it pays the eight and collects none of the
         // saving. The ratchet is here to make a change like that be noticed and argued, which is
         // what this comment is.
-        ("open, first batch", File, 133_640, FirstBatch),
+        //
+        // 133_640 -> 133_752 on 2026-09-18, and here is the argument. `VortexReadOptions.
+        // ConstantForm` is now ON by default: a column the file says is one repeated value decodes
+        // to that value and a row count, instead of a million copies of it. This axis opens the
+        // file and reads ONE batch, so it pays the extra record the form costs and collects none of
+        // what the form is for -- which is why it is the only one of the twelve that moved up. The
+        // same switch takes `full scan` DOWN 304 B on the same file, and it takes the 1M `variant`
+        // scan from 605 us to 104 and its write from 3.48 to 0.38 against Vortex Rust. 112 bytes,
+        // once per open, measured identical on three runs.
+        ("open, first batch", File, 133_752, FirstBatch),
         ("full scan", File, 190_976, FullScan),
         ("projected scan, 1 of 5 columns", File, 134_144, ProjectedScan),
         ("take 64 rows from 64 splits", File, 192_000, ScatteredTake),

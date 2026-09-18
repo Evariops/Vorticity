@@ -109,7 +109,8 @@ public class FsstKernelBenchmarks
         FsstDecodeTable table = FsstSymbolTable
             .Create(_symbols, _lengths, "vortex.fsst")
             .Prepare(symbolScratch, widthScratch);
-        return table.Decode(_codes, _output, "vortex.fsst");
+        uint escapeBits = 0;
+        return table.Decode(_codes, _output, "vortex.fsst", ref escapeBits);
     }
 
     /// <summary>The reference's shape: one 8-byte store per symbol, advance by the real length.</summary>

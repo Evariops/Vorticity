@@ -34,7 +34,42 @@ public sealed class SparseDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false);
+    }
 
+    /// <summary>
+    /// The selected rows: the fill over <c>wanted.Length</c> rows, patched only where a patch and a
+    /// wanted row coincide.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// PERF-GAPS.md E8, which REOPENS v2 R17. R17 closed this encoding "by measurement" at 1,12 --
+    /// but the one decoder it did write, `alprd`, went from 2,94 to 0,42 by pushing the selection
+    /// down, and the shape of the waste is the same here and visible in the code: a take of
+    /// sixty-four rows wrote a million-row fill and then walked 15 625 patches to place at most
+    /// sixty-four values.
+    /// </para>
+    /// <para>
+    /// The fill is the whole of the saving. Everything else is `Decode` line for line, which is why
+    /// the two share `Core` -- including the R5 fast path, whose `ApplyAll` becomes R27's
+    /// `ApplySelected`, the merge that drives off whichever of the two lists is shorter.
+    /// </para>
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted, selective: true);
+    }
+
+    /// <inheritdoc/>
+    public override bool SelectsWithoutFullDecode => true;
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted, bool selective)
+    {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, Id);
 
@@ -100,20 +135,24 @@ public sealed class SparseDecoder : ArrayDecoder
             //
             // It was 14% of a scattered-take profile: a zero fill of the whole node, immediately
             // tiled over.
+            // THE OUTPUT IS AS LONG AS THE SELECTION, and that is where a selective read's saving
+            // is: the fill is written once per ROW DELIVERED rather than once per row of the node.
+            int produced = selective ? wanted.Length : length;
+
             ValueWriter writer = fillIsNull
-                ? ValueWriter.Create(context, in values, length, hasFillBuffer ? 1 : 0, Id)
+                ? ValueWriter.Create(context, in values, produced, hasFillBuffer ? 1 : 0, Id)
                 : ValueWriter.CreateUninitialized(
-                    context, in values, length, hasFillBuffer ? 1 : 0, Id);
-            ValidityWriter validity = ValidityWriter.Create(context, length, tracked, Id);
+                    context, in values, produced, hasFillBuffer ? 1 : 0, Id);
+            ValidityWriter validity = ValidityWriter.Create(context, produced, tracked, Id);
 
             if (!fillIsNull)
             {
-                WriteFill(in writer, in fill, dtype, fillBytes, length);
+                WriteFill(in writer, in fill, dtype, fillBytes, produced);
             }
 
             if (tracked && !fillIsNull)
             {
-                validity.SetValidRange(0, length);
+                validity.SetValidRange(0, produced);
             }
 
             // THE CASE THE ENCODING IS FOR, TAKEN WHOLE. PERF-AUDIT-v2.md R5: the loop below asks
@@ -135,35 +174,48 @@ public sealed class SparseDecoder : ArrayDecoder
             // `Copy` and is left with the general loop rather than assumed.
             if (writer.Kind == CanonicalKind.Primitive && valuesValidity.IsAllValid && !fillIsNull)
             {
-                patches.ApplyAll(values.Bytes, writer.Width, writer.Bytes);
+                if (selective)
+                {
+                    Patches.ApplySelected(in patches, values.Bytes, writer.Width, wanted, writer.Bytes);
+                }
+                else
+                {
+                    patches.ApplyAll(values.Bytes, writer.Width, writer.Bytes);
+                }
 
                 return writer.Complete(
                     context, dtype, validity.Complete(context, dtype, Id), dataBuffers.Buffers);
             }
 
-            for (int i = 0; i < patches.Count; i++)
+            if (selective)
             {
-                int position = patches.GetPosition(i);
-                bool valid = valuesValidity.IsValid(i);
-                if (valid)
+                // THE SAME LOOP, AT THE POSITIONS THE SELECTION LEAVES. A patch only survives if
+                // its row was wanted, and then it lands at that row's INDEX IN THE SELECTION, not
+                // at its index in the node. Driven off the wanted side and searching the patches --
+                // R27's argument, and for R27's reason: a take asks for a handful of rows and the
+                // ALP axis carries 16 454 patches, so walking the patch list per batch is the cost
+                // that specializing was supposed to remove.
+                int from = 0;
+                for (int w = 0; w < wanted.Length && from < patches.Count; w++)
                 {
-                    writer.Copy(in values, i, position);
-                }
-                else
-                {
-                    writer.ClearRow(position);
-                }
+                    int found = Patches.Find(in patches, wanted[w], from);
+                    if (found < 0)
+                    {
+                        from = ~found;
+                        continue;
+                    }
 
-                if (tracked)
+                    from = found + 1;
+                    Place(in writer, in validity, in values, in valuesValidity, found, w, tracked);
+                }
+            }
+            else
+            {
+                for (int i = 0; i < patches.Count; i++)
                 {
-                    if (valid)
-                    {
-                        validity.SetValid(position);
-                    }
-                    else
-                    {
-                        validity.SetInvalid(position);
-                    }
+                    Place(
+                        in writer, in validity, in values, in valuesValidity,
+                        i, patches.GetPosition(i), tracked);
                 }
             }
 
@@ -173,6 +225,36 @@ public sealed class SparseDecoder : ArrayDecoder
         finally
         {
             dataBuffers.Dispose();
+        }
+    }
+
+    /// <summary>Writes patch <paramref name="patch"/> at output row <paramref name="at"/>.</summary>
+    private static void Place(
+        in ValueWriter writer, in ValidityWriter validity, in ValueReader values,
+        in ValidityReader valuesValidity, int patch, int at, bool tracked)
+    {
+        bool valid = valuesValidity.IsValid(patch);
+        if (valid)
+        {
+            writer.Copy(in values, patch, at);
+        }
+        else
+        {
+            writer.ClearRow(at);
+        }
+
+        if (!tracked)
+        {
+            return;
+        }
+
+        if (valid)
+        {
+            validity.SetValid(at);
+        }
+        else
+        {
+            validity.SetInvalid(at);
         }
     }
 

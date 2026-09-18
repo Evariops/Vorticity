@@ -25,6 +25,13 @@ public sealed class ConstantFormTests
         new VortexOpenOptions { Read = new VortexReadOptions { ConstantForm = constantForm } };
 
     /// <summary>The switch, and nothing else, decides which kind the canonicalizer produces.</summary>
+    /// <remarks>
+    /// READ OFF THE ARENA NODE, not off <c>VortexColumn.Kind</c>, and the difference is the point:
+    /// the column API deliberately never reports <see cref="CanonicalKind.Constant"/>, because the
+    /// form is how the decoder stored the column and not what the column holds -- a caller
+    /// switching on the kind is asking the second question. So the arena is the only place the
+    /// switch's effect is observable, which is exactly what this test is for.
+    /// </remarks>
     [Fact]
     public async Task TheSwitchDecidesWhichKindTheCanonicalizerProduces()
     {
@@ -40,6 +47,30 @@ public sealed class ConstantFormTests
         // stands for every row.
         Assert.Equal(tiledRows, constantRows);
         Assert.True(tiledRows > 0, "the corpus entry produced no rows");
+    }
+
+    /// <summary>Whichever form the arena holds, the public column view reports Primitive.</summary>
+    /// <remarks>
+    /// The other half of the promise above, and the one that keeps every caller's `switch` working
+    /// when the switch is flipped: a constant column presents the form its dtype stands for.
+    /// </remarks>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TheColumnViewNeverReportsTheConstantForm(bool constantForm)
+    {
+        Vorticity.Tests.Scan.Decoders.EnsureRegistered();
+
+        await using VortexFile file = await VortexFile.OpenAsync(
+            CorpusManifest.Get("encodings/constant").Path, With(constantForm), CancellationToken.None);
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            Assert.Equal(CanonicalKind.Primitive, batch.Root.Kind);
+            return;
+        }
+
+        Assert.Fail("encodings/constant produced no batches.");
     }
 
     /// <summary>Both forms hand the caller the same values, row for row.</summary>
@@ -77,6 +108,80 @@ public sealed class ConstantFormTests
         Assert.Equal(await RewriteOf(false), await RewriteOf(true));
     }
 
+    /// <summary>Every row of every shipped file reads the same with the switch either way.</summary>
+    /// <remarks>
+    /// <para>
+    /// THE TEST THAT WAS MISSING, and the corpus cross-check against Vortex Rust is what said so:
+    /// `containers/zoned_many_zones` came back with row 33792's `banded` reading 32 where the
+    /// reference has 33 -- one zone's constant standing in for the next one's. Nothing in the suite
+    /// caught it, because every test that could have compared two reads made with the SAME option,
+    /// or compared a read against a rewrite of itself; a read that is consistently wrong passes all
+    /// of those. The constant form's one promise is that it changes no value, so the assertion has
+    /// to be the two forms against EACH OTHER, over files that are not about constants.
+    /// </para>
+    /// <para>
+    /// Whole corpus rather than a list: the file that broke would not have been on a list, which is
+    /// the entire lesson. It runs in a few seconds because it renders rows and compares strings.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task EveryCorpusFileReadsTheSameValuesEitherWay()
+    {
+        Vorticity.Tests.Scan.Decoders.EnsureRegistered();
+
+        List<string> disagreed = [];
+        foreach (CorpusEntry entry in CorpusManifest.InScope())
+        {
+            List<string> tiled;
+            try
+            {
+                tiled = await RowsOf(entry, false);
+            }
+            catch (Exception e) when (e is VortexUnsupportedException or VortexFormatException)
+            {
+                // The file does not read under this build's default options at all -- a missing
+                // embedded dtype, an edition that is off. The coverage tests own that question, and
+                // it is the SAME question with the switch either way. Only the tiled side is
+                // caught: if that read succeeds and the constant one throws, the switch broke it,
+                // and the exception is the answer this test exists to give.
+                continue;
+            }
+
+            List<string> constant = await RowsOf(entry, true);
+
+            if (tiled.Count != constant.Count)
+            {
+                disagreed.Add($"{entry.Id}: {tiled.Count} rows tiled, {constant.Count} constant");
+                continue;
+            }
+
+            for (int i = 0; i < tiled.Count; i++)
+            {
+                if (tiled[i] != constant[i])
+                {
+                    disagreed.Add($"{entry.Id}: row {i} is '{tiled[i]}' tiled and '{constant[i]}' constant");
+                    break;
+                }
+            }
+        }
+
+        Assert.Empty(disagreed);
+    }
+
+    private static async Task<List<string>> RowsOf(CorpusEntry entry, bool constantForm)
+    {
+        List<string> rows = [];
+        await using VortexFile file = await VortexFile.OpenAsync(
+            entry.Path, With(constantForm), CancellationToken.None);
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            Vorticity.Tests.Writing.Values.DescribeRows(batch, rows);
+        }
+
+        return rows;
+    }
+
     private static async Task<(CanonicalKind Kind, int Rows)> RootOf(string entry, bool constantForm)
     {
         await using VortexFile file = await VortexFile.OpenAsync(
@@ -84,7 +189,7 @@ public sealed class ConstantFormTests
         await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            return (batch.Root.Kind, batch.RowCount);
+            return (batch.Node(batch.RootIndex).Kind, batch.RowCount);
         }
 
         throw new InvalidOperationException($"{entry} produced no batches.");

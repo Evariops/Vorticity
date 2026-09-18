@@ -609,6 +609,104 @@ internal static class ViewKernels
         }
     }
 
+    /// <summary>
+    /// <see cref="BuildFromOffsets"/> for a SELECTION: one view per entry of
+    /// <paramref name="wanted"/>, cut at <c>offsets[w]..offsets[w + 1]</c>.
+    /// </summary>
+    /// <param name="offsets">
+    /// The whole node's offsets, already validated non-decreasing and inside the heap.
+    /// </param>
+    /// <param name="ptype">The offsets' physical type.</param>
+    /// <param name="heap">The value bytes.</param>
+    /// <param name="views">Exactly <c>wanted.Length</c> views of room; every byte is written.</param>
+    /// <param name="wanted">Row indices into the node, strictly ascending.</param>
+    /// <param name="requireUtf8">Whether the dtype is Utf8.</param>
+    /// <param name="mask">Validity of the SELECTED rows, indexed by position in
+    /// <paramref name="wanted"/>.</param>
+    /// <exception cref="VortexFormatException">A valid row is not valid UTF-8.</exception>
+    /// <remarks>
+    /// THE WHOLE-HEAP UTF-8 SHORTCUT IS NOT AVAILABLE HERE and must not be borrowed: it is sound
+    /// only because every byte of the heap belongs to some row the loop then visits, and a
+    /// selection visits a few of them. The per-row `Utf8.IsValid` is what a take pays, on the bytes
+    /// it actually returns.
+    /// </remarks>
+    internal static void BuildFromOffsetsSelected(
+        ReadOnlySpan<byte> offsets, PType ptype, ReadOnlySpan<byte> heap, Span<byte> views,
+        ReadOnlySpan<int> wanted, bool requireUtf8, in ValidityMask mask)
+    {
+        switch (ptype)
+        {
+            case PType.U8:
+                SelectedFromOffsets<byte>(offsets, heap, views, wanted, requireUtf8, in mask);
+                break;
+            case PType.U16:
+                SelectedFromOffsets<ushort>(offsets, heap, views, wanted, requireUtf8, in mask);
+                break;
+            case PType.U32:
+                SelectedFromOffsets<uint>(offsets, heap, views, wanted, requireUtf8, in mask);
+                break;
+            case PType.U64:
+                SelectedFromOffsets<ulong>(offsets, heap, views, wanted, requireUtf8, in mask);
+                break;
+            case PType.I8:
+                SelectedFromOffsets<sbyte>(offsets, heap, views, wanted, requireUtf8, in mask);
+                break;
+            case PType.I16:
+                SelectedFromOffsets<short>(offsets, heap, views, wanted, requireUtf8, in mask);
+                break;
+            case PType.I32:
+                SelectedFromOffsets<int>(offsets, heap, views, wanted, requireUtf8, in mask);
+                break;
+            default:
+                SelectedFromOffsets<long>(offsets, heap, views, wanted, requireUtf8, in mask);
+                break;
+        }
+    }
+
+    private static void SelectedFromOffsets<TOff>(
+        ReadOnlySpan<byte> offsets, ReadOnlySpan<byte> heap, Span<byte> views,
+        ReadOnlySpan<int> wanted, bool requireUtf8, in ValidityMask mask)
+        where TOff : unmanaged
+    {
+        ReadOnlySpan<TOff> typed = MemoryMarshal.Cast<byte, TOff>(offsets);
+        bool allValid = mask.AllValid;
+
+        ref byte heapRef = ref MemoryMarshal.GetReference(heap);
+        ref byte viewRef = ref MemoryMarshal.GetReference(views);
+        int heapLength = heap.Length;
+
+        for (int i = 0; i < wanted.Length; i++)
+        {
+            ref byte view = ref Unsafe.Add(ref viewRef, i * ViewSize);
+
+            if (!allValid && !mask.IsValid(i))
+            {
+                // BinaryView::empty_view(), written rather than inherited from the allocator.
+                Unsafe.WriteUnaligned(ref view, 0UL);
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), 0UL);
+                continue;
+            }
+
+            // The pair is read fresh for every row: `start` cannot be carried across the gaps a
+            // selection leaves, which is the one structural difference from `FromOffsets`.
+            int row = wanted[i];
+            int start = (int)Widen(typed[row]);
+            int size = (int)Widen(typed[row + 1]) - start;
+            if ((uint)start > (uint)heapLength || (uint)size > (uint)(heapLength - start))
+            {
+                ThrowRowPastHeap(row, start, size, heapLength);
+            }
+
+            ref byte value = ref Unsafe.Add(ref heapRef, start);
+            if (requireUtf8 && !Utf8.IsValid(MemoryMarshal.CreateReadOnlySpan(ref value, size)))
+            {
+                ThrowInvalidRow(row);
+            }
+
+            CanonicalSupport.WriteView(ref view, ref value, size, 0, start);
+        }
+    }
+
     private static void FromOffsets<TOff>(
         ReadOnlySpan<byte> offsets, ReadOnlySpan<byte> heap, Span<byte> views, int count,
         bool requireUtf8, bool wholeHeap, in ValidityMask mask)

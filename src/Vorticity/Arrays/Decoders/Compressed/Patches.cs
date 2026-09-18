@@ -286,7 +286,7 @@ public readonly ref struct Patches
     /// <param name="patches">The patch set, whose positions ascend.</param>
     /// <param name="row">The row to find.</param>
     /// <param name="from">The first patch that may still match.</param>
-    private static int Find(in Patches patches, int row, int from)
+    internal static int Find(in Patches patches, int row, int from)
     {
         int low = from;
         int high = patches.Count - 1;

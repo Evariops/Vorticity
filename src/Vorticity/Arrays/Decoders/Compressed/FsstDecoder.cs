@@ -162,21 +162,32 @@ public sealed class FsstDecoder : ArrayDecoder
         VortexBuffer heap = CanonicalSupport.AllocateUninitialized(
             context, total, 1, out Span<byte> destination);
 
+        uint escapeBits = 0;
         if (selective)
         {
             DecodeRows(table, codesOffsets, offsetsPType, length, codes, uncompressedLengths,
-                lengthsPType, wanted, destination);
+                lengthsPType, wanted, destination, ref escapeBits);
         }
         else
         {
             ReadOnlySpan<byte> stream = CodeStream(codesOffsets, offsetsPType, length, codes);
-            int written = table.Decode(stream, destination, Id);
+            int written = table.Decode(stream, destination, Id, ref escapeBits);
             if (written != total)
             {
                 CompressedThrow.Format(
                     $"{Id} decoded {written} bytes; its uncompressed lengths sum to {total}.");
             }
         }
+
+        // THE SWEEP IS SKIPPED ONLY WHEN THE HEAP IS PROVABLY ASCII, and the proof is two facts
+        // about where its bytes came from rather than a look at the bytes: every byte is either one
+        // of the first `width` bytes of some symbol -- all below 0x80, which `SymbolsAreAscii`
+        // establishes over two kilobytes of table -- or a byte the escape path wrote, all of which
+        // `escapeBits` has accumulated. ASCII is valid UTF-8, so there is nothing left to check.
+        // Anything else falls through to the full `Utf8.IsValid` exactly as before: the guarantee
+        // is the same one, bought at two kilobytes instead of fifty-two megabytes.
+        bool heapIsAscii = table.SymbolsAreAscii && (escapeBits & 0x80) == 0;
+        bool requireUtf8 = dtype.Kind == DTypeKind.Utf8 && !heapIsAscii;
 
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             produced, CanonicalSupport.ViewSize, Id + " views");
@@ -190,7 +201,7 @@ public sealed class FsstDecoder : ArrayDecoder
         // exactly the produced rows in selection order.
         ViewKernels.BuildFromLengths(
             uncompressedLengths.Values.Span, lengthsPType, default, destination, writable, produced,
-            dtype.Kind == DTypeKind.Utf8);
+            requireUtf8);
 
         if (total == 0)
         {
@@ -222,7 +233,8 @@ public sealed class FsstDecoder : ArrayDecoder
         CanonicalNode lengths,
         PType lengthsPType,
         ReadOnlySpan<int> wanted,
-        Span<byte> destination)
+        Span<byte> destination,
+        ref uint escapeBits)
     {
         ReadOnlySpan<byte> rawOffsets = offsets.Values.Span;
         ReadOnlySpan<byte> rawLengths = lengths.Values.Span;
@@ -243,7 +255,8 @@ public sealed class FsstDecoder : ArrayDecoder
 
             int expected = (int)CanonicalSupport.ReadInteger(rawLengths, lengthsPType, k);
             int got = table.Decode(
-                stream.Slice((int)start, (int)(end - start)), destination.Slice(written), Id);
+                stream.Slice((int)start, (int)(end - start)), destination.Slice(written), Id,
+                ref escapeBits);
             if (got != expected)
             {
                 CompressedThrow.Format(

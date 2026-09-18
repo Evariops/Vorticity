@@ -78,6 +78,10 @@ internal static class ComparisonKernels
                 CompareBytes(arena, node, op, literal, destination);
                 return;
 
+            case CanonicalKind.Constant:
+                CompareConstant(arena, node, op, literal, destination);
+                return;
+
             default:
                 throw new NotSupportedException(
                     $"A filter cannot compare a {node.Kind} column. The 1.0 filter evaluates " +
@@ -107,7 +111,9 @@ internal static class ComparisonKernels
             return;
         }
 
-        if (node.Kind != CanonicalKind.VarBinView)
+        bool constant = node.Kind == CanonicalKind.Constant &&
+                        node.DType.Kind is DTypeKind.Utf8 or DTypeKind.Binary;
+        if (node.Kind != CanonicalKind.VarBinView && !constant)
         {
             throw new NotSupportedException(
                 $"{op} matches bytes, so it evaluates utf8 and binary columns and extensions over " +
@@ -118,6 +124,14 @@ internal static class ComparisonKernels
         if (mask.AllInvalid)
         {
             Trilean.Fill(destination, Trilean.Unknown);
+            return;
+        }
+
+        if (constant)
+        {
+            // One value, so one match decides every row -- the same collapse the comparisons make,
+            // and it reaches further here because a pattern search is dearer than a compare.
+            MatchConstant(node, mask, op, pattern.BytesValue, escape, destination);
             return;
         }
 
@@ -135,6 +149,32 @@ internal static class ComparisonKernels
             default:
                 MatchCore<LikeMatch>(node, mask, needle, escape, destination);
                 return;
+        }
+    }
+
+    /// <summary>A byte-pattern predicate over a constant column: one match, then a fill.</summary>
+    private static void MatchConstant(
+        CanonicalNode node, ValidityMask mask, StringMatchOp op, ReadOnlySpan<byte> pattern,
+        byte escape, Span<byte> destination)
+    {
+        ReadOnlySpan<byte> value = node.ConstantElement;
+        bool holds = op switch
+        {
+            StringMatchOp.StartsWith => StartsWithMatch.Holds(value, pattern, escape),
+            StringMatchOp.Contains => ContainsMatch.Holds(value, pattern, escape),
+            _ => LikeMatch.Holds(value, pattern, escape),
+        };
+
+        byte state = holds ? Trilean.True : Trilean.False;
+        if (mask.AllValid)
+        {
+            Trilean.Fill(destination, state);
+            return;
+        }
+
+        for (int i = 0; i < destination.Length; i++)
+        {
+            destination[i] = mask.IsValid(i) ? state : Trilean.Unknown;
         }
     }
 
@@ -245,6 +285,85 @@ internal static class ComparisonKernels
         }
     }
 
+    /// <summary>Compares a constant column, which is ONE comparison and then a fill.</summary>
+    /// <remarks>
+    /// <para>
+    /// The whole point of the constant form (PERF-AUDIT-v2.md Z1b): every row holds the same value,
+    /// so every row has the same answer, and the per-row loop the other kernels run collapses to a
+    /// memset. The comparison itself goes through <see cref="ComparePrimitiveValues"/>, the kernel
+    /// that would have run anyway, so the NaN and signedness rules at the top of this file are
+    /// applied by the one piece of code that implements them rather than restated here.
+    /// </para>
+    /// <para>
+    /// IT READS THE ELEMENT IN PLACE, and the first version did not: it built a one-row arena node
+    /// so the kernel could take a node like every other caller. That node is a record, a record is
+    /// appended per filter evaluation, and a selective filter evaluates once per BLOCK -- which
+    /// `PathAllocationTests` priced at 25 kB on a single read path. Memoizing it instead only moved
+    /// the cost, to four bytes on every record in the arena. The element was always just bytes.
+    /// </para>
+    /// </remarks>
+    private static void CompareConstant(
+        CanonicalArena arena, CanonicalNode node, ComparisonOp op, FilterLiteral literal,
+        Span<byte> destination)
+    {
+        DType dtype = node.DType;
+        ValidityMask mask = ValidityMask.From(arena, node.Validity);
+        if (mask.AllInvalid)
+        {
+            Trilean.Fill(destination, Trilean.Unknown);
+            return;
+        }
+
+        byte state;
+        switch (dtype.Kind)
+        {
+            case DTypeKind.Primitive:
+            {
+                // One row, and an ALL-VALID mask for it: the answer wanted here is what the VALUE
+                // says, and whether a given row is null is applied below, over the rows this fills.
+                Span<byte> one = stackalloc byte[1];
+                ComparePrimitiveValues(
+                    dtype.PType, node.ConstantElement, ValidityMask.From(arena, Validity.AllValid),
+                    op, literal, one);
+                state = one[0];
+                break;
+            }
+
+            case DTypeKind.Utf8:
+            case DTypeKind.Binary:
+            {
+                if (literal.Kind != FilterLiteralKind.Bytes)
+                {
+                    throw Mismatch("utf8 or binary", literal.Kind);
+                }
+
+                // `Apply(op, order)` is what `BytesCore` evaluates per row, so the operator's
+                // semantics are the ones already written down rather than a second copy.
+                state = Trilean.From(
+                    true, Apply(op, node.ConstantElement.SequenceCompareTo(literal.BytesValue)));
+                break;
+            }
+
+            default:
+                throw new NotSupportedException(
+                    $"A filter cannot compare a constant {dtype.Kind} column. The 1.0 filter " +
+                    "evaluates booleans, primitives, utf8 and binary, plus extensions over those " +
+                    "(docs/01-scope.md F7).");
+        }
+
+        if (mask.AllValid)
+        {
+            Trilean.Fill(destination, state);
+            return;
+        }
+
+        // A nullable constant: the value answers the same everywhere, and the nulls are unknown.
+        for (int i = 0; i < destination.Length; i++)
+        {
+            destination[i] = mask.IsValid(i) ? state : Trilean.Unknown;
+        }
+    }
+
     /// <summary>An extension node's storage; anything else unchanged.</summary>
     internal static int Unwrap(CanonicalArena arena, int nodeIndex) =>
         arena.GetNode(nodeIndex).Kind == CanonicalKind.Extension
@@ -334,10 +453,24 @@ internal static class ComparisonKernels
         CanonicalArena arena, CanonicalNode node, ComparisonOp op, FilterLiteral literal,
         Span<byte> destination)
     {
-        PType ptype = node.PType;
-        ValidityMask mask = ValidityMask.From(arena, node.Validity);
-        VortexBuffer values = node.Values;
+        ComparePrimitiveValues(
+            node.PType, node.Values.Span, ValidityMask.From(arena, node.Validity), op, literal,
+            destination);
+    }
 
+    /// <summary>
+    /// The primitive comparison over the VALUES, without a node: one state per row of
+    /// <paramref name="destination"/>, read from the first bytes of <paramref name="values"/>.
+    /// </summary>
+    /// <remarks>
+    /// Split out so the constant form can reach it. A constant column's element is a one-row values
+    /// buffer and nothing more, so it wants exactly this and not an arena node built to carry it --
+    /// see <see cref="CompareConstant"/> for what that node cost.
+    /// </remarks>
+    private static void ComparePrimitiveValues(
+        PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op,
+        FilterLiteral literal, Span<byte> destination)
+    {
         if (ptype.IsFloat())
         {
             CompareFloat(ptype, values, mask, op, ToDouble(literal, "a float"), destination);
@@ -354,7 +487,7 @@ internal static class ComparisonKernels
     }
 
     private static void CompareFloat(
-        PType ptype, VortexBuffer values, ValidityMask mask, ComparisonOp op, double wanted,
+        PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op, double wanted,
         Span<byte> destination)
     {
         // PERF-AUDIT-v2.md F-4c, and the same defect as the bool kernel had: TWO switches per row,
@@ -368,7 +501,7 @@ internal static class ComparisonKernels
         // NotEqual included. What would break the rule is `CompareTo`, which orders NaN and would
         // give the row encoding's TOTAL order (docs/08-semantics.md §2) -- and nothing here calls
         // it. Widening a `Half` or a `float` to `double` is exact, so the answers are unchanged.
-        ReadOnlySpan<byte> bytes = values.Span;
+        ReadOnlySpan<byte> bytes = values;
         switch (ptype)
         {
             case PType.F16:
@@ -384,7 +517,7 @@ internal static class ComparisonKernels
     }
 
     private static void CompareSigned(
-        PType ptype, VortexBuffer values, ValidityMask mask, ComparisonOp op, FilterLiteral literal,
+        PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op, FilterLiteral literal,
         Span<byte> destination)
     {
         long wanted;
@@ -412,7 +545,7 @@ internal static class ComparisonKernels
                 throw Mismatch("a signed integer", literal.Kind);
         }
 
-        ReadOnlySpan<byte> bytes = values.Span;
+        ReadOnlySpan<byte> bytes = values;
         switch (ptype)
         {
             case PType.I8:
@@ -431,7 +564,7 @@ internal static class ComparisonKernels
     }
 
     private static void CompareUnsigned(
-        PType ptype, VortexBuffer values, ValidityMask mask, ComparisonOp op, FilterLiteral literal,
+        PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op, FilterLiteral literal,
         Span<byte> destination)
     {
         ulong wanted;
@@ -460,7 +593,7 @@ internal static class ComparisonKernels
                 throw Mismatch("an unsigned integer", literal.Kind);
         }
 
-        ReadOnlySpan<byte> bytes = values.Span;
+        ReadOnlySpan<byte> bytes = values;
         switch (ptype)
         {
             case PType.U8:
@@ -703,10 +836,10 @@ internal static class ComparisonKernels
     /// compares an i64 against a double lands on, and far better than rejecting the predicate.
     /// </remarks>
     private static void CompareSignedAgainstFloat(
-        PType ptype, VortexBuffer values, ValidityMask mask, ComparisonOp op, double wanted,
+        PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op, double wanted,
         Span<byte> destination)
     {
-        ReadOnlySpan<byte> bytes = values.Span;
+        ReadOnlySpan<byte> bytes = values;
         for (int i = 0; i < destination.Length; i++)
         {
             if (!mask.IsValid(i))
@@ -721,10 +854,10 @@ internal static class ComparisonKernels
     }
 
     private static void CompareUnsignedAgainstFloat(
-        PType ptype, VortexBuffer values, ValidityMask mask, ComparisonOp op, double wanted,
+        PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op, double wanted,
         Span<byte> destination)
     {
-        ReadOnlySpan<byte> bytes = values.Span;
+        ReadOnlySpan<byte> bytes = values;
         for (int i = 0; i < destination.Length; i++)
         {
             if (!mask.IsValid(i))

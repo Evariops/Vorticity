@@ -111,6 +111,29 @@ internal static class CanonicalDigest
                 return;
             }
 
+            case CanonicalKind.Constant:
+                // One element standing for every row. The element's bytes are written, NOT a
+                // recursion into the materialized twin: the twin would write its own validity byte
+                // first, and the digest has to be identical whichever form the read produced --
+                // that is the only reason it is worth digesting at all.
+                //
+                // A STRING WRITES ITS LENGTH FIRST, exactly as WriteVarBin does: the two forms of
+                // one file meet here whenever a read splits, and one of the two chunks folded to a
+                // constant while the other did not. `repeated_prefix_utf8` is that file, and eight
+                // missing length bytes is how it said so.
+                if (valid)
+                {
+                    ReadOnlySpan<byte> element = node.ConstantElement;
+                    if (node.DType.Kind is DTypeKind.Utf8 or DTypeKind.Binary)
+                    {
+                        WriteInt64(o, element.Length);
+                    }
+
+                    o.Write(element);
+                }
+
+                return;
+
             case CanonicalKind.Struct:
             {
                 int fields = node.FieldCount;

@@ -1430,22 +1430,18 @@ internal static class ArrayBlobWriter
     /// `ConstantFormTests.WritingBackIsByteIdenticalEitherWay` is what makes "by construction" a
     /// measured fact rather than a claim.
     /// </para>
+    /// <para>
+    /// THE EXPANSION ITSELF IS THE ARENA'S, not a second copy here. This used to tile the element
+    /// with the element's own LENGTH as the buffer alignment, which is a power of two for every
+    /// primitive and is 3 or 14 for a string -- so the day the constant form learned strings, the
+    /// writer refused its own file. One expansion, in one place, is what stops the reader's form
+    /// and the writer's from drifting apart again.
+    /// </para>
     /// </remarks>
-    internal static int Materialize(CanonicalArena arena, int nodeIndex)
-    {
-        CanonicalNode node = arena.GetNode(nodeIndex);
-        if (node.Kind != CanonicalKind.Constant)
-        {
-            return nodeIndex;
-        }
-
-        ReadOnlySpan<byte> element = node.ConstantElement;
-        int rows = node.Length;
-        VortexBuffer values = arena.AllocateUninitialized(
-            checked(rows * element.Length), element.Length, out Span<byte> writable);
-        RowKernels.Tile(writable, element);
-        return arena.AddPrimitive(node.DType, rows, node.Validity, node.DType.PType, values);
-    }
+    internal static int Materialize(CanonicalArena arena, int nodeIndex) =>
+        arena.GetNode(nodeIndex).Kind == CanonicalKind.Constant
+            ? arena.MaterializeConstant(nodeIndex)
+            : nodeIndex;
 
     /// <remarks>Writes a child that is a column in its own right, compressing it when asked.</remarks>
     private static int WriteChild(

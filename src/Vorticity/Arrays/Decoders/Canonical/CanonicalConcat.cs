@@ -108,15 +108,34 @@ internal static class CanonicalConcat
         }
 
         CanonicalKind kind = arena.GetNode(chunks[0]).Kind;
+        bool mixedConstants = false;
         for (int i = 1; i < chunks.Length; i++)
         {
             CanonicalKind other = arena.GetNode(chunks[i]).Kind;
-            if (other != kind)
+            if (other == kind)
             {
-                throw new VortexFormatException(
-                    $"Chunk 0 canonicalizes to {kind} but chunk {i} to {other}; a chunked array's " +
-                    "chunks all share its dtype and cannot disagree.");
+                continue;
             }
+
+            // A CONSTANT CHUNK BESIDE A CHUNK THAT IS NOT ONE is not the malformed file this check
+            // is for. `distributions/repeated_prefix_utf8` is exactly it: the writer folded one
+            // chunk to `vortex.constant` and left the others alone, so with the constant form on
+            // the kinds disagree where the tiled form made them agree. Expanding the constants is
+            // what restores the agreement, and it restores it to what the tiled form produced.
+            if (other == CanonicalKind.Constant || kind == CanonicalKind.Constant)
+            {
+                mixedConstants = true;
+                continue;
+            }
+
+            throw new VortexFormatException(
+                $"Chunk 0 canonicalizes to {kind} but chunk {i} to {other}; a chunked array's " +
+                "chunks all share its dtype and cannot disagree.");
+        }
+
+        if (mixedConstants)
+        {
+            return ConcatExpandingConstants(context, dtype, length, chunks, depth);
         }
 
         // Null carries no per-row validity and an Extension takes its storage's, so neither may
@@ -159,6 +178,46 @@ internal static class CanonicalConcat
         };
     }
 
+
+    /// <summary>
+    /// Concatenates chunks of which SOME are constant: every constant is expanded, and the concat
+    /// the shared kind already has runs over the result.
+    /// </summary>
+    /// <param name="context">The decode context owning the arena.</param>
+    /// <param name="dtype">The chunked array's dtype.</param>
+    /// <param name="length">Total row count across the chunks.</param>
+    /// <param name="chunks">The chunk node indices, at least one of them Constant and one not.</param>
+    /// <param name="depth">Recursion depth.</param>
+    /// <returns>The concatenated node's index.</returns>
+    /// <remarks>
+    /// There is nothing to save here and the expansion is the honest answer: the column holds more
+    /// than one value, so it cannot stay a constant, and the chunk that was one has to become what
+    /// its neighbours already are. It re-enters <c>Concat</c> at the SAME depth, which terminates
+    /// because the list it re-enters with holds no constant.
+    /// </remarks>
+    private static int ConcatExpandingConstants(
+        ArrayDecodeContext context, DType dtype, int length, ReadOnlySpan<int> chunks, int depth)
+    {
+        CanonicalArena arena = context.Canonical;
+        Span<int> stack = stackalloc int[StackChunks];
+        Scratch<int> scratch = new Scratch<int>(chunks.Length, stack);
+        try
+        {
+            Span<int> expanded = scratch.Span;
+            for (int i = 0; i < chunks.Length; i++)
+            {
+                expanded[i] = arena.GetNode(chunks[i]).Kind == CanonicalKind.Constant
+                    ? arena.MaterializeConstant(chunks[i])
+                    : chunks[i];
+            }
+
+            return Concat(context, dtype, length, expanded, depth);
+        }
+        finally
+        {
+            scratch.Dispose();
+        }
+    }
 
     /// <summary>Concatenating constants: equal ones stay constant, different ones materialize.</summary>
     /// <param name="context">The decode context owning the arena.</param>
@@ -209,9 +268,20 @@ internal static class CanonicalConcat
                 expanded[i] = arena.MaterializeConstant(chunks[i]);
             }
 
-            return dtype.Kind == DTypeKind.Decimal
-                ? ConcatDecimal(context, dtype, length, expanded, validity)
-                : ConcatPrimitive(context, dtype, length, expanded, validity);
+            // Three arms and not a switch over DTypeKind: the constant form covers the three dtypes
+            // `MaterializeConstant` can expand, and naming the twenty it cannot would say the
+            // opposite of the truth. The twin's KIND is what decides, and it is one of three.
+            if (dtype.Kind == DTypeKind.Decimal)
+            {
+                return ConcatDecimal(context, dtype, length, expanded, validity);
+            }
+
+            if (dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary)
+            {
+                return ConcatVarBinView(context, dtype, length, expanded, validity);
+            }
+
+            return ConcatPrimitive(context, dtype, length, expanded, validity);
         }
         finally
         {

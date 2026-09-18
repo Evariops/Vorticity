@@ -197,22 +197,37 @@ internal sealed class ZstdPlan
 
         int rows = node.Length;
         ReadOnlySpan<byte> source = node.Values.Span;
-        int valueCount = 0;
-        byte[] stream = ArrayPool<byte>.Shared.Rent(rows * width);
+
+        // WHEN NO ROW IS NULL THE STREAM IS THE SOURCE, and this loop was copying it to itself.
+        // The compacting loop below writes `source[i*width .. +width]` to `stream[i*width .. +width]`
+        // for every row and skips nothing, so `stream[0 .. rows*width]` comes out byte for byte
+        // equal to `source[0 .. rows*width]` - and it paid a validity call and a `CopyTo` of four
+        // or eight bytes per row to get there. Compressing the source in place produces the SAME
+        // BYTES, which is what lets this be a plain speed-up rather than a format change.
+        //
+        // SLICED AT `rows * width` and not handed over whole: `node.Values.Span` is the arena's
+        // block, which can be longer than the rows this node owns, and a longer input is a
+        // different frame.
+        bool allValid = node.Validity.IsAllValid;
+        int valueCount = allValid ? rows : 0;
+        byte[]? stream = allValid ? null : ArrayPool<byte>.Shared.Rent(rows * width);
         byte[] destination = ArrayPool<byte>.Shared.Rent(
             checked((int)ZstandardEncoder.GetMaxCompressedLength(rows * width)));
         bool kept = false;
         try
         {
-            for (int i = 0; i < rows; i++)
+            if (stream is not null)
             {
-                if (!IsValid(arena, node, i))
+                for (int i = 0; i < rows; i++)
                 {
-                    continue;
-                }
+                    if (!IsValid(arena, node, i))
+                    {
+                        continue;
+                    }
 
-                source.Slice(i * width, width).CopyTo(stream.AsSpan(valueCount * width, width));
-                valueCount++;
+                    source.Slice(i * width, width).CopyTo(stream.AsSpan(valueCount * width, width));
+                    valueCount++;
+                }
             }
 
             if (valueCount == 0)
@@ -221,8 +236,10 @@ internal sealed class ZstdPlan
             }
 
             int streamBytes = valueCount * width;
-            if (!ZstandardEncoder.TryCompress(
-                    stream.AsSpan(0, streamBytes), destination, out int written) || written <= 0)
+            ReadOnlySpan<byte> input = stream is null
+                ? source[..streamBytes]
+                : stream.AsSpan(0, streamBytes);
+            if (!ZstandardEncoder.TryCompress(input, destination, out int written) || written <= 0)
             {
                 return null;
             }
@@ -247,7 +264,11 @@ internal sealed class ZstdPlan
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(stream);
+            if (stream is not null)
+            {
+                ArrayPool<byte>.Shared.Return(stream);
+            }
+
             if (!kept)
             {
                 ArrayPool<byte>.Shared.Return(destination);

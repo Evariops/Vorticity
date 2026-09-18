@@ -73,6 +73,28 @@ internal sealed class FsstPlan
         CanonicalNode node = arena.GetNode(nodeIndex);
         int rows = node.Length;
 
+        // THE ROW TABLES ALONE CAN ALREADY LOSE, and that is decidable before a single byte is
+        // trained or compressed. `EncodedSize` is
+        //
+        //     table.Count * (MaxSymbolLength + 1) + written + rows * Width(max length)
+        //         + (rows + 1) * Width(written)
+        //
+        // in which the first two terms are non-negative and `Width` never returns less than one --
+        // `IndexPType(0)` is `U8` -- so `EncodedSize >= 2 * rows + 1` for every possible outcome.
+        // When that floor is already past the ceiling, no training run and no code stream can bring
+        // it back, so this returns exactly the null the full attempt would have returned.
+        //
+        // It is not a heuristic and it cannot drop a winner: the bound is a floor on the real
+        // value, not an estimate of it. What it buys is the case the profile actually shows -- a
+        // dictionary's VALUES child, a couple of hundred rows against a ceiling of a couple of
+        // hundred bytes, where FSST is trained and run in full every chunk to lose by arithmetic
+        // that was decided in advance (PERF-GAPS.md W1.2: -1.0 ms on `dict_u8_codes`, -2.4 on
+        // `onpair`).
+        if ((2L * rows) + 1 > sizeCeiling)
+        {
+            return null;
+        }
+
         // ONE HEAP, NOT ONE ARRAY PER ROW. This was `ValueOf(node, i).ToArray()` per row: a managed
         // allocation for every string in the column, 65 536 of them on the witness file, which is
         // most of what puts the write path at 314x the read path's allocation and 43% of its time

@@ -100,16 +100,21 @@ internal static class ConstantCanonicalizer
                 // tiling a value that never changes. R22 had predicted it: on that axis `Tile` is
                 // ENTIRELY bytes, +44,6 % when the work is doubled and nothing when only the calls
                 // are.
+                int bytes = ArrayDecodeContext.CheckedMultiply(
+                    length, ptype.ByteWidth(), "constant values");
+
                 if (context.Options.ConstantForm)
                 {
+                    // The ceiling is charged against what the node stands for, not against the
+                    // eight bytes it stores: see `RequireStandsForWithinBudget`.
+                    CanonicalSupport.RequireStandsForWithinBudget(context, bytes);
+
                     int width = ptype.ByteWidth();
                     Span<byte> element = stackalloc byte[width];
                     scalar.WriteTo(element, ptype);
                     return arena.AddConstant(dtype, length, validity, element);
                 }
 
-                int bytes = ArrayDecodeContext.CheckedMultiply(
-                    length, ptype.ByteWidth(), "constant values");
                 VortexBuffer values = CanonicalSupport.AllocateUninitialized(
                     context, bytes, Align, out Span<byte> writable);
                 scalar.WriteTo(writable, ptype);
@@ -213,6 +218,13 @@ internal static class ConstantCanonicalizer
         CanonicalArena arena = context.Canonical;
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             length, CanonicalSupport.ViewSize, "constant variant views");
+
+        if (context.Options.ConstantForm)
+        {
+            CanonicalSupport.RequireStandsForWithinBudget(context, viewBytes);
+            return arena.AddConstant(dtype, length, Validity.NonNullable, value);
+        }
+
         VortexBuffer views = CanonicalSupport.AllocateUninitialized(
             context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
         if (length == 0)
@@ -303,6 +315,16 @@ internal static class ConstantCanonicalizer
 
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             length, CanonicalSupport.ViewSize, "constant views");
+
+        // PERF-AUDIT-v2.md Z1b, the string half. This is where the `variant` axis's 6.5x lives: a
+        // constant variant column is two constant BINARY columns, and tiling them is 2 x 1M views,
+        // 32 MB of buffer for two values that never change.
+        if (context.Options.ConstantForm)
+        {
+            CanonicalSupport.RequireStandsForWithinBudget(context, viewBytes);
+            return arena.AddConstant(dtype, length, validity, value);
+        }
+
         VortexBuffer views = CanonicalSupport.AllocateUninitialized(
             context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
 

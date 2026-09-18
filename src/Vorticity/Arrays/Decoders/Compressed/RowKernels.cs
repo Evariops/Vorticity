@@ -260,6 +260,16 @@ internal static class RowKernels
         ref TValue targetRef = ref MemoryMarshal.GetReference(target);
         ref byte flagRef = ref MemoryMarshal.GetReference(flags);
 
+        // THE LOOP STAYS FUSED, and the split was TRIED AND MEASURED AWAY. PERF-GAPS.md E6 reads
+        // upstream's two separate walks -- `validity.take` then `take_views`
+        // (`varbinview/compute/take.rs:49`, `:57`) -- against this one body and guesses that two
+        // tight passes beat it. They do not: a pure gather pass followed by a mask-only pass over
+        // the same codes measured **1.082** against this form on `dict_nullable_values_nonnull_codes`
+        // fullscan, interval [1.045; 1.151], entirely on the wrong side of 1 (bench/ab.sh,
+        // 2026-09-18). The second walk of a megabyte of codes costs more than the contention it
+        // removes, and the fused body has no dependency between the view store and the mask
+        // arithmetic for a split to break anyway.
+        //
         // THE FULL BLOCK IS ITS OWN LOOP, with a CONSTANT eight iterations, for the reason the
         // bitmap form documents: a variable trip count costs the unroll, and with it the constant
         // shift amounts and the eight independent gathers in flight at once.

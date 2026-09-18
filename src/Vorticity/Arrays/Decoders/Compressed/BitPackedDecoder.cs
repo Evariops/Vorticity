@@ -19,6 +19,7 @@ using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.Types;
@@ -398,7 +399,10 @@ public sealed class BitPackedDecoder : ArrayDecoder
             context.MarkNodeChecked(in node);
         }
 
-        CanonicalNode values = context.Canonical.GetNode(valuesIndex);
+        // A span is read below, so a constant child is expanded: see
+        // `CanonicalSupport.RequirePrimitiveChild`.
+        CanonicalNode values = context.Canonical.GetNode(
+            CanonicalSupport.ExpandIfConstant(context, valuesIndex));
         if (values.Kind != CanonicalKind.Primitive)
         {
             CompressedThrow.ChildKind(Id, "patch_values", values.Kind, "a Primitive");
@@ -459,7 +463,10 @@ public sealed class BitPackedDecoder : ArrayDecoder
             context.MarkNodeChecked(in node);
         }
 
-        CanonicalNode values = context.Canonical.GetNode(valuesIndex);
+        // A span is read below, so a constant child is expanded: see
+        // `CanonicalSupport.RequirePrimitiveChild`.
+        CanonicalNode values = context.Canonical.GetNode(
+            CanonicalSupport.ExpandIfConstant(context, valuesIndex));
         if (values.Kind != CanonicalKind.Primitive)
         {
             CompressedThrow.ChildKind(Id, "patch_values", values.Kind, "a Primitive");

@@ -27,6 +27,7 @@ using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Text;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -123,7 +124,8 @@ public sealed class OnPairDecoder : ArrayDecoder
             context, in node, 0, "dict_offsets", metadata.DictionaryOffsetsPType, tokenCount + 1);
 
         VortexBuffer dictionary = node.GetBuffer(0);
-        ValidateDictionary(dictOffsets, metadata.DictionaryOffsetsPType, tokenCount, dictionary);
+        int dictionaryBytes = ValidateDictionary(
+            dictOffsets, metadata.DictionaryOffsetsPType, tokenCount, dictionary);
 
         // Child 1: the code stream, whose length the metadata carries.
         int codesLength = ArrayDecodeContext.CheckedLength(metadata.CodesLength, Id + " codes_len");
@@ -216,10 +218,23 @@ public sealed class OnPairDecoder : ArrayDecoder
         // WRITTEN rather than inherited from the allocator.
         VortexBuffer views = CanonicalSupport.AllocateUninitialized(
             context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
+        // THE UTF-8 SWEEP RUNS OVER THE DICTIONARY, NOT OVER THE HEAP, and the argument is shorter
+        // here than it is for FSST because this encoding HAS NO ESCAPE: every byte of the decoded
+        // heap is copied from the dictionary blob, verbatim. So "the dictionary is ASCII" and "the
+        // heap is ASCII" are the same statement, ASCII is valid UTF-8, and a blob of at most a
+        // megabyte answers a question the fifty-megabyte heap was being swept for. Anything with a
+        // high byte in it falls through to the per-heap sweep exactly as before.
+        //
+        // The blob is bounded by its LAST OFFSET and not by its length: `ValidateDictionary` has
+        // already established that bound, and the bytes past it are the read padding upstream
+        // requires, which no token ever emits.
+        bool heapIsAscii = dtype.Kind == DTypeKind.Utf8
+            && Ascii.IsValid(dictionary.Span[..dictionaryBytes]);
+
         bool referenced = ViewKernels.BuildFromLengths(
             uncompressedLengths.Values.Span, metadata.UncompressedLengthsPType,
             selective ? wanted : default, destination, writable, produced,
-            dtype.Kind == DTypeKind.Utf8);
+            dtype.Kind == DTypeKind.Utf8 && !heapIsAscii);
 
         // The heap is attached only if a view actually points into it. A value of 12 bytes or fewer
         // lives inside its own view, so a selection of short rows references nothing - and handing
@@ -583,7 +598,14 @@ public sealed class OnPairDecoder : ArrayDecoder
     /// <c>validate_safety</c>: the offsets must start at zero, be strictly increasing (no empty
     /// token), describe tokens of at most <see cref="MaxTokenSize"/> bytes, and end inside the blob.
     /// </summary>
-    private static void ValidateDictionary(
+    /// <returns>
+    /// The dictionary's LAST OFFSET, which bounds the live bytes of the blob: everything past it is
+    /// the read padding upstream requires and no token can emit. Returned rather than read again by
+    /// the caller because this walk has it in hand, and a second
+    /// <see cref="CanonicalSupport.ReadInteger"/> would be a second per-node dispatch for a value
+    /// already computed.
+    /// </returns>
+    private static int ValidateDictionary(
         CanonicalNode dictOffsets, PType ptype, int tokenCount, VortexBuffer dictionary)
     {
         ReadOnlySpan<byte> offsets = dictOffsets.Values.Span;
@@ -619,6 +641,8 @@ public sealed class OnPairDecoder : ArrayDecoder
             CompressedThrow.Format(
                 $"{Id}'s dictionary offsets end at {previous}, past its {dictionary.Length}-byte blob.");
         }
+
+        return (int)previous;
     }
 
     /// <summary>

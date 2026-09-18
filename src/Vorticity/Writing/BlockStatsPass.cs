@@ -80,13 +80,44 @@ internal static class BlockStatsPass
         switch (node.Kind)
         {
             case CanonicalKind.Constant:
-                // One element, `count` rows, and its dtype is Primitive by construction
-                // (ConstantCanonicalizer builds the form for no other kind). A block of it is
-                // bounded by the element itself as soon as one row of it is valid.
+            {
+                // One element, `count` rows. Its dtype is a primitive or a string: those are the
+                // two the canonicalizer builds the form for, and each contributes what its own kind
+                // contributes below -- a bound for the first, a byte count for the second, exactly
+                // as the Primitive and VarBinView arms do over their own rows.
                 stats.IsSummarizable = true;
+                ReadOnlySpan<byte> element = node.ConstantElement;
+                bool bytes = node.DType.Kind is DTypeKind.Utf8 or DTypeKind.Binary;
+                bool elementValid = mask.IsValid(start);
+
                 if (valid > 0)
                 {
-                    Element(node.DType.PType, node.ConstantElement, ref stats);
+                    if (bytes)
+                    {
+                        // No bounds, for the VarBinView arm's reason. The byte total is the one
+                        // thing a string block owes the compressor, and here it is one length
+                        // multiplied rather than a walk over the views.
+                        stats.TotalBytes += (long)valid * element.Length;
+                    }
+                    else
+                    {
+                        Element(node.DType.PType, element, ref stats);
+                    }
+                }
+
+                // THE STEPS, WHICH THIS ARM USED NOT TO TOUCH AT ALL, and the corpus cross-check
+                // against Vortex Rust is what found it: `containers/zoned_many_zones` came back
+                // with `banded` reading one zone's value for the next one's. `Deltas` runs from the
+                // Primitive arm only, so a chunk whose blocks are constants left `DeltaKnown` set
+                // by whichever block was not one -- and `stepsAreConstant` then tells
+                // `SequencePlan` its walk has already been done. It skips it, reads the step as
+                // `v[1] - v[0]` = 0 off the first block, and writes `vortex.sequence(base, 0)` over
+                // rows that climb. A claim that the steps are verified has to be made by whoever
+                // verified them.
+                if (!bytes && node.DType.PType.IsInteger())
+                {
+                    ConstantDeltas(
+                        node.DType.PType, element, count, valid, startsBlock, ref stats, previous);
                 }
 
                 // Order: one value repeated is sorted and not strict, and the seam with the row
@@ -94,9 +125,19 @@ internal static class BlockStatsPass
                 stats.OrderTracked = true;
                 if (!stats.OrderUntracked && !stats.Unsorted)
                 {
-                    OrderSeam(
-                        node.DType.PType, node.ConstantElement, mask.IsValid(start), startsBlock,
-                        ref stats, previous);
+                    if (bytes)
+                    {
+                        OrderSeamBytes(
+                            elementValid ? element : default, elementValid, startsBlock, ref stats,
+                            previous);
+                    }
+                    else
+                    {
+                        OrderSeam(
+                            node.DType.PType, element, elementValid, startsBlock, ref stats,
+                            previous);
+                    }
+
                     if (count > 1)
                     {
                         stats.Repeats = true;
@@ -114,6 +155,7 @@ internal static class BlockStatsPass
                 // over -- which is why this is answered without reading a value per row.
                 ConstantRuns(node, in mask, start, count, valid, startsBlock, ref stats, previous);
                 return;
+            }
 
             case CanonicalKind.Primitive:
             {
@@ -401,6 +443,130 @@ internal static class BlockStatsPass
             default: Wide<ulong>(values, seed, seam, start, count, ref stats); return;
         }
     }
+
+    /// <summary>The steps of a constant range, which has at most two distinct ones.</summary>
+    /// <param name="ptype">The element's physical type; an integer, checked by the caller.</param>
+    /// <param name="element">The one value's bytes.</param>
+    /// <param name="count">Rows in the range.</param>
+    /// <param name="valid">Valid rows in it.</param>
+    /// <param name="startsBlock">Whether the range is the block's first.</param>
+    /// <param name="stats">The accumulator.</param>
+    /// <param name="previous">The row before the range, when there is one.</param>
+    /// <remarks>
+    /// <para>
+    /// <see cref="Deltas"/>'s rules, without its walk: a range of one value repeated has
+    /// <c>count - 1</c> steps of ZERO, plus the seam from the row before it. So there is nothing to
+    /// read per row -- two subtractions answer a million rows -- but the answer must still be
+    /// RECORDED, because what the chooser reads is the claim, not the rows.
+    /// </para>
+    /// <para>
+    /// <see cref="Int128"/> throughout, for <see cref="Wide{T}"/>'s reason: the difference of two
+    /// 64-bit values does not fit in 64 bits in general, and the wire field is a signed 64. The
+    /// cost of the wider arithmetic is two subtractions per RANGE, not per row.
+    /// </para>
+    /// </remarks>
+    private static void ConstantDeltas(
+        PType ptype, ReadOnlySpan<byte> element, int count, int valid, bool startsBlock,
+        ref BlockStats stats, PreviousRow? previous)
+    {
+        if (stats.DeltaBroken)
+        {
+            return;
+        }
+
+        // A null has no value to step from or to, and `vortex.sequence` has no children to put a
+        // validity bitmap in -- one null row disqualifies the whole column.
+        if (valid != count)
+        {
+            stats.BreakDelta();
+            return;
+        }
+
+        bool hadPrevious = previous is not null && previous.HasValue;
+        if (hadPrevious && previous!.IsNull)
+        {
+            if (!startsBlock)
+            {
+                stats.BreakDelta();
+                return;
+            }
+
+            stats.BreakLeading();
+            hadPrevious = false;
+        }
+
+        Int128 value = ElementValue(ptype, element);
+        Int128 step = stats.Delta;
+        bool known = stats.DeltaKnown;
+
+        if (hadPrevious)
+        {
+            Int128 delta = value - ElementValue(ptype, previous!.Bytes);
+            if (startsBlock)
+            {
+                // The seam is recorded apart, for the merge to read when this block is not the
+                // chunk's first; folding it into the block's own steps is the defect the remarks on
+                // `Deltas` describe.
+                if (delta < long.MinValue || delta > long.MaxValue)
+                {
+                    stats.BreakLeading();
+                }
+                else
+                {
+                    stats.SetLeading((long)delta);
+                }
+            }
+            else if (known)
+            {
+                if (delta != step)
+                {
+                    stats.BreakDelta();
+                    return;
+                }
+            }
+            else if (delta < long.MinValue || delta > long.MaxValue)
+            {
+                stats.BreakDelta();
+                return;
+            }
+            else
+            {
+                step = delta;
+                known = true;
+            }
+        }
+
+        // Every step INSIDE the range is zero: one value, repeated.
+        if (count > 1)
+        {
+            if (known && step != 0)
+            {
+                stats.BreakDelta();
+                return;
+            }
+
+            step = 0;
+            known = true;
+        }
+
+        if (known)
+        {
+            stats.SetDelta((long)step);
+        }
+    }
+
+    /// <summary>One integer element, widened from its physical type.</summary>
+    private static Int128 ElementValue(PType ptype, ReadOnlySpan<byte> bytes) => ptype switch
+    {
+        PType.I8 => MemoryMarshal.Read<sbyte>(bytes),
+        PType.I16 => MemoryMarshal.Read<short>(bytes),
+        PType.I32 => MemoryMarshal.Read<int>(bytes),
+        PType.U8 => bytes[0],
+        PType.U16 => MemoryMarshal.Read<ushort>(bytes),
+        PType.U32 => MemoryMarshal.Read<uint>(bytes),
+        PType.U64 => MemoryMarshal.Read<ulong>(bytes),
+        _ => MemoryMarshal.Read<long>(bytes),
+    };
 
     /// <summary>Steps of a column narrower than 64 bits, where a difference always fits a long.</summary>
     /// <remarks>

@@ -97,6 +97,21 @@ public sealed class DeltaDecoder : ArrayDecoder
 
         // Only the window is materialized, not the whole decoded run: a delta node of a million rows
         // asked for one batch has no reason to produce a million values.
+        //
+        // THE ZERO FILL STAYS, and `AllocateUninitialized` here was TRIED AND MEASURED AWAY. It is
+        // provable -- `Undelta` walks the blocks `[offset / 1024, (offset + length - 1) / 1024]`
+        // and writes `output[p - offset]` for every `p` in `[max(offset, blockStart),
+        // min(offset + length, blockStart + 1024))`, whose union over that block span is exactly
+        // `[offset, offset + length)` -- and it is SLOWER: 1.035 and 1.042 against this line over
+        // two `bench/ab.sh` runs of `fastlanes_delta` fullscan (2026-09-18).
+        //
+        // The reason is the one `ZstdDecoder.BuildViews` already documents for its views: a
+        // 1M-row batch asks for 8 000 000 bytes, which is UNDER `AlignedBufferPool.MaxPooledLength`
+        // (8 388 608), so this block comes back from the pool with its pages already faulted. The
+        // memset is then not a page-fault pass but a sequential prefetch of a buffer the untranspose
+        // loop is about to rewrite, and dropping it trades that fill for a cold miss per row. The
+        // zstd heap makes the opposite call (31.84 MB, over the pool's bar, fresh pages every scan)
+        // and takes the uninitialized block -- the rule is the size, not the encoding.
         VortexBuffer output = CompressedValues.Allocate(
             context, length * width, width, Id, out Span<byte> destination);
 

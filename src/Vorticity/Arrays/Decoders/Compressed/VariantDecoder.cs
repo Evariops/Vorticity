@@ -52,7 +52,38 @@ public sealed class VariantDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false);
+    }
 
+    /// <summary>
+    /// The logical spelling is TRANSPARENT to a take: it hands back its one child's node with a
+    /// shape check and nothing else, so the rows it is asked for are the rows the child is asked for.
+    /// </summary>
+    /// <remarks>
+    /// PERF-GAPS.md V1. Without this the take went through the default -- decode the whole node,
+    /// then gather -- which on the corpus's `variant` file expands a million rows of constant to
+    /// deliver sixty-four: the take cost as much as the scan (636 against 611 us against a Rust that
+    /// pushes the selection into the child, `variant/compute/take.rs:15-25`).
+    ///
+    /// The storage check runs against the SELECTED length, because that is the node's length on
+    /// this path; everything above it is the same code, which is why the two share `Core`.
+    /// `TakeSpecializationTests` holds this answer to the default's.
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted, selective: true);
+    }
+
+    /// <inheritdoc/>
+    public override bool SelectsWithoutFullDecode => true;
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted, bool selective)
+    {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         VariantMetadata metadata = VariantMetadata.Read(node.Metadata);
 
@@ -76,9 +107,11 @@ public sealed class VariantDecoder : ArrayDecoder
         // decodes at the variant dtype and whatever encoding it uses has to produce the
         // `Struct{metadata, value}` form. `vortex.constant` does; anything else that does not will
         // say so below rather than be reinterpreted.
-        int core = context.DecodeChild(in node, 0, dtype, length);
+        int core = selective
+            ? context.DecodeChildSelected(in node, 0, dtype, length, wanted)
+            : context.DecodeChild(in node, 0, dtype, length);
         CanonicalNode storage = context.Canonical.GetNode(core);
-        VariantStorage.Require(storage, length, Id);
+        VariantStorage.Require(storage, selective ? wanted.Length : length, Id);
         return core;
     }
 }
@@ -101,7 +134,40 @@ public sealed class ParquetVariantDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false);
+    }
 
+    /// <summary>
+    /// The selection goes into the two binary children, which is where upstream puts it too
+    /// (<c>parquet-variant/src/kernel.rs:273-289</c>).
+    /// </summary>
+    /// <remarks>
+    /// PERF-GAPS.md V2. Nothing here is per-row: the node is a struct of two `vortex.varbin`
+    /// columns, so pushing `wanted` down is the whole of the work, and the saving is theirs --
+    /// two million sixteen-byte views not built to return sixty-four rows.
+    ///
+    /// THIS IS ONLY SAFE BECAUSE <see cref="VarBinDecoder"/> IS SPECIALIZED TOO. Declaring
+    /// <see cref="SelectsWithoutFullDecode"/> takes `FlatLayoutReader`'s pushed route, which has no
+    /// retained-chunk cache; an unspecialized child on that route decodes its whole node once per
+    /// batch, which is v2 R23's quadratic take. `TakeSpecializationTests` checks the flag against
+    /// the overrides of THIS decoder and cannot see that, so the pairing is stated here and the
+    /// `--throughput --take` axis is what holds it.
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted, selective: true);
+    }
+
+    /// <inheritdoc/>
+    public override bool SelectsWithoutFullDecode => true;
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted, bool selective)
+    {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ParquetVariantMetadata metadata = ParquetVariantMetadata.Read(node.Metadata);
 
@@ -142,11 +208,21 @@ public sealed class ParquetVariantDecoder : ArrayDecoder
             ? context.DecodeValidity(in node, 0, dtype.Nullability, length)
             : Validity.FromNullability(dtype.Nullability);
 
-        int metadataChild = context.DecodeChild(in node, first, metadataType, length);
-        int valueChild = context.DecodeChild(in node, first + 1, valueType, length);
+        int produced = selective ? wanted.Length : length;
+        if (selective && first == 1)
+        {
+            validity = Compute.CanonicalFilter.FilterValidity(context.Canonical, validity, wanted);
+        }
 
-        RequireBinary(context, metadataChild, length, "metadata");
-        RequireBinary(context, valueChild, length, "value");
+        int metadataChild = selective
+            ? context.DecodeChildSelected(in node, first, metadataType, length, wanted)
+            : context.DecodeChild(in node, first, metadataType, length);
+        int valueChild = selective
+            ? context.DecodeChildSelected(in node, first + 1, valueType, length, wanted)
+            : context.DecodeChild(in node, first + 1, valueType, length);
+
+        RequireBinary(context, metadataChild, produced, "metadata");
+        RequireBinary(context, valueChild, produced, "value");
 
         Span<int> fields = stackalloc int[2];
         fields[0] = metadataChild;
@@ -154,7 +230,7 @@ public sealed class ParquetVariantDecoder : ArrayDecoder
 
         // A STRUCT WEARING THE VARIANT DTYPE. See the file header: the shape is
         // `Struct{metadata, value}` and the schema still says variant.
-        return context.Canonical.AddStruct(dtype, length, validity, fields);
+        return context.Canonical.AddStruct(dtype, produced, validity, fields);
     }
 
     private static void RequireBinary(ArrayDecodeContext context, int child, int length, string what)

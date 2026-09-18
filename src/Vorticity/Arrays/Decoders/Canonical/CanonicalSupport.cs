@@ -10,6 +10,7 @@ using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Buffers;
 using Vorticity.Types;
 
@@ -78,6 +79,26 @@ internal static class CanonicalSupport
         RequireWithinBudget(context, byteLength);
         return context.Canonical.Allocate(byteLength, alignment);
     }
+
+    /// <summary>
+    /// Charges <paramref name="byteLength"/> against the read's decompression ceiling WITHOUT
+    /// allocating it, for a node that stands for more bytes than it stores.
+    /// </summary>
+    /// <param name="context">The decode context carrying the ceiling.</param>
+    /// <param name="byteLength">The size the node stands for.</param>
+    /// <remarks>
+    /// The constant form (PERF-AUDIT-v2.md Z1b) keeps one element and a row count, so nothing is
+    /// allocated at decode and the guard the two <c>Allocate</c> overloads apply never fires. The
+    /// guard still has to fire: the row count is file-supplied, <c>MaterializeConstant</c> will
+    /// expand it in full the moment a caller asks for a span, and the arena deliberately does not
+    /// check -- its contract says the size arrives already validated. So the ceiling is charged
+    /// here, where the row count is first seen, which also keeps the two forms indistinguishable to
+    /// a caller. That is the premise of the option, and a file refused in one form and accepted in
+    /// the other would break it.
+    /// </remarks>
+    /// <exception cref="VortexFormatException">It exceeds the ceiling.</exception>
+    internal static void RequireStandsForWithinBudget(ArrayDecodeContext context, int byteLength) =>
+        RequireWithinBudget(context, byteLength);
 
     private static void RequireWithinBudget(ArrayDecodeContext context, int byteLength)
     {
@@ -156,16 +177,71 @@ internal static class CanonicalSupport
     /// <paramref name="ptype"/> and <paramref name="length"/> rows. A child's own encoding never
     /// gets to decide what it means (Phase 1 contract §2.5).
     /// </summary>
+    /// <remarks>
+    /// A CONSTANT CHILD IS EXPANDED HERE, AND THIS IS THE ONE PLACE THAT DOES IT. Every caller of
+    /// this helper is about to read a CONTIGUOUS SPAN of <paramref name="length"/> values -- offsets
+    /// to walk, lengths to sum, patch indices to binary-search -- and
+    /// <see cref="CanonicalKind.Constant"/> has an element, not a span. Expanding it restores
+    /// exactly the bytes the tiling form would have produced, at exactly the cost it would have
+    /// paid, so nothing is lost by it.
+    /// <para>
+    /// That asymmetry is the whole design of the constant form. It exists to save a CONSUMER from
+    /// reading a million copies of one value; it was never meant to save a decoder from a side
+    /// table it has to walk. Recounted on 2026-09-18, this helper alone accounts for about 120 of
+    /// the 225 tests that turning <c>VortexReadOptions.ConstantForm</c> on used to break --
+    /// `vortex.onpair`'s and `vortex.fsst`'s `uncompressed_lengths`, `vortex.fsst`'s
+    /// `codes_offsets`, `fastlanes.bitpacked`'s patch indices and `vortex.alp`'s `patch_values`.
+    /// </para>
+    /// </remarks>
     internal static CanonicalNode RequirePrimitiveChild(
         ArrayDecodeContext context, int index, PType ptype, int length, string what)
     {
-        CanonicalNode node = context.Canonical.GetNode(index);
+        CanonicalNode node = context.Canonical.GetNode(ExpandIfConstant(context, index));
         if (node.Kind != CanonicalKind.Primitive || node.PType != ptype || node.Length != length)
         {
             ThrowChildShape(what, ptype, length);
         }
 
         return node;
+    }
+
+    /// <summary>
+    /// The node at <paramref name="index"/>, or a dense Primitive equal to it when it is a
+    /// primitive <see cref="CanonicalKind.Constant"/>.
+    /// </summary>
+    /// <returns>
+    /// <paramref name="index"/> itself for anything else, so a call site can use this
+    /// unconditionally.
+    /// </returns>
+    /// <remarks>
+    /// See <see cref="RequirePrimitiveChild"/> for why expanding here gives nothing up. This is the
+    /// form for the sites that check the child's shape THEMSELVES rather than through that helper --
+    /// `vortex.alp`'s and `fastlanes.bitpacked`'s `patch_values` -- because their messages name the
+    /// patch count rather than the array's row count.
+    /// </remarks>
+    internal static int ExpandIfConstant(ArrayDecodeContext context, int index)
+    {
+        CanonicalNode node = context.Canonical.GetNode(index);
+        if (node.Kind != CanonicalKind.Constant || node.DType.Kind != DTypeKind.Primitive)
+        {
+            return index;
+        }
+
+        PType ptype = node.DType.PType;
+        int length = node.Length;
+        int width = ptype.ByteWidth();
+        int bytes = ArrayDecodeContext.CheckedMultiply(length, width, "expanded constant");
+
+        // Uninitialized: `Tile` writes every byte from the element, and the element is the node's
+        // own `ConstantElement`, which `AddConstant` refused to leave empty.
+        VortexBuffer values = AllocateUninitialized(context, bytes, width, out Span<byte> writable);
+        if (length != 0)
+        {
+            node.ConstantElement[..width].CopyTo(writable);
+            RowKernels.Tile(writable, writable[..width]);
+        }
+
+        return context.Canonical.AddPrimitive(node.DType, length, node.Validity, ptype, values);
     }
 
     /// <summary>

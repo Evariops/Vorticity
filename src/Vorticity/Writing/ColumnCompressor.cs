@@ -29,6 +29,7 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Runtime.InteropServices;
@@ -279,7 +280,9 @@ internal static class ColumnCompressor
         {
             int runCount = node.Kind == CanonicalKind.Bool && node.Validity.IsAllValid
                 ? BitmapRuns(node.Bits.Span, node.BitOffset, length, ceiling, runStarts, runEnds)
-                : ComparedRuns(in comparer, length, ceiling, runStarts, runEnds);
+                : FixedRuns(in node, length, ceiling, runStarts, runEnds, out int fixedRuns)
+                    ? fixedRuns
+                    : ComparedRuns(in comparer, length, ceiling, runStarts, runEnds);
 
             if (runCount > ceiling)
             {
@@ -319,6 +322,126 @@ internal static class ColumnCompressor
             ends[runCount - 1] = i;
             starts[runCount] = i;
             runCount++;
+        }
+
+        return runCount;
+    }
+
+    /// <summary>
+    /// The same count over a fixed-width, all-valid column, read as raw bits at its own width.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when this shape was handled, in which case <paramref name="runs"/>
+    /// holds the count; <see langword="false"/> when the caller must fall back to
+    /// <see cref="ComparedRuns"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// PERF-GAPS.md W3.1. <see cref="ComparedRuns"/> asks <see cref="RowComparer.Equal"/> once per
+    /// row, and that call is two validity lookups, a zero-width test and a switch on the width
+    /// before it reads anything -- per row, for a column whose kind and width were settled when the
+    /// comparer was built. On the `sparse` write axis the pass was 2,68 ms of 4,2, and the profile
+    /// had been charging it to the chooser's own time.
+    /// </para>
+    /// <para>
+    /// RAW BITS, NEVER <c>==</c> ON THE LOGICAL TYPE, and that is what makes generalizing by WIDTH
+    /// rather than by ptype correct. <see cref="RowComparer"/> reads a 4-byte row as
+    /// <see langword="uint"/> and an 8-byte one as <see langword="ulong"/> whatever the column
+    /// holds, and its header says why: -0.0 and +0.0 are different values to a writer, and two NaNs
+    /// with the same payload are the same value. A <c>float ==</c> loop would fuse the zeros and cut
+    /// every run of NaN, changing the runs -- and so the bytes. Reading unsigned at the same width
+    /// reproduces <see cref="RowComparer.Equal"/> exactly, which is also why a `Decimal` stored in
+    /// four bytes may take this path.
+    /// </para>
+    /// <para>
+    /// ALL-VALID ONLY, for the same reason <see cref="BitmapRuns"/> is: "null equals null, and null
+    /// equals nothing else" is not reproducible from the value bytes, whose contents under a null
+    /// row are unspecified.
+    /// </para>
+    /// </remarks>
+    private static bool FixedRuns(
+        in CanonicalNode node, int length, int ceiling, Span<int> starts, Span<int> ends, out int runs)
+    {
+        runs = 0;
+        if (!node.Validity.IsAllValid
+            || node.Kind is not (CanonicalKind.Primitive or CanonicalKind.Decimal))
+        {
+            return false;
+        }
+
+        int width = node.Kind == CanonicalKind.Decimal
+            ? Types.Numerics.DecimalStorage.ByteWidth(node.Storage)
+            : node.PType.ByteWidth();
+
+        ReadOnlySpan<byte> values = node.Values.Span;
+        switch (width)
+        {
+            case 1:
+                runs = TypedRuns<byte>(values, length, ceiling, starts, ends);
+                return true;
+            case 2:
+                runs = TypedRuns<ushort>(values, length, ceiling, starts, ends);
+                return true;
+            case 4:
+                runs = TypedRuns<uint>(values, length, ceiling, starts, ends);
+                return true;
+            case 8:
+                runs = TypedRuns<ulong>(values, length, ceiling, starts, ends);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="FixedRuns"/> with the width resolved to a type, so the comparison is one load.
+    /// </summary>
+    /// <remarks>
+    /// THE VECTOR STEP SKIPS EQUAL STRETCHES WHOLESALE, which is the shape run-end is being asked
+    /// about: a column worth encoding has far fewer boundaries than rows, so most of this walk is
+    /// proving that a block has none. Comparing `v[i..i+W]` with `v[i-1..i-1+W]` answers that for a
+    /// whole vector at once; a vector that holds a boundary falls through to the scalar step, which
+    /// finds its exact position. The unaligned second load is the point, not an oversight.
+    /// </remarks>
+    private static int TypedRuns<T>(
+        ReadOnlySpan<byte> bytes, int length, int ceiling, Span<int> starts, Span<int> ends)
+        where T : unmanaged, IEquatable<T>
+    {
+        ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes)[..length];
+        ref T first = ref MemoryMarshal.GetReference(values);
+
+        int runCount = 1;
+        starts[0] = 0;
+
+        bool wide = Vector.IsHardwareAccelerated && Vector<T>.Count > 1;
+        int step = Vector<T>.Count;
+        int i = 1;
+        while (i < length)
+        {
+            if (wide && i + step <= length
+                && Vector.EqualsAll(
+                    Vector.LoadUnsafe(ref first, (nuint)i),
+                    Vector.LoadUnsafe(ref first, (nuint)(i - 1))))
+            {
+                i += step;
+                continue;
+            }
+
+            if (Unsafe.Add(ref first, i).Equals(Unsafe.Add(ref first, i - 1)))
+            {
+                i++;
+                continue;
+            }
+
+            if (runCount > ceiling)
+            {
+                return runCount;
+            }
+
+            ends[runCount - 1] = i;
+            starts[runCount] = i;
+            runCount++;
+            i++;
         }
 
         return runCount;

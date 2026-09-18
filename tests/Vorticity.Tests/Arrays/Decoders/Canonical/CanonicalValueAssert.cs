@@ -72,6 +72,14 @@ internal static class CanonicalValueAssert
                 return;
             }
 
+            case CanonicalKind.Constant:
+                // One element standing for every row. Asserting through the materialized twin,
+                // rather than against the element here, is deliberate: it makes this test read the
+                // column the way a caller does, so a twin that expanded the wrong bytes fails here
+                // instead of passing because both sides read the same element.
+                AssertRow(scan, scan.Canonical.MaterializeConstant(nodeIndex), dtype, row, expected);
+                return;
+
             case CanonicalKind.Struct when dtype.Kind == DTypeKind.Variant:
                 AssertVariant(in node, scan, row, expected);
                 return;

@@ -97,12 +97,17 @@ public sealed class ZstdDecoder : ArrayDecoder
         int byteWidth = isPrimitive ? dtype.PType.ByteWidth() : 1;
 
         int total = PlanFrames(frames, dtype, isPrimitive, byteWidth, valueCount, out int usedFrames);
+
+        // The UTF-8 shortcut is decided FRAME BY FRAME, inside the decompression loop, rather than
+        // by one sweep of the finished heap. See `Decompress` for why that is the same predicate.
+        bool scanAscii = dtype.Kind == DTypeKind.Utf8;
         VortexBuffer values = Decompress(
-            context, in node, metadata, frames, usedFrames, hasDictionary, total, byteWidth);
+            context, in node, metadata, frames, usedFrames, hasDictionary, total, byteWidth,
+            scanAscii, out bool allAscii);
 
         return isPrimitive
             ? Scatter(context, dtype, length, validity, values, valueCount, byteWidth)
-            : BuildViews(context, dtype, length, validity, values, valueCount);
+            : BuildViews(context, dtype, length, validity, values, valueCount, scanAscii && !allAscii);
     }
 
     /// <summary>
@@ -170,6 +175,10 @@ public sealed class ZstdDecoder : ArrayDecoder
     /// <summary>
     /// Decompresses <paramref name="usedFrames"/> frames, in order, into one allocation.
     /// </summary>
+    /// <remarks>
+    /// <c>scanAscii</c> asks, for a utf8 array only, whether every decompressed byte is below 0x80;
+    /// <c>allAscii</c> answers it, and is false whenever nothing was asked.
+    /// </remarks>
     private static VortexBuffer Decompress(
         ArrayDecodeContext context,
         in ArrayNode node,
@@ -178,12 +187,22 @@ public sealed class ZstdDecoder : ArrayDecoder
         int usedFrames,
         bool hasDictionary,
         int total,
-        int byteWidth)
+        int byteWidth,
+        bool scanAscii,
+        out bool allAscii)
     {
         // The cap applies here and not one line later: `total` is a file-supplied sum, and a 1 KiB
         // frame can claim to expand to 100 GiB (docs/08-semantics.md §6).
-        VortexBuffer output = CanonicalSupport.Allocate(
+        //
+        // UNINITIALIZED, unlike the sixteen-megabyte view buffer below, and for a reason the two
+        // do not share. The frames are written back to back from offset 0 and the loop refuses to
+        // return unless `written == total`, so every byte of this block is produced by
+        // `TryDecompress` before anyone reads it; and nothing here rereads a byte it has not
+        // written first, so there is no cold-miss-against-memset trade to make -- the fill would be
+        // a whole extra pass over thirty-two megabytes. See `CanonicalArena.AllocateUninitialized`.
+        VortexBuffer output = CanonicalSupport.AllocateUninitialized(
             context, total, byteWidth, out Span<byte> destination);
+        allAscii = scanAscii;
         if (total == 0)
         {
             return output;
@@ -225,6 +244,17 @@ public sealed class ZstdDecoder : ArrayDecoder
                     CompressedThrow.Format(
                         $"{Id} frame {i} did not decompress into the {region.Length} bytes its " +
                         "metadata left for it.");
+                }
+
+                // THE ASCII SWEEP, HERE AND NOT OVER THE FINISHED HEAP. The frames partition the
+                // stream -- they are written back to back from 0 and their sizes sum to `total` --
+                // so "every frame is ASCII" and "the heap is ASCII" are the same statement, and the
+                // guarantee handed to `BuildViews` is untouched. What changes is the memory: a
+                // second pass over thirty-two megabytes of DRAM becomes a test on the ~32 KiB
+                // `TryDecompress` has just written, still in cache.
+                if (scanAscii && allAscii)
+                {
+                    allAscii = Ascii.IsValid(region[..produced]);
                 }
 
                 written += produced;
@@ -361,7 +391,8 @@ public sealed class ZstdDecoder : ArrayDecoder
         int length,
         Validity validity,
         VortexBuffer values,
-        int valueCount)
+        int valueCount,
+        bool requireUtf8)
     {
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             length, CanonicalSupport.ViewSize, Id + " views");
@@ -378,10 +409,10 @@ public sealed class ZstdDecoder : ArrayDecoder
             context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
         ReadOnlySpan<byte> heap = values.Span;
 
-        // ONE PASS OVER THE HEAP INSTEAD OF A CALL PER ROW. Every byte below 0x80 is a complete,
-        // valid UTF-8 sequence on its own, so if the whole decompressed stream is ASCII then so is
-        // every value inside it, whatever the boundaries -- and no per-row validation can fail.
-        // `Ascii.IsValid` is one intrinsified sweep at memory speed; the per-row
+        // ONE SWEEP OF THE STREAM INSTEAD OF A CALL PER ROW, and `requireUtf8` is its answer,
+        // decided frame by frame in `Decompress`. Every byte below 0x80 is a complete, valid UTF-8
+        // sequence on its own, so if the whole decompressed stream is ASCII then so is every value
+        // inside it, whatever the boundaries -- and no per-row validation can fail. The per-row
         // `Utf8.IsValid` was 19% of a zstd scan, because a validator called on twenty bytes at a
         // time never reaches its stride.
         //
@@ -390,7 +421,6 @@ public sealed class ZstdDecoder : ArrayDecoder
         // it, which is the shape of essentially every string column. When the sweep does find a
         // high byte -- a real non-ASCII value, or a value at least 128 bytes long -- the per-row
         // path below is exactly what it was.
-        bool requireUtf8 = dtype.Kind == DTypeKind.Utf8 && !Ascii.IsValid(heap);
 
         int offset = 0;
         int written = 0;

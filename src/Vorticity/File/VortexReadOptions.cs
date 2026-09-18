@@ -89,25 +89,56 @@ public sealed class VortexReadOptions
     public IReadOnlyList<ReadOnlyMemory<byte>> IndexFragments { get; init; } = [];
 
     /// <summary>
-    /// THE INTERNAL SWITCH OF PERF-AUDIT-v2.md Z1b. Default <see langword="false"/>.
+    /// THE INTERNAL SWITCH OF PERF-AUDIT-v2.md Z1b. Default <see langword="true"/> since
+    /// 2026-09-18.
     /// </summary>
     /// <remarks>
-    /// With this on, `ConstantCanonicalizer` emits <see cref="Arrays.CanonicalKind.Constant"/> -- the
-    /// element and a length -- instead of tiling the element over every row. Measured on the 1M
-    /// `constant` file, a full scan goes from **201 us to 144**, a ratio of **0,716**: 28,4 % of that
-    /// scan was tiling a value that never changes.
     /// <para>
-    /// IT IS A PER-SCAN OPTION AND NOT A STATIC FLAG: the two forms coexist in ONE process until the
-    /// refactor reaches its exit (§3.7 condition 5), and a mutable global would poison every test
-    /// running beside the one that flips it.
+    /// With this on, `ConstantCanonicalizer` emits <see cref="Arrays.CanonicalKind.Constant"/> --
+    /// the element and a length -- instead of tiling the element over every row, for a primitive, a
+    /// string or a blob. What it buys, measured by `bench/ab.sh` against the commit before it and
+    /// by `--throughput` against Vortex Rust:
     /// </para>
     /// <para>
-    /// WHY IT IS STILL HERE, stated rather than left to be discovered: Z1b-c2c tried to take it out
-    /// and **89 tests went red**. `VortexColumn.Resolve` and `CanonicalNode.Values` cover the typed
-    /// primitive path, which is what Z1b-c2b2 measured; `AsExtension`, `AsFixedSizeList` and the
-    /// layout split paths do not have their case yet. The remaining work is counted, not guessed --
-    /// see Z1b-c2c2.
+    /// <b>1M `variant` scan 605 us -> 104</b> (ratio against Rust <b>6,51 -> 0,96</b>), <b>its write
+    /// 3,48 -> 0,39</b>, <b>1M `constant` scan 127 us -> 60</b> (0,96 -> 0,42) and <b>its write 0,34
+    /// -> 0,072</b>. The `variant` axis was the furthest behind in the repository and is now ahead:
+    /// a constant variant is two constant BINARY columns, which the tiling form turned into 2 x 1M
+    /// views and 32 MB of buffer for two values that never change. No other axis of the four
+    /// benchmarks moved outside its ceiling.
+    /// </para>
+    /// <para>
+    /// IT IS A PER-SCAN OPTION AND NOT A STATIC FLAG, and it stays one now that it is on: a mutable
+    /// global would poison every test running beside the one that flips it, and
+    /// `ConstantFormTests` reads both forms of the same file to assert they agree.
+    /// </para>
+    /// <para>
+    /// WHERE THE FORM ENDS. Two boundaries, and only two:
+    /// <see cref="Arrays.CanonicalNode.Values"/> and the `RequireMaterialized` sibling behind
+    /// <see cref="Arrays.CanonicalNode.Views"/>. Both promise a CONTIGUOUS array, which one element
+    /// and a count cannot be, so both expand into a twin memoized on the record. Everything that
+    /// never asks keeps the form -- and the filter does better than keep it: `ComparisonKernels`
+    /// answers a whole constant column from ONE comparison, and `Extremes` from none at all.
+    /// A decoder that wants a side table as a span uses
+    /// <see cref="Arrays.Decoders.Canonical.CanonicalSupport.ExpandIfConstant"/>: this form exists
+    /// to spare a CONSUMER a million copies of one value, never to spare a decoder a table it has
+    /// to walk.
+    /// </para>
+    /// <para>
+    /// WHAT THE SWITCH COST, stated because the ratchets recorded it: <b>+112 bytes</b> on
+    /// `PathAllocationTests`'s "open, first batch" -- one extra record, once per open, on the one
+    /// axis that pays for the form and collects none of it. The same file's full scan went DOWN
+    /// 304 B. The argument is written where the ceiling is.
+    /// </para>
+    /// <para>
+    /// AND WHAT IT BROKE ON THE WAY, because both were latent and neither was about constants:
+    /// `CanonicalArena.Commit` let a record copied from another arena keep a `Materialized` index
+    /// that meant nothing here, and `BlockStatsPass`'s Constant arm never touched the step
+    /// bookkeeping -- so `SequencePlan` was told its walk had been done and wrote
+    /// `vortex.sequence(base, 0)` over rows that climb. The corpus cross-check against Vortex Rust
+    /// is what found the second one; `ConstantFormTests.EveryCorpusFileReadsTheSameValuesEitherWay`
+    /// is the test that was missing for the first.
     /// </para>
     /// </remarks>
-    internal bool ConstantForm { get; init; }
+    internal bool ConstantForm { get; init; } = true;
 }
