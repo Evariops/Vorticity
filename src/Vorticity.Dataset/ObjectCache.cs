@@ -79,16 +79,32 @@ internal sealed class ObjectCache : IAsyncDisposable
                     held.Idle = null;
                 }
 
-                return new ObjectLease(this, handle, held.File, cached: true);
+                return new ObjectLease(this, handle, held.File, cached: true) { FragmentRefusals = held.FragmentRefusals };
             }
 
             Misses++;
             // A compacted fragment is a bundle of containers (§6.4): each goes to the reader as the
-            // fragment it was.
+            // fragment it was. One whose bytes are not what its reference says is LEFT OUT, the rule
+            // of a region that fails its checksum (§7): an index claims nothing it cannot prove, and
+            // the object answers exactly without it. `verify` names it. A missing commit object is
+            // not that: the version is gone, and the read says so.
             List<ReadOnlyMemory<byte>> fragments = [];
+            List<string> refused = [];
             foreach (PageReference reference in entry.Fragments)
             {
-                ReadOnlyMemory<byte> fragment = await pages.ReadFragmentAsync(reference, cancellationToken).ConfigureAwait(false);
+                ReadOnlyMemory<byte> fragment;
+                try
+                {
+                    fragment = await pages.ReadFragmentAsync(reference, cancellationToken).ConfigureAwait(false);
+                }
+                catch (CommitFormatException torn)
+                {
+                    refused.Add(string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"the fragment in version {reference.Version} at {reference.Offset}+{reference.Length}: {torn.Message}"));
+                    continue;
+                }
+
                 fragments.AddRange(FragmentBundle.Unpack(fragment));
             }
 
@@ -107,9 +123,9 @@ internal sealed class ObjectCache : IAsyncDisposable
                 throw;
             }
 
-            _open[handle] = new Held(file, source) { Leases = 1 };
+            _open[handle] = new Held(file, source) { Leases = 1, FragmentRefusals = refused };
             await EvictAsync().ConfigureAwait(false);
-            return new ObjectLease(this, handle, file, cached: false);
+            return new ObjectLease(this, handle, file, cached: false) { FragmentRefusals = refused };
         }
         finally
         {
@@ -230,6 +246,8 @@ internal sealed class ObjectCache : IAsyncDisposable
         internal int Leases { get; set; }
 
         internal LinkedListNode<string>? Idle { get; set; }
+
+        internal IReadOnlyList<string> FragmentRefusals { get; init; } = [];
     }
 }
 
@@ -243,6 +261,12 @@ internal sealed class ObjectLease(ObjectCache cache, string key, VortexFile file
 
     /// <summary>Whether the object was already open, so the lease cost no request.</summary>
     internal bool WasCached => cached;
+
+    /// <summary>
+    /// The fragments left out because their bytes are not what their references say; the file's own
+    /// <see cref="VortexFile.IndexFragmentRefusals"/> covers the fragments it was given.
+    /// </summary>
+    internal IReadOnlyList<string> FragmentRefusals { get; init; } = [];
 
     /// <inheritdoc/>
     public ValueTask DisposeAsync()

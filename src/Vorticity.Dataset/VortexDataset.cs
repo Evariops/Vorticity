@@ -419,6 +419,17 @@ public sealed class VortexDataset : IAsyncDisposable
     public ValueTask<VacuumResult> VacuumAsync(VacuumOptions? options = null, CancellationToken cancellationToken = default) =>
         DatasetVacuum.RunAsync(_store, options, cancellationToken);
 
+    /// <summary>
+    /// Checks this version's pages, objects and fragments against what its references and entries
+    /// promise (§10); offline, and the only reader of the content hash.
+    /// </summary>
+    /// <param name="since">A version already verified, whose shared pages and entries are not checked
+    /// again; null to verify everything.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>What held, and every problem named.</returns>
+    public ValueTask<DatasetVerification> VerifyAsync(ulong? since = null, CancellationToken cancellationToken = default) =>
+        DatasetVerifier.VerifyAsync(_store, new VerifyOptions { Version = Version, Since = since }, cancellationToken);
+
     /// <summary>A scan over every object of this version.</summary>
     /// <returns>The builder.</returns>
     public DatasetScanBuilder Scan() => new DatasetScanBuilder(this);
@@ -826,7 +837,7 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>A file's identity as §7 mints it, or zero when it has none.</summary>
-    private static UInt128 Identity(VortexFile file) =>
+    internal static UInt128 Identity(VortexFile file) =>
         file.Identity is { } identity ? Uid(identity) : UInt128.Zero;
 
     private static UInt128 Uid(Guid identity)

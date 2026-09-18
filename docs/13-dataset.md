@@ -679,7 +679,7 @@ that commits once per block range.**
   directory once. A new fragment is a new view, never a stale handle. The fragments are read from
   their commit objects by reference and checked against it; one whose bytes do not match fails the
   read with the reason, as a torn page does — step 43's tamper tests decide whether a scan should
-  rather proceed without it.
+  rather proceed without it. *Decided at step 43b: it proceeds without it (§10).*
 
 **As delivered (step 42c): "compacted by merging them (index bytes only) into one fragment" — a
 bundle of the containers, not a rebuilt index.**
@@ -1146,6 +1146,43 @@ lacked, the number of objects, is the one that matters most.
   - Two commits whose own version is not retained survive: one held only by a fragment reference,
     one held only by the old leaves the latest still points at. Each was proved by removing its
     mark: the test fails.
+
+**As delivered (step 43b): verify.** `DatasetVerifier.VerifyAsync(store, options)`, also reachable
+as `VortexDataset.VerifyAsync(since?)`, is offline. It reports every problem by name in
+`DatasetVerification.Problems` and throws none.
+- **Pages from the store, never from the header.** A reader takes the pages a header inlines, which
+  the header's checksum covers, and never reads their stored copies. Measured on the tamper tests'
+  dataset (eight objects, a tree of 400-byte pages), every page is inlined, root and leaves alike.
+  A stored page torn there is invisible to every reader, and would surface only the day a larger
+  tree stopped inlining it. Verify reads every page it checks from the store, and checks each
+  inlined copy against its reference. Giving verify the inlined copies makes the root and leaf
+  tear tests fail, as they should.
+- **Everything else a version promises.**
+  - Each object: its length, its content hash (skipped and counted for an imported object that
+    records none), its rows, its identity.
+  - Each fragment: its bytes against its reference, then the object opened with it. That catches a
+    fragment of another object, a torn index region and a recorded file hash that no longer holds.
+  - Each commit object it read from, whole: trailer, table and checksum. A reader checks those only
+    when its one open read happens to cover the whole object.
+- **Incremental by the diff of the trees.** With `since`, both versions' trees are walked from
+  their roots one height at a time. The target's pages that the older version does not hold at
+  that height are checked, and only their children are walked further. The older version's
+  differing pages are read only to learn which leaf entries it vouched for, and an entry both hold
+  byte for byte is not checked again. That is O(changed pages), whatever the lineage. After one
+  append on eight objects, one object is checked and fewer pages than the full walk. A tear planted
+  in an old object is left to the full verify, and one in the new object is reported.
+- **A torn fragment is left out** (§6.4's open question, decided). Its bytes do not hash to its
+  reference, so it claims nothing, as a region that fails its checksum claims nothing (§7). The
+  object answers exactly without it and verify names it. A missing commit object is not that: the
+  version is gone, and the read still fails.
+- **What the tests hold** (§14's tampering rows):
+  - An object replaced at equal size keeps its length, identity and rows; verify alone names it,
+    by its hash.
+  - A leaf, the root and a fragment are torn at every byte. Each time, a fresh reader answers every
+    key exactly, and verify names the region. For the root and the fragment the tests require that
+    no reader refuses, since readers never see the tear.
+  - A fragment of another object, committed under the victim's uid by a caller who lies, is refused
+    by the binding. The reader answers exactly and verify names it.
 
 ## 11. The store abstraction
 
