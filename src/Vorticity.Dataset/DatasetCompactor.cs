@@ -14,13 +14,12 @@
 // Level 0's objects have the mandatory run of §6.1; an object of a level above is stated sorted and
 // `InKeyOrder` takes the cheaper source by itself.
 //
-// TWO REFUSALS, BOTH NAMED RATHER THAN WORKED AROUND. A composite clustering key has no permuted
-// read yet -- `InKeyOrder` drives one column, and a composite key source exists only for cursors
-// (12 §4.6) -- so a compaction of such a dataset is refused with what would fix it. And a key
-// column holding nulls is refused because `InKeyOrder` delivers no row whose key is null (12 §6):
-// a compaction that used it would silently drop those rows. The row count is checked against the
-// inputs' at the end regardless, because a silent row loss is the one failure a rewrite must never
-// have.
+// ONE REFUSAL LEFT, NAMED RATHER THAN WORKED AROUND. A composite key is read through its run by
+// `InKeyOrder(paths)`, and one column's null keys come last, where the row encoding sorts them.
+// A composite key's column holding nulls is refused: its run holds no tuple with a null, whose
+// encoded place is inside its leading column's group, so the merge would drop those rows. The row
+// count is checked against the inputs' at the end regardless, because a silent row loss is the one
+// failure a rewrite must never have.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -68,8 +67,8 @@ public static class DatasetCompactor
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
     /// <exception cref="ArgumentException">The job has no input.</exception>
     /// <exception cref="VortexUnsupportedException">
-    /// The clustering key is composite, or an input's key column holds nulls: neither has a
-    /// permuted read that would keep every row (12 §6).
+    /// The clustering key is composite and one of its columns holds nulls in an input: its run holds
+    /// no such tuple, so no permuted read keeps every row (12 §4.6).
     /// </exception>
     /// <exception cref="InvalidOperationException">The outputs do not hold the inputs' rows.</exception>
     public static async ValueTask<CompactionResult> RunAsync(
@@ -159,30 +158,30 @@ public static class DatasetCompactor
                 "(13 §4.1). Compact it tiered, which concatenates.");
         }
 
-        if (key.IsComposite)
+        // ONE COLUMN'S NULL KEYS ARE READ, last, where the merge's encoding puts them
+        // (KeyOrderedMerge.Field). A COMPOSITE KEY'S ARE NOT: its run holds no tuple with a null,
+        // whose encoded place is inside its leading column's group, so the read cannot deliver it
+        // there, and a merge that went on would drop the row.
+        if (!key.IsComposite)
         {
-            throw new VortexUnsupportedException(
-                "clustering key",
-                "compaction",
-                "A composite clustering key has no permuted read: `InKeyOrder` drives one column, " +
-                "and the composite key source serves cursors only (12 §4.6). A merge that ordered " +
-                "on the first column alone would write objects whose ranges overlap below it, " +
-                "which is the invariant of 13 §5.2.");
+            return;
         }
 
-        string path = key.Paths[0];
         foreach (CompactionInput input in job.Inputs)
         {
-            if (input.Entry.Summaries.TryGet(path, out ColumnSummary column)
-                && column.HasNullCount
-                && column.NullCount > 0)
+            foreach (string path in key.Paths)
             {
-                throw new VortexUnsupportedException(
-                    input.Entry.Key,
-                    "compaction",
-                    $"'{path}' holds {column.NullCount} null key(s) in this object, and a key-ordered " +
-                    "read delivers no row whose key is null (12 §6): the merge would drop them. " +
-                    "Declare the clustering key on a non-nullable column.");
+                if (input.Entry.Summaries.TryGet(path, out ColumnSummary column)
+                    && column.HasNullCount
+                    && column.NullCount > 0)
+                {
+                    throw new VortexUnsupportedException(
+                        input.Entry.Key,
+                        "compaction",
+                        $"'{path}' holds {column.NullCount} null(s) in this object, and a composite key's " +
+                        "run holds no tuple with a null (12 §4.6): the merge would drop those rows. Declare " +
+                        "the composite clustering key on non-nullable columns.");
+                }
             }
         }
     }
@@ -288,14 +287,14 @@ public static class DatasetCompactor
 
         inputs.Sort(static (left, right) => left.Key.Span.SequenceCompareTo(right.Key.Span));
 
-        string path = key.Paths[0];
+        IReadOnlyList<string> paths = key.Paths;
         KeyOrderedMerge merge = new KeyOrderedMerge(
             dataset,
             inputs.Select(static held => held.Object).ToAsyncEnumerable(),
             key.Paths,
             descending: false,
             rankedTies: false,
-            file => file.Scan().InKeyOrder(path),
+            file => file.Scan().InKeyOrder(paths),
             opened: null,
             cancellationToken);
         long rows = 0;

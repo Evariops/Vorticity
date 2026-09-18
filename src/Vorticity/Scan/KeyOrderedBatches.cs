@@ -43,28 +43,42 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
     private readonly BatchAsyncEnumerable _scan;
     private readonly VortexExpr? _filter;
     private readonly string _path;
+    private readonly string[]? _composite;
     private readonly bool _descending;
     private readonly bool _prune;
     private readonly bool _indexes;
     private readonly int _window;
+    private readonly IAsyncEnumerable<RecordBatch>? _nulls;
 
     /// <param name="scan">The compiled scan, whose projections, plan and sink this one reads under.</param>
     /// <param name="filter">The predicate, or null.</param>
-    /// <param name="path">The key column.</param>
+    /// <param name="path">The key column, or a composite key's first.</param>
+    /// <param name="composite">A composite key's columns in key order (§4.6), or null for one column.</param>
     /// <param name="descending">Whether the order is reversed.</param>
     /// <param name="prune">Whether the mask of live blocks skips entries.</param>
     /// <param name="indexes">Whether the index directory may serve.</param>
     /// <param name="window">The entries a window walks: the batch size.</param>
+    /// <param name="nulls">The rows whose key is null, delivered after the walk; null when there can be none.</param>
     internal KeyOrderedBatches(
-        BatchAsyncEnumerable scan, VortexExpr? filter, string path, bool descending, bool prune, bool indexes, int window)
+        BatchAsyncEnumerable scan,
+        VortexExpr? filter,
+        string path,
+        string[]? composite,
+        bool descending,
+        bool prune,
+        bool indexes,
+        int window,
+        IAsyncEnumerable<RecordBatch>? nulls)
     {
         _scan = scan;
         _filter = filter;
         _path = path;
+        _composite = composite;
         _descending = descending;
         _prune = prune;
         _indexes = indexes;
         _window = Math.Max(window, 1);
+        _nulls = nulls;
     }
 
     /// <inheritdoc/>
@@ -93,6 +107,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         private bool _started;
         private bool _disposed;
         private RecordBatch? _current;
+        private IAsyncEnumerator<RecordBatch>? _tail;
 
         internal Enumerator(KeyOrderedBatches owner, CancellationToken token)
         {
@@ -118,12 +133,18 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             }
         }
 
-        public RecordBatch Current => _current ?? ScanThrow.NoCurrentBatch<RecordBatch>();
+        public RecordBatch Current =>
+            _tail is not null ? _tail.Current : _current ?? ScanThrow.NoCurrentBatch<RecordBatch>();
 
         public async ValueTask<bool> MoveNextAsync()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             Release();
+            if (_tail is not null)
+            {
+                return await _tail.MoveNextAsync().ConfigureAwait(false);
+            }
+
             if (!_started)
             {
                 await StartAsync().ConfigureAwait(false);
@@ -136,7 +157,14 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                 int count = await CollectAsync().ConfigureAwait(false);
                 if (count == 0)
                 {
-                    return false;
+                    // The walk is done; the rows no source holds come last (ScanBuilder.InKeyOrder).
+                    if (_owner._nulls is null)
+                    {
+                        return false;
+                    }
+
+                    _tail = _owner._nulls.GetAsyncEnumerator(_token);
+                    return await _tail.MoveNextAsync().ConfigureAwait(false);
                 }
 
                 try
@@ -169,6 +197,11 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
 
             _disposed = true;
             Release();
+            if (_tail is not null)
+            {
+                await _tail.DisposeAsync().ConfigureAwait(false);
+            }
+
             _context.Dispose();
             if (_lanes is not null)
             {
@@ -204,17 +237,34 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         private async ValueTask StartAsync()
         {
             VortexFile file = _scan.File;
-            (KeySource? source, _) = await KeyCursorBuilder
-                .OpenSourceAsync(file, _owner._path, _owner._indexes, _token)
-                .ConfigureAwait(false);
-            _source = source ?? throw new VortexUnsupportedException(
-                IndexKinds.SortedRuns,
-                "index",
-                $"InKeyOrder(\"{_owner._path}\") needs a key source: the column is neither stated sorted " +
-                "nor indexed with IndexPolicy.SortedRuns, and ordering an unindexed column would mean " +
-                "holding it (docs/12-index-reads.md §3, §6).");
-
-            _slices = await ExactCover.RangeAsync(_owner._filter, source, _owner._path, _token).ConfigureAwait(false);
+            KeySource source;
+            if (_owner._composite is { } composite)
+            {
+                // The tuple's run (§4.6). The filter names columns, not tuples, so it does not narrow
+                // the walk: it prunes and filters as it does for one column.
+                (SortedRunsSource? runs, string? reason) = _owner._indexes
+                    ? await SortedRunsSource.OpenCompositeAsync(file, composite, _token).ConfigureAwait(false)
+                    : (null, "the scan was asked not to use indexes");
+                _source = source = runs ?? throw new VortexUnsupportedException(
+                    IndexKinds.SortedRuns,
+                    "index",
+                    $"InKeyOrder(({string.Join(", ", composite)})) needs the composite key's sorted runs " +
+                    $"(WritePolicy.ForKey): {reason} (docs/12-index-reads.md §4.6, §6).");
+                _slices = await ExactCover.RangeAsync(null, source, _owner._path, _token).ConfigureAwait(false);
+            }
+            else
+            {
+                (KeySource? opened, _) = await KeyCursorBuilder
+                    .OpenSourceAsync(file, _owner._path, _owner._indexes, _token)
+                    .ConfigureAwait(false);
+                _source = source = opened ?? throw new VortexUnsupportedException(
+                    IndexKinds.SortedRuns,
+                    "index",
+                    $"InKeyOrder(\"{_owner._path}\") needs a key source: the column is neither stated sorted " +
+                    "nor indexed with IndexPolicy.SortedRuns, and ordering an unindexed column would mean " +
+                    "holding it (docs/12-index-reads.md §3, §6).");
+                _slices = await ExactCover.RangeAsync(_owner._filter, source, _owner._path, _token).ConfigureAwait(false);
+            }
             if (_owner._descending)
             {
                 _slices.Reverse();

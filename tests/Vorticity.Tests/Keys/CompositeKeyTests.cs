@@ -191,6 +191,65 @@ public sealed class CompositeKeyTests
     }
 
     /// <summary>Every row's key, the null ones left out, sorted by key then row.</summary>
+    [Theory]
+    [InlineData(false, 1, 0)]
+    [InlineData(true, 2, 100)]
+    public async Task AScanInTheTuplesOrderDeliversTheWalk(bool descending, int degree, int window)
+    {
+        // Debt 1 of the closing plan: `InKeyOrder(paths)`, the permuted read over the composite run
+        // that a composite clustering key's compaction and key-ordered reads need (12 §4.6, §6). The
+        // oracle is the walk's: every non-null tuple in encoded order, ties in row order, reversed
+        // descending; the filter, on a column the tuple does not hold, removes rows and nothing else.
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync(withEncoder: true);
+        List<(byte[] Key, long Row)> oracle = Oracle(row => City(row) is string city && Number(row) > 0
+            ? RowEncoder.EncodeKey([FilterLiteral.From(Country(row)), FilterLiteral.From(city)], [Utf8, Utf8N], [Asc, Asc])
+            : null);
+        if (descending)
+        {
+            oracle.Reverse();
+        }
+
+        ScanBuilder scan = written.File.Scan()
+            .InKeyOrder(["country", "city"], descending)
+            .Where(Expr.Gt(Expr.Field("n"), Expr.Literal(FilterLiteral.From(0))))
+            .Project("country", "city", "n")
+            .WithDegreeOfParallelism(degree);
+        if (window > 0)
+        {
+            scan.WithMaxBatchRows(window);
+        }
+
+        List<string> delivered = [];
+        await foreach (RecordBatch batch in scan.ExecuteAsync())
+        {
+            Assert.True(window == 0 || batch.RowCount <= window);
+            BinaryColumn countries = batch.Column(0).AsBinary();
+            BinaryColumn cities = batch.Column(1).AsBinary();
+            ReadOnlySpan<int> numbers = batch.Column(2).AsPrimitive<int>().Values;
+            for (int i = 0; i < batch.RowCount; i++)
+            {
+                delivered.Add($"{countries.GetString(i)}|{cities.GetString(i)}|{numbers[i]}");
+            }
+        }
+
+        Assert.Equal(oracle.ConvertAll(e => $"{Country((int)e.Row)}|{City((int)e.Row)}|{Number((int)e.Row)}"), delivered);
+
+        ScanPlan plan = await written.File.Scan().InKeyOrder(["country", "city"], descending).ExplainAsync();
+        Assert.Equal("(country, city)", plan.Order!.Path);
+        Assert.Equal(KeySourceKind.SortedRuns, plan.Order.Source);
+
+        // A tuple the file has no run for is refused, with the policy that would have served.
+        VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(async () =>
+        {
+            await foreach (RecordBatch batch in written.File.Scan().InKeyOrder(["city", "n"]).ExecuteAsync())
+            {
+                batch.Dispose();
+            }
+        });
+        Assert.Contains("WritePolicy.ForKey", refused.Message, StringComparison.Ordinal);
+    }
+
     private static List<(byte[] Key, long Row)> Oracle(Func<int, byte[]?> key)
     {
         List<(byte[] Key, long Row)> entries = [];

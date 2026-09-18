@@ -482,29 +482,39 @@ public sealed class KeyCursorTests
     }
 
     [Fact]
-    public async Task AKeyOrderedScanOfANullableColumnSkipsItsNulls()
+    public async Task AKeyOrderedScanOfANullableColumnDeliversItsNullsLast()
     {
+        // In both directions, as the row encoding's default null sentinel sorts them: a merge across
+        // files and one file's key-ordered scan must agree (docs/13-dataset.md §6.6).
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
-        List<int> values = [];
-        await foreach (RecordBatch batch in written.File.Scan().InKeyOrder("nulls_i32", descending: true).Project("nulls_i32").ExecuteAsync())
+        foreach (bool descending in (bool[])[true, false])
         {
-            VortexColumn column = batch.Column(0);
-            for (int i = 0; i < batch.RowCount; i++)
+            List<int?> values = [];
+            await foreach (RecordBatch batch in written.File.Scan().InKeyOrder("nulls_i32", descending).Project("nulls_i32").ExecuteAsync())
             {
-                Assert.True(column.IsValid(i));
+                VortexColumn column = batch.Column(0);
+                ReadOnlySpan<int> ints = column.AsPrimitive<int>().Values;
+                for (int i = 0; i < batch.RowCount; i++)
+                {
+                    values.Add(column.IsValid(i) ? ints[i] : null);
+                }
             }
 
-            values.AddRange(column.AsPrimitive<int>().Values.ToArray());
-        }
+            List<int?> expected = [];
+            for (int i = Nulls; i < Rows; i++)
+            {
+                expected.Add((i - Nulls) / 3);
+            }
 
-        List<int> expected = [];
-        for (int i = Rows - 1; i >= Nulls; i--)
-        {
-            expected.Add((i - Nulls) / 3);
-        }
+            if (descending)
+            {
+                expected.Reverse();
+            }
 
-        Assert.Equal(expected, values);
+            expected.AddRange(System.Linq.Enumerable.Repeat<int?>(null, Nulls));
+            Assert.Equal(expected, values);
+        }
     }
 
     private static bool Step(KeyCursor cursor)

@@ -574,6 +574,33 @@ order, so a descending read is still the exact reverse of an ascending one. And 
 the key out is honoured: the merge compares rows by the key, reads it on top of the selection and
 drops it with `RecordBatch.Project` before a batch goes out.
 
+**As delivered (2026-09-18, closing debts 1 and 2 of the plan): both gaps named above are closed.**
+- **Null keys come last, in both directions.** A row whose key is null is delivered after every
+  keyed row: in row order ascending, in reverse row order descending. No source holds it, so the
+  scan reads those rows once the walk is done, in file order, as a filtered scan under
+  `IsNull(key) AND filter`; the zone maps' null counts prune every block without one. Descending,
+  the splits go last first and each batch is reversed. A split is at most one batch, so memory stays
+  one batch.
+- **Why last, in both directions.** A merge of files in key order encodes its keys with nulls last to
+  match, which is not the row encoding's own default (nulls first). A non-null key encodes to the
+  same bytes either way, so the merge's bounds are unchanged. Taking the encoding's default instead
+  was the first run, and a test caught it: a null head went out before another object's largest keys.
+- **Composite keys: `InKeyOrder(IReadOnlyList<string> paths)`.** It walks the composite run (§4.6,
+  `WritePolicy.ForKey`), whose bytewise order is exactly what a merge across files compares. The
+  filter prunes and filters but does not narrow the walk, since its conjuncts name columns and the
+  walk is over tuples. `Explain` names the key `(a, b)`. A file with no run for the tuple is refused,
+  naming `ForKey`.
+- **What the composite path still does not deliver.** A row whose tuple holds a null is in no entry
+  and is not delivered. The row encoding sorts it inside its leading column's group, not after every
+  keyed row, so it cannot come last as a single column's null does without sorting every such row in
+  memory. The dataset's compactor refuses such a tuple by name; nothing else moves it.
+- The tests:
+  - the oracle table of `SortedRunsCursorTests` gains the null tail, including a descending case
+    with lanes and windows of 100;
+  - `KeyCursorTests` holds nulls last in both directions;
+  - `CompositeKeyTests` walks the tuple with a filter on a third column, in both directions, with
+    lanes and windows.
+
 ---
 
 ## 7. The expression model gains three predicates

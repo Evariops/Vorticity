@@ -755,6 +755,7 @@ public sealed class SortedRunsCursorTests
         { "text", string.Empty, true, 1, 0 },
         { "text", "text starts k1", false, 2, 50 },
         { "nullable", string.Empty, false, 1, 0 },
+        { "nullable", string.Empty, true, 2, 100 },
         { "nullable", "nullable >= 50", true, 2, 128 },
         { "nullable", "nullable = 1000", false, 1, 0 },
     };
@@ -788,11 +789,33 @@ public sealed class SortedRunsCursorTests
             oracle.Reverse();
         }
 
+        // A null key comes last in both directions, in row order ascending and reversed descending
+        // (12 §6 as amended by the closing of debt 2). No filter here is true on a null.
+        List<long> expected = oracle.ConvertAll(e => e.Row);
+        if (column == "nullable" && text.Length == 0)
+        {
+            List<long> nulls = [];
+            for (int row = 0; row < Rows; row++)
+            {
+                if (Nullable(row) is null)
+                {
+                    nulls.Add(row);
+                }
+            }
+
+            if (descending)
+            {
+                nulls.Reverse();
+            }
+
+            expected.AddRange(nulls);
+        }
+
         (List<long> rows, int largest, int empty) = await OrderedRowsOf(scan);
-        Assert.Equal(oracle.ConvertAll(e => e.Row), rows);
+        Assert.Equal(expected, rows);
         Assert.Equal(0, empty);
         Assert.True(largest <= (window > 0 ? window : Block), $"a batch of {largest} rows");
-        Assert.Equal(oracle.Count, metrics.Rows);
+        Assert.Equal(expected.Count, metrics.Rows);
         Assert.True(metrics.WindowSplits >= metrics.Windows, $"{metrics.WindowSplits} splits over {metrics.Windows} windows");
         Assert.Equal(oracle.Count == 0 ? 0 : 1, Math.Sign(metrics.Windows));
     }

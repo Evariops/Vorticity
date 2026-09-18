@@ -454,6 +454,15 @@ compaction is refused with the sentence that would fix it. A key column **holdin
 too, because a key-ordered read delivers no row whose key is null (12 §6) and the merge would drop
 them in silence. The rows written are compared against the inputs' count at the end regardless: a
 rewrite that loses rows is the one failure it must not have.
+*Both refusals are lifted, save one case (2026-09-18, debts 1 and 2 of the closing plan).*
+- **A composite key compacts.** Its objects are read by the core's `InKeyOrder(paths)` over the
+  mandatory composite run (§6.1) and merged on the tuple. Four interleaved objects become one
+  object in tuple order, which the dataset reads back in both directions.
+- **One column's null keys compact.** The core delivers them last, and the merge encodes nulls last
+  to match (`KeyOrderedMerge.Field`), so no row is dropped and the output holds the keyed rows first,
+  the nulls after.
+- **What stays refused**, by name: a composite key's column holding nulls. Its run holds no such
+  tuple (12 §6's note).
 
 And the price, measured rather than assumed: four interleaved objects of level 0, 42 808 bytes, came
 out as one sorted object of **16 596**. §5.4's write amplification counts the bytes a row is
@@ -860,6 +869,13 @@ level above 0, the one object that can hold the sought key. And the fourth row o
 and count on the clustering key in O((8 + L) log n) — is not delivered: the dataset has no rank, and
 `CountAsync` opens every object the summaries keep. The note of step 39c above says "the fourth" and
 describes the terminals, which are the §6.6 third answer at k = 1, not that row.
+
+*Since 2026-09-18 the second row takes a composite key too.* `DatasetScanBuilder.InKeyOrder(paths)`
+merges each object's `InKeyOrder(paths)`, and a row whose key is null comes last in both directions,
+as in the core (12 §6's note). On the clustering key, upward, objects open on demand as for one
+column. Anywhere else, a composite key's bound is its first column's summary minimum. That encoded
+value is a prefix of every tuple above it, so it bounds them upward. Its maximum is no bound downward,
+where every object is opened first: the eager merge, correct and output-sensitive.
 
 ## 7. Identity and integrity
 

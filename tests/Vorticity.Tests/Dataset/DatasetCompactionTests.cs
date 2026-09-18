@@ -13,6 +13,7 @@
 // same rows already sorted, which is §14's sentence read literally.
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -325,11 +326,12 @@ public sealed class DatasetCompactionTests
     }
 
     [Fact]
-    public async Task ACompositeClusteringKeyIsRefusedWithWhatWouldFixIt()
+    public async Task ACompositeClusteringKeyIsMergedThroughItsRun()
     {
-        // The one thing this step does not deliver, refused by name rather than merged wrongly: a
-        // composite key has no permuted read (12 §4.6), and ordering on its first column alone
-        // would write objects whose ranges overlap below it.
+        // Debt 1 of the closing plan, closed: a composite key's objects are read by
+        // `InKeyOrder(paths)` over the mandatory composite run (12 §4.6, 13 §6.1) and merged on the
+        // tuple. Four interleaved, shuffled objects; the output is one object in tuple order, and
+        // the dataset reads back in that order.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -337,19 +339,153 @@ public sealed class DatasetCompactionTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         DatasetOptions composite = Unclustered() with { ClusteringKey = ["key", "measure"] };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, composite);
-        foreach (int residue in (int[])[1, 0])
+        foreach (int residue in (int[])[3, 1, 0, 2])
         {
             await dataset.AppendAsync(Batches(types, schema, residue));
         }
 
-        CompactionOptions options = Options(target: 1 << 20) with { LevelZeroCeiling = 1 };
-        VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
-            async () => await dataset.CompactAsync(options));
-        Assert.Contains("12 §4.6", refused.Message, StringComparison.Ordinal);
+        CompactionOptions options = Options(target: 1 << 20);
+        CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options));
+        Assert.Equal(OperationOutcome.Applied, result.Outcome);
+        Assert.Equal((Objects, 1L, (long)Rows), (result.ObjectsIn, result.ObjectsOut, result.Rows));
+        Assert.Equal(CompactionStyle.Leveled, result.Style);
 
-        // And nothing was committed: the dataset is where it was.
+        // The one output, read in its own file order, is the tuple order; and the dataset's
+        // key-ordered read on the tuple, in both directions, is the same rows.
+        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.Scan()));
+        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.Scan().InKeyOrder(["key", "measure"])));
+        List<long> descending = await SortedKeysAsync();
+        descending.Reverse();
+        Assert.Equal(descending, await KeysAsync(dataset.Scan().InKeyOrder(["key", "measure"], descending: true)));
+    }
+
+    [Fact]
+    public async Task ACompositeKeyHoldingANullIsRefusedByName()
+    {
+        // What stays refused: a composite run holds no tuple with a null, so a merge through it
+        // would drop the row. One column's null keys are read last and merged (the test above
+        // `TheNullKeysOfOneColumnAreMergedLast`); a tuple's are not.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = types.Struct(
+            ["key", "measure"],
+            [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.Nullable)],
+            Nullability.NonNullable);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(
+            store, schema, Unclustered() with { ClusteringKey = ["key", "measure"] });
+        await dataset.AppendAsync(NullableMeasures(types, schema, 0, nullEvery: 5));
+        await dataset.AppendAsync(NullableMeasures(types, schema, 1, nullEvery: 5));
+
+        VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
+            async () => await dataset.CompactAsync(Options(target: 1 << 20) with { LevelZeroCeiling = 1 }));
+        Assert.Contains("12 §4.6", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("'measure'", refused.Message, StringComparison.Ordinal);
         Assert.Equal(2, dataset.Levels[0].Entries);
-        Assert.Equal(2 * PerObject, dataset.RowCount);
+    }
+
+    [Fact]
+    public async Task TheNullKeysOfOneColumnAreMergedLast()
+    {
+        // Debt 2 of the closing plan, closed: a key column holding nulls compacts. The core's
+        // key-ordered read delivers them last, which is where the merge's row encoding sorts them,
+        // so no row is dropped and the output reads back keyed rows first, nulls after.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = types.Struct(
+            ["measure", "key"],
+            [types.Primitive(PType.F64, Nullability.Nullable), types.Primitive(PType.I64, Nullability.NonNullable)],
+            Nullability.NonNullable);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(
+            store, schema, Unclustered() with { ClusteringKey = ["measure"] });
+        foreach (int residue in (int[])[3, 1, 0, 2])
+        {
+            await dataset.AppendAsync(NullableMeasures(types, schema, residue, nullEvery: 7, measureFirst: true));
+        }
+
+        // Before any compaction, the read merge across the four objects puts them in the same place,
+        // in both directions: the merge encodes nulls last because the core delivers them last. The
+        // first run of this test put them first -- the row encoding's own default -- and a null head
+        // went out before another object's largest keys.
+        foreach (bool descending in (bool[])[false, true])
+        {
+            List<double?> merged = await MeasuresAsync(dataset.Scan().InKeyOrder("measure", descending));
+            int tail = merged.Count(m => m is null);
+            Assert.Equal(Rows, merged.Count);
+            Assert.All(merged.Skip(merged.Count - tail), m => Assert.Null(m));
+            List<double?> keys = [.. merged.Take(merged.Count - tail)];
+            Assert.Equal(descending ? keys.OrderDescending() : keys.Order(), keys);
+        }
+
+        CompactionResult result = Assert.IsType<CompactionResult>(
+            await dataset.CompactAsync(Options(target: 1 << 20)));
+        Assert.Equal((long)Rows, result.Rows);
+
+        List<double?> measures = await MeasuresAsync(dataset.Scan());
+        int nulls = measures.Count(m => m is null);
+        Assert.True(nulls > 0);
+        Assert.All(measures.Take(measures.Count - nulls), m => Assert.NotNull(m));
+        Assert.All(measures.Skip(measures.Count - nulls), m => Assert.Null(m));
+        List<double?> keyed = [.. measures.Take(measures.Count - nulls)];
+        Assert.Equal(keyed.Order(), keyed);
+    }
+
+    /// <summary>The first column of every batch, a nullable f64, in delivery order.</summary>
+    private static async Task<List<double?>> MeasuresAsync(DatasetScanBuilder scan)
+    {
+        List<double?> measures = [];
+        await foreach (RecordBatch batch in scan.ExecuteAsync())
+        {
+            VortexColumn column = batch.Column(0);
+            ReadOnlySpan<double> values = column.AsPrimitive<double>().Values;
+            for (int i = 0; i < batch.RowCount; i++)
+            {
+                measures.Add(column.IsValid(i) ? values[i] : null);
+            }
+        }
+
+        return measures;
+    }
+
+    /// <summary>
+    /// One object's rows with a nullable f64: the keys congruent to <paramref name="residue"/> mod
+    /// four, every <paramref name="nullEvery"/>-th measure null.
+    /// </summary>
+    private static async IAsyncEnumerable<RecordBatch> NullableMeasures(
+        DTypeArena types, DType schema, int residue, int nullEvery, bool measureFirst = false)
+    {
+        int count = PerObject;
+        CanonicalArena arena = new CanonicalArena();
+        VortexBuffer keyBuffer = arena.Allocate(count * sizeof(long), sizeof(long), out Span<byte> keyBytes);
+        VortexBuffer measureBuffer = arena.Allocate(count * sizeof(double), sizeof(double), out Span<byte> measureBytes);
+        VortexBuffer bits = arena.Allocate((count + 7) / 8, 8, out Span<byte> valid);
+        valid.Clear();
+        Span<long> keys = MemoryMarshal.Cast<byte, long>(keyBytes);
+        Span<double> measures = MemoryMarshal.Cast<byte, double>(measureBytes);
+        for (int row = 0; row < count; row++)
+        {
+            long key = ((long)row * Objects) + residue;
+            keys[row] = key;
+            measures[row] = ((key * 37) % 101) / 4.0;
+            if (key % nullEvery != 0)
+            {
+                valid[row >> 3] |= (byte)(1 << (row & 7));
+            }
+        }
+
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType f64 = types.Primitive(PType.F64, Nullability.Nullable);
+        int validity = arena.AddBool(types.Bool(Nullability.NonNullable), count, Validity.NonNullable, bits, 0);
+        int keyNode = arena.AddPrimitive(i64, count, Validity.NonNullable, PType.I64, keyBuffer);
+        int measureNode = arena.AddPrimitive(f64, count, Validity.Bitmap(validity), PType.F64, measureBuffer);
+        int root = arena.AddStruct(
+            schema, count, Validity.NonNullable, measureFirst ? [measureNode, keyNode] : [keyNode, measureNode]);
+        using RecordBatch batch = new RecordBatch(arena, root, 0);
+        yield return batch;
+        await Task.CompletedTask;
     }
 
     /// <summary>§5.2's invariant, asked of a version rather than assumed of it.</summary>

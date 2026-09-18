@@ -7,7 +7,8 @@
 // enumerator, which trims `read` down to `keep` after the filter has run.
 using System;
 using System.Collections.Generic;
-
+using System.Threading.Tasks;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
@@ -39,6 +40,7 @@ public sealed class ScanBuilder
     private ScanMetrics? _metrics;
     private TerminalTiers _tiers = TerminalTiers.All;
     private string? _orderPath;
+    private string[]? _orderComposite;
     private bool _descending;
 
     internal ScanBuilder(VortexFile file)
@@ -245,10 +247,16 @@ public sealed class ScanBuilder
     /// statistics say it is sorted, its <c>sorted.runs</c> index otherwise -- one window of
     /// <see cref="WithMaxBatchRows"/> entries at a time: each batch is in key order, consecutive
     /// batches are, and equal keys come in row order. The filter's conjuncts on the key column
-    /// narrow the walk; the others prune as they always do. <b>A row whose key is null is in no
-    /// source and is not delivered.</b> A source-less column is refused at the first
-    /// <c>MoveNextAsync</c>, with a <see cref="VortexUnsupportedException"/> that names the policy
-    /// that would have served.
+    /// narrow the walk; the others prune as they always do. A source-less column is refused at the
+    /// first <c>MoveNextAsync</c>, with a <see cref="VortexUnsupportedException"/> that names the
+    /// policy that would have served.
+    /// </para>
+    /// <para>
+    /// <b>A row whose key is null comes last, in both directions</b>: after every keyed row, in row
+    /// order ascending and in reverse row order descending. No source holds it, so the scan reads
+    /// those rows in file order once the walk is done, under the same filter. A merge of files in
+    /// key order (docs/13-dataset.md §6.6) encodes its keys with nulls last in both directions to
+    /// match, so a key-ordered file and a key-ordered merge of files agree.
     /// </para>
     /// <para>
     /// <b>What it costs</b> is the key's correlation with file order: a window of a sorted column
@@ -273,7 +281,50 @@ public sealed class ScanBuilder
         }
 
         _orderPath = path;
+        _orderComposite = null;
         _descending = descending;
+        return this;
+    }
+
+    /// <summary>
+    /// Delivers the rows in the order of a composite key, the tuple of <paramref name="paths"/>
+    /// (docs/12-index-reads.md §4.6, §6).
+    /// </summary>
+    /// <param name="paths">The key's columns, in key order; one path is <see cref="InKeyOrder(string, bool)"/>.</param>
+    /// <param name="descending">Whether the order is reversed, ties included.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// Driven by the composite key's <c>sorted.runs</c> entry (<c>WritePolicy.ForKey</c>), whose keys
+    /// are the row encoding of the tuple and whose order is bytewise: exactly the order a merge across
+    /// files compares. The filter prunes and filters as for one column, but does not narrow the walk,
+    /// since its conjuncts name columns and the walk is over tuples. <b>A row whose tuple holds a null
+    /// is in no entry and is not delivered</b>: the row encoding sorts it inside its leading column's
+    /// group, not after every keyed row, so it cannot come last the way a single column's null does
+    /// without sorting every such row in memory.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="paths"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="paths"/> is empty, or a path does not resolve.</exception>
+    /// <exception cref="InvalidOperationException"><see cref="Rows(RowRange)"/> or <see cref="Take"/> was already set.</exception>
+    public ScanBuilder InKeyOrder(IReadOnlyList<string> paths, bool descending = false)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        if (paths.Count == 0)
+        {
+            throw new ArgumentException("A key has at least one column.", nameof(paths));
+        }
+
+        if (paths.Count == 1)
+        {
+            return InKeyOrder(paths[0], descending);
+        }
+
+        foreach (string path in paths)
+        {
+            Resolved(path);
+        }
+
+        InKeyOrder(paths[0], descending);
+        _orderComposite = [.. paths];
         return this;
     }
 
@@ -373,7 +424,11 @@ public sealed class ScanBuilder
 
         if (_orderPath is not null)
         {
-            return new KeyOrderedBatches(batches, _filter, _orderPath, _descending, _prune, _indexes, (int)cap);
+            IAsyncEnumerable<RecordBatch>? nulls = _orderComposite is null && MayBeNull(_orderPath)
+                ? NullKeysAsync(tree, rows, keep, cap)
+                : null;
+            return new KeyOrderedBatches(
+                batches, _filter, _orderPath, _orderComposite, _descending, _prune, _indexes, (int)cap, nulls);
         }
 
         // Only a filtered scan pays for the skip-empty wrapper; an unfiltered one is the same
@@ -568,18 +623,33 @@ public sealed class ScanBuilder
     /// <summary>The key source <c>InKeyOrder</c> would walk, and the range it would walk; §6.</summary>
     private async System.Threading.Tasks.ValueTask<OrderPlan> OrderAsync(System.Threading.CancellationToken cancellationToken)
     {
-        (Keys.KeySource? source, Keys.KeySourceKind kind) = await Keys.KeyCursorBuilder
-            .OpenSourceAsync(_file, _orderPath!, _indexes, cancellationToken)
-            .ConfigureAwait(false);
+        Keys.KeySource? source;
+        Keys.KeySourceKind kind;
+        string named = _orderComposite is null ? _orderPath! : "(" + string.Join(", ", _orderComposite) + ")";
+        if (_orderComposite is not null)
+        {
+            (source, _) = _indexes
+                ? await Keys.SortedRunsSource.OpenCompositeAsync(_file, _orderComposite, cancellationToken).ConfigureAwait(false)
+                : (null, null);
+            kind = source is null ? Keys.KeySourceKind.None : Keys.KeySourceKind.SortedRuns;
+        }
+        else
+        {
+            (source, kind) = await Keys.KeyCursorBuilder
+                .OpenSourceAsync(_file, _orderPath!, _indexes, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         if (source is null)
         {
-            return new OrderPlan(_orderPath!, Keys.KeySourceKind.None, 0, 0, null, 0, _descending);
+            return new OrderPlan(named, Keys.KeySourceKind.None, 0, 0, null, 0, _descending);
         }
 
         try
         {
+            // A composite walk is not narrowed by the filter (InKeyOrder(paths)).
             List<(long Low, long High)> slices = await Keys.ExactCover
-                .RangeAsync(_filter, source, _orderPath!, cancellationToken)
+                .RangeAsync(_orderComposite is null ? _filter : null, source, _orderPath!, cancellationToken)
                 .ConfigureAwait(false);
             long entries = 0;
             foreach ((long low, long high) in slices)
@@ -588,7 +658,7 @@ public sealed class ScanBuilder
             }
 
             int runsInRange = await source.RunsOverlappingAsync(slices, cancellationToken).ConfigureAwait(false);
-            return new OrderPlan(_orderPath!, kind, source.Runs, runsInRange, source.EntryCount, entries, _descending);
+            return new OrderPlan(named, kind, source.Runs, runsInRange, source.EntryCount, entries, _descending);
         }
         finally
         {
@@ -749,6 +819,84 @@ public sealed class ScanBuilder
         }
 
         return Projection.Create(builder.Build());
+    }
+
+    /// <summary>Whether the key column, or a struct above it, is nullable: whether rows can have no key.</summary>
+    private bool MayBeNull(string path)
+    {
+        DType current = _file.Schema;
+        foreach (string segment in path.Split('.'))
+        {
+            int field = current.IndexOfField(System.Text.Encoding.UTF8.GetBytes(segment));
+            if (field < 0)
+            {
+                // A field whose name holds a dot: the projection resolved it, the walk here cannot,
+                // and assuming it nullable costs one pruned scan at most.
+                return true;
+            }
+
+            current = current.GetField(field);
+            if (current.IsNullable)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The rows a key-ordered scan delivers after its walk: those whose key is null, which no source
+    /// holds, in file order -- reversed, split by split, when the scan is descending.
+    /// </summary>
+    /// <remarks>
+    /// A filtered scan under <c>IsNull(key) AND filter</c>, so the zone maps' null counts prune every
+    /// block that holds no null key before a byte of it is read. A split is at most one batch, so the
+    /// descending tail reverses one batch at a time and memory stays one batch.
+    /// </remarks>
+    private IAsyncEnumerable<RecordBatch> NullKeysAsync(LayoutTree tree, RowRange rows, Projection keep, long cap)
+    {
+        VortexExpr isNull = Expr.IsNull(Expr.Field(_orderPath!));
+        VortexExpr filter = _filter is null ? isNull : Expr.And(isNull, _filter);
+        Projection read = Union(keep, [.. _filterPaths ?? [], _orderPath!]);
+        SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
+        return _descending
+            ? ReversedAsync(tree, rows, read, keep, plan, filter, cap)
+            : new FilteredBatches(
+                new BatchAsyncEnumerable(_file, tree, read, keep, plan, _degree, filter, null, _metrics),
+                filter, _prune, _indexes, rows);
+    }
+
+    /// <summary>The splits of <paramref name="plan"/> last first, each batch's rows reversed.</summary>
+    private async IAsyncEnumerable<RecordBatch> ReversedAsync(
+        LayoutTree tree, RowRange rows, Projection read, Projection keep, SplitPlan plan, VortexExpr filter, long cap)
+    {
+        List<RowRange> splits = [];
+        SplitCursor cursor = plan.CreateCursor();
+        while (cursor.TryNext(out RowRange split))
+        {
+            splits.Add(split);
+        }
+
+        for (int i = splits.Count - 1; i >= 0; i--)
+        {
+            SplitPlan one = SplitPlan.Compute(tree, splits[i], read.RootMask, cap);
+            IAsyncEnumerable<RecordBatch> scan = new FilteredBatches(
+                new BatchAsyncEnumerable(_file, tree, read, keep, one, 1, filter, null, _metrics),
+                filter, _prune, _indexes, splits[i].Intersect(rows));
+            await foreach (RecordBatch batch in scan.ConfigureAwait(false))
+            {
+                int[] order = new int[batch.RowCount];
+                for (int row = 0; row < order.Length; row++)
+                {
+                    order[row] = order.Length - 1 - row;
+                }
+
+                // In the batch's own arena: the scan owns it, and disposes it at its next batch.
+                int root = CanonicalFilter.Apply(batch.Arena, batch.RootIndex, order);
+                yield return new RecordBatch(batch.Arena, root, batch.StartRow);
+            }
+        }
     }
 
     /// <summary>The projection widened by every field a filter reads.</summary>

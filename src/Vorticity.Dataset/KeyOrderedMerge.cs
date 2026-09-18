@@ -140,7 +140,16 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     /// <summary>How one key column sorts in a merge in this direction.</summary>
     /// <param name="descending">Whether the largest key comes first.</param>
     /// <returns>The field; its encoding makes the smallest bytes come first either way.</returns>
-    internal static RowSortField Field(bool descending) => RowSortField.Ascending.WithDescending(descending);
+    /// <remarks>
+    /// NULLS LAST, in both directions: where the core's key-ordered read delivers a null key
+    /// (`ScanBuilder.InKeyOrder`), and not the row encoding's own default, which puts them first. A
+    /// non-null key encodes to the same bytes under either choice, so the leaf keys and the summary
+    /// bounds the merge orders objects by -- non-null minima and maxima, encoded with the clustering
+    /// key's default -- compare as they always have; and with nulls last, an object's non-null
+    /// minimum stays a lower bound on every row it delivers.
+    /// </remarks>
+    internal static RowSortField Field(bool descending) =>
+        RowSortField.Ascending.WithNullsLast().WithDescending(descending);
 
     /// <summary>Moves to the next run, opening what could hold it.</summary>
     /// <returns>Whether there is one.</returns>
