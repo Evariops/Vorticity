@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Columns;
+using Vorticity.Dataset;
 using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.Scan;
@@ -93,6 +94,7 @@ public sealed class RoundTripSweepTests
         int afterTheFact = 0;
         int stringBounded = 0;
         int tables = 0;
+        int compacted = 0;
         Dictionary<string, int> built = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (CorpusEntry entry in CorpusManifest.InScope())
         {
@@ -156,6 +158,20 @@ public sealed class RoundTripSweepTests
             {
                 stringBounded++;
             }
+            // EVERY PLAIN TABLE OF THE WRITE-ONCE THIRD IS A COMPACTED DATASET OBJECT (13 §14: "the
+            // cross-check gains compacted files"), since the corpus holds few of them: the rows
+            // appended as three objects of an unclustered dataset, which compacts tiered -- a
+            // concatenation, so the rows keep the order the verifier compares them in -- and the one
+            // object the compaction wrote is what Rust reads.
+            if (mode == 0 && source.RowCount >= 3 && PlainColumns(source.Schema))
+            {
+                await System.IO.File.WriteAllBytesAsync(destination, await CompactedAsync(source, options));
+                compacted++;
+                indexed++;
+                written++;
+                continue;
+            }
+
             IReadOnlyList<IndexWriteReport> indexes;
             int columns;
             long split = mode == 1 ? (source.RowCount / 2) + 1 : long.MaxValue;
@@ -220,7 +236,8 @@ public sealed class RoundTripSweepTests
             .Append(", ").Append(indexed.ToString(CultureInfo.InvariantCulture)).Append(" of them with an index directory, ")
             .Append(appended.ToString(CultureInfo.InvariantCulture)).Append(" appended, ")
             .Append(afterTheFact.ToString(CultureInfo.InvariantCulture)).Append(" indexed after the fact, ")
-            .Append(stringBounded.ToString(CultureInfo.InvariantCulture)).Append(" with string zone bounds;");
+            .Append(stringBounded.ToString(CultureInfo.InvariantCulture)).Append(" with string zone bounds, ")
+            .Append(compacted.ToString(CultureInfo.InvariantCulture)).Append(" compacted from three dataset objects;");
         foreach ((string kind, int files) in built)
         {
             line.Append(' ').Append(kind).Append(": ").Append(files.ToString(CultureInfo.InvariantCulture)).Append(';');
@@ -231,6 +248,7 @@ public sealed class RoundTripSweepTests
         Assert.Equal(written, indexed);
         Assert.True(appended > 15 && afterTheFact > 15, $"{appended} appended, {afterTheFact} indexed after the fact");
         Assert.True(stringBounded > 50, $"only {stringBounded} files carry string zone bounds");
+        Assert.True(compacted > 10, $"only {compacted} files are compacted dataset objects");
 
         // Enough files with payload regions between their chunks that the rule is tested, not assumed.
         foreach (string kind in new[] { IndexKinds.BloomSbbf, IndexKinds.PostingsBlocks, IndexKinds.SortedRuns })
@@ -333,6 +351,55 @@ public sealed class RoundTripSweepTests
             : new VortexOpenOptions { DType = OutOfBandSchema.Value };
 
     /// <summary>Whether a zone map of this schema can carry string bounds: a top-level utf8 or binary.</summary>
+    /// <summary>A struct of booleans, primitives, strings and bytes: what a leaf entry summarises plainly.</summary>
+    private static bool PlainColumns(DType schema)
+    {
+        if (schema.Kind != DTypeKind.Struct || schema.FieldCount == 0)
+        {
+            return false;
+        }
+
+        for (int field = 0; field < schema.FieldCount; field++)
+        {
+            if (schema.GetField(field).Kind is not (DTypeKind.Bool or DTypeKind.Primitive or DTypeKind.Utf8 or DTypeKind.Binary))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The file's rows appended in thirds to an unclustered dataset, compacted into one object, and
+    /// that object's bytes.
+    /// </summary>
+    private static async Task<byte[]> CompactedAsync(VortexFile source, VortexWriteOptions write)
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(
+            store, source.Schema, new DatasetOptions { Seed = 0xC0_55C4EC, Write = write });
+        long third = source.RowCount / 3;
+        foreach ((long from, long to) in ((long, long)[])[(0, third), (third, 2 * third), (2 * third, source.RowCount)])
+        {
+            await dataset.AppendAsync(source.Scan().Rows(new RowRange(from, to)).ExecuteAsync());
+        }
+
+        CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(
+            new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 1L << 32 }));
+        Assert.Equal((3L, 1L, CompactionStyle.Tiered), (result.ObjectsIn, result.ObjectsOut, result.Style));
+
+        string key = string.Empty;
+        await foreach (ObjectEntry entry in dataset.ObjectsAsync())
+        {
+            key = entry.Key;
+        }
+
+        ObjectHead head = (await store.HeadAsync(key, CancellationToken.None))!.Value;
+        using ObjectRange range = await store.GetRangeAsync(key, 0, (int)head.Length, CancellationToken.None);
+        return range.Bytes.ToArray();
+    }
+
     private static bool HasStringField(DType schema)
     {
         if (schema.Kind is DTypeKind.Utf8 or DTypeKind.Binary)

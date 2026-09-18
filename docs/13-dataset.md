@@ -1543,8 +1543,15 @@ of §9.1. Where the two still differ under latency:
   objects it opened.*
 - **Tampering**: an object replaced out of band at equal size, a page, a root and a fragment torn
   at every byte, a fragment of another object.
+  *As delivered (step 43b): `DatasetVerifyTests`, every row; §10 says what each showed.*
 - **Rust**: every data object, including compaction outputs, remains a plain file that 0.86.1
   reads; the cross-check gains compacted files.
+  *As delivered (2026-09-18, after step 43c).* Every plain table of the corpus's write-once third
+  (booleans, primitives, strings, bytes) is written for the cross-check as a compaction output
+  instead: its rows appended as three objects of an unclustered dataset, compacted tiered into one,
+  and that object's bytes handed to `verify_written`. A concatenation keeps the row order the
+  verifier compares in. Sixteen compacted objects are among the 854 files 0.86.1 reads back scalar
+  by scalar against the reference's own.
 
 ## 15. Decisions left open
 
