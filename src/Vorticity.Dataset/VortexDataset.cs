@@ -91,6 +91,19 @@ public sealed record DatasetOptions
     public IBoundaryRule? Rule { get; init; }
 }
 
+/// <summary>One data object being written: its identity, its sink and its writer.</summary>
+/// <param name="Identity">The uid §7 mints for it, before a byte is written.</param>
+/// <param name="Key">Its key in the store.</param>
+/// <param name="Sink">Where its bytes go; <c>Position</c> is what it has written so far.</param>
+/// <param name="Writer">The file writer over the sink.</param>
+internal sealed record ObjectDraft(
+    Guid Identity, string Key, ObjectSegmentSink Sink, VortexFileWriter Writer);
+
+/// <summary>A data object that has reached the store, and the key its leaf sits at (§4.1).</summary>
+/// <param name="Entry">Its leaf entry, summaries included.</param>
+/// <param name="Key">Its tree key: what orders it, then its uid.</param>
+internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<byte> Key);
+
 /// <summary>A versioned dataset over an object store.</summary>
 public sealed class VortexDataset : IAsyncDisposable
 {
@@ -149,6 +162,9 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>The seed every boundary of its trees is decided under (§4.1).</summary>
     public ulong Seed => _header.Seed;
+
+    /// <summary>The compaction settings its header carries (§5), zero-valued when it states none.</summary>
+    public CompactionSettings Compaction => _header.Compaction;
 
     /// <summary>The columns it is ordered by (§4.1), empty when it is ordered by row position.</summary>
     public IReadOnlyList<string> ClusteringKeyPaths => _header.ClusteringKey;
@@ -294,51 +310,26 @@ public sealed class VortexDataset : IAsyncDisposable
         IAsyncEnumerable<RecordBatch> batches, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(batches);
-        Guid identity = Guid.NewGuid();
-        string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
-        ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes);
+        ObjectDraft draft = StartObject();
         long rows = 0;
-        VortexWriteOptions write = _options.Write.WithIdentity(identity);
-        if (Key is { } clustering)
-        {
-            // §6.1's mandatory run, added to whatever policy the caller asked for.
-            write = clustering.Applied(write);
-        }
-
-        VortexFileWriter writer = VortexFileWriter.Create(sink, Schema, write);
-        await using (writer.ConfigureAwait(false))
+        await using (draft.Writer.ConfigureAwait(false))
         {
             await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 rows += batch.RowCount;
-                await writer.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
+                await draft.Writer.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
             }
 
-            await writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+            await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        if (rows == 0)
-        {
-            sink.Discard();
-            return _header.Version;
-        }
-
-        long bytes = sink.Position;
-        UInt128 hash = sink.ContentHash;
-
-        // Before the put, out of the buffer the sink still holds: the bounds §4.2 asks the entry to
-        // carry, and the smallest key §4.1 orders the leaf by, cost no request at all this way.
-        (ObjectSummaries summaries, byte[] prefix) =
-            await DescribeAsync(sink.Written, RowCount, cancellationToken).ConfigureAwait(false);
-        if (await sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
-        {
-            throw new ObjectStoreException($"'{key}' was taken; a fresh uid cannot collide (13 §3).");
-        }
-
-        ObjectEntry entry = new ObjectEntry(key, Uid(identity), rows, bytes, hash, summaries);
-        return await ApplyAsync(
-            [new DatasetOperation.AddObject(KeyOf(prefix, entry), entry)], cancellationToken)
+        WrittenObject? written = await SealAsync(draft, rows, RowCount, cancellationToken)
             .ConfigureAwait(false);
+        return written is { } produced
+            ? await ApplyAsync(
+                [new DatasetOperation.AddObject(produced.Key, produced.Entry)], cancellationToken)
+                .ConfigureAwait(false)
+            : _header.Version;
     }
 
     /// <summary>Applies operations and moves this handle to the version they created.</summary>
@@ -346,12 +337,20 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the requests.</param>
     /// <returns>The version created.</returns>
     public async ValueTask<ulong> ApplyAsync(
-        IReadOnlyList<DatasetOperation> operations, CancellationToken cancellationToken = default)
+        IReadOnlyList<DatasetOperation> operations, CancellationToken cancellationToken = default) =>
+        (await CommitAsync(operations, cancellationToken).ConfigureAwait(false)).Version;
+
+    /// <summary>Applies operations and reports what the commit made of each of them (§8.2).</summary>
+    /// <param name="operations">What to do.</param>
+    /// <param name="cancellationToken">Cancels the requests.</param>
+    /// <returns>The commit, outcomes included.</returns>
+    internal async ValueTask<CommitResult> CommitAsync(
+        IReadOnlyList<DatasetOperation> operations, CancellationToken cancellationToken)
     {
         CommitResult result = await DatasetCommitter
             .CommitAsync(_store, operations, Commit(_options, _header), cancellationToken).ConfigureAwait(false);
         await RefreshAsync(cancellationToken).ConfigureAwait(false);
-        return result.Version;
+        return result;
     }
 
     /// <summary>Every data object of this version, over every level, in key order.</summary>
@@ -365,6 +364,33 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             yield return held.Entry;
         }
+    }
+
+    /// <summary>What compaction is due on this version, and what it would cost (§5.3).</summary>
+    /// <param name="options">The numbers of §5, or null for the specification's.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The plan; its job is null when nothing is over its bound.</returns>
+    public ValueTask<CompactionPlan> PlanCompactionAsync(
+        CompactionOptions? options = null, CancellationToken cancellationToken = default) =>
+        CompactionPolicy.PlanAsync(this, options, cancellationToken);
+
+    /// <summary>Runs the compaction that is due, if one is (§5.3).</summary>
+    /// <param name="options">The numbers of §5, or null for the specification's.</param>
+    /// <param name="cancellationToken">Cancels the reads, the writes and the commit.</param>
+    /// <returns>What it did, or null when nothing was due.</returns>
+    /// <remarks>
+    /// ONE STEP, AND THE CALLER DECIDES WHETHER THERE IS ANOTHER. §5.3 makes compaction "the user's
+    /// background job": a library that looped here would rewrite gigabytes inside a call that looks
+    /// like a maintenance hint. A caller that wants the invariant restored loops until this returns
+    /// null, and one that wants to spend a fixed budget calls it a fixed number of times.
+    /// </remarks>
+    public async ValueTask<CompactionResult?> CompactAsync(
+        CompactionOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        CompactionPlan plan = await PlanCompactionAsync(options, cancellationToken).ConfigureAwait(false);
+        return plan.Job is { } job
+            ? await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false)
+            : null;
     }
 
     /// <summary>A scan over every object of this version.</summary>
@@ -535,6 +561,60 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>A lease the caller disposes when it is done reading.</returns>
     internal ValueTask<ObjectLease> RentAsync(string key, CancellationToken cancellationToken) =>
         _objects.RentAsync(key, cancellationToken);
+
+    /// <summary>Starts one data object: a fresh identity, the sink that will hold it, its writer.</summary>
+    /// <returns>The draft, whose writer the caller drives and completes.</returns>
+    /// <remarks>
+    /// ONE PLACE WRITES A DATA OBJECT, and the fuzzer of step 40 is why. An append and a compaction
+    /// both mint an identity, apply §6.1's mandatory run and derive the leaf key from what they
+    /// wrote; two copies of that would be two chances to derive a key that is not a function of the
+    /// object, which is the defect that turned ten appends into six objects.
+    /// </remarks>
+    internal ObjectDraft StartObject()
+    {
+        Guid identity = Guid.NewGuid();
+        string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
+        ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes);
+        VortexWriteOptions write = _options.Write.WithIdentity(identity);
+        if (Key is { } clustering)
+        {
+            // §6.1's mandatory run, added to whatever policy the caller asked for.
+            write = clustering.Applied(write);
+        }
+
+        return new ObjectDraft(identity, key, sink, VortexFileWriter.Create(sink, Schema, write));
+    }
+
+    /// <summary>Puts a completed draft in the store and mints its leaf entry and tree key.</summary>
+    /// <param name="draft">The draft, whose writer has been completed.</param>
+    /// <param name="rows">What it wrote.</param>
+    /// <param name="firstRow">Its first row in the dataset, for an object ordered by position.</param>
+    /// <param name="cancellationToken">Cancels the put.</param>
+    /// <returns>The object, or null when it held no rows and nothing was put.</returns>
+    internal async ValueTask<WrittenObject?> SealAsync(
+        ObjectDraft draft, long rows, long firstRow, CancellationToken cancellationToken)
+    {
+        if (rows == 0)
+        {
+            draft.Sink.Discard();
+            return null;
+        }
+
+        long bytes = draft.Sink.Position;
+        UInt128 hash = draft.Sink.ContentHash;
+
+        // Before the put, out of the buffer the sink still holds: the bounds §4.2 asks the entry to
+        // carry, and the smallest key §4.1 orders the leaf by, cost no request at all this way.
+        (ObjectSummaries summaries, byte[] prefix) =
+            await DescribeAsync(draft.Sink.Written, firstRow, cancellationToken).ConfigureAwait(false);
+        if (await draft.Sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
+        {
+            throw new ObjectStoreException($"'{draft.Key}' was taken; a fresh uid cannot collide (13 §3).");
+        }
+
+        ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries);
+        return new WrittenObject(entry, KeyOf(prefix, entry));
+    }
 
     /// <summary>The bounds §4.2 asks an entry to carry, read out of a file's own statistics.</summary>
     /// <param name="file">The data object, open.</param>

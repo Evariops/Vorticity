@@ -7,10 +7,12 @@
 // after Dispose - is closed here by a disposed flag every accessor checks, so the failure is an
 // ObjectDisposedException rather than a read of recycled pool memory.
 using System;
+using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using Vorticity.Arrays;
+using Vorticity.Compute;
 using Vorticity.Types;
 
 namespace Vorticity.Columns;
@@ -266,6 +268,61 @@ public sealed class RecordBatch : IDisposable
         }
 
         return Column(index);
+    }
+
+    /// <summary>
+    /// A batch over rows <c>[start, start + length)</c> of this one, with the same schema.
+    /// </summary>
+    /// <param name="start">The first row of the window, within this batch.</param>
+    /// <param name="length">How many rows it holds; zero gives an empty batch.</param>
+    /// <returns>The window, which the caller disposes.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>What it is for.</b> A consumer that merges several batches into one ordered stream — a
+    /// k-way merge across the objects of a dataset (docs/13-dataset.md §5.3), a top-k, a re-chunk —
+    /// emits <em>runs</em> of rows rather than whole batches, and has no way to say "these rows of
+    /// that batch" without one. Writing a second gather outside this assembly to say it would be a
+    /// second implementation of the one below, which is the thing to avoid.
+    /// </para>
+    /// <para>
+    /// <b>What it costs: a copy.</b> The window's rows are gathered into this batch's arena, the
+    /// same positional gather a filter uses, so it is O(rows × columns) and not free. A true window
+    /// over the buffers is possible — a primitive is a buffer slice, a bitmap is a slice and a bit
+    /// offset — but it is a second traversal of every canonical kind, and nothing measured yet asks
+    /// for it. The gather is stated here rather than implied by the name.
+    /// </para>
+    /// <para>
+    /// <b>Lifetime.</b> The window lives in <em>this</em> batch's arena: it is valid until this
+    /// batch is disposed or its successor is decoded, whichever comes first, and disposing the
+    /// window releases nothing — it is this batch that owns the memory. A consumer that needs the
+    /// rows to outlive the batch copies them, as it does for any other borrowed view.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The window is not inside the batch.</exception>
+    /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
+    /// <exception cref="NotSupportedException">A column's canonical form has no gather.</exception>
+    public RecordBatch Window(int start, int length)
+    {
+        ThrowIfDisposed();
+        ArgumentOutOfRangeException.ThrowIfNegative(start);
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(start + (long)length, _rowCount);
+
+        int[] rows = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        try
+        {
+            for (int i = 0; i < length; i++)
+            {
+                rows[i] = start + i;
+            }
+
+            int root = CanonicalFilter.Apply(_arena, _root, rows.AsSpan(0, length));
+            return new RecordBatch(_arena, root, _startRow + start);
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(rows);
+        }
     }
 
     /// <summary>

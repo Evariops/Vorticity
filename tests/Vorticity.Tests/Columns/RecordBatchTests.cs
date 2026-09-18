@@ -257,4 +257,68 @@ public sealed class RecordBatchTests
         Assert.False(batch.Root.AsStruct().TryGetFieldIndex("z"u8, out int missing));
         Assert.Equal(-1, missing);
     }
+
+    [Fact]
+    public void WindowIsTheSameRowsWithTheirOwnStartRow()
+    {
+        // The seam docs/13-dataset.md §4.2 named and §5.3's merge needs: "these rows of that
+        // batch", so that a k-way merge can emit a run without writing a second gather.
+        using ColumnFixture f = new ColumnFixture();
+        int keys = f.Int64Node([10L, 20L, 30L, 40L, 50L], Validity.NonNullable);
+        int flags = f.BoolNode([true, false, true, false, true]);
+        DType schema = f.Types.Struct(
+            ["key", "flag"],
+            [
+                f.Types.Primitive(PType.I64, Nullability.NonNullable),
+                f.Types.Bool(Nullability.NonNullable),
+            ],
+            Nullability.NonNullable);
+        RecordBatch batch = f.Batch(f.Arena.AddStruct(schema, 5, Validity.NonNullable, [keys, flags]), startRow: 400);
+
+        using RecordBatch window = batch.Window(1, 3);
+        Assert.Equal(3, window.RowCount);
+        Assert.Equal(401L, window.StartRow);
+        Assert.Equal(schema, window.Schema);
+        Assert.Equal([20L, 30L, 40L], window.Column(0).AsPrimitive<long>().Values.ToArray());
+        Assert.Equal([false, true, false], Bits(window.Column(1)));
+
+        // The source is untouched: a window reads rows, it does not consume them.
+        Assert.Equal(5, batch.RowCount);
+        Assert.Equal(400L, batch.StartRow);
+        Assert.Equal([10L, 20L, 30L, 40L, 50L], batch.Column(0).AsPrimitive<long>().Values.ToArray());
+
+        // The degenerate ends, which a merge hits on its last run and on an empty input.
+        using RecordBatch all = batch.Window(0, 5);
+        Assert.Equal([10L, 20L, 30L, 40L, 50L], all.Column(0).AsPrimitive<long>().Values.ToArray());
+        using RecordBatch none = batch.Window(5, 0);
+        Assert.Equal(0, none.RowCount);
+        Assert.Equal(405L, none.StartRow);
+    }
+
+    [Fact]
+    public void WindowRefusesWhatIsNotInsideTheBatch()
+    {
+        using ColumnFixture f = new ColumnFixture();
+        RecordBatch batch = f.Batch(f.Int32Node([1, 2, 3], Validity.NonNullable));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => batch.Window(-1, 1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => batch.Window(0, -1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => batch.Window(2, 2));
+        Assert.Throws<ArgumentOutOfRangeException>(() => batch.Window(4, 0));
+
+        batch.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => batch.Window(0, 1));
+    }
+
+    private static bool[] Bits(VortexColumn column)
+    {
+        BoolColumn bits = column.AsBool();
+        bool[] values = new bool[bits.Length];
+        for (int i = 0; i < values.Length; i++)
+        {
+            values[i] = bits[i];
+        }
+
+        return values;
+    }
 }

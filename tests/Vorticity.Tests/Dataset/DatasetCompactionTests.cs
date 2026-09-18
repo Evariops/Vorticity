@@ -1,0 +1,561 @@
+// The compaction of docs/13-dataset.md §5.3, and the two acceptances §14 asks of it: "the invariant
+// of §5.2 after every compaction step of a randomised append stream", and "a compaction reading
+// level 0 through its runs produces the same object as one reading inputs sorted beforehand".
+//
+// THE DATA IS THE ONE THAT BREAKS A LAZY MERGE, deliberately the same shape as the clustering
+// tests': the objects' key ranges INTERLEAVE (object i holds the keys congruent to i modulo four),
+// they are appended OUT OF ORDER, and the keys inside one object are SHUFFLED. A compaction that
+// concatenated its inputs instead of merging them would be caught on the second key; one that read
+// its inputs in file order instead of through their runs would be caught on the first.
+//
+// AND THE ORACLE IS ALWAYS THE SAME ROWS WRITTEN ANOTHER WAY, never a number typed into the test: a
+// dataset compacted from four interleaved objects is compared against one file written from the
+// same rows already sorted, which is §14's sentence read literally.
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
+using Vorticity.Arrays;
+using Vorticity.Buffers;
+using Vorticity.Columns;
+using Vorticity.Dataset;
+using Vorticity.Diagnostics;
+using Vorticity.File;
+using Vorticity.IO;
+using Vorticity.Scan;
+using Vorticity.Tests.Scan;
+using Vorticity.Types;
+using Vorticity.Writing;
+using Xunit;
+
+namespace Vorticity.Tests.Dataset;
+
+public sealed class DatasetCompactionTests
+{
+    private const int Objects = 4;
+    private const int PerObject = 250;
+    private const int Rows = Objects * PerObject;
+
+    [Fact]
+    public async Task ACompactionOfLevelZeroProducesTheObjectASortedInputWouldHave()
+    {
+        // §14: "a compaction reading level 0 through its runs produces the same object as one
+        // reading inputs sorted beforehand".
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        foreach (int residue in (int[])[3, 1, 0, 2])
+        {
+            await dataset.AppendAsync(Batches(types, schema, residue));
+        }
+
+        CompactionOptions options = Options(target: 1 << 20);
+        CompactionPlan plan = await dataset.PlanCompactionAsync(options);
+        Assert.Equal(CompactionTrigger.LevelZeroCeiling, plan.Job!.Trigger);
+        Assert.Equal(CompactionStyle.Leveled, plan.Style);
+        Assert.Equal(Objects, plan.Job.Inputs.Count);
+        Assert.Equal(Rows, plan.Job.Rows);
+
+        CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options));
+        Assert.Equal(OperationOutcome.Applied, result.Outcome);
+        Assert.Equal(Objects, result.ObjectsIn);
+        Assert.Equal(1, result.ObjectsOut);
+        Assert.Equal(Rows, result.Rows);
+        Assert.Equal(0, dataset.Levels[0].Entries);
+        Assert.Equal(1, dataset.Levels[1].Entries);
+        Assert.Equal(Rows, dataset.RowCount);
+
+        // The oracle: the same rows, sorted before they were written, in one file.
+        byte[] sorted = await SortedFileAsync(types, schema);
+        await using MemorySegmentSource source = new MemorySegmentSource(sorted);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
+
+        List<(long Key, double Measure)> expected = await RowsAsync(file.Scan());
+        List<(long Key, double Measure)> produced = await RowsAsync(dataset.Scan());
+        Assert.Equal(expected, produced);
+
+        // And the output says what it is: a sorted key column, which is what lets a lookup inside it
+        // be a seek without reading the run at all (§6.1).
+        ObjectEntry compacted = Assert.Single(await ObjectsAsync(dataset));
+        await using ObjectSegmentSource bytes = new ObjectSegmentSource(store, compacted.Key);
+        await using VortexFile output = await VortexFile.OpenAsync(bytes, new VortexOpenOptions(), default);
+        Assert.True(IsSorted(output, "key"), "a merge writes its output sorted by construction (§5.3)");
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET COMPACTION: {result.ObjectsIn} interleaved objects of level 0 merged into {result.ObjectsOut} sorted object at level 1, {result.Rows} rows, {result.BytesIn} bytes read and {result.BytesOut} written.\n"));
+    }
+
+    [Fact]
+    public async Task TheInvariantHoldsAfterEveryStepOfARandomisedAppendStream()
+    {
+        // §14's other acceptance. The stream appends a random number of rows at a random offset,
+        // and compaction is run to exhaustion at random moments — so level 0 is sometimes over its
+        // ceiling and sometimes empty, and the invariant is checked after every single step.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+
+        // A small target so the merges roll into several objects per level, a fan-out of three so
+        // level 1 goes over its size and the second trigger fires too, and a ceiling of two so
+        // level 0 is over its bound most of the time.
+        CompactionOptions options = Options(target: 3 << 10) with { Fanout = 3 };
+        Random random = new Random(0x5A1AD);
+        List<long> appended = [];
+        int compactions = 0;
+        for (int round = 0; round < 24; round++)
+        {
+            int count = 40 + random.Next(120);
+            long from = random.Next(2_000);
+            await dataset.AppendAsync(Shuffled(types, schema, from, count, random.Next()));
+            for (int i = 0; i < count; i++)
+            {
+                appended.Add(from + i);
+            }
+
+            if (random.Next(2) != 0)
+            {
+                continue;
+            }
+
+            while (await dataset.CompactAsync(options) is { } step)
+            {
+                compactions++;
+                Assert.Equal(OperationOutcome.Applied, step.Outcome);
+                await AssertInvariantAsync(dataset, options, appended);
+            }
+        }
+
+        while (await dataset.CompactAsync(options) is { } last)
+        {
+            compactions++;
+            Assert.Equal(OperationOutcome.Applied, last.Outcome);
+            await AssertInvariantAsync(dataset, options, appended);
+        }
+
+        // Drained: §5.2's ceiling holds, and the lag it would have reported is gone.
+        Assert.True(dataset.Levels[0].Entries <= options.LevelZeroCeiling);
+        Assert.Equal(0, dataset.Lag);
+        Assert.True(compactions >= 10, $"the stream must exercise compaction; it ran {compactions} time(s)");
+        Assert.True(dataset.Levels.Count >= 3, "the second trigger must have reached a third level");
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET COMPACTION STREAM: {compactions} compaction(s) over {appended.Count} appended rows left {dataset.ObjectCount} object(s) across {dataset.Levels.Count} level(s), lag 0.\n"));
+    }
+
+    [Fact]
+    public async Task OutputsAreRolledAtTheDestinationSizeAndStayKeyDisjoint()
+    {
+        // §5.3 writes "one or more, at the target size of the destination level"; §5.2 asks that
+        // level's objects to be key-disjoint. A target below one object's size forces both.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        foreach (int residue in (int[])[3, 1, 0, 2])
+        {
+            await dataset.AppendAsync(Batches(types, schema, residue));
+        }
+
+        // Big enough a fan-out that level 1 is not immediately over its own size, small enough a
+        // target that the merge has to roll.
+        CompactionOptions options = Options(target: 2 << 10) with { Fanout = 1_000 };
+        CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options));
+        Assert.True(result.ObjectsOut > 1, $"a target of 2 KiB must roll; it wrote {result.ObjectsOut}");
+        Assert.Equal(Rows, result.Rows);
+        Assert.Equal(Rows, dataset.RowCount);
+
+        List<(long Min, long Max)> ranges = await RangesAsync(dataset, level: 1);
+        Assert.Equal(result.ObjectsOut, ranges.Count);
+        for (int i = 1; i < ranges.Count; i++)
+        {
+            Assert.True(
+                ranges[i - 1].Max < ranges[i].Min,
+                $"object {i - 1} ends at {ranges[i - 1].Max} and object {i} starts at {ranges[i].Min}");
+        }
+
+        // And the rows are still every key, once, in order.
+        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.Scan()));
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET COMPACTION ROLL: a target of 2 KiB split {result.Rows} rows into {result.ObjectsOut} key-disjoint objects at level 1.\n"));
+    }
+
+    [Fact]
+    public async Task ATieredCompactionConcatenatesAndKeepsTheDatasetsRowOrder()
+    {
+        // §5.4: "the default is leveled when a clustering key is declared and tiered otherwise". A
+        // tiered compaction is a concatenation, and without a clustering key the dataset's order is
+        // the first row position (§4.1) — so the rows must come out in exactly the same sequence.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Unclustered());
+        for (int i = 0; i < 6; i++)
+        {
+            await dataset.AppendAsync(Shuffled(types, schema, i * 100, 100, seed: i + 1));
+        }
+
+        List<long> before = await KeysAsync(dataset.Scan());
+        CompactionOptions options = Options(target: 1 << 20) with { LevelZeroCeiling = 3 };
+        CompactionPlan plan = await dataset.PlanCompactionAsync(options);
+        Assert.Equal(CompactionStyle.Tiered, plan.Style);
+        Assert.False(plan.IsClustered);
+
+        CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options));
+        Assert.Equal(6, result.ObjectsIn);
+        Assert.Equal(1, result.ObjectsOut);
+        Assert.Equal(600, dataset.RowCount);
+
+        // The same rows in the same sequence, which is what a concatenation promises and a merge
+        // does not: these keys are shuffled inside each object and still come back shuffled.
+        Assert.Equal(before, await KeysAsync(dataset.Scan()));
+        Assert.Equal(before, await KeysAsync(dataset.Rows(0, 600)));
+        Assert.Equal(before.GetRange(150, 300), await KeysAsync(dataset.Rows(150, 450)));
+    }
+
+    [Fact]
+    public async Task ALevelAboveItsSizeIsCompactedIntoTheOneAbove()
+    {
+        // §5.3's second trigger. Level 0 goes up first; then level 1 is over the size its fan-out
+        // allows, and the next step moves it to level 2 — the lowest level over its size first.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        foreach (int residue in (int[])[3, 1, 0, 2])
+        {
+            await dataset.AppendAsync(Batches(types, schema, residue));
+        }
+
+        // A target of 2 KiB and a fan-out of 2: level 1 holds at most 4 KiB, and the rolled outputs
+        // are well past it.
+        CompactionOptions options = Options(target: 2 << 10) with { Fanout = 2 };
+        Assert.Equal(CompactionTrigger.LevelZeroCeiling, (await dataset.PlanCompactionAsync(options)).Job!.Trigger);
+        _ = await dataset.CompactAsync(options);
+
+        CompactionPlan second = await dataset.PlanCompactionAsync(options);
+        Assert.Equal(CompactionTrigger.LevelSize, second.Job!.Trigger);
+        Assert.Equal(1, second.Job.FromLevel);
+        Assert.Equal(2, second.Job.ToLevel);
+
+        CompactionResult moved = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options));
+        Assert.Equal(1, moved.FromLevel);
+        Assert.Equal(2, moved.ToLevel);
+        Assert.True(dataset.Levels.Count >= 3);
+        Assert.Equal(Rows, dataset.RowCount);
+        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.Scan()));
+    }
+
+    [Fact]
+    public async Task APlanReadsEntriesAndChangesNothing()
+    {
+        // §5.3 makes compaction "the user's background job", so planning must be pure: a caller
+        // reads what it would cost and decides. The version does not move and no object is written.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        foreach (int residue in (int[])[3, 1, 0, 2])
+        {
+            await dataset.AppendAsync(Batches(types, schema, residue));
+        }
+
+        ulong version = dataset.Version;
+        long objects = store.Count;
+        CompactionPlan plan = await dataset.PlanCompactionAsync(Options(target: 1 << 20));
+
+        Assert.Equal(version, dataset.Version);
+        Assert.Equal(objects, store.Count);
+        Assert.Equal(version, plan.Version);
+        Assert.True(plan.HasWork);
+        Assert.Equal([(long)Objects], plan.ObjectsByLevel);
+        Assert.Equal(plan.Job!.Bytes, plan.BytesByLevel[0]);
+        Assert.Equal(0, plan.FragmentedObjects);
+
+        // Under the specification's own ceiling of eight, four objects are not due at all.
+        CompactionPlan idle = await dataset.PlanCompactionAsync();
+        Assert.False(idle.HasWork);
+        Assert.Null(idle.Job);
+        Assert.Equal(0, idle.Lag);
+    }
+
+    [Fact]
+    public async Task ACompositeClusteringKeyIsRefusedWithWhatWouldFixIt()
+    {
+        // The one thing this step does not deliver, refused by name rather than merged wrongly: a
+        // composite key has no permuted read (12 §4.6), and ordering on its first column alone
+        // would write objects whose ranges overlap below it.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DatasetOptions composite = Unclustered() with { ClusteringKey = ["key", "measure"] };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, composite);
+        foreach (int residue in (int[])[1, 0])
+        {
+            await dataset.AppendAsync(Batches(types, schema, residue));
+        }
+
+        CompactionOptions options = Options(target: 1 << 20) with { LevelZeroCeiling = 1 };
+        VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
+            async () => await dataset.CompactAsync(options));
+        Assert.Contains("12 §4.6", refused.Message, StringComparison.Ordinal);
+
+        // And nothing was committed: the dataset is where it was.
+        Assert.Equal(2, dataset.Levels[0].Entries);
+        Assert.Equal(2 * PerObject, dataset.RowCount);
+    }
+
+    /// <summary>§5.2's invariant, asked of a version rather than assumed of it.</summary>
+    private static async Task AssertInvariantAsync(
+        VortexDataset dataset, CompactionOptions options, List<long> appended)
+    {
+        for (int level = 1; level < dataset.Levels.Count; level++)
+        {
+            List<(long Min, long Max)> ranges = await RangesAsync(dataset, level);
+            for (int i = 1; i < ranges.Count; i++)
+            {
+                Assert.True(
+                    ranges[i - 1].Max < ranges[i].Min,
+                    $"level {level}: [{ranges[i - 1].Min}, {ranges[i - 1].Max}] then [{ranges[i].Min}, {ranges[i].Max}]");
+            }
+        }
+
+        // The ceiling trigger is the first one checked, so the step that follows a level-0 overflow
+        // is the one that empties it: after any step at all, level 0 is inside its bound.
+        Assert.True(dataset.Levels[0].Entries <= options.LevelZeroCeiling);
+        Assert.Equal(appended.Count, dataset.RowCount);
+
+        List<long> sorted = [.. appended];
+        sorted.Sort();
+        List<long> held = await KeysAsync(dataset.Scan());
+        held.Sort();
+        Assert.Equal(sorted, held);
+    }
+
+    /// <summary>The key range of every object of one level, in the tree's order.</summary>
+    private static async Task<List<(long Min, long Max)>> RangesAsync(VortexDataset dataset, int level)
+    {
+        List<(long Min, long Max)> ranges = [];
+        await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, default))
+        {
+            ObjectEntry held = ObjectEntry.FromBytes(entry.Value.Span);
+            Assert.True(held.Summaries.TryGet("key", out ColumnSummary key));
+            ranges.Add((key.Min.SignedValue, key.Max.SignedValue));
+        }
+
+        return ranges;
+    }
+
+    private static bool IsSorted(VortexFile file, string path)
+    {
+        int index = file.Schema.IndexOfField(path);
+        return index >= 0
+            && file.HasFileStatistics
+            && file.Statistics.GetField(index).TryGetIsSorted(out bool sorted)
+            && sorted;
+    }
+
+    private static async Task<List<ObjectEntry>> ObjectsAsync(VortexDataset dataset)
+    {
+        List<ObjectEntry> entries = [];
+        await foreach (ObjectEntry entry in dataset.ObjectsAsync())
+        {
+            entries.Add(entry);
+        }
+
+        return entries;
+    }
+
+    private static Task<List<long>> SortedKeysAsync()
+    {
+        List<long> keys = [];
+        for (long key = 0; key < Rows; key++)
+        {
+            keys.Add(key);
+        }
+
+        return Task.FromResult(keys);
+    }
+
+    private static async Task<List<long>> KeysAsync(DatasetScanBuilder scan)
+    {
+        List<long> keys = [];
+        await foreach (RecordBatch batch in scan.ExecuteAsync())
+        {
+            ReadOnlySpan<long> values = batch.Column(0).AsPrimitive<long>().Values;
+            for (int row = 0; row < batch.RowCount; row++)
+            {
+                keys.Add(values[row]);
+            }
+        }
+
+        return keys;
+    }
+
+    private static async Task<List<(long Key, double Measure)>> RowsAsync(DatasetScanBuilder scan)
+    {
+        List<(long Key, double Measure)> rows = [];
+        await foreach (RecordBatch batch in scan.ExecuteAsync())
+        {
+            ReadOnlySpan<long> keys = batch.Column(0).AsPrimitive<long>().Values;
+            ReadOnlySpan<double> measures = batch.Column(1).AsPrimitive<double>().Values;
+            for (int row = 0; row < batch.RowCount; row++)
+            {
+                rows.Add((keys[row], measures[row]));
+            }
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<(long Key, double Measure)>> RowsAsync(ScanBuilder scan)
+    {
+        List<(long Key, double Measure)> rows = [];
+        await foreach (RecordBatch batch in scan.ExecuteAsync())
+        {
+            ReadOnlySpan<long> keys = batch.Column(0).AsPrimitive<long>().Values;
+            ReadOnlySpan<double> measures = batch.Column(1).AsPrimitive<double>().Values;
+            for (int row = 0; row < batch.RowCount; row++)
+            {
+                rows.Add((keys[row], measures[row]));
+            }
+        }
+
+        return rows;
+    }
+
+    private static DType Schema(DTypeArena types) => types.Struct(
+        ["key", "measure"],
+        [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
+        Nullability.NonNullable);
+
+    private static DatasetOptions Clustered() => Unclustered() with { ClusteringKey = ["key"] };
+
+    private static DatasetOptions Unclustered() => new DatasetOptions
+    {
+        Seed = 0xC0A9AC7_5EED,
+
+        // Small blocks, so that the sink's position moves while the object is being written and a
+        // roll at the destination's target size is something the merge can actually see.
+        Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 512 },
+    };
+
+    private static CompactionOptions Options(long target) => new CompactionOptions
+    {
+        LevelZeroCeiling = 2,
+        TargetBytesAtLevelOne = target,
+        MaxObjectBytes = 1L << 30,
+    };
+
+    /// <summary>The same rows as the four objects, sorted before a byte of them is written.</summary>
+    private static async Task<byte[]> SortedFileAsync(DTypeArena types, DType schema)
+    {
+        System.IO.MemoryStream stream = new System.IO.MemoryStream();
+        await using (VortexFileWriter writer = VortexFileWriter.Create(
+            new StreamSegmentSink(stream), schema, Clustered().Write))
+        {
+            await foreach (RecordBatch batch in Ordered(types, schema, 0, Rows))
+            {
+                await writer.WriteAsync(batch);
+            }
+
+            await writer.CompleteAsync();
+        }
+
+        return stream.ToArray();
+    }
+
+    /// <summary>One object's rows: the keys congruent to <paramref name="residue"/> mod four, shuffled.</summary>
+    private static IAsyncEnumerable<RecordBatch> Batches(DTypeArena types, DType schema, int residue)
+    {
+        long[] keys = new long[PerObject];
+        for (int i = 0; i < PerObject; i++)
+        {
+            keys[i] = ((long)i * Objects) + residue;
+        }
+
+        Shuffle(keys, residue + 1);
+        return Of(types, schema, keys);
+    }
+
+    /// <summary><paramref name="count"/> consecutive keys from <paramref name="from"/>, shuffled.</summary>
+    private static IAsyncEnumerable<RecordBatch> Shuffled(
+        DTypeArena types, DType schema, long from, int count, int seed)
+    {
+        long[] keys = new long[count];
+        for (int i = 0; i < count; i++)
+        {
+            keys[i] = from + i;
+        }
+
+        Shuffle(keys, seed);
+        return Of(types, schema, keys);
+    }
+
+    /// <summary><paramref name="count"/> consecutive keys from <paramref name="from"/>, in order.</summary>
+    private static IAsyncEnumerable<RecordBatch> Ordered(DTypeArena types, DType schema, long from, int count)
+    {
+        long[] keys = new long[count];
+        for (int i = 0; i < count; i++)
+        {
+            keys[i] = from + i;
+        }
+
+        return Of(types, schema, keys);
+    }
+
+    /// <summary>A fixed shuffle: the same every run, and nothing like the file order.</summary>
+    private static void Shuffle(long[] keys, int seed)
+    {
+        Random random = new Random(seed);
+        for (int i = keys.Length - 1; i > 0; i--)
+        {
+            int j = random.Next(i + 1);
+            (keys[i], keys[j]) = (keys[j], keys[i]);
+        }
+    }
+
+    private static async IAsyncEnumerable<RecordBatch> Of(DTypeArena types, DType schema, long[] keys)
+    {
+        const int size = 125;
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType f64 = types.Primitive(PType.F64, Nullability.NonNullable);
+        for (int start = 0; start < keys.Length; start += size)
+        {
+            int count = Math.Min(size, keys.Length - start);
+            CanonicalArena arena = new CanonicalArena();
+            VortexBuffer keyBuffer = arena.Allocate(count * sizeof(long), sizeof(long), out Span<byte> keyBytes);
+            VortexBuffer measures = arena.Allocate(count * sizeof(double), sizeof(double), out Span<byte> measureBytes);
+            Span<long> keyValues = MemoryMarshal.Cast<byte, long>(keyBytes);
+            Span<double> measureValues = MemoryMarshal.Cast<byte, double>(measureBytes);
+            for (int row = 0; row < count; row++)
+            {
+                keyValues[row] = keys[start + row];
+                measureValues[row] = keys[start + row] / 4.0;
+            }
+
+            int keyNode = arena.AddPrimitive(i64, count, Validity.NonNullable, PType.I64, keyBuffer);
+            int measureNode = arena.AddPrimitive(f64, count, Validity.NonNullable, PType.F64, measures);
+            int root = arena.AddStruct(schema, count, Validity.NonNullable, [keyNode, measureNode]);
+            using RecordBatch batch = new RecordBatch(arena, root, start);
+            yield return batch;
+            await Task.CompletedTask;
+        }
+    }
+}

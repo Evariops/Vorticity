@@ -290,6 +290,11 @@ expose — a batch that is a **window** over another batch's buffers, and a per-
 a filter literal. Both exist inside the scan; neither is public, and inventing a second copy of
 either in this package is the wrong place for them.
 
+*Step 41b closed the first of the two: `RecordBatch.Window(start, length)` is public, because the
+compaction's k-way merge needed exactly it — "these rows of that batch". It gathers rather than
+aliasing the buffers, and says so: a true window is a second traversal of every canonical kind and
+nothing measured yet asks for it. The second seam is still missing, and with it step 39d.*
+
 The acceptance is §14's and it is a comparison, never a chosen number: the same rows written into a
 dataset of several objects and into one file answer the same, unfiltered and filtered, with the
 index chain on and off — and now with the summaries consulted and ignored.
@@ -356,9 +361,23 @@ Bounded either way, and the difference is stated rather than hidden.
 The one inline budget of §3 is shared and spent from the top down: level 0 is the level every lookup
 descends and the one an append touches, so it gets the room first.
 
-**What is not here:** the policy that decides when to compact and the compaction itself (step 41b).
-Until then a dataset has one level and the machinery above is exercised by moving objects between
-levels by hand, through the very `ReplaceObjects` a compactor will use.
+**As delivered (step 41b): the invariant is now held rather than described.** `CompactionPolicy`
+reads the leaves of every occupied level — the objects, never the rows — and returns a
+`CompactionPlan`: the objects and bytes per level, the lag, the style, and the one job that is due.
+`DatasetCompactor` runs it. A randomised append stream of 24 rounds, drained at random moments, ran
+16 compactions across 4 levels and the two halves of the invariant were asserted **after every
+single step**: level 0 inside its ceiling, and every level above key-disjoint object by object.
+
+The numbers of §5.2 and §5.3 are reconciled by one formula rather than by two readings. An object
+written into level `i` targets `level1 × F^(i-1)` — "256 MiB at level 1, growing with the level" —
+and a level holds `F` of them, which is at once §5.2's "F^i times the size of level 1" and the
+tiered bullet's "at most F of them". The fan-out and level 1's size are read from the header when it
+states them (§4.1), so two writers of one dataset compact it to the same shape.
+
+One guard is not in the specification and belongs here: **a level holding a single object is never
+over its size**. The object target saturates at 4 GiB, so a level's capacity stops growing at the
+top; without the guard a dataset past that point would move its last object up a new level on every
+call, for ever, and every move would look like progress.
 
 ### 5.3 What a compaction does
 
@@ -388,6 +407,36 @@ only slower.
 
 The zero-decode rewrite of 11 §9 (pass encoded arrays through when the encoding tree is kept) is
 the optimisation that makes compaction cheap on CPU; it is separate work and it is not assumed.
+
+**As delivered (step 41b).** The merge emits **runs, not rows**. At every step one input holds the
+smallest key and may emit every row at or below the smallest key the others hold — a contiguous
+window of its current batch — so the cost is `k` comparisons per window rather than per row, and the
+writer keeps receiving batches of a useful size. `RecordBatch.Window` is the seam that says "these
+rows of that batch"; §4.2 had already named it as one of the two things the core did not expose, and
+it is now public rather than copied into this package. The comparator is the row encoding of 06,
+because it is the order the tree, the runs and the seeks already use: a comparison written here
+would be a second order, and the first time the two disagreed the dataset would hold an object whose
+own run says it is sorted and whose rows are not.
+
+A roll **never splits a key**. Two outputs sharing a boundary value would have overlapping ranges,
+and §5.2 asks a level for disjoint ones, so the object is sealed at the first key change past the
+target rather than at the target. The overlap that selects the destination inputs is computed
+against the **union** of the source range, not object by object: sources at `[1,5]` and `[90,100]`
+leave a hole, the outputs span `[1,100]` because a merge writes one sorted sequence, and a
+destination object at `[20,30]` that was not read would end up overlapping an output.
+
+**Two refusals, named rather than worked around.** A **composite** clustering key has no permuted
+read — `InKeyOrder` drives one column and the composite key source serves cursors only (12 §4.6) —
+and ordering on the first column alone would write objects whose ranges overlap below it, so such a
+compaction is refused with the sentence that would fix it. A key column **holding nulls** is refused
+too, because a key-ordered read delivers no row whose key is null (12 §6) and the merge would drop
+them in silence. The rows written are compared against the inputs' count at the end regardless: a
+rewrite that loses rows is the one failure it must not have.
+
+And the price, measured rather than assumed: four interleaved objects of level 0, 42 808 bytes, came
+out as one sorted object of **16 596**. §5.4's write amplification counts the bytes a row is
+rewritten through; it does not say each pass writes as much as it read, and sorting a key column is
+exactly the case where a pass writes much less.
 
 ### 5.4 The price, stated
 
@@ -1154,6 +1203,12 @@ of §9.1. Where the two still differ under latency:
 - **The rebase matrix** of §8.2, every row.
 - **The invariant of §5.2** after every compaction step of a randomised append stream; `Explain`
   reports the lag when it is violated on purpose.
+  *As delivered (steps 41a and 41b): the lag in `DatasetLevelTests` — eleven objects against a
+  ceiling of eight, reported as 3 and refused nowhere — and the invariant in
+  `DatasetCompactionTests`. The stream appends a random count of shuffled keys at a random offset
+  and drains at random moments, so level 0 is sometimes over its ceiling and sometimes empty; both
+  halves of §5.2 are asserted after every step, not at the end. The seeded run does 16 compactions
+  across 4 levels.*
 - **Progressive indexing**: at every intermediate commit, answers equal those without indexes.
 - **Merge equivalence**: a run merged at `CompleteAsync` answers as the chunk runs did; a file
   appended in place `n` times answers as one written once, and holds ≤ K runs per entry.
@@ -1165,6 +1220,12 @@ of §9.1. Where the two still differ under latency:
 - **Order**: `InKeyOrder` across levels equals the sorted scan; `ORDER BY x LIMIT k` through the
   summaries equals the first `k` of the full sort; a compaction reading level 0 through its runs
   produces the same object as one reading inputs sorted beforehand.
+  *As delivered (step 41b): the third one. Four objects whose key ranges interleave modulo four,
+  appended out of order, shuffled inside each object — so a compactor that concatenated instead of
+  merging, or read file order instead of its inputs' runs, is caught on the first key. The oracle is
+  the same rows sorted before a byte of them was written, into one file: the compaction's output is
+  compared against it row by row, key and measure. The first two await `InKeyOrder` across objects
+  (step 39d).*
 - **Tampering**: an object replaced out of band at equal size, a page, a root and a fragment torn
   at every byte, a fragment of another object.
 - **Rust**: every data object, including compaction outputs, remains a plain file that 0.86.1

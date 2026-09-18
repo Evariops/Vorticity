@@ -555,6 +555,17 @@ in 64 splits (`--ratio-check`): a 1 % band of a sorted column in key order at **
 reference's filtered scan; 64 rows of an uncorrelated column at **1,40×** the reference's take of
 64 rows over 64 splits; the same band counted by the exact cover at **0,79×** the reference's scan.
 
+**A second caller since 13's step 41b: compaction.** A dataset's k-way merge reads each of its
+inputs through this, which is what 13 §5.3 asks for by name ("the permuted read `InKeyOrder` already
+performs"). Two properties stated above become load-bearing there rather than advisory. The first is
+that it drives **one** column: a dataset whose clustering key is composite has no permuted read, the
+composite key source of §4.6 serving cursors only, and its compaction is refused rather than ordered
+on the leading column. The second is that a row whose key is null is in no source and is delivered by
+no key-ordered scan: for a merge that rewrites objects, that is not a filter but a silent row loss,
+so a key column with nulls is refused up front and the rewritten row count is checked against the
+inputs' at the end. Both are gaps of this section, not of the dataset's, and closing the first is
+what would let a composite-keyed dataset compact.
+
 ---
 
 ## 7. The expression model gains three predicates
