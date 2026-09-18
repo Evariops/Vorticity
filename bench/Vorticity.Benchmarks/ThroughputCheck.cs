@@ -784,7 +784,7 @@ internal static class ThroughputCheck
         ("chunked_one_chunk", 0.13),   // 3 passes, spread 0.13-0.13; was 0.14, -7.1%
         ("chunked_varbinview", 0.23),   // 3 passes, spread 0.23-0.23; was 0.25, -7.0%
         ("constant", 0.34),   // 3 passes, spread 0.33-0.34; was 0.34, -0.5%
-        ("datetimeparts", 0.27),   // 3 passes, spread 0.27-0.28; HELD at 0.27: 2 of 3 passes above, peak 0.28, no loosening
+        ("datetimeparts", 0.22),   // 3 passes, spread 0.21-0.22; was 0.27, -18.6% (2026-09-18)
         ("decimal", 0.13),   // 3 passes, spread 0.13-0.13; was 0.15, -10.2%
         ("decimal_byte_parts", 0.13),   // 3 passes, spread 0.13-0.13; was 0.15, -10.2%
         ("dict", 0.79),   // 3 passes, spread 0.78-0.79; was 0.84, -6.3%
@@ -797,29 +797,29 @@ internal static class ThroughputCheck
         ("fastlanes_bitpacked_patched_no_chunk_offsets", 0.45),   // axe entier, 3 passes, spread 0.42-0.45; was 0.64. 7j : les patches par registres ; 7k (0.36-0.37 en sous-ensemble, B8)
         ("fastlanes_delta", 0.18),   // 3 passes, spread 0.17-0.18; was 0.19, -2.8%
         ("fastlanes_for", 0.63),   // 3 passes, spread 0.61-0.63; was 0.64, -1.9%
-        ("fastlanes_rle", 0.89),   // 3 passes, spread 0.88-0.89; was 0.91, -2.1%
+        ("fastlanes_rle", 0.88),   // 3 passes, spread 0.88-0.88; was 0.89, -1.0% (2026-09-18)
         ("fixed_size_list", 0.065),   // 3 passes, spread 0.064-0.065; was 0.12, -45.5% (28a, 2026-09-17 : les éléments résumés à l'ingestion, la marche des pas par registres)
         ("fsst", 0.24),   // 3 passes, spread 0.24-0.24; HELD at 0.24: 3 of 3 passes above, peak 0.24, no loosening
         ("masked", 0.67),   // 3 passes, spread 0.67-0.68; HELD at 0.67: 2 of 3 passes above, peak 0.68, no loosening
         ("masked_all_invalid", 0.38),   // 3 passes; TENU à la main : --rebase proposait +0.5 %, et une référence ne monte jamais
-        ("masked_all_valid", 0.096),   // 3 passes, spread 0.093-0.096; was 0.10, -3.9%
+        ("masked_all_valid", 0.086),   // 3 passes, spread 0.071-0.086; was 0.096, -10.8% (2026-09-18)
         ("null", 0.21),   // 3 passes; TENU à la main : --rebase proposait +5.7 %, et une référence ne monte jamais
-        ("onpair", 1.30),   // 3 passes, spread 1.27-1.30; was 1.91, -32.1%
+        ("onpair", 1.24),   // 3 passes, spread 1.22-1.24; was 1.30, -4.7% (2026-09-18)
         ("parquet_variant", 0.98),   // 3 passes, spread 0.98-1.00; HELD at 0.98: 3 of 3 passes above, peak 1.00, no loosening
         ("pco", 0.13),   // 3 passes, spread 0.12-0.13; was 0.13, -2.3%
         ("primitive", 0.13),   // 3 passes, spread 0.13-0.13; was 0.14, -3.7%
-        ("runend", 0.74),   // 3 passes, spread 0.74-0.74; was 0.74, 0.0%
+        ("runend", 0.67),   // 3 passes, spread 0.67-0.67; was 0.74, -9.7% (2026-09-18)
         ("sequence", 0.10),   // 3 passes, spread 0.098-0.10; was 0.11, -6.9%
-        ("sparse", 1.48),   // 3 passes, spread 1.48-1.49; HELD at 1.48: 3 of 3 passes above, peak 1.49, no loosening
+        ("sparse", 1.43),   // 3 passes, spread 1.39-1.43; was 1.48, -3.5% (2026-09-18)
         ("struct", 0.22),   // 3 passes, spread 0.22-0.22; was 0.24, -6.6%
         ("table_mixed", 0.22),   // 3 passes, spread 0.21-0.22; was 0.25, -12.5%
         ("table_wide", 0.35),   // axe entier, 3 passes, spread 0.35-0.35; was 0.43. Le +7 % d'après le refacto est rattrapé (7i, 7k)
-        ("varbin", 0.20),   // 3 passes, spread 0.19-0.20; was 0.20, -2.1%
-        ("varbinview", 0.24),   // 3 passes, spread 0.24-0.24; was 0.40, -39.0%
+        ("varbin", 0.19),   // 3 passes, spread 0.18-0.19; was 0.20, -4.6% (2026-09-18)
+        ("varbinview", 0.21),   // 3 passes, spread 0.21-0.21; was 0.24, -11.0% (2026-09-18)
         ("variant", 3.48),   // 3 passes, spread 3.51-3.68; HELD at 3.48: 3 of 3 passes above, peak 3.68, no loosening
         ("zigzag", 0.33),   // 3 passes, spread 0.32-0.33; was 0.34, -1.6%
-        ("zstd", 0.95),   // 3 passes, spread 0.94-0.95; was 1.33, -28.7%
-        ("zstd_buffers", 0.076),   // 3 passes, spread 0.081-0.11; HELD at 0.076: 3 of 3 passes above, peak 0.11, no loosening. Axe de 5 ms : le pic à 0.11 est un processus bruyant, les deux autres à 0.081
+        ("zstd", 0.87),   // 3 passes, spread 0.87-0.87; was 0.95, -7.9% (2026-09-18)
+        ("zstd_buffers", 0.053),   // 3 passes, spread 0.052-0.053; was 0.076, -30.2% (2026-09-18). Axe de 5 ms, qui lisait 0.081-0.11 à la calibration précédente : à re-mesurer avant de croire un rouge
         ("list", 0.97),   // 3 passes, spread 0.95-0.97; was 1.61, -39.9% (28a, 2026-09-17 : le chooser lit les éléments dans leurs blocs)
         ("listview", 0.60),   // 3 passes, spread 0.59-0.60; was 0.96, -37.9% (28a, idem)
         ("map", 0.35),   // 3 passes, spread 0.34-0.35; was 0.54, -35.3% (28a, idem)

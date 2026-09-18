@@ -350,24 +350,24 @@ internal static class RatioCheck
     /// </remarks>
     private static readonly Dictionary<string, Reference> References = new()
     {
-        ["full scan"] = new(0.466, 2),   // 5 passes, spread 0.456-0.466; REBASED UP from 0.462 (k 1->2): +0.8%
-        ["full scan, upstream lazy"] = new(0.467, 2),   // 5 passes, spread 0.462-0.467; REBASED UP from 0.463 (k 1->2): +0.9%
-        ["projected scan, 1 of 5 columns"] = new(0.441, 9),   // 5 passes, spread 0.425-0.441; REBASED UP from 0.435 (k 5->9): +1.4%
-        ["open to first batch"] = new(0.085, 10),   // 5 passes, spread 0.079-0.085; was 0.086, -0.8%
-        ["open, footer only"] = new(0.787, 28),   // 5 passes, spread 0.755-0.787; REBASED UP from 0.761 (k 19->28): +3.5%
-        ["read and write back"] = new(1.027, 1),   // 5 passes, spread 1.017-1.062; HELD at 1.027: 5 passes peaked at 1.062, no loosening
-        ["filtered scan, 1% band"] = new(0.217, 10),   // 5 passes, spread 0.208-0.217; was 0.219, -0.9%
-        ["filtered scan, half the rows"] = new(0.325, 5),   // 5 passes, spread 0.320-0.325; was 0.326, -0.4%
-        ["scattered take, 64 of 64 splits"] = new(0.250, 3),   // 5 passes, spread 0.244-0.250; REBASED UP from 0.245 (k 1->3): +2.0%
-        ["rewritten zoned, reference's"] = new(0.470, 2),   // 5 passes, spread 0.463-0.470; REBASED UP from 0.457 (k 1->2): +2.8%
-        ["rewritten zoned, ours"] = new(5.325, 5),   // 5 passes, spread 5.024-5.325; REBASED UP from 5.189 (k 1->5): +2.6%
-        ["rewritten high card, reference's"] = new(0.881, 28),   // 5 passes, spread 0.858-0.881; REBASED UP from 0.862 (k 23->28): +2.2%
-        ["rewritten high card, ours"] = new(0.915, 22),   // 5 passes, spread 0.897-0.915; was 0.920, -0.5%
-        ["full scan, 1M table"] = new(0.068, 1),   // 5 passes, spread 0.066-0.069; HELD at 0.068: 5 passes peaked at 0.069, no loosening
-        ["projected scan, 1 of 50 columns"] = new(0.096, 11),   // 5 passes, spread 0.092-0.096; was 0.124, -22.8%
-        ["key order, sorted column, 1% band"] = new(0.701, 12),   // 5 passes, spread 0.676-0.701; new
-        ["key order, uncorrelated, 64 rows"] = new(1.404, 7),   // 5 passes, spread 1.359-1.404; new
-        ["count, exact cover, 1% band"] = new(0.785, 6),   // 5 passes, spread 0.762-0.785; new
+        ["full scan"] = new(0.461, 2),   // 3 passes, spread 0.455-0.461; was 0.466, -1.0%
+        ["full scan, upstream lazy"] = new(0.467, 2),   // 3 passes, spread 0.449-0.468; HELD at 0.467: 3 passes peaked at 0.468, no loosening
+        ["projected scan, 1 of 5 columns"] = new(0.441, 9),   // 3 passes, spread 0.431-0.481; HELD at 0.441: 3 passes peaked at 0.481, no loosening
+        ["open to first batch"] = new(0.085, 10),   // 3 passes, spread 0.081-0.090; HELD at 0.085: 3 passes peaked at 0.090, no loosening
+        ["open, footer only"] = new(0.782, 25),   // 3 passes, spread 0.762-0.782; was 0.787, -0.6%
+        ["read and write back"] = new(0.478, 1),   // 3 passes, spread 0.473-0.478; was 1.027, -53.4%
+        ["filtered scan, 1% band"] = new(0.217, 10),   // 3 passes, spread 0.216-0.229; HELD at 0.217: 3 passes peaked at 0.229, no loosening
+        ["filtered scan, half the rows"] = new(0.313, 5),   // 3 passes, spread 0.306-0.313; was 0.325, -3.6%
+        ["scattered take, 64 of 64 splits"] = new(0.250, 3),   // 3 passes, spread 0.248-0.252; HELD at 0.250: 3 passes peaked at 0.252, no loosening
+        ["rewritten zoned, reference's"] = new(0.466, 2),   // 3 passes, spread 0.431-0.466; was 0.470, -0.9%
+        ["rewritten zoned, ours"] = new(5.325, 5),   // 3 passes, spread 4.669-5.337; HELD at 5.325: 3 passes peaked at 5.337, no loosening
+        ["rewritten high card, reference's"] = new(0.881, 27),   // 3 passes, spread 0.847-0.882; HELD at 0.881: 3 passes peaked at 0.882, no loosening
+        ["rewritten high card, ours"] = new(0.915, 21),   // 3 passes, spread 0.900-0.949; HELD at 0.915: 3 passes peaked at 0.949, no loosening
+        ["full scan, 1M table"] = new(0.060, 1),   // 3 passes, spread 0.060-0.060; was 0.068, -11.7%
+        ["projected scan, 1 of 50 columns"] = new(0.088, 8),   // 3 passes, spread 0.086-0.088; was 0.096, -8.2%
+        ["key order, sorted column, 1% band"] = new(0.701, 12),   // 3 passes, spread 0.677-0.706; HELD at 0.701: 3 passes peaked at 0.706, no loosening
+        ["key order, uncorrelated, 64 rows"] = new(1.148, 6),   // 3 passes, spread 1.124-1.148; was 1.404, -18.2%
+        ["count, exact cover, 1% band"] = new(0.759, 7),   // 3 passes, spread 0.733-0.759; was 0.785, -3.3%
     };
 
     /// <summary>
