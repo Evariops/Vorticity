@@ -32,8 +32,15 @@ public sealed class MemoryObjectStore : IObjectStore
     private long _tokens;
     private bool _disposed;
 
-    /// <summary>One stored object: its bytes and the token it was created with.</summary>
-    private readonly record struct Entry(byte[] Bytes, string Token);
+    /// <summary>One stored object: its bytes, the token it was created with, and when.</summary>
+    private readonly record struct Entry(byte[] Bytes, string Token, DateTimeOffset Created);
+
+    /// <summary>
+    /// The store's clock, which stamps every object it creates (<see cref="ObjectHead.LastModified"/>).
+    /// The system's by default; a test that needs an object older than a retention window moves its
+    /// own instead of waiting for one (§10).
+    /// </summary>
+    public TimeProvider Clock { get; set; } = TimeProvider.System;
 
     /// <summary>The delay every operation waits before doing anything. Zero by default.</summary>
     /// <remarks>
@@ -123,7 +130,7 @@ public sealed class MemoryObjectStore : IObjectStore
         lock (_gate)
         {
             return _objects.TryGetValue(key, out Entry entry)
-                ? new ObjectHead(entry.Bytes.Length, entry.Token)
+                ? new ObjectHead(entry.Bytes.Length, entry.Token, entry.Created)
                 : null;
         }
     }
@@ -147,7 +154,7 @@ public sealed class MemoryObjectStore : IObjectStore
             }
             else
             {
-                _objects[key] = new Entry(bytes, Token());
+                _objects[key] = new Entry(bytes, Token(), Clock.GetUtcNow());
                 outcome = PutOutcome.Created;
             }
         }

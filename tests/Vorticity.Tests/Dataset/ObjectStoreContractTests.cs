@@ -143,6 +143,32 @@ public sealed class ObjectStoreContractTests : IDisposable
 
     [Theory]
     [MemberData(nameof(Stores))]
+    public async Task AHeadSaysWhenTheStoreCreatedTheObject(string kind)
+    {
+        // §10's vacuum ages an unreferenced object by the store's timestamp: a store that could not
+        // say when it created an object would have every orphan look like a writer in flight.
+        await using IObjectStore store = Open(kind);
+        DateTimeOffset before = DateTimeOffset.UtcNow.AddSeconds(-5);
+        await store.PutIfAbsentAsync("data/dated", Bytes("dated"), default);
+        DateTimeOffset created = (await store.HeadAsync("data/dated", default))!.Value.LastModified;
+        Assert.InRange(created, before, DateTimeOffset.UtcNow.AddSeconds(5));
+    }
+
+    [Fact]
+    public async Task TheMemoryStoreStampsObjectsWithItsOwnClock()
+    {
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero));
+        await using MemoryObjectStore store = new MemoryObjectStore { Clock = clock };
+        await store.PutIfAbsentAsync("data/first", Bytes("first"), default);
+        clock.Advance(TimeSpan.FromHours(1));
+        await store.PutIfAbsentAsync("data/second", Bytes("second"), default);
+
+        Assert.Equal(clock.Now - TimeSpan.FromHours(1), (await store.HeadAsync("data/first", default))!.Value.LastModified);
+        Assert.Equal(clock.Now, (await store.HeadAsync("data/second", default))!.Value.LastModified);
+    }
+
+    [Theory]
+    [MemberData(nameof(Stores))]
     public async Task ListingIsOrdinalAndPagesByItsLastKey(string kind)
     {
         await using IObjectStore store = Open(kind);

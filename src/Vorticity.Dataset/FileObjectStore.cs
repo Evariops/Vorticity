@@ -117,7 +117,7 @@ public sealed class FileObjectStore : IObjectStore
 
         FileInfo info = new FileInfo(PathOf(key));
         return new ValueTask<ObjectHead?>(
-            info.Exists ? new ObjectHead(info.Length, Token(info)) : null);
+            info.Exists ? new ObjectHead(info.Length, Token(info), new DateTimeOffset(info.LastWriteTimeUtc)) : null);
     }
 
     /// <inheritdoc/>

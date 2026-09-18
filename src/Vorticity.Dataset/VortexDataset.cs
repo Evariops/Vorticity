@@ -62,6 +62,13 @@ public sealed record DatasetOptions
     /// <summary>How many times a commit rebases before giving up (§8.2).</summary>
     public int MaxAttempts { get; init; } = 8;
 
+    /// <summary>
+    /// What vacuum keeps (§10), fixed at creation and carried by every header: the versions beyond
+    /// the current one, and how long a superseded version stays readable. <see langword="default"/>
+    /// is the specification's seven days and no version beyond the window.
+    /// </summary>
+    public RetentionSettings Retention { get; init; }
+
     /// <summary>The most bytes one appended data object may buffer before the store takes it.</summary>
     public long MaxObjectBytes { get; init; } = ObjectSegmentSink.DefaultMaxBytes;
 
@@ -169,6 +176,9 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The compaction settings its header carries (§5), zero-valued when it states none.</summary>
     public CompactionSettings Compaction => _header.Compaction;
 
+    /// <summary>What vacuum keeps (§10), as the header carries it.</summary>
+    public RetentionSettings Retention => _header.Retention;
+
     /// <summary>The columns it is ordered by (§4.1), empty when it is ordered by row position.</summary>
     public IReadOnlyList<string> ClusteringKeyPaths => _header.ClusteringKey;
 
@@ -203,6 +213,7 @@ public sealed class VortexDataset : IAsyncDisposable
             Seed = options.Seed,
             Schema = DTypeProtobuf.Serialize(schema),
             ClusteringKey = [.. options.ClusteringKey ?? []],
+            Retention = options.Retention,
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,
                 ProllyBoundaryRule.DefaultTargetBytes,
@@ -231,7 +242,7 @@ public sealed class VortexDataset : IAsyncDisposable
             throw ObjectNotFoundException.For(CommitKey.Prefix);
         }
 
-        CommitPageSource pages = new CommitPageSource(store);
+        CommitPageSource pages = new CommitPageSource(store) { Reading = version };
         pages.Inline(commit.Header);
         pages.Know(version, commit.HeaderEnd);
         return new VortexDataset(
@@ -254,7 +265,7 @@ public sealed class VortexDataset : IAsyncDisposable
             return _header.Version;
         }
 
-        CommitPageSource pages = new CommitPageSource(_store);
+        CommitPageSource pages = new CommitPageSource(_store) { Reading = version };
         pages.Inline(commit.Header);
         pages.Know(version, commit.HeaderEnd);
         _header = commit.Header;
@@ -395,6 +406,18 @@ public sealed class VortexDataset : IAsyncDisposable
             ? await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false)
             : null;
     }
+
+    /// <summary>Deletes what no version inside the retention window references (§10).</summary>
+    /// <param name="options">The clock and the dry run, or null for the defaults.</param>
+    /// <param name="cancellationToken">Cancels the reads and the deletes.</param>
+    /// <returns>What it kept and what it deleted.</returns>
+    /// <remarks>
+    /// Explicit, never automatic (§10). It marks from the store's latest version, not from this
+    /// handle's: a handle on an older version is a reader like any other, and outlives the window at
+    /// its own risk.
+    /// </remarks>
+    public ValueTask<VacuumResult> VacuumAsync(VacuumOptions? options = null, CancellationToken cancellationToken = default) =>
+        DatasetVacuum.RunAsync(_store, options, cancellationToken);
 
     /// <summary>A scan over every object of this version.</summary>
     /// <returns>The builder.</returns>
@@ -576,8 +599,20 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="entry">Its leaf entry, as this version holds it.</param>
     /// <param name="cancellationToken">Cancels the reads and the open.</param>
     /// <returns>A lease the caller disposes when it is done reading.</returns>
-    internal ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken) =>
-        _objects.RentAsync(entry, _pages, cancellationToken);
+    /// <exception cref="ObjectNotFoundException">
+    /// The object is gone: this version fell out of the retention window and vacuum took it (§10).
+    /// </exception>
+    internal async ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _objects.RentAsync(entry, _pages, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ObjectNotFoundException missing) when (missing.Version == 0)
+        {
+            throw ObjectNotFoundException.InVersion(entry.Key, Version, missing);
+        }
+    }
 
     /// <summary>The bytes of one of this version's index fragments (§6.4), checked against its reference.</summary>
     /// <param name="reference">The fragment's reference, from an object's leaf entry.</param>

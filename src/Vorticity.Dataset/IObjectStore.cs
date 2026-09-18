@@ -99,14 +99,19 @@ public interface IObjectStore : IAsyncDisposable
         string prefix, string? startAfter, int max, CancellationToken cancellationToken);
 }
 
-/// <summary>An object's size and token.</summary>
+/// <summary>An object's size, token and creation time.</summary>
 /// <param name="Length">Its bytes.</param>
 /// <param name="Token">
 /// A value that changes whenever the bytes under the key change (§11). An object is immutable, so
 /// in practice the token changes only when a key is deleted and created again — which is exactly
 /// the case §7's binding has to catch.
 /// </param>
-public readonly record struct ObjectHead(long Length, string Token);
+/// <param name="LastModified">
+/// When the store created it, by the STORE's clock (§10). Vacuum keeps an unreferenced object younger
+/// than the retention window, since it may be a writer's in flight; a writer's own clock is not what
+/// decides that, because two writers' clocks need not agree and the store's is the one they share.
+/// </param>
+public readonly record struct ObjectHead(long Length, string Token, DateTimeOffset LastModified);
 
 /// <summary>What <see cref="IObjectStore.PutIfAbsentAsync"/> did.</summary>
 public enum PutOutcome
@@ -145,11 +150,33 @@ public sealed class ObjectNotFoundException : Exception
     /// <summary>The key, when the thrower named it.</summary>
     public string Key { get; init; } = string.Empty;
 
+    /// <summary>
+    /// The dataset version whose read found the object missing; 0 when the thrower was not reading a
+    /// version (§10: a reader that outlives the retention window "reports that, never a wrong answer").
+    /// </summary>
+    public ulong Version { get; init; }
+
     /// <summary>The exception naming <paramref name="key"/>.</summary>
     /// <param name="key">The key that is not there.</param>
     /// <returns>The exception, ready to throw.</returns>
     public static ObjectNotFoundException For(string key) =>
         new ObjectNotFoundException($"No object at '{key}'.") { Key = key };
+
+    /// <summary>The exception a reader of <paramref name="version"/> throws for an object that is gone.</summary>
+    /// <param name="key">The key its version names and the store no longer holds.</param>
+    /// <param name="version">The version being read.</param>
+    /// <param name="cause">The store's own exception.</param>
+    /// <returns>The exception, ready to throw.</returns>
+    public static ObjectNotFoundException InVersion(string key, ulong version, Exception cause) =>
+        new ObjectNotFoundException(
+            $"Version {version} of the dataset names '{key}', which the store no longer holds. A reader that " +
+            "outlives the retention window loses its objects to vacuum (docs/13-dataset.md §10); refresh to " +
+            "read the latest version.",
+            cause)
+        {
+            Key = key,
+            Version = version,
+        };
 }
 
 /// <summary>A store refused or failed an operation.</summary>

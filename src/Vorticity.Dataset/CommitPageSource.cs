@@ -42,6 +42,12 @@ public sealed class CommitPageSource : IPageSource
     /// <summary>How many pages were read through the store rather than found in hand.</summary>
     public long Reads { get; private set; }
 
+    /// <summary>
+    /// The version this source reads for, which a missing commit object is reported against (§10);
+    /// 0 when it reads for none.
+    /// </summary>
+    public ulong Reading { get; init; }
+
     /// <summary>The bytes of a page this source already holds, without any request.</summary>
     /// <param name="reference">The reference.</param>
     /// <param name="page">Receives its bytes.</param>
@@ -111,11 +117,7 @@ public sealed class CommitPageSource : IPageSource
             return fresh;
         }
 
-        string key = CommitKey.For(reference.Version);
-        long start = await StartAsync(reference.Version, key, cancellationToken).ConfigureAwait(false);
-        Reads++;
-        byte[] page = await CommitObject
-            .ReadPageAsync(_store, key, reference, start, cancellationToken).ConfigureAwait(false);
+        byte[] page = await ReadStoredAsync(reference, cancellationToken).ConfigureAwait(false);
 
         // KEPT, because a page is immutable and a commit reads the same ones twice by construction:
         // the descent that looks a key up and the merge that rewrites its leaf are the same page.
@@ -133,13 +135,28 @@ public sealed class CommitPageSource : IPageSource
     /// long as this version is read, and a fragment is index bytes, not a 128 KiB page.
     /// </remarks>
     public async ValueTask<ReadOnlyMemory<byte>> ReadFragmentAsync(
-        PageReference reference, CancellationToken cancellationToken)
+        PageReference reference, CancellationToken cancellationToken) =>
+        await ReadStoredAsync(reference, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// A page or a fragment read out of the commit object its reference names. A missing object is
+    /// reported against the version being read: vacuum took it (§10), and a reader says so rather
+    /// than answering from what is left.
+    /// </summary>
+    private async ValueTask<byte[]> ReadStoredAsync(PageReference reference, CancellationToken cancellationToken)
     {
         string key = CommitKey.For(reference.Version);
-        long start = await StartAsync(reference.Version, key, cancellationToken).ConfigureAwait(false);
-        Reads++;
-        return await CommitObject
-            .ReadPageAsync(_store, key, reference, start, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            long start = await StartAsync(reference.Version, key, cancellationToken).ConfigureAwait(false);
+            Reads++;
+            return await CommitObject
+                .ReadPageAsync(_store, key, reference, start, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ObjectNotFoundException missing) when (Reading != 0 && missing.Version == 0)
+        {
+            throw ObjectNotFoundException.InVersion(key, Reading, missing);
+        }
     }
 
     /// <summary>Where a version's body starts: one sixteen-byte read per version, remembered.</summary>

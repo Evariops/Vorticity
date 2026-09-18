@@ -1113,6 +1113,40 @@ lacked, the number of objects, is the one that matters most.
 - **Rebuild** an index: drop the entry's fragments in a commit and index again; or rewrite the
   object, which embeds it.
 
+**As delivered (step 43a): vacuum.** `DatasetVacuum.RunAsync(store, options)`, also reachable as
+`VortexDataset.VacuumAsync`, runs only when called, and `DryRun` reports without deleting.
+- **The window.** It is the header's `RetentionSettings`, set at creation by
+  `DatasetOptions.Retention`. `Seconds` unset means seven days. What ages is the moment a version
+  was **superseded**: the store timestamp of the next commit object. A reader that opened a
+  version while it was the latest can read it until then plus the window. `Versions` keeps that
+  many more whatever their age, and the latest is always kept. Every age compared is a store
+  timestamp.
+- **Marking.** Every page of every level of every retained version is walked. Each page reference
+  marks the commit object that holds it, each leaf entry its data object, and each fragment
+  reference its commit object. A reference names its content, so a subtree already seen is not
+  walked again: the retained versions cost their distinct pages, barely more than one tree.
+- **Sweeping.** Nothing is deleted until marking is complete. Then:
+  - commit objects go oldest first, then data objects;
+  - an unmarked object younger than the window is reported in `Young` and kept, as a writer in
+    flight;
+  - a commit newer than the one marked from is left alone;
+  - only `commit/` and `data/` are swept, since an imported object lives where its owner put it and
+    is its owner's to delete.
+- **A reader that outlives the window.** It gets an `ObjectNotFoundException` whose `Version` is
+  the version it was reading and whose `Key` is what it lost. The commit-object page source
+  (`CommitPageSource.Reading`) and the dataset's object rental both say so; nothing answers from
+  what is left. A data object already open when vacuum takes it fails its next ranged read with
+  the store's own `ObjectNotFoundException`, which names the key but not the version.
+- **What the tests hold.** Four cases:
+  - The inputs a compaction replaced are kept inside the window and deleted after it; a dry run
+    lists the same keys; the latest reads whole from a fresh handle; a handle on the swept version
+    reports its version; a second vacuum deletes nothing.
+  - Of two orphans, the old one goes and the young one stays; an object outside `data/` stays.
+  - `Versions = 2` keeps three versions after thirty days.
+  - Two commits whose own version is not retained survive: one held only by a fragment reference,
+    one held only by the old leaves the latest still points at. Each was proved by removing its
+    mark: the test fails.
+
 ## 11. The store abstraction
 
 `IObjectStore`, in the `Vorticity.Dataset` package so that the S3 library can reference it:
@@ -1153,6 +1187,15 @@ same ten cases against both stores — atomicity under sixteen concurrent writer
 changes when a key is deleted and created again, ordinal listing and its paging, a range clamped to
 the object and refused past its end, an empty object, a 4 MiB object read in pieces, and every key
 shape that could escape the store. An S3 library runs it against its own store.
+
+**As delivered (step 43a): `Head` says when.** `ObjectHead` gains `LastModified`, the store's own
+creation time. It is what §10's vacuum ages an unreferenced object by. A writer's clock is not
+used, because two writers need not agree and the store's clock is the one they share.
+- The file store reports the file's last-write time.
+- The memory store stamps with a `Clock` (`TimeProvider`), so a test moves time rather than
+  waiting for it.
+
+Two cases join the contract suite.
 
 ## 12. What stays, what goes
 
