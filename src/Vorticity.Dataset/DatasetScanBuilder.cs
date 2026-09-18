@@ -66,6 +66,9 @@ public sealed class DatasetScanMetrics
     /// <summary>Rents the object cache answered without opening anything.</summary>
     public long CacheHits { get; internal set; }
 
+    /// <summary>The objects a count answered from their entries, without opening them (§6.6).</summary>
+    public long ObjectsCounted { get; internal set; }
+
     /// <summary>
     /// The most data objects the scan read at once: one in the tree's order, and under
     /// <see cref="DatasetScanBuilder.InKeyOrder(string, bool)"/> the inputs the merge held open — §6.6's
@@ -276,11 +279,32 @@ public sealed class DatasetScanBuilder
     /// <summary>The rows the scan selects, without materialising them.</summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The count.</returns>
+    /// <remarks>
+    /// A RANGE ON THE CLUSTERING KEY IS COUNTED FROM THE ENTRIES (§6.6's fourth row): an object whose
+    /// summary bounds lie wholly inside the range, and whose key holds no null, contributes its row
+    /// count without being opened, and only the objects the range cuts are opened, where the core
+    /// counts through its exact cover (12 §9). Inside a level above 0 the objects are key-disjoint,
+    /// so the range cuts at most two of them; with level 0's, O((8 + L) log n). Any other filter —
+    /// another column, a float key, whose summaries exclude NaN — opens every object the summaries
+    /// keep. <see cref="DatasetScanMetrics.ObjectsCounted"/> says how many were answered unopened.
+    /// </remarks>
     public async ValueTask<long> CountAsync(CancellationToken cancellationToken = default)
     {
         long rows = 0;
+        KeyRange? range = _summaries && !_rowsSet ? KeyRange.Of(_dataset, _filter) : null;
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
+            if (range is { } key && key.Holds(held.Entry.Summaries))
+            {
+                rows += held.Entry.Rows;
+                if (_metrics is { } counted)
+                {
+                    counted.ObjectsCounted++;
+                }
+
+                continue;
+            }
+
             ObjectLease lease = await _dataset.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {

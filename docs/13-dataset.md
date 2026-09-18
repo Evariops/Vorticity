@@ -870,6 +870,25 @@ and count on the clustering key in O((8 + L) log n) — is not delivered: the da
 `CountAsync` opens every object the summaries keep. The note of step 39c above says "the fourth" and
 describes the terminals, which are the §6.6 third answer at k = 1, not that row.
 
+*Both covered since 2026-09-18 (debts 11 and 12 of the closing plan).*
+- **The cursor.** `DatasetKeyCursor` opens an object's cursor only once it could hold the next key,
+  its leaf key being its exact minimum, as `KeyOrderedMerge` does. A seek goes further, level by
+  level: above level 0 the objects are key-disjoint, so every object before the last one whose
+  minimum is at or below the sought key holds only smaller keys and is not opened for the seek.
+  `OpenAsync` opens nothing. `Cursors` counts what the walk opened. An object without a key source
+  is refused when the walk reaches it, the one moment its rows could have been left out. Measured on
+  a randomised stream drained into three levels: a seek on a fresh cursor, for six keys, opens at
+  most level 0's objects plus one per level, and the walk from there is every key at or after it.
+- **Rank and count.** `DatasetScanBuilder.CountAsync` on a range of the clustering key (a
+  conjunction of comparisons on it) counts the objects whose summary bounds lie wholly inside the
+  range, and whose key holds no null, from their entries without opening them
+  (`DatasetScanMetrics.ObjectsCounted`). The objects the range cuts go through the core's exact
+  cover. A summary bound errs only outward (a truncated string's maximum rounds up), so "wholly
+  inside" is sound. A float key has none, its summaries excluding NaN, so it opens objects as
+  before. `VortexDataset.RankAsync(key)` is the count below the key. Measured on the same stream: four
+  ranges and four ranks equal the oracle; at most level 0's objects plus two per level are opened;
+  objects are counted unopened; and a filter on another column counts none.
+
 *Since 2026-09-18 the second row takes a composite key too.* `DatasetScanBuilder.InKeyOrder(paths)`
 merges each object's `InKeyOrder(paths)`, and a row whose key is null comes last in both directions,
 as in the core (12 §6's note). On the clustering key, upward, objects open on demand as for one

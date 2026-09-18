@@ -21,6 +21,7 @@ using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Diagnostics;
+using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scan;
@@ -147,6 +148,93 @@ public sealed class DatasetCompactionTests
 
         Console.Out.Write(FormattableString.Invariant(
             $"DATASET COMPACTION STREAM: {compactions} compaction(s) over {appended.Count} appended rows left {dataset.ObjectCount} object(s) across {dataset.Levels.Count} level(s), lag 0.\n"));
+    }
+
+    [Fact]
+    public async Task ASeekOpensLevelZeroAndOneObjectPerLevelAbove()
+    {
+        // Debt 11 of the closing plan: §6.6's "≤ 8 + L cursors" for the key cursor, not only for
+        // `InKeyOrder`. A multi-level dataset from a randomised stream; a fresh cursor per sought
+        // key, whose seek must open no more than level 0's objects and one per level above it, and
+        // whose walk from there must be every key at or after it, in order.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        List<long> appended = await LevelledAsync(dataset, types, schema);
+        appended.Sort();
+
+        int levels = 0;
+        for (int level = 1; level < dataset.Levels.Count; level++)
+        {
+            levels += dataset.Levels[level].Entries > 0 ? 1 : 0;
+        }
+
+        Assert.True(levels >= 2, $"the stream must fill at least two levels above 0; it filled {levels}");
+        Assert.True(dataset.ObjectCount > dataset.Levels[0].Entries + levels, "some level must hold several objects");
+        long bound = dataset.Levels[0].Entries + levels;
+        foreach (long sought in (long[])[-5, 0, 333, 1_000, 1_777, 2_150])
+        {
+            await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset);
+            bool found = await cursor.SeekAsync(FilterLiteral.From(sought));
+            Assert.True(cursor.Cursors <= bound, $"a seek to {sought} opened {cursor.Cursors} cursors against {bound}");
+
+            List<long> walked = [];
+            for (bool any = found; any; any = await cursor.NextAsync())
+            {
+                walked.Add(cursor.Key.SignedValue);
+            }
+
+            Assert.Equal(appended.FindAll(key => key >= sought), walked);
+        }
+    }
+
+    [Fact]
+    public async Task ACountOnTheKeyOpensOnlyTheObjectsTheRangeCuts()
+    {
+        // Debt 12 of the closing plan: §6.6's fourth row. The objects wholly inside the range are
+        // counted from their entries; only the ones the range cuts are opened -- at most two per
+        // level above 0, plus level 0's. The oracle is the keys appended.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        List<long> appended = await LevelledAsync(dataset, types, schema);
+        int levels = 0;
+        for (int level = 1; level < dataset.Levels.Count; level++)
+        {
+            levels += dataset.Levels[level].Entries > 0 ? 1 : 0;
+        }
+
+        long bound = dataset.Levels[0].Entries + (2 * levels);
+        long counted = 0;
+        foreach ((long low, long high) in ((long, long)[])[(100, 1_900), (0, 2_200), (777, 778), (1_500, 1_200)])
+        {
+            DatasetScanMetrics metrics = new DatasetScanMetrics();
+            VortexExpr range = Expr.And(
+                Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(low))),
+                Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(high))));
+            long count = await dataset.Scan().Where(range).WithMetrics(metrics).CountAsync();
+            Assert.Equal(appended.FindAll(key => key >= low && key < high).Count, count);
+            Assert.True(metrics.ObjectsOpened <= bound, $"[{low}, {high}) opened {metrics.ObjectsOpened} objects against {bound}");
+            counted += metrics.ObjectsCounted;
+        }
+
+        Assert.True(counted > 0, "some object must lie wholly inside a range and be counted unopened");
+
+        // The rank is the count below the key, by the same path.
+        foreach (long key in (long[])[-1, 0, 1_000, 5_000])
+        {
+            Assert.Equal(appended.FindAll(k => k < key).Count, await dataset.RankAsync(FilterLiteral.From(key)));
+        }
+
+        // A filter the key's summaries cannot count opens what the summaries keep, and answers the same.
+        DatasetScanMetrics other = new DatasetScanMetrics();
+        VortexExpr measure = Expr.Lt(Expr.Field("measure"), Expr.Literal(FilterLiteral.From(100.0)));
+        Assert.Equal(appended.FindAll(key => key / 4.0 < 100.0).Count, await dataset.Scan().Where(measure).WithMetrics(other).CountAsync());
+        Assert.Equal(0, other.ObjectsCounted);
     }
 
     [Fact]
@@ -431,6 +519,36 @@ public sealed class DatasetCompactionTests
         Assert.All(measures.Skip(measures.Count - nulls), m => Assert.Null(m));
         List<double?> keyed = [.. measures.Take(measures.Count - nulls)];
         Assert.Equal(keyed.Order(), keyed);
+    }
+
+    /// <summary>
+    /// A randomised append stream drained into several levels of several objects each; the keys
+    /// appended, as the oracle.
+    /// </summary>
+    private static async Task<List<long>> LevelledAsync(VortexDataset dataset, DTypeArena types, DType schema)
+    {
+        CompactionOptions options = Options(target: 3 << 10) with { Fanout = 3 };
+        Random random = new Random(0x5A1AD);
+        List<long> appended = [];
+        for (int round = 0; round < 24; round++)
+        {
+            int count = 40 + random.Next(120);
+            long from = random.Next(2_000);
+            await dataset.AppendAsync(Shuffled(types, schema, from, count, random.Next()));
+            for (int i = 0; i < count; i++)
+            {
+                appended.Add(from + i);
+            }
+
+            if (random.Next(2) == 0)
+            {
+                while (await dataset.CompactAsync(options) is not null)
+                {
+                }
+            }
+        }
+
+        return appended;
     }
 
     /// <summary>The first column of every batch, a nullable f64, in delivery order.</summary>

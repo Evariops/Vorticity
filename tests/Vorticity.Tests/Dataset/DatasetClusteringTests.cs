@@ -103,7 +103,7 @@ public sealed class DatasetClusteringTests
         }
 
         await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset);
-        Assert.Equal(Objects, cursor.Cursors);
+        Assert.Equal(0, cursor.Cursors);
 
         List<long> walked = [];
         HashSet<string> objects = new HashSet<string>(StringComparer.Ordinal);
@@ -124,6 +124,9 @@ public sealed class DatasetClusteringTests
 
         Assert.Equal(expected, walked);
         Assert.Equal(Objects, objects.Count);
+
+        // Four level-0 objects overlap, so every one of them is a candidate: four cursors.
+        Assert.Equal(Objects, cursor.Cursors);
 
         // And a seek lands where a single sorted file would.
         Assert.True(await cursor.SeekAsync(FilterLiteral.From(517L)));
@@ -193,8 +196,11 @@ public sealed class DatasetClusteringTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
         await dataset.ImportAsync(key);
 
+        // Refused when the walk reaches it -- the first seek, since it is the only object -- which is
+        // the one moment its rows could have been left out.
+        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset);
         VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
-            async () => await DatasetKeyCursor.OpenAsync(dataset));
+            async () => await cursor.SeekFirstAsync());
         Assert.Contains(key, refused.Message, StringComparison.Ordinal);
 
         // The scan is unaffected: it reads objects, not keys.

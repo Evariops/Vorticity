@@ -28,6 +28,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Columns;
+using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scan;
@@ -455,6 +456,33 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>What held, and every problem named.</returns>
     public ValueTask<DatasetVerification> VerifyAsync(ulong? since = null, CancellationToken cancellationToken = default) =>
         DatasetVerifier.VerifyAsync(_store, new VerifyOptions { Version = Version, Since = since }, cancellationToken);
+
+    /// <summary>
+    /// The rank of <paramref name="key"/> on the clustering key: how many rows hold a smaller key
+    /// (§6.6's fourth row).
+    /// </summary>
+    /// <param name="key">The key, in the clustering key's domain.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The rows whose key is below <paramref name="key"/>; a null key is below nothing.</returns>
+    /// <remarks>
+    /// A count of the range below the key, answered by the objects' entries wherever an object lies
+    /// wholly inside it and by the exact cover of the objects the key cuts
+    /// (<see cref="DatasetScanBuilder.CountAsync"/>): at most two per level above 0, plus level 0's.
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">The dataset has no clustering key, or a composite one.</exception>
+    public ValueTask<long> RankAsync(FilterLiteral key, CancellationToken cancellationToken = default)
+    {
+        if (Key is not { IsComposite: false } clustering)
+        {
+            throw new InvalidOperationException(
+                "A rank is on the clustering key, and this dataset declares " +
+                (Key is null ? "none (13 §4.1)." : "a composite one: rank a tuple's leading column with a count instead."));
+        }
+
+        return Scan()
+            .Where(Expr.Lt(Expr.Field(clustering.Paths[0]), Expr.Literal(key)))
+            .CountAsync(cancellationToken);
+    }
 
     /// <summary>A scan over every object of this version.</summary>
     /// <returns>The builder.</returns>
