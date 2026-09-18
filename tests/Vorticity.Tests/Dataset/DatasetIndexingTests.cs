@@ -124,6 +124,43 @@ public sealed class DatasetIndexingTests
     }
 
     [Fact]
+    public async Task ARebuildSwapsAnObjectsFragmentsForOneInOneCommit()
+    {
+        // §10: "Rebuild an index: drop the entry's fragments in a commit and index again". Three
+        // partial fragments become one over the whole object, and no version in between holds the
+        // object with neither.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await dataset.AppendAsync(ObjectRows(types, schema, 0));
+        PositionedObject target = Assert.Single(await ObjectsAsync(dataset));
+        for (int block = 0; block < 3; block++)
+        {
+            RowRange one = new RowRange(block * BlockRows, (block + 1) * BlockRows);
+            Assert.Equal(OperationOutcome.Applied, (await DatasetIndexer.IndexAsync(dataset, target, Policy, one, Build)).Outcome);
+        }
+
+        PositionedObject partial = Assert.Single(await ObjectsAsync(dataset));
+        Assert.Equal(3, partial.Entry.Fragments.Count);
+        ulong before = dataset.Version;
+
+        IndexingResult rebuilt = await DatasetIndexer.RebuildAsync(dataset, partial, Policy, Build);
+        Assert.Equal(OperationOutcome.Applied, rebuilt.Outcome);
+        Assert.Equal(before + 1, dataset.Version);
+        PositionedObject whole = Assert.Single(await ObjectsAsync(dataset));
+        PageReference fragment = Assert.Single(whole.Entry.Fragments);
+        Assert.Equal(dataset.Version, fragment.Version);
+
+        // The fragment covers every block now, so a key-ordered read on `id` is served, and the
+        // answers are the same as without any index.
+        Assert.Equal(PerObject, await CountRowsAsync(dataset.Scan().InKeyOrder("id")));
+        await AssertAnswersAsync(dataset);
+        Assert.True((await dataset.VerifyAsync()).Holds);
+    }
+
+    [Fact]
     public async Task MoreThanKFragmentsAreBundledIntoOneAndAnswerTheSame()
     {
         // §6.4: "An entry with more than K fragments is compacted by merging them (index bytes only)

@@ -69,6 +69,12 @@ public sealed record DatasetOptions
     /// </summary>
     public RetentionSettings Retention { get; init; }
 
+    /// <summary>
+    /// The compaction settings every header carries (§5): the level cap, level 1's object size and
+    /// the fan-out. <see langword="default"/> states none, and a planner uses its own options.
+    /// </summary>
+    public CompactionSettings Compaction { get; init; }
+
     /// <summary>The most bytes one appended data object may buffer before the store takes it.</summary>
     public long MaxObjectBytes { get; init; } = ObjectSegmentSink.DefaultMaxBytes;
 
@@ -214,6 +220,7 @@ public sealed class VortexDataset : IAsyncDisposable
             Schema = DTypeProtobuf.Serialize(schema),
             ClusteringKey = [.. options.ClusteringKey ?? []],
             Retention = options.Retention,
+            Compaction = options.Compaction,
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,
                 ProllyBoundaryRule.DefaultTargetBytes,
@@ -418,6 +425,25 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </remarks>
     public ValueTask<VacuumResult> VacuumAsync(VacuumOptions? options = null, CancellationToken cancellationToken = default) =>
         DatasetVacuum.RunAsync(_store, options, cancellationToken);
+
+    /// <summary>
+    /// Moves what this dataset still references in <paramref name="versions"/>' commit objects into
+    /// a new one, so that the next vacuum past the window can delete them (§10's repack).
+    /// </summary>
+    /// <param name="versions">The commit objects to empty, usually <see cref="VacuumResult.Sparse"/>.</param>
+    /// <param name="cancellationToken">Cancels the reads and the commit.</param>
+    /// <returns>The version created, and whether anything moved.</returns>
+    /// <remarks>
+    /// A metadata-only commit: no row is read or written, and the version's content hash does not
+    /// change. A version still inside the window keeps its own commit object whatever moves out of it.
+    /// </remarks>
+    public async ValueTask<(ulong Version, OperationOutcome Outcome)> RepackAsync(
+        IReadOnlyList<ulong> versions, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(versions);
+        CommitResult result = await CommitAsync([new DatasetOperation.Repack(versions)], cancellationToken).ConfigureAwait(false);
+        return (result.Version, result.Outcomes[0]);
+    }
 
     /// <summary>
     /// Checks this version's pages, objects and fragments against what its references and entries

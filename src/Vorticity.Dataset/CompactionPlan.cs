@@ -100,6 +100,43 @@ public sealed record CompactionOptions
     /// <summary>Leveled, tiered, or whichever the clustering key implies (§5.4).</summary>
     public CompactionStyle Style { get; init; } = CompactionStyle.Auto;
 
+    /// <summary>
+    /// How many levels the dataset keeps, level 0 included; 0, the default, for no cap. Taken from
+    /// the header's <see cref="CompactionSettings.Levels"/> when it states one.
+    /// </summary>
+    /// <remarks>
+    /// THE TOP LEVEL IS UNBOUNDED, which is what a cap has to mean in a dataset that never deletes a
+    /// row. Its size trigger would move data to a level that may not exist, and merging it into
+    /// itself would rewrite key-disjoint objects into the same key-disjoint objects: bytes written for
+    /// nothing, since the level holds no dead rows to reclaim. So the level below the top compacts
+    /// into it as usual, and the top only grows. §5.2's bound then reads the top level's object count
+    /// rather than its size, which is the price of the cap and the reason it is a setting. A cap
+    /// under 2 leaves level 0 nowhere to go and is refused.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative or 1.</exception>
+    public int MaxLevels
+    {
+        get => _maxLevels;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            if (value == 1)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(value), value, "A dataset of one level has nowhere to compact level 0 into (13 §5.2).");
+            }
+
+            _maxLevels = value;
+        }
+    }
+
+    private readonly int _maxLevels;
+
+    /// <summary>Whether <paramref name="level"/> is the top the cap allows, or above it: no size bound.</summary>
+    /// <param name="level">The level.</param>
+    /// <returns>Whether nothing may be compacted out of it.</returns>
+    public bool IsTop(int level) => _maxLevels > 0 && level >= _maxLevels - 1;
+
     /// <summary>The size an object written into <paramref name="level"/> targets.</summary>
     /// <param name="level">The destination level; 0 and 1 share the level-1 size.</param>
     /// <returns>The target, never above <see cref="MaxObjectBytes"/>.</returns>
@@ -154,15 +191,14 @@ public sealed record CompactionOptions
     /// <param name="stored">The header's settings; a zero field means "unstated".</param>
     /// <returns>The options a writer of that dataset compacts under.</returns>
     /// <remarks>
-    /// <c>Levels</c> is deliberately not read: it caps how many levels a dataset keeps, and what a
-    /// planner should do at the cap — stop, or merge the top level into itself — is a retention
-    /// question (§10), not a trigger. Reading it here and doing nothing with it would be worse than
-    /// leaving it to the step that answers it.
+    /// <c>Levels</c> is read since step 43c, as <see cref="MaxLevels"/>: the top level is unbounded
+    /// (see there).
     /// </remarks>
     public CompactionOptions From(CompactionSettings stored) => this with
     {
         Fanout = stored.Fanout > 0 ? stored.Fanout : Fanout,
         TargetBytesAtLevelOne = stored.LevelTargetBytes > 0 ? stored.LevelTargetBytes : TargetBytesAtLevelOne,
+        MaxLevels = stored.Levels > 0 ? stored.Levels : MaxLevels,
     };
 }
 

@@ -110,7 +110,7 @@ public static class DatasetCommitter
             // into it and its entry names it there (§6.4); a lost attempt throws both away.
             ulong version = parent + 1;
             CommitObjectBuilder builder = new CommitObjectBuilder(version);
-            (Dictionary<int, List<TreeChange>> changes, List<OperationOutcome> outcomes) =
+            (Dictionary<int, List<TreeChange>> changes, List<OperationOutcome> outcomes, Relocation repack) =
                 await ApplyAsync(levels, operations, pages, builder, cancellationToken).ConfigureAwait(false);
 
             pages.Writing(builder, version);
@@ -124,6 +124,25 @@ public static class DatasetCommitter
                         await next[level]
                             .CommitAsync(batch, options.NewRule(), options.NewFold(), pages, builder, cancellationToken)
                             .ConfigureAwait(false));
+                }
+            }
+
+            // A repack moves the pages last, over the trees the changes produced: a leaf the batch
+            // rewrote is already in this commit, and what is left in the named objects moves now.
+            if (repack.Versions.Count > 0)
+            {
+                foreach ((int level, DatasetTree tree) in next.Occupied())
+                {
+                    (DatasetTree relocated, int moved) = await tree
+                        .RelocateAsync(reference => repack.Versions.Contains(reference.Version), pages, builder, cancellationToken)
+                        .ConfigureAwait(false);
+                    next = next.With(level, relocated);
+                    repack.Moved += moved;
+                }
+
+                foreach (int at in repack.At)
+                {
+                    outcomes[at] = repack.Moved > 0 ? OperationOutcome.Applied : OperationOutcome.AlreadyThere;
                 }
             }
 
@@ -266,14 +285,15 @@ public static class DatasetCommitter
     /// <param name="pages">Where the trees' pages are read.</param>
     /// <param name="builder">The attempt's commit object, which receives the fragments applied.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
-    private static async ValueTask<(Dictionary<int, List<TreeChange>> Changes, List<OperationOutcome> Outcomes)>
+    private static async ValueTask<(Dictionary<int, List<TreeChange>> Changes, List<OperationOutcome> Outcomes, Relocation Repack)>
         ApplyAsync(
             DatasetLevels levels,
             IReadOnlyList<DatasetOperation> operations,
-            IPageSource pages,
+            CommitPageSource pages,
             CommitObjectBuilder builder,
             CancellationToken cancellationToken)
     {
+        Relocation repack = new Relocation();
         // Sorted and unique by key WITHIN A LEVEL, which is what a batch has to be; an operation
         // that touches a key another already touched sees the pending value, so two fragments on
         // one object both land. One batch per level, because one tree per level (§4.3).
@@ -376,6 +396,43 @@ public static class DatasetCommitter
                     break;
                 }
 
+                case DatasetOperation.Repack move:
+                {
+                    // The fragments move here, as leaf changes: an entry names its fragments, so a
+                    // moved fragment is a changed entry. The pages move after the batches (above).
+                    repack.Versions.UnionWith(move.Versions);
+                    repack.At.Add(outcomes.Count);
+                    outcomes.Add(OperationOutcome.AlreadyThere);
+                    foreach ((int level, DatasetTree tree) in levels.Occupied())
+                    {
+                        await foreach (TreeEntry leaf in tree.EnumerateAsync(pages, cancellationToken).ConfigureAwait(false))
+                        {
+                            ObjectEntry entry = await CurrentAsync(level, leaf.Key).ConfigureAwait(false)
+                                ?? ObjectEntry.FromBytes(leaf.Value.Span);
+                            PageReference[] fragments = [.. entry.Fragments];
+                            bool changed = false;
+                            for (int i = 0; i < fragments.Length; i++)
+                            {
+                                if (repack.Versions.Contains(fragments[i].Version))
+                                {
+                                    ReadOnlyMemory<byte> bytes = await pages
+                                        .ReadFragmentAsync(fragments[i], cancellationToken).ConfigureAwait(false);
+                                    fragments[i] = builder.AddFragment(bytes.Span);
+                                    changed = true;
+                                    repack.Moved++;
+                                }
+                            }
+
+                            if (changed)
+                            {
+                                Put(level, leaf.Key, entry with { Fragments = fragments });
+                            }
+                        }
+                    }
+
+                    break;
+                }
+
                 default:
                     throw new ArgumentException(
                         $"An operation of type {operation.GetType().Name} is not one of §8.2's.", nameof(operations));
@@ -388,7 +445,7 @@ public static class DatasetCommitter
             batches[level] = [.. sorted.Values];
         }
 
-        return (batches, outcomes);
+        return (batches, outcomes, repack);
 
         async ValueTask<ObjectEntry?> CurrentAsync(int level, ReadOnlyMemory<byte> key)
         {
@@ -429,6 +486,16 @@ public static class DatasetCommitter
         // another, so the pending map is keyed by both: the same key at two levels is two objects.
         static string Named(int level, ReadOnlyMemory<byte> key) =>
             level.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + Convert.ToHexString(key.Span);
+    }
+
+    /// <summary>What an attempt's repacks name, and what they moved (§10).</summary>
+    private sealed class Relocation
+    {
+        internal HashSet<ulong> Versions { get; } = [];
+
+        internal List<int> At { get; } = [];
+
+        internal int Moved { get; set; }
     }
 
     /// <summary>`memcmp` order over keys, which is the tree's (06).</summary>

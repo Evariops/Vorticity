@@ -386,6 +386,20 @@ over its size**. The object target saturates at 4 GiB, so a level's capacity sto
 top; without the guard a dataset past that point would move its last object up a new level on every
 call, for ever, and every move would look like progress.
 
+**As delivered (step 43c): the header's `Levels` is read.** It was left unread at 41b as "a
+retention question". The answer: the top level a cap allows has **no size bound**.
+- A dataset that never deletes a row has no dead rows at the top to reclaim.
+- Merging the top level into itself would rewrite key-disjoint objects into the same key-disjoint
+  objects.
+- Its size trigger would move data to a level the cap says does not exist.
+
+So the level below compacts into the top as usual, and the top only grows. §5.2's bound then
+counts the top's objects rather than its size, which is the price of the cap and why it is a
+setting. `CompactionOptions.MaxLevels` carries it, and `DatasetOptions.Compaction` states it at
+creation. A cap of 1 leaves level 0 nowhere to go and is refused. Tested on the data of the
+level-size test: capped at two levels, level 1 holds several objects over its size, nothing is
+planned, and the rows are all there.
+
 ### 5.3 What a compaction does
 
 A compaction reads `k` objects and writes one or more, at the target size of the destination
@@ -1184,6 +1198,33 @@ as `VortexDataset.VerifyAsync(since?)`, is offline. It reports every problem by 
   - A fragment of another object, committed under the victim's uid by a caller who lies, is refused
     by the binding. The reader answers exactly and verify names it.
 
+**As delivered (step 43c): rebuild and repack.**
+- **Rebuild.** `DatasetIndexer.RebuildAsync(dataset, object, policy)` makes one commit that drops
+  the object's fragments by content and attaches one fragment over the whole object, so no version
+  holds the object with neither. On a rebase, a fragment attached meanwhile stays. An object a
+  compaction replaced meanwhile gets nothing, since its rewrite embedded the index: that rewrite is
+  the other rebuild of this section, and it is a compaction.
+- **Repack.** A new operation, `DatasetOperation.Repack(versions)`, reached through
+  `VortexDataset.RepackAsync`. It is metadata only and reads no row:
+  - it copies every page the version still references in those commit objects, byte for byte, into
+    the new one (`DatasetTree.RelocateAsync`), with the pages above them, whose references named
+    the old placement;
+  - it copies every fragment there, which changes the entries holding them, since a fragment
+    reference names placement too.
+
+  Moving pages alone leaves the tree's content hash as it was, a tree test holds. Moving a fragment
+  changes its entry, and the repack test compares entries with their fragments by content.
+- **The threshold.** Vacuum reports `Sparse`: the commit objects kept alive only by references,
+  whose live pages and fragments are under `RepackBelow` of their **body**. The default is 0.25.
+  - **Why the body, measured.** Over the whole object, the repack's own commit came out sparse at
+    the next vacuum. A header inlines copies of the pages it has in hand, so every superseded
+    commit looks half dead, and each repack would make the next one due.
+  - **What the default does in practice.** On the repack test's dataset, where an append writes a
+    leaf and the internal pages above it and the leaf stays live, a third of each body is live. The
+    default reports nothing there, so that test asks for 1.
+  - After the repack, the next vacuum past the window deletes every commit object it emptied, and
+    reports nothing sparse at the default.
+
 ## 11. The store abstraction
 
 `IObjectStore`, in the `Vorticity.Dataset` package so that the S3 library can reference it:
@@ -1456,6 +1497,13 @@ of §9.1. Where the two still differ under latency:
   entry for entry — which is what caught the key collision recorded in §8.2. Vacuum and the
   compactor's policy are not scheduled because they do not exist yet (steps 41 and 43); their
   operations are, so the schedule drives those directly.*
+  *Since step 43c they are.* A second schedule runs over real objects: two handles, each acting
+  half the time on the version it last saw, and one store clock the seed moves. Each step is an
+  append, an indexing, a compaction, or a vacuum followed by a repack of what it found sparse.
+  After each step the answers must equal the scan with indexes and summaries off. After each
+  vacuum, every version it retained must verify whole: that is "every retained root references only
+  existing objects", with the pages and fragments checked too. Three seeds; each vacuums and
+  repacks.
 - **The rebase matrix** of §8.2, every row.
 - **The invariant of §5.2** after every compaction step of a randomised append stream; `Explain`
   reports the lag when it is violated on purpose.

@@ -43,6 +43,13 @@ public sealed record VacuumOptions
 
     /// <summary>Marks and reports what would be deleted, and deletes nothing.</summary>
     public bool DryRun { get; init; }
+
+    /// <summary>
+    /// The share of a kept commit object that live pages and fragments must reach for it not to be
+    /// reported <see cref="VacuumResult.Sparse"/>: 0.25 by default, so an object three quarters dead
+    /// is worth a repack (§10's "a threshold on the dead ratio").
+    /// </summary>
+    public double RepackBelow { get; init; } = 0.25;
 }
 
 /// <summary>What a vacuum found and did (§10).</summary>
@@ -52,13 +59,19 @@ public sealed record VacuumOptions
 /// <param name="PagesRead">The distinct pages the marking read.</param>
 /// <param name="Deleted">The objects it deleted, or would have, on a dry run: commits first.</param>
 /// <param name="Young">The unmarked objects it kept because they are younger than the window.</param>
+/// <param name="Sparse">
+/// The commit objects kept alive only by references into them, whose live pages and fragments are
+/// under <see cref="VacuumOptions.RepackBelow"/> of their bytes: what a repack
+/// (<see cref="VortexDataset.RepackAsync"/>) would free at the next vacuum past the window.
+/// </param>
 public sealed record VacuumResult(
     ulong Latest,
     IReadOnlyList<ulong> Retained,
     TimeSpan Window,
     long PagesRead,
     IReadOnlyList<string> Deleted,
-    IReadOnlyList<string> Young);
+    IReadOnlyList<string> Young,
+    IReadOnlyList<ulong> Sparse);
 
 /// <summary>Deletes what no version inside the retention window references (§10). Never automatic.</summary>
 public static class DatasetVacuum
@@ -86,7 +99,7 @@ public static class DatasetVacuum
         (ulong latest, CommitObject? head) = await DatasetCommitter.LatestAsync(store, cancellationToken).ConfigureAwait(false);
         if (head is null)
         {
-            return new VacuumResult(0, [], DefaultWindow, 0, [], []);
+            return new VacuumResult(0, [], DefaultWindow, 0, [], [], []);
         }
 
         RetentionSettings retention = head.Header.Retention;
@@ -95,12 +108,14 @@ public static class DatasetVacuum
         // The commits, newest first, from the one marked from down. A newer one landed meanwhile and
         // is not this vacuum's to judge.
         List<(ulong Version, string Key, DateTimeOffset Created)> commits = [];
+        Dictionary<ulong, long> lengths = [];
         foreach (string key in await ListAllAsync(store, CommitKey.Prefix, cancellationToken).ConfigureAwait(false))
         {
             if (CommitKey.TryParse(key, out ulong version) && version <= latest
                 && await store.HeadAsync(key, cancellationToken).ConfigureAwait(false) is { } found)
             {
                 commits.Add((version, key, found.LastModified));
+                lengths[version] = found.Length;
             }
         }
 
@@ -119,6 +134,8 @@ public static class DatasetVacuum
         HashSet<ulong> markedCommits = [.. retained];
         HashSet<string> markedData = new HashSet<string>(StringComparer.Ordinal);
         HashSet<PageReference> seen = [];
+        HashSet<PageReference> fragmentsSeen = [];
+        Dictionary<ulong, long> live = [];
         CommitPageSource pages = new CommitPageSource(store);
         foreach (ulong version in retained)
         {
@@ -154,7 +171,28 @@ public static class DatasetVacuum
             }
         }
 
-        return new VacuumResult(latest, retained, window, seen.Count, deleted, young);
+        // Sparse: kept by references alone -- a retained version's own header keeps its object
+        // whatever a repack moves out of it -- and mostly dead. The ratio is over the BODY, past the
+        // header: a header inlines copies of the pages it has in hand, so over the whole object every
+        // superseded commit would look half dead, a repack's own commit included, and each repack
+        // would make the next one due.
+        List<ulong> sparse = [];
+        foreach ((ulong version, long bytes) in live)
+        {
+            if (retained.Contains(version) || !lengths.TryGetValue(version, out long length))
+            {
+                continue;
+            }
+
+            long body = length - await CommitObject.PagesStartAsync(store, CommitKey.For(version), cancellationToken).ConfigureAwait(false);
+            if (body > 0 && (double)bytes / body < options.RepackBelow)
+            {
+                sparse.Add(version);
+            }
+        }
+
+        sparse.Sort();
+        return new VacuumResult(latest, retained, window, seen.Count, deleted, young, sparse);
 
         async ValueTask MarkAsync(PageReference reference, int depth)
         {
@@ -164,6 +202,7 @@ public static class DatasetVacuum
             }
 
             markedCommits.Add(reference.Version);
+            live[reference.Version] = live.GetValueOrDefault(reference.Version) + reference.Length;
             ReadOnlyMemory<byte> page = await pages.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false);
             if (depth == 1)
             {
@@ -174,6 +213,10 @@ public static class DatasetVacuum
                     foreach (PageReference fragment in entry.Fragments)
                     {
                         markedCommits.Add(fragment.Version);
+                        if (fragmentsSeen.Add(fragment))
+                        {
+                            live[fragment.Version] = live.GetValueOrDefault(fragment.Version) + fragment.Length;
+                        }
                     }
                 }
 

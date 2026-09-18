@@ -404,6 +404,70 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
         return IsEmpty ? UInt128.Zero : await HashAsync(Root, Depth, source, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// The same tree with every page <paramref name="move"/> selects written again into
+    /// <paramref name="sink"/>, and every page above one of them with it (§10's repack).
+    /// </summary>
+    /// <param name="move">Which pages to take out of where they lie.</param>
+    /// <param name="source">Where the pages are read from.</param>
+    /// <param name="sink">Where the moved pages are written.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The tree, and how many pages were written.</returns>
+    /// <remarks>
+    /// THE CONTENT DOES NOT CHANGE, ONLY THE PLACEMENT: a leaf is copied byte for byte, an internal
+    /// page is copied with its moved children's references, so the tree's content hash
+    /// (<see cref="ContentHashAsync"/>) is the same before and after. A moved page's parent must move
+    /// too, because the reference it holds names the old placement; that is the O(depth) above each
+    /// moved page. Every page is read to find the ones to move -- a reference says where a page lies
+    /// but not where its children do -- which is the offline cost §10 accepts for repack.
+    /// </remarks>
+    public async ValueTask<(DatasetTree Tree, int Moved)> RelocateAsync(
+        Func<PageReference, bool> move, IPageSource source, IPageSink sink, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(move);
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(sink);
+        if (IsEmpty)
+        {
+            return (this, 0);
+        }
+
+        int moved = 0;
+        PageReference root = await RelocateAsync(Root, Depth).ConfigureAwait(false);
+        return (moved == 0 ? this : this with { Root = root }, moved);
+
+        async ValueTask<PageReference> RelocateAsync(PageReference reference, int level)
+        {
+            ReadOnlyMemory<byte> bytes = await source.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false);
+            if (level == 1)
+            {
+                return move(reference) ? Write(bytes.Span) : reference;
+            }
+
+            IReadOnlyList<InternalEntry> page = TreePage.ReadInternal(bytes);
+            InternalEntry[]? rewritten = null;
+            for (int i = 0; i < page.Count; i++)
+            {
+                PageReference child = await RelocateAsync(page[i].Child, level - 1).ConfigureAwait(false);
+                if (child != page[i].Child)
+                {
+                    rewritten ??= [.. page];
+                    rewritten[i] = page[i] with { Child = child };
+                }
+            }
+
+            return rewritten is not null ? Write(TreePage.WriteInternal(rewritten))
+                : move(reference) ? Write(bytes.Span)
+                : reference;
+        }
+
+        PageReference Write(ReadOnlySpan<byte> page)
+        {
+            moved++;
+            return sink.WritePage(page);
+        }
+    }
+
     private static async ValueTask<UInt128> HashAsync(
         PageReference reference, int level, IPageSource source, CancellationToken cancellationToken)
     {

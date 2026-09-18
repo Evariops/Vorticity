@@ -74,6 +74,23 @@ public abstract record DatasetOperation
     /// (<see cref="ObjectEntry.Holds(PageReference)"/>).
     /// </param>
     public sealed record DropFragment(ReadOnlyMemory<byte> Key, PageReference Fragment) : DatasetOperation;
+
+    /// <summary>
+    /// Moves every page and fragment the version still references in these commit objects into
+    /// the new one, so that vacuum can delete them once they leave the window (§10's repack).
+    /// </summary>
+    /// <param name="Versions">The commit objects to empty; vacuum names them in
+    /// <see cref="VacuumResult.Sparse"/>.</param>
+    /// <remarks>
+    /// METADATA ONLY: no row is read or written, and no entry changes what it says -- only where its
+    /// pages lie, the pages above them, whose references named the old placement, and the fragment
+    /// references of the entries whose fragments move, which name placement too. A repack that moves
+    /// pages alone leaves the tree's content hash as it was; one that moves a fragment changes the
+    /// entry that names it, and with it the hash.
+    /// Re-applied on a rebase like any operation: whatever the winner's tree references in those
+    /// objects is what moves, and nothing at all is <see cref="OperationOutcome.AlreadyThere"/>.
+    /// </remarks>
+    public sealed record Repack(IReadOnlyList<ulong> Versions) : DatasetOperation;
 }
 
 /// <summary>What re-applying one operation decided, for `Explain` and for the tests.</summary>

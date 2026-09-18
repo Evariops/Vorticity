@@ -69,6 +69,42 @@ public sealed class DatasetTreeTests
         Assert.Null(await tree.FindAsync(Encoding.UTF8.GetBytes("k99999999"), store, default));
     }
 
+    [Fact]
+    public async Task RelocatingAPageMovesItAndItsAncestorsAndChangesNoContent()
+    {
+        // §10's repack, at the tree: a leaf copied elsewhere takes the pages above it along, since
+        // their references named its old placement, and nothing else; the content hash, which
+        // ignores placement, does not move.
+        MemoryPageStore store = new MemoryPageStore();
+        List<TreeEntry> entries = [.. Enumerable.Range(0, 2_000).Select(i => Entry(i))];
+        DatasetTree tree = DatasetTree.Build(entries, Rule(), store);
+        UInt128 content = await tree.ContentHashAsync(store, default);
+
+        PageReference leaf = Assert.NotNull(await FirstLeafAsync(tree, store));
+        (DatasetTree moved, int written) = await tree.RelocateAsync(reference => reference == leaf, store, store, default);
+        Assert.Equal(tree.Depth, written);
+        Assert.NotEqual(tree.Root, moved.Root);
+        Assert.NotEqual(leaf, await FirstLeafAsync(moved, store));
+        Assert.Equal(content, await moved.ContentHashAsync(store, default));
+        Assert.Equal((tree.Entries, tree.Rows, tree.Depth), (moved.Entries, moved.Rows, moved.Depth));
+
+        // Nothing selected, nothing written, the same tree.
+        (DatasetTree same, int none) = await moved.RelocateAsync(_ => false, store, store, default);
+        Assert.Equal(0, none);
+        Assert.Same(moved, same);
+    }
+
+    private static async Task<PageReference?> FirstLeafAsync(DatasetTree tree, MemoryPageStore store)
+    {
+        PageReference reference = tree.Root;
+        for (int level = tree.Depth; level > 1; level--)
+        {
+            reference = TreePage.ReadInternal(await store.ReadPageAsync(reference, default))[0].Child;
+        }
+
+        return reference;
+    }
+
     [Theory]
     [InlineData(17)]
     [InlineData(4_242)]

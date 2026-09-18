@@ -229,6 +229,77 @@ public sealed class DatasetVacuumTests
     }
 
     [Fact]
+    public async Task ARepackEmptiesTheSparseCommitsSoTheNextVacuumCanTakeThem()
+    {
+        // §10: "when vacuum finds a commit object kept alive by a few live pages among many dead
+        // ones, a metadata-only commit rewrites those pages into itself, so the old object can go at
+        // the next pass". Old leaves and a fragment keep early commits alive after the window.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
+        await using MemoryObjectStore store = new MemoryObjectStore { Clock = clock };
+        DatasetOptions options = Options() with { Rule = new FillBoundaryRule(400) };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options);
+        const int appends = 8;
+        for (int i = 0; i < appends; i++)
+        {
+            await dataset.AppendAsync(Of(types, schema, i * 50, 50));
+            if (i == 0)
+            {
+                IndexingResult indexed = await DatasetIndexer.IndexAsync(
+                    dataset, await SingleObjectAsync(dataset), WritePolicy.None.For("measure", IndexPolicy.Bloom(falsePositivePpm: 1_000)),
+                    options: new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 });
+                Assert.Equal(OperationOutcome.Applied, indexed.Outcome);
+            }
+        }
+
+        List<string> content = Described(await EntriesAsync(dataset));
+        clock.Advance(TimeSpan.FromHours(2));
+
+        // Measured: an append here writes a leaf and the internal pages above it, and the leaf stays
+        // live, so about a third of each body is live -- over the default 0.25. A threshold of 1
+        // names every commit kept by references alone.
+        Assert.Empty((await dataset.VacuumAsync(new VacuumOptions { Clock = clock, DryRun = true })).Sparse);
+        VacuumResult first = await dataset.VacuumAsync(new VacuumOptions { Clock = clock, RepackBelow = 1.0 });
+        Assert.NotEmpty(first.Sparse);
+        Assert.DoesNotContain(dataset.Version, first.Sparse);
+
+        (ulong repacked, OperationOutcome outcome) = await dataset.RepackAsync(first.Sparse);
+        Assert.Equal(OperationOutcome.Applied, outcome);
+        Assert.Equal(repacked, dataset.Version);
+
+        // Placement moved, content did not: every entry as it was, its fragments compared by content
+        // -- a fragment reference names where it lies, so the entry holding a moved one is a changed
+        // entry and the tree hash moves with it -- a clean verify, and nothing of the version left in
+        // the objects it emptied.
+        Assert.Equal(content, Described(await EntriesAsync(dataset)));
+        Assert.True((await dataset.VerifyAsync()).Holds);
+        foreach (ObjectEntry entry in await EntriesAsync(dataset))
+        {
+            Assert.All(entry.Fragments, fragment => Assert.DoesNotContain(fragment.Version, first.Sparse));
+        }
+
+        // A second repack of the same objects finds nothing to move.
+        Assert.Equal(OperationOutcome.AlreadyThere, (await dataset.RepackAsync(first.Sparse)).Outcome);
+
+        // Past the window again, the next vacuum takes every one of them.
+        clock.Advance(TimeSpan.FromHours(2));
+        VacuumResult second = await dataset.VacuumAsync(new VacuumOptions { Clock = clock });
+        foreach (ulong version in first.Sparse)
+        {
+            Assert.Contains(CommitKey.For(version), second.Deleted);
+        }
+
+        // The repack's own commit is all live past its header but for its table, so nothing is due
+        // again at the default threshold: the ratio is over the body, or every repack would make the
+        // next one due.
+        Assert.Empty(second.Sparse);
+        await using VortexDataset fresh = await VortexDataset.OpenAsync(store, options);
+        Assert.Equal(Enumerable.Range(0, appends * 50).Select(i => (long)i), (await KeysAsync(fresh.Scan())).Order());
+    }
+
+    [Fact]
     public async Task AnEmptyStoreHasNothingToVacuum()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
@@ -262,6 +333,14 @@ public sealed class DatasetVacuumTests
 
         return entries;
     }
+
+    /// <summary>Each entry by what it is, its fragments by their content rather than their placement.</summary>
+    private static List<string> Described(List<ObjectEntry> entries) =>
+    [
+        .. entries.Select(entry =>
+            $"{entry.Key} {entry.Uid:x32} {entry.Rows} {entry.Bytes} {entry.Hash:x32} "
+            + string.Join(",", entry.Fragments.Select(fragment => $"{fragment.Length}:{fragment.Hash:x32}"))),
+    ];
 
     private static async Task<PositionedObject> SingleObjectAsync(VortexDataset dataset)
     {

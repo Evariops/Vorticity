@@ -259,6 +259,37 @@ public sealed class DatasetCompactionTests
     }
 
     [Fact]
+    public async Task TheTopLevelOfACappedDatasetHasNoSize()
+    {
+        // The header's `Levels` (step 43c): the same data as above, where level 1 went over its size
+        // and moved up. Capped at two levels, level 1 is the top: it only grows, and a drain ends.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(
+            store, schema, Clustered() with { Compaction = new CompactionSettings(2, 0, 0) });
+        Assert.Equal(2, dataset.Compaction.Levels);
+        foreach (int residue in (int[])[3, 1, 0, 2])
+        {
+            await dataset.AppendAsync(Batches(types, schema, residue));
+        }
+
+        CompactionOptions options = Options(target: 2 << 10) with { Fanout = 2 };
+        Assert.Equal(CompactionTrigger.LevelZeroCeiling, (await dataset.PlanCompactionAsync(options)).Job!.Trigger);
+        _ = await dataset.CompactAsync(options);
+        Assert.True(dataset.Levels[1].Entries > 1);
+
+        Assert.Null((await dataset.PlanCompactionAsync(options)).Job);
+        Assert.Equal(2, dataset.Levels.Count);
+        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.Scan()));
+
+        // And a cap that leaves level 0 nowhere to go is refused where it is stated.
+        Assert.Throws<ArgumentOutOfRangeException>(() => new CompactionOptions { MaxLevels = 1 });
+    }
+
+    [Fact]
     public async Task APlanReadsEntriesAndChangesNothing()
     {
         // §5.3 makes compaction "the user's background job", so planning must be pure: a caller

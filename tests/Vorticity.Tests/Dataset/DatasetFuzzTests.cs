@@ -17,9 +17,9 @@
 // interleavings no fixed test would write down. The two failures it is built for are a page
 // re-chunked wrongly after a rebase, and a commit that landed while its writer was told it had not.
 //
-// VACUUM AND THE COMPACTOR DRIVER ARE NOT HERE because they do not exist yet (steps 41 and 43).
-// Their OPERATIONS do (`ReplaceObjects`), so the schedule drives those directly; what is missing is
-// the policy that chooses them, not the concurrency they run under.
+// THE MODEL SCHEDULE DRIVES `ReplaceObjects` DIRECTLY, since a model of synthetic leaves has no rows
+// to merge. The real compactor and vacuum (steps 41 and 43) run in their own schedule, over real
+// objects, where the invariant is the store's: every version a vacuum retained still verifies.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -335,6 +335,122 @@ public sealed class DatasetFuzzTests
         Assert.True(outcomes.GetValueOrDefault(OperationOutcome.Applied) > 3, "the schedule must index something");
         Console.Out.Write(FormattableString.Invariant(
             $"DATASET FUZZ INDEXERS: {dataset.ObjectCount} objects, {outcomes.GetValueOrDefault(OperationOutcome.Applied)} fragments applied, {outcomes.GetValueOrDefault(OperationOutcome.AlreadyThere)} already there, {outcomes.GetValueOrDefault(OperationOutcome.Dropped)} dropped.\n"));
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(17)]
+    [InlineData(29)]
+    public async Task AScheduleWithTheCompactorAndVacuumLosesNothingARetainedVersionNeeds(int seed)
+    {
+        // The rest of §14's cast since step 43: compactors and vacuum, with repack after it, under
+        // one clock the schedule moves. Two handles, each acting on the version it last saw half of
+        // the time: an append, an indexing, a compaction, a vacuum. Two invariants after every
+        // step: the answers are the scan's with indexes and summaries off, and after a vacuum every
+        // version it retained still verifies whole -- pages, objects and fragments all there.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = types.Struct(
+            ["key", "measure"],
+            [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
+            Nullability.NonNullable);
+
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 0, 0, 0, TimeSpan.Zero));
+        await using MemoryObjectStore store = new MemoryObjectStore { Clock = clock };
+        DatasetOptions options = new DatasetOptions
+        {
+            Seed = Seed,
+            ClusteringKey = ["key"],
+            Retention = new RetentionSettings(0, 3_600),
+            Write = new VortexWriteOptions { RowBlockSize = 128, DataBlockTargetBytes = 8 << 10 },
+        };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options);
+        await using VortexDataset second = await VortexDataset.OpenAsync(store, options);
+        VortexDataset[] handles = [dataset, second];
+        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 64 << 10 };
+        WritePolicy policy = WritePolicy.None.For("measure", IndexPolicy.Bloom(falsePositivePpm: 100));
+        VortexWriteOptions build = new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 };
+
+        Random random = new Random(seed);
+        long rows = 0;
+        int compactions = 0;
+        int deleted = 0;
+        int repacked = 0;
+        for (int step = 0; step < 30; step++)
+        {
+            clock.Advance(TimeSpan.FromMinutes(random.Next(90)));
+            VortexDataset handle = handles[random.Next(2)];
+            switch (rows == 0 ? 0 : random.Next(4))
+            {
+                case 0:
+                    await handle.AppendAsync(Batches(types, schema, rows, 300));
+                    rows += 300;
+                    break;
+
+                case 1:
+                {
+                    List<PositionedObject> seen = [];
+                    await foreach (PositionedObject held in handle.Scan().ObjectsAsync())
+                    {
+                        seen.Add(held);
+                    }
+
+                    _ = await DatasetIndexer.IndexAsync(handle, seen[random.Next(seen.Count)], policy, options: build);
+                    break;
+                }
+
+                case 2:
+                    if (await handle.CompactAsync(compaction) is { Outcome: OperationOutcome.Applied })
+                    {
+                        compactions++;
+                    }
+
+                    break;
+
+                default:
+                {
+                    // A threshold of 1: every commit kept by references alone is repacked, so the
+                    // schedule puts repack commits between the others rather than almost never.
+                    VacuumResult vacuum = await handle.VacuumAsync(new VacuumOptions { Clock = clock, RepackBelow = 1.0 });
+                    deleted += vacuum.Deleted.Count;
+                    foreach (ulong version in vacuum.Retained)
+                    {
+                        DatasetVerification verified = await DatasetVerifier.VerifyAsync(store, new VerifyOptions { Version = version });
+                        Assert.True(verified.Holds, $"step {step}, version {version}: {string.Join("; ", verified.Problems)}");
+                    }
+
+                    if (vacuum.Sparse.Count > 0 && (await handle.RepackAsync(vacuum.Sparse)).Outcome == OperationOutcome.Applied)
+                    {
+                        repacked++;
+                    }
+
+                    break;
+                }
+            }
+
+            if (random.Next(2) == 0)
+            {
+                await handles[0].RefreshAsync();
+                await handles[1].RefreshAsync();
+            }
+
+            await dataset.RefreshAsync();
+            Assert.Equal(rows, dataset.RowCount);
+            VortexExpr question = Expr.Eq(Expr.Field("measure"), Expr.Literal(FilterLiteral.From(rows / 8.0)));
+            Assert.Equal(
+                await KeysAsync(dataset.Scan().Where(question).WithIndexes(false).WithSummaries(false)),
+                await KeysAsync(dataset.Scan().Where(question)));
+            List<long> keys = await KeysAsync(dataset.Scan());
+            keys.Sort();
+            Assert.Equal(rows, keys.Count);
+            Assert.Equal(rows == 0 ? 0 : rows - 1, keys.Count == 0 ? 0 : keys[^1]);
+        }
+
+        Assert.True((await dataset.VerifyAsync()).Holds);
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET FUZZ LIFECYCLE seed {seed}: version {dataset.Version}, {dataset.ObjectCount} objects, {compactions} compaction(s), {deleted} object(s) vacuumed, {repacked} repack(s).\n"));
+        Assert.True(deleted > 0, "the schedule should have vacuumed something");
+        Assert.True(repacked > 0, "the schedule should have repacked something");
     }
 
     /// <summary>One writer's next batch, built from the dataset as it is right now.</summary>

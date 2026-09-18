@@ -68,6 +68,63 @@ public static class DatasetIndexer
         VortexWriteOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        IndexFragment fragment = await BuildAsync(dataset, target, policy, rows, options, cancellationToken).ConfigureAwait(false);
+        CommitResult commit = await dataset
+            .CommitAsync([Attach(target, fragment)], cancellationToken).ConfigureAwait(false);
+        return new IndexingResult(commit.Version, commit.Outcomes[0], fragment.Bytes.Length, fragment.Reports);
+    }
+
+    /// <summary>
+    /// Rebuilds one object's index (§10): its fragments dropped and one fragment over the whole object
+    /// attached, in one commit.
+    /// </summary>
+    /// <param name="dataset">The dataset, which moves to the version the commit creates.</param>
+    /// <param name="target">The object, as the dataset's own walk gives it.</param>
+    /// <param name="policy">What the index is now to hold.</param>
+    /// <param name="options">The budget, block length and scratch for the build; null for the defaults.</param>
+    /// <param name="cancellationToken">Cancels the reads, the build and the commit.</param>
+    /// <returns>What became of the new fragment; its outcome is the commit's for it.</returns>
+    /// <remarks>
+    /// ONE COMMIT, so that no version holds the object with neither index: a reader sees the old
+    /// fragments or the new one. The drops match by content (§8.2), so a fragment another indexer
+    /// attached after this one looked is not dropped, and a rebuild of an object a compaction replaced
+    /// meanwhile drops nothing and attaches nothing -- the compaction embedded its index. The other
+    /// §10 rebuild, rewriting the object so that it embeds the index, is a compaction.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="target"/> does not come from the dataset's walk.</exception>
+    /// <exception cref="VortexUnsupportedException">The object has no identity to bind a fragment to.</exception>
+    public static async ValueTask<IndexingResult> RebuildAsync(
+        VortexDataset dataset,
+        PositionedObject target,
+        WritePolicy policy,
+        VortexWriteOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        IndexFragment fragment = await BuildAsync(dataset, target, policy, null, options, cancellationToken).ConfigureAwait(false);
+        List<DatasetOperation> operations = [];
+        foreach (PageReference old in target.Entry.Fragments)
+        {
+            operations.Add(new DatasetOperation.DropFragment(target.TreeKey, old) { Level = target.Level });
+        }
+
+        operations.Add(Attach(target, fragment));
+        CommitResult commit = await dataset.CommitAsync(operations, cancellationToken).ConfigureAwait(false);
+        return new IndexingResult(commit.Version, commit.Outcomes[^1], fragment.Bytes.Length, fragment.Reports);
+    }
+
+    private static DatasetOperation.AddFragment Attach(PositionedObject target, IndexFragment fragment) =>
+        new DatasetOperation.AddFragment(target.TreeKey, target.Entry.Uid, fragment.Bytes) { Level = target.Level };
+
+    /// <summary>The fragment over <paramref name="rows"/> of the object, built from its plain view.</summary>
+    private static async ValueTask<IndexFragment> BuildAsync(
+        VortexDataset dataset,
+        PositionedObject target,
+        WritePolicy policy,
+        RowRange? rows,
+        VortexWriteOptions? options,
+        CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(dataset);
         ArgumentNullException.ThrowIfNull(policy);
         ObjectEntry entry = target.Entry ?? throw new ArgumentNullException(nameof(target));
@@ -107,12 +164,6 @@ public static class DatasetIndexer
                 cancellationToken).ConfigureAwait(false);
         }
 
-        DatasetOperation.AddFragment attach = new DatasetOperation.AddFragment(
-            target.TreeKey, entry.Uid, fragment.Bytes)
-        {
-            Level = target.Level,
-        };
-        CommitResult commit = await dataset.CommitAsync([attach], cancellationToken).ConfigureAwait(false);
-        return new IndexingResult(commit.Version, commit.Outcomes[0], fragment.Bytes.Length, fragment.Reports);
+        return fragment;
     }
 }

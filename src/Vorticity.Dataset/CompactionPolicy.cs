@@ -100,9 +100,11 @@ public static class CompactionPolicy
         // level's capacity stops growing at the top; without this, a dataset past that point would
         // move its last object up a new level on every call, for ever, and each move would look
         // like progress.
+        //
+        // AND THE TOP LEVEL OF A CAPPED DATASET HAS NO SIZE: nothing is moved out of it (MaxLevels).
         for (int level = 1; level < levels.Count; level++)
         {
-            if (objects[level] > 1 && bytes[level] > settings.CapacityBytes(level))
+            if (!settings.IsTop(level) && objects[level] > 1 && bytes[level] > settings.CapacityBytes(level))
             {
                 return Build(dataset, levels, level, settings, style, CompactionTrigger.LevelSize);
             }
