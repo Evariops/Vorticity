@@ -109,7 +109,7 @@ public sealed record IndexRun(
     public ulong EndBlock => FirstBlock + BlockCount;
 
     /// <summary>
-    /// Where the run's bytes are read: 0 for the directory the file names (its own, or a sidecar),
+    /// Where the run's bytes are read: 0 for the file's own directory,
     /// then one per fragment attached at the open, in the order they were given
     /// (docs/13-dataset.md §6.4).
     /// </summary>
@@ -167,37 +167,37 @@ public sealed record IndexDirectory(
     /// </summary>
     public int BudgetPerMille { get; init; } = DefaultBudgetPerMille;
 
-    /// <summary>For a sidecar: the length of the file it indexes (field 7); 0 in a file's own directory.</summary>
+    /// <summary>For a fragment: the length of the file it indexes (field 7); 0 in a file's own directory.</summary>
     public ulong FileLength { get; init; }
 
     /// <summary>
-    /// For a sidecar: the identity of the version of the file it indexes (field 10,
+    /// For a fragment: the identity of the version of the file it indexes (field 10,
     /// docs/13-dataset.md §7), the binding a reader checks without reading the file; null for a
     /// file written without one.
     /// </summary>
     public Guid? FileIdentity { get; init; }
 
     /// <summary>
-    /// For a sidecar: the store's token for the file when it was indexed (field 11), an opaque
+    /// For a fragment: the store's token for the file when it was indexed (field 11), an opaque
     /// string -- on a file system, its length and modification time. The binding of a file without
     /// an identity, and a heuristic there.
     /// </summary>
     public string? FileToken { get; init; }
 
     /// <summary>
-    /// For a sidecar: the XXH3-128 of the file's bytes, computed by the indexer that read them
-    /// (field 12). No reader computes it; <c>vxdump --verify</c> does.
+    /// For a fragment: the XXH3-128 of the file's bytes, when the indexer knew it (field 12). No
+    /// reader computes it; <c>vxdump --verify</c> does.
     /// </summary>
     public UInt128? FileHash { get; init; }
 
     /// <summary>
     /// Whether the directory carried a SHA-256 of its file (field 8, before step 26), which this
-    /// reader no longer computes: such a sidecar binds by nothing it checks.
+    /// reader no longer computes: such a container binds by nothing it checks.
     /// </summary>
     internal bool LegacySha256 { get; init; }
 
     /// <summary>
-    /// For a sidecar: the array encodings its payloads name, by index (field 9) -- a sidecar's
+    /// For a fragment: the array encodings its payloads name, by index (field 9) -- a fragment's
     /// payloads cannot use the data file's footer, which it does not rewrite.
     /// </summary>
     public IReadOnlyList<string>? ArrayEncodings { get; init; }

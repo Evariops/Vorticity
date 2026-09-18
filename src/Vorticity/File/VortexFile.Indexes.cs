@@ -48,6 +48,19 @@ public sealed record VortexIndexInfo(
     string Kind, string Column, long BlockLength, int Runs, long Blocks, long Entries, long ListedBytes,
     VortexIndexLayout Layout);
 
+/// <summary>What <see cref="VortexFile.VerifyIndexesAsync"/> found.</summary>
+/// <param name="Held">Listed regions whose bytes hold their checksum.</param>
+/// <param name="Torn">The regions whose bytes do not, named: entry, origin, offset and length.</param>
+/// <param name="Bare">Listed regions that carry no checksum (a version 1 directory).</param>
+/// <param name="FileHashHolds">
+/// Whether the file's XXH3-128 is the one every fragment that recorded one recorded; null when none did.
+/// </param>
+public sealed record VortexIndexVerification(long Held, IReadOnlyList<string> Torn, long Bare, bool? FileHashHolds)
+{
+    /// <summary>Whether everything checked holds.</summary>
+    public bool Holds => Torn.Count == 0 && FileHashHolds != false;
+}
+
 public sealed partial class VortexFile
 {
     // Benign race, as for the layout tree: two first readers may both parse, and the results are
@@ -60,13 +73,15 @@ public sealed partial class VortexFile
         IReadOnlyList<string?> FragmentRefusals);
 
     /// <summary>Where one origin's index bytes are read, and the encoding table its payloads name.</summary>
-    /// <param name="Source">The file itself, its sidecar, or a fragment (docs/13-dataset.md §6.4).</param>
+    /// <param name="Source">The file itself, or a fragment (docs/13-dataset.md §6.4).</param>
     /// <param name="Encodings">The array encodings its payloads name; null for the file's own footer.</param>
     /// <param name="Owned">Whether the file disposes the source with itself.</param>
-    private sealed record IndexOrigin(ISegmentSource Source, IReadOnlyList<string>? Encodings, bool Owned);
+    /// <param name="FileHash">The file's XXH3-128 a fragment recorded, which only a verification reads.</param>
+    private sealed record IndexOrigin(
+        ISegmentSource Source, IReadOnlyList<string>? Encodings, bool Owned, UInt128? FileHash = null);
 
     /// <summary>
-    /// Where a run's regions are read: the file itself, its sidecar, or the fragment it came from.
+    /// Where a run's regions are read: the file itself, or the fragment it came from.
     /// </summary>
     /// <param name="run">A run of the directory <see cref="ReadIndexDirectoryAsync"/> returned.</param>
     /// <returns>The source its offsets count in.</returns>
@@ -79,7 +94,7 @@ public sealed partial class VortexFile
 
     /// <summary>
     /// A context to decode a run's payloads in: over the file's encoding table, or over the table the
-    /// run's sidecar or fragment carries (docs/10-indexes.md §8, docs/13-dataset.md §6.4).
+    /// run's fragment carries (docs/13-dataset.md §6.4).
     /// </summary>
     /// <param name="run">A run of the directory <see cref="ReadIndexDirectoryAsync"/> returned.</param>
     /// <returns>The context, which the caller disposes.</returns>
@@ -120,14 +135,11 @@ public sealed partial class VortexFile
     }
 
     /// <summary>
-    /// Whether the postscript names an index directory at all, or the read options name a sidecar
-    /// to take one from (<see cref="VortexReadOptions.IndexSidecarPath"/>) or fragments to add
-    /// (<see cref="VortexReadOptions.IndexFragments"/>).
+    /// Whether the postscript names an index directory at all, or the read options name fragments
+    /// to add (<see cref="VortexReadOptions.IndexFragments"/>).
     /// </summary>
     public bool HasIndexDirectory =>
-        TryGetMetadataIndex(IndexDirectory.MetadataKeyUtf8, out _)
-        || ReadOptions.IndexSidecarPath is not null
-        || ReadOptions.IndexFragments.Count > 0;
+        TryGetMetadataIndex(IndexDirectory.MetadataKeyUtf8, out _) || ReadOptions.IndexFragments.Count > 0;
 
     /// <summary>
     /// Why the file's index directory was not used, when it was present and refused; otherwise
@@ -286,12 +298,12 @@ public sealed partial class VortexFile
         string?[] refusals = new string?[blobs.Count];
         for (int i = 0; i < blobs.Count; i++)
         {
-            // Bound like a sidecar, by the identity or the store token the fragment records: a
-            // fragment of another object, or of another version of this one, is refused whole.
+            // Bound by the identity or the store token the fragment records: a fragment of another
+            // object, or of another version of this one, is refused whole.
             MemorySegmentSource source = new MemorySegmentSource(blobs[i]);
-            (IndexDirectory? fragment, string? why) = await IndexSidecar
-                .ReadAsync(source, blobs[i].Length, this, "fragment", cancellationToken).ConfigureAwait(false);
-            origins.Add(new IndexOrigin(source, fragment?.ArrayEncodings, Owned: true));
+            (IndexDirectory? fragment, string? why) = await IndexContainer
+                .ReadAsync(source, blobs[i].Length, this, cancellationToken).ConfigureAwait(false);
+            origins.Add(new IndexOrigin(source, fragment?.ArrayEncodings, Owned: true, fragment?.FileHash));
             fragments.Add(fragment);
             refusals[i] = why;
         }
@@ -300,7 +312,7 @@ public sealed partial class VortexFile
         return new IndexState(merged, refusal, origins, refusals);
     }
 
-    /// <summary>The file's own directory, else the sidecar the read options name, else none.</summary>
+    /// <summary>The file's own directory, or none.</summary>
     /// <param name="cancellationToken">Cancels the read.</param>
     private async ValueTask<(IndexDirectory? Directory, string? Refusal, IndexOrigin Origin)> ReadNamedDirectoryAsync(
         CancellationToken cancellationToken)
@@ -308,17 +320,7 @@ public sealed partial class VortexFile
         IndexOrigin file = new IndexOrigin(_source, null, Owned: false);
         if (!TryGetMetadataIndex(IndexDirectory.MetadataKeyUtf8, out int index))
         {
-            // No directory of its own: the sidecar, when the caller named one (§8).
-            if (ReadOptions.IndexSidecarPath is not { } sidecar)
-            {
-                return (null, null, file);
-            }
-
-            (ISegmentSource? source, IndexDirectory? found, string? why) =
-                await IndexSidecar.OpenAsync(sidecar, this, cancellationToken).ConfigureAwait(false);
-            return source is null
-                ? (null, why, file)
-                : (found, why, new IndexOrigin(source, found?.ArrayEncodings, Owned: true));
+            return (null, null, file);
         }
 
         // A run lies before the directory: runs go out before the zone maps, the directory after
@@ -331,10 +333,72 @@ public sealed partial class VortexFile
             : (null, reason, file);
     }
 
+    /// <summary>
+    /// Checks every index region the directory lists against its checksum, wherever it is read — the
+    /// file or a fragment — and the file's bytes against the XXH3-128 a fragment recorded
+    /// (docs/13-dataset.md §7): the hash no reader computes, computed here, offline.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>What held and what did not.</returns>
+    /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>
+    /// <remarks>
+    /// Every region listed is read once, and the file whole once when a fragment recorded its hash:
+    /// this is the tool's check, `vxdump --verify`, never a scan's. The pages and tree nodes under a
+    /// listed region are checked as they are read, by the reader that reads them.
+    /// </remarks>
+    public async ValueTask<VortexIndexVerification> VerifyIndexesAsync(CancellationToken cancellationToken = default)
+    {
+        IndexDirectory? directory = await ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
+        long held = 0;
+        long bare = 0;
+        List<string> torn = [];
+        foreach (IndexEntry entry in directory?.Entries ?? [])
+        {
+            foreach (IndexRun run in entry.Runs)
+            {
+                foreach (IndexSegment segment in run.Payload)
+                {
+                    if (segment.Checksum is null)
+                    {
+                        bare++;
+                        continue;
+                    }
+
+                    using SegmentOwner bytes = await IndexSourceOf(run)
+                        .ReadRangeAsync((long)segment.Offset, (int)segment.Length, 1, cancellationToken).ConfigureAwait(false);
+                    if (segment.Holds(bytes.Buffer.Span))
+                    {
+                        held++;
+                    }
+                    else
+                    {
+                        torn.Add(FormattableString.Invariant(
+                            $"{entry.Kind} on '{ColumnOf(entry)}', origin {run.Origin}, region {segment.Offset}+{segment.Length}"));
+                    }
+                }
+            }
+        }
+
+        bool? hashHolds = null;
+        UInt128? actual = null;
+        foreach (IndexOrigin origin in _indexState!.Origins)
+        {
+            if (origin.FileHash is not { } recorded)
+            {
+                continue;
+            }
+
+            actual ??= await IndexContainer.HashAsync(_source, FileLength, cancellationToken).ConfigureAwait(false);
+            hashHolds = (hashHolds ?? true) && actual == recorded;
+        }
+
+        return new VortexIndexVerification(held, torn, bare, hashHolds);
+    }
+
     /// <summary>An entry as a refusal names it: its kind and its column.</summary>
     private string EntryName(IndexEntry entry) => $"{entry.Kind} on '{ColumnOf(entry)}'";
 
-    /// <summary>Closes the sidecar and fragment sources a state opened; the file's own is not its to close.</summary>
+    /// <summary>Closes the fragment sources a state opened; the file's own is not its to close.</summary>
     private static async ValueTask DisposeIndexSourcesAsync(IndexState state)
     {
         foreach (IndexOrigin origin in state.Origins)

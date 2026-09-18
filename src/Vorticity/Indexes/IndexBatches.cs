@@ -2,7 +2,7 @@
 // regions of the runs it needs, read them in one request, decode them in one context.
 //
 // ONE BATCH PER ORIGIN, since docs/13-dataset.md §6.4. A run's offsets count from the start of its
-// origin -- the file, its sidecar, or the fragment it came from -- and its payloads name the arrays of
+// origin -- the file, or the fragment it came from -- and its payloads name the arrays of
 // that origin's encoding table. So regions of two origins can be neither read by one request nor
 // decoded by one context, and a load that used to be one read per file is one read per origin: still
 // one for a file indexed by itself, one more per fragment a scan actually needs.

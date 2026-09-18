@@ -1,29 +1,31 @@
-// The sidecar index file - docs/10-indexes.md §8, third way: `file.vortex.idx`, for stores that
-// cannot append (the Iceberg Puffin pattern).
+// The container of an index kept outside its file - docs/13-dataset.md §6.4: a fragment is "one
+// entry's runs over one block range of one object, in the format of the in-file runs ... with its
+// own encoding table ... so a fragment decodes with no access to the data object's footer".
 //
 //   "VXIX"                        magic
 //   run payloads                  array blobs, aligned like a data file's segments
 //   directory                     the IndexDirectory message, version byte first, with the indexed
 //                                 file's length, identity, store token and XXH3-128, and the
-//                                 sidecar's own encoding table
+//                                 container's own encoding table
 //   u64 directory offset, u32 directory length, u32 version, "VXIX"      the trailer, 20 bytes
 //
-// THE SIDECAR IS BOUND TO ONE VERSION OF ONE FILE (13 §7, step 26). A file rewritten under the same
-// name would make every run a lie about rows it no longer has, so a mismatch refuses the sidecar
+// IT WAS THE SIDECAR'S, and 13 §12 retired the word: "the sidecar is one fragment in one commit
+// object: it is not a separate thing any more". The `.idx` file beside a data file went with step
+// 42d; the container stayed, because a fragment is exactly it, and every offset in it counts from
+// its own first byte, so it is read from wherever it is kept -- a commit object's range, bytes in
+// memory -- by the same code.
+//
+// A FRAGMENT IS BOUND TO ONE VERSION OF ONE FILE (13 §7, step 26). A file rewritten under the same
+// key would make every run a lie about rows it no longer has, so a mismatch refuses the fragment
 // whole -- an index is a hint, and a stale one is none. The binding is what a reader can check
 // without reading the file: its length and its identity, which every write and every append mints
 // anew, from the tail the open already holds. A file without an identity -- written by another
 // writer -- is bound by the store's token instead, its length and modification time on a file
-// system, which is a heuristic and is said to be one. The SHA-256 that bound a sidecar before this
-// step made every open read the whole file; a sidecar that carries only that binds by nothing a
-// reader checks, and is refused.
+// system, which is a heuristic and is said to be one. A container that binds only by the SHA-256 of
+// step 17 binds by nothing a reader checks, and is refused.
 //
-// THE FILE'S HASH IS THE INDEXER'S. It reads the whole file to index it anyway, so it records the
-// XXH3-128 of the bytes; no reader computes it, and `vxdump --verify` compares it offline.
-//
-// ITS PAYLOADS NAME THEIR OWN ENCODINGS. A payload is an array blob whose nodes name encodings by
-// index into a footer's table; the data file's footer is not the sidecar's to extend, so the
-// directory carries the table the payloads were written against.
+// THE FILE'S HASH IS THE INDEXER'S, when it knows it: no reader computes it, and `vxdump --verify`
+// compares it offline.
 using System;
 using System.Buffers.Binary;
 using System.IO;
@@ -36,8 +38,8 @@ using Vorticity.IO;
 
 namespace Vorticity.Indexes;
 
-/// <summary>The sidecar file's container.</summary>
-internal static class IndexSidecar
+/// <summary>The container an index fragment is written in (docs/13-dataset.md §6.4).</summary>
+internal static class IndexContainer
 {
     /// <summary>The magic at both ends.</summary>
     internal static ReadOnlySpan<byte> Magic => "VXIX"u8;
@@ -60,61 +62,20 @@ internal static class IndexSidecar
     }
 
     /// <summary>
-    /// Opens a sidecar and reads its directory, refusing it with a reason when it is not one, or
-    /// is not the sidecar of <paramref name="file"/>.
-    /// </summary>
-    /// <returns>The sidecar's source and directory, or a reason.</returns>
-    internal static async ValueTask<(ISegmentSource? Source, IndexDirectory? Directory, string? Reason)> OpenAsync(
-        string path, File.VortexFile file, CancellationToken cancellationToken)
-    {
-        if (!System.IO.File.Exists(path))
-        {
-            return (null, null, $"the sidecar {path} does not exist");
-        }
-
-        MemoryMappedSegmentSource source = MemoryMappedSegmentSource.Open(path);
-        try
-        {
-            long length = await source.GetLengthAsync(cancellationToken).ConfigureAwait(false);
-            (IndexDirectory? directory, string? reason) =
-                await ReadAsync(source, length, file, "sidecar", cancellationToken).ConfigureAwait(false);
-            if (directory is null)
-            {
-                await source.DisposeAsync().ConfigureAwait(false);
-                return (null, null, reason);
-            }
-
-            return (source, directory, null);
-        }
-        catch
-        {
-            await source.DisposeAsync().ConfigureAwait(false);
-            throw;
-        }
-    }
-
-    /// <summary>
-    /// Reads the container's directory from any source holding it whole, refusing it with a reason
+    /// Reads a container's directory from any source holding it whole, refusing it with a reason
     /// when it is not one, or is not this file's.
     /// </summary>
-    /// <param name="source">The bytes, starting at the magic: a file, or a fragment's blob (13 §6.4).</param>
+    /// <param name="source">The bytes, starting at the magic.</param>
     /// <param name="length">How long they are.</param>
     /// <param name="file">The data object the index is offered for.</param>
-    /// <param name="what">What to call it in a refusal: "sidecar" or "fragment".</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The directory, or the reason it was refused.</returns>
-    /// <remarks>
-    /// THE CONTAINER IS POSITION-INDEPENDENT, which is what lets a fragment be the same bytes inside
-    /// a commit object (13 §12: "one fragment in one commit object; the word goes"). Every offset in
-    /// it is relative to its own start, so the reader needs a source that begins at the magic and
-    /// nothing else — not a path, not a length in some enclosing file.
-    /// </remarks>
     internal static async ValueTask<(IndexDirectory? Directory, string? Reason)> ReadAsync(
-        ISegmentSource source, long length, File.VortexFile file, string what, CancellationToken cancellationToken)
+        ISegmentSource source, long length, File.VortexFile file, CancellationToken cancellationToken)
     {
         if (length < Magic.Length + TrailerSize)
         {
-            return (null, $"the {what} is too short to hold a trailer");
+            return (null, "the fragment is too short to hold a trailer");
         }
 
         long offset;
@@ -122,7 +83,7 @@ internal static class IndexSidecar
         using (SegmentOwner trailer = await source
             .ReadRangeAsync(length - TrailerSize, TrailerSize, 1, cancellationToken).ConfigureAwait(false))
         {
-            (offset, size, string? bad) = ReadTrailer(trailer.Buffer, length, what);
+            (offset, size, string? bad) = ReadTrailer(trailer.Buffer, length);
             if (bad is not null)
             {
                 return (null, bad);
@@ -137,38 +98,37 @@ internal static class IndexSidecar
             if (!IndexDirectory.TryParse(
                 bytes.Buffer.Span, (ulong)file.RowCount, (ulong)offset, out directory, out reason))
             {
-                return (null, $"the {what}'s " + reason);
+                return (null, "the fragment's " + reason);
             }
         }
 
-        if (Unbound(directory!, file, what) is { } stale)
+        if (Unbound(directory!, file) is { } stale)
         {
             return (null, stale);
         }
 
         return directory!.ArrayEncodings is null
-            ? (null, $"the {what} carries no encoding table for its payloads")
+            ? (null, "the fragment carries no encoding table for its payloads")
             : (directory, null);
     }
 
-    private static (long Offset, int Length, string? Reason) ReadTrailer(
-        VortexBuffer trailer, long length, string what)
+    private static (long Offset, int Length, string? Reason) ReadTrailer(VortexBuffer trailer, long length)
     {
         ReadOnlySpan<byte> bytes = trailer.Span;
         if (!bytes[16..].SequenceEqual(Magic))
         {
-            return (0, 0, $"the {what}'s trailer does not end with VXIX");
+            return (0, 0, "the fragment's trailer does not end with VXIX");
         }
 
         if (BinaryPrimitives.ReadUInt32LittleEndian(bytes[12..]) != Version)
         {
-            return (0, 0, $"the {what}'s version is not one this library reads");
+            return (0, 0, "the fragment's version is not one this library reads");
         }
 
         ulong offset = BinaryPrimitives.ReadUInt64LittleEndian(bytes);
         uint size = BinaryPrimitives.ReadUInt32LittleEndian(bytes[8..]);
         return offset < (ulong)Magic.Length || offset + size > (ulong)(length - TrailerSize)
-            ? (0, 0, $"the {what}'s trailer names a directory outside it")
+            ? (0, 0, "the fragment's trailer names a directory outside it")
             : ((long)offset, (int)size, null);
     }
 
@@ -177,38 +137,37 @@ internal static class IndexSidecar
     /// does: the length, then the identity, or the store's token for a file without one. Nothing of
     /// the file is read.
     /// </summary>
-    /// <param name="directory">The sidecar's directory.</param>
+    /// <param name="directory">The fragment's directory.</param>
     /// <param name="file">The file it is offered for.</param>
-    /// <param name="what">What to call it in a refusal: "sidecar" or "fragment" (13 §6.4).</param>
-    internal static string? Unbound(IndexDirectory directory, File.VortexFile file, string what = "sidecar")
+    internal static string? Unbound(IndexDirectory directory, File.VortexFile file)
     {
         if (directory.FileLength != (ulong)file.FileLength)
         {
-            return $"the {what} indexes a file of {directory.FileLength} bytes, not this one of {file.FileLength}: it is stale";
+            return $"the fragment indexes a file of {directory.FileLength} bytes, not this one of {file.FileLength}: it is stale";
         }
 
         if (directory.FileIdentity is { } identity)
         {
             return file.Identity == identity
                 ? null
-                : $"the {what} indexes the version {identity:N} of the file, and this is {(file.Identity is { } other ? other.ToString("N") : "a file without an identity")}: it is stale";
+                : $"the fragment indexes the version {identity:N} of the file, and this is {(file.Identity is { } other ? other.ToString("N") : "a file without an identity")}: it is stale";
         }
 
         if (directory.FileToken is { } token)
         {
             if (TokenOf(file) is not { } current)
             {
-                return $"the {what} binds a file without an identity by its store token, and this file was not opened from a path that gives one";
+                return "the fragment binds a file without an identity by its store token, and this file was not opened from a path that gives one";
             }
 
             return string.Equals(current, token, StringComparison.Ordinal)
                 ? null
-                : $"the {what} was written for the store token {token}, and the file's is {current}: it is stale (a heuristic for a file without an identity)";
+                : $"the fragment was written for the store token {token}, and the file's is {current}: it is stale (a heuristic for a file without an identity)";
         }
 
         return directory.LegacySha256
-            ? $"the {what} binds its file by a SHA-256, which a reader no longer computes (13 §7): rebuild it"
-            : $"the {what} names neither the file's identity nor its store token";
+            ? "the fragment binds its file by a SHA-256, which a reader no longer computes (13 §7): rebuild it"
+            : "the fragment names neither the file's identity nor its store token";
     }
 
     /// <summary>The store token of the file at <paramref name="path"/>: its length and modification time.</summary>
@@ -220,8 +179,8 @@ internal static class IndexSidecar
     }
 
     /// <summary>
-    /// The store tokens of files opened from a path while a sidecar was asked for, taken at the
-    /// open. A file opened otherwise has none, and pays nothing for the table.
+    /// The store tokens of files opened from a path with fragments to bind, taken at the open. A file
+    /// opened otherwise has none, and pays nothing for the table.
     /// </summary>
     private static readonly ConditionalWeakTable<File.VortexFile, string> Tokens = [];
 

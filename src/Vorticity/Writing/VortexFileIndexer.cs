@@ -1,4 +1,5 @@
-// Indexing a file that already exists - docs/10-indexes.md §8, the second and third ways.
+// Indexing a file that already exists - docs/10-indexes.md §8, the second way, and the fragment of
+// docs/13-dataset.md §6.4 that replaced the third.
 //
 // POST-HOC INDEXING BY APPEND. The file is read chunk by chunk, block by block, and every row is fed
 // to the builders exactly as the writer would have fed it; the runs, a new directory, a footer and a
@@ -12,11 +13,11 @@
 // before the copy leaves the file as it was; one that dies during it leaves a tail
 // `VortexFileRepair` removes.
 //
-// THE SIDECAR AND THE FRAGMENT. The same runs and directory in a container of their own -- a file
-// beside the data (`file.vortex.idx`) for stores that cannot append, or bytes a dataset keeps in a
-// commit object (docs/13-dataset.md §6.4) -- bound to the file by its identity or its store token,
-// and carrying the encoding table its payloads name. Every offset in it counts from its own start,
-// so one writer serves both. A fragment may cover a block RANGE rather than the file: its builders
+// THE FRAGMENT. The same runs and directory in a container of their own, which a dataset keeps in a
+// commit object (docs/13-dataset.md §6.4), bound to the file by its identity or its store token and
+// carrying the encoding table its payloads name. It was the sidecar's container: the `.idx` file
+// beside the data went with step 42d, since a store that cannot append is a dataset's store, and a
+// file system can append. A fragment may cover a block RANGE rather than the file: its builders
 // are numbered from the range's first block, which an append learns from `Continue` and a range has
 // to be told -- fed without it, a run's blocks would contradict its `FirstBlock`, an index that is
 // wrong and says nothing.
@@ -129,42 +130,6 @@ public static class VortexFileIndexer
     }
 
     /// <summary>
-    /// Indexes <paramref name="path"/> under <paramref name="policy"/> into a sidecar file, leaving
-    /// the file untouched; a reader takes it with <see cref="VortexReadOptions.IndexSidecarPath"/>.
-    /// </summary>
-    /// <param name="path">The file.</param>
-    /// <param name="policy">What to build.</param>
-    /// <param name="sidecarPath">Where the sidecar goes; null for <c>path + ".idx"</c>.</param>
-    /// <param name="options">As for <see cref="AppendIndexesAsync"/>.</param>
-    /// <param name="cancellationToken">Cancels the read and the writes.</param>
-    /// <returns>What became of every index the policy asked for.</returns>
-    /// <exception cref="VortexUnsupportedException">The file's layout is not one this can index.</exception>
-    public static async ValueTask<IReadOnlyList<IndexWriteReport>> WriteSidecarAsync(
-        string path, WritePolicy policy, string? sidecarPath = null, VortexWriteOptions? options = null,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(path);
-        ArgumentNullException.ThrowIfNull(policy);
-        sidecarPath ??= path + ".idx";
-        VortexFile file = await VortexFile.OpenAsync(path, cancellationToken).ConfigureAwait(false);
-        await using (file.ConfigureAwait(false))
-        {
-            VortexFileRepair.ThrowIfTorn(path, file, "A sidecar");
-            // THE BINDING (13 §7): the identity when the file has one, the store's token always,
-            // and the hash of the bytes, which this pass is the one to compute.
-            UInt128 hash = await IndexSidecar.HashAsync(file.Segments, file.FileLength, cancellationToken).ConfigureAwait(false);
-            FileStream stream = new FileStream(sidecarPath, FileMode.Create, FileAccess.Write, FileShare.None);
-            StreamSegmentSink sink = new StreamSegmentSink(stream, ownsStream: true);
-            await using (sink.ConfigureAwait(false))
-            {
-                return await WriteContainerAsync(
-                    file, sink, policy, new RowRange(0, file.RowCount), IndexSidecar.TokenOf(path), hash, options,
-                    cancellationToken).ConfigureAwait(false);
-            }
-        }
-    }
-
-    /// <summary>
     /// Indexes the rows <paramref name="rows"/> of <paramref name="file"/> under
     /// <paramref name="policy"/> into a fragment (docs/13-dataset.md §6.4), leaving the file
     /// untouched; a reader adds it to the file's own index with
@@ -208,6 +173,7 @@ public static class VortexFileIndexer
     {
         ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(policy);
+        VortexFileRepair.ThrowIfTorn("The file", file, "A fragment");
         if (file.Identity is null && storeToken is null)
         {
             throw new InvalidOperationException(
@@ -233,16 +199,16 @@ public static class VortexFileIndexer
         VortexFile file, StreamSegmentSink sink, WritePolicy policy, RowRange rows, string? token, UInt128? hash,
         VortexWriteOptions? options, CancellationToken cancellationToken)
     {
-        await sink.WriteAsync(IndexSidecar.Magic.ToArray(), cancellationToken).ConfigureAwait(false);
+        await sink.WriteAsync(IndexContainer.Magic.ToArray(), cancellationToken).ConfigureAwait(false);
         EncodingDictionary encodings = new EncodingDictionary(
             ComponentKind.Array, options?.TargetEdition ?? EditionRegistry.Newest);
         using IndexWriter indexes = await BuildAsync(
             file, sink, policy, options, encodings, [], 0, rows, cancellationToken).ConfigureAwait(false);
-        SidecarBinding binding = new SidecarBinding(file.FileLength, file.Identity, token, hash, [.. encodings.Ids]);
+        FragmentBinding binding = new FragmentBinding(file.FileLength, file.Identity, token, hash, [.. encodings.Ids]);
         long offset = sink.Position;
         byte[] directory = indexes.Directory(file.RowCount, binding)!;
         await sink.WriteAsync(directory, cancellationToken).ConfigureAwait(false);
-        await sink.WriteAsync(IndexSidecar.Trailer(offset, directory.Length), cancellationToken).ConfigureAwait(false);
+        await sink.WriteAsync(IndexContainer.Trailer(offset, directory.Length), cancellationToken).ConfigureAwait(false);
         await sink.FlushAsync(cancellationToken).ConfigureAwait(false);
         return [.. indexes.Reports];
     }

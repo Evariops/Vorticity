@@ -53,9 +53,10 @@ internal static class Program
                   --row-keys    row-encode every batch and report the keys (experimental format)
                   --indexes     the index directory: policy, entries, runs and their bytes
                   --explain E   the plan of a scan filtered by E, e.g. "id >= 10 and name = 'x'"
-                  --sidecar P   read the indexes from the sidecar P when the file has none
+                  --fragment P  add the index fragment in file P to the file's own indexes
+                                (repeatable; a fragment of a dataset, 13-dataset.md §6.4)
                   --verify      check every listed index region against its checksum, and a
-                                sidecar's record of the file's XXH3-128 against the file
+                                fragment's record of the file's XXH3-128 against the file
                   --repair      truncate a torn append back to the last valid file
                 """);
             return args.Length == 0 ? 2 : 0;
@@ -71,8 +72,14 @@ internal static class Program
 
         try
         {
-            VortexOpenOptions open = sections.Sidecar is { } sidecarPath
-                ? new VortexOpenOptions { Read = new VortexReadOptions { IndexSidecarPath = sidecarPath } }
+            List<ReadOnlyMemory<byte>> fragments = [];
+            foreach (string fragment in sections.Fragments)
+            {
+                fragments.Add(await System.IO.File.ReadAllBytesAsync(fragment).ConfigureAwait(false));
+            }
+
+            VortexOpenOptions open = fragments.Count > 0
+                ? new VortexOpenOptions { Read = new VortexReadOptions { IndexFragments = fragments } }
                 : VortexOpenOptions.Default;
             await using VortexFile file = await VortexFile.OpenAsync(path, open, CancellationToken.None);
             StringBuilder output = new StringBuilder();
@@ -113,7 +120,7 @@ internal static class Program
                 await Explain(output, file, expression).ConfigureAwait(false);
             }
 
-            bool verified = !sections.Verify || await Verify(output, file, sections.Sidecar).ConfigureAwait(false);
+            bool verified = !sections.Verify || await Verify(output, file).ConfigureAwait(false);
             Console.Out.Write(output.ToString());
             if (!verified)
             {
@@ -573,15 +580,23 @@ internal static class Program
     }
 
     /// <summary>
-    /// `--verify`: every index region the directory lists against its checksum, and, for a sidecar,
-    /// the file's bytes against the XXH3-128 the indexer recorded -- the hash no reader computes
-    /// (docs/13-dataset.md §7), computed here, offline.
+    /// `--verify`: every index region the directory lists against its checksum, wherever it is read
+    /// -- the file or a fragment -- and the file's bytes against the XXH3-128 a fragment recorded:
+    /// the hash no reader computes (docs/13-dataset.md §7), computed here, offline.
     /// </summary>
     /// <returns>Whether everything checked holds.</returns>
-    private static async Task<bool> Verify(StringBuilder output, VortexFile file, string? sidecar)
+    private static async Task<bool> Verify(StringBuilder output, VortexFile file)
     {
         output.Append("\nverify\n");
         Vorticity.Indexes.IndexDirectory? directory = await file.ReadIndexDirectoryAsync().ConfigureAwait(false);
+        foreach (string? fragment in file.IndexFragmentRefusals)
+        {
+            if (fragment is not null)
+            {
+                output.Append("  fragment  ").Append(fragment).Append('\n');
+            }
+        }
+
         if (directory is null)
         {
             output.Append("  no index directory");
@@ -594,76 +609,22 @@ internal static class Program
             return file.IndexDirectoryRefusal is null;
         }
 
-        bool fromSidecar = sidecar is not null && !file.TryGetMetadataIndex("vorticity.index"u8, out _);
-        ISegmentSource regions = fromSidecar ? MemoryMappedSegmentSource.Open(sidecar!) : file.Segments;
-        try
+        VortexIndexVerification verified = await file.VerifyIndexesAsync().ConfigureAwait(false);
+        foreach (string torn in verified.Torn)
         {
-            long held = 0;
-            long torn = 0;
-            long bare = 0;
-            foreach (Vorticity.Indexes.IndexEntry entry in directory.Entries)
-            {
-                foreach (Vorticity.Indexes.IndexRun run in entry.Runs)
-                {
-                    foreach (Vorticity.Indexes.IndexSegment segment in run.Payload)
-                    {
-                        if (segment.Checksum is null)
-                        {
-                            bare++;
-                            continue;
-                        }
-
-                        using SegmentOwner bytes = await regions.ReadRangeAsync(
-                            (long)segment.Offset, (int)segment.Length, 1, CancellationToken.None).ConfigureAwait(false);
-                        if (segment.Holds(bytes.Buffer.Span))
-                        {
-                            held++;
-                        }
-                        else
-                        {
-                            torn++;
-                            output.Append("  torn      ").Append(entry.Kind).Append(" region ")
-                                .Append(Text(segment.Offset)).Append('+').Append(Text((long)segment.Length)).Append('\n');
-                        }
-                    }
-                }
-            }
-
-            output.Append("  regions   ").Append(Text(held)).Append(" hold their checksums, ")
-                .Append(Text(torn)).Append(" do not, ").Append(Text(bare)).Append(" carry none")
-                .Append(" (the pages and nodes under them are checked as they are read)\n");
-            if (!fromSidecar)
-            {
-                return torn == 0;
-            }
-
-            if (directory.FileHash is not { } expected)
-            {
-                output.Append("  file hash the sidecar records none\n");
-                return torn == 0;
-            }
-
-            System.IO.Hashing.XxHash128 hash = new System.IO.Hashing.XxHash128();
-            for (long at = 0; at < file.FileLength; at += 1 << 20)
-            {
-                int size = (int)Math.Min(1 << 20, file.FileLength - at);
-                using SegmentOwner chunk = await file.Segments.ReadRangeAsync(at, size, 1, CancellationToken.None).ConfigureAwait(false);
-                hash.Append(chunk.Buffer.Span);
-            }
-
-            UInt128 actual = hash.GetCurrentHashAsUInt128();
-            output.Append("  file hash ").Append(actual == expected
-                ? "matches the sidecar's record"
-                : $"{actual:X32} is not the sidecar's {expected:X32}: the file changed under its identity").Append('\n');
-            return torn == 0 && actual == expected;
+            output.Append("  torn      ").Append(torn).Append('\n');
         }
-        finally
+
+        output.Append("  regions   ").Append(Text(verified.Held)).Append(" hold their checksums, ")
+            .Append(Text(verified.Torn.Count)).Append(" do not, ").Append(Text(verified.Bare)).Append(" carry none")
+            .Append(" (the pages and nodes under them are checked as they are read)\n");
+        output.Append("  file hash ").Append(verified.FileHashHolds switch
         {
-            if (fromSidecar)
-            {
-                await regions.DisposeAsync().ConfigureAwait(false);
-            }
-        }
+            null => "no fragment records one",
+            true => "matches every fragment's record",
+            false => "is not a fragment's record: the file changed under its identity",
+        }).Append('\n');
+        return verified.Holds;
     }
 
     /// <summary>`--indexes`: the directory of docs/10-indexes.md §4.1, as the reader kept it.</summary>
@@ -761,7 +722,7 @@ internal static class Program
     {
         private Sections(
             bool schema, bool encodings, bool layout, bool segments, bool stats, bool scan, bool rowKeys,
-            bool indexes, string? explain, string? sidecar, bool verify)
+            bool indexes, string? explain, IReadOnlyList<string> fragments, bool verify)
         {
             Schema = schema;
             Encodings = encodings;
@@ -772,16 +733,16 @@ internal static class Program
             RowKeys = rowKeys;
             Indexes = indexes;
             Explain = explain;
-            Sidecar = sidecar;
+            Fragments = fragments;
             Verify = verify;
         }
 
         internal bool Indexes { get; }
 
-        /// <summary>A sidecar index file to read the indexes from, when the file has none of its own.</summary>
-        internal string? Sidecar { get; }
+        /// <summary>Files holding index fragments to add to the file's own indexes.</summary>
+        internal IReadOnlyList<string> Fragments { get; }
 
-        /// <summary>Check the index regions against their checksums, and a sidecar's file hash against the file.</summary>
+        /// <summary>Check the index regions against their checksums, and a fragment's file hash against the file.</summary>
         internal bool Verify { get; }
 
         internal string? Explain { get; }
@@ -811,7 +772,7 @@ internal static class Program
             bool rowKeys = false;
             bool indexes = false;
             string? explain = null;
-            string? sidecar = null;
+            List<string> fragments = [];
             bool verify = false;
             bool any = false;
 
@@ -821,8 +782,8 @@ internal static class Program
                 switch (arg)
                 {
                     case "--indexes": indexes = any = true; break;
-                    case "--sidecar" when i + 1 < args.Length:
-                        sidecar = args[++i];
+                    case "--fragment" when i + 1 < args.Length:
+                        fragments.Add(args[++i]);
                         break;
                     case "--verify": verify = any = true; break;
                     case "--explain" when i + 1 < args.Length:
@@ -851,8 +812,8 @@ internal static class Program
 
             // No section asked for means the layout tree, which is what F12 names.
             return any
-                ? new Sections(schema, encodings, layout, segments, stats, scan, rowKeys, indexes, explain, sidecar, verify)
-                : new Sections(false, false, true, false, false, false, false, false, null, sidecar, false);
+                ? new Sections(schema, encodings, layout, segments, stats, scan, rowKeys, indexes, explain, fragments, verify)
+                : new Sections(false, false, true, false, false, false, false, false, null, fragments, false);
         }
     }
 }

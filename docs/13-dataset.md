@@ -707,6 +707,23 @@ bundle of the containers, not a rebuilt index.**
   pruner reads them in the bundle's one read, and a cursor merges them as it merges any runs.
   Rebuilding them into one run is a data read, which is §10's rebuild, not this.
 
+**As delivered (step 42d): the word "sidecar" is retired.**
+- **What is removed.** The `.idx` file, `VortexFileIndexer.WriteSidecarAsync`,
+  `VortexReadOptions.IndexSidecarPath`, `IndexSidecar` and `vxdump --sidecar`.
+- **What replaces them.** A single file's post-hoc index is a fragment in the caller's hands:
+  `BuildFragmentAsync` over the whole file, attached with `IndexFragments`. The container and its
+  binding live on as `IndexContainer`.
+- **The tests.** The five binding tests of step 26 are now fragment tests, each over the same
+  scenario:
+  - bound without reading the file;
+  - refused once the file changes;
+  - bound by the token when there is no identity;
+  - the reasons;
+  - a byte changed in place passes the reader and fails the recorded hash.
+- **A hole the last test found.** A fragment the budget emptied still binds, and binds to
+  nothing. The runs of a small, well-compressed file outweigh its data. The test now asserts
+  every report `Built`, since a bound fragment with no entry proves nothing.
+
 ### 6.5 Which structure for which column
 
 The read bound depends on choosing by cardinality, which the writer knows exactly (11 §3.2.2).
@@ -882,6 +899,8 @@ every such file: the cross-check reads 854 of them.
   mismatch and exits with 6.
 - **Scope.** The sidecar itself is retired by §6.4 when the dataset's fragments exist (step 42).
   This step moves its binding to the one this document keeps.
+- **Since step 42d**, that binding is a fragment's (`IndexContainer`), and the check no reader
+  makes is public: `VortexFile.VerifyIndexesAsync()`, which `vxdump --fragment P --verify` calls.
 
 **As delivered (step 21, the checksums of the file's own indexes).** The in-file index directory is
 version 2 ([10-indexes.md](10-indexes.md) §4.1): an XXH3-64 trailer over the directory, and an
@@ -1165,7 +1184,8 @@ shape that could escape the store. An S3 library runs it against its own store.
 - **What it refuses.** `VortexOpenOptions.TornTail = Refuse` keeps the failure, and so does a file
   with no whole version before its tail. An in-place append, an in-place indexing pass and a
   sidecar all refuse a torn file and name `VortexFileRepair.RepairAsync`: nothing is written
-  behind garbage.
+  behind garbage. Since step 42d the sidecar's place is taken by `BuildFragmentAsync`, which
+  refuses a file opened at its previous version the same way.
 - **What it does not use.** The new directory's `previous_eof` is never read: it is in the torn
   bytes. The walk finds the old end-of-file record, which the append never overwrote.
 

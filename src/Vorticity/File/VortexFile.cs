@@ -125,15 +125,15 @@ public sealed partial class VortexFile : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(options);
         MemoryMappedSegmentSource source = MemoryMappedSegmentSource.Open(path);
         ValueTask<VortexFile> open = OpenCoreAsync(source, options, ownsSource: true, cancellationToken);
-        string? tokenPath = options.Read.IndexSidecarPath is null && options.Read.IndexFragments.Count == 0 ? null : path;
+        string? tokenPath = options.Read.IndexFragments.Count == 0 ? null : path;
         return tokenPath is null && !options.PreloadIndexes
             ? open
             : FinishOpenAsync(open, tokenPath, options.PreloadIndexes, cancellationToken);
     }
 
     /// <summary>
-    /// What an open does after the tail: the store token of a file opened from a path for a sidecar
-    /// or its fragments (13 §7), the binding of a file without an identity, taken now; then the index directory when
+    /// What an open does after the tail: the store token of a file opened from a path for its
+    /// fragments (13 §7), the binding of a file without an identity, taken now; then the index directory when
     /// the options preload it (11 §6.3).
     /// </summary>
     private static async ValueTask<VortexFile> FinishOpenAsync(
@@ -144,7 +144,7 @@ public sealed partial class VortexFile : IAsyncDisposable
         {
             if (tokenPath is not null)
             {
-                global::Vorticity.Indexes.IndexSidecar.RememberToken(file, tokenPath);
+                global::Vorticity.Indexes.IndexContainer.RememberToken(file, tokenPath);
             }
 
             // A file without a directory is answered without a read, and then describes none.

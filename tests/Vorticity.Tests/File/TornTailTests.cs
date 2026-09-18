@@ -6,7 +6,7 @@
 // reads as that version; a second append torn opens at the first; a whole file opens as it stands
 // with no read more; a file that does not begin as Vortex is refused without a walk; the refusing
 // policy keeps the failure, and so does a file with no whole version; and neither an append, an
-// index nor a sidecar is written behind a tear.
+// index nor a fragment is built behind a tear.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -154,17 +154,23 @@ public sealed class TornTailTests
                 async () => await VortexFileWriter.AppendAsync(path, Options));
             VortexFormatException index = await Assert.ThrowsAsync<VortexFormatException>(
                 async () => await VortexFileIndexer.AppendIndexesAsync(path, WritePolicy.None.For("id", IndexPolicy.SortedRuns)));
-            VortexFormatException sidecar = await Assert.ThrowsAsync<VortexFormatException>(
-                async () => await VortexFileIndexer.WriteSidecarAsync(path, WritePolicy.None.For("id", IndexPolicy.SortedRuns), path + ".idx"));
-            foreach (VortexFormatException refusal in (VortexFormatException[])[append, index, sidecar])
+            VortexFormatException fragment;
+            await using (VortexFile previous = await VortexFile.OpenAsync(path))
+            {
+                Assert.NotNull(previous.TornTail);
+                fragment = await Assert.ThrowsAsync<VortexFormatException>(
+                    async () => await VortexFileIndexer.BuildFragmentAsync(
+                        previous, WritePolicy.None.For("id", IndexPolicy.SortedRuns), new RowRange(0, previous.RowCount)));
+            }
+
+            foreach (VortexFormatException refusal in (VortexFormatException[])[append, index, fragment])
             {
                 Assert.Contains("torn tail", refusal.Message, StringComparison.Ordinal);
                 Assert.Contains("RepairAsync", refusal.Message, StringComparison.Ordinal);
             }
 
-            // Not a byte moved, and no sidecar was left.
+            // Not a byte moved.
             Assert.Equal(torn, await System.IO.File.ReadAllBytesAsync(path));
-            Assert.False(System.IO.File.Exists(path + ".idx"));
 
             // The repair is the caller's, and after it the file is whole again.
             VortexRepairResult repaired = await VortexFileRepair.RepairAsync(path);
@@ -176,7 +182,6 @@ public sealed class TornTailTests
         finally
         {
             System.IO.File.Delete(path);
-            System.IO.File.Delete(path + ".idx");
         }
     }
 

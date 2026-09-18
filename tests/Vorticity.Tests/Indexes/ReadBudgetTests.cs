@@ -4,10 +4,10 @@
 // WHAT IS HELD: the counting source counts rounds, ranges and bytes as a reader asks; a file's
 // indexes are described without a request once its directory is read, and preloading reads it at
 // the open, from the tail it already holds; and a point lookup -- through a sorted run in fence
-// pages, a filter tree, a count, a key cursor, a sidecar -- costs the same requests and the same
+// pages, a filter tree, a count, a key cursor, a fragment -- costs the same requests and the same
 // bytes on a file of one gibibyte and on the same file of ten, both sparse: nothing on the read path
-// depends on the file's length. The SHA-256 a sidecar bound by until step 26 read the whole file;
-// this is the test that would have said so.
+// depends on the file's length. The SHA-256 the retired sidecar bound by until step 26 read the
+// whole file; this is the test that would have said so.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -139,37 +139,39 @@ public sealed class ReadBudgetTests
             Assert.InRange(costs[0].Bytes, 1, 4L << 20);
         }
 
-        // The same with the indexes in a sidecar, bound by identity: the binding reads nothing.
-        foreach (Sparse sparse in (Sparse[])[small, large])
-        {
-            await VortexFileIndexer.WriteSidecarAsync(sparse.Plain, Policy);
-        }
-
-        (long Requests, long Bytes)[] sidecar = new (long, long)[2];
+        // The same with the indexes in a fragment, bound by identity: the binding reads nothing.
+        (long Requests, long Bytes)[] fragmented = new (long, long)[2];
         for (int at = 0; at < 2; at++)
         {
-            sidecar[at] = await LookupAsync((at == 0 ? small : large).Plain, 77_777, sidecar: true);
+            string plain = (at == 0 ? small : large).Plain;
+            IndexFragment fragment;
+            await using (VortexFile unindexed = await VortexFile.OpenAsync(plain))
+            {
+                fragment = await VortexFileIndexer.BuildFragmentAsync(unindexed, Policy, new RowRange(0, unindexed.RowCount));
+            }
+
+            fragmented[at] = await LookupAsync(plain, 77_777, fragment.Bytes);
         }
 
-        Assert.Equal(sidecar[0], sidecar[1]);
-        Assert.InRange(sidecar[0].Bytes, 1, 4L << 20);
+        Assert.Equal(fragmented[0], fragmented[1]);
+        Assert.InRange(fragmented[0].Bytes, 1, 4L << 20);
     }
 
     /// <summary>
     /// What one lookup of <paramref name="row"/>'s keys costs on the file: the open, a count through
     /// the sorted run, a scan through the filter tree, a key cursor's seek, and the roots' answer.
     /// </summary>
-    private static async Task<(long Requests, long Bytes)> LookupAsync(string path, int row, bool sidecar = false)
+    private static async Task<(long Requests, long Bytes)> LookupAsync(string path, int row, ReadOnlyMemory<byte>? fragment = null)
     {
         CountingSegmentSource source = new CountingSegmentSource(MemoryMappedSegmentSource.Open(path));
         VortexOpenOptions options = new VortexOpenOptions
         {
-            Read = sidecar ? new VortexReadOptions { IndexSidecarPath = path + ".idx" } : VortexReadOptions.Default,
+            Read = fragment is { } bytes ? new VortexReadOptions { IndexFragments = [bytes] } : VortexReadOptions.Default,
         };
         await using VortexFile file = await VortexFile.OpenAsync(source, options);
-        if (sidecar)
+        if (fragment is not null)
         {
-            Assert.True(await file.ReadIndexDirectoryAsync() is not null, file.IndexDirectoryRefusal);
+            Assert.True(await file.ReadIndexDirectoryAsync() is not null, string.Join("; ", file.IndexFragmentRefusals));
         }
 
         VortexExpr key = Expr.Eq(Expr.Field("k"), Expr.Literal(FilterLiteral.From(K(row))));
@@ -197,7 +199,7 @@ public sealed class ReadBudgetTests
 
     /// <summary>
     /// The same rows written twice: once with a hole after every large write -- a sparse file of the
-    /// size asked for -- and once without, for the sidecar, which only an unindexed file takes.
+    /// size asked for -- and once without, for the fragment, which only an unindexed file takes.
     /// </summary>
     private sealed class Sparse : IDisposable
     {
@@ -222,7 +224,7 @@ public sealed class ReadBudgetTests
 
         public void Dispose()
         {
-            foreach (string path in (string[])[Path, Plain, Plain + ".idx"])
+            foreach (string path in (string[])[Path, Plain])
             {
                 System.IO.File.Delete(path);
             }

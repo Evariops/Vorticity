@@ -25,7 +25,7 @@ namespace Vorticity.Indexes;
 internal static class IndexFragmentMerge
 {
     /// <summary>The directory the file names, with every fragment's entries added to it.</summary>
-    /// <param name="named">The file's own directory, or its sidecar's; null when it has none.</param>
+    /// <param name="named">The file's own directory; null when it has none.</param>
     /// <param name="fragments">
     /// Each fragment's directory, already bound to the file; null for one refused whole. Fragment
     /// <c>i</c> is origin <c>i + 1</c>.

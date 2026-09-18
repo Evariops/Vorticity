@@ -336,23 +336,28 @@ public sealed class AppendTests
     }
 
     [Fact]
-    public async Task ASidecarIndexesAFileItLeavesAloneAndIsRefusedOnceTheFileChanges()
+    public async Task AFragmentIndexesAFileItLeavesAloneAndIsRefusedOnceTheFileChanges()
     {
         Decoders.EnsureRegistered();
         string once = TempPath();
         string plain = TempPath();
-        string sidecar = plain + ".idx";
         try
         {
             await WriteAsync(once, 0, Rows);
             await WriteAsync(plain, 0, Rows, WritePolicy.None);
             byte[] before = await System.IO.File.ReadAllBytesAsync(plain);
-            await VortexFileIndexer.WriteSidecarAsync(plain, Policy, options: new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 });
+            IndexFragment fragment;
+            await using (VortexFile unindexed = await VortexFile.OpenAsync(plain))
+            {
+                fragment = await VortexFileIndexer.BuildFragmentAsync(
+                    unindexed, Policy, new RowRange(0, unindexed.RowCount),
+                    options: new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 });
+            }
             Assert.True((await System.IO.File.ReadAllBytesAsync(plain)).AsSpan().SequenceEqual(before));
 
-            VortexOpenOptions withSidecar = new VortexOpenOptions { Read = new VortexReadOptions { IndexSidecarPath = sidecar } };
+            VortexOpenOptions withFragment = new VortexOpenOptions { Read = new VortexReadOptions { IndexFragments = [fragment.Bytes] } };
             await using (VortexFile expected = await VortexFile.OpenAsync(once))
-            await using (VortexFile actual = await VortexFile.OpenAsync(plain, withSidecar))
+            await using (VortexFile actual = await VortexFile.OpenAsync(plain, withFragment))
             {
                 Assert.True(actual.HasIndexDirectory);
                 await AssertSameAnswers(expected, actual);
@@ -366,8 +371,8 @@ public sealed class AppendTests
                 Assert.False(bare.HasIndexDirectory);
             }
 
-            // The file changes under the sidecar -- an append that writes no directory of its own,
-            // so the sidecar is still the one looked at: refused as stale, and the scan still answers.
+            // The file changes under the fragment -- an append that writes no directory of its own,
+            // so the fragment is still the one looked at: refused as stale, and the scan still answers.
             await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(
                 plain, new VortexWriteOptions { Indexes = WritePolicy.None }))
             {
@@ -375,9 +380,9 @@ public sealed class AppendTests
                 await writer.CompleteAsync();
             }
 
-            await using VortexFile changed = await VortexFile.OpenAsync(plain, withSidecar);
+            await using VortexFile changed = await VortexFile.OpenAsync(plain, withFragment);
             Assert.Null(await changed.ReadIndexDirectoryAsync());
-            Assert.Contains("stale", changed.IndexDirectoryRefusal, StringComparison.Ordinal);
+            Assert.Contains("stale", Assert.Single(changed.IndexFragmentRefusals), StringComparison.Ordinal);
             VortexExpr filter = Expr.Eq(Expr.Field("v"), Expr.Literal(FilterLiteral.From(417L)));
             Assert.Equal(
                 await changed.Scan().Where(filter).WithIndexes(false).CountAsync(),
@@ -387,7 +392,6 @@ public sealed class AppendTests
         {
             System.IO.File.Delete(once);
             System.IO.File.Delete(plain);
-            System.IO.File.Delete(sidecar);
         }
     }
 

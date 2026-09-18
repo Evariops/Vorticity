@@ -107,7 +107,7 @@ public sealed class VortexOpenOptions
     public VortexTornTailPolicy TornTail { get; init; }
 
     /// <summary>
-    /// Whether the open also reads the index directory -- a sidecar's included -- rather than the
+    /// Whether the open also reads the index directory -- its fragments included -- rather than the
     /// first scan that needs it (docs/11-write-strategy.md §6.3). Default <see langword="false"/>.
     /// </summary>
     /// <remarks>

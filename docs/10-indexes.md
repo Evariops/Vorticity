@@ -778,6 +778,25 @@ that compacts runs.
   (`IndexRun.Origin`) and is read and decoded there. `IndexSidecarPath` stays until the sidecar is
   retired.
 
+- **The sidecar is retired, since step 42d (13 §6.4, §12).** What goes is the `.idx` file and the
+  reader's search for one: `VortexFileIndexer.WriteSidecarAsync` and
+  `VortexReadOptions.IndexSidecarPath` are removed, and a post-hoc index for a store that cannot
+  append is a fragment built by `BuildFragmentAsync`. The caller keeps its bytes where it likes and
+  hands them back in `IndexFragments`; in a dataset, that is a commit object. What stays is
+  everything the sidecar taught:
+  - **The container.** `IndexContainer` now holds the magic, the trailer and the binding.
+  - **The binding.** It is by identity, or by the store's token for a file written without one.
+    A file opened from a path records its token only when fragments are asked for, as it did for a
+    sidecar.
+  - **The offline check.** It is public now: `VortexFile.VerifyIndexesAsync()` checks every listed
+    region against its checksum, wherever it lies, and the file's bytes against the XXH3-128 a
+    fragment recorded. `vxdump --fragment P --verify` is its tool, repeatable, and still exits
+    with 6.
+
+  A torn file refuses a fragment as it refused a sidecar, naming `RepairAsync`. The second way of
+  this section, post-hoc indexing by append on a file system, is untouched: the capability stays,
+  and only the second object goes.
+
 **A key source needs a complete index.** Found by the append tests: a pruner can use runs that cover
 part of the file (a block no run covers is live), but a cursor over them misses the other blocks'
 keys, and the exact cover counted the old rows only after an append whose builder the budget had

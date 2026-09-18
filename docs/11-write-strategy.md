@@ -499,7 +499,8 @@ reads the version it ends, and reports the tear in `VortexFile.TornTail`.
 `VortexOpenOptions.TornTail = Refuse` keeps the old failure. An append, an indexing pass or a
 sidecar refuses a torn file until it is repaired.
 Object stores that cannot append (S3) take the sidecar path of [10-indexes.md](10-indexes.md) §8
-or a rewrite.
+or a rewrite. *Since step 42d, that path is a fragment (13 §6.4), which a torn file refuses in the
+same way.*
 
 **As delivered (step 17).** `VortexFileWriter.AppendAsync(path, options?)` continues a file of this
 writer's shape — a struct of columns, each a chunked layout of flat segments, zoned or not, chunked

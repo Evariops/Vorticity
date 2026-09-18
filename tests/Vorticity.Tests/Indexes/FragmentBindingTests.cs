@@ -1,14 +1,14 @@
-// The sidecar bound by identity - docs/13-dataset.md §7, docs/10-indexes.md §8, step 26 of
-// IMPL-PLAN.md.
+// An index fragment bound to one version of one file - docs/13-dataset.md §7 and §6.4. These were
+// the sidecar's binding tests (step 26); step 42d retired the sidecar and kept its container, which
+// is the fragment, so they hold the same promises of the fragment.
 //
-// WHAT IS HELD: a sidecar records the file's length, identity, store token and XXH3-128; opening it
+// WHAT IS HELD: a fragment records the file's length, identity, store token and XXH3-128; reading it
 // reads no byte of the file beyond the tail the open already took; a file rewritten at the same
 // length is refused by its identity, without a hash; a file without an identity is bound by its
-// store token, which a touch breaks and a source without a path cannot give; a sidecar that binds
-// only by a SHA-256 is refused with the reason; and a byte changed under an unchanged identity
-// passes every reader check and fails the recorded hash, which is what `vxdump --verify` compares.
+// store token, which a touch breaks and a source without a path cannot give; a fragment that binds
+// only by a SHA-256 is refused with the reason; and a byte changed under an unchanged identity passes
+// every reader check and fails the recorded hash, which is what `VerifyIndexesAsync` compares.
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.IO.Hashing;
 using System.Runtime.InteropServices;
@@ -30,7 +30,7 @@ using Xunit;
 
 namespace Vorticity.Tests.Indexes;
 
-public sealed class SidecarBindingTests
+public sealed class FragmentBindingTests
 {
     private const int Rows = 20_000;
 
@@ -44,15 +44,15 @@ public sealed class SidecarBindingTests
     private static long Id(int row) => (row * 7_919L) % 100_003;
 
     [Fact]
-    public async Task ASidecarBindsByIdentityAndOpensWithoutReadingTheFile()
+    public async Task AFragmentBindsByIdentityAndIsReadWithoutReadingTheFile()
     {
         Decoders.EnsureRegistered();
         using Temp temp = new Temp();
         await WriteAsync(temp.Path, Guid.NewGuid());
-        await VortexFileIndexer.WriteSidecarAsync(temp.Path, Policy);
+        byte[] fragment = await FragmentAsync(temp.Path);
 
         // What it records.
-        IndexDirectory recorded = await SidecarDirectoryAsync(temp.Path);
+        IndexDirectory recorded = await RecordedAsync(temp.Path, fragment);
         await using (VortexFile file = await VortexFile.OpenAsync(temp.Path))
         {
             Assert.Equal((ulong)file.FileLength, recorded.FileLength);
@@ -63,12 +63,12 @@ public sealed class SidecarBindingTests
         Assert.Equal(XxHash128.HashToUInt128(await System.IO.File.ReadAllBytesAsync(temp.Path)), recorded.FileHash);
         Assert.False(recorded.LegacySha256);
 
-        // Opening it reads nothing of the file past the open's own tail.
+        // Reading it reads nothing of the file past the open's own tail.
         CountingSource source = new CountingSource(MemoryMappedSegmentSource.Open(temp.Path));
-        await using VortexFile counted = await VortexFile.OpenAsync(source, WithSidecar(temp.Path));
+        await using VortexFile counted = await VortexFile.OpenAsync(source, With(fragment));
         int atOpen = source.Reads;
         IndexDirectory? directory = await counted.ReadIndexDirectoryAsync();
-        Assert.True(directory is not null, counted.IndexDirectoryRefusal);
+        Assert.True(directory is not null, Assert.Single(counted.IndexFragmentRefusals));
         Assert.Equal(atOpen, source.Reads);
 
         // And it answers.
@@ -82,7 +82,7 @@ public sealed class SidecarBindingTests
         Decoders.EnsureRegistered();
         using Temp temp = new Temp();
         await WriteAsync(temp.Path, Guid.NewGuid());
-        await VortexFileIndexer.WriteSidecarAsync(temp.Path, Policy);
+        byte[] fragment = await FragmentAsync(temp.Path);
         long length = new FileInfo(temp.Path).Length;
 
         // The same rows written again: the same length, another version.
@@ -90,11 +90,12 @@ public sealed class SidecarBindingTests
         Assert.Equal(length, new FileInfo(temp.Path).Length);
 
         CountingSource source = new CountingSource(MemoryMappedSegmentSource.Open(temp.Path));
-        await using VortexFile file = await VortexFile.OpenAsync(source, WithSidecar(temp.Path));
+        await using VortexFile file = await VortexFile.OpenAsync(source, With(fragment));
         int atOpen = source.Reads;
         Assert.Null(await file.ReadIndexDirectoryAsync());
-        Assert.Contains("stale", file.IndexDirectoryRefusal, StringComparison.Ordinal);
-        Assert.Contains("version", file.IndexDirectoryRefusal, StringComparison.Ordinal);
+        string refusal = Assert.Single(file.IndexFragmentRefusals)!;
+        Assert.Contains("stale", refusal, StringComparison.Ordinal);
+        Assert.Contains("version", refusal, StringComparison.Ordinal);
         Assert.Equal(atOpen, source.Reads);
 
         // The scan answers without it.
@@ -121,94 +122,116 @@ public sealed class SidecarBindingTests
             Assert.Null(foreign.Identity);
         }
 
-        await VortexFileIndexer.WriteSidecarAsync(temp.Path, Policy);
-        IndexDirectory recorded = await SidecarDirectoryAsync(temp.Path);
+        byte[] fragment = await FragmentAsync(temp.Path);
+        IndexDirectory recorded = await RecordedAsync(temp.Path, fragment);
         Assert.Null(recorded.FileIdentity);
-        Assert.Equal(IndexSidecar.TokenOf(temp.Path), recorded.FileToken);
+        Assert.Equal(IndexContainer.TokenOf(temp.Path), recorded.FileToken);
 
-        await using (VortexFile bound = await VortexFile.OpenAsync(temp.Path, WithSidecar(temp.Path)))
+        await using (VortexFile bound = await VortexFile.OpenAsync(temp.Path, With(fragment)))
         {
-            Assert.True(await bound.ReadIndexDirectoryAsync() is not null, bound.IndexDirectoryRefusal);
+            Assert.True(await bound.ReadIndexDirectoryAsync() is not null, Assert.Single(bound.IndexFragmentRefusals));
         }
 
         // Without a path, there is no token to compare.
-        await using (VortexFile unbound = await VortexFile.OpenAsync(MemoryMappedSegmentSource.Open(temp.Path), WithSidecar(temp.Path)))
+        await using (VortexFile unbound = await VortexFile.OpenAsync(MemoryMappedSegmentSource.Open(temp.Path), With(fragment)))
         {
             Assert.Null(await unbound.ReadIndexDirectoryAsync());
-            Assert.Contains("store token", unbound.IndexDirectoryRefusal, StringComparison.Ordinal);
+            Assert.Contains("store token", Assert.Single(unbound.IndexFragmentRefusals), StringComparison.Ordinal);
         }
 
         // A touch changes the token: the heuristic refuses.
         System.IO.File.SetLastWriteTimeUtc(temp.Path, DateTime.UtcNow.AddMinutes(-5));
-        await using VortexFile touched = await VortexFile.OpenAsync(temp.Path, WithSidecar(temp.Path));
+        await using VortexFile touched = await VortexFile.OpenAsync(temp.Path, With(fragment));
         Assert.Null(await touched.ReadIndexDirectoryAsync());
-        Assert.Contains("heuristic", touched.IndexDirectoryRefusal, StringComparison.Ordinal);
+        Assert.Contains("heuristic", Assert.Single(touched.IndexFragmentRefusals), StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task ASidecarBoundOnlyByASha256IsRefusedWithItsReason()
+    public async Task AFragmentBoundOnlyByASha256IsRefusedWithItsReason()
     {
         Decoders.EnsureRegistered();
         using Temp temp = new Temp();
         await WriteAsync(temp.Path, Guid.NewGuid());
-        await VortexFileIndexer.WriteSidecarAsync(temp.Path, Policy);
-        IndexDirectory recorded = await SidecarDirectoryAsync(temp.Path);
+        IndexDirectory recorded = await RecordedAsync(temp.Path, await FragmentAsync(temp.Path));
         await using VortexFile file = await VortexFile.OpenAsync(temp.Path);
 
-        Assert.Null(IndexSidecar.Unbound(recorded, file));
+        Assert.Null(IndexContainer.Unbound(recorded, file));
         IndexDirectory legacy = recorded with { FileIdentity = null, FileToken = null, LegacySha256 = true };
-        Assert.Contains("SHA-256", IndexSidecar.Unbound(legacy, file), StringComparison.Ordinal);
+        Assert.Contains("SHA-256", IndexContainer.Unbound(legacy, file), StringComparison.Ordinal);
         IndexDirectory nothing = legacy with { LegacySha256 = false };
-        Assert.Contains("neither", IndexSidecar.Unbound(nothing, file), StringComparison.Ordinal);
+        Assert.Contains("neither", IndexContainer.Unbound(nothing, file), StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task AByteChangedUnderTheIdentityPassesTheReaderAndFailsTheRecordedHash()
     {
         // 13 §7: no reader computes the hash. A byte of data changed in place keeps the length and
-        // the identity, so the sidecar still binds; only the offline check sees it.
+        // the identity, so the fragment still binds; only the offline check sees it.
         Decoders.EnsureRegistered();
         using Temp temp = new Temp();
         await WriteAsync(temp.Path, Guid.NewGuid());
-        await VortexFileIndexer.WriteSidecarAsync(temp.Path, Policy);
-        IndexDirectory recorded = await SidecarDirectoryAsync(temp.Path);
+        byte[] fragment = await FragmentAsync(temp.Path);
+
+        await using (VortexFile whole = await VortexFile.OpenAsync(temp.Path, With(fragment)))
+        {
+            VortexIndexVerification clean = await whole.VerifyIndexesAsync();
+            Assert.True(clean.Holds);
+            Assert.True(clean.FileHashHolds);
+            Assert.True(clean.Held > 0);
+        }
 
         byte[] bytes = await System.IO.File.ReadAllBytesAsync(temp.Path);
         bytes[bytes.Length / 3] ^= 0x10;
         await System.IO.File.WriteAllBytesAsync(temp.Path, bytes);
 
-        await using VortexFile file = await VortexFile.OpenAsync(temp.Path, WithSidecar(temp.Path));
-        Assert.True(await file.ReadIndexDirectoryAsync() is not null, file.IndexDirectoryRefusal);
-        Assert.NotEqual(recorded.FileHash, XxHash128.HashToUInt128(bytes));
+        await using VortexFile file = await VortexFile.OpenAsync(temp.Path, With(fragment));
+        Assert.True(await file.ReadIndexDirectoryAsync() is not null, Assert.Single(file.IndexFragmentRefusals));
+        VortexIndexVerification changed = await file.VerifyIndexesAsync();
+        Assert.False(changed.FileHashHolds);
+        Assert.False(changed.Holds);
+        Assert.Empty(changed.Torn);
     }
 
     // ------------------------------------------------------------------------------ helpers
 
-    private static VortexOpenOptions WithSidecar(string path) =>
-        new VortexOpenOptions { Read = new VortexReadOptions { IndexSidecarPath = path + ".idx" } };
+    private static VortexOpenOptions With(byte[] fragment) =>
+        new VortexOpenOptions { Read = new VortexReadOptions { IndexFragments = [fragment] } };
 
-    /// <summary>The directory a sidecar holds, as written.</summary>
-    private static async Task<IndexDirectory> SidecarDirectoryAsync(string path)
+    /// <summary>
+    /// A fragment over the whole file, bound as the retired sidecar was: by its identity, the file
+    /// system's token, and the hash of its bytes, which this indexer knows because it read them.
+    /// </summary>
+    private static async Task<byte[]> FragmentAsync(string path)
     {
-        byte[] sidecar = await System.IO.File.ReadAllBytesAsync(path + ".idx");
-        ReadOnlySpan<byte> trailer = sidecar.AsSpan(sidecar.Length - IndexSidecar.TrailerSize);
+        UInt128 hash = XxHash128.HashToUInt128(await System.IO.File.ReadAllBytesAsync(path));
+        await using VortexFile file = await VortexFile.OpenAsync(path);
+        IndexFragment fragment = await VortexFileIndexer.BuildFragmentAsync(
+            file, Policy, new RowRange(0, file.RowCount), IndexContainer.TokenOf(path), hash,
+            new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 });
+
+        // The runs outweigh this small file's compressed data: a budget of the data's size abandons
+        // them, and a fragment with no entry would bind and prove nothing.
+        Assert.All(fragment.Reports, report => Assert.Equal(IndexOutcome.Built, report.Outcome));
+        return fragment.Bytes.ToArray();
+    }
+
+    /// <summary>The directory a fragment holds, as written.</summary>
+    private static async Task<IndexDirectory> RecordedAsync(string path, byte[] fragment)
+    {
+        ReadOnlySpan<byte> trailer = fragment.AsSpan(fragment.Length - IndexContainer.TrailerSize);
         long offset = (long)System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(trailer);
         int length = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(trailer[8..]);
         await using VortexFile file = await VortexFile.OpenAsync(path);
         Assert.True(IndexDirectory.TryParse(
-            sidecar.AsSpan((int)offset, length), (ulong)file.RowCount, (ulong)offset, out IndexDirectory? directory, out string? reason), reason);
+            fragment.AsSpan((int)offset, length), (ulong)file.RowCount, (ulong)offset, out IndexDirectory? directory, out string? reason), reason);
         return directory!;
     }
 
     private sealed class Temp : IDisposable
     {
-        internal string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vorticity-sidecar-{Guid.NewGuid():N}.vortex");
+        internal string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vorticity-fragment-{Guid.NewGuid():N}.vortex");
 
-        public void Dispose()
-        {
-            System.IO.File.Delete(Path);
-            System.IO.File.Delete(Path + ".idx");
-        }
+        public void Dispose() => System.IO.File.Delete(Path);
     }
 
     /// <summary>Counts what goes through a source.</summary>

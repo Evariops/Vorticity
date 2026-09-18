@@ -24,14 +24,14 @@ using Vorticity.Types.Serialization;
 namespace Vorticity.Writing;
 
 /// <summary>
-/// What binds a sidecar or a fragment to the version of the file it indexes (docs/13-dataset.md §7).
+/// What binds an index fragment to the version of the file it indexes (docs/13-dataset.md §7).
 /// </summary>
 /// <param name="Length">The file's length.</param>
 /// <param name="Identity">Its identity, when it has one.</param>
 /// <param name="Token">The store's token for it, when the store gives one.</param>
 /// <param name="Hash">The XXH3-128 of its bytes, when the indexer knows it; no reader computes it.</param>
 /// <param name="Encodings">The encodings the container's payloads name.</param>
-internal sealed record SidecarBinding(long Length, Guid? Identity, string? Token, UInt128? Hash, IReadOnlyList<string> Encodings);
+internal sealed record FragmentBinding(long Length, Guid? Identity, string? Token, UInt128? Hash, IReadOnlyList<string> Encodings);
 
 /// <summary>Builds the indexes of one file and the directory that lists them.</summary>
 internal sealed class IndexWriter : IDisposable
@@ -774,7 +774,7 @@ internal sealed class IndexWriter : IDisposable
     /// covers every block and replaces it.
     /// </summary>
     /// <param name="entries">The old entries.</param>
-    /// <param name="previousEof">The old file's length, when the new runs are appended to it; 0 for a sidecar.</param>
+    /// <param name="previousEof">The old file's length, when the new runs are appended to it; 0 for a fragment.</param>
     internal void Preserve(IReadOnlyList<IndexEntry> entries, long previousEof)
     {
         (_preserved ??= []).AddRange(entries);
@@ -1475,8 +1475,8 @@ internal sealed class IndexWriter : IDisposable
     /// and since `Auto` became the default it would have cost every file of a sorted or numeric
     /// schema a hundred and fifty bytes for that nothing.
     /// </remarks>
-    /// <param name="sidecar">For a sidecar: what binds it to the indexed file, and the payloads' encoding table.</param>
-    internal byte[]? Directory(long rowCount, SidecarBinding? sidecar = null)
+    /// <param name="fragment">For a fragment: what binds it to the indexed file, and the payloads' encoding table.</param>
+    internal byte[]? Directory(long rowCount, FragmentBinding? fragment = null)
     {
         if (!Enabled && _preserved is not { Count: > 0 })
         {
@@ -1490,16 +1490,16 @@ internal sealed class IndexWriter : IDisposable
 
         bool defaultPolicy = _policy.Default == IndexPolicy.Auto && _policy.Columns.Count == 0;
         List<IndexEntry> entries = Merged();
-        return entries.Count == 0 && defaultPolicy && _previousEof == 0 && sidecar is null
+        return entries.Count == 0 && defaultPolicy && _previousEof == 0 && fragment is null
             ? null
             : new IndexDirectory((ulong)rowCount, _previousEof, _policy, entries)
             {
                 BudgetPerMille = _budgetPerMille,
-                FileLength = (ulong)(sidecar?.Length ?? 0),
-                FileIdentity = sidecar?.Identity,
-                FileToken = sidecar?.Token,
-                FileHash = sidecar?.Hash,
-                ArrayEncodings = sidecar?.Encodings,
+                FileLength = (ulong)(fragment?.Length ?? 0),
+                FileIdentity = fragment?.Identity,
+                FileToken = fragment?.Token,
+                FileHash = fragment?.Hash,
+                ArrayEncodings = fragment?.Encodings,
             }.ToBytes();
     }
 
