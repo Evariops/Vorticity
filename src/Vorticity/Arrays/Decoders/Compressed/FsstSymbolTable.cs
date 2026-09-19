@@ -172,6 +172,83 @@ internal readonly ref struct FsstSymbolTable
     internal ulong SymbolBits(int code) =>
         BinaryPrimitives.ReadUInt64LittleEndian(_symbols.Slice(code * SymbolSize, SymbolSize));
 
+    /// <summary>The most code bytes <paramref name="length"/> input bytes can turn into.</summary>
+    /// <param name="length">The value's length in bytes.</param>
+    internal static int MaxCompressedLength(int length) => length * 2;
+
+    /// <summary>
+    /// Compresses <paramref name="value"/> with this table, the way the writer compressed the rows.
+    /// </summary>
+    /// <param name="value">The bytes to compress.</param>
+    /// <param name="destination">At least <see cref="MaxCompressedLength"/> bytes.</param>
+    /// <param name="written">How many code bytes were produced.</param>
+    /// <returns><see langword="false"/> when <paramref name="destination"/> is too short.</returns>
+    /// <remarks>
+    /// <para>
+    /// The same rule the writer applies -- take the longest symbol that matches at this position,
+    /// and escape the byte when none does -- and therefore the same output, because that rule does
+    /// not depend on the order symbols are examined in: two symbols of equal width that both match
+    /// the same bytes are the same symbol. Equal values compress to equal code sequences, which is
+    /// what lets an equality be answered on the codes.
+    /// </para>
+    /// <para>
+    /// A LINEAR SCAN OVER AT MOST 255 SYMBOLS, where the writer builds a hash of prefixes and a
+    /// table of every two-byte pair. That table is 128 KiB and the writer amortizes it over a whole
+    /// column; here one needle is compressed once for a whole scan, so the index would cost more to
+    /// build than the scan it accelerates. Keeping the two implementations apart is also what lets a
+    /// test compress the corpus both ways and compare, which is the only honest check that they
+    /// agree.
+    /// </para>
+    /// </remarks>
+    internal bool TryCompress(ReadOnlySpan<byte> value, Span<byte> destination, out int written)
+    {
+        written = 0;
+        int read = 0;
+        int count = _lengths.Length;
+        while (read < value.Length)
+        {
+            ReadOnlySpan<byte> rest = value[read..];
+            int best = -1;
+            int bestLength = 0;
+            for (int code = 0; code < count; code++)
+            {
+                int width = _lengths[code];
+                if (width > rest.Length || width <= bestLength)
+                {
+                    continue;
+                }
+
+                if (rest[..width].SequenceEqual(_symbols.Slice(code * SymbolSize, width)))
+                {
+                    best = code;
+                    bestLength = width;
+                }
+            }
+
+            if (best >= 0)
+            {
+                if (written >= destination.Length)
+                {
+                    return false;
+                }
+
+                destination[written++] = (byte)best;
+                read += bestLength;
+                continue;
+            }
+
+            // No symbol covers this byte, so it costs two: the escape and the byte itself.
+            if (written + 1 >= destination.Length)
+            {
+                return false;
+            }
+
+            destination[written++] = EscapeCode;
+            destination[written++] = value[read++];
+        }
+
+        return true;
+    }
 }
 
 /// <summary>
