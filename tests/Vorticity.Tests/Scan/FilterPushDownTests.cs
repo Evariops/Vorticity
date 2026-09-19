@@ -24,6 +24,7 @@ using Xunit;
 
 namespace Vorticity.Tests.Scan;
 
+[Collection(nameof(AllocationCollection))]
 public sealed class FilterPushDownTests
 {
     private const string Field = "strs";
