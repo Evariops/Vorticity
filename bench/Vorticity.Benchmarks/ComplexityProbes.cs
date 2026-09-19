@@ -16,6 +16,7 @@ using BenchmarkDotNet.Attributes;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Columns;
+using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Scan;
@@ -63,8 +64,12 @@ public class ComplexityProbes
     /// </remarks>
     public static IEnumerable<int> LiteralCounts => [1, 8, 64, 512, 4_096, 16_384];
 
+    /// <summary>Rows per zone of the map the pruning probe asks, which is one block.</summary>
+    private const int ZoneLength = 1_024;
+
     private string _path = string.Empty;
     private Dictionary<int, FilterLiteral[]> _needles = [];
+    private Dictionary<int, ZonePruner> _pruners = [];
     private CanonicalArena _arena = new CanonicalArena();
     private RecordBatch? _batch;
     private FilterLiteral[] _keys = [];
@@ -89,6 +94,35 @@ public class ComplexityProbes
             }
 
             _needles[count] = needles;
+        }
+
+        // Every candidate sits above the column, so no zone can hold one and the pruner has to
+        // look at all of them before it can say so. That is the case the cost per zone shows in:
+        // with a candidate the map can find, the first zone answers and the count never matters.
+        _pruners = [];
+        ZoneBounds[] zones = new ZoneBounds[(FilterRows + ZoneLength - 1) / ZoneLength];
+        for (int zone = 0; zone < zones.Length; zone++)
+        {
+            long low = (long)zone * ZoneLength;
+            zones[zone] = ZoneBounds.Create(
+                FilterLiteral.From(low), true,
+                FilterLiteral.From(Math.Min(low + ZoneLength, FilterRows) - 1), true,
+                exact: true, nullCount: 0, hasNullCount: true);
+        }
+
+        ZoneColumn map = new ZoneColumn(Expr.Field(Field), ZoneLength, FilterRows, zones);
+        foreach (int count in LiteralCounts)
+        {
+            FilterLiteral[] absent = new FilterLiteral[count];
+            for (int i = 0; i < count; i++)
+            {
+                // Below every zone, and not merely past the last one: a candidate above the column
+                // still falls inside the final zone unless its bounds stop where the rows do, and
+                // a probe that lets the first candidate answer measures nothing.
+                absent[i] = FilterLiteral.From(-(i + 1L));
+            }
+
+            _pruners[count] = new ZonePruner(Expr.In(Expr.Field(Field), absent), [map]);
         }
 
         _arena = new CanonicalArena();
@@ -136,6 +170,36 @@ public class ComplexityProbes
         return FilteredCountAsync(literals).GetAwaiter().GetResult();
     }
 
+    /// <summary>Counts the same rows with pruning left on.</summary>
+    /// <remarks>
+    /// The mirror of <see cref="FilteredCount"/>, and it prices the whole read rather than the
+    /// pruning: its candidates are values the column holds, so the first zone answers the map and
+    /// what grows with their count is the rows the filter keeps. The pruning's own cost is
+    /// <see cref="ZonePrune"/>. Indexes stay off so nothing but the zone map stands between the
+    /// plan and the kernel.
+    /// </remarks>
+    [Benchmark]
+    [ArgumentsSource(nameof(LiteralCounts))]
+    public long PrunedCount(int literals)
+    {
+        return PrunedCountAsync(literals).GetAwaiter().GetResult();
+    }
+
+    /// <summary>Asks a thousand-zone map to rule out an <c>IN</c> it can rule out.</summary>
+    /// <remarks>
+    /// The zone map on its own, with no scan around it, because a scan hides the question: its
+    /// candidates are values the column holds, so the first zone answers and what grows with their
+    /// count is the rows the filter keeps, not the pruning. Here no zone can hold a candidate, so
+    /// the pruner has to look at every zone before it may say no -- which is the shape the growth
+    /// lives in, and the one a filter over a key the file does not carry meets in practice.
+    /// </remarks>
+    [Benchmark]
+    [ArgumentsSource(nameof(LiteralCounts))]
+    public bool ZonePrune(int literals)
+    {
+        return _pruners[literals].MayMatch(new RowRange(0, FilterRows));
+    }
+
     /// <summary>Windows a batch of half a million rows.</summary>
     /// <remarks>
     /// Not parameterized: the question is whether the cost is proportional to the rows windowed or
@@ -173,6 +237,17 @@ public class ComplexityProbes
         await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None);
         return await file.Scan()
             .WithPruning(false)
+            .WithIndexes(false)
+            .Where(Expr.In(Expr.Field(Field), _needles[literals]))
+            .CountAsync(CancellationToken.None)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<long> PrunedCountAsync(int literals)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None);
+        return await file.Scan()
+            .WithPruning(true)
             .WithIndexes(false)
             .Where(Expr.In(Expr.Field(Field), _needles[literals]))
             .CountAsync(CancellationToken.None)

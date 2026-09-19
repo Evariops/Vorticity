@@ -44,6 +44,15 @@ internal sealed class ZonePruner : IBlockPruner
     private readonly VortexExpr _filter;
     private readonly ZoneColumn[] _columns;
 
+    /// <summary>
+    /// The ordered candidates of each <c>IN</c> the filter has been asked about, or a null entry
+    /// for one whose candidates do not order. Grown by replacement and published by a volatile
+    /// write, because a scan of several lanes prunes from several threads and what is published is
+    /// never written again; a filter holds a handful of <c>IN</c> nodes at most, so the lookup is a
+    /// walk.
+    /// </summary>
+    private volatile Ordered[]? _ordered;
+
     internal ZonePruner(VortexExpr filter, ZoneColumn[] columns)
     {
         _filter = filter;
@@ -170,6 +179,11 @@ internal sealed class ZonePruner : IBlockPruner
                     // NOT IN prunes nothing a zone map can prove; a zone almost always holds some
                     // value outside a small candidate set.
                     return true;
+                }
+
+                if (OrderedFor(membership) is OrderedCandidates candidates)
+                {
+                    return MayMatchMembership(membership.Field, candidates, rows);
                 }
 
                 FilterLiteral[] literals = membership.Literals;
@@ -308,6 +322,44 @@ internal sealed class ZonePruner : IBlockPruner
             || MayMatchComparison(field, ComparisonOp.Less, FilterLiteral.From(upper[..length]), rows);
     }
 
+    /// <summary>
+    /// Whether any zone of <paramref name="field"/> may hold one of <paramref name="candidates"/>,
+    /// asked once per zone rather than once per candidate.
+    /// </summary>
+    /// <remarks>
+    /// The same question as the loop it replaces, and the same answer: a zone may match an
+    /// <c>IN</c> exactly when one candidate falls inside its bounds, which ordered candidates
+    /// answer with a search rather than a walk. A zone whose bounds do not compare against them
+    /// decides nothing, which is the "may match" every unresolvable case takes.
+    /// </remarks>
+    private bool MayMatchMembership(FieldExpr field, OrderedCandidates candidates, RowRange rows)
+    {
+        ZoneColumn? column = Find(field);
+        if (column is null || !column.HasStatistics)
+        {
+            return true;
+        }
+
+        ZoneRange zones = column.Zones(rows);
+        for (int zone = zones.Start; zone < zones.End; zone++)
+        {
+            ZoneBounds bounds = column.Bounds(zone);
+
+            // An all-null zone satisfies no equality, exactly as ZoneMayMatch rules it out.
+            if (bounds.HasNullCount && bounds.NullCount >= column.RowsInZone(zone))
+            {
+                continue;
+            }
+
+            if (!candidates.TryAnswer(bounds, out bool inside, out _) || inside)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private bool MayMatchComparison(
         FieldExpr field, ComparisonOp op, FilterLiteral value, RowRange rows, bool nanMatches = false)
     {
@@ -406,7 +458,8 @@ internal sealed class ZonePruner : IBlockPruner
             case ExprKind.In:
             {
                 InExpr membership = (InExpr)expr;
-                return Decide(membership.Field, rows, ZoneQuestion.In(membership.Literals));
+                return Decide(
+                    membership.Field, rows, ZoneQuestion.In(membership.Literals, OrderedFor(membership)));
             }
 
             case ExprKind.StringMatch:
@@ -607,10 +660,12 @@ internal sealed class ZonePruner : IBlockPruner
         private readonly FilterLiteral _value;
         private readonly FilterLiteral _upper;
         private readonly FilterLiteral[]? _literals;
+        private readonly OrderedCandidates? _ordered;
 
         private ZoneQuestion(
             Shape shape, ComparisonOp op, bool isNull, bool whole, bool hasUpper,
-            FilterLiteral value, FilterLiteral upper, FilterLiteral[]? literals)
+            FilterLiteral value, FilterLiteral upper, FilterLiteral[]? literals,
+            OrderedCandidates? ordered = null)
         {
             _shape = shape;
             _op = op;
@@ -620,6 +675,7 @@ internal sealed class ZonePruner : IBlockPruner
             _value = value;
             _upper = upper;
             _literals = literals;
+            _ordered = ordered;
         }
 
         private enum Shape : byte
@@ -655,8 +711,9 @@ internal sealed class ZonePruner : IBlockPruner
         internal static ZoneQuestion NullCheck(bool isNull) =>
             new ZoneQuestion(Shape.NullCheck, default, isNull, false, false, default, default, null);
 
-        internal static ZoneQuestion In(FilterLiteral[] literals) =>
-            new ZoneQuestion(Shape.Membership, default, false, false, false, default, default, literals);
+        internal static ZoneQuestion In(FilterLiteral[] literals, OrderedCandidates? ordered) =>
+            new ZoneQuestion(
+                Shape.Membership, default, false, false, false, default, default, literals, ordered);
 
         /// <summary><c>Contains(p)</c>: everything when the pattern is empty, else unchecked.</summary>
         internal static ZoneQuestion Contains(bool empty) => empty ? Everything : Open;
@@ -753,21 +810,34 @@ internal sealed class ZonePruner : IBlockPruner
         /// </summary>
         private RangeVerdict Membership(ZoneColumn column, ZoneBounds bounds, long rows, long? nulls)
         {
-            FilterLiteral[] literals = _literals!;
             bool anyNull = false;
-            bool anyAll = false;
-            bool allNone = true;
-            for (int i = 0; i < literals.Length; i++)
-            {
-                if (literals[i].Kind == FilterLiteralKind.Null)
-                {
-                    anyNull = true;
-                    continue;
-                }
+            bool anyAll;
+            bool allNone;
 
-                Proof proof = Prove(bounds, ComparisonOp.Equal, literals[i]);
-                anyAll |= proof == Proof.All;
-                allNone &= proof == Proof.None;
+            // Ordered candidates hold no null, so the OR cannot be unknown on that account.
+            if (_ordered is OrderedCandidates ordered &&
+                ordered.TryAnswer(bounds, out bool inside, out bool whole))
+            {
+                anyAll = whole;
+                allNone = !inside;
+            }
+            else
+            {
+                FilterLiteral[] literals = _literals!;
+                anyAll = false;
+                allNone = true;
+                for (int i = 0; i < literals.Length; i++)
+                {
+                    if (literals[i].Kind == FilterLiteralKind.Null)
+                    {
+                        anyNull = true;
+                        continue;
+                    }
+
+                    Proof proof = Prove(bounds, ComparisonOp.Equal, literals[i]);
+                    anyAll |= proof == Proof.All;
+                    allNone &= proof == Proof.None;
+                }
             }
 
             long? nans = NaNs(bounds, rows);
@@ -1050,4 +1120,191 @@ internal sealed class ZonePruner : IBlockPruner
         ComparisonOp.Greater => ComparisonOp.LessOrEqual,
         _ => ComparisonOp.Less,
     };
+
+    /// <summary>
+    /// The ordered candidates of <paramref name="membership"/>, built on first use and kept for
+    /// the pruner's life, or <see langword="null"/> when they do not order.
+    /// </summary>
+    private OrderedCandidates? OrderedFor(InExpr membership)
+    {
+        Ordered[]? known = _ordered;
+        if (known is not null)
+        {
+            for (int i = 0; i < known.Length; i++)
+            {
+                if (ReferenceEquals(known[i].Node, membership))
+                {
+                    return known[i].Candidates;
+                }
+            }
+        }
+
+        OrderedCandidates? built = OrderedCandidates.TryBuild(membership.Literals);
+
+        // Two lanes reaching the same unseen node build the same thing twice and one array wins.
+        // Both are equal and neither is mutated after publication, so the loser is only work.
+        int length = known?.Length ?? 0;
+        Ordered[] grown = new Ordered[length + 1];
+        for (int i = 0; i < length; i++)
+        {
+            grown[i] = known![i];
+        }
+
+        grown[length] = new Ordered(membership, built);
+        _ordered = grown;
+        return built;
+    }
+
+    /// <summary>What one <c>IN</c> node of the filter was prepared into.</summary>
+    private sealed record Ordered(InExpr Node, OrderedCandidates? Candidates);
+
+    /// <summary>
+    /// The candidates of one <c>IN</c>, sorted so that a zone's bounds are answered by a search.
+    /// </summary>
+    /// <remarks>
+    /// A zone rules an <c>IN</c> out exactly when no candidate falls inside <c>[min, max]</c>, and
+    /// the candidate that decides it is the smallest one at or above <c>min</c>: if that one is
+    /// above <c>max</c>, none is inside. So the walk over candidates becomes one binary search, and
+    /// the cost per zone falls from the candidate count to its logarithm.
+    ///
+    /// Only kinds whose order is exact are taken. Widening an integer to a double is lossy above
+    /// 2^53, which would let the sort and the per-zone comparison disagree about two candidates
+    /// that differ; a float candidate, a boolean, a null, or a mix of bytes and numbers therefore
+    /// leaves the caller on the walk it already had.
+    /// </remarks>
+    private sealed class OrderedCandidates
+    {
+        /// <summary>
+        /// Below this many candidates the walk wins: the search costs a bounds-kind test and a
+        /// handful of unpredictable branches, where the walk is a straight line over values
+        /// already in cache, and the file-level pruner asks a single zone.
+        /// </summary>
+        private const int LeastCandidates = 32;
+
+        private readonly FilterLiteral[] _sorted;
+        private readonly bool _bytes;
+
+        private OrderedCandidates(FilterLiteral[] sorted, bool bytes)
+        {
+            _sorted = sorted;
+            _bytes = bytes;
+        }
+
+        /// <summary>
+        /// Orders <paramref name="literals"/>, or reports that they are not worth ordering.
+        /// </summary>
+        /// <param name="literals">The candidates of the <c>IN</c>.</param>
+        /// <returns><see langword="null"/> when the caller must keep to one pass per candidate.</returns>
+        internal static OrderedCandidates? TryBuild(FilterLiteral[] literals)
+        {
+            if (literals.Length < LeastCandidates)
+            {
+                return null;
+            }
+
+            bool bytes = literals[0].Kind == FilterLiteralKind.Bytes;
+            for (int i = 0; i < literals.Length; i++)
+            {
+                FilterLiteralKind kind = literals[i].Kind;
+                bool ordered = bytes
+                    ? kind == FilterLiteralKind.Bytes
+                    : kind is FilterLiteralKind.Signed or FilterLiteralKind.Unsigned;
+                if (!ordered)
+                {
+                    return null;
+                }
+            }
+
+            FilterLiteral[] sorted = (FilterLiteral[])literals.Clone();
+            Array.Sort(sorted, bytes ? CompareBytes : CompareIntegers);
+            return new OrderedCandidates(sorted, bytes);
+        }
+
+        /// <summary>
+        /// What the bounds of one zone prove of the membership, when they compare at all.
+        /// </summary>
+        /// <param name="bounds">The zone's bounds.</param>
+        /// <param name="inside">Whether some candidate falls within them.</param>
+        /// <param name="whole">
+        /// Whether some candidate is the zone's every value: exact bounds that meet, on a candidate.
+        /// </param>
+        /// <returns>Whether the bounds are of a kind these candidates compare against.</returns>
+        internal bool TryAnswer(ZoneBounds bounds, out bool inside, out bool whole)
+        {
+            inside = false;
+            whole = false;
+            if (BoundsKind(bounds) is not FilterLiteralKind kind)
+            {
+                // No bounds at all: every candidate is possible and none is proven.
+                inside = true;
+                return true;
+            }
+
+            bool comparable = _bytes
+                ? kind == FilterLiteralKind.Bytes
+                : kind is FilterLiteralKind.Signed or FilterLiteralKind.Unsigned;
+            if (!comparable)
+            {
+                return false;
+            }
+
+            int at = bounds.HasMin ? LowerBound(bounds.Min) : 0;
+            if (at == _sorted.Length)
+            {
+                // Every candidate sorts below the zone's minimum.
+                return true;
+            }
+
+            if (bounds.HasMax && TryCompare(bounds.Max, _sorted[at], out int high) && high < 0)
+            {
+                // The smallest candidate the minimum allows is already above the maximum.
+                return true;
+            }
+
+            inside = true;
+            whole = bounds.IsExact && bounds.HasMin && bounds.HasMax &&
+                TryCompare(bounds.Min, _sorted[at], out int low) && low == 0 &&
+                TryCompare(bounds.Max, _sorted[at], out int top) && top == 0;
+            return true;
+        }
+
+        /// <summary>The first candidate at or above <paramref name="bound"/>, else the count.</summary>
+        private int LowerBound(FilterLiteral bound)
+        {
+            int low = 0;
+            int high = _sorted.Length;
+            while (low < high)
+            {
+                int middle = (int)(((uint)low + (uint)high) >> 1);
+
+                // The order is the sign of bound - candidate, so a positive one puts the candidate
+                // below the bound and the answer to its right.
+                if (TryCompare(bound, _sorted[middle], out int order) && order > 0)
+                {
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+
+            return low;
+        }
+
+        private static int CompareBytes(FilterLiteral left, FilterLiteral right) =>
+            left.BytesValue.SequenceCompareTo(right.BytesValue);
+
+        /// <summary>
+        /// The signed and unsigned candidates on one line, which is what
+        /// <see cref="TryCompare"/> also does with them: every negative sits below every value a
+        /// <c>ulong</c> can hold, and the rest compare as the numbers they are.
+        /// </summary>
+        private static int CompareIntegers(FilterLiteral left, FilterLiteral right)
+        {
+            Int128 first = left.Kind == FilterLiteralKind.Signed ? left.SignedValue : left.UnsignedValue;
+            Int128 second = right.Kind == FilterLiteralKind.Signed ? right.SignedValue : right.UnsignedValue;
+            return first.CompareTo(second);
+        }
+    }
 }
