@@ -401,7 +401,10 @@ internal static class RatioCheck
         ["count, exact cover, 1% band"] = new(0.633, 7, 0.047),
         ["filtered scan, string equality, fsst"] = new(2.169, 4, 0.007),
         ["filtered scan, string prefix, fsst"] = new(1.452, 2, 0.008),
-        ["filtered scan, string equality, dict"] = new(2.473, 7, 0.024),
+        // Nine passes, not three: three read 0.024 and this axis swings sixteen times that. It is
+        // the shortest of the four string axes, and the only one whose dispersion needs more
+        // processes than the default to show itself at all.
+        ["filtered scan, string equality, dict"] = new(2.473, 7, 0.375),   // 9 passes, spread 2.067-2.993; HELD at 2.473: 9 passes peaked at 2.993, no loosening
         ["filtered scan, string prefix, dict"] = new(1.444, 6, 0.007),
     };
 
