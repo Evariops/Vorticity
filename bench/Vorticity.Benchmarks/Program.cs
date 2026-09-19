@@ -212,7 +212,11 @@ internal static class Program
                     i > 0 && i != tpCounted && !a.StartsWith("--", StringComparison.Ordinal))
             ];
             return await ThroughputCheck.RunAsync(
-                check, only, tpPasses, Array.IndexOf(args, "--rebase") >= 0).ConfigureAwait(false);
+                check,
+                only,
+                tpPasses,
+                Array.IndexOf(args, "--rebase") >= 0,
+                Array.IndexOf(args, "--hold") >= 0).ConfigureAwait(false);
         }
 
         if (args.Length > 0 && args[0] == "--tree")
@@ -407,6 +411,9 @@ internal static class Program
                                      --take            64 rows spread over each file
                                      --write           read back out to a discarding sink, ~8 min
                                      --recalibrate N   as above
+                                     --hold            with --recalibrate, print every reference
+                                                       back unchanged and refresh only the
+                                                       dispersion each encoding measured
           --ffi-check              rows AND decoded values agree with the reference, < 1 s
           --probe [name…]          the write, decomposed: scan, serialize, transit, compress,
                                      five configurations a file, median of five
