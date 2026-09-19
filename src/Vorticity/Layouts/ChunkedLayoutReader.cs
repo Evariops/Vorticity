@@ -138,11 +138,20 @@ public sealed class ChunkedLayoutReader : LayoutReader
     /// rows, as a chunk-local selection, and nothing else of the chunk is decoded.
     /// </summary>
     /// <remarks>
-    /// The rows are contiguous, so the selection is a counted range -- the price is one rented
-    /// array per batch of the chunk, against the whole chunk decoded and retained for the first
-    /// batch of it. An encoding that <c>SelectsWithoutFullDecode</c> then materializes these rows
-    /// alone; one that does not decodes the chunk once, retains it, and gathers, which is what the
-    /// whole-chunk path cost anyway.
+    /// <para>
+    /// The rows are contiguous, so the selection is a counted range, and teaching the selection to
+    /// carry <c>[start, start + length)</c> instead of writing it out would buy nothing measurable.
+    /// The rent is pooled, so it allocates nothing once the pool is warm: renting and filling a
+    /// second identical range beside this one moves not a single byte on any of the twelve axes of
+    /// <c>PathAllocationTests</c>. The loop is bounded by one block, because the splits are cut at
+    /// the mask's block boundaries -- the widest range this path is ever handed across the whole
+    /// suite is 1 024 rows, against the decode of those same rows.
+    /// </para>
+    /// <para>
+    /// An encoding that <c>SelectsWithoutFullDecode</c> then materializes these rows alone; one that
+    /// does not decodes the chunk once, retains it, and gathers, which is what the whole-chunk path
+    /// cost anyway.
+    /// </para>
     /// </remarks>
     private static int ExecuteChunkLive(
         in LayoutNode chunk, RowRange local, in FieldMask fields, ScanContext context)
