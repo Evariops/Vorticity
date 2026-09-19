@@ -6,6 +6,14 @@
 // zones child of every zoned layout in the corpus is exactly that), and a `vortex.dict` layout's
 // values may be a struct too. Those decode whole, so the mask is applied afterwards - here - and the
 // batch's schema still matches the projection.
+//
+// WHAT THAT COSTS, MEASURED. On a file of fifty columns and fifty thousand rows stored as one flat
+// node, a scan projecting ONE column reads 66 and 67 microseconds against 64 and 63 for the whole
+// thing: projecting is very slightly DEARER than not projecting, because it decodes the same fifty
+// columns and then throws forty-nine away. Every million-row file of the bench has this shape, the
+// six-column one included. The cure is to push the mask into the struct decoder so the unselected
+// children are never decoded, which also makes this narrowing a no-op on that path; it is not done
+// here and the number is written down so that nobody has to measure it twice to decide.
 using System;
 
 using Vorticity.Arrays;
