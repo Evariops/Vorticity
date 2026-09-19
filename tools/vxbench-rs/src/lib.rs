@@ -32,8 +32,11 @@ use vortex::array::VortexSessionExecute;
 use vortex::buffer::Buffer;
 use vortex::scan::strict_sorted_buffer::StrictSortedBuffer;
 use vortex::error::VortexResult;
+use vortex::expr::Expression;
 use vortex::expr::and;
+use vortex::expr::eq;
 use vortex::expr::get_item;
+use vortex::expr::like;
 use vortex::expr::lit;
 use vortex::expr::lt;
 use vortex::expr::gt_eq;
@@ -369,6 +372,100 @@ pub unsafe extern "C" fn vxbench_scan_filtered(
                     gt_eq(get_item(field.as_str(), root()), lit(lo)),
                     lt(get_item(field.as_str(), root()), lit(lo + width)),
                 );
+                let filter = predicate
+                    .optimize_recursive(file.dtype())
+                    .and_then(|expr| expr.bind(file.dtype()))?;
+                let stream = file.scan()?.with_filter(filter).into_array_stream()?;
+                pin_mut!(stream);
+                let mut rows: i64 = 0;
+                while let Some(array) = stream.next().await {
+                    let array = array?;
+                    rows += array.len() as i64;
+                    let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
+                }
+
+                Ok(rows)
+            }
+        })
+    })
+}
+
+/// Scans `path` keeping the rows whose `field` equals `value`, and returns how many survived.
+///
+/// The band filter above is an i64 interval, so no axis asked a string column anything. That is
+/// the measurement gap this pair closes: the cost of a predicate on text is the question every
+/// encoding that stores text compressed has to answer, and a ratio needs the reference's answer to
+/// the same question.
+///
+/// `eq` rather than a band, because equality is the predicate an encoding can answer without
+/// decompressing -- on a dictionary by comparing the k values, on FSST by compressing the needle
+/// with the column's own table. A band would measure ordering, which text encodings do not
+/// accelerate.
+///
+/// # Safety
+/// `path`, `field` and `value` must be valid NUL-terminated C strings for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vxbench_scan_filtered_eq_utf8(
+    path: *const c_char,
+    field: *const c_char,
+    value: *const c_char,
+) -> i64 {
+    let (Some(field), Some(value)) = (unsafe { text(field) }, unsafe { text(value) }) else {
+        return ERR_BAD_PATH;
+    };
+
+    filtered_utf8(path, field, move |column| eq(column, lit(value.as_str())))
+}
+
+/// Scans `path` keeping the rows whose `field` starts with `prefix`, and returns how many survived.
+///
+/// SQL LIKE with a trailing `%` is how this side expresses a prefix; the .NET side has a dedicated
+/// `StartsWith`. Each uses its own natural form on purpose -- the axis compares what a caller
+/// would actually write, not a shape imposed on one side to resemble the other -- and the harness
+/// holds them to the same surviving row count before it times anything.
+///
+/// `prefix` MUST NOT contain `%` or `_`. Both are LIKE wildcards here and neither is a wildcard to
+/// `StartsWith`, so a prefix carrying one would quietly make the two sides ask different questions.
+/// The caller picks the prefixes; escaping is not added for a needle nobody needs.
+///
+/// # Safety
+/// `path`, `field` and `prefix` must be valid NUL-terminated C strings for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vxbench_scan_filtered_prefix_utf8(
+    path: *const c_char,
+    field: *const c_char,
+    prefix: *const c_char,
+) -> i64 {
+    let (Some(field), Some(prefix)) = (unsafe { text(field) }, unsafe { text(prefix) }) else {
+        return ERR_BAD_PATH;
+    };
+
+    if prefix.contains('%') || prefix.contains('_') {
+        return ERR_BAD_PATH;
+    }
+
+    let pattern = format!("{prefix}%");
+    filtered_utf8(path, field, move |column| like(column, lit(pattern.as_str())))
+}
+
+/// Opens `path`, filters it by the predicate `build` puts on `field`, and counts the rows kept.
+///
+/// The body the two string axes share: everything but the predicate is the band filter's, down to
+/// the recursive canonicalization that makes the count evidence of a decode rather than of a
+/// metadata read.
+fn filtered_utf8<F>(path: *const c_char, field: String, build: F) -> i64
+where
+    F: Fn(Expression) -> Expression + Send + 'static,
+{
+    run(path, move |session, path| {
+        let field = field.clone();
+        let build = &build;
+        block_on(|handle| {
+            let session = session.with_handle(handle);
+            async move {
+                let mut ctx = session.create_execution_ctx();
+                let file = session.open_options().open_path(&path).await?;
+                let predicate = build(get_item(field.as_str(), root()));
                 let filter = predicate
                     .optimize_recursive(file.dtype())
                     .and_then(|expr| expr.bind(file.dtype()))?;

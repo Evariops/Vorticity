@@ -23,11 +23,13 @@
 // The ceilings are ratchets like every other number in this repository: set just above what was
 // measured, lowered by hand when an improvement lands, red on a regression.
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -382,6 +384,9 @@ internal static class RatioCheck
         ["key order, sorted column, 1% band"] = new(0.683, 11),   // 3 passes, spread 0.671-0.683; was 0.701, -2.6%
         ["key order, uncorrelated, 64 rows"] = new(1.148, 6),   // 3 passes, spread 1.058-1.339; HELD at 1.148: 3 passes peaked at 1.339, no loosening
         ["count, exact cover, 1% band"] = new(0.759, 7),   // 3 passes, spread 0.725-0.759; HELD at 0.759: 3 passes peaked at 0.759, no loosening
+        ["filtered scan, string prefix, fsst"] = new(1.712, 3),   // 3 passes, spread 1.656-1.712; new
+        ["filtered scan, string equality, dict"] = new(2.530, 7),   // 3 passes, spread 2.314-2.530; new
+        ["filtered scan, string prefix, dict"] = new(1.562, 6),   // 3 passes, spread 1.468-1.562; new
     };
 
     /// <summary>
@@ -521,6 +526,9 @@ internal static class RatioCheck
                 .. KeyOrderNames.Any(Selected)
                     ? await KeyOrderAxesAsync(temporary, Selected).ConfigureAwait(false)
                     : [],
+                .. StringPredicateNames.Any(Selected)
+                    ? await StringPredicateAxesAsync(temporary, Selected).ConfigureAwait(false)
+                    : [],
                 .. Lanes > 1 ? new[] { LaneAxis(Lanes) } : [],
                 .. TableAxes().Where(a => Selected(a.Name)),
             ];
@@ -528,7 +536,8 @@ internal static class RatioCheck
             {
                 Console.Error.WriteLine(
                     $"No axis matches {string.Join(", ", only)}. The axes are:\n  " +
-                    string.Join("\n  ", Axes.Select(a => a.Name).Concat(RewrittenNames()).Concat(KeyOrderNames)));
+                    string.Join("\n  ", Axes.Select(a => a.Name).Concat(RewrittenNames())
+                        .Concat(KeyOrderNames).Concat(StringPredicateNames)));
                 return 2;
             }
 
@@ -1089,6 +1098,224 @@ internal static class RatioCheck
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         return await file.Scan().Where(Band(field, low, width)).CountAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>The string-predicate group's axes, in the order they are reported.</summary>
+    /// <remarks>
+    /// The gate measured predicates on one i64 column and nothing else, so the place the remaining
+    /// read time actually sits -- a predicate on text -- had no reference at all. Two predicates
+    /// over two encodings: equality, which a compressed text encoding can answer over its k values
+    /// or by compressing the needle with the column's own table, and a prefix, which it cannot.
+    ///
+    /// TWO ENCODINGS AND NOT THREE. `onpair` belongs in this group and is absent: our writer
+    /// deliberately does not produce it (`src/Vorticity/Writing/ColumnCompressor.cs`), and the
+    /// generated 1M file that does carry it has a bare array at its root, which a field path cannot
+    /// address. Neither is a gap this group can close on its own.
+    ///
+    /// THE FILES ARE WRITTEN HERE rather than taken from the generated corpus, for the same reason
+    /// the key-order group writes its own: the corpus's single-encoding files are bare arrays with
+    /// no column to name, and the shared five-column file has no text column at all. An encoding
+    /// hint pins what the chooser would otherwise price.
+    /// </remarks>
+    /// <remarks>
+    /// EQUALITY OVER FSST IS MISSING, and it is the axis this group most wanted. Asking the
+    /// reference for it aborts the process: `fsst-rs` panics with "rebuild symbol insertion into
+    /// PHT must succeed" while rebuilding a compressor from the column's symbol table, which is
+    /// the very step that makes equality cheap on FSST. The prefix axis over the same file and the
+    /// same column is fine, so the column reads; it is the rebuild that does not. An axis that
+    /// kills the gate is worse than an axis that is missing, so it is left out until the panic is
+    /// understood rather than left in behind a flag nobody sets.
+    /// </remarks>
+    private static readonly string[] StringPredicateNames =
+    [
+        "filtered scan, string prefix, fsst",
+        "filtered scan, string equality, dict",
+        "filtered scan, string prefix, dict",
+    ];
+
+    /// <summary>The text column both string-predicate files carry.</summary>
+    private const string StringField = "strs";
+
+    /// <summary>Rows of each string-predicate file: the shape every other axis reads.</summary>
+    private const int StringRows = 65_536;
+
+    /// <summary>A prefix of the fsst column: the 10 000 rows whose number starts with five zeros.</summary>
+    private const string FsstPrefix = "https://example.invalid/vortex/conformance/00000";
+
+    /// <summary>The needle that matches one label of sixteen.</summary>
+    private const string DictNeedle = "label-07";
+
+    /// <summary>A prefix of the dict column: the seven labels from 10 to 15, plus 01.</summary>
+    private const string DictPrefix = "label-1";
+
+    /// <summary>Writes the two string-predicate files and returns the group's axes.</summary>
+    /// <param name="temporary">Collects the files written, for the caller to delete.</param>
+    /// <param name="selected">Which axes the caller asked for.</param>
+    private static async Task<List<Axis>> StringPredicateAxesAsync(
+        List<string> temporary, Func<string, bool> selected)
+    {
+        string fsst = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"vorticity-strings-fsst-{Guid.NewGuid():N}.vortex");
+        string dict = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"vorticity-strings-dict-{Guid.NewGuid():N}.vortex");
+        temporary.Add(fsst);
+        temporary.Add(dict);
+        await WriteStringFileAsync(
+            fsst,
+            Vorticity.Writing.VortexEncodingHint.Fsst,
+            row => string.Create(CultureInfo.InvariantCulture, $"https://example.invalid/vortex/conformance/{row:D9}"))
+            .ConfigureAwait(false);
+        await WriteStringFileAsync(
+            dict,
+            Vorticity.Writing.VortexEncodingHint.Dictionary,
+            row => string.Create(CultureInfo.InvariantCulture, $"label-{row % 16:D2}"))
+            .ConfigureAwait(false);
+
+        List<Axis> axes =
+        [
+            new Axis(
+                StringPredicateNames[0],
+                p => StringPrefix(p, FsstPrefix),
+                p => RustReader.Require(
+                    RustReader.ScanFilteredPrefixUtf8(p, StringField, FsstPrefix), "string prefix"),
+                fsst),
+            new Axis(
+                StringPredicateNames[1],
+                p => StringEquality(p, DictNeedle),
+                p => RustReader.Require(
+                    RustReader.ScanFilteredEqUtf8(p, StringField, DictNeedle), "string equality"),
+                dict),
+            new Axis(
+                StringPredicateNames[2],
+                p => StringPrefix(p, DictPrefix),
+                p => RustReader.Require(
+                    RustReader.ScanFilteredPrefixUtf8(p, StringField, DictPrefix), "string prefix"),
+                dict),
+        ];
+        return axes.FindAll(a => selected(a.Name));
+    }
+
+    /// <summary>Writes one text column of <see cref="StringRows"/> rows under an encoding hint.</summary>
+    /// <param name="path">Where to write.</param>
+    /// <param name="hint">The encoding the column is pinned to.</param>
+    /// <param name="value">The value of a row, by row number.</param>
+    private static async Task WriteStringFileAsync(
+        string path, Vorticity.Writing.VortexEncodingHint hint, Func<int, string> value)
+    {
+        Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
+        Vorticity.Types.DType utf8 = types.Utf8(Vorticity.Types.Nullability.NonNullable);
+        Vorticity.Types.DType schema = types.Struct(
+            [StringField], [utf8], Vorticity.Types.Nullability.NonNullable);
+        Vorticity.Writing.VortexWriteOptions options = new Vorticity.Writing.VortexWriteOptions
+        {
+            EncodingHints = new Dictionary<string, Vorticity.Writing.VortexEncodingHint>
+            {
+                [StringField] = hint,
+            },
+        };
+
+        await using Vorticity.Writing.VortexFileWriter writer =
+            Vorticity.Writing.VortexFileWriter.Create(path, schema, options);
+        const int batch = 8_192;
+        for (int start = 0; start < StringRows; start += batch)
+        {
+            Vorticity.Arrays.CanonicalArena arena = new Vorticity.Arrays.CanonicalArena();
+            int column = Strings(arena, utf8, start, batch, value);
+            int root = arena.AddStruct(schema, batch, Vorticity.Arrays.Validity.NonNullable, [column]);
+            using RecordBatch record = new RecordBatch(arena, root, start);
+            await writer.WriteAsync(record, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        await writer.CompleteAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>Builds a varbin-view column from a run of rows.</summary>
+    private static int Strings(
+        Vorticity.Arrays.CanonicalArena arena,
+        Vorticity.Types.DType dtype,
+        int start,
+        int count,
+        Func<int, string> value)
+    {
+        const int ViewSize = 16;
+        const int MaxInline = 12;
+
+        byte[][] encoded = new byte[count][];
+        int heapBytes = 0;
+        for (int i = 0; i < count; i++)
+        {
+            encoded[i] = Encoding.UTF8.GetBytes(value(start + i));
+            if (encoded[i].Length > MaxInline)
+            {
+                heapBytes += encoded[i].Length;
+            }
+        }
+
+        Vorticity.Buffers.VortexBuffer views =
+            arena.Allocate(count * ViewSize, ViewSize, out Span<byte> viewBytes);
+        viewBytes.Clear();
+        Vorticity.Buffers.VortexBuffer heap = Vorticity.Buffers.VortexBuffer.Empty;
+        Span<byte> heapBuffer = default;
+        if (heapBytes > 0)
+        {
+            heap = arena.Allocate(heapBytes, 1, out heapBuffer);
+        }
+
+        int offset = 0;
+        for (int i = 0; i < count; i++)
+        {
+            byte[] bytes = encoded[i];
+            Span<byte> view = viewBytes.Slice(i * ViewSize, ViewSize);
+            BinaryPrimitives.WriteUInt32LittleEndian(view, (uint)bytes.Length);
+            if (bytes.Length <= MaxInline)
+            {
+                bytes.CopyTo(view[4..]);
+                continue;
+            }
+
+            bytes.AsSpan(0, 4).CopyTo(view[4..8]);
+            BinaryPrimitives.WriteUInt32LittleEndian(view[8..12], 0);
+            BinaryPrimitives.WriteUInt32LittleEndian(view[12..16], (uint)offset);
+            bytes.CopyTo(heapBuffer[offset..]);
+            offset += bytes.Length;
+        }
+
+        Span<Vorticity.Buffers.VortexBuffer> buffers = heapBytes == 0
+            ? [Vorticity.Buffers.VortexBuffer.Empty]
+            : [heap];
+        return arena.AddVarBinView(dtype, count, Vorticity.Arrays.Validity.NonNullable, views, buffers);
+    }
+
+    /// <summary>Scans keeping the rows whose text column equals a needle.</summary>
+    private static async Task<long> StringEquality(string path, string needle)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        long rows = 0;
+        VortexExpr predicate = Expr.Eq(
+            Expr.Field(StringField), Expr.Literal(FilterLiteral.From(needle)));
+        await foreach (RecordBatch batch in file.Scan().Where(predicate).ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
+    /// <summary>Scans keeping the rows whose text column starts with a prefix.</summary>
+    private static async Task<long> StringPrefix(string path, string prefix)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        long rows = 0;
+        VortexExpr predicate = Expr.StartsWith(
+            Expr.Field(StringField), FilterLiteral.From(prefix));
+        await foreach (RecordBatch batch in file.Scan().Where(predicate).ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
     }
 
     /// <summary>The two axis names of one rewritten entry.</summary>

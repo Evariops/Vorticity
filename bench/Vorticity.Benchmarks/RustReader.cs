@@ -90,6 +90,35 @@ internal static partial class RustReader
     [LibraryImport(Library, EntryPoint = "vxbench_scan_filtered", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long ScanFiltered(string path, string field, long lo, long width);
 
+    /// <summary>Scans under <c>field = value</c> on a text column, canonicalizing.</summary>
+    /// <param name="path">The file to scan, as a UTF-8 C string.</param>
+    /// <param name="field">The root field the equality applies to; must be a string.</param>
+    /// <param name="value">The needle.</param>
+    /// <returns>The surviving row count, or negative on failure.</returns>
+    /// <remarks>
+    /// The band filter is an i64 interval, so until this pair arrived no axis asked a text column
+    /// anything -- and a text column is where the remaining read time is. Equality rather than an
+    /// interval because equality is what a compressed text encoding can answer cheaply: the k
+    /// values of a dictionary, or a needle compressed with the column's own symbol table.
+    /// </remarks>
+    [LibraryImport(Library, EntryPoint = "vxbench_scan_filtered_eq_utf8", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial long ScanFilteredEqUtf8(string path, string field, string value);
+
+    /// <summary>Scans keeping the rows of <paramref name="field"/> that start with a prefix.</summary>
+    /// <param name="path">The file to scan, as a UTF-8 C string.</param>
+    /// <param name="field">The root field the prefix applies to; must be a string.</param>
+    /// <param name="prefix">The prefix; must contain neither <c>%</c> nor <c>_</c>.</param>
+    /// <returns>The surviving row count, or negative on failure.</returns>
+    /// <remarks>
+    /// The reference expresses this as SQL LIKE with a trailing wildcard and we express it as
+    /// `StartsWith`; each side writes what its caller would write, and the harness holds both to
+    /// the same surviving row count before timing either. The two LIKE wildcards are rejected
+    /// rather than escaped: a prefix carrying one would make the two sides ask different questions,
+    /// and no axis needs one.
+    /// </remarks>
+    [LibraryImport(Library, EntryPoint = "vxbench_scan_filtered_prefix_utf8", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial long ScanFilteredPrefixUtf8(string path, string field, string prefix);
+
     /// <summary>Takes <paramref name="count"/> rows, one every <paramref name="stride"/>.</summary>
     /// <param name="path">The file to take from, as a UTF-8 C string.</param>
     /// <param name="count">How many rows to ask for.</param>
