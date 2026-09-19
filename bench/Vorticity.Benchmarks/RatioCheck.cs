@@ -407,6 +407,7 @@ internal static class RatioCheck
         ["filtered scan, string equality, dict"] = new(1.713, 7, 0.051),   // 3 passes, spread 1.625-1.713; was 2.084, -17.8%; and 2.473 before the dictionary answered the equality from its values
         ["filtered scan, string prefix, dict"] = new(1.444, 6, 0.007),
         ["filtered scan, band, runend"] = new(1.160, 11),   // first calibration, 4 runs, spread 1.141-1.160
+        ["filtered scan, band, bitpacked"] = new(1.142, 13),   // first calibration, 3 runs, spread 1.136-1.145
     };
 
     /// <summary>
@@ -1405,8 +1406,15 @@ internal static class RatioCheck
     /// shape: expanding a run-end column is a fill, not a decode, and the answer is a fill too, so
     /// both paths write one byte a row and that write is the axis. An encoding whose rows are cheap
     /// to produce has nothing to win by not producing them.
+    ///
+    /// AND THE BIT-PACKED HALF SAYS THE SAME, more bluntly. Comparing in the packed domain, which
+    /// the reference does, could at most save what the unpack costs -- and DOUBLING the unpack on
+    /// this axis reads 97,1 and 99,3 us against a baseline of 97,8, which is no change at all. The
+    /// decode such a push would avoid costs nothing measurable here, so the fourteen per cent that
+    /// separates us from the reference on this axis is somewhere else.
     /// </remarks>
-    private static readonly string[] RunEndPredicateNames = ["filtered scan, band, runend"];
+    private static readonly string[] RunEndPredicateNames =
+        ["filtered scan, band, runend", "filtered scan, band, bitpacked"];
 
     /// <summary>The integer column the run-end file carries.</summary>
     private const string RunEndField = "runs";
@@ -1429,10 +1437,20 @@ internal static class RatioCheck
     private static async Task<List<Axis>> RunEndPredicateAxesAsync(
         List<string> temporary, Func<string, bool> selected)
     {
-        string path = System.IO.Path.Combine(
+        string runs = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(), $"vorticity-runend-{Guid.NewGuid():N}.vortex");
-        temporary.Add(path);
-        await WriteRunEndFileAsync(path).ConfigureAwait(false);
+        string packed = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"vorticity-bitpacked-{Guid.NewGuid():N}.vortex");
+        temporary.Add(runs);
+        temporary.Add(packed);
+
+        // THE SAME COLUMN UNDER TWO ENCODINGS, which is what makes the pair readable: a thousand
+        // values in runs of sixty-four bit-pack to ten bits just as well as they run-end, so the
+        // two axes differ in how the column is stored and in nothing else.
+        await WriteRunEndFileAsync(runs, Vorticity.Writing.VortexEncodingHint.RunEnd)
+            .ConfigureAwait(false);
+        await WriteRunEndFileAsync(packed, Vorticity.Writing.VortexEncodingHint.BitPacked)
+            .ConfigureAwait(false);
 
         List<Axis> axes =
         [
@@ -1442,14 +1460,23 @@ internal static class RatioCheck
                 p => RustReader.Require(
                     RustReader.ScanFiltered(p, RunEndField, RunEndBandLow, RunEndBandWidth),
                     "filtered scan"),
-                path),
+                runs),
+            new Axis(
+                RunEndPredicateNames[1],
+                RunEndBand,
+                p => RustReader.Require(
+                    RustReader.ScanFiltered(p, RunEndField, RunEndBandLow, RunEndBandWidth),
+                    "filtered scan"),
+                packed),
         ];
         return axes.FindAll(a => selected(a.Name));
     }
 
     /// <summary>Writes one integer column of runs of <see cref="RunLength"/> equal values.</summary>
     /// <param name="path">Where to write.</param>
-    private static async Task WriteRunEndFileAsync(string path)
+    /// <param name="hint">The encoding the column is pinned to.</param>
+    private static async Task WriteRunEndFileAsync(
+        string path, Vorticity.Writing.VortexEncodingHint hint)
     {
         Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
         // i64 and not i32: the reference's filtered scan takes its bounds as i64 and refuses a
@@ -1462,7 +1489,7 @@ internal static class RatioCheck
         {
             EncodingHints = new Dictionary<string, Vorticity.Writing.VortexEncodingHint>
             {
-                [RunEndField] = Vorticity.Writing.VortexEncodingHint.RunEnd,
+                [RunEndField] = hint,
             },
         };
 
