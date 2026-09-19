@@ -711,6 +711,11 @@ public sealed class DTypeArena
         long pair = ((long)ai << 32) | (uint)bi;
         if (memo is not null)
         {
+            // Asked and added separately, and left that way: the add is on the far side of the
+            // recursion, where only a pair PROVEN equal is remembered. Folding the two into one
+            // `Add` would have to remember the pair before proving it. Measured before being left
+            // alone -- the whole test suite takes under ten thousand steps through here, memo and
+            // scalar store together, because the budget above keeps this off for any real schema.
             if (memo.Contains(pair))
             {
                 return true;

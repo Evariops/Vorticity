@@ -287,6 +287,8 @@ public sealed class ScalarStore
         long pair = ((long)ai << 32) | (uint)bi;
         if (memo is not null)
         {
+            // Two calls on purpose, as in DTypeArena and for the same reason: what is remembered
+            // is a pair already proven equal, which is only known after the walk below.
             if (memo.Contains(pair))
             {
                 return true;
