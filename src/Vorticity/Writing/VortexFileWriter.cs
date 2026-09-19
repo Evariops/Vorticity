@@ -1181,9 +1181,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             await disposable.DisposeAsync().ConfigureAwait(false);
         }
 
-        // AFTER THE SINK, because the stream holds the file with FileShare.None and a delete under
-        // it fails on Windows. A file that is already gone is the outcome asked for, and a file the
-        // caller has since replaced is not this writer's to judge, so neither is an error here.
+        // After the sink, because the stream holds the file with FileShare.None and a delete under
+        // it fails on Windows.
         if (_abandoned && _createdPath is not null)
         {
             try
@@ -1192,9 +1191,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             }
             catch (System.IO.IOException)
             {
+                // A file that is already gone is the outcome asked for, and a file the caller has
+                // since replaced is not this writer's to judge: neither is an error on a path whose
+                // whole job is to leave nothing behind.
             }
             catch (UnauthorizedAccessException)
             {
+                // The same answer for the arrivals File.Delete reports as this one: a read-only
+                // file, a path that has become a directory, a permission the process no longer
+                // holds.
             }
         }
     }

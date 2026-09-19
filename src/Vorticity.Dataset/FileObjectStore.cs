@@ -260,6 +260,10 @@ public sealed class FileObjectStore : IObjectStore
         }
         catch (UnauthorizedAccessException)
         {
+            // The same answer for the arrivals File.Delete reports as this rather than as an
+            // IOException: a read-only file, a path that has become a directory, a permission the
+            // process no longer holds. None of them is recoverable here, and none of them is the
+            // failure the caller is about to see.
         }
     }
 }
