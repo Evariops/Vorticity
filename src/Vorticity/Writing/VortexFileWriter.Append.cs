@@ -88,7 +88,30 @@ public sealed partial class VortexFileWriter
     /// <exception cref="VortexUnsupportedException">The file's layout is not one this writer can continue.</exception>
     /// <exception cref="VortexFormatException">The file is malformed.</exception>
     public static async ValueTask<VortexFileWriter> AppendAsync(
-        string path, VortexWriteOptions? options = null, CancellationToken cancellationToken = default)
+        string path, VortexWriteOptions? options = null, CancellationToken cancellationToken = default) =>
+        await AppendAsync(path, options, null, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// The same append, over a sink the caller builds around the file's stream.
+    /// </summary>
+    /// <param name="path">The file to continue.</param>
+    /// <param name="options">Write-time policy, or null for the file's own.</param>
+    /// <param name="wrap">
+    /// Builds the sink from the opened stream and the offset the next byte lands at, or null for
+    /// the plain one.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the read, and the writes that re-emit a chunk.</param>
+    /// <remarks>
+    /// INTERNAL BECAUSE IT EXISTS FOR A TEST, and the test is one the public surface cannot write:
+    /// the failure that matters here happens between reading the plan and re-emitting the chunk the
+    /// plan re-opened, and nothing a caller can pass reaches inside that. A sink that refuses its
+    /// nth write does, and that is the only way to hold this method to what it does on the way out.
+    /// </remarks>
+    internal static async ValueTask<VortexFileWriter> AppendAsync(
+        string path,
+        VortexWriteOptions? options,
+        Func<Stream, long, ISegmentSink>? wrap,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(path);
         AppendPlan plan;
@@ -115,7 +138,10 @@ public sealed partial class VortexFileWriter
             }
 
             stream.Seek(0, SeekOrigin.End);
-            writer = Create(new StreamSegmentSink(stream, ownsStream: true, plan.FileLength), plan.Schema, effective);
+            ISegmentSink sink = wrap is null
+                ? new StreamSegmentSink(stream, ownsStream: true, plan.FileLength)
+                : wrap(stream, plan.FileLength);
+            writer = Create(sink, plan.Schema, effective);
         }
         catch
         {

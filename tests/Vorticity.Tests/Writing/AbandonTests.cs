@@ -12,6 +12,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,6 +20,7 @@ using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.File;
+using Vorticity.Indexes;
 using Vorticity.Scan;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
@@ -154,15 +156,104 @@ public sealed class AbandonTests
         }
     }
 
+    [Fact]
+    public async Task AFailedResumeLeavesTheOriginalRowsRecoverable()
+    {
+        // THE CASE THE REVIEW REASONED OUT AND COULD NOT REACH. `AppendAsync` re-emits the chunk it
+        // re-opened before it hands the writer back; a failure in there used to be caught by a
+        // dispose, which wrote a footer over the kept rows alone. The file then parsed, held fewer
+        // rows than it started with, and repair could not see it, because repair looks for a tail
+        // that does not parse.
+        //
+        // A REFUSED WRITE, NOT A CANCELLATION, and that corrects the review: it expected the token
+        // passed to `AppendAsync` to be enough, but the writes that re-emit the chunk put rows into
+        // transit rather than on the sink, so nothing in them polls the token. What does reach the
+        // sink is a block spilling, which needs the re-opened chunk to be large and the append's
+        // own block target small -- hence one chunk written wide, continued narrow.
+        string path = TempPath();
+        try
+        {
+            await WriteAsync(path, 0, 20_000, OneChunk());
+            List<string> before = await RowsOfAsync(path);
+            Assert.Equal(20_000, before.Count);
+
+            await Assert.ThrowsAsync<IOException>(async () =>
+                await VortexFileWriter.AppendAsync(
+                    path,
+                    Indexed(),
+                    (stream, position) => new RefusingSink(stream, position, allow: 0),
+                    CancellationToken.None));
+
+            // Torn, which is the repairable kind, and repair takes it back to every original row.
+            await VortexFileRepair.RepairAsync(path);
+            Assert.Equal(before, await RowsOfAsync(path));
+        }
+        finally
+        {
+            Delete(path);
+        }
+    }
+
     private static VortexWriteOptions Options() => new VortexWriteOptions
     {
         RowBlockSize = Block,
         DataBlockTargetBytes = 1L << 14,
     };
 
-    private static async Task WriteAsync(string path, int start, int end)
+    /// <summary>One chunk for the whole file, so the chunk an append re-opens is the whole file.</summary>
+    private static VortexWriteOptions OneChunk() => new VortexWriteOptions
     {
-        await using VortexFileWriter writer = VortexFileWriter.Create(path, Schema, Options());
+        RowBlockSize = Block,
+        DataBlockTargetBytes = 1L << 24,
+    };
+
+    /// <summary>A sink that passes <paramref name="allow"/> writes through, then refuses.</summary>
+    private sealed class RefusingSink : ISegmentSink, IAsyncDisposable
+    {
+        private readonly StreamSegmentSink _inner;
+        private readonly int _allow;
+        private int _writes;
+
+        internal RefusingSink(Stream stream, long position, int allow)
+        {
+            _inner = new StreamSegmentSink(stream, ownsStream: true, position);
+            _allow = allow;
+        }
+
+        public long Position => _inner.Position;
+
+        public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+        {
+            if (++_writes > _allow)
+            {
+                throw new IOException("the sink refused this write");
+            }
+
+            return _inner.WriteAsync(data, cancellationToken);
+        }
+
+        public ValueTask FlushAsync(CancellationToken cancellationToken) =>
+            _inner.FlushAsync(cancellationToken);
+
+        public ValueTask DisposeAsync() => _inner.DisposeAsync();
+    }
+
+    /// <summary>Options that make an append re-open the file's last chunk: indexed, part-block.</summary>
+    private static VortexWriteOptions Indexed() => new VortexWriteOptions
+    {
+        RowBlockSize = Block,
+        DataBlockTargetBytes = 1L << 14,
+        IndexBudgetPerMille = 1_000_000,
+        Indexes = WritePolicy.Auto.For("s", IndexPolicy.Postings),
+    };
+
+    private static async Task WriteAsync(string path, int start, int end) =>
+        await WriteAsync(path, start, end, Options());
+
+    private static async Task WriteAsync(
+        string path, int start, int end, VortexWriteOptions options)
+    {
+        await using VortexFileWriter writer = VortexFileWriter.Create(path, Schema, options);
         await FeedAsync(writer, start, end);
         await writer.CompleteAsync();
     }
