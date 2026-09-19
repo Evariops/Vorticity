@@ -67,9 +67,21 @@ public class ComplexityProbes
     /// <summary>Rows per zone of the map the pruning probe asks, which is one block.</summary>
     private const int ZoneLength = 1_024;
 
+    /// <summary>
+    /// How many rows the take probe asks for, scattered over every chunk of the file.
+    /// </summary>
+    /// <remarks>
+    /// The published <c>take</c> scenario asks for sixty-four rows, which is too few to tell a
+    /// selection walked once per chunk from one searched: at sixty-four the walk is a cache line.
+    /// These counts run to a tenth of the file because that is where a per-chunk pass over the
+    /// whole selection stops hiding under the gather it precedes.
+    /// </remarks>
+    public static IEnumerable<int> TakeCounts => [64, 1_024, 10_000, 100_000];
+
     private string _path = string.Empty;
     private Dictionary<int, FilterLiteral[]> _needles = [];
     private Dictionary<int, ZonePruner> _pruners = [];
+    private Dictionary<int, long[]> _takes = [];
     private CanonicalArena _arena = new CanonicalArena();
     private RecordBatch? _batch;
     private FilterLiteral[] _keys = [];
@@ -123,6 +135,18 @@ public class ComplexityProbes
             }
 
             _pruners[count] = new ZonePruner(Expr.In(Expr.Field(Field), absent), [map]);
+        }
+
+        _takes = [];
+        foreach (int count in TakeCounts)
+        {
+            long[] rows = new long[count];
+            for (int i = 0; i < count; i++)
+            {
+                rows[i] = (long)i * (FilterRows / count);
+            }
+
+            _takes[count] = rows;
         }
 
         _arena = new CanonicalArena();
@@ -200,6 +224,19 @@ public class ComplexityProbes
         return _pruners[literals].MayMatch(new RowRange(0, FilterRows));
     }
 
+    /// <summary>Takes rows scattered over every chunk of the file.</summary>
+    /// <remarks>
+    /// A chunked reader re-bases the selection into each chunk's own row space, and what that costs
+    /// per chunk is what this measures against the count asked for. The rows are evenly spread, so
+    /// every chunk wants some and none is skipped.
+    /// </remarks>
+    [Benchmark]
+    [ArgumentsSource(nameof(TakeCounts))]
+    public long ChunkedTake(int rows)
+    {
+        return ChunkedTakeAsync(rows).GetAwaiter().GetResult();
+    }
+
     /// <summary>Windows a batch of half a million rows.</summary>
     /// <remarks>
     /// Not parameterized: the question is whether the cost is proportional to the rows windowed or
@@ -241,6 +278,22 @@ public class ComplexityProbes
             .Where(Expr.In(Expr.Field(Field), _needles[literals]))
             .CountAsync(CancellationToken.None)
             .ConfigureAwait(false);
+    }
+
+    private async Task<long> ChunkedTakeAsync(int rows)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None);
+        long taken = 0;
+        await foreach (RecordBatch batch in file.Scan()
+            .Take(_takes[rows]).ExecuteAsync()
+            .WithCancellation(CancellationToken.None)
+            .ConfigureAwait(false))
+        {
+            taken += batch.RowCount;
+            batch.Dispose();
+        }
+
+        return taken;
     }
 
     private async Task<long> PrunedCountAsync(int literals)
