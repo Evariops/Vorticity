@@ -139,7 +139,7 @@ public sealed class StructLayoutReader : LayoutReader
                 int decoded;
                 try
                 {
-                    decoded = ExecuteChild(in child, rows, in childMask, context);
+                    decoded = ExecuteRowChild(in child, rows, in childMask, context);
                 }
                 finally
                 {

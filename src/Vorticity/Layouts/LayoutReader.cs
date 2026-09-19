@@ -146,13 +146,48 @@ public abstract class LayoutReader
         in LayoutNode child, RowRange rows, in FieldMask fields, SegmentRequestSet segments) =>
         LayoutReaderTable.Require(in child).RegisterSegments(in child, rows, in fields, segments);
 
-    /// <summary>Executes one child.</summary>
+    /// <summary>Executes one child that is NOT the predicate's column, whatever the parent is.</summary>
     /// <param name="child">The child node.</param>
     /// <param name="rows">The child-local row range.</param>
     /// <param name="fields">The child's field mask.</param>
     /// <param name="context">The scan context.</param>
     /// <returns>The child's canonical node index.</returns>
+    /// <remarks>
+    /// The default is to clear the pushed comparison, and it is the safe default rather than the
+    /// convenient one. A layout's children are not always its rows: a dictionary layout's are its
+    /// codes and its values, a list layout's are its offsets and its elements. A leaf under one of
+    /// those answering a predicate would hand its parent a boolean column where the format promises
+    /// integers, which is exactly what it did before this cleared. A reader whose children ARE the
+    /// same rows as itself says so with <see cref="ExecuteRowChild"/>.
+    /// </remarks>
     protected static int ExecuteChild(
+        in LayoutNode child, RowRange rows, in FieldMask fields, ScanContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        bool outer = context.PredicateAtNode;
+        context.PredicateAtNode = false;
+        try
+        {
+            return LayoutReaderTable.Require(in child).Execute(in child, rows, in fields, context);
+        }
+        finally
+        {
+            context.PredicateAtNode = outer;
+        }
+    }
+
+    /// <summary>Executes one child that carries the same rows as its parent.</summary>
+    /// <param name="child">The child node.</param>
+    /// <param name="rows">The child-local row range.</param>
+    /// <param name="fields">The child's field mask.</param>
+    /// <param name="context">The scan context.</param>
+    /// <returns>The child's canonical node index.</returns>
+    /// <remarks>
+    /// For the two readers that re-partition or wrap a column without changing what it holds: a
+    /// chunked layout's children are ranges of its rows and a zoned layout's data child is the
+    /// column itself, so a predicate pushed at the parent is still about what the child produces.
+    /// </remarks>
+    protected static int ExecuteRowChild(
         in LayoutNode child, RowRange rows, in FieldMask fields, ScanContext context) =>
         LayoutReaderTable.Require(in child).Execute(in child, rows, in fields, context);
 

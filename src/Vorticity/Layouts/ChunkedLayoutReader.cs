@@ -103,7 +103,7 @@ public sealed class ChunkedLayoutReader : LayoutReader
                 }
                 else
                 {
-                    chunks[count++] = ExecuteChild(in chunk, local, in fields, context);
+                    chunks[count++] = ExecuteRowChild(in chunk, local, in fields, context);
                 }
             }
 
@@ -172,7 +172,7 @@ public sealed class ChunkedLayoutReader : LayoutReader
             (int[]? Buffer, int Count) saved = context.ExchangeSelection(range, length);
             try
             {
-                return ExecuteChild(in chunk, local, in fields, context);
+                return ExecuteRowChild(in chunk, local, in fields, context);
             }
             finally
             {
@@ -225,7 +225,7 @@ public sealed class ChunkedLayoutReader : LayoutReader
             (int[]? Buffer, int Count) saved = context.ExchangeSelection(rebased, count);
             try
             {
-                return ExecuteChild(in chunk, local, in fields, context);
+                return ExecuteRowChild(in chunk, local, in fields, context);
             }
             finally
             {

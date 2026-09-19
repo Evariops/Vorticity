@@ -49,6 +49,6 @@ public sealed class ZonedLayoutReader : LayoutReader
 
         // The row range reaches the data child unchanged: a zoned layout re-partitions nothing.
         LayoutNode data = node.GetChild(0);
-        return ExecuteChild(in data, rows, in fields, context);
+        return ExecuteRowChild(in data, rows, in fields, context);
     }
 }
