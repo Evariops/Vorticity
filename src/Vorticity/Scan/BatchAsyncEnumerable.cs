@@ -60,6 +60,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     private readonly Projection _keep;
     private readonly SplitPlan _plan;
     private readonly int _degree;
+    private readonly bool _reverse;
     private readonly VortexExpr? _filter;
     private readonly RowSelection? _take;
     private readonly ScanMetrics? _metrics;
@@ -74,6 +75,10 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// <param name="filter">The predicate, or null.</param>
     /// <param name="take">The row index list, or null.</param>
     /// <param name="metrics">The caller's sink for what the scan does (docs/11 §6.4), or null.</param>
+    /// <param name="reverse">
+    /// Whether to deliver the plan's splits last one first, for a descending walk. It asks for
+    /// <paramref name="degree"/> one, because the order is the point and lanes do not keep one.
+    /// </param>
     internal BatchAsyncEnumerable(
         VortexFile file,
         LayoutTree tree,
@@ -83,8 +88,14 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         int degree,
         VortexExpr? filter,
         RowSelection? take,
-        ScanMetrics? metrics)
+        ScanMetrics? metrics,
+        bool reverse = false)
     {
+        if (reverse && degree != 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(degree), degree, "a reversed walk reads one split at a time");
+        }
+
         _file = file;
         _take = take;
         _metrics = metrics;
@@ -94,6 +105,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         _plan = plan;
         _degree = degree;
         _filter = filter;
+        _reverse = reverse;
 
         // Computed once, here, and into an arena of this enumerable's own. Deriving it lazily from
         // the LayoutTree's arena would mutate a structure the tree promises is immutable and
@@ -137,7 +149,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, live: null, _metrics,
-            cancellationToken);
+            cancellationToken, reverse: _reverse);
 
     /// <summary>Starts a scan that reads only the splits <paramref name="live"/> keeps.</summary>
     /// <param name="live">The mask of live blocks the pruning pass refined, or null for every block.</param>
@@ -146,7 +158,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         BlockMask? live, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, live, _metrics,
-            cancellationToken);
+            cancellationToken, reverse: _reverse);
 
     /// <summary>
     /// Starts a scan whose filter an exact index has already answered: it reads exactly the rows
@@ -159,7 +171,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         BlockMask? live, RowSelection proven, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, proven, live, _metrics,
-            cancellationToken, filterProven: true);
+            cancellationToken, filterProven: true, reverse: _reverse);
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
     internal bool HasTake => _take is not null;
@@ -237,7 +249,8 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         BlockMask? live,
         ScanMetrics? metrics,
         CancellationToken cancellationToken,
-        bool filterProven = false)
+        bool filterProven = false,
+        bool reverse = false)
     {
         _filterProven = filterProven;
         _tree = tree;
@@ -251,7 +264,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _evaluator = filter is null ? null : new FilterEvaluator(filter);
         _maxBatchRows = (int)Math.Min(plan.MaxRows, int.MaxValue);
         _token = cancellationToken;
-        _cursor = plan.CreateCursor();
+        _cursor = plan.CreateCursor(reverse);
 
         _lanes = new Lane[degree];
         for (int i = 0; i < degree; i++)

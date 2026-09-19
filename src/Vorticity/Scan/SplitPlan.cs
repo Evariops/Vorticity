@@ -112,6 +112,15 @@ internal sealed class SplitPlan
     /// <summary>A fresh cursor over this plan's splits.</summary>
     internal SplitCursor CreateCursor() => new SplitCursor(this);
 
+    /// <summary>A fresh cursor over this plan's splits, last one first.</summary>
+    /// <param name="reverse">Whether to walk the splits backwards.</param>
+    /// <remarks>
+    /// The same splits in the opposite order, and the same splits matters: a descending walk that
+    /// cut the range differently from the ascending one would deliver different batches, and the
+    /// two are compared row for row.
+    /// </remarks>
+    internal SplitCursor CreateCursor(bool reverse) => new SplitCursor(this, reverse);
+
     /// <summary>
     /// The split holding <paramref name="row"/>, exactly as <see cref="SplitCursor"/> would cut it,
     /// found without walking the splits before it.
@@ -332,14 +341,21 @@ internal sealed class SplitPlan
 internal struct SplitCursor
 {
     private readonly SplitPlan _plan;
+    private readonly bool _reverse;
     private int _span;          // index of the span [BoundaryAt(_span), BoundaryAt(_span + 1))
     private long _cursor;       // first row of the next split
     private long _subSize;      // even sub-division size within the current span
 
     internal SplitCursor(SplitPlan plan)
+        : this(plan, reverse: false)
+    {
+    }
+
+    internal SplitCursor(SplitPlan plan, bool reverse)
     {
         _plan = plan;
-        _span = -1;
+        _reverse = reverse;
+        _span = reverse ? plan.BoundaryCount - 1 : -1;
         _cursor = 0;
         _subSize = 0;
     }
@@ -347,7 +363,58 @@ internal struct SplitCursor
     /// <summary>The next split, or <see langword="false"/> when the plan is exhausted.</summary>
     /// <param name="range">The split's rows, in root coordinates.</param>
     /// <returns>Whether a split was produced.</returns>
-    internal bool TryNext(out RowRange range)
+    internal bool TryNext(out RowRange range) => _reverse ? TryPrevious(out range) : TryForward(out range);
+
+    /// <summary>
+    /// The spans last first, and each span's sub-divisions last first, which is the forward walk
+    /// read backwards and not a second way of cutting the same rows.
+    /// </summary>
+    /// <param name="range">The split's rows, in root coordinates.</param>
+    /// <returns>Whether a split was produced.</returns>
+    private bool TryPrevious(out RowRange range)
+    {
+        SplitPlan plan = _plan;
+
+        while (true)
+        {
+            // `_cursor` is the END of the next split here, where the forward walk holds its start,
+            // and `_subSize` of zero means no span is open. Which sub-division that end belongs to
+            // is arithmetic on the span's start, so the reversed walk needs no counter of its own --
+            // and it must need none: this cursor lives by value inside the enumerator, and one more
+            // field of it is eight bytes on every scan, which three allocation axes have no room
+            // for.
+            if (_subSize == 0 || _cursor <= plan.BoundaryAt(_span))
+            {
+                int next = _span - 1;
+                if (next < 0)
+                {
+                    range = RowRange.Empty;
+                    return false;
+                }
+
+                _span = next;
+                long low = plan.BoundaryAt(next);
+                long high = plan.BoundaryAt(next + 1);
+                if (high <= low)
+                {
+                    _subSize = 0;
+                    continue;
+                }
+
+                _subSize = SubSize(high - low, plan.MaxRows);
+                _cursor = high;
+            }
+
+            long start = plan.BoundaryAt(_span);
+            long stop = _cursor;
+            start += ((stop - start - 1) / _subSize) * _subSize;
+            _cursor = start;
+            range = new RowRange(start, stop);
+            return true;
+        }
+    }
+
+    private bool TryForward(out RowRange range)
     {
         SplitPlan plan = _plan;
         int boundaries = plan.BoundaryCount;

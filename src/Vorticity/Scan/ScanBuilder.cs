@@ -871,48 +871,41 @@ public sealed class ScanBuilder
     private async IAsyncEnumerable<RecordBatch> ReversedAsync(
         LayoutTree tree, RowRange rows, Projection read, Projection keep, SplitPlan plan, VortexExpr filter, long cap)
     {
-        List<RowRange> splits = [];
-        SplitCursor cursor = plan.CreateCursor();
-        while (cursor.TryNext(out RowRange split))
-        {
-            splits.Add(split);
-        }
+        // One pipeline for the whole walk, reading the plan's splits last one first. Building one
+        // per split cost a plan, an enumerable and a filter for every batch -- a split is a batch,
+        // since both are cut to the same row cap -- which is 40 kB a batch against the 80 of the
+        // RecordBatch every other scan is held to.
+        IAsyncEnumerable<RecordBatch> scan = new FilteredBatches(
+            new BatchAsyncEnumerable(_file, tree, read, keep, plan, 1, filter, null, _metrics, reverse: true),
+            filter, _prune, _indexes, rows);
 
         // The permutation of a batch of n rows is n-1 … 0 and depends on nothing else, so it is
         // shared by every batch of the same length. Kept across the walk and refilled only when the
-        // length changes, it costs one array per scan instead of one per batch, which is what
-        // `ScanAllocationTests` asks of every other path.
+        // length changes, it costs one array per scan instead of one per batch.
         int[] order = [];
         int ordered = 0;
 
-        for (int i = splits.Count - 1; i >= 0; i--)
+        await foreach (RecordBatch batch in scan.ConfigureAwait(false))
         {
-            SplitPlan one = SplitPlan.Compute(tree, splits[i], read.RootMask, cap);
-            IAsyncEnumerable<RecordBatch> scan = new FilteredBatches(
-                new BatchAsyncEnumerable(_file, tree, read, keep, one, 1, filter, null, _metrics),
-                filter, _prune, _indexes, splits[i].Intersect(rows));
-            await foreach (RecordBatch batch in scan.ConfigureAwait(false))
+            if (batch.RowCount > order.Length)
             {
-                if (batch.RowCount > order.Length)
-                {
-                    order = new int[batch.RowCount];
-                    ordered = 0;
-                }
-
-                if (ordered != batch.RowCount)
-                {
-                    for (int row = 0; row < batch.RowCount; row++)
-                    {
-                        order[row] = batch.RowCount - 1 - row;
-                    }
-
-                    ordered = batch.RowCount;
-                }
-
-                // In the batch's own arena: the scan owns it, and disposes it at its next batch.
-                int root = CanonicalFilter.Apply(batch.Arena, batch.RootIndex, order.AsSpan(0, batch.RowCount));
-                yield return new RecordBatch(batch.Arena, root, batch.StartRow);
+                order = new int[batch.RowCount];
+                ordered = 0;
             }
+
+            if (ordered != batch.RowCount)
+            {
+                for (int row = 0; row < batch.RowCount; row++)
+                {
+                    order[row] = batch.RowCount - 1 - row;
+                }
+
+                ordered = batch.RowCount;
+            }
+
+            // In the batch's own arena: the scan owns it, and disposes it at its next batch.
+            int root = CanonicalFilter.Apply(batch.Arena, batch.RootIndex, order.AsSpan(0, batch.RowCount));
+            yield return new RecordBatch(batch.Arena, root, batch.StartRow);
         }
     }
 

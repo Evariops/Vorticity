@@ -132,8 +132,8 @@ public sealed class ScanAllocationTests
     }
 
     /// <summary>
-    /// What a descending key-ordered scan costs per batch, which is not yet one
-    /// <see cref="RecordBatch"/>.
+    /// A descending key-ordered scan costs the two <see cref="RecordBatch"/> objects a reversal
+    /// needs, and nothing else.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -141,16 +141,15 @@ public sealed class ScanAllocationTests
     /// cursor: the two phases allocate differently and averaging them would measure neither.
     /// </para>
     /// <para>
-    /// The ceiling is 40 200 B where every other path here is held to 80, and the gap is named
-    /// rather than rounded off. Reversing walks the splits backwards and builds a plan, an
-    /// enumerable and a filter for each one, and a split is a batch, so the whole pipeline is paid
-    /// per batch; the permutation the reversal needs is 256 B of that. The ceiling is here to hold
-    /// the figure still until the pipeline is hoisted out of the walk, and to come down to the
-    /// <see cref="RecordBatch"/> when it is.
+    /// Two and not one, because a reversal cannot make fewer. The scan underneath yields a batch
+    /// over the rows in file order, the reversed rows are a different root, and §12.1 makes a
+    /// <see cref="RecordBatch"/> a sealed class with readonly fields precisely so that neither is
+    /// recycled. Everything else the walk once rebuilt per batch is gone: it read 40 200 B while it
+    /// built a plan, an enumerable and a filter for every split, a split being a batch.
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task ADescendingScanCostsWhatItsWalkRebuildsPerBatch()
+    public async Task ADescendingScanCostsTheTwoBatchesAReversalNeeds()
     {
         ReleaseOnlyCeilings.Require();
         Decoders.EnsureRegistered();
@@ -160,21 +159,13 @@ public sealed class ScanAllocationTests
         try
         {
             long perBatch = await MeasureDescendingPerBatch(path, 64);
-            Assert.True(
-                perBatch <= DescendingPerBatchCeiling,
-                string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"{perBatch} bytes per batch against a ceiling of {DescendingPerBatchCeiling}, " +
-                    $"where one RecordBatch is {batchObject}"));
+            Assert.Equal(2 * batchObject, perBatch);
         }
         finally
         {
             System.IO.File.Delete(path);
         }
     }
-
-    /// <summary>What the reversing walk rebuilds per batch, measured and held.</summary>
-    private const long DescendingPerBatchCeiling = 40_200;
 
     [Fact]
     public async Task ThePerBatchFigureDoesNotGrowWithTheData()
