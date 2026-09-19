@@ -474,6 +474,15 @@ internal static class CanonicalConcat
     /// belong to the mapping or the arena that produced the chunks, and the concatenation is a
     /// node in that same arena.
     /// </para>
+    /// <para>
+    /// The run it publishes may cross more than one chunk's buffer, and that is the point: since
+    /// adjacency is tested by address, two blocks that happen to sit end to end are borrowed as a
+    /// single span. Both of the things that usually make such a span wrong are absent here. The
+    /// bytes are native - a raw pointer into a mapping or into a rented block, never a managed
+    /// object - so crossing is pointer arithmetic over memory the collector neither tracks nor
+    /// moves; and the blocks are released together with the batch that holds them, never one while
+    /// another is still borrowed.
+    /// </para>
     /// </remarks>
     private static bool TryBorrowRun(
         CanonicalArena arena, ReadOnlySpan<int> chunks, int width, int totalBytes,
