@@ -234,6 +234,21 @@ internal static class ThroughputCheck
     /// reference, the band and the dispersion -- comes from one run, so the line can be read
     /// against the log that produced it.
     /// </para>
+    /// <para>
+    /// THREE PASSES, AND NOT MORE, AND THE REASON IS NOT COST. Measured over this whole table, nine
+    /// passes double the median dispersion (0.035 to 0.073) and grow it on fifty-one axes of
+    /// fifty-seven; ten then exceed the flat margin where none did. That looks like three passes
+    /// under-reporting, and for scatter it partly is, but the largest figures are not scatter at
+    /// all: `dict` spans 0.96-1.40 with nine passes of nine above its reference, `alprd` 1.32-1.62
+    /// with nine of nine. A band that only climbs is a level that moved, and `(max - min)` cannot
+    /// tell the two apart -- so widening a ceiling by it would spend a longer observation window on
+    /// hiding exactly what the window revealed.
+    ///
+    /// Axis length does not predict it either, which was the other guess: the median dispersion
+    /// runs 0.079 under a hundred microseconds and 0.067 over two milliseconds, flat across the
+    /// range. What the count of passes above the reference says is the usable signal, and it is
+    /// already printed on every line.
+    /// </para>
     /// </remarks>
     private static int PrintRecalibration(
         Dictionary<string, List<double>> measured,
