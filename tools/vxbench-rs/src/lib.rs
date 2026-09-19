@@ -453,6 +453,10 @@ pub unsafe extern "C" fn vxbench_scan_filtered_prefix_utf8(
 /// The body the two string axes share: everything but the predicate is the band filter's, down to
 /// the recursive canonicalization that makes the count evidence of a decode rather than of a
 /// metadata read.
+///
+/// An EMPTY `field` addresses the root array instead of a column of it. The single-encoding files
+/// have a bare array at their root, so without this there is no way to put a predicate on one at
+/// all -- and those are the only files that carry a given encoding with nothing else mixed in.
 fn filtered_utf8<F>(path: *const c_char, field: String, build: F) -> i64
 where
     F: Fn(Expression) -> Expression + Send + 'static,
@@ -465,7 +469,12 @@ where
             async move {
                 let mut ctx = session.create_execution_ctx();
                 let file = session.open_options().open_path(&path).await?;
-                let predicate = build(get_item(field.as_str(), root()));
+                let column = if field.is_empty() {
+                    root()
+                } else {
+                    get_item(field.as_str(), root())
+                };
+                let predicate = build(column);
                 let filter = predicate
                     .optimize_recursive(file.dtype())
                     .and_then(|expr| expr.bind(file.dtype()))?;
