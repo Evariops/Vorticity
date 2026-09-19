@@ -167,15 +167,28 @@ public sealed class ObjectSegmentSource : ISegmentSource
             catch
             {
                 // Every read that did succeed still owns a buffer; none of them is the caller's.
+                //
+                // AND THE ONES STILL RUNNING OWN ONE THEY HAVE NOT PRODUCED YET. They were issued
+                // together, so a failure leaves the rest in flight: skipping them sent whatever
+                // they returned to the finalizer instead of the pool, and left their faults
+                // unobserved. Waiting for them costs the error the time of the slowest sibling,
+                // and buys a batch that owns nothing by the time it throws -- the reads carry the
+                // same cancellation token, so what cancels one is already cancelling the rest.
                 for (int r = 0; r < runCount; r++)
                 {
                     if (ranges[r] is { } taken)
                     {
                         taken.Dispose();
+                        continue;
                     }
-                    else if (reads[r].IsCompletedSuccessfully)
+
+                    try
                     {
                         (await reads[r].ConfigureAwait(false)).Dispose();
+                    }
+                    catch
+                    {
+                        // One of these is the failure on its way out; the rest may have their own.
                     }
                 }
 
