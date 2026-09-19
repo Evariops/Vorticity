@@ -141,6 +141,14 @@ public sealed partial class VortexFileWriter
         }
         catch
         {
+            // ABANDON BEFORE DISPOSING, or disposal completes the file. The reopened chunk has not
+            // been re-emitted yet at this point, so a footer written here describes the kept rows
+            // alone and the original's last chunk is gone from a file that still parses -- which
+            // `VortexFileRepair` cannot see, because repair looks for a tail that does not parse.
+            // The cancellation token reaches those `WriteAsync` calls, so cancelling an append is
+            // enough to get there. Abandoning leaves that unparseable tail instead, and repair
+            // truncates back to the original's last postscript.
+            writer.Abandon();
             await writer.DisposeAsync().ConfigureAwait(false);
             throw;
         }

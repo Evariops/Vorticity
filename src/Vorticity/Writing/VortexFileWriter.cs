@@ -221,6 +221,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     private long _rowCount;
     private bool _started;
     private bool _completed;
+    private bool _abandoned;
+
+    /// <summary>The path this writer created, or null when the caller brought the sink.</summary>
+    /// <remarks>
+    /// Only <see cref="Create(string, DType, VortexWriteOptions)"/> sets it, and that is the whole
+    /// distinction <see cref="Abandon"/> needs: a file this writer created holds nothing but a
+    /// half-written attempt, while an appended file holds the caller's rows under a tail this
+    /// writer never finished. Owning the stream does not separate the two -- an append owns its
+    /// stream as well.
+    /// </remarks>
+    private string? _createdPath;
     // SHARED, BECAUSE NOTHING WRITES TO IT: the sink takes `ReadOnlyMemory<byte>`. One array per
     // writer was 88 bytes on every file for 64 zeros, which is what pays for the report's fields.
     private static readonly byte[] Padding = new byte[VortexLimits.MaxAlignment];
@@ -528,7 +539,30 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         ArgumentNullException.ThrowIfNull(path);
         System.IO.FileStream stream = new System.IO.FileStream(
             path, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None);
-        return Create(new StreamSegmentSink(stream, ownsStream: true), schema, options);
+        VortexFileWriter writer = Create(new StreamSegmentSink(stream, ownsStream: true), schema, options);
+        writer._createdPath = path;
+        return writer;
+    }
+
+    /// <summary>Gives up on the file: nothing more is written, and a created file is removed.</summary>
+    /// <remarks>
+    /// THE EXIT <see cref="DisposeAsync"/> DOES NOT GIVE. Disposal completes an unfinished file,
+    /// so a producer that throws half way through still leaves a valid one holding the rows it
+    /// managed to write, and nothing downstream can tell that apart from a file that was meant to
+    /// end there. `Abandon` is how a caller says the rows are not worth keeping.
+    ///
+    /// On a file this writer created, the partial file is deleted when the sink releases the
+    /// stream. On an append it is not, and must not be: those bytes are the caller's rows. What an
+    /// abandoned append leaves is a tail that does not parse, which is the state
+    /// <see cref="File.VortexFileRepair"/> was written for -- unlike a completed one, which parses
+    /// and reports the rows the append had kept so far, losing the rest without a trace.
+    ///
+    /// It is safe to call more than once, and after it the writer accepts no further rows.
+    /// </remarks>
+    public void Abandon()
+    {
+        _completed = true;
+        _abandoned = true;
     }
 
     /// <summary>Appends <paramref name="batch"/> as one chunk of every column.</summary>
@@ -1109,6 +1143,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     }
 
     /// <summary>Completes the file if it is not complete, then releases the sink.</summary>
+    /// <remarks>
+    /// COMPLETING IS WHAT DISPOSAL DOES, AND ON AN ERROR PATH THAT IS RARELY WHAT IS WANTED. A
+    /// producer that writes two batches and throws on the third leaves, through an `await using`
+    /// alone, a file that exists, opens, reports no torn tail and holds the two batches: the
+    /// failure is invisible in the artefact. Nothing downstream can separate it from a file that
+    /// was meant to end there, because there is nothing to separate -- the bytes are the same.
+    /// <see cref="Abandon"/> is the exit; call it before disposing when the rows are not wanted.
+    /// </remarks>
     /// <returns>A task that completes when everything is released.</returns>
     public async ValueTask DisposeAsync()
     {
@@ -1137,6 +1179,23 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         if (_sink is IAsyncDisposable disposable)
         {
             await disposable.DisposeAsync().ConfigureAwait(false);
+        }
+
+        // AFTER THE SINK, because the stream holds the file with FileShare.None and a delete under
+        // it fails on Windows. A file that is already gone is the outcome asked for, and a file the
+        // caller has since replaced is not this writer's to judge, so neither is an error here.
+        if (_abandoned && _createdPath is not null)
+        {
+            try
+            {
+                System.IO.File.Delete(_createdPath);
+            }
+            catch (System.IO.IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
         }
     }
 
