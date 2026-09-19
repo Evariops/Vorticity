@@ -292,6 +292,15 @@ internal readonly ref struct FsstDecodeTable
         {
             // EIGHT AT A TIME while the block is escape-free and the slack covers eight stores.
             // One compare for the slack and one SWAR test for the escapes, against eight of each.
+            //
+            // Nothing is owed to the escape here, because trained tables barely produce one. Counted
+            // over every file of the corpus: 622 escapes in 264 038 codes, a quarter of a per cent,
+            // and 1 640 breaks out of this loop for them -- two and a half per escape, because the
+            // 0xFF stays in the eight-byte window until the scalar path has consumed it and the
+            // literal that follows an escape can be 0xFF itself. On the million-row `fsst` file the
+            // benchmarks read there is not one escape in 9 877 674 codes. Upstream's other shape,
+            // which keeps the escape inside the block of eight, would therefore be answering a
+            // question this data does not ask.
             while (i <= blockEnd && written <= blockLimit)
             {
                 ulong word = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref input, (uint)i));
