@@ -384,9 +384,10 @@ internal static class RatioCheck
         ["key order, sorted column, 1% band"] = new(0.683, 11),   // 3 passes, spread 0.671-0.683; was 0.701, -2.6%
         ["key order, uncorrelated, 64 rows"] = new(1.148, 6),   // 3 passes, spread 1.058-1.339; HELD at 1.148: 3 passes peaked at 1.339, no loosening
         ["count, exact cover, 1% band"] = new(0.759, 7),   // 3 passes, spread 0.725-0.759; HELD at 0.759: 3 passes peaked at 0.759, no loosening
-        ["filtered scan, string prefix, fsst"] = new(1.712, 3),   // 3 passes, spread 1.656-1.712; new
-        ["filtered scan, string equality, dict"] = new(2.530, 7),   // 3 passes, spread 2.314-2.530; new
-        ["filtered scan, string prefix, dict"] = new(1.562, 6),   // 3 passes, spread 1.468-1.562; new
+        ["filtered scan, string equality, fsst"] = new(2.306, 4),   // 3 passes, spread 2.120-2.306; new
+        ["filtered scan, string prefix, fsst"] = new(1.468, 2),   // 3 passes, spread 1.431-1.468
+        ["filtered scan, string equality, dict"] = new(2.530, 7),   // 3 passes, spread 2.293-3.092
+        ["filtered scan, string prefix, dict"] = new(1.467, 6),   // 3 passes, spread 1.374-1.467
     };
 
     /// <summary>
@@ -1117,17 +1118,9 @@ internal static class RatioCheck
     /// no column to name, and the shared five-column file has no text column at all. An encoding
     /// hint pins what the chooser would otherwise price.
     /// </remarks>
-    /// <remarks>
-    /// EQUALITY OVER FSST IS MISSING, and it is the axis this group most wanted. Asking the
-    /// reference for it aborts the process: `fsst-rs` panics with "rebuild symbol insertion into
-    /// PHT must succeed" while rebuilding a compressor from the column's symbol table, which is
-    /// the very step that makes equality cheap on FSST. The prefix axis over the same file and the
-    /// same column is fine, so the column reads; it is the rebuild that does not. An axis that
-    /// kills the gate is worse than an axis that is missing, so it is left out until the panic is
-    /// understood rather than left in behind a flag nobody sets.
-    /// </remarks>
     private static readonly string[] StringPredicateNames =
     [
+        "filtered scan, string equality, fsst",
         "filtered scan, string prefix, fsst",
         "filtered scan, string equality, dict",
         "filtered scan, string prefix, dict",
@@ -1138,6 +1131,9 @@ internal static class RatioCheck
 
     /// <summary>Rows of each string-predicate file: the shape every other axis reads.</summary>
     private const int StringRows = 65_536;
+
+    /// <summary>The needle that matches one row of the fsst column.</summary>
+    private const string FsstNeedle = "https://example.invalid/vortex/conformance/000040000";
 
     /// <summary>A prefix of the fsst column: the 10 000 rows whose number starts with five zeros.</summary>
     private const string FsstPrefix = "https://example.invalid/vortex/conformance/00000";
@@ -1175,18 +1171,24 @@ internal static class RatioCheck
         [
             new Axis(
                 StringPredicateNames[0],
+                p => StringEquality(p, FsstNeedle),
+                p => RustReader.Require(
+                    RustReader.ScanFilteredEqUtf8(p, StringField, FsstNeedle), "string equality"),
+                fsst),
+            new Axis(
+                StringPredicateNames[1],
                 p => StringPrefix(p, FsstPrefix),
                 p => RustReader.Require(
                     RustReader.ScanFilteredPrefixUtf8(p, StringField, FsstPrefix), "string prefix"),
                 fsst),
             new Axis(
-                StringPredicateNames[1],
+                StringPredicateNames[2],
                 p => StringEquality(p, DictNeedle),
                 p => RustReader.Require(
                     RustReader.ScanFilteredEqUtf8(p, StringField, DictNeedle), "string equality"),
                 dict),
             new Axis(
-                StringPredicateNames[2],
+                StringPredicateNames[3],
                 p => StringPrefix(p, DictPrefix),
                 p => RustReader.Require(
                     RustReader.ScanFilteredPrefixUtf8(p, StringField, DictPrefix), "string prefix"),

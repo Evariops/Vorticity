@@ -10,10 +10,12 @@
 //
 // WHERE THIS DELIBERATELY DIVERGES FROM THE REFERENCE, and why each divergence is safe:
 //
-//   * The reference matches symbols through a LOSSY perfect hash table, whose insert can FAIL and
-//     silently drop a symbol. That is a speed optimization with a correctness-visible side effect;
-//     we use exact dictionaries keyed by length, so every chosen symbol is reachable. The result
-//     is a table at least as good, never worse, and the output is still a legal FSST stream.
+//   * The reference matches symbols through a lossy hash table, whose insert can fail and silently
+//     drop a symbol. We match through exact dictionaries keyed by length instead, so nothing we
+//     choose is unreachable to us. What we may NOT do is keep a symbol that table could not hold:
+//     a reader pushing a predicate down has to turn our table back into a matcher, and a symbol it
+//     cannot place stops it dead. So the table is filtered to what the reference can hold before it
+//     is settled, and the exact dictionaries buy speed rather than a larger table.
 //   * The reference's compress loop reads 8 bytes past its cursor and lets a symbol match into the
 //     zero padding of the final word. WE CAP EVERY MATCH AT THE BYTES REMAINING. A match into
 //     padding would decode to MORE bytes than the row contained, and our own reader checks the
@@ -188,6 +190,9 @@ internal sealed class FsstSymbols
 
     /// <summary>Slots in the symbol table; a power of two, four times <see cref="MaxSymbols"/>.</summary>
     private const int SlotCount = 1024;
+
+    /// <summary>Slots in the reference's matcher, which decides which symbols it can hold.</summary>
+    private const int ReferenceSlotCount = 2048;
 
     /// <summary>The multiplier of the multiply-shift hash; the reference's own constant.</summary>
     private const ulong HashPrime = 2971215073UL;
@@ -655,6 +660,13 @@ internal sealed class FsstSymbols
             return byGain != 0 ? byGain : b.Key.Length.CompareTo(a.Key.Length);
         });
 
+        // One bit per slot of the reference's matcher. A symbol it could not hold is skipped here
+        // rather than removed later, so the next candidate down the ranking takes the code instead
+        // and the table still fills: dropping after the table is full would spend code space on
+        // nothing.
+        Span<ulong> taken = stackalloc ulong[ReferenceSlotCount / 64];
+        taken.Clear();
+
         Clear();
         for (int i = 0; i < ranked.Count && _count < MaxSymbols; i++)
         {
@@ -666,6 +678,19 @@ internal sealed class FsstSymbols
                 {
                     continue;
                 }
+            }
+
+            if (candidate.Length >= 3)
+            {
+                int slot = ReferenceSlot(candidate.Bits);
+                ref ulong word = ref taken[slot >> 6];
+                ulong mask = 1UL << (slot & 63);
+                if ((word & mask) != 0)
+                {
+                    continue;
+                }
+
+                word |= mask;
             }
 
             Insert(candidate.Bits, candidate.Length);
@@ -817,6 +842,26 @@ internal sealed class FsstSymbols
             Insert(bits[i], lengths[i]);
         }
     }
+
+    /// <summary>
+    /// The slot the reference's matcher gives a symbol of three bytes or more.
+    /// </summary>
+    /// <remarks>
+    /// Its table holds one symbol per slot and refuses a second, so a symbol that lands on a taken
+    /// slot is one the reference cannot hold. It drops such a symbol while training, which is why
+    /// its own tables always fit; ours are built with exact dictionaries and would keep it. Keeping
+    /// it costs nothing to read -- the decoder walks codes and never hashes -- but a reader that
+    /// wants to push a predicate down has to turn the table back into a matcher, and a symbol it
+    /// cannot place aborts that. The few bytes a dropped symbol would have saved are not worth a
+    /// column no one else can filter on.
+    ///
+    /// The mixing is the reference's, and it is NOT <see cref="Bucket"/>'s: that one hashes the
+    /// product where this hashes the value, which is a different function and would predict the
+    /// wrong slot.
+    /// </remarks>
+    /// <param name="bits">The symbol's bytes, little-endian.</param>
+    private static int ReferenceSlot(ulong bits) =>
+        (int)(Hash(bits & 0xFFFFFFUL) & (ReferenceSlotCount - 1));
 
     private void Insert(ulong bits, byte length)
     {
