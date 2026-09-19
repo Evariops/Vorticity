@@ -103,7 +103,11 @@ public sealed class ZstdBuffersDecoder : ArrayDecoder
 
         // Decompressed into the canonical arena, which is the only writable memory a decoder may
         // have (contract §8.4) and is released with the batch.
+        //
+        // One decoder for every buffer of the node, for the reason `ZstdDecoder` gives: the one-shot
+        // form builds and tears down a native decompression context per call.
         int firstBuffer = -1;
+        using ZstandardDecoder reused = new ZstandardDecoder();
         for (int i = 0; i < buffers; i++)
         {
             long size = sizes[i];
@@ -118,11 +122,15 @@ public sealed class ZstdBuffersDecoder : ArrayDecoder
             VortexBuffer destination = context.Canonical.Allocate(
                 (int)size, alignment, out Span<byte> writable);
 
-            if (size != 0
-                && (!ZstandardDecoder.TryDecompress(node.GetBuffer(i).Span, writable, out int written)
-                    || written != (int)size))
+            if (size != 0)
             {
-                CompressedThrow.Format($"{Id}'s buffer {i} did not decompress to its declared {size} bytes.");
+                reused.Reset();
+                System.Buffers.OperationStatus status =
+                    reused.Decompress(node.GetBuffer(i).Span, writable, out _, out int written);
+                if (status != System.Buffers.OperationStatus.Done || written != (int)size)
+                {
+                    CompressedThrow.Format($"{Id}'s buffer {i} did not decompress to its declared {size} bytes.");
+                }
             }
 
             node.Arena.AddGlobalBuffer(destination);

@@ -40,6 +40,7 @@ public sealed class ZstdDecoder : ArrayDecoder
     /// <summary>The wire id.</summary>
     public const string Id = "vortex.zstd";
 
+
     /// <summary>Bytes of the little-endian length prefix in front of every stored value.</summary>
     private const int ValueLengthPrefix = sizeof(uint);
 
@@ -210,6 +211,7 @@ public sealed class ZstdDecoder : ArrayDecoder
 
         int firstFrame = hasDictionary ? 1 : 0;
         ZstandardDictionary? dictionary = null;
+        ZstandardDecoder? reused = null;
         try
         {
             if (hasDictionary)
@@ -236,10 +238,11 @@ public sealed class ZstdDecoder : ArrayDecoder
                 // Bounded by what is left of the planned total, so a frame that expands further
                 // than advertised is refused by the decoder rather than overrunning.
                 Span<byte> region = destination[written..];
-                bool ok = dictionary is null
-                    ? ZstandardDecoder.TryDecompress(frame, region, out int produced)
-                    : ZstandardDecoder.TryDecompress(frame, region, out produced, dictionary);
-                if (!ok)
+                reused ??= dictionary is null ? new ZstandardDecoder() : new ZstandardDecoder(dictionary);
+                reused.Reset();
+                System.Buffers.OperationStatus status =
+                    reused.Decompress(frame, region, out _, out int produced);
+                if (status != System.Buffers.OperationStatus.Done)
                 {
                     CompressedThrow.Format(
                         $"{Id} frame {i} did not decompress into the {region.Length} bytes its " +
@@ -268,6 +271,7 @@ public sealed class ZstdDecoder : ArrayDecoder
         }
         finally
         {
+            reused?.Dispose();
             dictionary?.Dispose();
         }
 

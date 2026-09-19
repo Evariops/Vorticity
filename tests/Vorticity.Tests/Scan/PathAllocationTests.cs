@@ -211,7 +211,14 @@ public sealed class PathAllocationTests
         // the 32 B of headroom the neighbouring axes have.
         ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_712, FullScan),
         ("scan, vortex.pco", "encodings/pco", 29_184, FullScan),
-        ("scan, vortex.zstd", "encodings/zstd", 27_648, FullScan),
+        // 27 648 -> 27 712 on 2026-09-19, and here is the argument. Decompressing a node's frames
+        // used the one-shot `ZstandardDecoder.TryDecompress`, which builds and tears down a native
+        // decompression context per call -- 977 of them on a million-row column. One decoder per
+        // node, reset between frames, costs 64 B of managed object once per scan and takes the
+        // `zstd` axis from 7 476 to 6 844 us and `zstd_nullable` from 2 170 to 2 012 (bench/ab.sh,
+        // 21 rounds, intervals [0,913; 0,937] and [0,921; 0,936]). Sixty-four bytes once, against
+        // seven and a half per cent of both axes.
+        ("scan, vortex.zstd", "encodings/zstd", 27_712, FullScan),
         ("scan, vortex.map", "encodings/map", 28_160, FullScan),
         ("scan, vortex.variant", "encodings/variant", 27_648, FullScan),
     ];
