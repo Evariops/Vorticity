@@ -278,6 +278,14 @@ internal static class BlockStatsPass
                     stats.TotalBytes += ViewBytes(node, in mask, start, count, valid);
                 }
 
+                // WHAT THE TWO OF THEM COST, measured by doubling them: 13,1 ms of a 54,7 ms write
+                // of a million `fsst` rows, 8,2 of 31,0 on `onpair`, 5,9 of 33,7 on `varbin` --
+                // a quarter of the axis on the string encodings. Merging them with the dictionary
+                // probe was the plan and cannot reach them: the probe runs only on a chunk whose
+                // remembered plan is a dictionary that held (`ColumnWriter.cs:608`), and a
+                // dictionary does not hold on these columns. Making the two cheaper in themselves,
+                // or skipping them where nothing consumes them, is the shape that would.
+                //
                 // Order, bytewise: the seam here, the pairs inside ViewRuns, which reads them
                 // for the run boundaries anyway.
                 stats.OrderTracked = true;
