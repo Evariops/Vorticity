@@ -399,12 +399,12 @@ internal static class RatioCheck
         ["key order, sorted column, 1% band"] = new(0.683, 13, 0.040),
         ["key order, uncorrelated, 64 rows"] = new(1.148, 6, 0.160),
         ["count, exact cover, 1% band"] = new(0.633, 7, 0.047),
-        ["filtered scan, string equality, fsst"] = new(2.169, 4, 0.007),
-        ["filtered scan, string prefix, fsst"] = new(1.452, 2, 0.008),
+        ["filtered scan, string equality, fsst"] = new(1.131, 4, 0.191),   // 3 passes, spread 0.915-1.131; was 2.169, -47.8%: the column answers the equality from its codes, and its values no longer ascend
+        ["filtered scan, string prefix, fsst"] = new(1.281, 2, 0.014),   // 3 passes, spread 1.264-1.281; was 1.452, -11.7%: the same column, no longer ascending
         // Nine passes, not three: three read 0.024 and this axis swings sixteen times that. It is
         // the shortest of the four string axes, and the only one whose dispersion needs more
         // processes than the default to show itself at all.
-        ["filtered scan, string equality, dict"] = new(2.084, 7, 0.120),   // 3 passes, spread 1.834-2.084; was 2.473, -15.7%: the dictionary now answers the equality from its values
+        ["filtered scan, string equality, dict"] = new(1.713, 7, 0.051),   // 3 passes, spread 1.625-1.713; was 2.084, -17.8%; and 2.473 before the dictionary answered the equality from its values
         ["filtered scan, string prefix, dict"] = new(1.444, 6, 0.007),
         ["filtered scan, band, runend"] = new(1.160, 11),   // first calibration, 4 runs, spread 1.141-1.160
     };
@@ -1219,7 +1219,15 @@ internal static class RatioCheck
         await WriteStringFileAsync(
             fsst,
             Vorticity.Writing.VortexEncodingHint.Fsst,
-            row => string.Create(CultureInfo.InvariantCulture, $"https://example.invalid/vortex/conformance/{row:D9}"))
+            // SCRAMBLED, not ascending, and the axis's name depends on it. A column whose values ascend
+            // is a sorted column, and a scan answers an equality over one by seeking it: the rows
+            // are proved before anything is read and there is no predicate left to evaluate. This
+            // axis is named for what the encoding costs a filter, so its column must be one a
+            // filter actually has to read. Multiplying by a prime coprime with the row count
+            // permutes the rows and keeps every value distinct.
+            row => string.Create(
+                CultureInfo.InvariantCulture,
+                $"https://example.invalid/vortex/conformance/{(row * 7_919) % StringRows:D9}"))
             .ConfigureAwait(false);
         await WriteStringFileAsync(
             dict,

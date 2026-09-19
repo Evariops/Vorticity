@@ -140,13 +140,10 @@ public sealed class FlatLayoutReader : LayoutReader
         // answer. It is kept under a key of its own because the same chunk can be wanted both as an
         // answer and as values, and a cache that confused the two would hand a boolean column to a
         // caller that asked for strings.
-        if (context.PredicateAtNode)
+        if (context.PredicateAtNode &&
+            TryRetainedAnswer(in node, context, key, total, out CanonicalArena states, out int said))
         {
-            int answered = RetainedAnswer(in node, context, key, total, (int)rows.Start, length);
-            if (answered >= 0)
-            {
-                return answered;
-            }
+            return CanonicalSlice.SliceAcross(states, context.Canonical, said, (int)rows.Start, length);
         }
 
         if (!context.TryGetRetained(key, out CanonicalArena held, out int retained))
@@ -211,6 +208,24 @@ public sealed class FlatLayoutReader : LayoutReader
         // would be created, used once and evicted. It is not free to get this wrong - the take axis
         // of `PathAllocationTests` is 64 chunks of 1024 rows, and retaining every one of them put it
         // 7 008 B over a ceiling that may not rise.
+        // THE PREDICATE IS ASKED HERE TOO, and the selective path is where a selective predicate
+        // actually lands: a column with a zone map whose blocks the scan can kill reaches this
+        // reader with a selection in force, and that is exactly the shape a selective equality
+        // makes. Answering only on the branch above meant answering only for the columns whose
+        // data defeats pruning -- a dictionary of sixteen labels, never a column of distinct
+        // strings. The answer is for the whole node and the selection is gathered out of it,
+        // which is what `Gather` does for values and for the same reason.
+        if (context.PredicateAtNode)
+        {
+            long answerKey = ScanContext.SegmentKey(node.Segments[0]);
+            if (TryRetainedAnswer(
+                    in node, context, answerKey, total, out CanonicalArena answered, out int answer))
+            {
+                int whole = CanonicalSlice.SliceAcross(answered, context.Canonical, answer, 0, total);
+                return Compute.CanonicalFilter.Apply(context.Canonical, whole, context.Selection);
+            }
+        }
+
         if (length < total)
         {
             long key = ScanContext.SegmentKey(node.Segments[0]);
@@ -265,31 +280,42 @@ public sealed class FlatLayoutReader : LayoutReader
     private const long AnswerKey = unchecked((long)0x8000_0000_0000_0000);
 
     /// <summary>
-    /// The window of a chunk's answer this batch wants, asking the encoding once per chunk.
+    /// The chunk's answer to the pushed comparison, asked of the encoding once per chunk.
     /// </summary>
     /// <param name="node">The flat layout node.</param>
     /// <param name="context">The scan context carrying the comparison.</param>
     /// <param name="key">The chunk's retention key.</param>
     /// <param name="total">The chunk's row count.</param>
-    /// <param name="start">This batch's first row within the chunk.</param>
-    /// <param name="length">This batch's row count.</param>
-    /// <returns>The canonical node holding the window, or -1 when the encoding declined.</returns>
-    private int RetainedAnswer(
-        in LayoutNode node, ScanContext context, long key, int total, int start, int length)
+    /// <param name="arena">The arena the answer is retained in.</param>
+    /// <param name="answer">The answer's node in <paramref name="arena"/>, one state a row.</param>
+    /// <returns><see langword="false"/> when the encoding declined.</returns>
+    /// <remarks>
+    /// It answers for the WHOLE chunk whatever the caller wants of it, because that is what can be
+    /// retained: a chunk spans several batches and several selections, and an answer cut to one of
+    /// them would have to be recomputed for the next. The callers window or gather out of it.
+    /// </remarks>
+    private bool TryRetainedAnswer(
+        in LayoutNode node, ScanContext context, long key, int total,
+        out CanonicalArena arena, out int answer)
     {
         long answerKey = key ^ AnswerKey;
         if (context.TryGetRetained(answerKey, out CanonicalArena hit, out int hitNode))
         {
             context.PredicateAnswered = true;
-            return CanonicalSlice.SliceAcross(hit, context.Canonical, hitNode, start, length);
+            arena = hit;
+            answer = hitNode;
+            return true;
         }
+
+        arena = default!;
+        answer = -1;
 
         ArrayNode root = LoadRoot(in node, context);
         ArrayDecoder decoder =
             ArrayDecoderTable.Require(context, root.Encoding, root.EncodingSpecIndex);
         if (!decoder.EvaluatesWithoutFullDecode)
         {
-            return -1;
+            return false;
         }
 
         byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(total, 1));
@@ -300,7 +326,7 @@ public sealed class FlatLayoutReader : LayoutReader
                     context.Decode, in root, node.DType, total,
                     context.PushedOp, context.PushedLiteral, states))
             {
-                return -1;
+                return false;
             }
 
             // Only the answer itself is retained. Whatever the encoding decoded to reach it -- a
@@ -318,7 +344,9 @@ public sealed class FlatLayoutReader : LayoutReader
             }
 
             context.PredicateAnswered = true;
-            return CanonicalSlice.SliceAcross(held, context.Canonical, retained, start, length);
+            arena = held;
+            answer = retained;
+            return true;
         }
         finally
         {

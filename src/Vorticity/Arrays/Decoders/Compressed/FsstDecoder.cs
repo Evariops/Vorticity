@@ -55,6 +55,112 @@ public sealed class FsstDecoder : ArrayDecoder
     public override bool SelectsWithoutFullDecode => true;
 
     /// <inheritdoc/>
+    public override bool EvaluatesWithoutFullDecode => true;
+
+    /// <summary>
+    /// Answers an equality by compressing the literal and comparing code for code, so the column is
+    /// never decompressed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Equal values compress to equal codes, and equal codes decompress to equal values, so code
+    /// equality IS value equality. The first half is the invariant
+    /// <c>FsstCompressInvariantTests</c> holds; the second is decompression being a function.
+    /// </para>
+    /// <para>
+    /// ONLY EQUALITY AND ITS NEGATION. An ordering on codes is not an ordering on the bytes they
+    /// stand for -- a symbol's code says nothing about where its bytes sort -- so anything else
+    /// declines and the scan decodes as it always has.
+    /// </para>
+    /// <para>
+    /// MOST ROWS ARE REJECTED BY THEIR OFFSETS ALONE: a row whose code slice is not the needle's
+    /// length cannot equal it, and that is two integer reads against touching its bytes. Only the
+    /// rows of the right length are compared, which on a selective equality is few.
+    /// </para>
+    /// <para>
+    /// The uncompressed lengths are not read at all. They size the decoded heap, and there is no
+    /// heap here.
+    /// </para>
+    /// </remarks>
+    public override bool TryCompare(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (op is not (Expressions.ComparisonOp.Equal or Expressions.ComparisonOp.NotEqual) ||
+            literal.Kind != Expressions.FilterLiteralKind.Bytes ||
+            node.BufferCount != 3)
+        {
+            return false;
+        }
+
+        CanonicalSupport.RequireBinaryLike(dtype, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, 3, Id);
+
+        FsstMetadata metadata = FsstMetadata.Read(node.Metadata);
+        FsstSymbolTable table = FsstSymbolTable.Create(
+            node.GetBuffer(0).Span, node.GetBuffer(1).Span, Id);
+
+        ReadOnlySpan<byte> needle = literal.BytesValue;
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(
+            FsstSymbolTable.MaxCompressedLength(needle.Length) + 1);
+        try
+        {
+            if (!table.TryCompress(needle, rented, out int needleLength))
+            {
+                return false;
+            }
+
+            ReadOnlySpan<byte> wanted = rented.AsSpan(0, needleLength);
+
+            PType offsetsPType = metadata.CodesOffsetsPType;
+            CanonicalSupport.RequireIntegerPType(offsetsPType, Id + " codes_offsets");
+            int offsetCount = ArrayDecodeContext.CheckedLength(
+                (ulong)length + 1, Id + " codes_offsets");
+            DType offsetsType = context.Types.Primitive(offsetsPType, Nullability.NonNullable);
+            int offsetsIndex = context.DecodeChild(in node, 1, offsetsType, offsetCount);
+            CanonicalNode codesOffsets = CanonicalSupport.RequirePrimitiveChild(
+                context, offsetsIndex, offsetsPType, offsetCount, Id + " codes_offsets");
+
+            VortexBuffer codes = node.GetBuffer(2);
+            ReadOnlySpan<byte> stream = CodeStream(codesOffsets, offsetsPType, length, codes);
+            ReadOnlySpan<byte> raw = codesOffsets.Values.Span;
+
+            Validity validity = context.DecodeValidity(in node, 2, dtype.Nullability, length);
+            ValidityReader rows = ValidityReader.Of(context.Canonical, validity);
+
+            byte match = op == Expressions.ComparisonOp.Equal
+                ? Compute.Trilean.True
+                : Compute.Trilean.False;
+            byte miss = op == Expressions.ComparisonOp.Equal
+                ? Compute.Trilean.False
+                : Compute.Trilean.True;
+
+            // The physical type of the offsets is resolved ONCE, for the reason
+            // `TotalDecodedLength` gives: reading one offset a row through a switch on the type was
+            // 15 % of a scan, and a loop that reads two is no better.
+            switch (offsetsPType)
+            {
+                case PType.U8: Match<byte>(raw, stream, wanted, in rows, length, match, miss, destination); break;
+                case PType.U16: Match<ushort>(raw, stream, wanted, in rows, length, match, miss, destination); break;
+                case PType.U32: Match<uint>(raw, stream, wanted, in rows, length, match, miss, destination); break;
+                case PType.U64: Match<ulong>(raw, stream, wanted, in rows, length, match, miss, destination); break;
+                case PType.I8: Match<sbyte>(raw, stream, wanted, in rows, length, match, miss, destination); break;
+                case PType.I16: Match<short>(raw, stream, wanted, in rows, length, match, miss, destination); break;
+                case PType.I32: Match<int>(raw, stream, wanted, in rows, length, match, miss, destination); break;
+                case PType.I64: Match<long>(raw, stream, wanted, in rows, length, match, miss, destination); break;
+                default: return false;
+            }
+
+            return true;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <inheritdoc/>
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -286,6 +392,53 @@ public sealed class FsstDecoder : ArrayDecoder
         }
 
         return codes.Span.Slice((int)start, (int)(end - start));
+    }
+
+    /// <summary>Marks the rows whose code slice is the needle's, with the offsets typed once.</summary>
+    /// <typeparam name="T">The physical type of <c>codes_offsets</c>.</typeparam>
+    /// <param name="raw">The offsets child's bytes.</param>
+    /// <param name="stream">The code stream the offsets bound.</param>
+    /// <param name="wanted">The needle's codes.</param>
+    /// <param name="rows">The column's validity.</param>
+    /// <param name="length">The row count.</param>
+    /// <param name="match">The state a matching row takes.</param>
+    /// <param name="miss">The state every other valid row takes.</param>
+    /// <param name="destination">Receives one state per row.</param>
+    private static void Match<T>(
+        ReadOnlySpan<byte> raw, ReadOnlySpan<byte> stream, ReadOnlySpan<byte> wanted,
+        in ValidityReader rows, int length, byte match, byte miss, Span<byte> destination)
+        where T : unmanaged, System.Numerics.IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> offsets = System.Runtime.InteropServices.MemoryMarshal
+            .Cast<byte, T>(raw)[..(length + 1)];
+        long origin = long.CreateChecked(offsets[0]);
+        long previous = origin;
+        int needleLength = wanted.Length;
+        for (int row = 0; row < length; row++)
+        {
+            long next = long.CreateChecked(offsets[row + 1]);
+            if (next < previous || next - origin > stream.Length)
+            {
+                CompressedThrow.Format(
+                    $"{Id} row {row} spans codes [{previous}, {next}) of a " +
+                    $"{stream.Length}-byte stream.");
+            }
+
+            int start = (int)(previous - origin);
+            int size = (int)(next - previous);
+            previous = next;
+
+            if (!rows.IsValid(row))
+            {
+                destination[row] = Compute.Trilean.Unknown;
+                continue;
+            }
+
+            // The length alone rejects a row without touching its bytes, which is most of them.
+            destination[row] = size == needleLength && stream.Slice(start, size).SequenceEqual(wanted)
+                ? match
+                : miss;
+        }
     }
 
     /// <summary>The sum of the per-row uncompressed lengths, which is the decoded heap's size.</summary>

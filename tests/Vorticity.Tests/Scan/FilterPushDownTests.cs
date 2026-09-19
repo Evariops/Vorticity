@@ -1,10 +1,15 @@
-// A filter a dictionary answers from its values, and the proof that the column is never built.
+// An equality a string encoding answers from what it stores, and the proof that the column is
+// never built to answer it.
 //
 // The quantity is `FlatLayoutReader.ValuesDecoded`, the same counter the block-pruning tests read:
 // it counts what a scan materialized, so a push that works shows as a count near the number of
 // rows the predicate keeps rather than near the number of rows the file holds. Correctness is
 // asserted against the same scan without a predicate, filtered in memory, so the two paths have to
 // agree row for row and not merely in their totals.
+//
+// One case per encoding that claims to answer, because the claim is per encoding: a channel proven
+// on a dictionary says nothing about a compressed-string column, and the two reach the decoder by
+// different routes through the writer's cascade.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -30,35 +35,68 @@ public sealed class FilterPushDownTests
     private const string Field = "strs";
     private const int Rows = 24_576;
     private const int Labels = 16;
-    private const string Needle = "label-07";
 
-    /// <summary>One row in sixteen matches, and the column is never materialized to find them.</summary>
-    [Fact]
-    public async Task ADictionaryAnswersAnEqualityWithoutBuildingTheColumn()
+    /// <summary>The encodings that claim to answer an equality, and a column each.</summary>
+    public static TheoryData<string> Encodings => ["dictionary", "fsst"];
+
+    /// <summary>The matching rows come back, and the column is never materialized to find them.</summary>
+    /// <param name="encoding">Which fixture to write.</param>
+    [Theory]
+    [MemberData(nameof(Encodings))]
+    public async Task AnEncodingAnswersAnEqualityWithoutBuildingTheColumn(string encoding)
     {
-        string path = Write();
+        (VortexEncodingHint hint, Func<int, string> value, string needle) = Fixture(encoding);
+        string path = Write(hint, value);
         try
         {
             (List<string> pushed, long decoded) = await ReadAsync(
-                path, Expr.Eq(Expr.Field(Field), Expr.Literal(FilterLiteral.From(Needle))));
+                path, Expr.Eq(Expr.Field(Field), Expr.Literal(FilterLiteral.From(needle))));
             (List<string> all, _) = await ReadAsync(path, null);
 
-            List<string> expected = all.FindAll(value => value == Needle);
-            Assert.Equal(Rows / Labels, expected.Count);
+            List<string> expected = all.FindAll(v => v == needle);
+            Assert.NotEmpty(expected);
             Assert.Equal(expected, pushed);
 
-            // The predicate keeps one row in sixteen. Without the push the scan materializes every
-            // row of the column to compare it; with it, only the rows that survived are built.
+            // Without the push the scan materializes every row of the column to compare it; with
+            // it, only the rows that survived are built.
             Assert.True(
                 decoded < Rows / 2,
-                $"a filtered scan materialized {decoded} values of {Rows}, so the comparison was " +
-                "answered by decoding the column rather than by the dictionary.");
+                $"a filtered scan over a {encoding} column materialized {decoded} values of " +
+                $"{Rows}, so the comparison was answered by decoding the column.");
         }
         finally
         {
             System.IO.File.Delete(path);
         }
     }
+
+    /// <summary>The hint, the value of a row, and a needle the column holds.</summary>
+    private static (VortexEncodingHint Hint, Func<int, string> Value, string Needle) Fixture(
+        string encoding) => encoding switch
+        {
+            // Short and repeated: sixteen entries over the whole column, which is what a dictionary
+            // is for, and one row in sixteen matches.
+            "dictionary" => (
+                VortexEncodingHint.Dictionary,
+                row => string.Create(CultureInfo.InvariantCulture, $"label-{row % Labels:D2}"),
+                "label-07"),
+
+            // Long, distinct and highly prefixed: no dictionary would help and the symbol table has
+            // everything to learn. Exactly one row matches.
+            //
+            // SCRAMBLED, and that is load-bearing. A column whose values ascend is a sorted column,
+            // and a scan answers an equality over one by seeking it -- no index needed, the rows
+            // proved before anything is read, and no predicate left to push. Which is the right
+            // path when it exists, and not the one this measures.
+            "fsst" => (
+                VortexEncodingHint.Fsst,
+                row => string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"https://example.invalid/vortex/conformance/{(row * 7_919) % Rows:D9}"),
+                "https://example.invalid/vortex/conformance/000012345"),
+
+            _ => throw new ArgumentOutOfRangeException(nameof(encoding), encoding, "no such fixture"),
+        };
 
     private static async Task<(List<string> Values, long Decoded)> ReadAsync(
         string path, VortexExpr? filter)
@@ -84,46 +122,78 @@ public sealed class FilterPushDownTests
         return (values, FlatLayoutReader.ValuesDecoded);
     }
 
-    /// <summary>A one-column file of sixteen repeated labels, pinned to the dictionary encoding.</summary>
-    private static string Write()
+    /// <summary>A one-column file pinned to <paramref name="hint"/>.</summary>
+    private static string Write(VortexEncodingHint hint, Func<int, string> value)
     {
+        const int ViewSize = 16;
+        const int MaxInline = 12;
+
         DTypeArena types = new DTypeArena();
         DType utf8 = types.Utf8(Nullability.NonNullable);
         DType schema = types.Struct([Field], [utf8], Nullability.NonNullable);
 
-        CanonicalArena arena = new CanonicalArena();
-        VortexBuffer buffer = arena.Allocate(Rows * 16, 1, out Span<byte> views);
-        views.Clear();
+        byte[][] encoded = new byte[Rows][];
+        int heapBytes = 0;
         for (int row = 0; row < Rows; row++)
         {
-            byte[] value = System.Text.Encoding.UTF8.GetBytes(
-                string.Create(CultureInfo.InvariantCulture, $"label-{row % Labels:D2}"));
+            encoded[row] = System.Text.Encoding.UTF8.GetBytes(value(row));
+            if (encoded[row].Length > MaxInline)
+            {
+                heapBytes += encoded[row].Length;
+            }
+        }
 
-            // Eight bytes fit inside the view, so the column has no heap at all and the fixture
-            // stays a single buffer.
-            Span<byte> view = views.Slice(row * 16, 16);
-            BinaryPrimitives.WriteUInt32LittleEndian(view, (uint)value.Length);
-            value.CopyTo(view[4..]);
+        CanonicalArena arena = new CanonicalArena();
+        VortexBuffer views = arena.Allocate(Rows * ViewSize, ViewSize, out Span<byte> viewBytes);
+        viewBytes.Clear();
+        VortexBuffer heap = VortexBuffer.Empty;
+        Span<byte> heapBuffer = default;
+        if (heapBytes > 0)
+        {
+            heap = arena.Allocate(heapBytes, 1, out heapBuffer);
+        }
+
+        int offset = 0;
+        for (int row = 0; row < Rows; row++)
+        {
+            byte[] bytes = encoded[row];
+            Span<byte> view = viewBytes.Slice(row * ViewSize, ViewSize);
+            BinaryPrimitives.WriteUInt32LittleEndian(view, (uint)bytes.Length);
+            if (bytes.Length <= MaxInline)
+            {
+                bytes.CopyTo(view[4..]);
+                continue;
+            }
+
+            bytes.AsSpan(0, 4).CopyTo(view[4..8]);
+            BinaryPrimitives.WriteUInt32LittleEndian(view[8..12], 0);
+            BinaryPrimitives.WriteUInt32LittleEndian(view[12..16], (uint)offset);
+            bytes.CopyTo(heapBuffer[offset..]);
+            offset += bytes.Length;
         }
 
         int column = arena.AddVarBinView(
-            utf8, Rows, Validity.NonNullable, buffer, [VortexBuffer.Empty]);
+            utf8, Rows, Validity.NonNullable, views,
+            heapBytes == 0 ? [VortexBuffer.Empty] : [heap]);
         int root = arena.AddStruct(schema, Rows, Validity.NonNullable, [column]);
 
         string path = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(), $"vorticity-pushdown-{Guid.NewGuid():N}.vortex");
-        WriteAsync(path, schema, arena, root).GetAwaiter().GetResult();
+        WriteAsync(path, schema, arena, root, hint).GetAwaiter().GetResult();
         return path;
     }
 
-    private static async Task WriteAsync(string path, DType schema, CanonicalArena arena, int root)
+    private static async Task WriteAsync(
+        string path, DType schema, CanonicalArena arena, int root, VortexEncodingHint hint)
     {
+        // NO INDEX, and that is what this measures. An exact index answers an equality before a
+        // scan reads anything, and the scan then takes the rows it proved -- a different path, and
+        // the right one when it exists. The push is for the columns no exact index covers, so a
+        // fixture that carried one would be testing the index.
         VortexWriteOptions options = new VortexWriteOptions
         {
-            EncodingHints = new Dictionary<string, VortexEncodingHint>
-            {
-                [Field] = VortexEncodingHint.Dictionary,
-            },
+            EncodingHints = new Dictionary<string, VortexEncodingHint> { [Field] = hint },
+            Indexes = Vorticity.Indexes.WritePolicy.None,
         };
 
         await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, options);

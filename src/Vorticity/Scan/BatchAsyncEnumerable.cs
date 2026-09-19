@@ -500,6 +500,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     {
         proven = false;
         ComparisonExpr? pushable = _push == PushDeclined ? null : Pushable();
+
         return pushable is null
             ? SplitExecution.Execute(context, _tree, in _mask, split, _take)
             : ExecutePushed(context, split, pushable, out proven);
