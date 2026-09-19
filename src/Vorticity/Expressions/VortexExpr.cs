@@ -383,7 +383,13 @@ public static class Expr
 {
     /// <summary>A column, by dotted path.</summary>
     /// <param name="path">e.g. <c>payload.size</c>.</param>
-    /// <exception cref="ArgumentException"><paramref name="path"/> is null or empty.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
+    /// <remarks>
+    /// The empty path is a path. A Vortex field name may be empty, so <c>""</c> names the field
+    /// called <c>""</c> wherever a schema has one, exactly as <c>Project("")</c> reaches the same
+    /// column; refusing it here would let one grammar accept what the other turns down. A path that
+    /// names nothing is refused by the scan, which holds the schema and can say which path it was.
+    /// </remarks>
     public static FieldExpr Field(string path) => new FieldExpr(path);
 
     /// <summary>A constant.</summary>
