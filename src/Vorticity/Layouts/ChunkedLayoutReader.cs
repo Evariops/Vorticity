@@ -149,8 +149,11 @@ public sealed class ChunkedLayoutReader : LayoutReader
     /// </para>
     /// <para>
     /// An encoding that <c>SelectsWithoutFullDecode</c> then materializes these rows alone; one that
-    /// does not decodes the chunk once, retains it, and gathers, which is what the whole-chunk path
-    /// cost anyway.
+    /// does not decodes the chunk once, retains it, and gathers this range out of it. That gather is
+    /// not what the whole-chunk path cost anyway, which this said for a while and which is wrong in
+    /// both directions: the whole-chunk path decodes the chunk for every batch that touches it,
+    /// where this decodes it once and gathers, and the gather copies rows the whole-chunk path
+    /// simply sliced. What the copy is worth is measured beside the gather itself.
     /// </para>
     /// </remarks>
     private static int ExecuteChunkLive(

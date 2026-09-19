@@ -12,6 +12,7 @@
 // `Func<,>`, which live in the shared runtime and are therefore the same type on both sides; a
 // scenario returning anything of the library's own would be two incompatible types with one name.
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -52,7 +53,7 @@ public static class ScenarioSet
 
     /// <summary>The scenario names this assembly answers to.</summary>
     public static string[] Names =>
-        ["fullscan", "projected", "projected-wide", "take", "filtered", "write", "write-bloom", "write-postings", "write-sorted-runs", "lookup-sorted-runs"];
+        ["fullscan", "projected", "projected-wide", "take", "filtered", "filtered-pruned", "write", "write-bloom", "write-postings", "write-sorted-runs", "lookup-sorted-runs"];
 
     /// <summary>
     /// The scenario <paramref name="name"/> names, as a delegate of shared-runtime types only.
@@ -71,6 +72,7 @@ public static class ScenarioSet
         "projected-wide" => p => ScanProjectedField(p, WideField),
         "take" => p => ScatteredTake(p, TakeCount, TakeStride),
         "filtered" => p => FilteredScan(p, BandLow, NarrowBand),
+        "filtered-pruned" => FilteredPruned,
         "write" => ReadAndWrite,
         "write-bloom" => p => ReadAndWriteIndexed(p, IndexPolicy.Bloom()),
         "write-postings" => p => ReadAndWriteIndexed(p, IndexPolicy.Postings),
@@ -335,6 +337,158 @@ public static class ScenarioSet
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// One live block in every chunk of a million-row file: the scan shape in which a chunk holds
+    /// dead blocks and is read through the selection path.
+    /// </summary>
+    /// <param name="path">Only the key under which the file is kept; the file itself is built here.</param>
+    /// <remarks>
+    /// <para>
+    /// The only scenario that builds its own input, because no corpus file has the shape and the
+    /// path it exercises is otherwise unmeasured: a chunk with dead blocks in it goes through
+    /// <c>ChunkedLayoutReader.ExecuteChunkLive</c>, and neither the throughput axis, nor the take
+    /// axis, nor any other scenario here reaches that branch. Passing a different file changes
+    /// nothing, which is why the argument is named for what it does.
+    /// </para>
+    /// <para>
+    /// The predicate is a membership of one value per chunk rather than a band, and that is the
+    /// whole design. A band leaves exactly two chunks partly live however wide it is -- the two it
+    /// starts and ends in -- so it exercises the path twice per scan whatever the file's size. One
+    /// value per chunk leaves every chunk partly live, which is the shape that shows what the path
+    /// costs.
+    /// </para>
+    /// <para>
+    /// The column is zstd so its decoder cannot take rows for itself, and the blocks are
+    /// <see cref="PrunedBlock"/> rows in chunks of <see cref="PrunedBlocksPerChunk"/>, so each
+    /// touched chunk decodes eight blocks and keeps one.
+    /// </para>
+    /// </remarks>
+    public static async Task<long> FilteredPruned(string path)
+    {
+        if (!PrunedFiles.TryGetValue(path, out byte[]? bytes))
+        {
+            bytes = await WritePrunedAsync();
+            PrunedFiles.TryAdd(path, bytes);
+        }
+
+        await using VortexFile file = await VortexFile.OpenAsync(
+            new Vorticity.IO.MemorySegmentSource(bytes), new VortexOpenOptions(), CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().Where(Expr.In(Expr.Field(PrunedField), PrunedNeedles))
+            .WithPruning(true).ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
+    /// <summary>The built file, per key: written on the first call and kept for the process.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> PrunedFiles = new();
+
+    /// <summary>The column <see cref="FilteredPruned"/> writes and filters.</summary>
+    public const string PrunedField = "v";
+
+    /// <summary>Rows of the file <see cref="FilteredPruned"/> builds.</summary>
+    public const int PrunedRows = 1_000_000;
+
+    /// <summary>Rows per block, and so per zone and per split, in that file.</summary>
+    public const int PrunedBlock = 1_024;
+
+    /// <summary>Blocks per chunk in that file.</summary>
+    public const int PrunedBlocksPerChunk = 8;
+
+    /// <summary>
+    /// Columns of that file: one the membership tests and nine of payload, because what a take out
+    /// of a retained chunk copies is every column of the rows it names, not just the filtered one.
+    /// </summary>
+    public const int PrunedColumns = 10;
+
+    /// <summary>One value per chunk, each in that chunk's first block: what the membership asks for.</summary>
+    private static readonly FilterLiteral[] PrunedNeedles = BuildNeedles();
+
+    private static FilterLiteral[] BuildNeedles()
+    {
+        const int chunk = PrunedBlock * PrunedBlocksPerChunk;
+        int chunks = (PrunedRows + chunk - 1) / chunk;
+        FilterLiteral[] needles = new FilterLiteral[chunks];
+        for (int i = 0; i < chunks; i++)
+        {
+            long row = ((long)i * chunk) + (PrunedBlock / 2);
+            needles[i] = FilterLiteral.From(row + (row % 3));
+        }
+
+        return needles;
+    }
+
+    private static async Task<byte[]> WritePrunedAsync()
+    {
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        string[] names = new string[PrunedColumns];
+        DType[] fields = new DType[PrunedColumns];
+        Dictionary<string, VortexEncodingHint> hints = new Dictionary<string, VortexEncodingHint>();
+        for (int c = 0; c < PrunedColumns; c++)
+        {
+            names[c] = c == 0 ? PrunedField : "p" + c.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            fields[c] = i64;
+
+            // Zstd because its decoder cannot take rows without decoding the node: the chunk is
+            // decoded once, retained, and the batch's rows come out of it. An encoding that selects
+            // for itself -- bit-packing, which is what the cascade picks for a monotone column left
+            // to itself -- never reaches that path and would measure the wrong branch.
+            hints[names[c]] = VortexEncodingHint.Zstd;
+        }
+
+        DType schema = types.Struct(names, fields, Nullability.NonNullable);
+        System.IO.MemoryStream written = new System.IO.MemoryStream();
+        VortexWriteOptions options = new VortexWriteOptions
+        {
+            RowBlockSize = PrunedBlock,
+            DataBlockTargetBytes = (long)PrunedBlock * PrunedBlocksPerChunk * PrunedColumns * sizeof(long),
+            EncodingHints = hints,
+        };
+
+        await using (VortexFileWriter writer = VortexFileWriter.Create(
+            new StreamSegmentSink(written), schema, options))
+        {
+            const int batch = PrunedBlock * PrunedBlocksPerChunk;
+            for (int start = 0; start < PrunedRows; start += batch)
+            {
+                int rows = Math.Min(batch, PrunedRows - start);
+                Vorticity.Arrays.CanonicalArena arena = new Vorticity.Arrays.CanonicalArena();
+                int[] columns = new int[PrunedColumns];
+                for (int c = 0; c < PrunedColumns; c++)
+                {
+                    Vorticity.Buffers.VortexBuffer values =
+                        arena.Allocate(rows * sizeof(long), sizeof(long), out Span<byte> destination);
+                    Span<long> longs = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(destination);
+                    for (int i = 0; i < rows; i++)
+                    {
+                        // Monotone but not a progression, so every zone map holds a range the
+                        // membership can be answered against; the payload columns carry the same
+                        // shape so the decode they cost is the decode a real table costs.
+                        long row = start + i;
+                        longs[i] = row + (row % 3);
+                    }
+
+                    columns[c] = arena.AddPrimitive(
+                        i64, rows, Vorticity.Arrays.Validity.NonNullable, PType.I64, values);
+                }
+
+                int root = arena.AddStruct(
+                    schema, rows, Vorticity.Arrays.Validity.NonNullable, columns);
+                using RecordBatch record = new RecordBatch(arena, root, start);
+                await writer.WriteAsync(record, CancellationToken.None);
+            }
+
+            await writer.CompleteAsync(CancellationToken.None);
+        }
+
+        return written.ToArray();
     }
 
     /// <summary>The file read back out to a sink that keeps nothing.</summary>

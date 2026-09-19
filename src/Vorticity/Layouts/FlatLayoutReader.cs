@@ -292,11 +292,21 @@ public sealed class FlatLayoutReader : LayoutReader
 
     /// <summary>Gathers <see cref="ScanContext.Selection"/> out of a retained whole-node decode.</summary>
     /// <remarks>
+    /// <para>
     /// Two steps and only the second moves bytes: the window is a full-width view onto the retained
     /// storage - records, no memory traffic, the property <see cref="CanonicalSlice.SliceAcross"/>
     /// exists for - and the gather then materializes exactly the wanted rows. The result borrows the
     /// retained arena, which <see cref="ScanContext.TryGetRetained"/> has just made un-evictable for
     /// the rest of this batch.
+    /// </para>
+    /// <para>
+    /// The pruned paths hand this a contiguous selection every time, and a contiguous selection is a
+    /// window that could be sliced rather than copied. It is not worth the branch: proved with one
+    /// pass of integer comparisons and measured on the <c>filtered-pruned</c> scenario, which leaves
+    /// one live block in each of 123 chunks of a million rows, slicing instead of gathering is worth
+    /// 1,1 % on one column and 3,1 % on ten. The saving grows with the columns copied and stays far
+    /// under what the branch would have to earn.
+    /// </para>
     /// </remarks>
     private static int Gather(
         CanonicalArena held, int retained, in FieldMask fields, ScanContext context, int total)
