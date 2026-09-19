@@ -164,6 +164,13 @@ in [BASELINE.md](BASELINE.md) and in the commits.
   A bare word narrows it to the axes whose name contains it — `-- --ratio-check write`, `--
   --ratio-check rewritten` — which is the difference between checking one change and waiting for
   thirteen axes.
+
+  **Do not pin tiered compilation for this gate.** `DOTNET_TieredCompilation=0` costs our side
+  dynamic profile-guided optimization while the reference, being native, loses nothing: the same
+  command that is green unpinned reports **nine axes over their ceiling** with the pin, `full scan`
+  among them at 0.417 against a 0.385 ceiling. `bench/ab.sh` pins on purpose and says why — both of
+  its sides are the same runtime and the pin removes a JIT difference between them. A ratio against
+  native code is the opposite case.
 * **`--throughput [family…] [--check]`** — 50 encodings at a million rows, where the fixed
   open-and-walk cost is under a percent instead of most of the measurement. `--check` makes it a
   gate. Its inputs are 330 MB and are not committed: run `bench/gen-throughput.sh` once, and it

@@ -398,6 +398,10 @@ internal static class Program
           (nothing)                every class, fast profile, ~2 min
           <word> [<word>…]         bare words become a filter: `fsst` is `--filter *fsst*`
           --ratio-check [axis…]    16 axes, ours over the reference, one clock, ~35 s
+                                     NEVER under DOTNET_TieredCompilation=0: the pin costs our
+                                     side dynamic PGO and the native reference nothing, which
+                                     turns nine green axes red. ab.sh pins both its sides and
+                                     says why; a ratio against native code must not.
                                      --recalibrate N   N processes, prints the table to paste
                                      --rebase          let a reference rise, only where k moved
                                      --ab-same         with --rebase, let it rise where ab.sh
