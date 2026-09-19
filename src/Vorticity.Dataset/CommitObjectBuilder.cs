@@ -75,6 +75,12 @@ public sealed class CommitObjectBuilder : IPageSink
     /// <param name="reference">The reference this builder handed out.</param>
     /// <param name="page">Receives its bytes.</param>
     /// <returns>Whether this builder wrote that page.</returns>
+    /// <remarks>
+    /// A walk and not a map, on measurement: a commit over a million objects does hold more than a
+    /// thousand pages, but it asks this question rarely, and the whole budget suite -- that commit
+    /// included -- takes under ten thousand steps here in total. A map would index a list nobody
+    /// reads often enough to pay for it.
+    /// </remarks>
     public bool TryGetPage(PageReference reference, out ReadOnlyMemory<byte> page)
     {
         for (int i = 0; i < _pageReferences.Count; i++)

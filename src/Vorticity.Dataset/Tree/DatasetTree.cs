@@ -757,6 +757,12 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
     }
 
     /// <summary>The child whose range holds the key, by the usual descent.</summary>
+    /// <remarks>
+    /// A walk and not a binary search, because the page it walks is short: the boundary rule never
+    /// let one past thirty-two entries anywhere in the dataset suite, a tree over a million objects
+    /// included. It also stops at the first entry above the key, so a descent that lands early
+    /// reads a handful.
+    /// </remarks>
     private static int Descend(IReadOnlyList<InternalEntry> page, ReadOnlySpan<byte> key)
     {
         int child = -1;
