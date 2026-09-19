@@ -10,6 +10,7 @@
 // metadata and statistics point into that copy, so a node view never depends on the segment
 // outliving it, and the inlined `array_encoding_tree` variant needs no pinning games.
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Vorticity.Buffers;
 
@@ -135,6 +136,9 @@ public readonly ref struct ArrayNode
     public ArrayNode GetChild(int index)
     {
         ref readonly ArrayNodeRecord r = ref _arena.RecordRef(_index);
+        Debug.Assert(
+            (r.FirstChild == -1) == (r.ChildCount == 0),
+            "a node addresses a first child exactly when it has children");
         if ((uint)index >= (uint)r.ChildCount)
         {
             ArraysThrow.ChildIndex(index, r.ChildCount);
