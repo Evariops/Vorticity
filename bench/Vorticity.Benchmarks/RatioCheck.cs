@@ -406,6 +406,7 @@ internal static class RatioCheck
         // processes than the default to show itself at all.
         ["filtered scan, string equality, dict"] = new(2.084, 7, 0.120),   // 3 passes, spread 1.834-2.084; was 2.473, -15.7%: the dictionary now answers the equality from its values
         ["filtered scan, string prefix, dict"] = new(1.444, 6, 0.007),
+        ["filtered scan, band, runend"] = new(1.160, 11),   // first calibration, 4 runs, spread 1.141-1.160
     };
 
     /// <summary>
@@ -549,6 +550,9 @@ internal static class RatioCheck
                 .. StringPredicateNames.Any(Selected)
                     ? await StringPredicateAxesAsync(temporary, Selected).ConfigureAwait(false)
                     : [],
+                .. RunEndPredicateNames.Any(Selected)
+                    ? await RunEndPredicateAxesAsync(temporary, Selected).ConfigureAwait(false)
+                    : [],
                 .. Lanes > 1 ? new[] { LaneAxis(Lanes) } : [],
                 .. TableAxes().Where(a => Selected(a.Name)),
             ];
@@ -557,7 +561,8 @@ internal static class RatioCheck
                 Console.Error.WriteLine(
                     $"No axis matches {string.Join(", ", only)}. The axes are:\n  " +
                     string.Join("\n  ", Axes.Select(a => a.Name).Concat(RewrittenNames())
-                        .Concat(KeyOrderNames).Concat(StringPredicateNames)));
+                        .Concat(KeyOrderNames).Concat(StringPredicateNames)
+                        .Concat(RunEndPredicateNames)));
                 return 2;
             }
 
@@ -1367,6 +1372,130 @@ internal static class RatioCheck
         VortexExpr predicate = Expr.StartsWith(
             Expr.Field(StringField), FilterLiteral.From(prefix));
         await foreach (RecordBatch batch in file.Scan().Where(predicate).ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The band-over-runs axis, which the generated corpus cannot carry.
+    /// </summary>
+    /// <remarks>
+    /// The corpus's `runend` file is a bare array with no column to name, and a predicate names a
+    /// column -- the same reason the string-predicate group writes its own. A band is the predicate
+    /// a run-end column is for: it is answered by comparing each run's value once, where a scan of
+    /// the rows compares it as many times as the run is long.
+    ///
+    /// WHAT IT ANSWERED THE DAY IT WAS BUILT, so that nobody pays the experiment twice. Letting the
+    /// encoding answer the band from its runs -- one comparison a run, then a fill -- is worth
+    /// nothing here: four runs alternating the push on and off read 101,0 and 103,4 us with it
+    /// against 101,7 and 105,5 without, a difference of one and a half per cent under a noise floor
+    /// of two to four. The saving a dictionary gets does not transfer, and the reason is in the
+    /// shape: expanding a run-end column is a fill, not a decode, and the answer is a fill too, so
+    /// both paths write one byte a row and that write is the axis. An encoding whose rows are cheap
+    /// to produce has nothing to win by not producing them.
+    /// </remarks>
+    private static readonly string[] RunEndPredicateNames = ["filtered scan, band, runend"];
+
+    /// <summary>The integer column the run-end file carries.</summary>
+    private const string RunEndField = "runs";
+
+    /// <summary>Rows of the run-end file, and the length of each of its runs.</summary>
+    private const int RunEndRows = 65_536;
+
+    /// <summary>How many rows share a value, which fixes the run count at a thousand and change.</summary>
+    private const int RunLength = 64;
+
+    /// <summary>The band's first value and its width, in values and therefore in runs.</summary>
+    private const long RunEndBandLow = 100;
+
+    /// <summary>Sixteen runs, a thousand rows, one and a half per cent of the file.</summary>
+    private const long RunEndBandWidth = 16;
+
+    /// <summary>Writes the run-end file and returns the group's axis.</summary>
+    /// <param name="temporary">Collects the file written, for the caller to delete.</param>
+    /// <param name="selected">Which axes the caller asked for.</param>
+    private static async Task<List<Axis>> RunEndPredicateAxesAsync(
+        List<string> temporary, Func<string, bool> selected)
+    {
+        string path = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"vorticity-runend-{Guid.NewGuid():N}.vortex");
+        temporary.Add(path);
+        await WriteRunEndFileAsync(path).ConfigureAwait(false);
+
+        List<Axis> axes =
+        [
+            new Axis(
+                RunEndPredicateNames[0],
+                RunEndBand,
+                p => RustReader.Require(
+                    RustReader.ScanFiltered(p, RunEndField, RunEndBandLow, RunEndBandWidth),
+                    "filtered scan"),
+                path),
+        ];
+        return axes.FindAll(a => selected(a.Name));
+    }
+
+    /// <summary>Writes one integer column of runs of <see cref="RunLength"/> equal values.</summary>
+    /// <param name="path">Where to write.</param>
+    private static async Task WriteRunEndFileAsync(string path)
+    {
+        Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
+        // i64 and not i32: the reference's filtered scan takes its bounds as i64 and refuses a
+        // column of another width, so a narrower column would measure nothing at all.
+        Vorticity.Types.DType i64 = types.Primitive(
+            Vorticity.Types.PType.I64, Vorticity.Types.Nullability.NonNullable);
+        Vorticity.Types.DType schema = types.Struct(
+            [RunEndField], [i64], Vorticity.Types.Nullability.NonNullable);
+        Vorticity.Writing.VortexWriteOptions options = new Vorticity.Writing.VortexWriteOptions
+        {
+            EncodingHints = new Dictionary<string, Vorticity.Writing.VortexEncodingHint>
+            {
+                [RunEndField] = Vorticity.Writing.VortexEncodingHint.RunEnd,
+            },
+        };
+
+        await using Vorticity.Writing.VortexFileWriter writer =
+            Vorticity.Writing.VortexFileWriter.Create(path, schema, options);
+        const int batch = 8_192;
+        for (int start = 0; start < RunEndRows; start += batch)
+        {
+            Vorticity.Arrays.CanonicalArena arena = new Vorticity.Arrays.CanonicalArena();
+            Vorticity.Buffers.VortexBuffer values =
+                arena.Allocate(batch * sizeof(long), sizeof(long), out Span<byte> bytes);
+            Span<long> typed = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(bytes);
+            for (int i = 0; i < batch; i++)
+            {
+                typed[i] = (start + i) / RunLength;
+            }
+
+            int column = arena.AddPrimitive(
+                i64, batch, Vorticity.Arrays.Validity.NonNullable,
+                Vorticity.Types.PType.I64, values);
+            int root = arena.AddStruct(
+                schema, batch, Vorticity.Arrays.Validity.NonNullable, [column]);
+            using RecordBatch record = new RecordBatch(arena, root, start);
+            await writer.WriteAsync(record, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        await writer.CompleteAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>Scans keeping the rows whose integer column falls in the band.</summary>
+    private static async Task<long> RunEndBand(string path)
+    {
+        VortexExpr band = Expr.And(
+            Expr.Ge(Expr.Field(RunEndField), Expr.Literal(FilterLiteral.From(RunEndBandLow))),
+            Expr.Lt(
+                Expr.Field(RunEndField),
+                Expr.Literal(FilterLiteral.From(RunEndBandLow + RunEndBandWidth))));
+
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan().Where(band).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
