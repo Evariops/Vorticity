@@ -166,7 +166,12 @@ public sealed class WriteAllocationTests
         // tient désormais un `ZstandardDecoder` par nœud au lieu d'en construire un par trame. Seize
         // octets une fois, pour 7,5 % sur les axes `zstd` et `zstd_nullable` en lecture ; rien du
         // chemin d'écriture n'a bougé.
-        ("encodings/zstd", 225_016),   // 224 592 mesurés (12e) : Auto ; était 223 400
+        // 225 016 -> 225 032 le 2026-09-19 : huit octets de plus par contexte de scan, comptés deux
+        // fois parce que l'axe lit le fichier avant de le réécrire. Le contexte porte une référence
+        // vers le comparatif qu'un encodage peut répondre sans décoder ; ce qu'elle achète est en
+        // lecture — `filtered scan, string equality, dict` passe de 380,6 à 276,4 µs contre la
+        // référence, 2,856 à 1,83. Rien du chemin d'écriture n'a bougé.
+        ("encodings/zstd", 225_032),   // 224 592 mesurés (12e) : Auto ; était 223 400
         ("encodings/map", 105_500),   // 104 952 mesurés (28a, 2026-09-17) : +2 984 B, les trois nœuds que l'arbre des colonnes gagne sous une map -- les entrées, la clé, la valeur (11 §3.2.4) -- chacun avec ses listes de blocs, sa ligne précédente, et le curseur de fenêtre de la map ; par colonne, pas par ligne. Ce qu'ils achètent : l'écriture de `map` à 0,893 de HEAD sur l'axe 1M, `list` 0,901, `listview` 0,911, octets identiques. Les autres fichiers prennent +8 B, le compteur du rédacteur. Était 102 500 : 102 008 mesurés (12e) : Auto. Était 101 600 : 101 368 mesurés (11a) : +1,2 kB par fichier, le segment de statistiques ; était 100 200
         ("encodings/variant", 68_200),   // 67 792 mesurés (12e) : Auto. Était 67 300 : 67 128 mesurés (11a, 2026-09-16) : +1,8 kB par fichier, le segment de statistiques de fichier. Était 65 400 : 65 336 mesurés (étape 8d, 2026-09-16) : +32 B pour deux champs de référence par ScanContext -- le masque de blocs vivants et le puits de métriques du contrat de lecture (8b, 8d) -- sur les deux contextes de transit que l'écrivain instancie ; par fichier, pas par ligne, pour un état qu'il n'utilise pas (un contexte réduit à l'arène est le correctif si ça compte un jour). Était 65 300 (65 232 mesurés, R5a : +32 B pour le champ PlanMemory? de trois ColumnWriter), 65 200 (R2 : +436 B pour trois DistinctTable), 64 700 (63 920 : +320 B pour deux ColumnWriter de plus)
 

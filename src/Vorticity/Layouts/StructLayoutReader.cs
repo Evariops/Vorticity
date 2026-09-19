@@ -128,7 +128,23 @@ public sealed class StructLayoutReader : LayoutReader
 
                 LayoutNode child = node.GetChild(k + validityChildren);
                 FieldMask childMask = fields.Descend(k);
-                int decoded = ExecuteChild(in child, rows, in childMask, context);
+
+                // The pushed comparison names a field; this is the one place that knows which child
+                // that is. The flag is set for the matching child and cleared for every other, so a
+                // leaf below never has to re-derive the path, and the previous value is restored
+                // because a struct can hold a struct.
+                bool outer = context.PredicateAtNode;
+                context.PredicateAtNode = !context.PushedField.IsEmpty &&
+                    dtype.GetFieldNameUtf8(k).SequenceEqual(context.PushedField);
+                int decoded;
+                try
+                {
+                    decoded = ExecuteChild(in child, rows, in childMask, context);
+                }
+                finally
+                {
+                    context.PredicateAtNode = outer;
+                }
 
                 childSpan[next] = decoded;
                 if (!whole)

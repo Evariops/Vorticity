@@ -96,4 +96,44 @@ public abstract class ArrayDecoder
     /// cannot drift from the overrides it claims to describe.
     /// </remarks>
     public virtual bool SelectsWithoutFullDecode => false;
+
+    /// <summary>
+    /// Whether <see cref="TryCompare"/> is overridden, i.e. whether this encoding can answer a
+    /// comparison without materializing the whole node.
+    /// </summary>
+    /// <remarks>
+    /// The guard, and the same one <see cref="SelectsWithoutFullDecode"/> puts in front of the
+    /// take. Answering a predicate from the encoding lets a scan decode only the rows that
+    /// survived, which means walking a split twice; paying for that where no encoding can answer
+    /// would cost every filtered scan something for nothing. It is asked once per column and per
+    /// predicate, never per row, and false leaves today's single pass exactly as it is.
+    /// </remarks>
+    public virtual bool EvaluatesWithoutFullDecode => false;
+
+    /// <summary>
+    /// Answers <paramref name="op"/> against <paramref name="literal"/> over this node's rows
+    /// without decoding it, writing one <see cref="Compute.Trilean"/> state per row.
+    /// </summary>
+    /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
+    /// <param name="node">The serialized node.</param>
+    /// <param name="dtype">The DType this node would produce.</param>
+    /// <param name="length">The row count this node would produce.</param>
+    /// <param name="op">The comparison.</param>
+    /// <param name="literal">Its right-hand side.</param>
+    /// <param name="destination">Receives <paramref name="length"/> states.</param>
+    /// <returns>
+    /// <see langword="false"/> when this encoding will not answer this comparison, leaving
+    /// <paramref name="destination"/> untouched and the caller to decode as it always has.
+    /// </returns>
+    /// <remarks>
+    /// An override answers the same thing the kernels would answer over the decoded node, three
+    /// valued and row for row: a dictionary compares the literal to its values and expands over its
+    /// codes, and a compressed-string encoding compresses the needle rather than decompressing the
+    /// column. Refusing per call rather than per encoding is deliberate -- an encoding that answers
+    /// equality has no reason to answer an ordering, and saying so here costs one branch.
+    /// </remarks>
+    public virtual bool TryCompare(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination) =>
+        false;
 }

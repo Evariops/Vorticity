@@ -40,6 +40,113 @@ public sealed class DictDecoder : ArrayDecoder
     public override bool SelectsWithoutFullDecode => true;
 
     /// <inheritdoc/>
+    public override bool EvaluatesWithoutFullDecode => true;
+
+    /// <summary>
+    /// Compares the dictionary's values and expands the answer through the codes, so the column's
+    /// rows are never built.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A dictionary of sixteen labels over sixty-five thousand rows answers an equality with
+    /// sixteen comparisons and one pass of code lookups, against sixty-five thousand string
+    /// comparisons over strings that had to be materialized first. The kernel that compares the
+    /// values is the same one the evaluator would have run over the decoded column, so the answer
+    /// is the same answer, three-valued and row for row.
+    /// </para>
+    /// <para>
+    /// It gives up on a dictionary wider than the rows it covers, which is upstream's own guard:
+    /// there is nothing to win by comparing more values than there are rows, and the codes still
+    /// have to be walked.
+    /// </para>
+    /// <para>
+    /// Class I, like every other path through this decoder: a code is bounds-checked before it
+    /// indexes the answers, and the check is what stops a corrupt file reading past them.
+    /// </para>
+    /// </remarks>
+    public override bool TryCompare(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, Id);
+
+        DictMetadata metadata = DictMetadata.Read(node.Metadata);
+        if (!metadata.CodesPType.IsInteger())
+        {
+            CompressedThrow.Format(
+                $"{Id} codes must be an integer physical type, not {metadata.CodesPType.Name()}.");
+        }
+
+        int valuesLength = ArrayDecodeContext.CheckedLength(metadata.ValuesLength, $"{Id} values_len");
+        if (valuesLength >= length)
+        {
+            return false;
+        }
+
+        Nullability codesNullability = metadata.IsNullableCodes switch
+        {
+            true => Nullability.Nullable,
+            false => Nullability.NonNullable,
+            null => dtype.Nullability,
+        };
+
+        int valuesIndex = context.DecodeChild(in node, 1, dtype, valuesLength);
+        ValueReader values = ValueReader.Of(context.Canonical, valuesIndex, Id);
+        if (values.Length != valuesLength)
+        {
+            CompressedThrow.ChildLength(Id, "values", values.Length, valuesLength);
+        }
+
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(valuesLength, 1));
+        try
+        {
+            Span<byte> answers = rented.AsSpan(0, valuesLength);
+            Compute.ComparisonKernels.Compare(context.Canonical, valuesIndex, op, literal, answers);
+
+            DType codesType = context.Types.Primitive(metadata.CodesPType, codesNullability);
+            int codesIndex = context.DecodeChild(in node, 0, codesType, length);
+            CanonicalNode codesNode = context.Canonical.GetNode(codesIndex);
+            if (codesNode.Kind != CanonicalKind.Primitive)
+            {
+                CompressedThrow.ChildKind(Id, "codes", codesNode.Kind, "a Primitive");
+            }
+
+            if (codesNode.Length != length)
+            {
+                CompressedThrow.ChildLength(Id, "codes", codesNode.Length, length);
+            }
+
+            ReadOnlySpan<byte> codes = codesNode.Values.Span;
+            PType codesPType = metadata.CodesPType;
+            ValidityReader codesValidity = ValidityReader.Of(context.Canonical, codesNode.Validity);
+            for (int row = 0; row < length; row++)
+            {
+                if (!codesValidity.IsValid(row))
+                {
+                    destination[row] = Compute.Trilean.Unknown;
+                    continue;
+                }
+
+                uint code = RowKernels.CodeAt(codes, codesPType, row);
+                if (code >= (uint)valuesLength)
+                {
+                    ThrowCode(codes, codesPType, row, valuesLength);
+                }
+
+                destination[row] = answers[(int)code];
+            }
+
+            return true;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <inheritdoc/>
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);

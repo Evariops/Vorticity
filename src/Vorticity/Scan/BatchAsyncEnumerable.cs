@@ -471,8 +471,8 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             // Cancellation is honoured before the read and after it, never inside a decode kernel
             // (docs/03-architecture.md §1: the granularity is the batch).
             _token.ThrowIfCancellationRequested();
-            int root = ExecuteWithTake(lane.Context, _pending);
-            root = ApplyFilter(lane.Context, root);
+            int root = ExecuteWithTake(lane.Context, _pending, out bool proven);
+            root = ApplyFilter(lane.Context, root, proven);
             _current = new RecordBatch(lane.Context, root, _pending.Start);
             _metrics?.AddBatch(_current.RowCount);
             return true;
@@ -490,8 +490,155 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// shared with the terminals of docs/12 §5 so that a count and a batch cannot disagree on
     /// which rows a split yields.
     /// </summary>
-    private int ExecuteWithTake(ScanContext context, RowRange split) =>
-        SplitExecution.Execute(context, _tree, in _mask, split, _take);
+    /// <param name="context">The lane's context.</param>
+    /// <param name="split">The rows this batch covers.</param>
+    /// <param name="proven">
+    /// Set when the split was executed over rows an encoding already selected, so the filter has
+    /// nothing left to decide.
+    /// </param>
+    private int ExecuteWithTake(ScanContext context, RowRange split, out bool proven)
+    {
+        proven = false;
+        ComparisonExpr? pushable = _push == PushDeclined ? null : Pushable();
+        return pushable is null
+            ? SplitExecution.Execute(context, _tree, in _mask, split, _take)
+            : ExecutePushed(context, split, pushable, out proven);
+    }
+
+    /// <summary>Nobody has asked an encoding yet.</summary>
+    private const byte PushUnasked = 0;
+
+    /// <summary>An encoding answered, so every split of this scan may ask.</summary>
+    private const byte PushAnswered = 1;
+
+    /// <summary>An encoding declined, and no later split asks again.</summary>
+    private const byte PushDeclined = 2;
+
+    /// <summary>
+    /// What the predicate's column said the first time it was asked. Raced by the lanes and written
+    /// with the same value by all of them, which is why it needs no lock: the answer is a property
+    /// of the encoding, not of the split that happened to ask.
+    /// </summary>
+    private byte _push;
+
+    /// <summary>
+    /// The one comparison this scan may offer to an encoding, or null when it has none to offer.
+    /// </summary>
+    /// <remarks>
+    /// Derived rather than stored: these paths are held to a ceiling in bytes and the test is two
+    /// type checks on a reference the enumerator already holds. The conditions are narrow on
+    /// purpose. A conjunction is not pushed because answering one arm does not select the rows, a
+    /// take is not pushed because its own selection already owns the row space, and a dotted path
+    /// is not pushed because only the struct reader resolves one and it resolves a name.
+    /// </remarks>
+    private ComparisonExpr? Pushable() =>
+        _take is null && !_filterProven && _evaluator?.Filter is ComparisonExpr comparison &&
+        comparison.Field.SegmentsUtf8.Length == 1
+            ? comparison
+            : null;
+
+    /// <summary>
+    /// Offers the comparison to the predicate's column, and reads the rest of the split over the
+    /// rows it selected.
+    /// </summary>
+    /// <remarks>
+    /// Two passes, and the first one reads a single column. When the encoding answers, the second
+    /// pass decodes the projection over the surviving rows alone -- which is the take's own pushed
+    /// selection, reused -- and the filter has nothing left to do. When it declines, the first pass
+    /// has decoded that one column for nothing, once, and no split of this scan asks again.
+    /// </remarks>
+    private int ExecutePushed(
+        ScanContext context, RowRange split, ComparisonExpr pushable, out bool proven)
+    {
+        proven = false;
+        // Resolved against the LAYOUT's struct and not against the batch's schema, which is the
+        // keep projection's: a filter-only column is absent from it, and a projected one can sit at
+        // another index. A mask is a path through the file's fields, so the file's dtype is the
+        // only one that names them.
+        byte[] name = pushable.Field.SegmentsUtf8[0];
+        DType root = _tree.Root.DType;
+        int field = root.Kind == DTypeKind.Struct ? root.IndexOfField(name) : -1;
+        if (field < 0 || !_mask.Includes(field))
+        {
+            _push = PushDeclined;
+            return SplitExecution.Execute(context, _tree, in _mask, split, _take);
+        }
+
+        FieldMask only = new FieldMaskBuilder().IncludeField(field).Build();
+        (byte[]? Field, ComparisonOp Op, FilterLiteral Literal) saved =
+            context.ExchangePushedPredicate(name, pushable.Op, pushable.Value);
+        int answer;
+        try
+        {
+            answer = SplitExecution.Execute(context, _tree, in only, split, null);
+        }
+        finally
+        {
+            context.ExchangePushedPredicate(saved.Field, saved.Op, saved.Literal);
+        }
+
+        if (!context.PredicateAnswered)
+        {
+            _push = PushDeclined;
+            return SplitExecution.Execute(context, _tree, in _mask, split, _take);
+        }
+
+        _push = PushAnswered;
+        context.PredicateAnswered = false;
+
+        int rows = (int)(split.End - split.Start);
+        int[] selected = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        try
+        {
+            int count = Selected(context, answer, split.Start, selected);
+            (int[]? Buffer, int Count) previous = context.ExchangeSelection(selected, count);
+            try
+            {
+                proven = true;
+                return SplitExecution.Execute(context, _tree, in _mask, split, null);
+            }
+            finally
+            {
+                context.ExchangeSelection(previous.Buffer, previous.Count);
+            }
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(selected);
+        }
+    }
+
+    /// <summary>Reads the rows an answered comparison selects, in the file's coordinates.</summary>
+    /// <param name="context">The context whose arena holds the answer.</param>
+    /// <param name="answer">The struct the first pass produced, holding one boolean column.</param>
+    /// <param name="start">The split's first row, which the selection is expressed against.</param>
+    /// <param name="into">Receives the selected rows.</param>
+    /// <returns>How many were selected.</returns>
+    private static int Selected(ScanContext context, int answer, long start, Span<int> into)
+    {
+        CanonicalArena arena = context.Canonical;
+        CanonicalNode node = arena.GetNode(answer);
+        if (node.Kind == CanonicalKind.Struct)
+        {
+            node = arena.GetNode(node.GetFieldIndex(0));
+        }
+
+        ReadOnlySpan<byte> bits = node.Bits.Span;
+        int offset = node.BitOffset;
+        Arrays.Decoders.Canonical.ValidityMask valid =
+            Arrays.Decoders.Canonical.ValidityMask.From(arena, node.Validity);
+        int count = 0;
+        for (int row = 0; row < node.Length; row++)
+        {
+            int bit = offset + row;
+            if ((bits[bit >> 3] & (1 << (bit & 7))) != 0 && valid.IsValid(row))
+            {
+                into[count++] = (int)start + row;
+            }
+        }
+
+        return count;
+    }
 
     /// <summary>
     /// Runs the filter over a decoded batch and drops both the rejected rows and the columns only
@@ -502,14 +649,20 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// when every row passed -- the common case for a filter that selects a whole split -- so a
     /// non-selective filter costs one evaluation pass and no copying at all.
     /// </remarks>
-    private int ApplyFilter(ScanContext context, int root)
+    /// <param name="context">The lane's context.</param>
+    /// <param name="root">The decoded split.</param>
+    /// <param name="proven">
+    /// Whether the rows are already the ones the filter selects, which an exact index and an
+    /// encoding that answered its comparison both make true.
+    /// </param>
+    private int ApplyFilter(ScanContext context, int root, bool proven = false)
     {
         if (_evaluator is null)
         {
             return root;
         }
 
-        if (_filterProven)
+        if (_filterProven || proven)
         {
             // Every row the take gathered is one the index proved: only the trim is left.
             return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
@@ -625,8 +778,8 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             Register(context, rows);
             NoteRequests(context);
             await _source.ReadManyAsync(context.Segments, _token).ConfigureAwait(false);
-            int root = ExecuteWithTake(context, rows);
-            return ApplyFilter(context, root);
+            int root = ExecuteWithTake(context, rows, out bool proven);
+            return ApplyFilter(context, root, proven);
         }
         catch
         {

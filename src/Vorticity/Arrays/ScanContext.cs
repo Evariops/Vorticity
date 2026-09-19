@@ -311,6 +311,81 @@ public sealed class ScanContext : IDisposable
         return previous;
     }
 
+    /// <summary>The pushed comparison, held behind one reference rather than in three fields.</summary>
+    /// <remarks>
+    /// A <see cref="Expressions.FilterLiteral"/> is a wide value and this context is allocated once
+    /// per lane of every scan, filtered or not: inline, the three fields cost thirty-two bytes on
+    /// every scan in the process to serve the few that push. Behind a reference they cost eight,
+    /// and the holder is allocated once for a scan that pushes and reused by each of its splits.
+    /// </remarks>
+    private sealed class Pushed
+    {
+        internal byte[]? Field;
+        internal Expressions.ComparisonOp Op;
+        internal Expressions.FilterLiteral Literal;
+    }
+
+    private Pushed? _pushed;
+
+    /// <summary>
+    /// The comparison this pass may let an encoding answer instead of decoding, or
+    /// <see langword="null"/> when there is none.
+    /// </summary>
+    /// <remarks>
+    /// Carried here for the selection's reason: <c>LayoutReader.Execute</c> is a public extension
+    /// point and the readers are the only place that holds a serialized node and its decoder at the
+    /// same time. It names the field rather than resolving it, because which layout child is that
+    /// field is the struct reader's business and no one else's.
+    /// </remarks>
+    internal ReadOnlySpan<byte> PushedField => _pushed?.Field;
+
+    /// <summary>The comparison of <see cref="PushedField"/>.</summary>
+    internal Expressions.ComparisonOp PushedOp => _pushed!.Op;
+
+    /// <summary>The right-hand side of <see cref="PushedField"/>'s comparison.</summary>
+    internal Expressions.FilterLiteral PushedLiteral => _pushed!.Literal;
+
+    /// <summary>
+    /// Whether the reader running right now is inside the column <see cref="PushedField"/> names.
+    /// </summary>
+    /// <remarks>
+    /// Set by the struct reader around the matching child and cleared again after it, so that the
+    /// leaf below it knows the node it holds is the predicate's without re-deriving the path. A
+    /// reader that executes a child which is NOT part of the column's values -- a zone map, say --
+    /// clears it for that child, or the leaf would answer the predicate over a table of statistics.
+    /// </remarks>
+    internal bool PredicateAtNode { get; set; }
+
+    /// <summary>
+    /// Whether an encoding answered <see cref="PushedField"/>'s comparison during this pass.
+    /// </summary>
+    /// <remarks>
+    /// The driver reads it to know which of the two shapes the pass produced, and it is the
+    /// encoding's own answer rather than a guess: a column can only be asked once its blob is
+    /// parsed, which happens inside the reader and not where the pass is decided.
+    /// </remarks>
+    internal bool PredicateAnswered { get; set; }
+
+    /// <summary>
+    /// Replaces the pushed comparison and returns what was there, for the driver to restore.
+    /// </summary>
+    /// <param name="field">The field's name, UTF-8, or <see langword="null"/> to clear it.</param>
+    /// <param name="op">The comparison.</param>
+    /// <param name="literal">Its right-hand side.</param>
+    /// <returns>The previous triple.</returns>
+    internal (byte[]? Field, Expressions.ComparisonOp Op, Expressions.FilterLiteral Literal)
+        ExchangePushedPredicate(
+            byte[]? field, Expressions.ComparisonOp op, Expressions.FilterLiteral literal)
+    {
+        Pushed held = _pushed ??= new Pushed();
+        (byte[]? Field, Expressions.ComparisonOp Op, Expressions.FilterLiteral Literal) previous =
+            (held.Field, held.Op, held.Literal);
+        held.Field = field;
+        held.Op = op;
+        held.Literal = literal;
+        return previous;
+    }
+
     /// <summary>One retained chunk: the arena that owns it, the node, and when it was last used.</summary>
     private sealed class RetainedChunk
     {
@@ -660,6 +735,13 @@ public sealed class ScanContext : IDisposable
         _batchNumber++;
         _selection = null;
         _selectionCount = 0;
+        if (_pushed is not null)
+        {
+            _pushed.Field = null;
+        }
+
+        PredicateAtNode = false;
+        PredicateAnswered = false;
         Segments.Release();
         Nodes.Reset();
         _batchCanonical.Reset();

@@ -106,6 +106,15 @@ public sealed class FlatLayoutReader : LayoutReader
         if (rows.Start == 0 && length == total)
         {
             ArrayNode wholeRoot = LoadRoot(in node, context);
+            if (context.PredicateAtNode)
+            {
+                int answered = TryAnswer(in wholeRoot, in node, context, total);
+                if (answered >= 0)
+                {
+                    return answered;
+                }
+            }
+
             Decoded(context, total);
             int whole = context.Decode.DecodeRoot(in wholeRoot, node.DType, total);
             return MaskProjection.Apply(context.Decode, whole, in fields);
@@ -125,6 +134,21 @@ public sealed class FlatLayoutReader : LayoutReader
         // The batch therefore BORROWS the retained arena. `ScanContext.Retain` owes the lifetime
         // argument and makes it: an entry touched during the current batch is never evicted.
         long key = ScanContext.SegmentKey(node.Segments[0]);
+
+        // THE ANSWER IS RETAINED LIKE THE CHUNK IS, and for the same reason: a chunk spans several
+        // batches, so asking the encoding once per batch would ask it once per batch for one
+        // answer. It is kept under a key of its own because the same chunk can be wanted both as an
+        // answer and as values, and a cache that confused the two would hand a boolean column to a
+        // caller that asked for strings.
+        if (context.PredicateAtNode)
+        {
+            int answered = RetainedAnswer(in node, context, key, total, (int)rows.Start, length);
+            if (answered >= 0)
+            {
+                return answered;
+            }
+        }
+
         if (!context.TryGetRetained(key, out CanonicalArena held, out int retained))
         {
             Decoded(context, total);
@@ -235,6 +259,170 @@ public sealed class FlatLayoutReader : LayoutReader
 
         ArrayNode wholeRoot = LoadRoot(in node, context);
         return Push(in wholeRoot, in node, in fields, context, total);
+    }
+
+    /// <summary>Distinguishes a retained answer from the retained values of the same chunk.</summary>
+    private const long AnswerKey = unchecked((long)0x8000_0000_0000_0000);
+
+    /// <summary>
+    /// The window of a chunk's answer this batch wants, asking the encoding once per chunk.
+    /// </summary>
+    /// <param name="node">The flat layout node.</param>
+    /// <param name="context">The scan context carrying the comparison.</param>
+    /// <param name="key">The chunk's retention key.</param>
+    /// <param name="total">The chunk's row count.</param>
+    /// <param name="start">This batch's first row within the chunk.</param>
+    /// <param name="length">This batch's row count.</param>
+    /// <returns>The canonical node holding the window, or -1 when the encoding declined.</returns>
+    private int RetainedAnswer(
+        in LayoutNode node, ScanContext context, long key, int total, int start, int length)
+    {
+        long answerKey = key ^ AnswerKey;
+        if (context.TryGetRetained(answerKey, out CanonicalArena hit, out int hitNode))
+        {
+            context.PredicateAnswered = true;
+            return CanonicalSlice.SliceAcross(hit, context.Canonical, hitNode, start, length);
+        }
+
+        ArrayNode root = LoadRoot(in node, context);
+        ArrayDecoder decoder =
+            ArrayDecoderTable.Require(context, root.Encoding, root.EncodingSpecIndex);
+        if (!decoder.EvaluatesWithoutFullDecode)
+        {
+            return -1;
+        }
+
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(total, 1));
+        try
+        {
+            Span<byte> states = rented.AsSpan(0, total);
+            if (!decoder.TryCompare(
+                    context.Decode, in root, node.DType, total,
+                    context.PushedOp, context.PushedLiteral, states))
+            {
+                return -1;
+            }
+
+            // Only the answer itself is retained. Whatever the encoding decoded to reach it -- a
+            // dictionary's codes, say -- stays in the batch's arena and dies with the batch, which
+            // is what keeps the retained arena the size of one bit a row.
+            CanonicalArena held = context.BeginRetainedDecode();
+            int retained = -1;
+            try
+            {
+                retained = Answer(context, states, total);
+            }
+            finally
+            {
+                context.EndRetainedDecode(answerKey, retained);
+            }
+
+            context.PredicateAnswered = true;
+            return CanonicalSlice.SliceAcross(held, context.Canonical, retained, start, length);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Offers the pushed comparison to this node's encoding, and turns an answer into the column.
+    /// </summary>
+    /// <param name="root">The node's parsed array root.</param>
+    /// <param name="node">The flat layout node.</param>
+    /// <param name="context">The scan context carrying the comparison.</param>
+    /// <param name="total">The node's row count.</param>
+    /// <returns>The canonical node holding the answer, or -1 when the encoding declined.</returns>
+    /// <remarks>
+    /// Asked here because this is where the decoder and the serialized node are both in hand and
+    /// the blob has been parsed anyway, which is the same reason
+    /// <see cref="ArrayDecoder.SelectsWithoutFullDecode"/> is asked a few lines below. The answer
+    /// travels as a <c>Bool</c> column with validity, which is three-valued logic in the canonical
+    /// model and needs no new form: true selects, false rejects, null is unknown.
+    /// </remarks>
+    private static int TryAnswer(
+        in ArrayNode root, in LayoutNode node, ScanContext context, int total)
+    {
+        ArrayDecoder decoder =
+            ArrayDecoderTable.Require(context, root.Encoding, root.EncodingSpecIndex);
+        if (!decoder.EvaluatesWithoutFullDecode)
+        {
+            return -1;
+        }
+
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(total, 1));
+        try
+        {
+            Span<byte> states = rented.AsSpan(0, total);
+            if (!decoder.TryCompare(
+                    context.Decode, in root, node.DType, total,
+                    context.PushedOp, context.PushedLiteral, states))
+            {
+                return -1;
+            }
+
+            context.PredicateAnswered = true;
+            return Answer(context, states, total);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>Builds the <c>Bool</c> column one run of trilean states means.</summary>
+    /// <param name="context">The scan context owning the arena.</param>
+    /// <param name="states">One state per row.</param>
+    /// <param name="total">The row count.</param>
+    /// <returns>The canonical node's index.</returns>
+    /// <remarks>
+    /// Two bitmaps out of one byte array, and the second one only when a row is unknown: a
+    /// comparison over a column with no null answers no unknown, and a validity bitmap nobody needs
+    /// is a block rented and cleared for nothing.
+    /// </remarks>
+    private static int Answer(ScanContext context, ReadOnlySpan<byte> states, int total)
+    {
+        Arrays.CanonicalArena arena = context.Canonical;
+        int bytes = Math.Max((total + 7) / 8, 1);
+
+        VortexBuffer truth = arena.Allocate(bytes, 1, out Span<byte> bits);
+        bits.Clear();
+        bool unknown = false;
+        for (int row = 0; row < total; row++)
+        {
+            byte state = states[row];
+            if (state == Compute.Trilean.True)
+            {
+                bits[row >> 3] |= (byte)(1 << (row & 7));
+            }
+            else if (state == Compute.Trilean.Unknown)
+            {
+                unknown = true;
+            }
+        }
+
+        Validity validity = Validity.NonNullable;
+        if (unknown)
+        {
+            VortexBuffer known = arena.Allocate(bytes, 1, out Span<byte> valid);
+            valid.Clear();
+            for (int row = 0; row < total; row++)
+            {
+                if (states[row] != Compute.Trilean.Unknown)
+                {
+                    valid[row >> 3] |= (byte)(1 << (row & 7));
+                }
+            }
+
+            validity = Validity.Bitmap(arena.AddBool(
+                context.Types.Bool(Types.Nullability.NonNullable), total, Validity.NonNullable,
+                known, 0));
+        }
+
+        return arena.AddBool(
+            context.Types.Bool(unknown ? Types.Nullability.Nullable : Types.Nullability.NonNullable),
+            total, validity, truth, 0);
     }
 
     /// <summary>Lets the encoding take the wanted rows itself, which is what it did before R23.</summary>

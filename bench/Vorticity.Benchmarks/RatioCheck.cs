@@ -404,7 +404,7 @@ internal static class RatioCheck
         // Nine passes, not three: three read 0.024 and this axis swings sixteen times that. It is
         // the shortest of the four string axes, and the only one whose dispersion needs more
         // processes than the default to show itself at all.
-        ["filtered scan, string equality, dict"] = new(2.473, 7, 0.375),   // 9 passes, spread 2.067-2.993; HELD at 2.473: 9 passes peaked at 2.993, no loosening
+        ["filtered scan, string equality, dict"] = new(2.084, 7, 0.120),   // 3 passes, spread 1.834-2.084; was 2.473, -15.7%: the dictionary now answers the equality from its values
         ["filtered scan, string prefix, dict"] = new(1.444, 6, 0.007),
     };
 

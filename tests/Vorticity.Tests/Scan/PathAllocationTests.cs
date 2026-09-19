@@ -180,10 +180,18 @@ public sealed class PathAllocationTests
         // same switch takes `full scan` DOWN 304 B on the same file, and it takes the 1M `variant`
         // scan from 605 us to 104 and its write from 3.48 to 0.38 against Vortex Rust. 112 bytes,
         // once per open, measured identical on three runs.
-        ("open, first batch", File, 133_752, FirstBatch),
+        // +8 B on 2026-09-19, and the same eight bytes on the three axes below. A scan context now
+        // carries one reference to the comparison an encoding may answer instead of decoding, and a
+        // context is built once per lane of every scan, filtered or not. Held inline the three
+        // fields cost 32 B on every scan in the process to serve the few that push; behind the
+        // reference they cost 8, and the holder exists only for a scan that pushes. What the eight
+        // bytes buy: a dictionary column answers an equality from its values and expands through
+        // its codes, taking `filtered scan, string equality, dict` from 380,6 to 276,4 us against
+        // the reference implementation, 2,856 to 1,83 (--ratio-check, 21 rounds, two runs).
+        ("open, first batch", File, 133_760, FirstBatch),
         ("full scan", File, 190_976, FullScan),
         ("projected scan, 1 of 5 columns", File, 134_144, ProjectedScan),
-        ("take 64 rows from 64 splits", File, 192_000, ScatteredTake),
+        ("take 64 rows from 64 splits", File, 192_008, ScatteredTake),
         ("selective filter, pruning on", File, 141_824, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
@@ -209,7 +217,7 @@ public sealed class PathAllocationTests
         // reference each on the enumerable, the enumerator and the lane's context, 32 B in all --
         // and this axis had none of the headroom the others carry. Loosened by exactly that, plus
         // the 32 B of headroom the neighbouring axes have.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_712, FullScan),
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_720, FullScan),
         ("scan, vortex.pco", "encodings/pco", 29_184, FullScan),
         // 27 648 -> 27 712 on 2026-09-19, and here is the argument. Decompressing a node's frames
         // used the one-shot `ZstandardDecoder.TryDecompress`, which builds and tears down a native
@@ -218,7 +226,7 @@ public sealed class PathAllocationTests
         // `zstd` axis from 7 476 to 6 844 us and `zstd_nullable` from 2 170 to 2 012 (bench/ab.sh,
         // 21 rounds, intervals [0,913; 0,937] and [0,921; 0,936]). Sixty-four bytes once, against
         // seven and a half per cent of both axes.
-        ("scan, vortex.zstd", "encodings/zstd", 27_712, FullScan),
+        ("scan, vortex.zstd", "encodings/zstd", 27_720, FullScan),
         ("scan, vortex.map", "encodings/map", 28_160, FullScan),
         ("scan, vortex.variant", "encodings/variant", 27_648, FullScan),
     ];
