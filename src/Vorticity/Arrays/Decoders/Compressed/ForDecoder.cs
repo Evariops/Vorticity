@@ -125,6 +125,16 @@ public sealed class ForDecoder : ArrayDecoder
 
         // UNINITIALIZED: AddWrapping writes all `total` bytes, and the zero-length case returned
         // above it.
+        //
+        // Adding the reference into the child's own buffer instead of a fresh one is possible and
+        // is not worth it. It has to be guarded -- a child that came straight from the file is a
+        // view of a read-only mapping, and writing to it faults, which is what the unguarded form
+        // does on the first million-row `fastlanes.for` file it meets. Guarded by a scan of the
+        // arena's rented blocks, it is worth nothing: 1,023 on that file, where the child is mapped
+        // and the guard refuses, 0,993 on a mixed million-row table and 1,012 on `zigzag`, where
+        // the child is the arena's own. The block comes from a warm pool and the kernel pass is
+        // paid either way, so only the second buffer's traffic could be saved, and it is not
+        // visible above the noise.
         VortexBuffer output = CompressedValues.AllocateUninitialized(
             context, total, width, Id, out Span<byte> destination);
         IntegerKernels.AddWrapping(child.Values.Span[..total], destination, width, referenceBits);
