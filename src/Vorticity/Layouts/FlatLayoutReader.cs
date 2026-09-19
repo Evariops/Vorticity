@@ -116,8 +116,7 @@ public sealed class FlatLayoutReader : LayoutReader
             }
 
             Decoded(context, total);
-            int whole = context.Decode.DecodeRoot(in wholeRoot, node.DType, total);
-            return MaskProjection.Apply(context.Decode, whole, in fields);
+            return Narrowed(Decoded(in wholeRoot, in node, in fields, context, total), in fields, context);
         }
 
         // A CHUNK LARGER THAN A BATCH IS DECODED ONCE, NOT ONCE PER BATCH. Decoding `total` and
@@ -160,7 +159,7 @@ public sealed class FlatLayoutReader : LayoutReader
             retained = -1;
             try
             {
-                retained = context.Decode.DecodeRoot(in chunkRoot, node.DType, total);
+                retained = Decoded(in chunkRoot, in node, in fields, context, total);
             }
             finally
             {
@@ -169,7 +168,7 @@ public sealed class FlatLayoutReader : LayoutReader
         }
 
         int sliced = CanonicalSlice.SliceAcross(held, context.Canonical, retained, (int)rows.Start, length);
-        return MaskProjection.Apply(context.Decode, sliced, in fields);
+        return Narrowed(sliced, in fields, context);
     }
 
     /// <summary>
@@ -275,6 +274,51 @@ public sealed class FlatLayoutReader : LayoutReader
         ArrayNode wholeRoot = LoadRoot(in node, context);
         return Push(in wholeRoot, in node, in fields, context, total);
     }
+
+    /// <summary>
+    /// Decodes this node under <paramref name="fields"/>, letting a struct honour it if it can.
+    /// </summary>
+    /// <param name="root">The node's parsed array root.</param>
+    /// <param name="node">The flat layout node.</param>
+    /// <param name="fields">The projection.</param>
+    /// <param name="context">The scan context.</param>
+    /// <param name="total">The node's row count.</param>
+    /// <returns>The canonical node, narrowed to the projection.</returns>
+    /// <remarks>
+    /// The projection is offered before the decode and the narrowing is applied after it only when
+    /// the decode did not take it. Taking it is worth the whole difference: a struct stored as one
+    /// array node has no layout to read fields lazily, so without this a scan projecting one column
+    /// of fifty decodes all fifty -- 66 microseconds against 64 for the whole file, which is dearer
+    /// than not projecting.
+    /// </remarks>
+    private static int Decoded(
+        in ArrayNode root, in LayoutNode node, in FieldMask fields, ScanContext context, int total)
+    {
+        // A whole projection has nothing to push, and saying so here is what keeps an unprojected
+        // scan from allocating the holder at all: these paths are held to a ceiling in bytes.
+        if (fields.IsAll)
+        {
+            return context.Decode.DecodeRoot(in root, node.DType, total);
+        }
+
+        FieldMask outer = context.ExchangePushedFields(fields);
+        try
+        {
+            return context.Decode.DecodeRoot(in root, node.DType, total);
+        }
+        finally
+        {
+            context.ExchangePushedFields(outer);
+        }
+    }
+
+    /// <summary>Narrows what the decode did not narrow itself.</summary>
+    /// <param name="node">The decoded node.</param>
+    /// <param name="fields">The projection.</param>
+    /// <param name="context">The scan context.</param>
+    /// <returns>The node, narrowed to the projection.</returns>
+    private static int Narrowed(int node, in FieldMask fields, ScanContext context) =>
+        context.FieldsHonoured ? node : MaskProjection.Apply(context.Decode, node, in fields);
 
     /// <summary>Distinguishes a retained answer from the retained values of the same chunk.</summary>
     private const long AnswerKey = unchecked((long)0x8000_0000_0000_0000);
@@ -487,7 +531,7 @@ public sealed class FlatLayoutReader : LayoutReader
     {
         int whole = CanonicalSlice.SliceAcross(held, context.Canonical, retained, 0, total);
         int taken = Compute.CanonicalFilter.Apply(context.Canonical, whole, context.Selection);
-        return MaskProjection.Apply(context.Decode, taken, in fields);
+        return Narrowed(taken, in fields, context);
     }
 
     /// <summary>

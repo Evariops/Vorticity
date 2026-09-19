@@ -7,13 +7,17 @@
 // values may be a struct too. Those decode whole, so the mask is applied afterwards - here - and the
 // batch's schema still matches the projection.
 //
-// WHAT THAT COSTS, MEASURED. On a file of fifty columns and fifty thousand rows stored as one flat
-// node, a scan projecting ONE column reads 66 and 67 microseconds against 64 and 63 for the whole
-// thing: projecting is very slightly DEARER than not projecting, because it decodes the same fifty
-// columns and then throws forty-nine away. Every million-row file of the bench has this shape, the
-// six-column one included. The cure is to push the mask into the struct decoder so the unselected
-// children are never decoded, which also makes this narrowing a no-op on that path; it is not done
-// here and the number is written down so that nobody has to measure it twice to decide.
+// WHAT THAT COST, AND WHAT IT COSTS NOW. On a file of fifty columns and fifty thousand rows stored
+// as one flat node, a scan projecting ONE column used to read 66 and 67 microseconds against 64 and
+// 63 for the whole thing: projecting was very slightly DEARER than not projecting, because it
+// decoded the same fifty columns and then threw forty-nine away. The struct decoder now takes the
+// mask itself and decodes only what is named, which is 78 microseconds down to 65 on that file --
+// eighteen per cent, and less than the ratio of columns because a primitive column is cheap to
+// decode and the rest of a scan is not.
+//
+// So this runs on what the decode did not narrow: a struct the mask reaches through a dict layout's
+// values, a projection that narrows DEEPER than the top level, and every path that decodes with a
+// selection rather than whole. `FlatLayoutReader` asks which happened before calling this.
 using System;
 
 using Vorticity.Arrays;

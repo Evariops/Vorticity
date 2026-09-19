@@ -323,6 +323,8 @@ public sealed class ScanContext : IDisposable
         internal byte[]? Field;
         internal Expressions.ComparisonOp Op;
         internal Expressions.FilterLiteral Literal;
+        internal Layouts.FieldMask Fields;
+        internal bool FieldsHonoured;
     }
 
     private Pushed? _pushed;
@@ -365,6 +367,38 @@ public sealed class ScanContext : IDisposable
     /// parsed, which happens inside the reader and not where the pass is decided.
     /// </remarks>
     internal bool PredicateAnswered { get; set; }
+
+    /// <summary>
+    /// The projection a struct decode may honour itself, instead of decoding every field and
+    /// narrowing afterwards.
+    /// </summary>
+    /// <remarks>
+    /// A struct LAYOUT reads only the fields a projection names. A struct stored as one array node
+    /// has no layout to do that, so without this the whole of it is decoded and all but one column
+    /// thrown away -- measured at slightly dearer than not projecting at all on a fifty-column file.
+    /// It rides on the holder the pushed comparison already allocates, so a scan that projects
+    /// nothing pays nothing for it.
+    /// </remarks>
+    internal Layouts.FieldMask PushedFields =>
+        _pushed is null ? Layouts.FieldMask.All : _pushed.Fields;
+
+    /// <summary>Whether a struct decode consumed <see cref="PushedFields"/> and narrowed itself.</summary>
+    internal bool FieldsHonoured
+    {
+        get => _pushed is not null && _pushed.FieldsHonoured;
+        set => (_pushed ??= new Pushed()).FieldsHonoured = value;
+    }
+
+    /// <summary>Replaces the pushed projection and returns what was there, for the caller to restore.</summary>
+    /// <param name="fields">The projection, or <see cref="Layouts.FieldMask.All"/> to clear it.</param>
+    /// <returns>The previous projection.</returns>
+    internal Layouts.FieldMask ExchangePushedFields(Layouts.FieldMask fields)
+    {
+        Pushed held = _pushed ??= new Pushed();
+        Layouts.FieldMask previous = held.Fields;
+        held.Fields = fields;
+        return previous;
+    }
 
     /// <summary>
     /// Replaces the pushed comparison and returns what was there, for the driver to restore.
@@ -738,6 +772,12 @@ public sealed class ScanContext : IDisposable
         if (_pushed is not null)
         {
             _pushed.Field = null;
+            _pushed.Fields = Layouts.FieldMask.All;
+
+            // FieldsHonoured is NOT cleared here, and that is the point: a scan has one projection
+            // from beginning to end, so whether the struct decodes take it is a fact about the
+            // scan. The retained chunks outlive the batch and are narrowed once; a flag that reset
+            // per batch would make the second batch narrow an already-narrowed node.
         }
 
         PredicateAtNode = false;
