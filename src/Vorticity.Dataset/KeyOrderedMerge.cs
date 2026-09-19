@@ -298,35 +298,49 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     /// <summary>The input holding the smallest key, and how many of its rows go before any other's.</summary>
     private (MergeInput Chosen, int Count) Choose()
     {
+        // ONE PASS, BECAUSE FETCHING A KEY COSTS MORE THAN COMPARING TWO. A row's encoded key is
+        // validated and rebuilt on every read -- about 1,1 ns against 1,0 to compare a pair -- and
+        // choosing in one pass and bounding in another read each key three times over. Here each
+        // is read once and kept in a local, which is two thirds of the fetching gone.
+        //
+        // The rows the chosen input may emit are those below the smallest key another input holds,
+        // and at it when that input ranks after this one; strictly below an unopened object's
+        // bound, whose rank against the objects behind it is not known. Unranked, a tie goes to
+        // whoever is emitting. That "at it when they all rank after" is an AND over the inputs
+        // sharing the smallest other key, which is the same as asking whether the LOWEST rank among
+        // them ranks after the chosen one -- and that can be tracked while the chosen input is
+        // still moving, where the flag itself could not.
         MergeInput chosen = _open[0];
+        ReadOnlySpan<byte> chosenKey = chosen.Key;
+        ReadOnlySpan<byte> limit = default;
+        long limitRank = 0;
+        bool bounded = false;
         for (int i = 1; i < _open.Count; i++)
         {
             MergeInput input = _open[i];
-            int order = input.Key.SequenceCompareTo(chosen.Key);
+            ReadOnlySpan<byte> key = input.Key;
+            int order = key.SequenceCompareTo(chosenKey);
             if (order < 0 || (order == 0 && input.Rank < chosen.Rank))
             {
+                // The input it displaces becomes one of the others, and bounds the run like them.
+                Tighten(ref limit, ref limitRank, ref bounded, chosenKey, chosen.Rank);
                 chosen = input;
+                chosenKey = key;
             }
-        }
-
-        // The rows it may emit: those below the smallest key another input holds, and at it when
-        // that input ranks after this one; strictly below an unopened object's bound, whose rank
-        // is not known yet. Unranked, a tie goes to whoever is emitting.
-        ReadOnlySpan<byte> limit = default;
-        bool bounded = false;
-        bool inclusive = false;
-        foreach (MergeInput other in _open)
-        {
-            if (!ReferenceEquals(other, chosen))
+            else
             {
-                Tighten(ref limit, ref bounded, ref inclusive, other.Key, !_rankedTies || other.Rank > chosen.Rank);
+                Tighten(ref limit, ref limitRank, ref bounded, key, input.Rank);
             }
         }
 
         if (_pending)
         {
-            Tighten(ref limit, ref bounded, ref inclusive, _objects.Current.Bound.Span, orEqual: !_rankedTies);
+            // A bound carries no rank, and a run stops strictly before it when ranks are asked
+            // for: the lowest rank there is says exactly that, and says nothing when they are not.
+            Tighten(ref limit, ref limitRank, ref bounded, _objects.Current.Bound.Span, long.MinValue);
         }
+
+        bool inclusive = !_rankedTies || limitRank > chosen.Rank;
 
         int count = bounded ? chosen.RunUpTo(limit, inclusive) : chosen.Remaining;
         if (count <= 0)
@@ -341,19 +355,24 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     }
 
     /// <summary>Lowers the run's limit to <paramref name="key"/> when it is the smaller one.</summary>
+    /// <param name="limit">The smallest key seen so far among the inputs that are not emitting.</param>
+    /// <param name="limitRank">The lowest rank among those holding it.</param>
+    /// <param name="bounded">Whether any of them has been seen yet.</param>
+    /// <param name="key">The key to lower the limit to.</param>
+    /// <param name="rank">Its holder's rank.</param>
     private static void Tighten(
-        ref ReadOnlySpan<byte> limit, ref bool bounded, ref bool inclusive, ReadOnlySpan<byte> key, bool orEqual)
+        ref ReadOnlySpan<byte> limit, ref long limitRank, ref bool bounded, ReadOnlySpan<byte> key, long rank)
     {
         int order = bounded ? key.SequenceCompareTo(limit) : -1;
         if (order < 0)
         {
             limit = key;
+            limitRank = rank;
             bounded = true;
-            inclusive = orEqual;
         }
-        else if (order == 0)
+        else if (order == 0 && rank < limitRank)
         {
-            inclusive &= orEqual;
+            limitRank = rank;
         }
     }
 
