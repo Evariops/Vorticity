@@ -63,6 +63,20 @@ public sealed class DictDecoder : ArrayDecoder
     /// Class I, like every other path through this decoder: a code is bounds-checked before it
     /// indexes the answers, and the check is what stops a corrupt file reading past them.
     /// </para>
+    /// <para>
+    /// There is no extreme beside it, and that is a decision rather than an omission. The reference
+    /// carries one because its pruning computes a column's bounds as it goes; ours reads the bounds
+    /// the writer put in the zone maps, so nothing on the read path asks a dictionary for its
+    /// smallest value. The one caller that computes an extreme is the min-and-max terminal, over a
+    /// column already decoded, and no gate measures it -- there is no such scenario in the bench and
+    /// no such axis in the ratio check. An extreme here would be correct and unreachable.
+    /// </para>
+    /// <para>
+    /// The chunk-level probe is the neighbour, not the duplicate. It is written by default and
+    /// prunes whole chunks that cannot hold the literal before they are read; this answers the rows
+    /// of a chunk that was read. The numbers above were measured with it present, so the two
+    /// compose, and what they share is one decode of the values child on a chunk it kept.
+    /// </para>
     /// </remarks>
     public override bool TryCompare(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
