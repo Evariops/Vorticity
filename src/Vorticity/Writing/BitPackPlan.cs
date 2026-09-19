@@ -190,6 +190,11 @@ internal sealed class BitPackPlan
             }
         }
 
+        // WHAT THAT SWEEP IS STILL WORTH, measured so the next reader does not have to. Doubling it
+        // on a million-row six-column write costs 3,7 ms in one run and 1,1 in another, against an
+        // axis of about 92 -- between one and four per cent, under the bar that would justify the
+        // bound-and-conditional-sweep §3.2.3 describes. What used to be five passes a row is one
+        // conditional one, and the columns whose reference is zero walk nothing at all.
         if (!framedFromIngest)
         {
             Histogram(
