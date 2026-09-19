@@ -102,8 +102,10 @@ internal static class Program
                     !a.StartsWith("--", StringComparison.Ordinal))
             ];
             bool rebase = Array.IndexOf(args, "--rebase") >= 0;
+            bool abSame = Array.IndexOf(args, "--ab-same") >= 0;
             bool onePass = Array.IndexOf(args, RatioCheck.PassFlag) >= 0;
-            return await RatioCheck.RunAsync(axes, recalibrate, rebase, onePass).ConfigureAwait(false);
+            return await RatioCheck.RunAsync(axes, recalibrate, rebase, abSame, onePass)
+                .ConfigureAwait(false);
         }
 
         if (args.Length > 0 && args[0] == "--rewrite")
@@ -393,7 +395,9 @@ internal static class Program
           <word> [<word>…]         bare words become a filter: `fsst` is `--filter *fsst*`
           --ratio-check [axis…]    16 axes, ours over the reference, one clock, ~35 s
                                      --recalibrate N   N processes, prints the table to paste
-                                     --rebase          let a reference rise, only where k > 1
+                                     --rebase          let a reference rise, only where k moved
+                                     --ab-same         with --rebase, let it rise where ab.sh
+                                                       reports no change in our own time
                                      --lanes N         adds `full scan, N lanes`, threads pinned
           --throughput [family…]   50 encodings at a million rows, ~55 s
                                      --check           hold each ratio to its ceiling. Refused

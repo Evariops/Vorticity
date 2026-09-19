@@ -328,7 +328,22 @@ internal static class RatioCheck
     /// at different k are not the same quantity. Recording it is what lets `--rebase` tell an
     /// estimator change from a regression -- see `RecalibrateAsync`.
     /// </param>
-    private readonly record struct Reference(double Ratio, int Repeats);
+    /// <param name="Spread">
+    /// How far apart the calibration passes fell, as a fraction of <paramref name="Ratio"/>, or zero
+    /// when the entry predates the field.
+    /// </param>
+    /// <remarks>
+    /// IT IS WHAT THE CEILING IS BUILT FROM, not a note about it. A flat margin over every axis says
+    /// the long ones and the short ones resolve the same change, and they do not: the steady axes
+    /// sit inside a couple of per cent between runs while the short ones wander by twenty. A ceiling
+    /// tighter than an axis can resolve does not catch a regression, it reports one at random, and
+    /// then the gate stops being believed -- which is worse than a wide ceiling, because a wide
+    /// ceiling at least says honestly how much this axis can see.
+    ///
+    /// Between passes rather than within one: a pass is a process, and the within-run interval is
+    /// two to three times narrower than the distribution the gate actually meets.
+    /// </remarks>
+    private readonly record struct Reference(double Ratio, int Repeats, double Spread = 0);
 
     /// <summary>
     /// The ratio each axis was measured at when its ceiling was last set. ONE TABLE, for every axis,
@@ -366,28 +381,28 @@ internal static class RatioCheck
     /// </remarks>
     private static readonly Dictionary<string, Reference> References = new()
     {
-        ["full scan"] = new(0.339, 2),   // 3 passes, spread 0.329-0.339; was 0.461, -26.5% (harness: RecursiveCanonical)
-        ["full scan, upstream lazy"] = new(0.460, 2),   // 3 passes, spread 0.455-0.460; was 0.467, -1.5%
-        ["projected scan, 1 of 5 columns"] = new(0.445, 10),   // rebased for a changed estimator: the axis now groups ten calls to a timed round rather than nine
-        ["open to first batch"] = new(0.085, 10),   // 3 passes, spread 0.084-0.085; HELD at 0.085: 3 passes peaked at 0.085, no loosening
-        ["open, footer only"] = new(0.776, 29),   // 3 passes, spread 0.750-0.776; was 0.782, -0.7%
-        ["read and write back"] = new(0.322, 1),   // 3 passes, spread 0.317-0.322; was 0.478, -32.6% (harness + W1.1/W1.2/W3.1)
-        ["filtered scan, 1% band"] = new(0.204, 10),   // 3 passes, spread 0.199-0.204; was 0.217, -6.0%
-        ["filtered scan, half the rows"] = new(0.274, 5),   // 3 passes, spread 0.271-0.274; was 0.313, -12.5%
-        ["scattered take, 64 of 64 splits"] = new(0.202, 3),   // 3 passes, spread 0.196-0.202; was 0.250, -19.1% (harness: take was shallow too)
-        ["rewritten zoned, reference's"] = new(0.330, 2),   // 3 passes, spread 0.329-0.330; was 0.466, -29.2% (harness)
-        ["rewritten zoned, ours"] = new(1.077, 1),   // 3 passes, spread 1.057-1.077; was 5.325, -79.8% (harness; see the note above)
-        ["rewritten high card, reference's"] = new(0.878, 26),   // 3 passes, spread 0.860-0.878; was 0.881, -0.3%
-        ["rewritten high card, ours"] = new(0.915, 20),   // 3 passes, spread 0.896-0.918; HELD at 0.915: 3 passes peaked at 0.918, no loosening
-        ["full scan, 1M table"] = new(0.058, 1),   // 3 passes, spread 0.054-0.058; was 0.060, -3.7%
-        ["projected scan, 1 of 50 columns"] = new(0.120, 10),   // raised deliberately: an A/B over the same work reports our own time unchanged, so what moved is the measurement and not the code
-        ["key order, sorted column, 1% band"] = new(0.683, 11),   // 3 passes, spread 0.671-0.683; was 0.701, -2.6%
-        ["key order, uncorrelated, 64 rows"] = new(1.148, 6),   // 3 passes, spread 1.058-1.339; HELD at 1.148: 3 passes peaked at 1.339, no loosening
-        ["count, exact cover, 1% band"] = new(0.759, 7),   // 3 passes, spread 0.725-0.759; HELD at 0.759: 3 passes peaked at 0.759, no loosening
-        ["filtered scan, string equality, fsst"] = new(2.306, 4),   // 3 passes, spread 2.120-2.306; new
-        ["filtered scan, string prefix, fsst"] = new(1.468, 2),   // 3 passes, spread 1.431-1.468
-        ["filtered scan, string equality, dict"] = new(2.530, 7),   // 3 passes, spread 2.293-3.092
-        ["filtered scan, string prefix, dict"] = new(1.467, 6),   // 3 passes, spread 1.374-1.467
+        ["full scan"] = new(0.335, 2, 0.004),
+        ["full scan, upstream lazy"] = new(0.460, 2, 0.004),
+        ["projected scan, 1 of 5 columns"] = new(0.443, 9, 0.039),
+        ["open to first batch"] = new(0.085, 10, 0.052),
+        ["open, footer only"] = new(0.776, 26, 0.049),
+        ["read and write back"] = new(0.322, 1, 0.028),
+        ["filtered scan, 1% band"] = new(0.204, 11, 0.151),
+        ["filtered scan, half the rows"] = new(0.271, 5, 0.015),
+        ["scattered take, 64 of 64 splits"] = new(0.202, 3, 0.027),
+        ["rewritten zoned, reference's"] = new(0.330, 2, 0.008),
+        ["rewritten zoned, ours"] = new(1.077, 2, 0.004),
+        ["rewritten high card, reference's"] = new(0.878, 28, 0.024),
+        ["rewritten high card, ours"] = new(0.915, 20, 0.005),
+        ["full scan, 1M table"] = new(0.057, 1, 0.049),
+        ["projected scan, 1 of 50 columns"] = new(0.119, 10, 0.138),
+        ["key order, sorted column, 1% band"] = new(0.683, 13, 0.040),
+        ["key order, uncorrelated, 64 rows"] = new(1.148, 6, 0.160),
+        ["count, exact cover, 1% band"] = new(0.633, 7, 0.047),
+        ["filtered scan, string equality, fsst"] = new(2.169, 4, 0.007),
+        ["filtered scan, string prefix, fsst"] = new(1.452, 2, 0.008),
+        ["filtered scan, string equality, dict"] = new(2.473, 7, 0.024),
+        ["filtered scan, string prefix, dict"] = new(1.444, 6, 0.007),
     };
 
     /// <summary>
@@ -464,7 +479,8 @@ internal static class RatioCheck
     /// Set by <see cref="PassFlag"/>: measure once and print machine-readable lines for the parent
     /// process that spawned this one. Not a user-facing mode.
     /// </param>
-    internal static async Task<int> RunAsync(string[] only, int recalibrate, bool rebase, bool onePass)
+    internal static async Task<int> RunAsync(
+        string[] only, int recalibrate, bool rebase, bool abSame, bool onePass)
     {
         if (!RustReader.Available)
         {
@@ -545,7 +561,7 @@ internal static class RatioCheck
             return onePass
                 ? await PassOnceAsync(path, axes).ConfigureAwait(false)
                 : recalibrate > 0
-                    ? await RecalibrateAsync(path, axes, recalibrate, rebase).ConfigureAwait(false)
+                    ? await RecalibrateAsync(path, axes, recalibrate, rebase, abSame).ConfigureAwait(false)
                     : await CheckAsync(path, axes).ConfigureAwait(false);
         }
         finally
@@ -598,7 +614,7 @@ internal static class RatioCheck
             else
             {
                 double reference = entry.Ratio;
-                double ceiling = reference * Margin;
+                double ceiling = reference * (1 + Math.Max(Margin - 1, entry.Spread));
                 columns = string.Create(
                     CultureInfo.InvariantCulture, $" {reference,10:F3} {ceiling,8:F3}");
 
@@ -689,7 +705,8 @@ internal static class RatioCheck
     /// command rather than an afternoon. It prints and gates nothing: a recalibration that could
     /// also pass its own gate would be a ratchet setting itself.
     /// </remarks>
-    private static async Task<int> RecalibrateAsync(string path, Axis[] axes, int passes, bool rebase)
+    private static async Task<int> RecalibrateAsync(
+        string path, Axis[] axes, int passes, bool rebase, bool abSame)
     {
         Console.Out.WriteLine(
             $"RECALIBRATE: {passes} PROCESSES over {axes.Length} axis/axes. " +
@@ -697,8 +714,15 @@ internal static class RatioCheck
         if (rebase)
         {
             Console.Out.WriteLine(
-                "  --rebase: references may RISE. Only for an estimator change, and the commit " +
-                "message has to say which one.");
+                "  --rebase: references may RISE. Only for an estimator change, or with --ab-same " +
+                "for a measurement that moved under code that did not.");
+        }
+
+        if (abSame)
+        {
+            Console.Out.WriteLine(
+                "  --ab-same: asserting bench/ab.sh reports `same` for these axes between the " +
+                "commit that set the reference and this one. The commit message has to quote it.");
         }
 
         Dictionary<string, List<double>> ratios = [];
@@ -742,7 +766,16 @@ internal static class RatioCheck
             // may absorb. The test was `k > 1` until B9 made k > 1 the ordinary case on nearly every
             // axis, at which point it stopped discriminating and started rubber-stamping.
             bool changedEstimator = rebase && known && repeats != entry.Repeats;
-            bool loosens = known && max >= current && !changedEstimator;
+
+            // THE SECOND WAY UP, and the only objective one. A measurement can move while the code
+            // stands still -- a heavier neighbour in the same process, a machine that is not the one
+            // the reference was set on -- and a rule that never lets a reference rise turns that into
+            // a gate that is red forever and therefore believed by nobody. `ab.sh` is what tells the
+            // two apart: it runs the commit that set the reference and this one against one clock,
+            // so `same` there means the code did not move and the measurement did. Asserting it is
+            // the caller's act, and the commit message carries the figures.
+            bool attested = rebase && abSame && known && max >= current;
+            bool loosens = known && max >= current && !changedEstimator && !attested;
             held += loosens ? 1 : 0;
             double value = loosens ? current : max;
             string movement = !known
@@ -752,16 +785,25 @@ internal static class RatioCheck
                         CultureInfo.InvariantCulture,
                         $"REBASED UP from {current:F3} (k {entry.Repeats}->{repeats}): " +
                         $"{(max / current) - 1:+0.0%}")
+                : attested
+                    ? string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"RAISED from {current:F3} on an A/B that reports no change in our own " +
+                        $"time: {(max / current) - 1:+0.0%}")
                 : loosens
                     ? string.Create(
                         CultureInfo.InvariantCulture,
                         $"HELD at {current:F3}: {passes} passes peaked at {max:F3}, no loosening")
                     : string.Create(
                         CultureInfo.InvariantCulture, $"was {current:F3}, {(max / current) - 1:+0.0%;-0.0%;0.0%}");
+            // The spread the passes actually showed, as a fraction of the value the ceiling is
+            // built on. It is emitted rather than described, because a number in a comment cannot
+            // widen a ceiling and this axis's own dispersion is the only honest thing to widen it by.
+            double spread = value > 0 ? (max - min) / value : 0;
             Console.Out.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"        [\"{axis.Name}\"] = new({value:F3}, {repeats}),   // {passes} passes, " +
-                $"spread {min:F3}-{max:F3}; {movement}"));
+                $"        [\"{axis.Name}\"] = new({value:F3}, {repeats}, {spread:F3}),   " +
+                $"// {passes} passes, spread {min:F3}-{max:F3}; {movement}"));
         }
 
         if (held > 0)
@@ -770,6 +812,11 @@ internal static class RatioCheck
                 $"\n{held} axis/axes measured ABOVE their reference and were printed back " +
                 "unchanged. Paste the table as it stands: if one of those is a real regression, " +
                 "`--ratio-check` says OVER and raising the reference is not the answer.");
+            Console.Out.WriteLine(
+                "  If it is not a regression, prove it rather than assert it: run\n" +
+                "    bash bench/ab.sh <the commit that set the reference> --after HEAD <file> " +
+                "<scenario>\n" +
+                "  and, only if it reports `same`, recalibrate again with --rebase --ab-same.");
         }
 
         return 0;
