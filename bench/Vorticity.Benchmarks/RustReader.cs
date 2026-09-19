@@ -13,6 +13,7 @@ using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 
 namespace Vorticity.Benchmarks;
 
@@ -202,6 +203,49 @@ internal static partial class RustReader
 
     /// <summary>Where the cdylib is expected, for the message when it is missing.</summary>
     internal static string ExpectedPath => Locate() ?? RelativePath();
+
+    /// <summary>The first twelve hex digits of the loaded cdylib's SHA-256, or null if absent.</summary>
+    /// <remarks>
+    /// Every ratio in the repository has this binary as its denominator, and the corpus manifest
+    /// does not describe it: it dates the generator and the `vortex` pin, which say what the files
+    /// are, not what they are measured against.
+    ///
+    /// It is not a stable denominator. `tools/vxbench-rs` builds with `lto = true` and
+    /// `codegen-units = 1`, so adding a function no reader calls still rebuilds the crate and can
+    /// move the inlining inside one that readers do call. An additive change to `lib.rs` took the
+    /// reference's `dict_u64_codes` scan from 804 to 592 us with our own side unchanged, which is
+    /// a 29 % move in every ratio over that file and looks exactly like a regression.
+    ///
+    /// Hashing the artefact rather than its sources, because the artefact is what ran. A release
+    /// build of unchanged sources is bit-identical on this toolchain, so this does not fire on a
+    /// rebuild that changed nothing.
+    /// </remarks>
+    internal static string? Fingerprint => _fingerprint ??= ComputeFingerprint();
+
+    private static string? _fingerprint;
+
+    private static string? ComputeFingerprint()
+    {
+        string? path = Locate();
+        if (path is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            using FileStream file = System.IO.File.OpenRead(path);
+            return Convert.ToHexStringLower(SHA256.HashData(file))[..12];
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     /// Teaches the loader where the cdylib lives, rather than copying 36 MB into every build.

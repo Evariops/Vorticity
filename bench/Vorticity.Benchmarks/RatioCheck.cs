@@ -585,6 +585,11 @@ internal static class RatioCheck
             "  OVER needs the whole interval above the ceiling; STALE needs it all under " +
             $"{StaleBelow.ToString("F2", CultureInfo.InvariantCulture)} x reference. " +
             "mde = smallest change this axis can currently see.");
+        // Every ratio below has this binary as its denominator, and it is not pinned: the crate
+        // builds with whole-program optimization, so a change that adds a function no axis calls
+        // can still move one that they do. Naming it is what makes such a move attributable after
+        // the fact instead of only by rebuilding the old one and measuring again.
+        Console.Out.WriteLine($"  reference binary: {RustReader.Fingerprint ?? "unknown"}");
         Console.Out.WriteLine(
             "  axis                             ours      rust     ratio  [   95% interval]  reference  ceiling   n  k     mde");
 
