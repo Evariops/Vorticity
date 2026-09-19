@@ -1302,6 +1302,15 @@ public sealed class CanonicalArena
     /// view and cost nothing here.
     /// </para>
     /// <para>
+    /// What the gather costs, where it is paid: the writer's transit copy of a million rows. Doing
+    /// it a second time and throwing the result away adds 5,1 ms to `fsst`, 4,2 to `zstd` and 3,9
+    /// to `onpair`, on write axes of 55,7, 39,1 and 31,2 ms -- two thirds of what buffering rows
+    /// into blocks costs at all. Moving the same bytes as one memcpy out of a contiguous heap, with
+    /// four bytes of offset a row instead of sixteen of view, adds 1,3, 0,3 and 0,7 instead. The
+    /// cost is the per-row copy and not the bytes, and a column whose views are nearly all inline
+    /// has neither: `varbin` moves 0,3 ms.
+    /// </para>
+    /// <para>
     /// THE BOUNDS ARE CHECKED ON EVERY BUFFERED VIEW, Class I, for
     /// <see cref="Decoders.Canonical.CanonicalConcat"/>'s reason: these views may have been rebased
     /// by a concat since the decoder validated them, and a copy is not a place to start trusting
