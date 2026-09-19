@@ -18,11 +18,13 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Scan;
 using Vorticity.Types;
+using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Scan;
@@ -128,6 +130,51 @@ public sealed class ScanAllocationTests
                 $"{perBatch} bytes per batch, but one RecordBatch is only {batchObject}"));
         Assert.Equal(batchObject, perBatch);
     }
+
+    /// <summary>
+    /// What a descending key-ordered scan costs per batch, which is not yet one
+    /// <see cref="RecordBatch"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every key is null, so every row comes out of the reversing tail and nothing out of the key
+    /// cursor: the two phases allocate differently and averaging them would measure neither.
+    /// </para>
+    /// <para>
+    /// The ceiling is 40 200 B where every other path here is held to 80, and the gap is named
+    /// rather than rounded off. Reversing walks the splits backwards and builds a plan, an
+    /// enumerable and a filter for each one, and a split is a batch, so the whole pipeline is paid
+    /// per batch; the permutation the reversal needs is 256 B of that. The ceiling is here to hold
+    /// the figure still until the pipeline is hoisted out of the walk, and to come down to the
+    /// <see cref="RecordBatch"/> when it is.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ADescendingScanCostsWhatItsWalkRebuildsPerBatch()
+    {
+        ReleaseOnlyCeilings.Require();
+        Decoders.EnsureRegistered();
+        long batchObject = MeasureOneRecordBatch();
+
+        string path = WriteNullKeys();
+        try
+        {
+            long perBatch = await MeasureDescendingPerBatch(path, 64);
+            Assert.True(
+                perBatch <= DescendingPerBatchCeiling,
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{perBatch} bytes per batch against a ceiling of {DescendingPerBatchCeiling}, " +
+                    $"where one RecordBatch is {batchObject}"));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>What the reversing walk rebuilds per batch, measured and held.</summary>
+    private const long DescendingPerBatchCeiling = 40_200;
 
     [Fact]
     public async Task ThePerBatchFigureDoesNotGrowWithTheData()
@@ -285,5 +332,98 @@ public sealed class ScanAllocationTests
         {
             Assert.True(batch.RowCount > 0);
         }
+    }
+
+    private static IAsyncEnumerable<RecordBatch> Descending(VortexFile file, int cap) =>
+        file.Scan().InKeyOrder(NullKeyField, descending: true).WithMaxBatchRows(cap).ExecuteAsync();
+
+    private static async Task<long> MeasureDescendingPerBatch(string path, int cap)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        for (int warm = 0; warm < 2; warm++)
+        {
+            await foreach (RecordBatch batch in Descending(file, cap))
+            {
+                Assert.True(batch.RowCount > 0);
+            }
+        }
+
+        IAsyncEnumerator<RecordBatch> enumerator = Descending(file, cap).GetAsyncEnumerator();
+        try
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                Assert.True(Next(enumerator));
+            }
+
+            List<long> perBatch = [];
+            while (true)
+            {
+                long before = GC.GetAllocatedBytesForCurrentThread();
+                bool more = Next(enumerator);
+                long delta = GC.GetAllocatedBytesForCurrentThread() - before;
+                if (!more)
+                {
+                    break;
+                }
+
+                perBatch.Add(delta);
+            }
+
+            Assert.True(perBatch.Count >= 5, "the measurement needs several steady-state batches");
+            return SteadyState(perBatch);
+        }
+        finally
+        {
+            await enumerator.DisposeAsync();
+        }
+    }
+
+    /// <summary>The key column of the file <see cref="WriteNullKeys"/> writes.</summary>
+    private const string NullKeyField = "k";
+
+    /// <summary>Rows of that file, every one of them with a null key.</summary>
+    private const int NullKeyRows = 8_192;
+
+    private static string WriteNullKeys()
+    {
+        DTypeArena types = new DTypeArena();
+        DType i32 = types.Primitive(PType.I32, Nullability.Nullable);
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType schema = types.Struct([NullKeyField, "payload"], [i32, i64], Nullability.NonNullable);
+
+        string path = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"vorticity-descending-{Guid.NewGuid():N}.vortex");
+        WriteNullKeysAsync(path, schema, i32, i64).GetAwaiter().GetResult();
+        return path;
+    }
+
+    private static async Task WriteNullKeysAsync(string path, DType schema, DType i32, DType i64)
+    {
+        CanonicalArena arena = new CanonicalArena();
+        await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, new VortexWriteOptions());
+        const int batch = 2_048;
+        for (int start = 0; start < NullKeyRows; start += batch)
+        {
+            int count = Math.Min(batch, NullKeyRows - start);
+            VortexBuffer keys = arena.Allocate(count * sizeof(int), sizeof(int), out _);
+            int key = arena.AddPrimitive(i32, count, Validity.AllInvalid, PType.I32, keys);
+
+            VortexBuffer values = arena.Allocate(count * sizeof(long), sizeof(long), out Span<byte> bytes);
+            Span<long> longs = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(bytes);
+            for (int i = 0; i < count; i++)
+            {
+                longs[i] = start + i;
+            }
+
+            int payload = arena.AddPrimitive(i64, count, Validity.NonNullable, PType.I64, values);
+            int root = arena.AddStruct(schema, count, Validity.NonNullable, [key, payload]);
+            using (RecordBatch record = new RecordBatch(arena, root, start))
+            {
+                await writer.WriteAsync(record, CancellationToken.None);
+            }
+        }
+
+        await writer.CompleteAsync(CancellationToken.None);
     }
 }

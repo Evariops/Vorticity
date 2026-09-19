@@ -878,6 +878,13 @@ public sealed class ScanBuilder
             splits.Add(split);
         }
 
+        // The permutation of a batch of n rows is n-1 … 0 and depends on nothing else, so it is
+        // shared by every batch of the same length. Kept across the walk and refilled only when the
+        // length changes, it costs one array per scan instead of one per batch, which is what
+        // `ScanAllocationTests` asks of every other path.
+        int[] order = [];
+        int ordered = 0;
+
         for (int i = splits.Count - 1; i >= 0; i--)
         {
             SplitPlan one = SplitPlan.Compute(tree, splits[i], read.RootMask, cap);
@@ -886,14 +893,24 @@ public sealed class ScanBuilder
                 filter, _prune, _indexes, splits[i].Intersect(rows));
             await foreach (RecordBatch batch in scan.ConfigureAwait(false))
             {
-                int[] order = new int[batch.RowCount];
-                for (int row = 0; row < order.Length; row++)
+                if (batch.RowCount > order.Length)
                 {
-                    order[row] = order.Length - 1 - row;
+                    order = new int[batch.RowCount];
+                    ordered = 0;
+                }
+
+                if (ordered != batch.RowCount)
+                {
+                    for (int row = 0; row < batch.RowCount; row++)
+                    {
+                        order[row] = batch.RowCount - 1 - row;
+                    }
+
+                    ordered = batch.RowCount;
                 }
 
                 // In the batch's own arena: the scan owns it, and disposes it at its next batch.
-                int root = CanonicalFilter.Apply(batch.Arena, batch.RootIndex, order);
+                int root = CanonicalFilter.Apply(batch.Arena, batch.RootIndex, order.AsSpan(0, batch.RowCount));
                 yield return new RecordBatch(batch.Arena, root, batch.StartRow);
             }
         }
