@@ -78,7 +78,28 @@ public class ComplexityProbes
     /// </remarks>
     public static IEnumerable<int> TakeCounts => [64, 1_024, 10_000, 100_000];
 
+    /// <summary>Columns of the wide file, each one chunk larger than the batch that reads it.</summary>
+    private const int WideColumns = 1_000;
+
+    /// <summary>Rows of that file, which is one chunk.</summary>
+    private const int WideRows = 1_024;
+
+    /// <summary>The batch it is read in, small enough that every column is retained.</summary>
+    private const int WideBatch = 64;
+
+    /// <summary>
+    /// How many of the wide file's columns the retention probe projects.
+    /// </summary>
+    /// <remarks>
+    /// A retained chunk is looked up once per column and per batch, so a lookup that walks the
+    /// retained entries costs the square of the count. The three points are far enough apart to
+    /// tell that square from a line.
+    /// </remarks>
+    public static IEnumerable<int> ColumnCounts => [64, 256, 1_000];
+
     private string _path = string.Empty;
+    private string _widePath = string.Empty;
+    private Dictionary<int, string[]> _projections = [];
     private Dictionary<int, FilterLiteral[]> _needles = [];
     private Dictionary<int, ZonePruner> _pruners = [];
     private Dictionary<int, long[]> _takes = [];
@@ -93,6 +114,22 @@ public class ComplexityProbes
         _path = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(), $"vorticity-probe-{Guid.NewGuid():N}.vortex");
         WriteFilterFileAsync(_path).GetAwaiter().GetResult();
+
+        _widePath = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"vorticity-wide-{Guid.NewGuid():N}.vortex");
+        WriteWideFileAsync(_widePath).GetAwaiter().GetResult();
+
+        _projections = [];
+        foreach (int count in ColumnCounts)
+        {
+            string[] paths = new string[count];
+            for (int i = 0; i < count; i++)
+            {
+                paths[i] = WideField(i);
+            }
+
+            _projections[count] = paths;
+        }
 
         _needles = [];
         foreach (int count in LiteralCounts)
@@ -174,6 +211,7 @@ public class ComplexityProbes
         try
         {
             System.IO.File.Delete(_path);
+            System.IO.File.Delete(_widePath);
         }
         catch (System.IO.IOException)
         {
@@ -237,6 +275,19 @@ public class ComplexityProbes
         return ChunkedTakeAsync(rows).GetAwaiter().GetResult();
     }
 
+    /// <summary>Reads a wide file whose every column is a chunk larger than the batch.</summary>
+    /// <remarks>
+    /// Each such column is decoded once and borrowed by every batch, and each batch asks the scan
+    /// context for the decode it holds. What that lookup costs is what this measures against the
+    /// number of columns holding one.
+    /// </remarks>
+    [Benchmark]
+    [ArgumentsSource(nameof(ColumnCounts))]
+    public long RetainedLookup(int columns)
+    {
+        return RetainedLookupAsync(columns).GetAwaiter().GetResult();
+    }
+
     /// <summary>Windows a batch of half a million rows.</summary>
     /// <remarks>
     /// Not parameterized: the question is whether the cost is proportional to the rows windowed or
@@ -278,6 +329,55 @@ public class ComplexityProbes
             .Where(Expr.In(Expr.Field(Field), _needles[literals]))
             .CountAsync(CancellationToken.None)
             .ConfigureAwait(false);
+    }
+
+    private static string WideField(int index) => $"c{index:D4}";
+
+    private static async Task WriteWideFileAsync(string path)
+    {
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        string[] names = new string[WideColumns];
+        DType[] fields = new DType[WideColumns];
+        for (int i = 0; i < WideColumns; i++)
+        {
+            names[i] = WideField(i);
+            fields[i] = i64;
+        }
+
+        DType schema = types.Struct(names, fields, Nullability.NonNullable);
+        VortexWriteOptions options = new VortexWriteOptions { Compress = false };
+        await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, options);
+
+        CanonicalArena arena = new CanonicalArena();
+        int[] columns = new int[WideColumns];
+        for (int i = 0; i < WideColumns; i++)
+        {
+            columns[i] = Longs(arena, i64, WideRows);
+        }
+
+        int root = arena.AddStruct(schema, WideRows, Validity.NonNullable, columns);
+        using RecordBatch record = new RecordBatch(arena, root, 0);
+        await writer.WriteAsync(record, CancellationToken.None).ConfigureAwait(false);
+        await writer.CompleteAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private async Task<long> RetainedLookupAsync(int columns)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(_widePath, CancellationToken.None);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.Scan()
+            .Project(_projections[columns])
+            .WithMaxBatchRows(WideBatch)
+            .ExecuteAsync()
+            .WithCancellation(CancellationToken.None)
+            .ConfigureAwait(false))
+        {
+            rows += batch.RowCount;
+            batch.Dispose();
+        }
+
+        return rows;
     }
 
     private async Task<long> ChunkedTakeAsync(int rows)
