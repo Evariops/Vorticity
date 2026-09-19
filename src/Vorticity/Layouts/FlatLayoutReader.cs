@@ -90,17 +90,15 @@ public sealed class FlatLayoutReader : LayoutReader
             return ExecuteSelected(in node, in fields, context, total, length);
         }
 
-        // DEAD BLOCKS IN THIS NODE (docs/11 §6.1): the scan's mask says some of its blocks will
-        // never be asked for, so decoding it whole and retaining it would materialize rows no
-        // batch reads -- sixteen blocks for the one that lived, on a chunk of the default shape.
-        // This batch's rows go through the selection path instead, as a counted range. The mask
-        // reaching this reader means no chunked ancestor re-partitioned the rows, so `rows` ARE
-        // file rows and the node covers the file: a chunked reader clears the mask for its
-        // children and says the same thing in the selection.
-        if (length < total && context.LiveBlocks is { } live && live.HasDeadBlocks(new RowRange(0, total)))
-        {
-            return ExecuteRange(in node, rows, in fields, context, total, length);
-        }
+        // Dead blocks in this node are handled a level up and not here. A branch used to read the
+        // batch's rows as a counted range when the scan's mask killed blocks of the node, on the
+        // reasoning that a mask reaching this reader means no chunked ancestor re-partitioned the
+        // rows. It reached nothing: this library wraps every column in `vortex.chunked`, even for a
+        // single chunk, and a chunked reader clears the mask for its children and says what it means
+        // in the selection, so the branch above takes those rows. The one file in the corpus whose
+        // column is a bare flat node carries no zone map, so its mask never has a dead block either.
+        // A file that did have the shape reads correctly through the retained decode below, which is
+        // what the chunked form pays for its first batch anyway.
 
         // WHOLE-NODE BATCH: nothing to retain, because there is no second batch to serve. This is
         // every file whose chunk is its batch, which is every conformance fixture and every file
@@ -248,46 +246,6 @@ public sealed class FlatLayoutReader : LayoutReader
         Decoded(context, context.Selection.Length);
         int taken = context.Decode.DecodeRootSelected(in root, node.DType, total, context.Selection);
         return MaskProjection.Apply(context.Decode, taken, in fields);
-    }
-
-    /// <summary>
-    /// This batch's rows through the selection path, as a counted range: the decode of a node
-    /// whose other blocks the scan's mask has killed.
-    /// </summary>
-    /// <remarks>
-    /// The guard above wants a live mask no chunked ancestor has cleared, which means a flat node
-    /// covering the file and read in partial batches. Nothing in the repository produces that shape:
-    /// the suite reaches this method zero times in 6 614 tests, and so does every bench scenario.
-    /// The counted range it would write is therefore not a cost anything pays today, and the rent is
-    /// pooled besides -- a second identical rent and fill here moves no axis of
-    /// <c>PathAllocationTests</c> by a byte.
-    /// </remarks>
-    private int ExecuteRange(
-        in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, int total, int length)
-    {
-        int[] range = System.Buffers.ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
-        try
-        {
-            int start = (int)rows.Start;
-            for (int i = 0; i < length; i++)
-            {
-                range[i] = start + i;
-            }
-
-            (int[]? Buffer, int Count) saved = context.ExchangeSelection(range, length);
-            try
-            {
-                return ExecuteSelected(in node, in fields, context, total, length);
-            }
-            finally
-            {
-                context.ExchangeSelection(saved.Buffer, saved.Count);
-            }
-        }
-        finally
-        {
-            System.Buffers.ArrayPool<int>.Shared.Return(range);
-        }
     }
 
     /// <summary>Gathers <see cref="ScanContext.Selection"/> out of a retained whole-node decode.</summary>

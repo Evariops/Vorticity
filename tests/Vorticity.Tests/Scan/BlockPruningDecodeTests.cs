@@ -110,6 +110,86 @@ public sealed class BlockPruningDecodeTests
         }
     }
 
+    /// <summary>
+    /// A column whose layout is a bare flat node, read in partial batches under a mask, answers as
+    /// an unpruned scan does.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The only shape in the repository where the flat reader sees the scan's mask itself:
+    /// <c>types/struct_field_names</c> is written elsewhere and its column sits directly under the
+    /// root, where everything this library writes wraps a column in <c>vortex.chunked</c>, even for
+    /// one chunk. A chunked ancestor clears the mask for its children and says what it means in the
+    /// selection, so under one the flat reader never sees a mask at all.
+    /// </para>
+    /// <para>
+    /// The batch cap is what puts the reader on a partial node: without it the file's 1 025 rows are
+    /// one batch and the node is covered whole. The reader used to carry a branch for exactly this
+    /// -- a partial batch of a masked flat node, read as a counted range -- and nothing ever reached
+    /// it, because a bare flat column and a zone map do not occur together here: this file has no
+    /// zone map, so its mask never holds a dead block. This test holds the shape that remains
+    /// readable now that the branch is gone.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AFlatColumnUnderNoChunkReadsTheSameRowsEitherWay()
+    {
+        Decoders.EnsureRegistered();
+        string path = Corpus.Path("types/struct_field_names");
+
+        int first = await FirstValue(path);
+        VortexExpr band = Expr.And(
+            Expr.Ge(Expr.Field(string.Empty), Expr.Literal(FilterLiteral.From(first))),
+            Expr.Lt(Expr.Field(string.Empty), Expr.Literal(FilterLiteral.From(first + 1))));
+
+        (List<int> unpruned, long unprunedDecoded) = await ReadField(path, band, prune: false, cap: 128);
+        (List<int> pruned, long prunedDecoded) = await ReadField(path, band, prune: true, cap: 128);
+
+        Console.Out.Write(
+            "FLAT RANGE: a band of " + pruned.Count.ToString(CultureInfo.InvariantCulture) +
+            " rows materialized " + prunedDecoded.ToString(CultureInfo.InvariantCulture) +
+            " values pruned and " + unprunedDecoded.ToString(CultureInfo.InvariantCulture) + " unpruned.\n");
+
+        Assert.NotEmpty(pruned);
+        Assert.Equal(unpruned, pruned);
+    }
+
+    private static async Task<int> FirstValue(string path)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync().WithCancellation(CancellationToken.None))
+        {
+            if (batch.RowCount > 0)
+            {
+                return batch.Column(System.Text.Encoding.UTF8.GetBytes(string.Empty))
+                    .AsPrimitive<int>().Values[0];
+            }
+        }
+
+        throw new InvalidOperationException("the fixture should hold rows");
+    }
+
+    private static async Task<(List<int> Values, long Decoded)> ReadField(
+        string path, VortexExpr filter, bool prune, int cap)
+    {
+        FlatLayoutReader.ValuesDecoded = 0;
+        List<int> values = [];
+        byte[] name = System.Text.Encoding.UTF8.GetBytes(string.Empty);
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await foreach (RecordBatch batch in file.Scan()
+            .Where(filter).WithPruning(prune).WithMaxBatchRows(cap).ExecuteAsync()
+            .WithCancellation(CancellationToken.None))
+        {
+            VortexColumn view = batch.Column(name);
+            for (int row = 0; row < batch.RowCount; row++)
+            {
+                values.Add(view.AsPrimitive<int>().Values[row]);
+            }
+        }
+
+        return (values, FlatLayoutReader.ValuesDecoded);
+    }
+
     /// <summary>The layout tree in one line, with what each zone map answers, for a message.</summary>
     private static string Describe(LayoutNode node, int depth)
     {
