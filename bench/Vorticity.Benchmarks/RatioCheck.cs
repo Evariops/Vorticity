@@ -395,7 +395,7 @@ internal static class RatioCheck
         ["rewritten high card, reference's"] = new(0.878, 28, 0.024),
         ["rewritten high card, ours"] = new(0.915, 20, 0.005),
         ["full scan, 1M table"] = new(0.057, 1, 0.049),
-        ["projected scan, 1 of 50 columns"] = new(0.119, 10, 0.138),
+        ["projected scan, 1 of 50 columns"] = new(0.104, 10, 0.062),   // 3 passes, spread 0.098-0.104; was 0.119, -12.3%
         ["key order, sorted column, 1% band"] = new(0.683, 13, 0.040),
         ["key order, uncorrelated, 64 rows"] = new(1.148, 6, 0.160),
         ["count, exact cover, 1% band"] = new(0.633, 7, 0.047),
