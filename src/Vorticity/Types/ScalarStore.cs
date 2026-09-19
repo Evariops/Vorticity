@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Text;
+using Vorticity.Arrays.Decoders.Canonical;
 
 namespace Vorticity.Types;
 
@@ -142,17 +143,9 @@ public sealed class ScalarStore
     {
         ArgumentNullException.ThrowIfNull(value);
         Span<byte> stack = stackalloc byte[256];
-        int exact = Encoding.UTF8.GetByteCount(value);
-        byte[]? rented = exact > stack.Length ? ArrayPool<byte>.Shared.Rent(exact) : null;
-        Span<byte> buffer = rented is null ? stack : rented.AsSpan();
-        int written = Encoding.UTF8.GetBytes(value, buffer);
-        ScalarValue result = Blob(ScalarValueKind.String, buffer[..written]);
-        if (rented is not null)
-        {
-            ArrayPool<byte>.Shared.Return(rented);
-        }
-
-        return result;
+        using Scratch<byte> buffer = new Scratch<byte>(Encoding.UTF8.GetByteCount(value), stack);
+        int written = Encoding.UTF8.GetBytes(value, buffer.Span);
+        return Blob(ScalarValueKind.String, buffer.Span[..written]);
     }
 
     /// <summary>An opaque bytes value. The bytes are copied into the store.</summary>

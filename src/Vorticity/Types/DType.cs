@@ -7,6 +7,7 @@ using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Text;
+using Vorticity.Arrays.Decoders.Canonical;
 
 namespace Vorticity.Types;
 
@@ -202,17 +203,9 @@ public readonly struct DType : IEquatable<DType>
     {
         ArgumentNullException.ThrowIfNull(name);
         Span<byte> stack = stackalloc byte[256];
-        int exact = Encoding.UTF8.GetByteCount(name);
-        byte[]? rented = exact > stack.Length ? ArrayPool<byte>.Shared.Rent(exact) : null;
-        Span<byte> buffer = rented is null ? stack : rented.AsSpan();
-        int written = Encoding.UTF8.GetBytes(name, buffer);
-        int result = IndexOfField(buffer[..written]);
-        if (rented is not null)
-        {
-            ArrayPool<byte>.Shared.Return(rented);
-        }
-
-        return result;
+        using Scratch<byte> buffer = new Scratch<byte>(Encoding.UTF8.GetByteCount(name), stack);
+        int written = Encoding.UTF8.GetBytes(name, buffer.Span);
+        return IndexOfField(buffer.Span[..written]);
     }
 
     /// <summary>

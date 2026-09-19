@@ -25,6 +25,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Text;
+using Vorticity.Arrays.Decoders.Canonical;
 
 namespace Vorticity.Types;
 
@@ -241,17 +242,9 @@ public sealed class DTypeArena
     {
         ArgumentNullException.ThrowIfNull(name);
         Span<byte> stack = stackalloc byte[256];
-        int exact = Encoding.UTF8.GetByteCount(name);
-        byte[]? rented = exact > stack.Length ? ArrayPool<byte>.Shared.Rent(exact) : null;
-        Span<byte> buffer = rented is null ? stack : rented.AsSpan();
-        int written = Encoding.UTF8.GetBytes(name, buffer);
-        int handle = InternName(buffer[..written]);
-        if (rented is not null)
-        {
-            ArrayPool<byte>.Shared.Return(rented);
-        }
-
-        return handle;
+        using Scratch<byte> buffer = new Scratch<byte>(Encoding.UTF8.GetByteCount(name), stack);
+        int written = Encoding.UTF8.GetBytes(name, buffer.Span);
+        return InternName(buffer.Span[..written]);
     }
 
     /// <summary>Returns the UTF-8 bytes behind an interned name handle.</summary>
@@ -542,17 +535,9 @@ public sealed class DTypeArena
         // Encode into a scratch buffer rather than interning first: a rejected storage dtype must
         // not leave the id behind in the intern table.
         Span<byte> stack = stackalloc byte[256];
-        int exact = Encoding.UTF8.GetByteCount(id);
-        byte[]? rented = exact > stack.Length ? ArrayPool<byte>.Shared.Rent(exact) : null;
-        Span<byte> buffer = rented is null ? stack : rented.AsSpan();
-        int written = Encoding.UTF8.GetBytes(id, buffer);
-        DType result = Extension(buffer[..written], storageType, metadata);
-        if (rented is not null)
-        {
-            ArrayPool<byte>.Shared.Return(rented);
-        }
-
-        return result;
+        using Scratch<byte> buffer = new Scratch<byte>(Encoding.UTF8.GetByteCount(id), stack);
+        int written = Encoding.UTF8.GetBytes(id, buffer.Span);
+        return Extension(buffer.Span[..written], storageType, metadata);
     }
 
     /// <summary>
