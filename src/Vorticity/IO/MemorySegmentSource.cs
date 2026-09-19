@@ -55,19 +55,35 @@ public sealed class MemorySegmentSource : ISegmentSource
     public async ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(requests);
-        for (int slot = 0; slot < requests.Count; slot++)
+        if (requests.IsPopulated)
         {
-            if (requests.IsFilled(slot))
-            {
-                continue;
-            }
-
-            SegmentOwner owner = await ReadAsync(requests.GetSpec(slot), cancellationToken)
-                .ConfigureAwait(false);
-            requests.SetResult(slot, owner);
+            return;
         }
 
-        requests.Complete();
+        try
+        {
+            for (int slot = 0; slot < requests.Count; slot++)
+            {
+                if (requests.IsFilled(slot))
+                {
+                    continue;
+                }
+
+                SegmentOwner owner = await ReadAsync(requests.GetSpec(slot), cancellationToken)
+                    .ConfigureAwait(false);
+                requests.SetResult(slot, owner);
+            }
+
+            requests.Complete();
+        }
+        catch
+        {
+            // All or nothing, as the other sources do it. Without this the slots filled before the
+            // failure keep their owners: the caller cannot release what it never received, and a
+            // retry over the same set hits them as already filled rather than reading them again.
+            requests.AbandonPending();
+            throw;
+        }
     }
 
     /// <inheritdoc/>
