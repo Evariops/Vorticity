@@ -42,6 +42,9 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
 {
     private readonly BatchAsyncEnumerable _scan;
     private readonly VortexExpr? _filter;
+
+    /// <summary>Holds what the filter is worth preparing once rather than once per batch.</summary>
+    private readonly FilterEvaluator? _evaluator;
     private readonly string _path;
     private readonly string[]? _composite;
     private readonly bool _descending;
@@ -72,6 +75,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
     {
         _scan = scan;
         _filter = filter;
+        _evaluator = filter is null ? null : new FilterEvaluator(filter);
         _path = path;
         _composite = composite;
         _descending = descending;
@@ -397,7 +401,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                 }
                 else
                 {
-                    FilterEvaluator.Evaluate(_owner._filter, _context.Canonical, root, distinct, verdicts);
+                    _owner._evaluator!.Evaluate(_context.Canonical, root, distinct, verdicts);
                 }
 
                 ReadOnlySpan<long> rows = _sorted.AsSpan(0, distinct);

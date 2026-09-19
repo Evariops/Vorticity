@@ -22,7 +22,14 @@ using Vorticity.Types;
 namespace Vorticity.Compute;
 
 /// <summary>Evaluates a filter over a decoded batch, producing one truth value per row.</summary>
-internal static class FilterEvaluator
+/// <remarks>
+/// One of these belongs to one scan, because some of what a filter needs is worth computing once
+/// for the whole file rather than once per batch: an <c>IN</c> hashes its candidates, and a scan of
+/// a million rows in eight-thousand-row batches would otherwise hash them a hundred and twenty
+/// times. The prepared state is keyed by the expression node it belongs to and never outlives the
+/// scan.
+/// </remarks>
+internal sealed class FilterEvaluator
 {
     /// <summary>
     /// How deep a filter expression may nest. Generous for anything written by hand or by a query
@@ -30,8 +37,42 @@ internal static class FilterEvaluator
     /// </summary>
     internal const int MaxDepth = 64;
 
+    private readonly VortexExpr _filter;
+
     /// <summary>
-    /// Evaluates <paramref name="filter"/> over the batch rooted at <paramref name="rootIndex"/>.
+    /// One entry per <c>IN</c> met so far, or null while none has been.
+    /// </summary>
+    /// <remarks>
+    /// Nothing is allocated until an <c>IN</c> is actually reached, which is what keeps a filter
+    /// without one free: the read paths are held to a ceiling in bytes, and a table nobody puts
+    /// anything in still costs more than the evaluator that owns it.
+    ///
+    /// Grown by replacement rather than mutated, so a reader never sees a half-written array and no
+    /// lock is needed: batches of one scan can be evaluated from several threads. Two racing here
+    /// build equal sets and one of the arrays is dropped, which costs a rebuild on a later batch
+    /// and nothing else.
+    /// </remarks>
+    private volatile Prepared[]? _prepared;
+
+    /// <summary>Prepares an evaluator for one filter, for the length of one scan.</summary>
+    /// <param name="filter">The expression every call will evaluate.</param>
+    internal FilterEvaluator(VortexExpr filter)
+    {
+        _filter = filter;
+    }
+
+    /// <summary>The expression this evaluator answers.</summary>
+    internal VortexExpr Filter => _filter;
+
+    /// <summary>One <c>IN</c>'s candidates, hashed for the column they were met over.</summary>
+    /// <param name="Node">The expression node the set belongs to.</param>
+    /// <param name="Signed">The signedness it was built for.</param>
+    /// <param name="Set">The set, or null when an OR of equalities is the better answer.</param>
+    private sealed record Prepared(InExpr Node, bool Signed, InSet? Set);
+
+    /// <summary>
+    /// Evaluates <paramref name="filter"/> once, keeping nothing. For a caller that has one batch
+    /// to answer rather than a scan's worth.
     /// </summary>
     /// <param name="filter">The expression.</param>
     /// <param name="arena">The arena holding the decoded batch.</param>
@@ -43,10 +84,65 @@ internal static class FilterEvaluator
     internal static void Evaluate(
         VortexExpr filter, CanonicalArena arena, int rootIndex, int rows, Span<byte> destination)
     {
-        Evaluate(filter, arena, rootIndex, rows, destination, 0);
+        new FilterEvaluator(filter).Evaluate(arena, rootIndex, rows, destination);
     }
 
-    private static void Evaluate(
+    /// <summary>
+    /// Evaluates this evaluator's filter over the batch rooted at <paramref name="rootIndex"/>.
+    /// </summary>
+    /// <param name="arena">The arena holding the decoded batch.</param>
+    /// <param name="rootIndex">The batch's root node, a struct for a tabular file.</param>
+    /// <param name="rows">The batch's row count.</param>
+    /// <param name="destination">Receives one <see cref="Trilean"/> state per row.</param>
+    /// <exception cref="ArgumentException">A field path names nothing in the batch's schema.</exception>
+    /// <exception cref="NotSupportedException">A column's type is outside the 1.0 filter scope.</exception>
+    internal void Evaluate(CanonicalArena arena, int rootIndex, int rows, Span<byte> destination)
+    {
+        Evaluate(_filter, arena, rootIndex, rows, destination, 0);
+    }
+
+    /// <summary>
+    /// The hashed candidates for this <c>IN</c> against this column, built once per scan.
+    /// </summary>
+    /// <param name="membership">The expression node, which is what the set belongs to.</param>
+    /// <param name="arena">The arena holding the decoded batch.</param>
+    /// <param name="column">The resolved column.</param>
+    /// <returns><see langword="null"/> when an OR of equalities is the better answer.</returns>
+    /// <remarks>
+    /// Keyed by signedness as well, because a candidate above <c>i64::MaxValue</c> shares its bits
+    /// with a negative value: a set built for one kind of column would answer wrongly for the
+    /// other. Within a scan the schema fixes it, so the rebuild is a guard rather than a cost.
+    /// </remarks>
+    private InSet? PreparedFor(InExpr membership, CanonicalArena arena, int column)
+    {
+        if (!ComparisonKernels.TryIntegerColumn(arena, column, out _, out bool signed))
+        {
+            return null;
+        }
+
+        Prepared[]? held = _prepared;
+        if (held is not null)
+        {
+            for (int i = 0; i < held.Length; i++)
+            {
+                Prepared entry = held[i];
+                if (ReferenceEquals(entry.Node, membership) && entry.Signed == signed)
+                {
+                    return entry.Set;
+                }
+            }
+        }
+
+        Prepared fresh = new Prepared(membership, signed, InSet.TryBuild(membership.Literals, signed));
+        int length = held?.Length ?? 0;
+        Prepared[] grown = new Prepared[length + 1];
+        held?.CopyTo(grown, 0);
+        grown[length] = fresh;
+        _prepared = grown;
+        return fresh.Set;
+    }
+
+    private void Evaluate(
         VortexExpr filter, CanonicalArena arena, int rootIndex, int rows, Span<byte> destination,
         int depth)
     {
@@ -95,11 +191,13 @@ internal static class FilterEvaluator
             {
                 InExpr membership = (InExpr)filter;
                 int column = Resolve(arena, rootIndex, membership.Field, rows);
+                InSet? prepared = PreparedFor(membership, arena, column);
                 byte[] scratch = ArrayPool<byte>.Shared.Rent(rows);
                 try
                 {
                     ComparisonKernels.In(
-                        arena, column, membership.Literals, destination, scratch.AsSpan(0, rows));
+                        arena, column, membership.Literals, destination, scratch.AsSpan(0, rows),
+                        prepared);
                 }
                 finally
                 {

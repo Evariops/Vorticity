@@ -38,6 +38,9 @@ internal sealed class TerminalScan
     private readonly VortexFile _file;
     private readonly LayoutTree _tree;
     private readonly VortexExpr? _filter;
+
+    /// <summary>Holds what the filter is worth preparing once rather than once per batch.</summary>
+    private readonly FilterEvaluator? _evaluator;
     private readonly RowRange _rows;
     private readonly bool _wholeFile;
     private readonly long _cap;
@@ -66,6 +69,7 @@ internal sealed class TerminalScan
         _file = file;
         _tree = tree;
         _filter = filter;
+        _evaluator = filter is null ? null : new FilterEvaluator(filter);
         _rows = rows;
         _wholeFile = wholeFile;
         _cap = cap;
@@ -279,7 +283,7 @@ internal sealed class TerminalScan
         try
         {
             Span<byte> window = buffer.AsSpan(0, rows);
-            FilterEvaluator.Evaluate(_filter!, context.Canonical, root, rows, window);
+            _evaluator!.Evaluate(context.Canonical, root, rows, window);
             return Trilean.CountTrue(window);
         }
         finally
@@ -603,7 +607,7 @@ internal sealed class TerminalScan
             if (_filter is not null)
             {
                 Span<byte> evaluated = window.AsSpan(0, rows);
-                FilterEvaluator.Evaluate(_filter, context.Canonical, root, rows, evaluated);
+                _evaluator!.Evaluate(context.Canonical, root, rows, evaluated);
                 int count = Trilean.CountTrue(evaluated);
                 if (count == 0)
                 {

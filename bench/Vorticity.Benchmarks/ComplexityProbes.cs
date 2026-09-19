@@ -48,15 +48,20 @@ public class ComplexityProbes
     /// How many literals the <c>IN</c> is given, per case.
     /// </summary>
     /// <remarks>
-    /// The four are decades apart because the point is the exponent, not the constant: a kernel that
+    /// They are decades apart because the point is the exponent, not the constant: a kernel that
     /// evaluates one comparison per literal shows a line, and one that tests membership once per row
     /// shows a floor.
     ///
+    /// The curve runs to sixteen thousand because the small end cannot tell the two shapes apart.
+    /// A scan of a million rows costs about 0,8 ms before any candidate is looked at, so at 512 that
+    /// floor is most of the reading and a residual term in the candidate count hides under it. Four
+    /// thousand and sixteen thousand are where such a term stops hiding.
+    ///
     /// Arguments of one benchmark rather than parameters of the class, because the other two probes
-    /// do not depend on them: as parameters they ran four times over and printed four identical rows,
+    /// do not depend on them: as parameters they ran once over per count and printed identical rows,
     /// which is both slower and an invitation to read a curve where there is none.
     /// </remarks>
-    public static IEnumerable<int> LiteralCounts => [1, 8, 64, 512];
+    public static IEnumerable<int> LiteralCounts => [1, 8, 64, 512, 4_096, 16_384];
 
     private string _path = string.Empty;
     private Dictionary<int, FilterLiteral[]> _needles = [];

@@ -200,7 +200,12 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly FieldMask _mask;
     private readonly FieldMask _keep;
     private readonly DType _schema;
-    private readonly VortexExpr? _filter;
+    /// <summary>
+    /// The filter and what is worth preparing once for it, or null when there is none. It stands in
+    /// for the expression itself so that a scan without a filter carries no extra field: these
+    /// paths are held to a ceiling in bytes and one reference each would show.
+    /// </summary>
+    private readonly FilterEvaluator? _evaluator;
     private readonly bool _filterProven;
     private readonly RowSelection? _take;
     private readonly BlockMask? _live;
@@ -243,7 +248,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _mask = read.RootMask;
         _keep = keep.RootMask;
         _schema = schema;
-        _filter = filter;
+        _evaluator = filter is null ? null : new FilterEvaluator(filter);
         _maxBatchRows = (int)Math.Min(plan.MaxRows, int.MaxValue);
         _token = cancellationToken;
         _cursor = plan.CreateCursor();
@@ -486,7 +491,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// </remarks>
     private int ApplyFilter(ScanContext context, int root)
     {
-        if (_filter is null)
+        if (_evaluator is null)
         {
             return root;
         }
@@ -503,7 +508,7 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         try
         {
             Span<byte> window = states.AsSpan(0, rows);
-            FilterEvaluator.Evaluate(_filter, context.Canonical, root, rows, window);
+            _evaluator!.Evaluate(context.Canonical, root, rows, window);
 
             int count = Trilean.CountTrue(window);
             if (count != rows)

@@ -86,6 +86,7 @@ public class FilterKernelBenchmarks
     private int _utf8Node;
     private byte[] _scratch = [];
     private FilterLiteral[] _inSet = [];
+    private InSet? _inPrepared;
 
     // Built once: `FilterLiteral.From(string)` encodes, and an allocation inside the timed body
     // would be charged to the kernel it is meant to measure.
@@ -199,6 +200,10 @@ public class FilterKernelBenchmarks
         {
             _inSet[i] = FilterLiteral.From((long)(i * 131));
         }
+
+        // Hashed here rather than in the timed body, which is where a scan hashes it too: once for
+        // the whole file, not once per batch.
+        _inPrepared = InSet.TryBuild(_inSet, signed: true);
     }
 
     [GlobalCleanup]
@@ -268,14 +273,15 @@ public class FilterKernelBenchmarks
 
     /// <summary>`i64 IN (eight candidates)`, through <c>In</c>.</summary>
     /// <remarks>
-    /// The one arm whose shape is not a single kernel: `In` folds N equalities with
-    /// <c>Trilean.Or</c>, so what it measures is N passes over the column plus N-1 ORs -- which is
-    /// precisely the thing F-4 proposed to replace with one pass, and could not price.
+    /// One pass over the column against a set hashed beforehand, which is what a scan does: the
+    /// candidates are prepared once for the whole file, so what this times is the row loop and not
+    /// the table. Folding N equalities with <c>Trilean.Or</c> was the shape before, and it made the
+    /// reading N passes plus N-1 ORs; passing no set still reaches it.
     /// </remarks>
     [Benchmark(Description = "library, i64 IN (8)")]
     public int LibraryIn()
     {
-        ComparisonKernels.In(_arena!, _node, _inSet, _destination, _scratch);
+        ComparisonKernels.In(_arena!, _node, _inSet, _destination, _scratch, _inPrepared);
         return _destination.Length;
     }
 

@@ -232,20 +232,51 @@ internal static class ComparisonKernels
     /// <param name="literals">The candidates.</param>
     /// <param name="destination">One state per row.</param>
     /// <param name="scratch">A second buffer of the same length.</param>
+    /// <param name="prepared">
+    /// The candidates already hashed for this column's signedness, or <see langword="null"/>.
+    /// </param>
     internal static void In(
         CanonicalArena arena, int nodeIndex, ReadOnlySpan<FilterLiteral> literals,
-        Span<byte> destination, Span<byte> scratch)
+        Span<byte> destination, Span<byte> scratch, InSet? prepared)
     {
+        if (prepared is not null && TryIntegerColumn(arena, nodeIndex, out CanonicalNode column, out bool signed) &&
+            signed == prepared.Signed)
+        {
+            prepared.Apply(
+                column.PType, column.Values.Span, ValidityMask.From(arena, column.Validity),
+                destination);
+            return;
+        }
+
         // `x IN (a, b)` is `x = a OR x = b`, three-valued logic included: a null x is unknown
         // against every candidate, so the OR stays unknown, and a null CANDIDATE makes that one
-        // comparison unknown rather than false - which is why this is an OR of the kernel above
-        // rather than a membership test.
+        // comparison unknown rather than false. One pass per candidate is what that costs when the
+        // column or the candidates are not a set.
         Compare(arena, nodeIndex, ComparisonOp.Equal, literals[0], destination);
         for (int i = 1; i < literals.Length; i++)
         {
             Compare(arena, nodeIndex, ComparisonOp.Equal, literals[i], scratch);
             Trilean.Or(destination, scratch);
         }
+    }
+
+    /// <summary>Whether <paramref name="nodeIndex"/> is an integer column a set can be read against.</summary>
+    /// <param name="arena">The arena.</param>
+    /// <param name="nodeIndex">The column, before the extension wrapper is removed.</param>
+    /// <param name="column">The storage node.</param>
+    /// <param name="signed">Whether it is signed, which decides which set is valid for it.</param>
+    internal static bool TryIntegerColumn(
+        CanonicalArena arena, int nodeIndex, out CanonicalNode column, out bool signed)
+    {
+        column = arena.GetNode(Unwrap(arena, nodeIndex));
+        if (column.Kind != CanonicalKind.Primitive)
+        {
+            signed = false;
+            return false;
+        }
+
+        signed = column.PType.IsSignedInteger();
+        return signed || column.PType.IsUnsignedInteger();
     }
 
     /// <summary>Evaluates <c>column IS [NOT] NULL</c>, which is never unknown.</summary>
