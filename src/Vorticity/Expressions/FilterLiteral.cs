@@ -129,7 +129,24 @@ public readonly struct FilterLiteral : IEquatable<FilterLiteral>
     public override bool Equals(object? obj) => obj is FilterLiteral other && Equals(other);
 
     /// <inheritdoc/>
-    public override int GetHashCode() => HashCode.Combine(Kind, _bits, _bytes?.Length ?? 0);
+    /// <remarks>
+    /// THE CONTENT, FOR A BYTE STRING, because equality reads the content and a hash that stops at
+    /// the length says every literal of the same width is the same one. A set of sixteen-byte
+    /// literals -- identifiers, which is what a key column holds -- then degenerates into one
+    /// bucket, and every insertion compares against everything already in it.
+    /// </remarks>
+    public override int GetHashCode()
+    {
+        if (Kind != FilterLiteralKind.Bytes)
+        {
+            return HashCode.Combine(Kind, _bits);
+        }
+
+        HashCode hash = default;
+        hash.Add(Kind);
+        hash.AddBytes(BytesValue);
+        return hash.ToHashCode();
+    }
 
     /// <summary>Equality operator.</summary>
     public static bool operator ==(FilterLiteral left, FilterLiteral right) => left.Equals(right);

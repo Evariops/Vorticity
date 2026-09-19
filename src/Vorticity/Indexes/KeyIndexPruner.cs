@@ -68,7 +68,9 @@ internal sealed class KeyIndexPruner
 
         Dictionary<string, List<FilterLiteral>> equalities = new Dictionary<string, List<FilterLiteral>>(StringComparer.Ordinal);
         Dictionary<string, List<StringMatchExpr>> matches = new Dictionary<string, List<StringMatchExpr>>(StringComparer.Ordinal);
-        CollectEqualities(filter, equalities, matches);
+        Dictionary<string, HashSet<FilterLiteral>> seenLiterals =
+            new Dictionary<string, HashSet<FilterLiteral>>(StringComparer.Ordinal);
+        CollectEqualities(filter, equalities, seenLiterals, matches);
         if (equalities.Count == 0 && matches.Count == 0)
         {
             return null;
@@ -106,13 +108,17 @@ internal sealed class KeyIndexPruner
 
                 // The keys a text index holds are trigrams, typed binary; its literals are the
                 // trigrams the predicates require, folded as the index was.
+                // The order is what the slot arrays are indexed by, so the list stays and the set
+                // only answers "seen already" -- which a scan of the list answered in time linear
+                // in the trigrams already found.
                 literals = [];
+                HashSet<FilterLiteral> seen = [];
                 foreach (StringMatchExpr predicate in predicates)
                 {
                     foreach (byte[] trigram in Trigrams.Required(predicate, fold))
                     {
                         FilterLiteral literal = FilterLiteral.From(trigram);
-                        if (!literals.Contains(literal))
+                        if (seen.Add(literal))
                         {
                             literals.Add(literal);
                         }
@@ -437,21 +443,24 @@ internal sealed class KeyIndexPruner
     private static string TrigramKey(string path) => path + "\0ngram3";
 
     private static void CollectEqualities(
-        VortexExpr expr, Dictionary<string, List<FilterLiteral>> into, Dictionary<string, List<StringMatchExpr>> matches)
+        VortexExpr expr,
+        Dictionary<string, List<FilterLiteral>> into,
+        Dictionary<string, HashSet<FilterLiteral>> seen,
+        Dictionary<string, List<StringMatchExpr>> matches)
     {
         switch (expr)
         {
             case LogicalExpr logical:
-                CollectEqualities(logical.Left, into, matches);
-                CollectEqualities(logical.Right, into, matches);
+                CollectEqualities(logical.Left, into, seen, matches);
+                CollectEqualities(logical.Right, into, seen, matches);
                 break;
             case ComparisonExpr { Op: ComparisonOp.Equal } equal:
-                Add(into, equal.Field.Path, equal.Value);
+                Add(into, seen, equal.Field.Path, equal.Value);
                 break;
             case InExpr @in:
                 foreach (FilterLiteral value in @in.Values)
                 {
-                    Add(into, @in.Field.Path, value);
+                    Add(into, seen, @in.Field.Path, value);
                 }
 
                 break;
@@ -468,15 +477,24 @@ internal sealed class KeyIndexPruner
                 break;
         }
 
-        static void Add(Dictionary<string, List<FilterLiteral>> into, string path, FilterLiteral value)
+        // The list keeps the order the slot arrays are indexed by; the set answers whether a
+        // literal is already in it. Asking the list cost a comparison per literal already found,
+        // so an `IN` of sixteen thousand identifiers paid a hundred and twenty-eight million of
+        // them before the pruner had read a single block.
+        static void Add(
+            Dictionary<string, List<FilterLiteral>> into,
+            Dictionary<string, HashSet<FilterLiteral>> seen,
+            string path,
+            FilterLiteral value)
         {
             if (!into.TryGetValue(path, out List<FilterLiteral>? list))
             {
                 list = [];
                 into[path] = list;
+                seen[path] = [];
             }
 
-            if (!list.Contains(value))
+            if (seen[path].Add(value))
             {
                 list.Add(value);
             }
