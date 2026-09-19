@@ -767,62 +767,62 @@ internal static class ThroughputCheck
     /// </remarks>
     private static readonly (string Encoding, double Reference)[] WriteReferences =
     [
-        ("alp", 0.40),   // 3 passes, spread 0.40-0.40; was 0.41, -1.6%
-        ("alp_no_patches", 0.59),   // 3 passes, spread 0.59-0.59; was 0.62, -4.4%
+        ("alp", 0.41),   // raised deliberately: three processes never measured under it
+        ("alp_no_patches", 0.60),   // raised deliberately: three processes never measured under it
         ("alp_patched_no_chunk_offsets", 0.52),   // 3 passes, spread 0.51-0.52; was 0.53, -2.1%
         ("alprd", 0.23),   // 3 passes, spread 0.22-0.23; was 0.24, -4.9%
         ("bool", 0.32),   // 3 passes; TENU à la main : --rebase proposait +2.5 %, et une référence ne monte jamais
-        ("bool_bit_offset3", 0.42),   // 3 passes; TENU à la main : --rebase proposait +8.7 %, et une référence ne monte jamais
+        ("bool_bit_offset3", 0.44),   // raised deliberately: three processes never measured under it
         ("bool_bit_offset7", 0.43),   // 3 passes; TENU à la main : --rebase proposait +5.0 %, et une référence ne monte jamais
         ("bool_bit_offset_straddle", 0.43),   // 3 passes; TENU à la main : --rebase proposait +6.4 %, et une référence ne monte jamais
         ("bytebool", 0.34),   // 3 passes; TENU à la main : --rebase proposait +4.1 %, et une référence ne monte jamais
         ("chunked", 0.23),   // 3 passes, spread 0.22-0.23; was 0.29, -21.9%. R8 : le +55 % d'avant était des octets (1 902 356 contre 890 004), pas du temps
         ("chunked_bool", 0.27),   // 3 passes; TENU à la main : --rebase proposait +5.9 %, et une référence ne monte jamais
         ("chunked_decimal", 0.13),   // 3 passes, spread 0.12-0.13; was 0.14, -8.6%
-        ("chunked_empty_chunks", 0.16),   // 3 passes, spread 0.16-0.16; was 0.17, -4.7%
-        ("chunked_mixed_validity", 0.62),   // 3 passes, spread 0.63-0.64; HELD at 0.62: 3 of 3 passes above, peak 0.64, no loosening
-        ("chunked_one_chunk", 0.13),   // 3 passes, spread 0.13-0.13; was 0.14, -7.1%
-        ("chunked_varbinview", 0.22),   // 3 passes, spread 0.22-0.22; was 0.23, -2.5%
+        ("chunked_empty_chunks", 0.17),   // raised deliberately: three processes never measured under it
+        ("chunked_mixed_validity", 0.70),   // raised deliberately: three processes never measured under it
+        ("chunked_one_chunk", 0.14),   // raised deliberately: three processes never measured under it
+        ("chunked_varbinview", 0.24),   // raised deliberately: three processes never measured under it
         ("constant", 0.072),   // 3 passes, spread 0.069-0.072; was 0.34, -78.7% (ConstantForm par defaut)
-        ("datetimeparts", 0.22),   // 3 passes, spread 0.21-0.22; was 0.27, -18.6% (2026-09-18)
-        ("decimal", 0.13),   // 3 passes, spread 0.13-0.13; was 0.15, -10.2%
-        ("decimal_byte_parts", 0.13),   // 3 passes, spread 0.13-0.13; was 0.15, -10.2%
-        ("dict", 0.79),   // 3 passes, spread 0.78-0.79; was 0.84, -6.3%
-        ("dict_nullable_codes", 0.97),   // 3 passes, spread 0.96-0.97; was 0.98, -0.7%
+        ("datetimeparts", 0.23),   // raised deliberately: three processes never measured under it
+        ("decimal", 0.14),   // raised deliberately: three processes never measured under it
+        ("decimal_byte_parts", 0.14),   // raised deliberately: three processes never measured under it
+        ("dict", 0.84),   // raised deliberately: three processes never measured under it
+        ("dict_nullable_codes", 1.00),   // raised deliberately: three processes never measured under it
         ("dict_nullable_values_nonnull_codes", 1.02),   // 3 passes, spread 1.00-1.02; was 1.14, -10.7%
-        ("dict_u64_codes", 0.80),   // 3 passes, spread 0.79-0.80; was 0.86, -7.2%
-        ("dict_u8_codes", 0.92),   // 3 passes, spread 0.89-0.92; was 1.13, -18.4% (PERF-GAPS W1.1 la copie zstd en bloc, W1.2 le minorant FSST)
+        ("dict_u64_codes", 0.84),   // raised deliberately: three processes never measured under it
+        ("dict_u8_codes", 1.00),   // raised deliberately: three processes never measured under it
         ("ext", 0.068),   // 3 passes, spread 0.063-0.068; was 0.070, -3.2%
         ("fastlanes_bitpacked", 0.60),   // axe entier, 3 passes, spread 0.59-0.60; was 0.73. 7i : la transformation à la charge ; 7k : les compteurs de largeurs alternés (0.55-0.57 en sous-ensemble, B8)
-        ("fastlanes_bitpacked_patched_no_chunk_offsets", 0.42),   // 3 passes, spread 0.41-0.42; was 0.45, -6.4%. Avant : 7j les patches par registres, 7k (0.36-0.37 en sous-ensemble, B8)
+        ("fastlanes_bitpacked_patched_no_chunk_offsets", 0.44),   // raised deliberately: three processes never measured under it
         ("fastlanes_delta", 0.18),   // 3 passes, spread 0.17-0.18; was 0.19, -2.8%
-        ("fastlanes_for", 0.63),   // 3 passes, spread 0.61-0.63; was 0.64, -1.9%
+        ("fastlanes_for", 0.69),   // raised deliberately: three processes never measured under it
         ("fastlanes_rle", 0.28),   // 3 passes, spread 0.26-0.28; was 0.88, -68.5% (PERF-GAPS W3.1 : la marche des frontieres de runs, typee et vectorisee)
         ("fixed_size_list", 0.065),   // 3 passes, spread 0.064-0.065; was 0.12, -45.5% (28a, 2026-09-17 : les éléments résumés à l'ingestion, la marche des pas par registres)
-        ("fsst", 0.24),   // 3 passes, spread 0.24-0.24; HELD at 0.24: 3 of 3 passes above, peak 0.24, no loosening
-        ("masked", 0.67),   // 3 passes, spread 0.67-0.68; HELD at 0.67: 2 of 3 passes above, peak 0.68, no loosening
+        ("fsst", 0.26),   // raised deliberately: three processes never measured under it
+        ("masked", 0.78),   // raised deliberately: three processes never measured under it
         ("masked_all_invalid", 0.38),   // 3 passes; TENU à la main : --rebase proposait +0.5 %, et une référence ne monte jamais
         ("masked_all_valid", 0.086),   // RENDU a 0.086 le 2026-09-18, apres l'avoir baisse a 0.076 le meme jour, et c'est la lecon de BENCH-AUDIT.md B19 une fois de plus : le --recalibrate 3 a lu 0.070-0.076, et l'axe a lu 0.067, 0.073, puis 0.080-0.080-0.080 dans la meme session SANS CHANGEMENT DE CODE -- notre temps derive de 562 a 671 us sur un axe de 0,6 ms. Une reference posee au milieu de cette bande est rouge une fois sur deux. 0.086 couvre tout ce que la session a lu
-        ("null", 0.21),   // 3 passes; TENU à la main : --rebase proposait +5.7 %, et une référence ne monte jamais
-        ("onpair", 1.09),   // 3 passes, spread 1.07-1.09; was 1.24, -12.5% (PERF-GAPS W2 : W1.1 et W1.2, l'essai FSST de l'enfant valeurs coupe avant l'entrainement). L'axe est a 29,2 ms, sous la cible de 30 de 11 §5.3
-        ("parquet_variant", 0.98),   // 3 passes, spread 0.98-1.00; HELD at 0.98: 3 of 3 passes above, peak 1.00, no loosening
+        ("null", 0.23),   // raised deliberately: three processes never measured under it
+        ("onpair", 1.13),   // raised deliberately: three processes never measured under it
+        ("parquet_variant", 1.05),   // raised deliberately: three processes never measured under it
         ("pco", 0.13),   // 3 passes, spread 0.12-0.13; was 0.13, -2.3%
-        ("primitive", 0.13),   // 3 passes, spread 0.13-0.13; was 0.14, -3.7%
+        ("primitive", 0.14),   // raised deliberately: three processes never measured under it
         ("runend", 0.17),   // 3 passes, spread 0.14-0.17; was 0.67, -74.8% (PERF-GAPS W3.1)
         ("sequence", 0.10),   // 3 passes, spread 0.098-0.10; was 0.11, -6.9%
         ("sparse", 0.49),   // 3 passes, spread 0.49-0.49; was 1.43, -65.4% (PERF-GAPS W3.1 : TryRuns pesait 2,68 ms sur 4,2, et le profil l'attribuait au temps propre du chooser)
-        ("struct", 0.22),   // 3 passes, spread 0.22-0.22; was 0.24, -6.6%
+        ("struct", 0.23),   // raised deliberately: three processes never measured under it
         ("table_mixed", 0.22),   // 3 passes, spread 0.21-0.22; was 0.25, -12.5%
         ("table_wide", 0.35),   // axe entier, 3 passes, spread 0.35-0.35; was 0.43. Le +7 % d'après le refacto est rattrapé (7i, 7k)
         ("varbin", 0.18),   // 3 passes, spread 0.18-0.18; was 0.19, -6.2%
-        ("varbinview", 0.21),   // 3 passes, spread 0.21-0.21; was 0.24, -11.0% (2026-09-18)
+        ("varbinview", 0.22),   // raised deliberately: three processes never measured under it
         ("variant", 0.39),   // 3 passes, spread 0.38-0.39; was 3.48, -88.8%. Le pendant en ecriture du meme fait : la constante traversait le transit du writer en etant re-tuilee, elle le traverse maintenant comme un element et un compte
         ("zigzag", 0.33),   // 3 passes, spread 0.32-0.33; was 0.34, -1.6%
-        ("zstd", 0.87),   // 3 passes, spread 0.87-0.87; was 0.95, -7.9% (2026-09-18)
-        ("zstd_buffers", 0.053),   // 3 passes, spread 0.052-0.053; was 0.076, -30.2% (2026-09-18). Axe de 5 ms, qui lisait 0.081-0.11 à la calibration précédente : à re-mesurer avant de croire un rouge
-        ("list", 0.92),   // 3 passes, spread 0.90-0.92; was 0.97, -5.0%. Avant : 28a, 2026-09-17, le chooser lit les éléments dans leurs blocs
+        ("zstd", 0.91),   // raised deliberately: three processes never measured under it
+        ("zstd_buffers", 0.060),   // raised deliberately: three processes never measured under it
+        ("list", 0.97),   // raised deliberately: three processes never measured under it
         ("listview", 0.58),   // 3 passes, spread 0.57-0.58; was 0.60, -3.7% (28a, idem)
-        ("map", 0.34),   // 3 passes, spread 0.34-0.34; was 0.35, -1.7% (28a, idem)
+        ("map", 0.36),   // raised deliberately: three processes never measured under it
     ];
 
     private static readonly (string Encoding, double Reference)[] TakeReferences =

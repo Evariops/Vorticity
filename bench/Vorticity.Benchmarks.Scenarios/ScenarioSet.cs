@@ -47,9 +47,12 @@ public static class ScenarioSet
     /// <summary>A band that keeps about half the rows.</summary>
     public const long WideBand = 32_768;
 
+    /// <summary>The column a projection out of a fifty-column file keeps.</summary>
+    public const string WideField = "c07";
+
     /// <summary>The scenario names this assembly answers to.</summary>
     public static string[] Names =>
-        ["fullscan", "projected", "take", "filtered", "write", "write-bloom", "write-postings", "write-sorted-runs", "lookup-sorted-runs"];
+        ["fullscan", "projected", "projected-wide", "take", "filtered", "write", "write-bloom", "write-postings", "write-sorted-runs", "lookup-sorted-runs"];
 
     /// <summary>
     /// The scenario <paramref name="name"/> names, as a delegate of shared-runtime types only.
@@ -65,6 +68,7 @@ public static class ScenarioSet
     {
         "fullscan" => ScanAll,
         "projected" => ScanProjected,
+        "projected-wide" => p => ScanProjectedField(p, WideField),
         "take" => p => ScatteredTake(p, TakeCount, TakeStride),
         "filtered" => p => FilteredScan(p, BandLow, NarrowBand),
         "write" => ReadAndWrite,
