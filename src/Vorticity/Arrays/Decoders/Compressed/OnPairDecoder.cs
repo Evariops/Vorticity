@@ -73,6 +73,13 @@ public sealed class OnPairDecoder : ArrayDecoder
     /// <inheritdoc/>
     public override bool SelectsWithoutFullDecode => true;
 
+    // NO PUSHED COMPARISON HERE, and the reason is that nothing could measure one. This encoding is
+    // read and never written: the writer has no scheme for it and no hint reaches it, so every file
+    // that carries one comes from the reference implementation, and those are bare arrays with no
+    // column a predicate could name. The gain would very likely be the one a compressed-string
+    // column gets -- the same shape, values never materialized -- but it would be a number nobody
+    // can produce, which is not a number.
+
     /// <inheritdoc/>
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {

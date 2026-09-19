@@ -66,6 +66,13 @@ public sealed class SparseDecoder : ArrayDecoder
     /// <inheritdoc/>
     public override bool SelectsWithoutFullDecode => true;
 
+    // NO PUSHED COMPARISON HERE, for two reasons that each suffice. Nothing could measure one: this
+    // encoding is read and never written, so every file carrying it is a bare array from the
+    // reference with no column a predicate could name. And the shape says there is nothing to win:
+    // expanding a sparse column is a fill of one value plus its patches, and answering a comparison
+    // over it would be a fill too -- both write one state a row, which is the cost. The same
+    // reasoning closed the run-end comparison, where it was measured at one and a half per cent.
+
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
         ReadOnlySpan<int> wanted, bool selective)
