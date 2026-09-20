@@ -20,6 +20,9 @@ slot is an empty reserved table and this library writes it empty.
 
 ## Reporting
 
-Report a vulnerability by email to **the maintainers**, not through a public issue. Include
-the file or the generator that reproduces it; a crash on a malformed input is a bug in scope of the
-guarantee above and is treated as one.
+Report a vulnerability through the repository's **Security** tab, with *Report a vulnerability*.
+That opens a private advisory visible only to you and the maintainers; a public issue is the wrong
+place and cannot be taken back.
+
+Include the file or the generator that reproduces it. A crash on a malformed input is a bug in
+scope of the guarantee above and is treated as one.
