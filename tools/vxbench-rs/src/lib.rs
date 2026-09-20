@@ -239,6 +239,49 @@ pub unsafe extern "C" fn vxbench_scan_projected(path: *const c_char, field: *con
     })
 }
 
+/// Opens `path`, scans one field of every batch and canonicalizes it, returning the row count.
+///
+/// The like-for-like projected scan, for the same reason `vxbench_scan_canonical` is the
+/// like-for-like full scan: `vxbench_scan_projected` counts rows off metadata and decodes nothing,
+/// while our reader materializes every column it delivers. Comparing the two measures the
+/// difference between decoding and not.
+///
+/// # Safety
+/// `path` and `field` must be valid NUL-terminated C strings for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vxbench_scan_projected_canonical(
+    path: *const c_char,
+    field: *const c_char,
+) -> i64 {
+    let Some(field) = (unsafe { text(field) }) else {
+        return ERR_BAD_PATH;
+    };
+
+    run(path, move |session, path| {
+        let field = field.clone();
+        block_on(|handle| {
+            let session = session.with_handle(handle);
+            async move {
+                let mut ctx = session.create_execution_ctx();
+                let file = session.open_options().open_path(path).await?;
+                let projection = select([field.as_str()], root())
+                    .optimize_recursive(file.dtype())
+                    .and_then(|expr| expr.bind(file.dtype()))?;
+                let stream = file.scan()?.with_projection(projection).into_array_stream()?;
+                pin_mut!(stream);
+                let mut rows: i64 = 0;
+                while let Some(array) = stream.next().await {
+                    let array = array?;
+                    rows += array.len() as i64;
+                    let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
+                }
+
+                Ok(rows)
+            }
+        })
+    })
+}
+
 /// Opens `path` and reads ONE batch, returning its row count: the time-to-first-batch axis.
 ///
 /// # Safety

@@ -32,6 +32,7 @@ dotnet run -c Release PROJ -- <arguments>
 | **anything, before you push** | `bench/gate.sh` | 68 s | the nine ratchets, `--ffi-check`, `--ratio-check`; exit 1 if one is red. `--throughput` adds the full axis (92 s) |
 | a change too big for a ported arm | `bench/ab.sh <commit> [--after <commit>] <file> [scenario…]` | 7 s | two builds of the library in one process, interleaved, ratio per round |
 | the FFI harness, or before trusting any ratio | `-- --ffi-check` | < 1 s | both readers return the same rows on the same files |
+| **what a user would see**, for the published page | `-- --report` | ~4 min | eight high-level scenarios at a million rows and ten million, **each side in its own process**: wall time with its spread, peak resident memory, rows rendered. The reference is the `vxbench` **binary**, so build it first. `--markdown --out <path>` writes the page. Every figure here includes starting a runtime, which the in-process ratios above do not — the `open` row is that floor |
 | a hot path you want to profile | `-- --profile <scenario> [seconds]` | as asked | a bare loop for `dotnet-trace`, no harness in the profile |
 | a ratchet | `dotnet test Vorticity.slnx -c Release` | ~1 min | the suite plus the nine allocation, count and budget ratchets |
 

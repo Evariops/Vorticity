@@ -69,6 +69,18 @@ internal static class Program
             return await FfiCheck().ConfigureAwait(false);
         }
 
+        // `--scenario` is one scenario in this process, for `--report` to spawn and time. It prints
+        // the rows it rendered and what the process cost, and nothing else: a parent parses it.
+        if (args.Length > 0 && args[0] == "--scenario")
+        {
+            return await Report.ScenarioAsync(args).ConfigureAwait(false);
+        }
+
+        if (args.Length > 0 && args[0] == "--report")
+        {
+            return await Report.RunAsync(args).ConfigureAwait(false);
+        }
+
         if (args.Length > 0 && args[0] == "--ratio-check")
         {
             // `--recalibrate` takes an optional count: `--recalibrate 5`, or bare for three. The
@@ -419,6 +431,19 @@ internal static class Program
                                                        back unchanged and refresh only the
                                                        dispersion each encoding measured
           --ffi-check              rows AND decoded values agree with the reference, < 1 s
+          --report                 the published comparison: eight high-level scenarios at a
+                                     million rows and ten million, EACH SIDE IN ITS OWN PROCESS,
+                                     reporting wall time, peak resident memory and rows rendered.
+                                     The reference is the vxbench binary rather than the cdylib,
+                                     because those figures belong to a process. ~4 min
+                                     --runs N          runs per scenario, default 5, one more
+                                                       discarded before them
+                                     --markdown        the table as the guide's page
+                                     --out <path>      write it there instead of to stdout
+          --scenario <name> <file> <rows>
+                                   one scenario in this process, printing the rows it rendered and
+                                     what the process cost. What --report spawns; not a benchmark
+                                     on its own
           --probe [name…]          the write, decomposed: scan, serialize, transit, compress,
                                      five configurations a file, median of five
                                      (WRITE-ARCHITECTURE.md §1.2)

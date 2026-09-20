@@ -33,11 +33,15 @@ fn main() -> ExitCode {
     };
 
     let rows = match scenario {
-        "scan" => unsafe { vxbench::vxbench_scan_all(path.as_ptr()) },
+        // The canonicalizing scans, not the counting ones: our reader materializes every column it
+        // delivers, so a scan that counts rows off metadata is not the same work.
+        "scan" => unsafe { vxbench::vxbench_scan_canonical(path.as_ptr()) },
         "open" => unsafe { vxbench::vxbench_open_only(path.as_ptr()) },
         "write" => unsafe { vxbench::vxbench_write(path.as_ptr()) },
         "project" => match field(&args, 2) {
-            Ok(field) => unsafe { vxbench::vxbench_scan_projected(path.as_ptr(), field.as_ptr()) },
+            Ok(field) => unsafe {
+                vxbench::vxbench_scan_projected_canonical(path.as_ptr(), field.as_ptr())
+            },
             Err(code) => return code,
         },
         "filter" => {
@@ -68,8 +72,29 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    println!("rows={rows}");
+    let (cpu_ms, rss_bytes) = cost();
+    println!("rows={rows} cpu_ms={cpu_ms} rss_bytes={rss_bytes}");
     ExitCode::SUCCESS
+}
+
+/// The processor time and the peak resident set of this process, the two figures the report pairs
+/// with the wall clock its parent keeps. `ru_maxrss` is bytes on macOS and kilobytes elsewhere.
+fn cost() -> (i64, i64) {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return (-1, -1);
+    }
+
+    let usage = unsafe { usage.assume_init() };
+    let micros = |t: libc::timeval| t.tv_sec as i64 * 1_000_000 + t.tv_usec as i64;
+    let cpu_ms = (micros(usage.ru_utime) + micros(usage.ru_stime)) / 1_000;
+    let rss_bytes = if cfg!(target_os = "macos") {
+        usage.ru_maxrss as i64
+    } else {
+        usage.ru_maxrss as i64 * 1024
+    };
+
+    (cpu_ms, rss_bytes)
 }
 
 fn field(args: &[String], at: usize) -> Result<CString, ExitCode> {
