@@ -240,6 +240,21 @@ public class FilterKernelBenchmarks
         return _destination.Length;
     }
 
+    /// <summary>`i64 &lt; 3.5`: an integer column against a float literal, widened per row.</summary>
+    /// <remarks>
+    /// The same column and operator as <see cref="Library"/>, the literal a double instead of a
+    /// long. Its distance from that arm is what widening costs and nothing else, which is the
+    /// question CO-1 asks: the answer has to be in the same neighbourhood, because the kernel is
+    /// the same kernel with a wider accumulator type.
+    /// </remarks>
+    [Benchmark(Description = "library, i64 < float")]
+    public int LibraryAgainstFloat()
+    {
+        ComparisonKernels.Compare(
+            _arena!, _node, ComparisonOp.Less, FilterLiteral.From(3.5), _destination);
+        return _destination.Length;
+    }
+
     /// <summary>`f64 &lt; literal`, through <c>CompareFloat</c>.</summary>
     /// <remarks>
     /// PERF-AUDIT-v2.md F-10. Same values as the i64 arm, widened: the distance between the two is

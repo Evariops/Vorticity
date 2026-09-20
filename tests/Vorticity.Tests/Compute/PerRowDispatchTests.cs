@@ -89,7 +89,7 @@ public sealed partial class PerRowDispatchTests
         ("Columns/ExtensionColumn.cs", 1, 0, "legitimate: the column API is per row by design"),
         ("Columns/ListColumn.cs", 2, 0, "legitimate: the column API is per row by design"),
         ("Columns/VortexColumn.cs", 1, 0, "legitimate: the column API is per row by design"),
-        ("Compute/ComparisonKernels.cs", 2, 2, "F-4"),
+        ("Compute/ComparisonKernels.cs", 0, 0, "F-4 done: the integer-against-float pair joined CompareOp"),
         ("Compute/LiteralReader.cs", 2, 0, "legitimate: a single literal"),
         ("Layouts/DictLayoutReader.cs", 1, 0, "R6 done: the one left is an error path"),
         ("Types/Variant/ParquetVariant.cs", 2, 0, "a local method of the same name, not these"),
@@ -128,7 +128,11 @@ public sealed partial class PerRowDispatchTests
     /// applied once instead of twice. What is left in the file is `Minimum`, already skipped
     /// whenever the ingest pass has the reference.
     /// </remarks>
-    private const int TotalCalls = 57;
+    ///
+    /// **55 since CO-1**: the two integer-against-float kernels were the last pair in
+    /// `ComparisonKernels` that read a value through a type switch, and they now go through the
+    /// same `CompareOp` every other comparison goes through. The file leaves the table.
+    private const int TotalCalls = 55;
 
     /// <summary>Calls annexe A classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
@@ -156,7 +160,10 @@ public sealed partial class PerRowDispatchTests
     /// per-row read (`Writing/ArrayBlobWriter.cs`, W-13) now finds the patches too, so the count
     /// of walks over a bit-packed column dropped without a new site appearing.
     /// </remarks>
-    private const int TotalPerRow = 17;
+    ///
+    /// **15 since CO-1**, the same two: they were per-row by the strictest reading, one read of one
+    /// value per row of the column.
+    private const int TotalPerRow = 15;
 
     [Fact]
     public void NoFileDispatchesPerRowMoreOftenThanItsCeiling()

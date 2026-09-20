@@ -858,47 +858,60 @@ internal static class ComparisonKernels
     }
 
     /// <summary>
-    /// An integer column against a float literal, in the literal's domain.
+    /// A signed integer column against a float literal, in the literal's domain.
     /// </summary>
     /// <remarks>
     /// <c>x &lt; 3.5</c> on an integer column is a legal and ordinary predicate, so it is answered
     /// rather than refused. The comparison happens in <see cref="double"/>, which is exact for
     /// magnitudes below 2^53 and can be off by one above it -- the same limit any engine that
     /// compares an i64 against a double lands on, and far better than rejecting the predicate.
+    /// <para>
+    /// The widening is the only thing that distinguishes this from any other comparison, so it is
+    /// the only thing it says: the physical type, the operator and the validity are resolved once
+    /// by the same <see cref="CompareOp{TValue,TWide}"/> every other column goes through, rather
+    /// than asked again on every row.
+    /// </para>
     /// </remarks>
     private static void CompareSignedAgainstFloat(
         PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op, double wanted,
         Span<byte> destination)
     {
-        ReadOnlySpan<byte> bytes = values;
-        for (int i = 0; i < destination.Length; i++)
+        switch (ptype)
         {
-            if (!mask.IsValid(i))
-            {
-                destination[i] = Trilean.Unknown;
-                continue;
-            }
-
-            double value = CanonicalSupport.ReadInteger(bytes, ptype, i);
-            destination[i] = FloatCompare(op, value, wanted) ? Trilean.True : Trilean.False;
+            case PType.I8:
+                CompareOp<sbyte, double>(values, mask, op, wanted, destination);
+                break;
+            case PType.I16:
+                CompareOp<short, double>(values, mask, op, wanted, destination);
+                break;
+            case PType.I32:
+                CompareOp<int, double>(values, mask, op, wanted, destination);
+                break;
+            default:
+                CompareOp<long, double>(values, mask, op, wanted, destination);
+                break;
         }
     }
 
+    /// <summary>The same for an unsigned column; see <see cref="CompareSignedAgainstFloat"/>.</summary>
     private static void CompareUnsignedAgainstFloat(
         PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op, double wanted,
         Span<byte> destination)
     {
-        ReadOnlySpan<byte> bytes = values;
-        for (int i = 0; i < destination.Length; i++)
+        switch (ptype)
         {
-            if (!mask.IsValid(i))
-            {
-                destination[i] = Trilean.Unknown;
-                continue;
-            }
-
-            double value = CompressedValues.ReadUnsigned(bytes, ptype, i);
-            destination[i] = FloatCompare(op, value, wanted) ? Trilean.True : Trilean.False;
+            case PType.U8:
+                CompareOp<byte, double>(values, mask, op, wanted, destination);
+                break;
+            case PType.U16:
+                CompareOp<ushort, double>(values, mask, op, wanted, destination);
+                break;
+            case PType.U32:
+                CompareOp<uint, double>(values, mask, op, wanted, destination);
+                break;
+            default:
+                CompareOp<ulong, double>(values, mask, op, wanted, destination);
+                break;
         }
     }
 
@@ -1012,16 +1025,6 @@ internal static class ComparisonKernels
             destination[i] = mask.IsValid(i) ? answer : Trilean.Unknown;
         }
     }
-
-    private static bool FloatCompare(ComparisonOp op, double value, double wanted) => op switch
-    {
-        ComparisonOp.Equal => value == wanted,
-        ComparisonOp.NotEqual => value != wanted,
-        ComparisonOp.Less => value < wanted,
-        ComparisonOp.LessOrEqual => value <= wanted,
-        ComparisonOp.Greater => value > wanted,
-        _ => value >= wanted,
-    };
 
     /// <summary>Turns the sign of a three-way comparison into the operator's answer.</summary>
     private static bool Apply(ComparisonOp op, int order) => op switch
