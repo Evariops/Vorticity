@@ -80,15 +80,12 @@ leak-*
 Thumbs.db
 
 # ---- Working notes, kept on the maintainer's machine ----
-TODO.md
-LOOP-PROMPT*
-todo2.md
-todo2.previous.md
-
-# The engineering journals: French, dated, raw. They are the project's memory and a hundred code
-# comments name them, so they are not deleted -- but a public repository's history is not the place
-# for them, so they live here and stay off the published tree. docs/history/README.md says what
-# each one is.
+# The engineering journals and the working notes beside them: French, dated, raw. They are the
+# project's memory and a hundred code comments name them, so they are not deleted -- but a public
+# repository's history is not the place for them, so they live in one ignored directory and stay
+# off the published tree. Anything of that kind belongs there rather than at the root, which is why
+# this is a single rule: a working note that appears anywhere else is visible, and that is the
+# point. docs/history/README.md says what each file is.
 docs/history/
 
 # ---- Recorded benchmark runs (bench/compare.sh --record) ----
