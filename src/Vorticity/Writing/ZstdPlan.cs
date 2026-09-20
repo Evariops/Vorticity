@@ -143,14 +143,22 @@ internal sealed class ZstdPlan
             offset += value.Length;
         }
 
-        // THE ONE-SHOT BUILDS A NATIVE COMPRESSION CONTEXT PER CALL, and reusing one instead is an
-        // open question with its first gate already passed: a `ZstandardEncoder` held across calls
-        // and `Reset` between them produces byte-identical output to this, checked on a run of
-        // a hundred thousand equal bytes, fifty thousand pseudo-random ones and four thousand
-        // URLs. What is not yet known is what it buys. Doubling this compression costs 15,9 ms of
-        // a 54,7 ms write of a million `fsst` rows and 11,9 of 33,7 on `varbin` -- a third of the
-        // axis -- but that is the compression itself, which has to happen; only the context build
-        // would go, and how many of those there are per write has not been counted.
+        // THE ONE-SHOT BUILDS A NATIVE COMPRESSION CONTEXT PER CALL, and reusing one instead is
+        // worth nothing here -- measured, not assumed, twice each way. Adding one more context
+        // build per call, constructed and disposed without compressing anything, moves a
+        // million-row `fsst` write by -0,8 and +0,2 ms on 54,7 and a `varbin` one by -0,1 and -0,7
+        // on 33,7: zero in both directions. So removing the one that is there would gain the same.
+        //
+        // WHY THE READ SIDE WAS DIFFERENT, since it gained eight per cent from exactly this: it
+        // built a decompression context PER FRAME, nine hundred and seventy-seven of them in one
+        // scan. This builds one per column per chunk -- about forty for a million rows -- and each
+        // one is followed by compressing a whole column, which dwarfs it. A context is cheap next
+        // to the work it is created for; it was only expensive next to one frame.
+        //
+        // The byte question was settled first, because a difference would have ended it whatever
+        // the timing: an encoder held across calls and reset between them produces output identical
+        // to this, checked on a hundred thousand equal bytes, fifty thousand pseudo-random ones and
+        // four thousand URLs.
         if (!ZstandardEncoder.TryCompress(
                 stream.AsSpan(0, (int)streamBytes), destination, out int written) || written <= 0)
         {
