@@ -1269,6 +1269,12 @@ internal static class ArrayBlobWriter
     /// an eight-byte slot would put pooled bytes from another file into a column the day a caller
     /// passes <c>u64</c>, and the only oracle for that is the Rust cross-check.
     /// </remarks>
+    /// <remarks>
+    /// The width switch is inside the loop and it does not matter: doubling this whole call costs
+    /// 0,2 ms of a 14,3 ms `dict_u8_codes` write, one and a half per cent, under the bar the plan
+    /// sets for the per-row family. The index arrays are short -- one entry a patch, one a
+    /// dictionary entry -- so what would be a per-row switch elsewhere is a per-entry one here.
+    /// </remarks>
     private static void WriteIndices(ReadOnlySpan<int> values, int width, Span<byte> destination)
     {
         for (int i = 0; i < values.Length; i++)

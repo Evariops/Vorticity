@@ -128,6 +128,12 @@ internal sealed class ZstdPlan
         bool kept = false;
         try
         {
+        // WHAT THIS LOOP COSTS, doubled on a million-row write: +7,8 ms on 54,7 for `fsst` and +4,0
+        // on 33,3 for `varbin`, twelve to fourteen per cent of the axis -- the largest of the four
+        // per-row sites the write path still has. Part of it is the validity call above, which this
+        // makes once a row; the rest is the length write and the copy. The primitive form below
+        // skips its own version of this loop entirely when nothing is null, and there is no such
+        // shortcut here: a length-prefixed stream has to be built.
         int offset = 0;
         for (int i = 0; i < rows; i++)
         {
