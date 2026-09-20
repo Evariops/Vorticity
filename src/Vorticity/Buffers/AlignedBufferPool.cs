@@ -224,6 +224,13 @@ public sealed class AlignedBufferPool
 
     /// <summary>Number of blocks currently retained in the bucket serving <paramref name="length"/>.</summary>
     /// <param name="length">A length whose size class is being inspected.</param>
+    /// <remarks>
+    /// TEST-FACING, and the only reason the count is reachable at all: nothing in the library asks
+    /// a bucket how full it is. A pool that is being used answers this from under the caller's
+    /// feet, so the number is a fact about an instant that has passed before it is returned --
+    /// which is what a test asserting on a quiesced pool wants and what nothing else should build
+    /// on.
+    /// </remarks>
     internal int ParkedCount(int length)
     {
         if (length > MaxPooledLength || length < 0)
@@ -259,16 +266,17 @@ public sealed class AlignedBufferPool
 
         internal Bucket(int capacity) => _items = new NativeSegmentOwner?[capacity];
 
-        internal int Count
-        {
-            get
-            {
-                lock (_gate)
-                {
-                    return _count;
-                }
-            }
-        }
+        /// <summary>
+        /// How many blocks the bucket holds, read without taking the gate.
+        /// </summary>
+        /// <remarks>
+        /// The lock this used to take bought nothing that a volatile read does not. An <c>int</c>
+        /// is read atomically whether or not a lock is held, so the gate could never have made the
+        /// value less stale than the instant it was read -- a pusher or a popper may run between
+        /// the read and the caller looking at it either way. What the gate did do is serialise a
+        /// diagnostic against the pool's real traffic.
+        /// </remarks>
+        internal int Count => Volatile.Read(ref _count);
 
         internal NativeSegmentOwner? TryPop()
         {
