@@ -268,6 +268,47 @@ public sealed class ChunkedConstantTests
         return h.Decode(b, node, dtype, length);
     }
 
+    /// <summary>A constant decimal takes the form, and expanding it does not lose its storage.</summary>
+    /// <remarks>
+    /// THE TRAP THIS GUARDS. A constant record carries an element and a width and has no storage,
+    /// precision or scale of its own -- one record shape serves every kind. So the expansion had to
+    /// get those from somewhere, and reading them off the record would have handed `AddDecimal` a
+    /// zeroed triple, which it refuses. They come from the element's width and from the dtype
+    /// instead, and this asserts both halves: the arena holds the form, and a caller reading
+    /// through it sees the same storage and the same bytes as a tiled column would have given.
+    /// </remarks>
+    [Theory]
+    [InlineData((byte)4, 4, DecimalStorageType.I32)]
+    [InlineData((byte)4, 16, DecimalStorageType.I128)]
+    [InlineData((byte)18, 32, DecimalStorageType.I256)]
+    public void AConstantDecimalKeepsItsStorageThroughTheForm(
+        byte precision, int scalarWidth, DecimalStorageType expected)
+    {
+        byte[] value = new byte[scalarWidth];
+        value[0] = 7;
+
+        using DecodeHarness h = new DecodeHarness();
+        int index = Constant(
+            h,
+            TestMetadata.ScalarBytes(value),
+            h.Types.Decimal(precision, 2, Nullability.NonNullable),
+            5);
+
+        CanonicalNode node = h.Node(index);
+
+        // The arena holds the element, not five copies of it.
+        Assert.Equal(CanonicalKind.Constant, node.Kind);
+
+        // And answers for it without expanding: these three used to require a Decimal record.
+        Assert.Equal(expected, node.Storage);
+        Assert.Equal(precision, node.Precision);
+        Assert.Equal(2, node.Scale);
+
+        // Expanding is where the zeroed triple would have thrown.
+        Assert.Equal(5 * DecimalStorage.ByteWidth(expected), node.Values.Length);
+        Assert.Equal(7, node.Values.Span[0]);
+    }
+
     [Fact]
     public void ConstantIgnoresItsMetadataEntirely()
     {

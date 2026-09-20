@@ -176,16 +176,50 @@ public readonly ref struct CanonicalNode
     // ------------------------------------------------------------------------------- Decimal
 
     /// <summary>The decimal storage width.</summary>
-    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Decimal"/>.</exception>
-    public DecimalStorageType Storage => Require(CanonicalKind.Decimal).Storage;
+    /// <remarks>
+    /// ANSWERED BY A CONSTANT TOO, and without expanding it, unlike <see cref="Values"/>. A
+    /// constant record has no storage field of its own -- one record shape serves every kind -- but
+    /// it does not need one: its element was written at the width the column reports, and that
+    /// width is what <c>FixedSize</c> holds. The precision and the scale come from the dtype, which
+    /// every node carries.
+    /// </remarks>
+    /// <exception cref="VortexFormatException">The kind is neither Decimal nor a decimal Constant.</exception>
+    public DecimalStorageType Storage
+    {
+        get
+        {
+            ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
+            return r.Kind == CanonicalKind.Constant && r.DType.Kind == DTypeKind.Decimal
+                ? DecimalStorage.FromByteWidth((int)r.FixedSize)
+                : Require(CanonicalKind.Decimal).Storage;
+        }
+    }
 
     /// <summary>The decimal precision, 1..76.</summary>
-    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Decimal"/>.</exception>
-    public byte Precision => Require(CanonicalKind.Decimal).Precision;
+    /// <exception cref="VortexFormatException">The kind is neither Decimal nor a decimal Constant.</exception>
+    public byte Precision
+    {
+        get
+        {
+            ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
+            return r.Kind == CanonicalKind.Constant && r.DType.Kind == DTypeKind.Decimal
+                ? r.DType.Precision
+                : Require(CanonicalKind.Decimal).Precision;
+        }
+    }
 
     /// <summary>The decimal scale.</summary>
-    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Decimal"/>.</exception>
-    public sbyte Scale => Require(CanonicalKind.Decimal).Scale;
+    /// <exception cref="VortexFormatException">The kind is neither Decimal nor a decimal Constant.</exception>
+    public sbyte Scale
+    {
+        get
+        {
+            ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
+            return r.Kind == CanonicalKind.Constant && r.DType.Kind == DTypeKind.Decimal
+                ? r.DType.Scale
+                : Require(CanonicalKind.Decimal).Scale;
+        }
+    }
 
     // ---------------------------------------------------------------------------- VarBinView
 
@@ -623,8 +657,14 @@ public sealed class CanonicalArena
                 checked(rows * width), width, out Span<byte> writable);
             Decoders.Compressed.RowKernels.Tile(writable, element);
 
+            // THE STORAGE COMES FROM THE ELEMENT'S WIDTH, not from the record's own fields: a
+            // constant record has no storage of its own, and reading one would hand `AddDecimal` a
+            // zeroed triple it refuses. The element was written at the width the column reports,
+            // which is what `FixedSize` holds, so the width is the storage.
             twin = dtype.Kind == DTypeKind.Decimal
-                ? AddDecimal(dtype, rows, validity, source.Storage, source.Precision, source.Scale, values)
+                ? AddDecimal(
+                    dtype, rows, validity, Types.Numerics.DecimalStorage.FromByteWidth(width),
+                    dtype.Precision, dtype.Scale, values)
                 : AddPrimitive(dtype, rows, validity, dtype.PType, values);
         }
 

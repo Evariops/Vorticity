@@ -232,7 +232,6 @@ internal static class ConstantCanonicalizer
         DecimalStorageType precisionStorage = DecimalStorage.ForPrecision(dtype.Precision);
         int precisionWidth = DecimalStorage.ByteWidth(precisionStorage);
         int width = Math.Max(scalar.DecimalWidth, precisionWidth);
-        DecimalStorageType storage = DecimalStorage.FromByteWidth(width);
 
         Span<byte> full = stackalloc byte[Int256.ByteCount];
         scalar.AsDecimal.Unscaled.WriteLittleEndianBytes(full);
@@ -258,13 +257,13 @@ internal static class ConstantCanonicalizer
                 $"A constant decimal does not fit its {precisionStorage} storage.");
         }
 
+        // The same form the other three kinds take, once the checks above have passed: sixteen
+        // bytes and a count rather than sixteen bytes a row. `MaterializeConstant` reads the
+        // storage back off the element's width, which is why `storage` is not carried on the
+        // record -- the width already is.
         int bytes = ArrayDecodeContext.CheckedMultiply(length, width, "constant decimals");
-        VortexBuffer values = CanonicalSupport.AllocateUninitialized(
-            context, bytes, Align, out Span<byte> writable);
-        RowKernels.Tile(writable, full[..width]);
-
-        return context.Canonical.AddDecimal(
-            dtype, length, validity, storage, dtype.Precision, dtype.Scale, values);
+        CanonicalSupport.RequireStandsForWithinBudget(context, bytes);
+        return context.Canonical.AddConstant(dtype, length, validity, full[..width]);
     }
 
     private static int BuildBinary(
