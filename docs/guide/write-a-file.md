@@ -107,7 +107,7 @@ the writer priced the candidates on the block it was holding.
 
 `report.Indexes` says the same for indexes, each one `Built` or `Abandoned` with the reason — the
 default policy builds what it can pay for out of a budget of a tenth of the file — 100 per mille —
-and gives up the rest. `indexes.md` is that subject.
+and gives up the rest. [indexes.md](indexes.md) is that subject.
 
 ## Appending
 

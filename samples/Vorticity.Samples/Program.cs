@@ -23,6 +23,10 @@ internal static class Program
         ["options"] = Options.RunAsync,
         ["cancel-work"] = CancelWork.RunAsync,
         ["errors"] = Errors.RunAsync,
+        ["indexes"] = Indexes.RunAsync,
+        ["keys-in-order"] = KeysInOrder.RunAsync,
+        ["statistics-and-pruning"] = StatisticsAndPruning.RunAsync,
+        ["encoding-hints"] = EncodingHints.RunAsync,
     };
 
     private static async Task<int> Main(string[] args)

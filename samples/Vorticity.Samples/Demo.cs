@@ -1,6 +1,9 @@
 using System;
+using System.Buffers.Binary;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -124,6 +127,146 @@ internal static class Demo
         using RecordBatch batch = new RecordBatch(arena, root, 0);
         await writer.WriteAsync(batch);
         await writer.CompleteAsync();
+    }
+
+    /// <summary>The city names the text column of the cities file cycles through.</summary>
+    internal static readonly string[] Cities = ["Paris", "Lyon", "Marseille", "Lille", "Bordeaux"];
+
+    /// <summary>Two columns: a city name, and a temperature that is sometimes missing.</summary>
+    internal static DType CitiesSchema(DTypeArena types) =>
+        types.Struct(
+            ["city", "celsius"],
+            [types.Utf8(Nullability.NonNullable),
+             types.Primitive(PType.F64, Nullability.Nullable)],
+            Nullability.NonNullable);
+
+    /// <summary>
+    /// A batch of city names and temperatures. The text column is a view per row: four bytes of
+    /// length, then the bytes themselves when they are twelve or fewer, otherwise a prefix and the
+    /// offset of the rest in a data buffer. The temperature carries a bit per row saying whether it
+    /// is there.
+    /// </summary>
+    internal static RecordBatch CitiesBatch(
+        DTypeArena types, DType schema, int rows, long startRow, bool everyThousandthIsNull,
+        bool clusteredByCity = false)
+    {
+        CanonicalArena arena = new CanonicalArena();
+
+        VortexBuffer degrees = arena.Allocate(rows * sizeof(double), 8, out Span<byte> degreeBytes);
+        Span<double> celsius = MemoryMarshal.Cast<byte, double>(degreeBytes);
+        for (int i = 0; i < rows; i++)
+        {
+            celsius[i] = 10.0 + (i * 7919L % 3001) / 100.0;
+        }
+
+        VortexBuffer views = arena.Allocate(rows * 16, 8, out Span<byte> viewBytes);
+        for (int i = 0; i < rows; i++)
+        {
+            // Cycling, the five names are in every block and no block's bounds can exclude one.
+            // Clustered, each name holds a stretch of rows and the bounds can.
+            string name = clusteredByCity
+                ? Cities[(int)(i * (long)Cities.Length / rows)]
+                : Cities[(int)((startRow + i) % Cities.Length)];
+            Span<byte> view = viewBytes.Slice(i * 16, 16);
+            int length = Encoding.UTF8.GetBytes(name, view[4..]);
+            BinaryPrimitives.WriteInt32LittleEndian(view, length);
+        }
+
+        Validity validity = Validity.AllValid;
+        if (everyThousandthIsNull)
+        {
+            VortexBuffer bitmap = arena.Allocate((rows + 7) / 8, 8, out Span<byte> bits);
+            bits.Fill(0xFF);
+            for (int i = 0; i < rows; i += 1_000)
+            {
+                bits[i >> 3] &= (byte)~(1 << (i & 7));
+            }
+
+            validity = Validity.Bitmap(
+                arena.AddBool(types.Bool(Nullability.NonNullable), rows, Validity.NonNullable, bitmap, 0));
+        }
+
+        int city = arena.AddVarBinView(schema.GetField(0), rows, Validity.NonNullable, views, [VortexBuffer.Empty]);
+        int temperature = arena.AddPrimitive(schema.GetField(1), rows, validity, PType.F64, degrees);
+        int root = arena.AddStruct(schema, rows, Validity.NonNullable, [city, temperature]);
+        return new RecordBatch(arena, root, startRow);
+    }
+
+    /// <summary>
+    /// A log of requests: a session identifier, and the row's own number. An identifier is the
+    /// column an equality is asked of and the column a Bloom filter is for -- no order, no repeats,
+    /// and nothing to compress, because that is what an identifier is.
+    /// </summary>
+    internal static async Task<WriteReport> WriteSessionsAsync(
+        string path, VortexWriteOptions options, int rows = 200_000)
+    {
+        DTypeArena types = new DTypeArena();
+        DType schema = types.Struct(
+            ["session", "n"],
+            [types.Utf8(Nullability.NonNullable),
+             types.Primitive(PType.I64, Nullability.NonNullable)],
+            Nullability.NonNullable);
+
+        await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, options);
+        CanonicalArena arena = new CanonicalArena();
+
+        VortexBuffer counters = arena.Allocate(rows * sizeof(long), 8, out Span<byte> counterBytes);
+        Span<long> n = MemoryMarshal.Cast<byte, long>(counterBytes);
+        VortexBuffer views = arena.Allocate(rows * 16, 8, out Span<byte> viewBytes);
+        for (int i = 0; i < rows; i++)
+        {
+            n[i] = i;
+            Span<byte> view = viewBytes.Slice(i * 16, 16);
+            int length = Encoding.UTF8.GetBytes(Session(i), view[4..]);
+            BinaryPrimitives.WriteInt32LittleEndian(view, length);
+        }
+
+        int session = arena.AddVarBinView(schema.GetField(0), rows, Validity.NonNullable, views, [VortexBuffer.Empty]);
+        int counter = arena.AddPrimitive(schema.GetField(1), rows, Validity.NonNullable, PType.I64, counters);
+        int root = arena.AddStruct(schema, rows, Validity.NonNullable, [session, counter]);
+        using RecordBatch batch = new RecordBatch(arena, root, 0);
+        await writer.WriteAsync(batch);
+        return await writer.CompleteAsync();
+    }
+
+    /// <summary>
+    /// The session identifier of row <paramref name="row"/>: twelve characters, so it lives inside
+    /// its view rather than in a data buffer. Seven of them come from a hash of the row and five
+    /// from the row itself, which is what makes every identifier distinct and the column
+    /// incompressible -- the two properties a real identifier has.
+    /// </summary>
+    internal static string Session(int row)
+    {
+        const string Alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
+        Span<char> token = stackalloc char[12];
+        uint scrambled = (uint)row * 2654435761u;
+        for (int i = 0; i < 7; i++)
+        {
+            token[i] = Alphabet[(int)(scrambled % 36)];
+            scrambled /= 36;
+        }
+
+        int value = row;
+        for (int i = 11; i >= 7; i--)
+        {
+            token[i] = Alphabet[value % 36];
+            value /= 36;
+        }
+
+        return new string(token);
+    }
+
+    /// <summary>Writes the cities file with the options given, and reports what the writer chose.</summary>
+    internal static async Task<WriteReport> WriteCitiesAsync(
+        string path, VortexWriteOptions options, int rows = 200_000, bool clusteredByCity = false)
+    {
+        DTypeArena types = new DTypeArena();
+        DType schema = CitiesSchema(types);
+        await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, options);
+        using RecordBatch batch = CitiesBatch(
+            types, schema, rows, 0, everyThousandthIsNull: true, clusteredByCity);
+        await writer.WriteAsync(batch);
+        return await writer.CompleteAsync();
     }
 
     /// <summary>

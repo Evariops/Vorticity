@@ -72,7 +72,7 @@ each is a `TryGet`: a writer that did not compute one leaves it out, and `HasFil
 false for a file written with `FileStatistics = false`.
 
 They are worth asking before a scan. A column the file says is sorted can be walked in key order
-(`keys-in-order.md`); a minimum and a maximum are what let a predicate be
+([keys-in-order.md](keys-in-order.md)); a minimum and a maximum are what let a predicate be
 answered without reading rows ([filter-rows.md](filter-rows.md)).
 
 ## Watch out

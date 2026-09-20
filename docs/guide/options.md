@@ -70,8 +70,8 @@ VortexWriteOptions options = new VortexWriteOptions
 | `FileStatistics` | `true` | write the per-column summaries the open reads back |
 | `TargetEdition` | `Core20260803` | the edition a reader must understand: see `editions.md` |
 | `IndexBudgetPerMille` | 100 | what the automatic index policy may spend, in thousandths of the file |
-| `EncodingHints` | empty | steer a column by name: see `encoding-hints.md` |
-| `Indexes` | `Auto` | the index policy: see `indexes.md` |
+| `EncodingHints` | empty | steer a column by name: see [encoding-hints.md](encoding-hints.md) |
+| `Indexes` | `Auto` | the index policy: see [indexes.md](indexes.md) |
 | `Identity` | minted | sixteen bytes naming this version of the bytes; pin it to make the write reproducible |
 | `StringBoundBytes` | 0 | how many bytes of string bounds a text column's zones carry; 0 is none, and none prunes nothing |
 | `ScratchDirectory` | the system's | where a locating index's runs wait for their merge once they outgrow memory |

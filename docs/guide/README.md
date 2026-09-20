@@ -41,11 +41,11 @@ and never repeats it.
 
 | page | what you are trying to do |
 |---|---|
-| `indexes.md` | what `Auto` builds and what it costs, and when to ask for more by name |
-| `keys-in-order.md` | walk a column in key order, seek, step, rank, and read distinct keys |
-| `statistics-and-pruning.md` | see which blocks were skipped and why, and what makes pruning work |
+| [indexes.md](indexes.md) | what `Auto` builds and what it costs, and when to ask for more by name |
+| [keys-in-order.md](keys-in-order.md) | walk a column in key order, seek, step, rank, and read distinct keys |
+| [statistics-and-pruning.md](statistics-and-pruning.md) | see which blocks were skipped and why, and what makes pruning work |
 | `editions.md` | target an edition so that older readers, and Vortex Rust, can read what you write |
-| `encoding-hints.md` | steer the compressor per column, and measure whether it helped |
+| [encoding-hints.md](encoding-hints.md) | steer the compressor per column, and measure whether it helped |
 | `append-and-repair.md` | add rows to a file you already wrote, and recover one whose tail was torn |
 | `datasets.md` | create a versioned dataset over an object store, import, append, commit |
 | `dataset-maintenance.md` | compact, vacuum, verify, and what each costs in requests |
