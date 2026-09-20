@@ -1,26 +1,37 @@
 Third-party notices for Vorticity.
 
+Copyright 2026 Raphaël Ducom
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
 Vorticity is an independent implementation of the Vortex columnar file format
 (https://vortex.dev). It is not affiliated with or endorsed by the Vortex
 project or the Linux Foundation (LF AI & Data).
 
 
-Vendored schemas
-----------------
+Vendored schemas and edition manifests
+--------------------------------------
 
-The files under spec/ are copied verbatim from the Vortex repository
-(https://github.com/vortex-data/vortex) and remain under its license:
+Fifteen files under spec/ are copied verbatim from the Vortex repository
+(https://github.com/vortex-data/vortex) at tag 0.86.1, commit d1fe2dc46d, and
+remain under its license. Upstream paths are the ones that tag uses; several
+moved afterwards, with byte-identical contents.
 
     SPDX-License-Identifier: Apache-2.0
     SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-    spec/flatbuffers/dtype.fbs    vortex-array/flatbuffers/vortex-dtype/dtype.fbs
-    spec/flatbuffers/array.fbs    vortex-array/flatbuffers/vortex-array/array.fbs
-    spec/flatbuffers/layout.fbs   vortex-layout/flatbuffers/vortex-layout/layout.fbs
-    spec/flatbuffers/footer.fbs   vortex-file/flatbuffers/vortex-file/footer.fbs
-    spec/proto/dtype.proto        vortex-array/proto/dtype.proto
-    spec/proto/scalar.proto       vortex-array/proto/scalar.proto
-    spec/proto/expr.proto         vortex-array/proto/expr.proto
+    spec/flatbuffers/dtype.fbs    vortex-flatbuffers/flatbuffers/vortex-dtype/dtype.fbs
+    spec/flatbuffers/array.fbs    vortex-flatbuffers/flatbuffers/vortex-array/array.fbs
+    spec/flatbuffers/layout.fbs   vortex-flatbuffers/flatbuffers/vortex-layout/layout.fbs
+    spec/flatbuffers/footer.fbs   vortex-flatbuffers/flatbuffers/vortex-file/footer.fbs
+    spec/proto/dtype.proto        vortex-proto/proto/dtype.proto
+    spec/proto/scalar.proto       vortex-proto/proto/scalar.proto
+    spec/proto/expr.proto         vortex-proto/proto/expr.proto
+    spec/editions/*.toml          the frozen core edition manifests, as upstream's
+                                  xtask generates them
+
+The three pages and the refresh script beside them are this repository's own.
+spec/METADATA.md in particular is a transcription, not a copy: the per-encoding
+metadata messages are Rust structs upstream, with no schema file to vendor.
 
 
 Documentation
@@ -32,10 +43,22 @@ contributors. Changes were made: the material has been condensed, reorganized,
 turned into .NET implementation requirements, and annotated.
 
 
+Conformance corpus
+------------------
+
+tests/Vorticity.Conformance/corpus/ is generated, not copied. tools/conformance-gen
+writes it by running the Vortex Rust library (Apache-2.0), and the data it feeds that
+library comes from a splitmix64 stream whose master seed is recorded in the corpus
+manifest along with the generator and upstream versions. No upstream file is
+reproduced in it, and two runs of the generator produce identical bytes. It is
+distributed under this repository's own Apache-2.0 license.
+
+
 Algorithm provenance
 --------------------
 
-Policy: docs/09-contracts.md section 6. Entries are appended as components land.
+Policy: docs/design/09-contracts.md section 6. Entries are appended as components
+land.
 
     Component              Origin                        Status
     ---------------------  ----------------------------  --------------------

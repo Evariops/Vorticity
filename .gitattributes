@@ -1,0 +1,27 @@
+# Text is stored with LF and checked out with LF, on every platform. Nothing here is Windows-only
+# and every script is a shell script, so a CRLF checkout would only break shebang lines and make
+# diffs lie.
+* text=auto eol=lf
+
+# The conformance corpus and the forged fixtures are bytes, not text. This is not a preference: the
+# runner hashes each .vortex and compares it against the hash its sidecar carries before trusting
+# anything else in the pair, so a checkout that rewrote one byte would fail the whole run on that
+# platform and nowhere else. Git already detects the .vortex files as binary; saying it here means
+# it no longer depends on detection, and it covers the .jsonl sidecars beside them.
+tests/Vorticity.Conformance/corpus/** -text
+tests/Vorticity.Conformance/forged/** -text
+
+# 1 717 generated files would otherwise decide what language this repository is written in, and
+# fill every pull request with diffs nobody reads.
+tests/Vorticity.Conformance/corpus/** linguist-generated
+tests/Vorticity.Conformance/forged/** linguist-generated
+
+# The one hand-written page inside the corpus tree, which describes the sidecar format.
+tests/Vorticity.Conformance/corpus/SIDECAR.md text eol=lf -linguist-generated
+
+# Fifteen files under spec/ come from upstream: the schemas verbatim and the frozen edition
+# manifests. The three pages and the refresh script beside them are this repository's own, so the
+# rule names the directories rather than the tree.
+spec/flatbuffers/** linguist-vendored
+spec/proto/** linguist-vendored
+spec/editions/** linguist-vendored

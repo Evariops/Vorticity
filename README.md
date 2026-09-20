@@ -14,6 +14,15 @@ in them reads back equal — that is the parity claimed and the cross-check is w
 not byte parity: the same data is encoded differently on the two sides by design, and a file from
 one is not expected to match the other byte for byte.
 
+## Requirements
+
+The library targets `net11.0`, and `global.json` pins the SDK to a **.NET 11 release candidate**
+with `allowPrerelease`. Until .NET 11 reaches general availability you need that SDK installed —
+an otherwise current machine on .NET 10 will be refused by `global.json` before anything builds.
+That SDK is all `dotnet build` and `dotnet test` need. Everything that compares against the Rust
+reference — the cross-check, the ratio axes of the bench, and the corpus generator — wants a Rust
+toolchain on top.
+
 ## Documentation
 
 | Document | Contents |
