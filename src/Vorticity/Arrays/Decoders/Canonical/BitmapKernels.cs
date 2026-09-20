@@ -20,6 +20,29 @@ using System.Runtime.Intrinsics;
 namespace Vorticity.Arrays.Decoders.Canonical;
 
 /// <summary>Whole-run bitmap writes, for the decoders that produce runs rather than bits.</summary>
+/// <remarks>
+/// <para>
+/// The choice between the two vector widths is written here because this class holds one of each.
+/// <see cref="Classify"/> folds bytes into an <c>or</c> and an <c>and</c> accumulator: every lane
+/// does the same thing to its own element, and the two answers are the same whether the machine
+/// gives sixteen lanes or sixty-four, so it takes <c>Vector&lt;T&gt;</c> and whatever width the
+/// hardware has. <see cref="PackBytes"/> extracts sixteen sign bits into a <see cref="ushort"/>
+/// and writes exactly two bytes per iteration: the lane count is part of the output's shape, so it
+/// takes <c>Vector128</c> and is pinned to sixteen.
+/// </para>
+/// <para>
+/// The rule that separates them: <c>Vector&lt;T&gt;</c> when the work is element-wise and its
+/// result does not depend on how many lanes ran at once; a fixed width when the width reaches the
+/// output — a lane shuffle, a mask extracted to an integer, a block of a size the format sets, or
+/// a floating-point reduction, whose folding order the width decides and whose last bit therefore
+/// moves with it.
+/// </para>
+/// <para>
+/// Reading <c>Vector&lt;T&gt;.Count</c> is not itself a breach of the rule. A loop may take its
+/// stride, its seed or its step from the width and still write the same bytes at every width —
+/// what matters is the bytes, not whether the width was consulted to produce them.
+/// </para>
+/// </remarks>
 internal static class BitmapKernels
 {
     /// <summary>
