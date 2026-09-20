@@ -1,17 +1,3 @@
-// The zones child's dtype, which a reader must reconstruct to read the zone map at all: a Layout
-// carries no dtype and the zones table's shape is derived from the column dtype plus the
-// aggregates the metadata names.
-//
-// Sources, transcribed rather than guessed:
-//   vortex-layout-0.86.1/src/layouts/zoned/schema.rs   aggregate_stats_table_dtype,
-//                                                      legacy_stats_table_dtype,
-//                                                      aggregate_state_dtype
-//   vortex-array-0.86.1/src/aggregate_fn/fns/{min,max,bounded_min,bounded_max,null_count,
-//                                             nan_count,min_max,sum,uncompressed_size_in_bytes}
-//   vortex-array-0.86.1/src/expr/stats/mod.rs          Stat::dtype, Stat::name
-//
-// PHASE1-CONTRACTS.md §11.3 restates all of it; where the two disagree the Rust wins, and they do
-// not disagree.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -25,7 +11,7 @@ namespace Vorticity.Layouts;
 
 /// <summary>
 /// The nine legacy statistics of <c>vortex.stats</c>. The value <b>is</b> the bit index in the
-/// metadata's stat bitset (vortex-array-0.86.1/src/expr/stats/mod.rs).
+/// metadata's stat bitset, so the order is part of the wire format and cannot be reshuffled.
 /// </summary>
 internal enum LegacyStat : byte
 {
@@ -40,6 +26,11 @@ internal enum LegacyStat : byte
     NaNCount = 8,
 }
 
+/// <summary>
+/// Reconstructs the dtype of a zone map's zones child. A layout carries no dtype on the wire, so a
+/// reader has to derive the zones table's shape from the column's own dtype plus the aggregates the
+/// layout metadata names, or it cannot read the zone map at all.
+/// </summary>
 internal static class ZoneMapSchema
 {
     /// <summary>Highest defined <see cref="LegacyStat"/>; higher bits are silently ignored.</summary>
@@ -48,9 +39,9 @@ internal static class ZoneMapSchema
     /// <summary>
     /// How far the walk of <c>supports_uncompressed_size_in_bytes</c> goes before it starts
     /// remembering. A DType arena deduplicates nodes, so <c>Struct(["a","b"], [d, d])</c> nested 64
-    /// deep is a 65-node DAG with 2^64 root-to-leaf paths: the depth cap bounds the stack, not the
-    /// work (docs/03-architecture.md §6). It is a fast path and not a cap - the same dedup makes a
-    /// 5000-column struct four distinct nodes but 5001 visits, and that dtype is perfectly legal.
+    /// deep is a 65-node graph with 2^64 root-to-leaf paths: the depth cap bounds the stack, not
+    /// the work. It is a fast path and not a cap - the same dedup makes a 5000-column struct four
+    /// distinct nodes but 5001 visits, and that dtype is perfectly legal.
     /// </summary>
     private const int SupportVisitBudget = 4096;
 
@@ -66,8 +57,7 @@ internal static class ZoneMapSchema
     /// <returns>
     /// <see langword="false"/> when an aggregate id is unknown or its options are unusable. The
     /// zones table then cannot be reconstructed, so pruning is disabled and the zones child is left
-    /// unresolved — exactly what upstream does
-    /// (<c>try_aggregate_fns_from_specs</c> returning <c>Ok(None)</c>). Never an error.
+    /// unresolved. Never an error: an unreadable zone map only costs the chance to skip data.
     /// </returns>
     internal static bool TryBuildAggregateTable(
         DTypeArena types,
@@ -113,18 +103,18 @@ internal static class ZoneMapSchema
             DType state = AggregateStateDType(types, column, aggregate);
             if (state.IsDefault)
             {
-                // "if the aggregate has no state DType for that column, it contributes no column
-                // and is skipped entirely" - schema.rs filter_map.
+                // An aggregate with no state dtype for this column contributes no column at all,
+                // rather than an empty one.
                 continue;
             }
 
             names[columns] = name!;
 
-            // The state dtype may be the column's own, which lives in the file schema's arena;
-            // a struct's children must all come from the arena it is built in. IMPORT FIRST, then
-            // flip: WithNullability on a foreign node calls DTypeArena.CloneWithNullability, which
-            // WRITES to that node's arena - and this parse runs once per scan, so on a file
-            // schema's arena it is an unsynchronized write shared by every concurrent scan.
+            // The state dtype may be the column's own, which lives in the file schema's arena, and a
+            // struct's children must all come from the arena it is built in. Import first, then
+            // flip the nullability: flipping a foreign node writes to that node's own arena, and the
+            // file schema's arena is shared by every concurrent scan, so that write would be a data
+            // race.
             fields[columns] = DTypeImport.Into(types, state).WithNullability(Nullability.Nullable);
             columnIndices[i] = columns;
             columns++;
@@ -143,8 +133,8 @@ internal static class ZoneMapSchema
     /// <param name="presentStats">The stat bitset, ascending by discriminant.</param>
     /// <returns>A non-nullable struct; <c>max</c> and <c>min</c> each add a truncation-flag column.</returns>
     /// <remarks>
-    /// UNTESTED: no fixture exists in the 0.86.1 corpus (manifest skipped/layouts/vortex_stats);
-    /// written against vortex-layout-0.86.1/src/layouts/zoned/{mod.rs,schema.rs}.
+    /// No writer in the reference corpus emits a legacy stats table, so this derivation has no
+    /// fixture behind it and is exercised only by files found in the wild.
     /// </remarks>
     internal static DType LegacyStatsTable(DTypeArena types, DType column, ReadOnlySpan<LegacyStat> presentStats)
     {
@@ -164,11 +154,12 @@ internal static class ZoneMapSchema
             }
 
             names[columns] = LegacyStatName(stat);
-            // Import first, then flip: see the note in AggregateTable.
+            // Import first, then flip the nullability, so the flip never writes to the arena the
+            // column's dtype came from.
             fields[columns] = DTypeImport.Into(types, value).WithNullability(Nullability.Nullable);
             columns++;
 
-            // Max and Min each emit a second, immediately-following NON-nullable Bool column.
+            // Max and Min each emit a second, immediately-following non-nullable Bool column.
             if (stat == LegacyStat.Max)
             {
                 names[columns] = "max_is_truncated";
@@ -194,8 +185,8 @@ internal static class ZoneMapSchema
     /// <returns>How many entries of <paramref name="stats"/> were written.</returns>
     /// <remarks>
     /// Bit indices above <see cref="MaxLegacyStat"/> are silently ignored: that is the
-    /// forward-compatibility rule for this bitset, and rejecting them would break read-forever
-    /// (docs/02-format.md §5.3).
+    /// forward-compatibility rule for this bitset, and rejecting them would make a file written by
+    /// a newer producer unreadable for no gain.
     /// </remarks>
     internal static int ReadLegacyStatBitset(ReadOnlySpan<byte> bitset, Span<LegacyStat> stats)
     {
@@ -231,14 +222,14 @@ internal static class ZoneMapSchema
             case AggregateId.Min:
             case AggregateId.Max:
             case AggregateId.BoundedMin:
-                // min/max: MinMax.return_dtype(..).map(|_| input.as_nullable()).
-                // bounded_min: supported_dtype(..).map(DType::as_nullable) - a plain scalar.
+                // All three carry a plain scalar of the column's own type, made nullable.
                 return MinMaxSupported(column)
                     ? DTypeImport.Into(types, column).WithNullability(Nullability.Nullable)
                     : default;
 
             case AggregateId.BoundedMax:
-                // make_bounded_max_partial_dtype: Struct({bound: element?, unknown: bool}, Nullable).
+                // A partial state rather than a scalar: a nullable struct of the bound and a flag
+                // saying the bound is not exact.
                 return MinMaxSupported(column) ? BoundedMaxPartial(types, column) : default;
 
             case AggregateId.NullCount:
@@ -269,7 +260,7 @@ internal static class ZoneMapSchema
 
     /// <summary>
     /// <c>nan_count</c> exists only for float primitives, and falls back to an extension's storage
-    /// dtype (schema.rs <c>aggregate_state_dtype</c>).
+    /// dtype.
     /// </summary>
     private static DType NanCountDType(DTypeArena types, DType column)
     {
@@ -290,7 +281,7 @@ internal static class ZoneMapSchema
         dtype.Kind == DTypeKind.Primitive && dtype.PType.IsFloat();
 
     /// <summary>
-    /// <c>minmax_supported_dtype</c> (vortex-array-0.86.1/src/aggregate_fn/fns/min_max/mod.rs).
+    /// Whether a min or max aggregate is defined over this dtype at all.
     /// </summary>
     /// <remarks>
     /// The recursion follows a single child per level (list element, fixed-size-list element), so
@@ -338,7 +329,7 @@ internal static class ZoneMapSchema
     };
 
     /// <summary>
-    /// <c>Stat::dtype</c> with <c>legacy_stats_table_dtype</c>'s extension fallback.
+    /// The column dtype one legacy stat contributes, with the fallback for extension types.
     /// </summary>
     /// <returns><c>default</c> when the stat contributes no column.</returns>
     private static DType LegacyStatDType(DTypeArena types, DType column, LegacyStat stat)
@@ -349,8 +340,8 @@ internal static class ZoneMapSchema
             return direct;
         }
 
-        // "Backward compat: older files may have stored stats (e.g. Sum) for extension types by
-        // resolving through the storage dtype."
+        // A file may have stored a stat for an extension type by resolving it through the storage
+        // dtype, so a stat that is undefined for the extension is retried against the storage.
         return LegacyStatDTypeCore(types, column.StorageType, stat);
     }
 
@@ -386,7 +377,8 @@ internal static class ZoneMapSchema
     }
 
     /// <summary>
-    /// <c>Sum::return_dtype</c>. Every result is nullable: an overflowing sum is recorded as null.
+    /// The widened accumulator a sum is stored in. Every result is nullable: an overflowing sum is
+    /// recorded as null.
     /// </summary>
     private static DType SumDType(DTypeArena types, DType column)
     {
@@ -414,13 +406,13 @@ internal static class ZoneMapSchema
     }
 
     /// <summary>
-    /// <c>supports_uncompressed_size_in_bytes</c>, walked iteratively.
+    /// Whether an uncompressed-size stat is defined over this dtype, walked iteratively.
     /// </summary>
     /// <remarks>
-    /// The visit budget is a fast path, not a cap. A DTypeArena deduplicates, so a struct of N
-    /// identically-typed fields is ONE child node referenced N times and a dtype nested that way
-    /// 64 deep is a 65-node DAG with 2^64 root-to-leaf paths: the depth cap bounds the stack, not
-    /// the work. But a flat count also rejects ordinary BREADTH - a 5000-column feature block is
+    /// The visit budget is a fast path, not a cap. A DTypeArena deduplicates, so a struct of n
+    /// identically-typed fields is one child node referenced n times, and a dtype nested that way
+    /// 64 deep is a 65-node graph with 2^64 root-to-leaf paths: the depth cap bounds the stack, not
+    /// the work. But a flat count also rejects ordinary breadth - a 5000-column feature block is
     /// four distinct nodes and 5001 visits - so crossing the budget switches the walk to a visited
     /// set keyed on the source node index instead of failing a legal dtype.
     /// </remarks>
@@ -428,8 +420,8 @@ internal static class ZoneMapSchema
     {
         // An explicit stack rather than recursion: the branching cases (struct, union, map) make
         // this the one derivation whose work is not bounded by the dtype depth cap. A DType is a
-        // managed type, so the stack is a heap array; this is parse-time code for a layout the
-        // 0.86.1 writer cannot produce, never a decode path.
+        // managed type, so the stack is a heap array; this runs at parse time for a legacy layout,
+        // never on a decode path.
         DType[] stack = new DType[32];
         int top = 0;
         stack[top++] = dtype;
@@ -514,11 +506,11 @@ internal static class ZoneMapSchema
             case AggregateId.Min:
             case AggregateId.Max:
             {
-                // NumericalAggregateOpts { bool skip_nans = 1 } has IMPLICIT presence, so the
-                // default configuration (skip_nans = true) is written as `08 01` and an EMPTY
-                // payload decodes to skip_nans = false. Display shows only the non-default case,
-                // "so that aggregates with default options render identically to their
-                // pre-options form" (aggregate_fn/vtable.rs).
+                // The options message declares `skip_nans` with implicit presence, so the usual
+                // configuration (skip_nans = true) is written explicitly and an empty payload
+                // decodes to false, not to the usual value. The name renders the flag only when it
+                // is false, so an aggregate carrying default options keeps the name it had before
+                // options existed at all.
                 bool skipNans = ReadSkipNans(options);
                 string id = aggregate == AggregateId.Min ? "vortex.min" : "vortex.max";
                 name = skipNans ? id + "()" : id + "(skip_nans=false)";
@@ -530,9 +522,9 @@ internal static class ZoneMapSchema
             {
                 if (!AggregateRegistry.TryGetBoundLength(aggregate, options, out uint boundLength))
                 {
-                    // Upstream fails the whole read here; we degrade to "no zone map", which is
-                    // strictly more permissive and can never produce a wrong value because Phase 1
-                    // prunes with nothing.
+                    // Unreadable bound options degrade to "no zone map" rather than failing the
+                    // whole read: the map only ever serves to skip data, so losing it can cost
+                    // speed but never correctness.
                     name = null;
                     return false;
                 }

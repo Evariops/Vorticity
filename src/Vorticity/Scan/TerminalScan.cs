@@ -1,21 +1,3 @@
-// The scan with a different output - docs/12-index-reads.md §5: AnyAsync, CountAsync, MinAsync and
-// MaxAsync, computed without a RecordBatch and bounded by one batch of memory, whatever the file's
-// size.
-//
-// THE ANSWER IS PUSHED INTO THE STRUCTURES, SPLIT BY SPLIT, CHEAPEST PROOF FIRST (§5.2, §5.3). A
-// split the mask killed counts nothing and reads nothing. A split the zone maps decide -- the
-// full-block proof, `ZonePruner.TryCount` over the verdict of step 10a; or, for an extreme, the
-// zone's own bound -- answers from bounds already in memory. The rest are decoded, the filter
-// evaluated, the trues counted or the extreme found among them: the first half of the batch
-// enumerator's ApplyFilter without the gather, the projection trim, or the batch. The exact cover
-// of an index (§5.2's first tier) is a case of the same loop, for when a source gives one.
-//
-// ONE CONTEXT, ONE SPLIT AT A TIME. A terminal runs on a single lane whatever the degree: it has no
-// batch to hand out, so nothing is gained by decoding two splits at once, and the memory bound of
-// §5 -- one batch -- is kept by construction. The read is the batch enumerator's own two-phase
-// register-then-read, and the decode the same push-down of a take (SplitExecution), so a terminal
-// cannot count a row a scan would not return; the tests hold that against the materialized scan
-// with each tier switched off in turn.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -32,7 +14,24 @@ using Vorticity.Types;
 
 namespace Vorticity.Scan;
 
-/// <summary>The terminals of one scan: what it would return, without returning it.</summary>
+/// <summary>
+/// The terminals of one scan - any, count, smallest, largest - answered without ever building a
+/// record batch and within one batch of memory, whatever the file's size.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The answer is pushed into the structures, split by split, cheapest proof first: a split the
+/// projection mask killed reads nothing, a split the zone maps decide answers from bounds already
+/// in memory, and only what is left is decoded, filtered and counted. An exactly covering source is
+/// the same loop with the first step already done.
+/// </para>
+/// <para>
+/// One context, one split at a time: a terminal has no batch to hand out, so it runs on a single
+/// lane whatever the degree of parallelism, and its memory bound holds by construction. It reads
+/// and decodes exactly as the batch enumerator does, take push-down included, so it cannot count a
+/// row the materialized scan would not return.
+/// </para>
+/// </remarks>
 internal sealed class TerminalScan
 {
     private readonly VortexFile _file;
@@ -80,12 +79,12 @@ internal sealed class TerminalScan
         _metrics = metrics;
     }
 
-    /// <summary>How many rows the scan would return (docs/12 §5.2).</summary>
+    /// <summary>How many rows the scan would return.</summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
     internal ValueTask<long> CountAsync(CancellationToken cancellationToken) =>
         RunAsync(stopAtFirst: false, cancellationToken);
 
-    /// <summary>Whether the scan would return at least one row (docs/12 §5.1).</summary>
+    /// <summary>Whether the scan would return at least one row.</summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
     internal async ValueTask<bool> AnyAsync(CancellationToken cancellationToken) =>
         await RunAsync(stopAtFirst: true, cancellationToken).ConfigureAwait(false) > 0;
@@ -125,7 +124,7 @@ internal sealed class TerminalScan
         context.Metrics = _metrics;
 
         // One evaluation window for the whole count, sized for the largest split the plan
-        // produces: rented once, so a block costs no allocation (docs/12 §11).
+        // produces: rented once, so a block costs no allocation.
         int capacity = (int)Math.Min(plan.MaxRows, int.MaxValue);
         byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(capacity, 1));
         try
@@ -172,9 +171,9 @@ internal sealed class TerminalScan
     }
 
     /// <summary>
-    /// The first tier (docs/12 §5.2): an exact source covers the predicate, and the count is the
-    /// sum of its slices -- or, under <c>Rows</c> or <c>Take</c>, the slices' rows walked and
-    /// intersected, up to a batch of them. Null when no source covers it.
+    /// The cheapest tier: an exact source covers the predicate, and the count is the sum of its
+    /// slices -- or, under <c>Rows</c> or <c>Take</c>, the slices' rows walked and intersected, up
+    /// to a batch of them. Null when no source covers it.
     /// </summary>
     private async ValueTask<long?> TryExactCountAsync(CancellationToken cancellationToken)
     {
@@ -298,22 +297,21 @@ internal sealed class TerminalScan
     // ------------------------------------------------------------------------------ extremes
 
     /// <summary>
-    /// The smallest or largest non-null value of <paramref name="path"/> among the scan's rows
-    /// (docs/12 §5.3), <see cref="FilterLiteral.Null"/> when there is none.
+    /// The smallest or largest non-null value of <paramref name="path"/> among the scan's rows,
+    /// <see cref="FilterLiteral.Null"/> when there is none.
     /// </summary>
     /// <param name="path">The column.</param>
     /// <param name="wantMin">Whether the smallest value is wanted, else the largest.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <remarks>
-    /// §5.3's resolutions in order. The file statistic, when the scan is the whole file and the
-    /// statistic is <c>Exact</c>: no read. The zone bounds, for every split that is whole zones
-    /// of the column's map and whose rows all qualify (no filter, or one the zone maps prove for
-    /// the split): an <c>Exact</c> bound is the split's answer, an <c>Inexact</c> one a
-    /// candidate -- the true extreme is at or beyond it -- decoded only when it could still beat
-    /// the best, cheapest first, which is usually one decode. Everything else is decoded: the
-    /// filter evaluated, the extreme found among the rows it keeps, one split of memory at a
-    /// time. Before the zone bounds, an ordered source on the same column that covers the whole
-    /// predicate (§5.3's third resolution) answers with a seek to either end of its slices.
+    /// The resolutions, cheapest first. The file statistic, when the scan is the whole file and the
+    /// statistic is <c>Exact</c>: no read. An ordered source on the same column that covers the
+    /// whole predicate: a seek to either end of its slices. The zone bounds, for every split that
+    /// is whole zones of the column's map and whose rows all qualify (no filter, or one the zone
+    /// maps prove for the split): an <c>Exact</c> bound is the split's answer, an <c>Inexact</c>
+    /// one a candidate -- the true extreme is at or beyond it -- decoded only when it could still
+    /// beat the best, cheapest first, which is usually one decode. Everything else is decoded: the
+    /// filter evaluated, the extreme found among the rows it keeps, one split of memory at a time.
     /// </remarks>
     internal async ValueTask<FilterLiteral> ExtremeAsync(
         string path, bool wantMin, CancellationToken cancellationToken)
@@ -329,8 +327,8 @@ internal sealed class TerminalScan
             return statistic;
         }
 
-        // §5.3's third resolution: a predicate that an ordered source on the same column covers
-        // exactly has its extremes at the two ends of its slices.
+        // A predicate that an ordered source on the same column covers exactly has its extremes at
+        // the two ends of its slices.
         if (_filter is not null && _wholeFile && _prune && (_tiers & TerminalTiers.ExactCover) != 0)
         {
             ExactCover? cover = await ExactCover
@@ -428,9 +426,9 @@ internal sealed class TerminalScan
 
         // Pass 2: the decodes -- the splits the bounds could not decide first, so that the best
         // is as good as it can be before a candidate is weighed against it. Each decode hands the
-        // readers a mask of exactly its split, so that the restricted decode of step 8b
-        // materializes the split and not the chunk around it: on a single-chunk file, one block
-        // instead of the whole column, which is the point of deciding from the bounds at all.
+        // readers a mask of exactly its split, so that the restricted decode materializes the split
+        // and not the chunk around it: on a single-chunk file, one block instead of the whole
+        // column, which is the point of deciding from the bounds at all.
         using ScanContext context = new ScanContext(_file);
         BlockMask scope = new BlockMask(_tree.Root.RowCount, SplitPlan.NaturalBatchRows(_tree));
         context.LiveBlocks = scope;
@@ -484,7 +482,7 @@ internal sealed class TerminalScan
         return best;
     }
 
-    /// <summary>§5.3's first resolution: the file's own statistic, when it is the true value.</summary>
+    /// <summary>The cheapest resolution: the file's own statistic, when it is the true value.</summary>
     private bool TryFileStatistic(string path, bool wantMin, out FilterLiteral literal)
     {
         literal = FilterLiteral.Null;
@@ -519,7 +517,7 @@ internal sealed class TerminalScan
     }
 
     /// <summary>
-    /// §5.3's second resolution over one split: the extreme of the zone bounds, when the split
+    /// The zone-bounds resolution over one split: the extreme of the zone bounds, when the split
     /// is whole zones of the map and every zone with a value has the bound.
     /// </summary>
     /// <param name="column">The column's zone map.</param>

@@ -47,24 +47,23 @@ internal static class CanonicalSlice
     /// <returns>The window's index in <paramref name="destination"/>.</returns>
     /// <remarks>
     /// <para>
-    /// SLICING COPIES NOTHING, AND ACROSS ARENAS IT STILL COPIES NOTHING. A slice is a record whose
-    /// buffers are narrowed <b>views</b> onto the same storage, so a window of a retained chunk costs
-    /// a handful of records however many rows or bytes it spans - including a <c>VarBinView</c>'s
-    /// data buffers, which travel as views and are never rebuilt. That is the whole reason the
-    /// string encodings can reach their ceiling.
+    /// Slicing copies nothing, within one arena or across two: a slice is a record whose buffers are
+    /// narrowed <b>views</b> onto the same storage, so a window of a retained chunk costs a handful
+    /// of records however many rows or bytes it spans - including a <c>VarBinView</c>'s data
+    /// buffers, which travel as views and are never rebuilt.
     /// </para>
     /// <para>
-    /// THE RESULT BORROWS <paramref name="source"/>'s MEMORY and is valid only while that arena is.
+    /// The result borrows <paramref name="source"/>'s memory and is valid only while that arena is.
     /// Whoever calls this owes a lifetime argument; <see cref="Vorticity.Arrays.ScanContext"/>'s
     /// is that an entry touched during the current batch is never evicted.
     /// </para>
     /// <para>
     /// <c>ListView</c> needs one extra step and no extra bytes: its offsets are absolute into an
-    /// elements CHILD named by an arena index, and an index means nothing in another arena, so the
-    /// child's RECORDS are re-created here (<see cref="CanonicalArena.ReferenceFrom"/>) while its
-    /// buffers stay views onto <paramref name="source"/>. Copying those bytes instead made a batch
-    /// of a large list chunk cost the whole child -- the scan quadratic, restricted to one dtype,
-    /// and measured at 16.9x the reference on the 1M-row axis.
+    /// elements child named by an arena index, and an index means nothing in another arena, so the
+    /// child's records are re-created here (<see cref="CanonicalArena.ReferenceFrom"/>) while its
+    /// buffers stay views onto <paramref name="source"/>. Copying those bytes instead would make a
+    /// batch of a large list chunk pay for the whole child, which turns a scan over many batches
+    /// quadratic.
     /// </para>
     /// </remarks>
     internal static int SliceAcross(
@@ -110,12 +109,11 @@ internal static class CanonicalSlice
 
         Validity validity = SliceValidity(source, destination, node.Validity, start, length, depth);
 
-        // EXHAUSTIVE BY CONSTRUCTION (PERF-AUDIT-v2.md §2.4bis, Z1b-c1): the `default:` this had was
-        // the Struct arm, so a tenth kind would have been sliced field by field over fields it does
-        // not have. Every kind is NAMED now -- Null and Extension included, at the throw the two
-        // early returns above make unreachable -- and IDE0072 (error, see .editorconfig) fails the
-        // build when a named kind is missing. Each arm is its own method so that this stays an
-        // expression, which is the form IDE0072 checks.
+        // Exhaustive by construction: every kind is named, Null and Extension included, at a throw
+        // the two early returns above make unreachable. There is no catch-all arm that would slice
+        // a new kind field by field over fields it does not have; IDE0072 is an error here, so the
+        // build fails as soon as a kind is missing. Each arm is its own method so that this stays
+        // an expression, which is the form IDE0072 checks.
         return node.Kind switch
         {
             CanonicalKind.Bool => SliceBool(destination, in node, dtype, validity, start, length),
@@ -130,8 +128,8 @@ internal static class CanonicalSlice
                 SliceStruct(source, destination, nodeIndex, dtype, validity, start, length, depth),
             CanonicalKind.Null or CanonicalKind.Extension => throw new UnreachableException(
                 $"{node.Kind} returns above, before SliceValidity."),
-            // EMPRUNTE (Z1b-c2b) : une fenetre sur une constante est la meme constante, plus
-            // courte. `start` ne sert a rien : toutes les lignes portent la meme valeur.
+            // A window on a constant is the same constant, shorter: every row carries the same
+            // value, so `start` plays no part.
             CanonicalKind.Constant =>
                 destination.AddConstant(dtype, length, validity, node.ConstantElement),
             _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
@@ -139,8 +137,8 @@ internal static class CanonicalSlice
     }
 
     /// <remarks>
-    /// The bit offset moves with the window; the bitmap itself is never shifted, which would be a
-    /// copy per batch (contract §2.6 rule 5).
+    /// The bit offset moves with the window; the bitmap itself is never shifted, which would cost a
+    /// copy per batch.
     /// </remarks>
     private static int SliceBool(
         CanonicalArena destination, in CanonicalNode node, DType dtype, Validity validity, int start, int length)

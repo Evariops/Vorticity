@@ -1,22 +1,3 @@
-// Materializing the rows a filter selected - the second half of docs/01-scope.md F7.
-//
-// Given a decoded batch and the row indices that passed, produce a batch of just those rows. It is
-// a gather, one canonical kind at a time, and two of the kinds are gathers of something OTHER than
-// values, which is where the interesting decisions are:
-//
-//   * VARBINVIEW keeps its data buffers untouched and gathers only the 16-byte views. A view is
-//     (length, prefix, buffer, offset), so a selected row's view still addresses the same bytes in
-//     the same buffer -- the heap does not need compacting and copying it would be the single most
-//     expensive thing this file could do.
-//   * LISTVIEW is the same trick one level up: offsets and sizes are gathered, the elements child
-//     is shared whole.
-//
-// FIXEDSIZELIST is the exception, and the reason it is not: its elements child has no offsets, so
-// row i IS elements[i * size .. (i+1) * size]. Selecting rows therefore has to gather the elements
-// too, through an expanded index list.
-//
-// Validity is gathered alongside, and collapses: a filtered column whose selected rows are all
-// valid becomes AllValid rather than carrying a bitmap of ones.
 using System;
 using System.Buffers;
 using System.Diagnostics;
@@ -27,7 +8,12 @@ using Vorticity.Types;
 
 namespace Vorticity.Compute;
 
-/// <summary>Rebuilds a canonical subtree over a subset of its rows.</summary>
+/// <summary>
+/// Rebuilds a canonical subtree over a subset of its rows. Views, offsets and sizes are gathered
+/// while the buffers they address are shared untouched, so a filter never compacts a string heap
+/// nor a list's elements; a fixed-size list is the exception, since its elements carry no offsets
+/// and have to be gathered through an expanded index list.
+/// </summary>
 internal static class CanonicalFilter
 {
     private const int ViewSize = 16;
@@ -59,16 +45,15 @@ internal static class CanonicalFilter
     /// <param name="nodeIndex">The node to filter.</param>
     /// <param name="indices">
     /// The selected rows, within the node's length, in the order the result carries them: every
-    /// gather below is positional, so a permutation lays a batch out in another order
-    /// (docs/12-index-reads.md §6), and a filter's ascending selection is the special case.
+    /// gather below is positional, so a permutation lays a batch out in another order and a
+    /// filter's ascending selection is the special case.
     /// </param>
     /// <returns>The new node's index.</returns>
     /// <exception cref="NotSupportedException">The node's canonical form has no gather.</exception>
     /// <remarks>
-    /// EXHAUSTIVE BY CONSTRUCTION (PERF-AUDIT-v2.md §2.4bis, Z1b-c1): every kind is NAMED, and the
-    /// <c>_</c> arm throws instead of gathering. It used to be <c>default: FilterExtension</c>, so a
-    /// tenth kind was gathered through an extension's storage child it does not have. IDE0072 --
-    /// error here, see <c>.editorconfig</c> -- now fails the build when a named kind is missing.
+    /// Every kind is named and the <c>_</c> arm throws rather than gathering, so a kind added
+    /// without its own arm fails the build instead of being gathered through a child it does not
+    /// have.
     /// </remarks>
     internal static int Apply(CanonicalArena arena, int nodeIndex, ReadOnlySpan<int> indices)
     {
@@ -86,9 +71,9 @@ internal static class CanonicalFilter
             CanonicalKind.FixedSizeList => FilterFixedSizeList(arena, node, nodeIndex, indices),
             CanonicalKind.Struct => FilterStruct(arena, node, indices),
             CanonicalKind.Extension => FilterExtension(arena, node, indices),
-            // EMPRUNTE (Z1b-c2b) : filtrer une constante donne une constante. Seules la longueur
-            // et la validite changent ; l'element est le meme, et c'est tout l'interet de la
-            // forme -- un gather de N lignes d'une seule valeur ne rassemble rien.
+            // Filtering a constant yields a constant: only the length and the validity change, the
+            // element is the same one, and a gather over rows that all hold it would gather
+            // nothing.
             CanonicalKind.Constant => arena.AddConstant(
                 node.DType,
                 count,
@@ -282,11 +267,9 @@ internal static class CanonicalFilter
     }
 
     /// <summary>
-    /// Gathers a validity, collapsing the result: a selection that happens to contain no null is
-    /// AllValid, not a bitmap of ones.
-    /// </summary>
-    /// <summary>
-    /// Gathers a validity, collapsing to AllValid or AllInvalid where the selection allows.
+    /// Gathers a validity, collapsing the result: a selection that happens to contain no null
+    /// becomes all-valid rather than a bitmap of ones, and one with no valid row becomes
+    /// all-invalid.
     /// </summary>
     /// <param name="arena">The arena.</param>
     /// <param name="validity">The validity to gather.</param>
@@ -331,7 +314,7 @@ internal static class CanonicalFilter
             }
         }
 
-        // The bitmap node's own dtype is non-nullable bool, which is what Validity::DTYPE is.
+        // A validity bitmap's own dtype is always non-nullable bool.
         int node = arena.AddBool(
             arena.GetNode(validity.CanonicalNodeIndex).DType, count, Validity.NonNullable, bits, 0);
         return Validity.Bitmap(node);

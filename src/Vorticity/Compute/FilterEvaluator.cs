@@ -1,16 +1,3 @@
-// Evaluating a filter expression over one decoded batch - docs/01-scope.md F7.
-//
-// Recursion over the expression, one rented byte buffer per node, three-valued logic throughout,
-// and a row is selected only when the whole thing comes out True (docs/08-semantics.md §3).
-//
-// The buffers come from ArrayPool rather than the canonical arena: they are scratch that dies with
-// the call, while the arena's blocks live until the batch is disposed. Renting is what keeps the
-// per-batch managed allocation at zero once the pool is warm, which is the same trade
-// BitPackedDecoder already makes for its unpack scratch.
-//
-// Expression depth is bounded, because the tree comes from the CALLER and a 100000-deep NOT chain
-// would blow the stack before any file was read. It is the same class of check as the format's own
-// depth caps, applied to the one input that does not come from a file.
 using System;
 using System.Buffers;
 using Vorticity.Arrays;
@@ -21,7 +8,12 @@ using Vorticity.Types;
 
 namespace Vorticity.Compute;
 
-/// <summary>Evaluates a filter over a decoded batch, producing one truth value per row.</summary>
+/// <summary>
+/// Evaluates a filter over a decoded batch, producing one three-valued truth per row; a row is
+/// selected only when the whole expression comes out true. The scratch one operand needs while the
+/// other is evaluated is rented from the shared pool rather than taken from the arena, because it
+/// dies with the call while the arena's blocks live until the batch is disposed.
+/// </summary>
 /// <remarks>
 /// One of these belongs to one scan, because some of what a filter needs is worth computing once
 /// for the whole file rather than once per batch: an <c>IN</c> hashes its candidates, and a scan of
@@ -32,8 +24,9 @@ namespace Vorticity.Compute;
 internal sealed class FilterEvaluator
 {
     /// <summary>
-    /// How deep a filter expression may nest. Generous for anything written by hand or by a query
-    /// planner, and far below what recursion here can survive.
+    /// How deep a filter expression may nest. The tree comes from the caller rather than from a
+    /// file, so evaluation is capped like anything else read from outside: generous for anything
+    /// written by hand or by a query planner, and far below what recursion here can survive.
     /// </summary>
     internal const int MaxDepth = 64;
 
@@ -240,24 +233,17 @@ internal sealed class FilterEvaluator
             }
 
             default:
-                // A bare field or literal is not a predicate. Expr's factories make this
-                // unreachable from the public API; it is here so a future node type cannot be
-                // silently evaluated as something else.
+                // A bare field or literal is not a predicate. The expression factories make this
+                // unreachable from the public API; the throw keeps another node kind from being
+                // evaluated as something it is not.
                 throw new ArgumentException(
                     $"A filter's root must be a predicate, not a {filter.Kind}.", nameof(filter));
         }
     }
 
     /// <summary>
-    /// Walks a dotted path from the batch's root to the column it names.
-    /// </summary>
-    /// <remarks>
-    /// Allocation-free: the segments were encoded at expression-construction time and
-    /// <see cref="DType.IndexOfField(ReadOnlySpan{byte})"/> resolves interned names to handles rather than comparing
-    /// strings.
-    /// </remarks>
-    /// <summary>
-    /// The column <paramref name="field"/> names in the batch rooted at <paramref name="rootIndex"/>.
+    /// Walks a dotted path from the batch rooted at <paramref name="rootIndex"/> to the column
+    /// <paramref name="field"/> names.
     /// </summary>
     /// <param name="arena">The arena holding the decoded batch.</param>
     /// <param name="rootIndex">The batch's root node.</param>
@@ -265,6 +251,11 @@ internal sealed class FilterEvaluator
     /// <param name="rows">The batch's row count, which the column must have.</param>
     /// <returns>The column's node.</returns>
     /// <exception cref="ArgumentException">The path names nothing in the batch's schema.</exception>
+    /// <remarks>
+    /// Allocation-free: the segments were encoded when the expression was built, and
+    /// <see cref="DType.IndexOfField(ReadOnlySpan{byte})"/> resolves interned names to handles
+    /// rather than comparing strings.
+    /// </remarks>
     internal static int Resolve(CanonicalArena arena, int rootIndex, FieldExpr field, int rows)
     {
         int current = rootIndex;
@@ -312,11 +303,10 @@ internal sealed class FilterEvaluator
     /// holds there.
     /// </summary>
     /// <remarks>
-    /// THE REFERENCE'S `get_item`, which masks the field with the struct's validity
-    /// (vortex-array-0.86.1 `scalar_fn/fns/get_item.rs`: `field.mask(input.validity())`). Without
-    /// it a filter on `person.name` matched the rows whose `person` is null by the value their
-    /// field buffer happened to hold. A struct with no null costs nothing here; one with nulls
-    /// re-publishes the field over the same buffers with the two validities intersected.
+    /// A field is read through the struct's own validity, so a filter on `person.name` cannot match
+    /// a row whose `person` is null by whatever that row's field buffer happens to hold. A struct
+    /// with no null costs nothing here; one with nulls re-publishes the field over the same buffers
+    /// with the two validities intersected.
     /// </remarks>
     /// <param name="arena">The batch's arena.</param>
     /// <param name="child">The field's node.</param>

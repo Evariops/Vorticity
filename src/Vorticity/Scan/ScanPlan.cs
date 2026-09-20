@@ -15,8 +15,8 @@ public sealed record PruningStep(string Structure, int BlocksPruned, int Segment
 /// <summary>
 /// The plan of a scan, from its builder, without a data segment read: the layout tree, the split
 /// plan, the mask of live blocks and the segments a live split registers, worked out exactly as the
-/// scan would but stopped before the first batch. Nothing here is measured; <see cref="ScanMetrics"/>
-/// counts the same quantities once the scan has run.
+/// scan would but stopped before the first batch. Nothing here comes from a run;
+/// <see cref="ScanMetrics"/> counts the same quantities once the scan has run.
 /// </summary>
 /// <param name="RowCount">Rows the scan covers, after <c>Rows</c> and <c>Take</c> narrowed it.</param>
 /// <param name="BlockRows">Rows per block -- the zone map's zone, the writer's row block.</param>

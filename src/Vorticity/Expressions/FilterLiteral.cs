@@ -48,7 +48,7 @@ public readonly struct FilterLiteral : IEquatable<FilterLiteral>
     /// <summary>Which of the union's arms is live.</summary>
     public FilterLiteralKind Kind { get; }
 
-    /// <summary>SQL <c>NULL</c>.</summary>
+    /// <summary>SQL <c>null</c>.</summary>
     public static FilterLiteral Null => default;
 
     /// <summary>The signed value. Only meaningful when <see cref="Kind"/> is <see cref="FilterLiteralKind.Signed"/>.</summary>

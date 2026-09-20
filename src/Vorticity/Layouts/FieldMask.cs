@@ -1,9 +1,3 @@
-// PHASE1-CONTRACTS.md §11.2. Which fields of a struct subtree the caller wants, as a tree because
-// projection paths nest. The scan (§13) builds it; the layout readers consume it.
-//
-// `default(FieldMask)` is All, deliberately: a reader handed a default mask materializes
-// everything, which is slower than intended but never wrong. The opposite default would silently
-// drop columns.
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -14,9 +8,17 @@ namespace Vorticity.Layouts;
 /// Which fields of a struct subtree a scan wants, as an immutable tree.
 /// </summary>
 /// <remarks>
+/// <para>
 /// A mask is either <see cref="All"/> (every field, recursively), <see cref="Empty"/> (no field at
 /// all), or a subset naming the wanted fields of the struct at this level, each with its own mask
-/// for its subtree. <see cref="Descend"/> walks one level down.
+/// for its subtree. It is a tree because projection paths nest; the scan builds it and the layout
+/// readers consume it. <see cref="Descend"/> walks one level down.
+/// </para>
+/// <para>
+/// <c>default(FieldMask)</c> is <see cref="All"/>, deliberately: a reader handed a default mask
+/// materializes everything, which is slower than intended but never wrong, where the opposite
+/// default would silently drop columns.
+/// </para>
 /// </remarks>
 public readonly struct FieldMask
 {
@@ -173,10 +175,10 @@ internal sealed class FieldMaskNode
 /// Builds a <see cref="FieldMask"/> from projection paths.
 /// </summary>
 /// <remarks>
-/// <b>Not part of PHASE1-CONTRACTS.md §11.2.</b> The contract gives <see cref="FieldMask"/> only
-/// <see cref="FieldMask.All"/> as a construction path, which leaves the scan's projection compiler
-/// (§13.2) with no way to express a partial projection. This builder is the missing piece; it
-/// allocates, is used once per scan, and is never touched on a decode path.
+/// The format itself gives <see cref="FieldMask"/> only <see cref="FieldMask.All"/> as a
+/// construction path, which leaves the scan's projection compiler with no way to express a partial
+/// projection. This builder is the missing piece; it allocates, is used once per scan, and is never
+/// touched on a decode path.
 /// </remarks>
 public sealed class FieldMaskBuilder
 {
@@ -233,10 +235,10 @@ public sealed class FieldMaskBuilder
     /// <param name="mask">The mask to union in.</param>
     /// <returns>This builder.</returns>
     /// <remarks>
-    /// The scan needs this to read the UNION of what a filter references and what the caller
-    /// projected, while keeping the projection itself intact for the trim afterwards
-    /// (docs/03-architecture.md §3.4). Building the union by mutating the projection's own builder
-    /// would leak the filter's columns into a second ExecuteAsync from the same builder.
+    /// The scan needs this to read the union of what a filter references and what the caller
+    /// projected, while keeping the projection itself intact for the trim afterwards. Building the
+    /// union by mutating the projection's own builder would leak the filter's columns into a second
+    /// execution from the same builder.
     /// </remarks>
     public FieldMaskBuilder Include(in FieldMask mask)
     {
@@ -279,9 +281,9 @@ public sealed class FieldMaskBuilder
         internal Level Child(int field)
         {
             // Linear scan, and the list stays sorted so Build needs no sort of its own. It costs
-            // the square of the field count, which is why it was measured rather than assumed: a
-            // projection of a thousand fields spends 0,12 ms here against 6,10 for the read that
-            // uses it, two per cent. A map would remove it and add a field to every level.
+            // the square of the field count, which stays negligible against the read it prepares
+            // even for a projection of a thousand fields; a map would remove it and add a field to
+            // every level.
             int i = 0;
             while (i < _fields.Count && _fields[i] < field)
             {

@@ -1,15 +1,3 @@
-// The running extreme over one decoded column - docs/12-index-reads.md §5.3, the last resolution
-// of MinAsync and MaxAsync: "a count-only decode over the live blocks with a running extreme: one
-// pass, one batch of memory".
-//
-// THE ANSWER IS A ROW, NOT A VALUE. The loop remembers where the best value sits and the caller
-// reads that one row as a FilterLiteral once the loop is done; nothing is copied per row, which is
-// what keeps a string column's minimum at one allocation per split rather than one per candidate.
-//
-// THE ORDER IS THE FILTER'S ORDER, docs/08-semantics.md §2: IEEE 754 for floats, so a NaN is never
-// the minimum nor the maximum -- it is skipped, exactly as the min / max statistics skip it -- and
-// -0.0 and 0.0 are equal, so whichever comes first stays. The total order of the row encoding
-// (docs/06-row-encoding.md §3), which does place NaN, is deliberately not used here.
 using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -19,7 +7,13 @@ using Vorticity.Types;
 
 namespace Vorticity.Compute;
 
-/// <summary>Finds the row holding a column's smallest or largest value.</summary>
+/// <summary>
+/// Finds the row holding a column's smallest or largest value. The answer is a row rather than a
+/// value, so a single pass copies nothing per candidate and the caller reads that one row when it
+/// is over. The order is the one a filter compares with: floats follow IEEE 754, so a NaN is
+/// neither the minimum nor the maximum and is skipped, and -0.0 and 0.0 tie so the first of them
+/// stays.
+/// </summary>
 internal static class Extremes
 {
     /// <summary>
@@ -62,7 +56,7 @@ internal static class Extremes
                 return Bytes(node, mask, rows, listed, wantMin, out bestRow);
 
             case CanonicalKind.Constant:
-                // Every row holds the same value, so every valid row IS the minimum and the
+                // Every row holds the same value, so every valid row is both the minimum and the
                 // maximum: the answer is the first one, and `wantMin` does not enter into it.
                 return FirstValid(mask, rows, listed, count, out bestRow);
 

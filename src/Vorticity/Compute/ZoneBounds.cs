@@ -1,35 +1,26 @@
-// What one zone of one column says about itself - docs/08-semantics.md §1 and §2.
-//
-// Copied OUT of the canonical arena on purpose. The zones are decoded once per scan, but the arena
-// they land in is reset at every batch boundary (ScanContext.ResetBatch), so anything the pruner
-// keeps has to stop being an arena index before the first batch runs. Per zone that is two values
-// and two counts, so the copy is measured in kilobytes for a file with thousands of zones.
-//
-// The bounds are held as FilterLiteral, the same tagged union a filter's constants use, so that
-// comparing a bound against a constant is the same code path as comparing a value against one, and
-// the signed/unsigned rules cannot drift between the two.
-//
-// PRECISION IS CARRIED, NOT ASSUMED. `vortex.bounded_min` and `vortex.bounded_max` are Inexact:
-// the true minimum is at or above the stored one, the true maximum at or below it. docs/08 §1 makes
-// that a conservative bound rather than an approximation, so range pruning stays legal while the
-// `min == max` equality shortcut does not -- and IsExact is what the pruner has to consult before
-// reaching for the latter.
 using System;
 using Vorticity.Expressions;
 
 namespace Vorticity.Compute;
 
-/// <summary>One column's summary of one zone.</summary>
+/// <summary>
+/// One column's summary of one zone, held as values rather than as indices into the arena the
+/// zones were decoded in: that arena is reset at every batch boundary, so a pruner that kept
+/// indices into it would be reading freed memory from the second batch on. The bounds are
+/// <see cref="FilterLiteral"/>s, the same tagged union a filter's constants use, so that comparing
+/// a bound against a constant runs the code that compares a value against one and the signed and
+/// unsigned rules cannot drift apart.
+/// </summary>
 internal readonly struct ZoneBounds
 {
     /// <summary>Nothing is known about this zone; every predicate must assume it may match.</summary>
     internal static ZoneBounds Unknown => default;
 
-    // THE COUNTS ARE INTS, AND THE STRUCT IS 64 BYTES BECAUSE OF IT. Two literals of 24 bytes, two
-    // counts and five flags fit one cache line exactly; two long counts would spill into 72 and
-    // cost eight more bytes per zone in the array PathAllocationTests holds. A zone is one batch
-    // of rows, so a count that does not fit an int is not a count this reader will ever meet, and
-    // Create treats one as "not recorded", which prunes and proves less and is never wrong.
+    // The counts are ints so the struct stays 64 bytes: two literals of 24 bytes, two counts and
+    // five flags fit one cache line exactly, where two long counts would spill past it and cost
+    // eight more bytes for every zone of the file. A zone is one batch of rows, so a count that
+    // does not fit an int is not a count this reader will ever meet, and Create treats one as
+    // "not recorded", which prunes and proves less and is never wrong.
     private readonly int _nullCount;
     private readonly int _nanCount;
 
@@ -49,9 +40,8 @@ internal readonly struct ZoneBounds
     }
 
     /// <summary>
-    /// How many of the zone's rows are NaN -- rows the bounds exclude (docs/08-semantics.md §2)
-    /// and no comparison ever selects, which is what a full-block proof has to know about them
-    /// (docs/12-index-reads.md §5.2).
+    /// How many of the zone's rows are NaN. The bounds exclude those rows and no comparison ever
+    /// selects one, so a proof that counts a whole block has to subtract them.
     /// </summary>
     internal long NanCount => _nanCount;
 
@@ -72,7 +62,11 @@ internal readonly struct ZoneBounds
 
     /// <summary>
     /// Whether the bounds are the true extremes rather than conservative ones. False for
-    /// <c>vortex.bounded_min</c> / <c>vortex.bounded_max</c>.
+    /// <c>vortex.bounded_min</c> / <c>vortex.bounded_max</c>, whose true minimum is at or above
+    /// the stored one and true maximum at or below it. A conservative bound still rules a range
+    /// out soundly, since it only widens the interval; what it does not license is the shortcut
+    /// that reads <c>min == max</c> as "the zone holds one value", so anything resting on equality
+    /// must consult this first.
     /// </summary>
     internal bool IsExact { get; }
 
@@ -96,7 +90,7 @@ internal readonly struct ZoneBounds
         FilterLiteral min, bool hasMin, FilterLiteral max, bool hasMax, bool exact,
         long nullCount, bool hasNullCount, long nanCount = 0, bool hasNanCount = false)
     {
-        // A count outside an int is not recorded: see the fields.
+        // A count that does not fit an int is taken as not recorded rather than truncated.
         bool nulls = hasNullCount && nullCount >= 0 && nullCount <= int.MaxValue;
         bool nans = hasNanCount && nanCount >= 0 && nanCount <= int.MaxValue;
         return new ZoneBounds(

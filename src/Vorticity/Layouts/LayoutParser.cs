@@ -1,10 +1,3 @@
-// The depth-first walk that flattens `table Layout` (spec/flatbuffers/layout.fbs) into a
-// LayoutTree, pushing dtypes down exactly as vortex-layout-0.86.1's `deserialize` /`child_dtype`
-// pairs do, and validating each encoding's arity where upstream validates it - plus the two places
-// PHASE1-CONTRACTS.md §11.3 asks us to be stricter than upstream:
-//
-//   * segment ids are bounds-checked HERE, at parse, not lazily at request time;
-//   * a vortex.stats data child must match the parent's row count, which upstream does not assert.
 using System;
 using System.Buffers.Binary;
 using System.Globalization;
@@ -16,11 +9,18 @@ using Vorticity.Types;
 
 namespace Vorticity.Layouts;
 
+/// <summary>
+/// The depth-first walk that flattens the serialized layout table into a <see cref="LayoutTree"/>,
+/// pushing dtypes down to the children and validating each encoding's arity. It is stricter than
+/// upstream in two places: segment ids are bounds-checked here, at parse time, rather than lazily
+/// when a segment is requested, and a <c>vortex.stats</c> data child must match the parent's row
+/// count.
+/// </summary>
 internal static class LayoutParser
 {
     internal static int ParseNode(LayoutTree.Builder b, in LayoutView view, DType dtype, int depth)
     {
-        // Semantic depth, counted separately from the FlatBuffers table depth (contract §1.5).
+        // Semantic depth, counted separately from the FlatBuffers table depth.
         VortexLimits.CheckDepth(depth, VortexLimits.MaxLayoutDepth, "layout");
 
         int index = b.NewRecord();
@@ -88,8 +88,8 @@ internal static class LayoutParser
 
             default:
                 // An unknown layout's children have no derivable dtypes, so they are not
-                // materialized. That is not an error here (contract §2.3): it becomes one only
-                // when a projection puts this node on the path to data, in LayoutReaderTable.Get.
+                // materialized. That is not an error here: it becomes one only when a projection
+                // puts this node on the path to data, in LayoutReaderTable.Get.
                 record.ChildCount = 0;
                 break;
         }
@@ -114,7 +114,7 @@ internal static class LayoutParser
 
     private static void ParseFlat(ReadOnlySpan<byte> metadata, int segmentCount, int childCount)
     {
-        // vortex-layout-0.86.1/src/layouts/flat/mod.rs deserialize: exactly one segment, no children.
+        // Exactly one segment, no children.
         if (segmentCount != 1)
         {
             LayoutsThrow.Arity("vortex.flat", "segment", segmentCount, 1);
@@ -125,8 +125,8 @@ internal static class LayoutParser
             LayoutsThrow.Arity("vortex.flat", "children", childCount, 0);
         }
 
-        // Parsed for validation only. Normally absent; when present it inlines the whole Array
-        // FlatBuffer (contract §11.3, corpus containers/flat_inline_array_node).
+        // Parsed for validation only. Normally absent; when present it inlines the whole array
+        // flatbuffer.
         FlatLayoutMetadata.Read(metadata);
     }
 
@@ -147,13 +147,10 @@ internal static class LayoutParser
             LayoutsThrow.Arity("vortex.chunked", "segment", segmentCount, 0);
         }
 
-        // UNTESTED: no fixture, and the 0.86.1 corpus cannot hold one. vortex-layout-0.86.1
-        // rejects non-empty chunked metadata outright, its Metadata being EmptyMetadata, so what
-        // would reopen this is a corpus from an upstream that writes the flag at all, not a
-        // fixture skipped from this one. layout.fbs's own comment and spec/METADATA.md describe a
-        // first-byte flag meaning "child 0 is the statistics table for the other chunks"; we read
-        // it, exclude that child from the chunk list, and let the offsets check below catch a
-        // wrong guess.
+        // No fixture exercises this branch, and none can be produced from an upstream that rejects
+        // non-empty chunked metadata outright. The schema describes a first-byte flag meaning
+        // "child 0 is the statistics table for the other chunks"; it is read here, that child is
+        // excluded from the chunk list, and the offsets check below catches a wrong guess.
         ChunkedLayoutMetadata chunked = ChunkedLayoutMetadata.Read(metadata);
 
         int firstChunk = chunked.HasStatsTable ? 1 : 0;
@@ -242,9 +239,8 @@ internal static class LayoutParser
 
         for (int i = 0; i < wireChildren; i++)
         {
-            // Serialized order: validity FIRST when the struct dtype is nullable, then the fields
-            // in dtype order. The validity child is Bool NON-nullable
-            // (vortex-layout-0.86.1/src/layouts/struct_/mod.rs slot_dtype).
+            // Serialized order: validity first when the struct dtype is nullable, then the fields
+            // in dtype order. The validity child is a non-nullable Bool.
             DType childType = nullable && i == 0
                 ? b.Types.Bool(Nullability.NonNullable)
                 : dtype.GetField(i - validityChildren);
@@ -296,8 +292,8 @@ internal static class LayoutParser
                 $"A vortex.dict layout's codes must be an integer physical type, not {dict.CodesPType.Name()}.");
         }
 
-        // Contract §10.5: absent `is_nullable_codes` falls back to the layout dtype's nullability,
-        // which is NOT the same as false.
+        // An absent `is_nullable_codes` falls back to the layout dtype's nullability, which is not
+        // the same as reading it as false.
         Nullability codesNullability = dict.IsNullableCodes switch
         {
             true => Nullability.Nullable,
@@ -310,9 +306,8 @@ internal static class LayoutParser
         record.ChildStart = b.ReserveChildren(2);
         record.ChildCount = 2;
 
-        // CHILD 0 IS VALUES AND CHILD 1 IS CODES - the opposite order from the vortex.dict ARRAY.
-        // vortex-layout-0.86.1/src/layouts/dict/mod.rs:
-        //   0 => Auxiliary("values"), 1 => Transparent("codes").
+        // Child 0 is the values and child 1 the codes, the opposite order from the vortex.dict
+        // array, whose child 0 is the codes.
         LayoutView values = view.GetChild(0);
         b.ChildIndices[record.ChildStart] = ParseNode(b, in values, dtype, depth + 1);
 
@@ -335,10 +330,10 @@ internal static class LayoutParser
     /// <c>vortex.list</c>: elements, offsets, and a validity child when the dtype is nullable.
     /// </summary>
     /// <remarks>
-    /// The children's dtypes are DERIVED rather than read, which is why an unknown layout cannot
+    /// The children's dtypes are derived rather than read, which is why an unknown layout cannot
     /// have children at all: the elements child takes the list's element dtype, the offsets child is
     /// a non-nullable primitive of the width the metadata names, and the validity child is a
-    /// non-nullable Bool. vortex-layout-0.86.1/src/layouts/list/mod.rs does exactly this.
+    /// non-nullable Bool.
     /// </remarks>
     private static void ParseList(
         LayoutTree.Builder b,
@@ -459,8 +454,8 @@ internal static class LayoutParser
             int zonesIndex = ParseNode(b, in zones, zonesType, depth + 1);
             b.ChildIndices[record.ChildStart + 1] = zonesIndex;
 
-            // nzones is the ZONES CHILD'S row count, not a function of zone_len: a consistent file
-            // has nzones == ceil(row_count / zone_len), and the reference does not enforce it.
+            // The zone count is the zones child's own row count and not a function of zone_len: a
+            // consistent file has ceil(row_count / zone_len) zones, but nothing enforces it.
             zoneCount = CheckedZoneCount(b.Records[zonesIndex].RowCount);
         }
 
@@ -493,10 +488,9 @@ internal static class LayoutParser
             LayoutsThrow.Arity("vortex.stats", "children", wireChildren, 2);
         }
 
-        // UNTESTED: no fixture exists in the 0.86.1 corpus (manifest skipped/layouts/vortex_stats);
-        // written against vortex-layout-0.86.1/src/layouts/zoned/{mod.rs,schema.rs}.
-        // LegacyStatsMetadata is NOT protobuf and has no version byte: u32 LE zone_len, then a raw
-        // stat bitset whose bit index is the Stat discriminant. A bare 4-byte metadata is valid.
+        // No fixture exercises this branch. The legacy stats metadata is not protobuf and carries
+        // no version byte: a little-endian u32 zone length, then a raw stat bitset whose bit index
+        // is the statistic's discriminant. A bare four-byte metadata is valid.
         if (metadata.Length < 4)
         {
             LayoutsThrow.Format(
@@ -518,7 +512,7 @@ internal static class LayoutParser
         b.ChildIndices[record.ChildStart] = dataIndex;
 
         // Upstream does not assert this for vortex.stats, only for vortex.zoned. Asserting it is
-        // free and a mismatch is meaningless (contract §11.3).
+        // free and a mismatch is meaningless.
         long dataRows = b.Records[dataIndex].RowCount;
         if (dataRows != record.RowCount)
         {
@@ -531,7 +525,7 @@ internal static class LayoutParser
 
         int zoneCount = CheckedZoneCount(b.Records[zonesIndex].RowCount);
 
-        // Structural only, per contract §2.7: the legacy zone map never enables pruning.
+        // Structural only: the legacy zone map never enables pruning.
         record.ZoneMapIndex = b.AddZoneMap(new ZoneMap(false, zoneCount, zoneLength, null, null));
     }
 

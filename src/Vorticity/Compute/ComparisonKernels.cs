@@ -1,18 +1,3 @@
-// Comparing one canonical column against one literal, row by row - docs/08-semantics.md §2 and §3.
-//
-// THE TWO RULES THAT ARE NOT NEGOTIABLE, both of them easy to get wrong by writing the obvious code:
-//
-//   * FLOATS FOLLOW IEEE 754. Every comparison involving NaN is false, `NaN == NaN` included, and
-//     `NaN != x` is false too -- it is not the negation of equality here. C#'s own operators already
-//     behave this way, so the kernels use them directly rather than reaching for CompareTo, which
-//     orders NaN and would quietly give the row-encoding's TOTAL order instead. docs/08 names that
-//     exact confusion as a correctness bug.
-//   * SIGNEDNESS IS NOT A DETAIL. A signed literal against an unsigned column is not a cast: `x > -1`
-//     on a u64 column is true for every row, and folding the two into one comparison makes it either
-//     always true or always false depending on which way the fold went, with the bug invisible below
-//     2^63. Both directions are resolved before the loop, by deciding the answer from the sign alone.
-//
-// Validity is the caller's: every kernel writes Unknown for a null row and never looks at its value.
 using System;
 using System.Numerics;
 using System.Buffers.Binary;
@@ -26,7 +11,20 @@ using Vorticity.Types;
 
 namespace Vorticity.Compute;
 
-/// <summary>Per-row comparison of a canonical column against a literal.</summary>
+/// <summary>
+/// Per-row comparison of a canonical column against a literal, under two rules that the obvious
+/// code gets wrong. Floats follow IEEE 754, so every comparison involving a NaN is false, including
+/// equality against itself and inequality against anything: the kernels use C#'s own operators and
+/// never a three-way <c>CompareTo</c>, which orders NaN and would answer with the row encoding's
+/// total order instead. Signedness is resolved before the loop rather than folded into a cast,
+/// because a negative literal against an unsigned column, or one above the signed maximum against a
+/// signed column, settles every row from the sign alone, while a cast would answer the opposite
+/// with nothing to show for it below the point where the two ranges part.
+/// </summary>
+/// <remarks>
+/// Validity belongs to the caller: every kernel writes unknown for a null row and never reads the
+/// value stored there.
+/// </remarks>
 internal static class ComparisonKernels
 {
     private const int ViewSize = 16;
@@ -54,8 +52,8 @@ internal static class ComparisonKernels
 
         if (literal.Kind == FilterLiteralKind.Null)
         {
-            // "A comparison with a null operand yields unknown" - for every row, whatever the
-            // column holds. IS NULL is the predicate that asks the question this one cannot.
+            // A comparison with a null operand yields unknown, for every row, whatever the column
+            // holds. The null check is the predicate that asks the question this one cannot.
             Trilean.Fill(destination, Trilean.Unknown);
             return;
         }
@@ -135,8 +133,8 @@ internal static class ComparisonKernels
             return;
         }
 
-        // The operator becomes a TYPE, as F-4c made it for the comparisons: the switch is asked once
-        // per column instead of once per row, and the BCL's vectorised search is what runs inside.
+        // The operator becomes a type argument: the switch is asked once per column instead of once
+        // per row, and the framework's vectorised search is what runs inside.
         ReadOnlySpan<byte> needle = pattern.BytesValue;
         switch (op)
         {
@@ -190,8 +188,8 @@ internal static class ComparisonKernels
         {
             if (!allValid && !mask.IsValid(i))
             {
-                // A null matches nothing and fails to match nothing: `unknown`, exactly as a
-                // comparison against it is (docs/08-semantics.md §3).
+                // A null matches nothing and fails to match nothing: unknown, exactly as a
+                // comparison against it is.
                 destination[i] = Trilean.Unknown;
                 continue;
             }
@@ -249,9 +247,9 @@ internal static class ComparisonKernels
         }
 
         // `x IN (a, b)` is `x = a OR x = b`, three-valued logic included: a null x is unknown
-        // against every candidate, so the OR stays unknown, and a null CANDIDATE makes that one
-        // comparison unknown rather than false. One pass per candidate is what that costs when the
-        // column or the candidates are not a set.
+        // against every candidate, so the disjunction stays unknown, and a candidate that is itself
+        // null makes that one comparison unknown rather than false. One pass per candidate is what
+        // that costs when the column or the candidates are not a set.
         Compare(arena, nodeIndex, ComparisonOp.Equal, literals[0], destination);
         for (int i = 1; i < literals.Length; i++)
         {
@@ -279,10 +277,10 @@ internal static class ComparisonKernels
         return signed || column.PType.IsUnsignedInteger();
     }
 
-    /// <summary>Evaluates <c>column IS [NOT] NULL</c>, which is never unknown.</summary>
+    /// <summary>Evaluates a column's null check, which is never unknown.</summary>
     /// <param name="arena">The arena.</param>
     /// <param name="nodeIndex">The column.</param>
-    /// <param name="isNull">Whether the predicate is <c>IS NULL</c>.</param>
+    /// <param name="isNull">Whether the predicate asks for null rather than for not null.</param>
     /// <param name="destination">One state per row.</param>
     internal static void NullCheck(
         CanonicalArena arena, int nodeIndex, bool isNull, Span<byte> destination)
@@ -316,21 +314,20 @@ internal static class ComparisonKernels
         }
     }
 
-    /// <summary>Compares a constant column, which is ONE comparison and then a fill.</summary>
+    /// <summary>Compares a constant column, which is one comparison and then a fill.</summary>
     /// <remarks>
     /// <para>
-    /// The whole point of the constant form (PERF-AUDIT-v2.md Z1b): every row holds the same value,
-    /// so every row has the same answer, and the per-row loop the other kernels run collapses to a
-    /// memset. The comparison itself goes through <see cref="ComparePrimitiveValues"/>, the kernel
-    /// that would have run anyway, so the NaN and signedness rules at the top of this file are
-    /// applied by the one piece of code that implements them rather than restated here.
+    /// The whole point of the constant form: every row holds the same value, so every row has the
+    /// same answer, and the per-row loop the other kernels run collapses to a fill. The comparison
+    /// itself goes through <see cref="ComparePrimitiveValues"/>, the kernel that would have run
+    /// anyway, so the rules on NaN and on signedness are applied by the one piece of code that
+    /// implements them rather than restated here.
     /// </para>
     /// <para>
-    /// IT READS THE ELEMENT IN PLACE, and the first version did not: it built a one-row arena node
-    /// so the kernel could take a node like every other caller. That node is a record, a record is
-    /// appended per filter evaluation, and a selective filter evaluates once per BLOCK -- which
-    /// `PathAllocationTests` priced at 25 kB on a single read path. Memoizing it instead only moved
-    /// the cost, to four bytes on every record in the arena. The element was always just bytes.
+    /// The element is read in place. Wrapping it in a one-row arena node, so the kernel could take
+    /// a node like every other caller, appends a record per filter evaluation, and a selective
+    /// filter evaluates once per block: that is real memory on a single read path. Memoizing the
+    /// node only moves the cost, onto every record in the arena. The element was always just bytes.
     /// </para>
     /// </remarks>
     private static void CompareConstant(
@@ -350,8 +347,8 @@ internal static class ComparisonKernels
         {
             case DTypeKind.Primitive:
             {
-                // One row, and an ALL-VALID mask for it: the answer wanted here is what the VALUE
-                // says, and whether a given row is null is applied below, over the rows this fills.
+                // One row, and an all-valid mask for it: what is wanted here is the answer the value
+                // gives, and whether a given row is null is applied below, over the rows this fills.
                 Span<byte> one = stackalloc byte[1];
                 ComparePrimitiveValues(
                     dtype.PType, node.ConstantElement, ValidityMask.From(arena, Validity.AllValid),
@@ -416,11 +413,11 @@ internal static class ComparisonKernels
         ReadOnlySpan<byte> bits = node.Bits.Span;
         int offset = node.BitOffset;
 
-        // PERF-AUDIT-v2.md F-4c. A bool column has exactly TWO possible answers once the operator
-        // and the literal are fixed, so the whole per-row decision -- `CompareTo`, the `switch` on
-        // the operator, `Trilean.From` -- collapses to picking one of two bytes. It was costing
-        // 4,45x an i64 `<` on the same row count (F-10), which is upside down for one bit per row
-        // against eight bytes per row; the ratio was the dispatch, not the data.
+        // A bool column has exactly two possible answers once the operator and the literal are
+        // fixed, so the whole per-row decision -- `CompareTo`, the `switch` on the operator,
+        // `Trilean.From` -- collapses to picking one of two bytes. Left per row, that dispatch
+        // costs more than comparing eight bytes of an integer column does, which is upside down
+        // for one bit per row.
         byte whenTrue = Trilean.From(true, Apply(op, true.CompareTo(wanted)));
         byte whenFalse = Trilean.From(true, Apply(op, false.CompareTo(wanted)));
 
@@ -490,13 +487,12 @@ internal static class ComparisonKernels
     }
 
     /// <summary>
-    /// The primitive comparison over the VALUES, without a node: one state per row of
+    /// The primitive comparison over the values, without a node: one state per row of
     /// <paramref name="destination"/>, read from the first bytes of <paramref name="values"/>.
     /// </summary>
     /// <remarks>
     /// Split out so the constant form can reach it. A constant column's element is a one-row values
-    /// buffer and nothing more, so it wants exactly this and not an arena node built to carry it --
-    /// see <see cref="CompareConstant"/> for what that node cost.
+    /// buffer and nothing more, so it wants exactly this and not an arena node built to carry it.
     /// </remarks>
     private static void ComparePrimitiveValues(
         PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op,
@@ -521,17 +517,16 @@ internal static class ComparisonKernels
         PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op, double wanted,
         Span<byte> destination)
     {
-        // PERF-AUDIT-v2.md F-4c, and the same defect as the bool kernel had: TWO switches per row,
-        // one on the physical type to read the value and one on the operator to compare it. The
-        // integer path has resolved both before the loop since the v1 -- `CompareOp` picks the
-        // operator as a TYPE and `CompareCore` monomorphises on the value type -- and this kernel
-        // simply never joined it.
+        // The two per-row switches -- one on the physical type to read the value, one on the
+        // operator to compare it -- are resolved before the loop, as they are on the integer path:
+        // `CompareOp` picks the operator as a type and `CompareCore` monomorphises on the value
+        // type.
         //
-        // IEEE 754 SURVIVES THE MOVE, which is the only thing that had to be checked: `IOrderOp`
-        // is written with C#'s own operators, so every comparison against NaN stays false,
-        // NotEqual included. What would break the rule is `CompareTo`, which orders NaN and would
-        // give the row encoding's TOTAL order (docs/08-semantics.md §2) -- and nothing here calls
-        // it. Widening a `Half` or a `float` to `double` is exact, so the answers are unchanged.
+        // IEEE 754 survives that move, which is the thing to watch: `IOrderOp` is written with C#'s
+        // own operators, so every comparison against NaN stays false, inequality included. What
+        // would break the rule is `CompareTo`, which orders NaN and would give the row encoding's
+        // total order -- and nothing here calls it. Widening a `Half` or a `float` to `double` is
+        // exact, so the answers are unchanged.
         ReadOnlySpan<byte> bytes = values;
         switch (ptype)
         {
@@ -643,14 +638,14 @@ internal static class ComparisonKernels
     }
 
     /// <summary>
-    /// Resolves the OPERATOR out of the loop and calls the typed comparison.
+    /// Resolves the operator out of the loop and calls the typed comparison.
     /// </summary>
     /// <typeparam name="TValue">The column's own element type.</typeparam>
     /// <typeparam name="TWide">
     /// The type the comparison happens in: <see cref="long"/> for a signed column,
     /// <see cref="ulong"/> for an unsigned one. Widening one element is free; what it buys is that
-    /// the literal is compared in a type that can hold it, which is the signedness rule this file
-    /// opens with.
+    /// the literal is compared in a type that can hold it, which is the signedness rule every
+    /// kernel here follows.
     /// </typeparam>
     private static void CompareOp<TValue, TWide>(
         ReadOnlySpan<byte> bytes, ValidityMask mask, ComparisonOp op, TWide wanted,
@@ -684,25 +679,24 @@ internal static class ComparisonKernels
     /// <summary>The comparison loop, with the type, the operator and the validity all resolved.</summary>
     /// <remarks>
     /// <para>
-    /// WHAT THIS REPLACES. The loop asked three questions per row that are properties of the CALL:
-    /// which physical type is this column (through <c>ReadInteger</c>'s switch), is this row valid
-    /// (through <c>ValidityMask.IsValid</c>'s switch on the validity kind), and which operator is
-    /// this (through <c>Apply</c>'s switch on an <c>int</c> ordering it had to compute first).
-    /// Hoisting all three was measured twice at 6.0x -- 97.2 us to 16.1 us on 65 536 rows of
-    /// <c>i64 &lt; literal</c> -- and never applied.
+    /// Three questions that are properties of the call rather than of the row are answered before
+    /// the loop runs: which physical type the column has, whether a row is valid, and which
+    /// operator is being applied. Asked per row -- a switch to read the value, a switch on the
+    /// validity kind, a switch on an ordering that had to be computed first -- they cost several
+    /// times the comparison itself.
     /// </para>
     /// <para>
-    /// The operator arrives as a struct with a static abstract member, which the JIT devirtualizes
-    /// and inlines for a value-type instantiation, so the body is one compare and one store. The
-    /// ORDERING is gone too: <c>Apply</c> needed a three-way <c>CompareTo</c> before it could ask a
-    /// two-way question.
+    /// The operator arrives as a struct with a static abstract member, which the runtime
+    /// devirtualizes and inlines for a value-type instantiation, so the body is one compare and one
+    /// store. The three-way ordering goes with it: a two-way question needs no <c>CompareTo</c>.
     /// </para>
     /// <para>
-    /// Still a byte per row, deliberately. bench/SIMD.md measured a <c>Vector128</c> version of this
-    /// loop 1.8x SLOWER and named the cause: the <see cref="Trilean"/> output is one byte per row,
-    /// so a vectorized compare has to narrow its mask back down to bytes and the narrowing costs
-    /// more than the compare saves. That is a statement about the OUTPUT representation, not about
-    /// vectorizing comparisons, and it stands until Trilean becomes two bitmaps.
+    /// Still a byte per row, deliberately. A <c>Vector128</c> form of this loop is slower than the
+    /// scalar one, and the cause is the output: a <see cref="Trilean"/> is one byte per row, so a
+    /// vectorized compare has to narrow its mask back down to bytes, and the narrowing costs more
+    /// than the compare saves. That is a statement about the output representation rather than
+    /// about vectorizing comparisons, and it would not hold if a trilean were carried as two
+    /// bitmaps.
     /// </para>
     /// </remarks>
     private static void CompareCore<TValue, TWide, TOp>(
@@ -739,16 +733,14 @@ internal static class ComparisonKernels
     /// <param name="wanted">The literal, widened once by the caller.</param>
     /// <param name="destination">One <see cref="Trilean"/> per row.</param>
     /// <remarks>
-    /// PERF-AUDIT-v2.md F12, and the number that opened it is BENCH-AUDIT.md B27: the same column,
-    /// operator and literal cost **48,30 µs nullable against 15,48 all-valid** -- 3,11x -- and F11's
-    /// disassembly says where it goes. The all-valid loop is already seven instructions and a `cset`
-    /// with no jump but its own back-edge, so ALL of that 3,11x is validity resolution:
-    /// `mask.IsValid(i)` recomputed the byte index, the mask and the bounds check for every row,
-    /// then branched on the bit.
+    /// The same column, operator and literal cost several times more nullable than all-valid, and
+    /// the whole of that gap is validity resolution: the all-valid loop is already a handful of
+    /// instructions with no jump, while asking the mask row by row recomputes the byte index, the
+    /// bit mask and the bounds check for every row before branching on the bit.
     /// <para>
-    /// This reads the byte ONCE for eight rows, exactly as <c>ExpandBits</c> has done for
-    /// <c>CompareBool</c> since F-4c. The inner eight are straight-line: shift, test, select. The
-    /// comparison itself is untouched -- it was never the cost.
+    /// This reads the byte once for eight rows, exactly as <c>ExpandBits</c> does for
+    /// <c>CompareBool</c>. The inner eight are straight-line: shift, test, select. The comparison
+    /// itself is untouched -- it was never the cost.
     /// </para>
     /// <para>
     /// The lead-in walks single rows until the bit cursor is byte-aligned, because a mask carries a
@@ -786,14 +778,13 @@ internal static class ComparisonKernels
 
             for (int k = 0; k < 8; k++)
             {
-                // THE COMPARISON STAYS INSIDE THE VALIDITY TEST, and that is a measured decision.
-                // Hoisting it out -- computing the result for every row and selecting afterwards --
-                // is the branchless form F11 went looking for, and it is the one site in these
-                // kernels where it applies: the index is in range whatever the bit says, since
-                // validity governs a value's MEANING and not its existence. Measured: **63,75 µs
-                // against 42,41**, +50 %. Running the comparison for the quarter of rows that are
-                // null costs more than the jump it removes, and R28 learned the same shape on
-                // `Utf8.IsValid`. The remedy for a branch must be cheaper than the branch.
+                // The comparison stays inside the validity test on purpose. Hoisting it out --
+                // computing the result for every row and selecting afterwards -- is the branchless
+                // form, and this is the one site in these kernels where it would be legal, since
+                // the index is in range whatever the bit says: validity governs a value's meaning,
+                // not its existence. It is also half again slower, because running the comparison
+                // for the null rows costs more than the jump it removes. The remedy for a branch
+                // must be cheaper than the branch.
                 destination[i + k] = (block & (1 << k)) != 0
                     ? (TOp.Holds(TWide.CreateTruncating(values[i + k]), wanted)
                         ? Trilean.True
@@ -924,10 +915,10 @@ internal static class ComparisonKernels
             throw Mismatch("utf8 or binary", literal.Kind);
         }
 
-        // PERF-AUDIT-v2.md F-4c, third of the three: the operator becomes a TYPE, the validity
-        // question is asked once, and the views span is taken once instead of through a property
-        // on every row. `Apply(op, order)` is exactly `TOp.Holds(order, 0)`, so the operator
-        // semantics are the ones already written down rather than a second copy of them.
+        // The operator becomes a type, the validity question is asked once, and the views span is
+        // taken once instead of through a property on every row. `Apply(op, order)` is exactly
+        // `TOp.Holds(order, 0)`, so the operator semantics are the ones already written down
+        // rather than a second copy of them.
         ReadOnlySpan<byte> wanted = literal.BytesValue;
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
         if (mask.AllInvalid)
@@ -963,7 +954,7 @@ internal static class ComparisonKernels
     /// <remarks>
     /// Ordinal byte order, which for utf8 is also code-point order: UTF-8 is designed so that
     /// memcmp of the encoded bytes equals comparison of the code points. Never a culture-aware
-    /// string comparison (docs/03-architecture.md §1).
+    /// string comparison.
     /// </remarks>
     private static void BytesCore<TOp>(
         CanonicalNode node, ValidityMask mask, ReadOnlySpan<byte> wanted, Span<byte> destination)
@@ -1003,7 +994,7 @@ internal static class ComparisonKernels
     }
 
     /// <summary>
-    /// Fills every non-null row with the answer implied by a comparison whose ORDER is already
+    /// Fills every non-null row with the answer implied by a comparison whose order is already
     /// known, for the cases where the literal is out of the column's range entirely.
     /// </summary>
     /// <param name="mask">Row validity.</param>

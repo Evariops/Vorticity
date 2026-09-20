@@ -1,21 +1,3 @@
-// The file open path. Transcribed from vortex-file-0.86.1/src/open.rs (`read_footer`),
-// src/footer/deserializer.rs (`parse_postscript`, `deserialize`, `checked_segment_slice`),
-// src/footer/postscript.rs and src/footer/mod.rs (`from_flatbuffer`,
-// `validate_segments_within_file`).
-//
-// THE ROUND-TRIP GUARANTEE (docs/02-format.md §1, PHASE1-CONTRACTS.md §7.1). One length probe, one
-// 65535-byte tail read, and at most one more read:
-//
-//   * 65535 = MAX_POSTSCRIPT_SIZE + EOF_SIZE, so the tail ALWAYS covers the postscript by
-//     construction - there is no file for which locating the footer needs a second read;
-//   * only a dtype / layout / statistics / footer segment that starts before the tail window costs
-//     the second read, and it is issued once, for the whole gap, and prepended;
-//   * supplying a DType removes the dtype segment from that decision entirely, which is the whole
-//     point of VortexOpenOptions.DType;
-//   * user metadata segment offsets are never part of it: metadata values are lazy.
-//
-// Measured over all 819 golden corpus files, zero need the second read. The synthetic file in
-// VortexFileRoundTripTests is the one that does, and an instrumented ISegmentSource counts both.
 using System;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
@@ -37,9 +19,20 @@ namespace Vorticity.File;
 /// An open Vortex file: schema, row count, footer dictionaries and the root layout.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Immutable after open and therefore thread-safe: concurrent scans on one open file are supported
-/// and expected (docs/09-contracts.md §1). The file holds the tail buffer for its whole life
-/// because <see cref="SegmentSpecs"/> points into it.
+/// and expected. The file holds the tail buffer for its whole life because
+/// <see cref="SegmentSpecs"/> points into it.
+/// </para>
+/// <para>
+/// Opening costs a length probe, one read of the file's last 65535 bytes, and at most one further
+/// read. The tail size is chosen so that it always covers the postscript, whatever the file, so
+/// locating the footer never needs a second read. Only a dtype, layout, statistics or footer
+/// segment that begins before that window costs one, and it is issued once, for the whole gap, and
+/// prepended to the window. Supplying a DType through <see cref="VortexOpenOptions.DType"/> takes
+/// the dtype segment out of that decision, which is what makes it a saving. User metadata segments
+/// never enter it, because metadata values are read lazily.
+/// </para>
 /// </remarks>
 public sealed partial class VortexFile : IAsyncDisposable
 {
@@ -133,8 +126,8 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     /// <summary>
     /// What an open does after the tail: the store token of a file opened from a path for its
-    /// fragments (13 §7), the binding of a file without an identity, taken now; then the index directory when
-    /// the options preload it (11 §6.3).
+    /// fragments, which is what binds a file that carries no identity and has to be taken now; then
+    /// the index directory when the options preload it.
     /// </summary>
     private static async ValueTask<VortexFile> FinishOpenAsync(
         ValueTask<VortexFile> open, string? tokenPath, bool preload, CancellationToken cancellationToken)
@@ -180,7 +173,7 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     /// <summary>
     /// Opens the file, or, when its tail does not parse and the policy allows it, the last whole
-    /// version before the tear (13 §12). The source is disposed on failure when the file would own it.
+    /// version before the tear. The source is disposed on failure when the file would own it.
     /// </summary>
     private static async ValueTask<VortexFile> OpenCoreAsync(
         ISegmentSource source, VortexOpenOptions options, bool ownsSource, CancellationToken cancellationToken)
@@ -280,10 +273,9 @@ public sealed partial class VortexFile : IAsyncDisposable
 
             PostscriptInfo postscript = ParsePostscript(tail.Buffer.Span, tailOffset, fileLength, options);
 
-            // The second-read rule of PHASE1-CONTRACTS.md §7.1, verbatim in effect from
-            // deserializer.rs. Bounded at one extension by construction, but written as a loop and
-            // asserted, because "exactly one suffices" is a claim about the arithmetic and not
-            // about the file.
+            // The window is extended at most once, which the arithmetic guarantees; the check after
+            // the extension stays because "one suffices" is a claim about that arithmetic and not
+            // about the file, and a file may say anything.
             long required = RequiredOffset(in postscript, tailOffset);
             if (required < tailOffset)
             {
@@ -348,8 +340,7 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     private static int InitialReadSize(int configured, long fileLength)
     {
-        // "The effective size is min(max(configured, 65535), fileLength); a caller may raise it,
-        // never lower it." PHASE1-CONTRACTS.md §7.1.
+        // A caller may raise the initial read size, never lower it, and it is capped at the file.
         int wanted = Math.Max(configured, VortexFileFormat.InitialReadSize);
         return fileLength < wanted ? (int)fileLength : wanted;
     }
@@ -411,9 +402,8 @@ public sealed partial class VortexFile : IAsyncDisposable
     }
 
     /// <summary>
-    /// PHASE1-CONTRACTS.md §7.3: the EOF marker and the postscript, checked in this order. The
-    /// order is the point - <c>postscript_length</c> is used to slice, so every check that could
-    /// reject it runs first.
+    /// The EOF marker and the postscript, checked in this order. The order is the point:
+    /// <c>postscript_length</c> slices the buffer, so every check that could reject it runs first.
     /// </summary>
     private static PostscriptInfo ParsePostscript(
         ReadOnlySpan<byte> window, long windowOffset, long fileLength, VortexOpenOptions options)
@@ -442,7 +432,7 @@ public sealed partial class VortexFile : IAsyncDisposable
             FileThrow.UnsupportedVersion(version);
         }
 
-        // 4. The declared length, bounded by the format before it is used to slice. Upstream only
+        // 4. The declared length, bounded by the format before it slices anything. Upstream only
         //    checks that the buffer is long enough; catching an over-large length here is cheaper
         //    than discovering it as a short buffer, and is strictly stronger.
         int postscriptLength = BinaryPrimitives.ReadUInt16LittleEndian(
@@ -472,9 +462,9 @@ public sealed partial class VortexFile : IAsyncDisposable
         ReadOnlySpan<byte> postscriptBytes = window.Slice(eof - postscriptLength, postscriptLength);
 
         // 6. The FlatBuffer itself. PostscriptView.Root validates the whole user-metadata vector
-        //    eagerly - at most 16 entries, every key present, non-empty, <= 64 UTF-8 BYTES, no two
-        //    equal - before any of it can be read (spec/flatbuffers/footer.fbs; upstream's own
-        //    test uses repeated "é" to prove the limit is bytes and not characters).
+        //    eagerly - at most 16 entries, every key present, non-empty, no two equal, and no
+        //    longer than 64 bytes, a limit on encoded bytes and not on characters - before any of
+        //    it can be read.
         int tableBudget = VortexLimits.MaxFlatBufferTables;
         PostscriptView view = PostscriptView.Root(postscriptBytes, ref tableBudget);
 
@@ -496,16 +486,16 @@ public sealed partial class VortexFile : IAsyncDisposable
             info.StatisticsSegment = view.Statistics.ToSegmentSpec();
         }
 
-        // PHASE1-CONTRACTS.md §7.4 row 4: no embedded DType and none supplied is malformed, and
-        // upstream raises it here, before any offset arithmetic.
+        // No embedded DType and none supplied is malformed, and it is raised here, before any
+        // offset arithmetic.
         bool supplied = !options.DType.IsDefault;
         if (!info.HasDType && !supplied)
         {
             FileThrow.MissingDType();
         }
 
-        // Row 2 of the same table: a supplied DType WINS. The segment is never read, never parsed,
-        // and is excluded from the second-read decision - that is what makes it an I/O saving.
+        // A supplied DType wins over the embedded one. The segment is then never read, never parsed,
+        // and excluded from the second-read decision, which is what makes it a saving.
         info.NeedsDTypeSegment = info.HasDType && !supplied;
 
         int metadataCount = view.MetadataCount;
@@ -521,17 +511,13 @@ public sealed partial class VortexFile : IAsyncDisposable
             info.MetadataSegments[i] = entry.Segment.ToSegmentSpec();
         }
 
-        // Range-check every postscript segment before any of them is used to slice.
+        // Range-check every postscript segment before any of them slices the window.
         //
-        // PHASE1-CONTRACTS.md §7.3 check 11 asks for an offset-alignment check on ALL of them,
-        // calling it "free and strictly stronger" than upstream's metadata-only check. Measured
-        // over the corpus it is neither: the postscript's four segments all declare
-        // alignment_exponent 3 and their offsets are routinely NOT 8-aligned - 687 of 819 dtype
-        // segments, 578 layout, 383 statistics, 548 footer. Applying it there rejects every real
-        // file. It IS applied where it holds and where memory safety depends on it: the footer's
-        // segment_specs (all 2236 in the corpus are aligned to their own exponent, and buffers are
-        // cast out of them) and the metadata segments, which is exactly upstream's rule
-        // (vortex-file-0.86.1/src/footer/deserializer.rs). Reported as a contract defect.
+        // Offset alignment is deliberately not checked here. The postscript's four segments all
+        // declare an alignment exponent of 3 while their offsets are routinely unaligned in files
+        // real writers produce, so enforcing it would reject almost everything. It is enforced
+        // where it does hold and where memory safety depends on it: the footer's segment_specs,
+        // out of which buffers are cast, and the metadata segments.
         CheckSegmentRange(in info.LayoutSegment, fileLength, "Layout segment", -1);
         CheckSegmentRange(in info.FooterSegment, fileLength, "Footer segment", -1);
         if (info.HasDType)
@@ -559,8 +545,8 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     private static void CheckSegmentRange(in SegmentSpec spec, long fileLength, string what, int index)
     {
-        // The exponent is validated for every segment without exception: it is cast into a shift
-        // later and PHASE1-CONTRACTS.md §0a C4 forbids a local cap.
+        // The exponent is validated for every segment without exception, because it is later cast
+        // into a shift; the bound belongs with the other resource limits, not in a local cap here.
         VortexLimits.CheckAlignmentExponent(spec.AlignmentExponent);
 
         ulong end = spec.End;
@@ -637,10 +623,9 @@ public sealed partial class VortexFile : IAsyncDisposable
         int footerBudget = VortexLimits.MaxFlatBufferTables;
         FooterView footer = FooterView.Root(footerBytes, ref footerBudget);
 
-        // Resolving every declared id at open is PHASE1-CONTRACTS.md §2.3: an id we do not
-        // implement maps to Unknown and THAT IS NOT AN ERROR here. The writer pre-populates
-        // array_specs with every id its editions permit, so unused and unresolvable entries are
-        // routine (40 declared against 36 serialized across the golden corpus).
+        // Every declared id is resolved at open, and one this library does not implement maps to
+        // Unknown rather than failing: a writer pre-populates array_specs with every id its
+        // editions permit, so entries nothing in the file uses are routine.
         int arrayCount = footer.ArraySpecCount;
         ArrayEncodingId[] arrayEncodings =
             arrayCount == 0 ? Array.Empty<ArrayEncodingId>() : new ArrayEncodingId[arrayCount];
@@ -665,8 +650,7 @@ public sealed partial class VortexFile : IAsyncDisposable
             layoutEncodingIds[i] = IdLocation.Of(window, id);
         }
 
-        // Absent segment_specs is an error, unlike every other footer vector: upstream
-        // "FileLayout missing segment specs" (vortex-file-0.86.1/src/footer/mod.rs).
+        // Absent segment_specs is an error, unlike every other footer vector.
         ReadOnlySpan<SegmentSpec> specs = footer.SegmentSpecs;
         ValidateSegmentSpecs(specs, fileLength);
 
@@ -686,9 +670,8 @@ public sealed partial class VortexFile : IAsyncDisposable
             FileThrow.RowCountTooLarge(wireRowCount);
         }
 
-        // Copied, not borrowed. Upstream copies the layout bytes too (FlatBuffer::copy_from in
-        // deserializer.rs) and it costs one bounded allocation at open in exchange for a
-        // ReadOnlyMemory the layouts component can hold without a MemoryManager over native memory.
+        // Copied, not borrowed: one bounded allocation at open buys a ReadOnlyMemory the layouts
+        // component can hold without wrapping native memory in a MemoryManager.
         byte[] rootLayoutBytes = layoutBytes.ToArray();
 
         // --- file statistics
@@ -734,8 +717,8 @@ public sealed partial class VortexFile : IAsyncDisposable
         {
             ref readonly SegmentSpec spec = ref specs[i];
 
-            // Non-decreasing, with `<=`, precisely because zero-length segments are legal
-            // (vortex-file-0.86.1/src/footer/mod.rs: "this assertion is `<=`").
+            // Non-decreasing rather than increasing, precisely because zero-length segments are
+            // legal and two of them share an offset.
             if (i > 0 && spec.Offset < previous)
             {
                 FileThrow.SegmentsOutOfOrder(i, previous, spec.Offset);
@@ -830,10 +813,9 @@ public sealed partial class VortexFile : IAsyncDisposable
         int budget = VortexLimits.MaxFlatBufferTables;
         FileStatisticsView view = FileStatisticsView.Root(bytes, ref budget);
 
-        // vortex-file-0.86.1/src/footer/file_statistics.rs: a struct root needs exactly one entry
-        // per TOP-LEVEL field (shallow - a nested struct gets one entry, its own fields none), and
-        // any other root needs exactly one. An absent field_stats vector is therefore an error for
-        // everything except a zero-field struct.
+        // A struct root needs exactly one entry per top-level field, shallow: a nested struct gets
+        // one entry and its own fields none. Any other root needs exactly one. An absent
+        // field_stats vector is therefore an error for everything except a zero-field struct.
         bool isStruct = schema.Kind == DTypeKind.Struct;
         int expected = isStruct ? schema.FieldCount : 1;
         int actual = view.FieldStatsCount;
@@ -862,10 +844,9 @@ public sealed partial class VortexFile : IAsyncDisposable
     private static FieldStatistics ReadFieldStatistics(
         ArrayStatsView stats, DType fieldDType, DType sumDType, DTypeArena types, ScalarStore scalars)
     {
-        // Stat::dtype(array_dtype) in vortex-array-0.86.1/src/expr/stats/mod.rs returns None for
-        // min/max on a Null column and for sum on anything that is not bool/primitive/decimal;
-        // upstream then skips the statistic entirely. The boolean and u64 statistics are read
-        // straight off the FlatBuffer and are not gated on any dtype.
+        // A statistic with no DType of its own is skipped entirely, which is the case for min and
+        // max on a Null column and for sum on anything that is not bool, primitive or decimal. The
+        // boolean and u64 statistics are read straight off the FlatBuffer and are gated on nothing.
         bool minMaxTyped = fieldDType.Kind != DTypeKind.Null;
 
         ScalarValue min = default;
@@ -939,10 +920,9 @@ public sealed partial class VortexFile : IAsyncDisposable
     }
 
     /// <summary>
-    /// The DType a <c>sum</c> statistic is typed against, from
-    /// vortex-array-0.86.1/src/aggregate_fn/fns/sum/mod.rs <c>return_dtype</c>. Every result is
-    /// nullable because an overflowing sum is recorded as null. <c>default</c> means the field has
-    /// no summable DType and the statistic is skipped.
+    /// The DType a <c>sum</c> statistic is typed against, which is the field's widened. Every
+    /// result is nullable because an overflowing sum is recorded as null. <c>default</c> means the
+    /// field has no summable DType and the statistic is skipped.
     /// </summary>
     private static DType SumDType(DType fieldDType, DTypeArena types)
     {
@@ -972,8 +952,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     // -------------------------------------------------------------------------- public surface
 
     /// <summary>
-    /// The file's root DType. It may be <em>any</em> DType, not necessarily a struct
-    /// (docs/02-format.md §4, docs/07-dotnet-mapping.md §5).
+    /// The file's root DType. It may be <em>any</em> DType, not necessarily a struct.
     /// </summary>
     public DType Schema => _schema;
 
@@ -982,10 +961,9 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE TREE IS A FUNCTION OF THE FILE AND NOTHING ELSE, so re-parsing it per
-    /// <c>ScanBuilder.ExecuteAsync</c> re-derived the same immutable object from the same
-    /// immutable bytes. A caller that scans one open file repeatedly - which
-    /// docs/09-contracts.md §1 exists to permit - paid for that every time.
+    /// The tree is a function of the file and of nothing else, so parsing it once per open file
+    /// rather than once per scan costs nothing in correctness and saves the whole parse for a
+    /// caller that scans the same open file repeatedly, which is a supported way to use it.
     /// </para>
     /// <para>
     /// The race is benign and deliberately left unlocked: two scans starting at once may both
@@ -1027,8 +1005,8 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// Sixteen bytes every postscript this library writes carries, minted anew by every write,
-    /// append and post-hoc indexing (docs/13-dataset.md §7), read from the tail the open already
-    /// read. A file written by another writer has none. An index or a dataset bound to a file
+    /// append and post-hoc indexing, read from the tail the open already read. A file written by
+    /// another writer has none. An index or a dataset bound to a file
     /// compares it, and never the file's content, to prove it describes these bytes.
     /// <para>
     /// Computed from the retained tail on every call, so a file that is never asked costs nothing
@@ -1085,7 +1063,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <summary>
     /// The resolved array encoding for a <c>u16</c> <c>ArrayNode.encoding</c> index.
     /// <see cref="ArrayEncodingId.Unknown"/> for an id this library does not decode, which is not
-    /// an error until a projected column actually needs it (PHASE1-CONTRACTS.md §2.3).
+    /// an error until a projected column actually needs it.
     /// </summary>
     /// <param name="specIndex">The index carried by the array node.</param>
     /// <returns>The resolved id.</returns>
@@ -1243,9 +1221,9 @@ public sealed partial class VortexFile : IAsyncDisposable
     }
 
     /// <summary>
-    /// Reads one user metadata value. Metadata values are lazy (docs/02-format.md §2): this issues
-    /// a targeted read unless the initial tail already covered the segment, in which case it hands
-    /// back a view into the tail buffer and performs no I/O at all.
+    /// Reads one user metadata value. Metadata values are lazy: this issues a targeted read unless
+    /// the initial tail already covered the segment, in which case it hands back a view into the
+    /// tail buffer and performs no reading at all.
     /// </summary>
     /// <param name="index">0-based index, below <see cref="MetadataCount"/>.</param>
     /// <param name="cancellationToken">Cancels the read.</param>

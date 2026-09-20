@@ -1,11 +1,3 @@
-// A half-open row interval. It lives in the root Vorticity namespace, not in Vorticity.File,
-// because PHASE1-CONTRACTS.md §11.1 and §15.5 place it "in Vorticity" so that both the layout
-// readers (Vorticity.Layouts) and the scan (Vorticity.Scan) see it: C# name lookup walks the
-// enclosing namespaces, so a type in `Vorticity` needs no `using` in either of them, while one
-// in `Vorticity.File` would need one in every consumer.
-//
-// long, not int, and not System.Range: docs/03-architecture.md §3.4 - a Vortex file may hold more
-// rows than an int can address, and System.Range is int-based with no long counterpart.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
@@ -14,14 +6,16 @@ using System.Runtime.CompilerServices;
 namespace Vorticity;
 
 /// <summary>
-/// A half-open range of rows, <c>[Start, End)</c>.
+/// A half-open range of rows, <c>[Start, End)</c>. It sits in the root namespace, rather than
+/// beside the file reader, so that the layout readers and the scan both see it without a
+/// <c>using</c>. Bounds are <see cref="long"/> because a file may hold more rows than an
+/// <see cref="int"/> can address, which also rules out <see cref="System.Range"/>.
 /// </summary>
 /// <remarks>
-/// Row ranges handed to a layout reader are <em>local to the receiving node</em>: 0-based within
-/// that node's rows, translated by each reader for its children
-/// (PHASE1-CONTRACTS.md §11.2). Bounds are always non-negative; a negative or inverted range is a
-/// caller error and throws <see cref="ArgumentOutOfRangeException"/>, never
-/// <see cref="VortexFormatException"/> (§1.4).
+/// A row range handed to a layout reader is <em>local to the receiving node</em>: 0-based within
+/// that node's rows, and translated by each reader before it reaches a child. Bounds are always
+/// non-negative; a negative or inverted range is a caller error and throws
+/// <see cref="ArgumentOutOfRangeException"/>, never <see cref="VortexFormatException"/>.
 /// </remarks>
 public readonly struct RowRange : IEquatable<RowRange>
 {

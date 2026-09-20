@@ -560,8 +560,8 @@ public readonly struct LayoutNode
     }
 
     /// <summary>
-    /// Indices into <see cref="VortexFile.SegmentSpecs"/>. Every entry was bounds-checked at parse
-    /// time, which is stricter than upstream's request-time check (contract §11.3).
+    /// Indices into <see cref="VortexFile.SegmentSpecs"/>. Every entry was bounds-checked against
+    /// the footer's segment count at parse time, so a reader never has to re-check one.
     /// </summary>
     public ReadOnlySpan<uint> Segments
     {
@@ -576,8 +576,7 @@ public readonly struct LayoutNode
     /// <param name="zoneMap">The parsed zone map's shape.</param>
     /// <returns><see langword="false"/> for every other layout.</returns>
     /// <remarks>
-    /// Not in PHASE1-CONTRACTS.md §11.1, which defines <see cref="ZoneMap"/> without saying how a
-    /// caller reaches one. Phase 1 exposes the map and prunes with nothing.
+    /// The map is exposed but never acted upon here: pruning on it is the caller's business.
     /// </remarks>
     public bool TryGetZoneMap(out ZoneMap zoneMap)
     {
@@ -595,8 +594,8 @@ public readonly struct LayoutNode
     /// <summary>
     /// Cumulative row offsets of a <c>vortex.chunked</c> node's chunks: <c>ChildCount + 1</c>
     /// entries, the first 0 and the last exactly <see cref="RowCount"/>. Empty for every other
-    /// layout. Derived at parse time because upstream derives it too and a per-batch prefix sum
-    /// would be linear in the chunk count (vortex-layout-0.86.1/src/layouts/chunked/mod.rs).
+    /// layout. Derived once at parse time, because recomputing the prefix sum per batch would be
+    /// linear in the chunk count.
     /// </summary>
     internal ReadOnlySpan<long> ChunkOffsets
     {

@@ -1,13 +1,14 @@
-// Every throw on the open path goes through here, [MethodImpl(NoInlining)] so the caller stays
-// inlineable (PHASE1-CONTRACTS.md §1.4). Messages name the offending value: a corrupt file is
-// diagnosed from the exception text alone in every bug report we will ever receive.
 using System;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 
 namespace Vorticity.File;
 
-/// <summary>Throw helpers for the file open path.</summary>
+/// <summary>
+/// Throw helpers for the file open path. Every throw goes through here, marked as never inlined so
+/// that the caller stays small enough to be inlined itself, and every message names the offending
+/// value so that a corrupt file can be diagnosed from the exception text alone.
+/// </summary>
 internal static class FileThrow
 {
     [MethodImpl(MethodImplOptions.NoInlining)]

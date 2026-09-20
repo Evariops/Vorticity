@@ -1,10 +1,3 @@
-// The index directory of docs/10-indexes.md §4.1, read the way every metadata value is read:
-// lazily, on the first request, and never at open (docs/02-format.md §2).
-//
-// NOTHING HERE CAN FAIL THE FILE. A directory that is absent, stale, malformed or of an unknown
-// version reads as "no index" with its reason kept for tooling; the scan is then exactly the scan of
-// a file written without indexes. The only exceptions that escape are the caller's own
-// cancellation and a disposed file.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -19,7 +12,7 @@ using Vorticity.Types;
 
 namespace Vorticity.File;
 
-/// <summary>How an index's regions are laid out (docs/10-indexes.md §4.2, docs/13-dataset.md §6).</summary>
+/// <summary>How an index's regions are laid out.</summary>
 public enum VortexIndexLayout
 {
     /// <summary>No payload: the index is its runs (a dictionary probe).</summary>
@@ -35,7 +28,7 @@ public enum VortexIndexLayout
     FilterTree,
 }
 
-/// <summary>What one index of a file is, as its directory says, for tooling (docs/12-index-reads.md §8.1).</summary>
+/// <summary>What one index of a file is, as its directory says, for tooling.</summary>
 /// <param name="Kind">The kind (<c>vorticity.bloom.sbbf.v1</c>, ...).</param>
 /// <param name="Column">The column it indexes: a dotted path, or the columns of a composite key in parentheses.</param>
 /// <param name="BlockLength">Rows per block.</param>
@@ -73,7 +66,7 @@ public sealed partial class VortexFile
         IReadOnlyList<string?> FragmentRefusals);
 
     /// <summary>Where one origin's index bytes are read, and the encoding table its payloads name.</summary>
-    /// <param name="Source">The file itself, or a fragment (docs/13-dataset.md §6.4).</param>
+    /// <param name="Source">The file itself, or an index fragment given by the read options.</param>
     /// <param name="Encodings">The array encodings its payloads name; null for the file's own footer.</param>
     /// <param name="Owned">Whether the file disposes the source with itself.</param>
     /// <param name="FileHash">The file's XXH3-128 a fragment recorded, which only a verification reads.</param>
@@ -94,7 +87,7 @@ public sealed partial class VortexFile
 
     /// <summary>
     /// A context to decode a run's payloads in: over the file's encoding table, or over the table the
-    /// run's fragment carries (docs/13-dataset.md §6.4).
+    /// run's fragment carries.
     /// </summary>
     /// <param name="run">A run of the directory <see cref="ReadIndexDirectoryAsync"/> returned.</param>
     /// <returns>The context, which the caller disposes.</returns>
@@ -258,10 +251,14 @@ public sealed partial class VortexFile
     /// <param name="cancellationToken">Cancels the read.</param>
     /// <returns>The directory, or <see langword="null"/>.</returns>
     /// <remarks>
-    /// A directory is refused WHOLE when its row count is not the file's -- a stale directory after
-    /// a failed append proves nothing -- and an entry is dropped ALONE when its kind is unknown or
-    /// its runs step outside the file (docs/10-indexes.md §4.1). The first call reads one metadata
-    /// segment; later calls read nothing.
+    /// The directory is read the way every metadata value is, lazily on the first request and never
+    /// at open: the first call reads one metadata segment, later calls read nothing. Nothing here
+    /// can fail the file. A directory whose row count is not the file's is refused whole, because a
+    /// stale directory left by a failed append proves nothing; an entry is dropped on its own when
+    /// its kind is unknown or its runs step outside the file. A file whose directory is absent,
+    /// stale, malformed or of an unknown version simply reads as one written without indexes, its
+    /// reason kept for tooling, and the only exceptions that escape are the caller's cancellation
+    /// and a disposed file.
     /// </remarks>
     public async ValueTask<IndexDirectory?> ReadIndexDirectoryAsync(CancellationToken cancellationToken = default)
     {
@@ -281,7 +278,7 @@ public sealed partial class VortexFile
         return _indexState!.Directory;
     }
 
-    /// <summary>The directory the file names, then every fragment the read options add to it (13 §6.4).</summary>
+    /// <summary>The directory the file names, then every fragment the read options add to it.</summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
     private async ValueTask<IndexState> ReadIndexStateAsync(CancellationToken cancellationToken)
     {
@@ -323,8 +320,9 @@ public sealed partial class VortexFile
             return (null, null, file);
         }
 
-        // A run lies before the directory: runs go out before the zone maps, the directory after
-        // the statistics (§7.2), so the directory's own offset bounds every run from above.
+        // A run always lies before the directory, because runs are written out before the zone maps
+        // and the directory after the statistics, so the directory's own offset bounds every run
+        // from above.
         SegmentSpec spec = GetMetadataSegment(index);
         using SegmentOwner owner = await ReadMetadataAsync(index, cancellationToken).ConfigureAwait(false);
         return IndexDirectory.TryParse(
@@ -335,8 +333,8 @@ public sealed partial class VortexFile
 
     /// <summary>
     /// Checks every index region the directory lists against its checksum, wherever it is read — the
-    /// file or a fragment — and the file's bytes against the XXH3-128 a fragment recorded
-    /// (docs/13-dataset.md §7): the hash no reader computes, computed here, offline.
+    /// file or a fragment — and the file's bytes against the XXH3-128 a fragment recorded: the hash
+    /// no reader computes, computed here, offline.
     /// </summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>What held and what did not.</returns>

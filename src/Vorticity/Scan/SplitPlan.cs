@@ -93,10 +93,10 @@ internal sealed class SplitPlan
             // The interior boundaries are hints; the two ends are load-bearing, and the walk is
             // trusted for neither. A node whose children cover fewer rows than it claims - a zoned
             // layout over a short data child, say - would otherwise contribute a maximum below
-            // rows.End and the scan would SILENTLY DROP the tail. Pinning the end here makes the
+            // rows.End and the scan would drop the tail silently. Pinning the end here makes the
             // split set cover the requested range whatever the tree says; the layout reader then
-            // fails loudly on the rows the file cannot actually produce, which is the correct
-            // failure for a malformed file (§1.4).
+            // fails loudly on the rows the file cannot actually produce, which is the right failure
+            // for a malformed file.
             list.Push(rows.End);
         }
 
@@ -168,8 +168,7 @@ internal sealed class SplitPlan
 
             case LayoutEncodingId.Dict:
                 // Child 1 is the codes - the row-aligned side. Child 0 is the dictionary and has a
-                // row count of its own that has nothing to do with the scan's rows
-                // (vortex-layout-0.86.1/src/layouts/dict/reader.rs::register_splits).
+                // row count of its own that has nothing to do with the scan's rows.
                 if (node.ChildCount == 2)
                 {
                     LayoutNode codes = node.GetChild(1);
@@ -328,10 +327,9 @@ internal sealed class SplitPlan
 /// sized pieces.
 /// </summary>
 /// <remarks>
-/// Even sub-division rather than "max-sized pieces plus a remainder" is upstream's
-/// <c>subdivide_large_spans</c> (vortex-layout-0.86.1/src/scan/split_by.rs): a 9000-row span capped
-/// at 8192 yields 4500 + 4500, not 8192 + 808, so a parallel decode is not left with one nearly
-/// empty split.
+/// Even sub-division rather than "max-sized pieces plus a remainder": a 9000-row span capped at
+/// 8192 yields 4500 + 4500, not 8192 + 808, so a parallel decode is not left with one nearly empty
+/// split.
 /// </remarks>
 internal struct SplitCursor
 {
@@ -372,12 +370,12 @@ internal struct SplitCursor
 
         while (true)
         {
-            // `_cursor` is the END of the next split here, where the forward walk holds its start,
+            // `_cursor` is the end of the next split here, where the forward walk holds its start,
             // and `_subSize` of zero means no span is open. Which sub-division that end belongs to
             // is arithmetic on the span's start, so the reversed walk needs no counter of its own --
-            // and it must need none: this cursor lives by value inside the enumerator, and one more
-            // field of it is eight bytes on every scan, which three allocation axes have no room
-            // for.
+            // and it must need none: this cursor lives by value inside the enumerator, so one more
+            // field of it is eight more bytes on every scan, which the allocation budget has no
+            // room for.
             if (_subSize == 0 || _cursor <= plan.BoundaryAt(_span))
             {
                 int next = _span - 1;

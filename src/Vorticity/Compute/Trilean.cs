@@ -29,8 +29,8 @@ internal static class Trilean
     /// </summary>
     /// <remarks>
     /// <c>unknown AND false = false</c>: a null operand does not make a conjunction unknown when
-    /// the other side already decided it. This is the rule that makes
-    /// <c>WHERE a = 1 AND b = 2</c> skip a row whose <c>a</c> is null without reading <c>b</c>'s
+    /// the other side already decided it. This is the rule that lets a filter of the shape
+    /// <c>a = 1 AND b = 2</c> skip a row whose <c>a</c> is null without reading <c>b</c>'s
     /// nullness into the answer.
     /// </remarks>
     /// <param name="left">The accumulator, overwritten.</param>

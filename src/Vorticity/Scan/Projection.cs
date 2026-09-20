@@ -1,19 +1,3 @@
-// PHASE1-CONTRACTS.md §13.2. The projection compiler: dotted paths in, a FieldMask tree out.
-//
-// A projection is compiled ONCE per scan, against the file's schema, and never touched again on a
-// decode path. Everything here therefore allocates freely (§1.3: "allocation at open time is
-// permitted and expected") - the result is a small immutable tree proportional to the projection,
-// never to the row count.
-//
-// TWO THINGS THIS FILE DELIBERATELY DOES NOT DO:
-//
-//   * It invents no escaping syntax. A Vortex field name may itself contain a '.' or be empty -
-//     corpus/types/struct_field_names has fields named "a.b", "" and "😀" - so the dotted grammar
-//     genuinely cannot address every column. ScanBuilder.ProjectFields(ReadOnlySpan<int>) plus
-//     StructColumn.GetField(int) is the documented escape hatch (§13.2).
-//   * It never reorders. ProjectedSchema keeps the schema's own field order and nullability,
-//     because a reader that reordered columns would disagree with every other Vortex reader about
-//     what column 0 is (§13 traps).
 using System;
 using System.Buffers;
 using System.Text;
@@ -29,9 +13,23 @@ namespace Vorticity.Scan;
 /// <see cref="FieldMask"/> tree over the file schema.
 /// </summary>
 /// <remarks>
+/// <para>
 /// <c>default(Projection)</c> is <see cref="All"/>, matching <c>default(FieldMask)</c>: a scan
 /// handed a default projection materializes everything, which is slower than intended but never
 /// wrong. The opposite default would silently drop columns.
+/// </para>
+/// <para>
+/// A projection is compiled once per scan, against the file's schema, and never touched again on a
+/// decode path, so compiling allocates freely; the result is a small immutable tree whose size
+/// follows the projection and never the row count.
+/// </para>
+/// <para>
+/// The dotted grammar has no escaping syntax, and a field name may itself contain a <c>.</c> or be
+/// empty, so it cannot address every column; naming fields by index does. Nor does a projection
+/// ever reorder: <see cref="ProjectedSchema"/> keeps the schema's own field order and nullability,
+/// because a reader that reordered columns would disagree with every other Vortex reader about
+/// which one is column zero.
+/// </para>
 /// </remarks>
 public readonly struct Projection
 {
@@ -59,7 +57,7 @@ public readonly struct Projection
     /// <exception cref="ArgumentException">
     /// A path does not resolve against <paramref name="schema"/>, descends through a non-struct,
     /// or names a field of a non-struct root. The message names the offending path. This is a
-    /// caller error, not a file one (§1.4).
+    /// caller error, not a malformed file.
     /// </exception>
     /// <exception cref="ArgumentNullException">A path is <see langword="null"/>.</exception>
     public static Projection Parse(DType schema, ReadOnlySpan<string> paths)

@@ -1,11 +1,3 @@
-// PHASE1-CONTRACTS.md §11.2. One reader per layout encoding, stateless and shared, exactly like
-// ArrayDecoder (§2.4): dispatch is one array index plus one virtual call per layout node.
-//
-// REGISTER, THEN EXECUTE. docs/03-architecture.md §3.6 separates I/O from CPU, and the split is
-// only worth anything if RegisterSegments registers EXACTLY the segments Execute will read and
-// Execute reads only registered ones. That pair is what lets a batch issue one coalesced
-// ReadManyAsync; break it and either the scan throws "segment not populated" or it silently issues
-// a second read.
 using System;
 
 using Vorticity.Arrays;
@@ -16,6 +8,13 @@ using Vorticity.Serialization.Schemas;
 namespace Vorticity.Layouts;
 
 /// <summary>One reader per layout encoding. Stateless and thread-safe; a single instance is shared.</summary>
+/// <remarks>
+/// Reading is split in two so that input and decoding stay apart:
+/// <see cref="RegisterSegments"/> registers exactly the segments <see cref="Execute"/> will read,
+/// and <see cref="Execute"/> reads only registered ones. That pair is what lets a batch issue a
+/// single coalesced read; break it and the scan either fails on an unpopulated segment or silently
+/// issues a second read.
+/// </remarks>
 public abstract class LayoutReader
 {
     /// <summary>The registry slot this reader occupies.</summary>
@@ -69,8 +68,8 @@ public abstract class LayoutReader
     /// <param name="rows">The range.</param>
     /// <returns>Its length.</returns>
     /// <remarks>
-    /// A batch never exceeds <see cref="int.MaxValue"/> rows (contract §2.4); a caller asking for
-    /// more gets an <see cref="ArgumentOutOfRangeException"/>, because the file is not at fault.
+    /// A batch never exceeds <see cref="int.MaxValue"/> rows; a caller asking for more gets an
+    /// <see cref="ArgumentOutOfRangeException"/>, because the file is not at fault.
     /// </remarks>
     protected static int BatchLength(RowRange rows)
     {
@@ -146,7 +145,7 @@ public abstract class LayoutReader
         in LayoutNode child, RowRange rows, in FieldMask fields, SegmentRequestSet segments) =>
         LayoutReaderTable.Require(in child).RegisterSegments(in child, rows, in fields, segments);
 
-    /// <summary>Executes one child that is NOT the predicate's column, whatever the parent is.</summary>
+    /// <summary>Executes one child that is not the predicate's column, whatever the parent is.</summary>
     /// <param name="child">The child node.</param>
     /// <param name="rows">The child-local row range.</param>
     /// <param name="fields">The child's field mask.</param>
@@ -157,8 +156,8 @@ public abstract class LayoutReader
     /// convenient one. A layout's children are not always its rows: a dictionary layout's are its
     /// codes and its values, a list layout's are its offsets and its elements. A leaf under one of
     /// those answering a predicate would hand its parent a boolean column where the format promises
-    /// integers, which is exactly what it did before this cleared. A reader whose children ARE the
-    /// same rows as itself says so with <see cref="ExecuteRowChild"/>.
+    /// integers. A reader whose children carry the same rows as itself says so with
+    /// <see cref="ExecuteRowChild"/>.
     /// </remarks>
     protected static int ExecuteChild(
         in LayoutNode child, RowRange rows, in FieldMask fields, ScanContext context)
@@ -199,8 +198,8 @@ public abstract class LayoutReader
             LayoutsThrow.Format($"A layout node has {ids.Length} segments; segment {which} was asked for.");
         }
 
-        // Bounds-checked once already, at parse time (contract §11.3): a segment id can only name
-        // a spec the footer declares.
+        // Bounds-checked once already, at parse time: a segment id can only name a spec the footer
+        // declares.
         ReadOnlySpan<SegmentSpec> specs = node.Tree.File.SegmentSpecs;
         uint id = ids[which];
         if (id >= (uint)specs.Length)

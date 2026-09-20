@@ -205,8 +205,8 @@ public sealed class SummaryPruner
     /// <param name="rows">How many rows the summaries cover.</param>
     /// <returns><see langword="false"/> only when the summaries prove no row can match.</returns>
     /// <remarks>
-    /// The summarised extent is ONE ZONE AS LONG AS ITSELF, which is what lets the zone pruner --
-    /// the only implementation of docs/08-semantics.md §1 in this library -- answer the question.
+    /// The summarised extent is treated as one zone as long as itself, which is what lets the zone
+    /// pruner -- the library's only three-valued pruning engine -- answer the question.
     /// A column the filter names and the summaries do not cover licenses nothing and is simply not
     /// passed on, so the answer degrades to "may match" rather than to a wrong prune.
     /// </remarks>

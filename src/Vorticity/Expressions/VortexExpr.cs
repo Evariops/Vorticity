@@ -105,31 +105,19 @@ public abstract class VortexExpr
 /// <summary>A column reference, by dotted path.</summary>
 public sealed class FieldExpr : VortexExpr
 {
-    /// <remarks>
-    /// EMPTY SEGMENTS ARE THE SCHEMA'S BUSINESS, NOT THIS CONSTRUCTOR'S. PERF-AUDIT-v2.md R18a: a
-    /// Vortex field name may be empty -- `corpus/types/struct_field_names` has one, and its first
-    /// column is literally named "" -- and `Projection` reaches it, because it splits on dots and
-    /// lets `DType.IndexOfField` decide whether the segment names anything. This refused the same
-    /// path up front, so `Project("")` worked and `Expr.Field("")` threw: the same file, the same
-    /// grammar, two answers.
-    ///
-    /// A path naming nothing still fails, at the place that can say so usefully -- the scan, which
-    /// has the schema and reports which path is unknown. What is gone is the guess made before
-    /// anything was known.
-    ///
-    /// Neither grammar can address a field whose NAME contains a dot, and that is deliberate on
-    /// both sides: `Projection`'s header says it invents no escaping syntax and points at
-    /// `ProjectFields(ReadOnlySpan&lt;int&gt;)` as the documented way in.
-    /// </remarks>
+    // An empty segment is the schema's business, not this constructor's: a field name may be
+    // empty, so nothing is refused here and a path that names nothing fails at the scan, which
+    // holds the schema and can say which path was unknown. A field whose name contains a dot is
+    // unreachable through this grammar, as it is through a projection path, and by design: both
+    // invent no escaping syntax and leave field indices as the way in.
     internal FieldExpr(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
         Path = path;
 
-        // Split and encode ONCE, here, because resolving the path is a per-batch operation and
-        // DType.IndexOfField takes UTF-8. Doing it per batch would put a string split and an
-        // encode on a path that docs/03-architecture.md §4 invariant 1 requires to allocate
-        // nothing.
+        // Split and encode once, here, because resolving the path happens per batch and
+        // DType.IndexOfField takes UTF-8: doing it there would put a string split and an encode on
+        // a code path that must not allocate at all.
         string[] parts = path.Split('.');
         SegmentsUtf8 = new byte[parts.Length][];
         for (int i = 0; i < parts.Length; i++)
@@ -247,10 +235,10 @@ public sealed class NotExpr : VortexExpr
     public override void CollectFields(ICollection<string> paths) => Operand.CollectFields(paths);
 }
 
-/// <summary><c>IS NULL</c> or <c>IS NOT NULL</c>.</summary>
+/// <summary><c>is null</c> or <c>is not null</c>.</summary>
 /// <remarks>
-/// Never yields <c>unknown</c> (docs/08-semantics.md §3), which is what makes it the one predicate
-/// a zone of nothing but nulls can still satisfy.
+/// Never yields <c>unknown</c>, which is what makes it the one predicate a zone of nothing but
+/// nulls can still satisfy.
 /// </remarks>
 public sealed class NullCheckExpr : VortexExpr
 {
@@ -263,7 +251,7 @@ public sealed class NullCheckExpr : VortexExpr
     /// <summary>The column.</summary>
     public FieldExpr Field { get; }
 
-    /// <summary><see langword="true"/> for <c>IS NULL</c>.</summary>
+    /// <summary><see langword="true"/> for <c>is null</c>.</summary>
     public bool IsNull { get; }
 
     /// <inheritdoc/>
@@ -300,8 +288,8 @@ public sealed class InExpr : VortexExpr
 
 /// <summary>A field matched against a byte pattern.</summary>
 /// <remarks>
-/// docs/12-index-reads.md §7. Null yields <c>unknown</c>, as a comparison does (08 §3), so a null
-/// row never satisfies one of these and never satisfies its negation either.
+/// A null value yields <c>unknown</c>, as a comparison does, so a null row never satisfies one of
+/// these and never satisfies its negation either.
 /// </remarks>
 public sealed class StringMatchExpr : VortexExpr
 {
@@ -335,13 +323,12 @@ public sealed class StringMatchExpr : VortexExpr
 /// <summary>A list column tested for an element equal to a literal.</summary>
 /// <remarks>
 /// The reference's <c>vortex.list.contains</c> with a constant needle, and the question a Bloom
-/// filter over a list's elements answers (docs/10-indexes.md §5.1). THREE-VALUED LIKE A COMPARISON
-/// (docs/08-semantics.md §3), with one rule of its own: a null list is <c>unknown</c>, and so is
-/// every row under a null literal; otherwise the row is <c>true</c> when an element equals the
-/// literal under the comparison kernels' equality (IEEE for floats, so a NaN matches nothing and
-/// the two zeros match each other) and <c>false</c> when none does. A NULL ELEMENT MATCHES NOTHING
-/// and leaves the row <c>false</c>, not unknown: the reference gives the result the list's validity
-/// alone. An empty list is <c>false</c>.
+/// filter over a list's elements answers. Three-valued like a comparison, with one rule of its
+/// own: a null list is <c>unknown</c>, and so is every row under a null literal; otherwise the row
+/// is <c>true</c> when an element equals the literal under the comparison kernels' equality (IEEE
+/// for floats, so a NaN matches nothing and the two zeros match each other) and <c>false</c> when
+/// none does. A null element matches nothing and leaves the row <c>false</c> rather than unknown,
+/// because the result takes the list's validity alone. An empty list is <c>false</c>.
 /// </remarks>
 public sealed class ListContainsExpr : VortexExpr
 {
@@ -439,7 +426,7 @@ public static class Expr
         return new NotExpr(operand);
     }
 
-    /// <summary><c>field IS NULL</c>.</summary>
+    /// <summary><c>field is null</c>.</summary>
     /// <param name="field">The column.</param>
     /// <exception cref="ArgumentNullException"><paramref name="field"/> is null.</exception>
     public static NullCheckExpr IsNull(FieldExpr field)
@@ -448,7 +435,7 @@ public static class Expr
         return new NullCheckExpr(field, true);
     }
 
-    /// <summary><c>field IS NOT NULL</c>.</summary>
+    /// <summary><c>field is not null</c>.</summary>
     /// <param name="field">The column.</param>
     /// <exception cref="ArgumentNullException"><paramref name="field"/> is null.</exception>
     public static NullCheckExpr IsNotNull(FieldExpr field)
@@ -493,7 +480,7 @@ public static class Expr
     public static StringMatchExpr Contains(FieldExpr field, FilterLiteral pattern) =>
         Match(field, StringMatchOp.Contains, pattern, (byte)'\\');
 
-    /// <summary>SQL <c>field LIKE pattern</c>.</summary>
+    /// <summary>The SQL <c>like</c> match, <c>field like pattern</c>.</summary>
     /// <param name="field">The column; utf8 or binary, or an extension over one.</param>
     /// <param name="pattern">The pattern: <c>%</c> any run, <c>_</c> any one byte.</param>
     /// <param name="escape">The byte that quotes a wildcard or itself. Default <c>\</c>.</param>
@@ -514,8 +501,9 @@ public static class Expr
     }
 
     /// <summary>
-    /// Rejects the one shape these predicates cannot evaluate, at CONSTRUCTION rather than during a
-    /// scan — the same rule <see cref="Compare"/> applies to a column-to-column comparison.
+    /// Rejects the one shape these predicates cannot evaluate, when the node is built rather than
+    /// during a scan - the same rule <see cref="Compare"/> applies to a column-to-column
+    /// comparison.
     /// </summary>
     private static StringMatchExpr Match(
         FieldExpr field, StringMatchOp op, FilterLiteral pattern, byte escape)

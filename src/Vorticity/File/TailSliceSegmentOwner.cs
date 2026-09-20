@@ -1,15 +1,13 @@
-// A SegmentOwner for a view into the open file's tail buffer.
-//
-// VortexFile.ReadMetadataAsync must hand back an owner the caller releases exactly once
-// (PHASE1-CONTRACTS.md §2.2 rule 3), but a metadata segment covered by the initial tail read costs
-// no I/O at all - the bytes are already in the window. Retaining the tail owner and publishing a
-// slice of it is the whole implementation: the tail cannot be freed while the slice is alive, and
-// the caller's Release() gives the reference back.
 using Vorticity.Buffers;
 
 namespace Vorticity.File;
 
-/// <summary>An owner for a slice of another owner's memory. Retains the parent for its lifetime.</summary>
+/// <summary>
+/// An owner for a slice of another owner's memory, used when a requested segment already lies
+/// inside the buffer read from the file's tail and so costs no further reading. Retaining the
+/// parent keeps the tail buffer alive for as long as the slice is, and releasing this owner gives
+/// that reference back, so the caller still releases exactly once.
+/// </summary>
 internal sealed class TailSliceSegmentOwner : SegmentOwner
 {
     private readonly SegmentOwner _parent;
@@ -24,6 +22,5 @@ internal sealed class TailSliceSegmentOwner : SegmentOwner
         Buffer = slice;
     }
 
-    /// <inheritdoc/>
     protected override void FreeCore() => _parent.Release();
 }

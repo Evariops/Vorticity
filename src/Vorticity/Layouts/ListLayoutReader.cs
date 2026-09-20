@@ -1,20 +1,3 @@
-// vortex.list - vortex-layout-0.86.1/src/layouts/list/{mod.rs,reader.rs}.
-//
-// A list column shredded into separate children rather than held as one array: elements, offsets,
-// and - when the dtype is nullable - a validity child. The offsets child carries `rows + 1` entries,
-// so element `i` of row `r` lives at `elements[offsets[r] + i]`.
-//
-// ONE PASS, AND THE WHOLE ELEMENTS CHILD. Reading rows [a, b) selectively would mean fetching the
-// offsets, reading `offsets[a]` and `offsets[b]`, and only then knowing which elements to ask for -
-// two segment round trips, which is what upstream's reader does with futures. This architecture
-// registers every segment it needs BEFORE any is fetched, and `RoundTripCountTests` holds that
-// property at exactly one round trip to open and two to the first batch. So the elements child is
-// registered whole and the window is taken afterwards.
-//
-// That is a real trade and not an oversight: it reads more bytes than upstream for a narrow batch,
-// and it keeps the round-trip count that docs/01 §3 makes a headline promise. The array-level
-// `vortex.listview` already behaves this way - its elements child is read whole - so the layout is
-// not adding a behaviour, only declining to remove one.
 using System;
 using System.Buffers.Binary;
 
@@ -26,7 +9,19 @@ using Vorticity.Types;
 
 namespace Vorticity.Layouts;
 
-/// <summary>Reads a <c>vortex.list</c> layout: elements, offsets and optional validity children.</summary>
+/// <summary>
+/// Reads a <c>vortex.list</c> layout: a list column shredded into an elements child, an offsets
+/// child and, when the dtype is nullable, a validity child. The offsets child carries
+/// <c>rows + 1</c> entries, so element <c>i</c> of row <c>r</c> lives at
+/// <c>elements[offsets[r] + i]</c>.
+/// </summary>
+/// <remarks>
+/// The elements child is registered and read whole, and the window is taken afterwards. Reading it
+/// selectively would mean fetching the offsets first, then asking for the elements they point at:
+/// two segment round trips instead of one. Registering every segment before any is fetched is what
+/// keeps a scan at one round trip to open and two to the first batch, and it costs extra bytes only
+/// for a narrow batch.
+/// </remarks>
 public sealed class ListLayoutReader : LayoutReader
 {
     private const string Id = "vortex.list";
@@ -84,16 +79,16 @@ public sealed class ListLayoutReader : LayoutReader
         LayoutNode offsetsLayout = node.GetChild(OffsetsChild);
         FieldMask all = FieldMask.All;
 
-        // THE SELECTION IS APPLIED HERE, NOT PUSHED DOWN, and the offsets are why. Row `r` needs
-        // BOTH `offsets[r]` and `offsets[r + 1]`, so a selection of rows is not a selection of
-        // offsets - a take of row 5 needs offsets 5 and 6, and the selection vocabulary cannot say
-        // that. The children are therefore read over the whole window with the selection suppressed,
-        // exactly as `vortex.dict` suppresses it for its values child, and the wanted rows are
-        // gathered afterwards.
-        // THE ELEMENTS CHILD IS READ WHOLE AND THE OFFSETS CHILD IS WINDOWED, which is why only the
-        // first is worth retaining across batches: a column split into N batches decoded ALL of its
-        // elements N times to serve each of them once. Same mechanism, same key namespace and same
-        // one-batch exemption as `vortex.dict`'s values child. PERF-AUDIT names both as P8.
+        // The selection is applied here rather than pushed down, because the offsets forbid pushing
+        // it: row `r` needs both `offsets[r]` and `offsets[r + 1]`, so a selection of rows is not a
+        // selection of offsets - a take of row 5 needs offsets 5 and 6, and the selection vocabulary
+        // cannot say that. The children are read over the whole window with the selection suppressed,
+        // as `vortex.dict` suppresses it for its values child, and the wanted rows are gathered
+        // afterwards.
+        // Only the elements child is worth retaining across batches, since it is the one read whole
+        // while the offsets child is windowed: without retention a column split into several batches
+        // decodes every element once per batch. Same mechanism, key namespace and one-batch exemption
+        // as `vortex.dict`'s values child.
         int elementsLength = NodeLength(in elementsLayout);
         bool wholeLayout = rows.Start == 0 && span == NodeLength(in node);
         long elementsKey = ScanContext.LayoutKey(elementsLayout.Index);
@@ -167,7 +162,7 @@ public sealed class ListLayoutReader : LayoutReader
             validity = Validity.Bitmap(validityIndex);
         }
 
-        // The canonical ListView wants per-row offsets AND sizes, where the layout stores only the
+        // The canonical ListView wants per-row offsets and sizes, where the layout stores only the
         // `rows + 1` boundaries. Both are materialized here at the offsets' own width, so the
         // elements child is referenced by absolute position and needs no rebasing.
         int width = metadata.OffsetsPType.ByteWidth();

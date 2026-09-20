@@ -1,7 +1,3 @@
-// Every throw in this component goes through a NoInlining helper so the walk stays inlineable
-// (PHASE1-CONTRACTS.md §1.4). A file says it -> VortexFormatException; a caller says it ->
-// Argument*; a component we do not implement -> VortexUnsupportedException, and only from
-// LayoutReaderTable.Get (contract §2.3).
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
@@ -9,6 +5,12 @@ using System.Runtime.CompilerServices;
 
 namespace Vorticity.Layouts;
 
+/// <summary>
+/// Every throw of the layout walk goes through one of these non-inlined helpers, so the walk itself
+/// stays small enough to inline. What the file said wrong becomes a
+/// <see cref="VortexFormatException"/>; what the caller asked for wrong becomes an
+/// <see cref="ArgumentException"/> or one of its kin.
+/// </summary>
 internal static class LayoutsThrow
 {
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -31,8 +33,8 @@ internal static class LayoutsThrow
         throw new VortexFormatException($"Layout child index {index} is outside [0, {count}).");
 
     /// <summary>
-    /// The eager segment check contract §11.3 requires: upstream resolves a segment id lazily, at
-    /// request time; we turn an I/O-time failure into a parse-time one.
+    /// Segment ids are checked eagerly, while the tree is parsed, so a dangling id surfaces as a
+    /// format error at open time rather than as a read failure once a scan is under way.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     [DoesNotReturn]

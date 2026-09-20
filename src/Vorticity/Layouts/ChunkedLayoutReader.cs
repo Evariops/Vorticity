@@ -1,11 +1,3 @@
-// vortex.chunked - vortex-layout-0.86.1/src/layouts/chunked/{mod.rs,reader.rs}. Zero segments; every
-// child is a chunk, in row order. ZERO CHILDREN IS LEGAL (an empty stream), and then the layout must
-// cover zero rows.
-//
-// Chunk offsets are derived, never stored, and the parser has already checked that they sum to the
-// parent's row count (docs/03-architecture.md §6: verify, never assume). The chunk SELECTION is
-// upstream's, transcribed: binary search for the range start falling back to insertion point - 1,
-// binary search for the end falling back to insertion point.
 using System;
 using System.Buffers;
 
@@ -16,7 +8,12 @@ using Vorticity.Types;
 
 namespace Vorticity.Layouts;
 
-/// <summary>Reads a <c>vortex.chunked</c> layout by concatenating the chunks a range touches.</summary>
+/// <summary>
+/// Reads a <c>vortex.chunked</c> layout by concatenating the chunks a range touches. The layout
+/// owns no segment of its own: every child is one chunk, in row order, and a layout with no child
+/// at all is legal and then covers zero rows. Chunk offsets are derived rather than stored, and the
+/// parser has already checked that they sum to the parent's row count.
+/// </summary>
 public sealed class ChunkedLayoutReader : LayoutReader
 {
     private const int StackChunks = 16;
@@ -70,12 +67,12 @@ public sealed class ChunkedLayoutReader : LayoutReader
         Span<int> stack = stackalloc int[StackChunks];
         Scratch<int> scratch = new Scratch<int>(Math.Max(last - first, 0), stack);
 
-        // THE MASK OF LIVE BLOCKS IS IN FILE COORDINATES AND THE CHILDREN ARE NOT (docs/11 §6.1):
-        // it is cleared for them here and what it means for a chunk is said in the selection, the
-        // one currency that is re-based per child. A chunk with dead blocks inside it is decoded
-        // through the selection path -- this batch's rows and nothing else -- rather than whole
-        // and retained: sixteen blocks decoded for the one that lived was the whole cost this
-        // fixes. A chunk with no dead block keeps today's path, whole and retained.
+        // The mask of live blocks is in file coordinates and the children are not, so it is cleared
+        // for them here; what it means for a chunk travels in the selection, the one currency that
+        // is re-based per child. A chunk holding dead blocks goes through the selection path --
+        // this batch's rows and nothing else -- rather than being decoded whole and retained, which
+        // would decode every block of the chunk for the few that live. A chunk with no dead block
+        // is decoded whole and retained.
         Compute.BlockMask? live = context.LiveBlocks;
         context.LiveBlocks = null;
         try
@@ -122,7 +119,7 @@ public sealed class ChunkedLayoutReader : LayoutReader
             }
 
             // Every chunk was decoded at the same dtype, so the concatenated dtype is any of
-            // theirs - and it is the PROJECTED one when a mask narrowed the children.
+            // theirs - and it is the projected one when a mask narrowed the children.
             DType dtype = context.Canonical.GetNode(chunks[0]).DType;
             return CanonicalConcat.Concat(context.Decode, dtype, length, chunks[..count]);
         }
@@ -139,21 +136,18 @@ public sealed class ChunkedLayoutReader : LayoutReader
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The rows are contiguous, so the selection is a counted range, and teaching the selection to
-    /// carry <c>[start, start + length)</c> instead of writing it out would buy nothing measurable.
-    /// The rent is pooled, so it allocates nothing once the pool is warm: renting and filling a
-    /// second identical range beside this one moves not a single byte on any of the twelve axes of
-    /// <c>PathAllocationTests</c>. The loop is bounded by one block, because the splits are cut at
-    /// the mask's block boundaries -- the widest range this path is ever handed across the whole
-    /// suite is 1 024 rows, against the decode of those same rows.
+    /// The rows are contiguous, so the selection is a counted range written out row by row; teaching
+    /// the selection to carry <c>[start, start + length)</c> instead would buy nothing measurable.
+    /// The buffer is rented from the shared pool, so this allocates nothing once the pool is warm,
+    /// and the loop is bounded by one block because the splits are cut at the mask's block
+    /// boundaries.
     /// </para>
     /// <para>
     /// An encoding that <c>SelectsWithoutFullDecode</c> then materializes these rows alone; one that
-    /// does not decodes the chunk once, retains it, and gathers this range out of it. That gather is
-    /// not what the whole-chunk path cost anyway, which this said for a while and which is wrong in
-    /// both directions: the whole-chunk path decodes the chunk for every batch that touches it,
-    /// where this decodes it once and gathers, and the gather copies rows the whole-chunk path
-    /// simply sliced. What the copy is worth is measured beside the gather itself.
+    /// does not decodes the chunk once, retains it, and gathers this range out of it. Against the
+    /// whole-chunk path the trade runs both ways: that path decodes the chunk again for every batch
+    /// touching it, where this decodes it once, but it then copies rows the whole-chunk path would
+    /// merely have sliced.
     /// </para>
     /// </remarks>
     private static int ExecuteChunkLive(
@@ -186,7 +180,7 @@ public sealed class ChunkedLayoutReader : LayoutReader
     }
 
     /// <summary>
-    /// Executes one chunk with the selection RE-BASED into that chunk's own row space.
+    /// Executes one chunk with the selection re-based into that chunk's own row space.
     /// </summary>
     /// <remarks>
     /// The only reader that has to do this, and the reason the selection is defined to live in its
@@ -197,11 +191,8 @@ public sealed class ChunkedLayoutReader : LayoutReader
     ///
     /// The pass over the whole selection looks like a cost per chunk and is not one: a chunk
     /// boundary is a split boundary, because the split walk recurses into every touched chunk and
-    /// pushes its end, so the caller's loop runs this once and the selection it walks is the
-    /// split's own. Taking a hundred thousand rows spread over a hundred and twenty-three chunks
-    /// costs 1,17 ms end to end; one pass per chunk over the whole selection would be twelve
-    /// million comparisons before a byte is decoded, which is several times that on its own.
-    /// Replacing the pass with two binary searches would therefore save nothing.
+    /// pushes its end, so the caller's loop runs this once per split and the selection it walks is
+    /// the split's own. Replacing the pass with two binary searches would therefore save nothing.
     /// </remarks>
     private static int ExecuteChunkSelected(
         in LayoutNode chunk, RowRange local, in FieldMask fields, ScanContext context, long start)
@@ -242,12 +233,9 @@ public sealed class ChunkedLayoutReader : LayoutReader
     /// The half-open chunk range a row range touches.
     /// </summary>
     /// <remarks>
-    /// vortex-layout-0.86.1/src/layouts/chunked/reader.rs <c>chunk_range</c>:
-    /// <code>
-    /// let start_chunk = offsets.binary_search(&amp;range.start).unwrap_or_else(|x| x.saturating_sub(1));
-    /// let end_chunk   = offsets.binary_search(&amp;range.end).unwrap_or_else(|x| x);
-    /// </code>
-    /// .NET's <c>BinarySearch</c> returns <c>~insertionPoint</c> where Rust returns
+    /// The selection is upstream's: a miss on the range start falls back to the insertion point
+    /// minus one, a miss on the range end to the insertion point itself. .NET's
+    /// <c>BinarySearch</c> returns <c>~insertionPoint</c> where Rust returns
     /// <c>Err(insertion_point)</c>, so the two agree once the complement is undone.
     /// </remarks>
     internal static void ChunkRange(ReadOnlySpan<long> offsets, RowRange rows, out int first, out int last)

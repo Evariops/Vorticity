@@ -1,15 +1,3 @@
-// vortex.dict - vortex-layout-0.86.1/src/layouts/dict/mod.rs. Zero segments, exactly two children:
-//
-//     0 => Auxiliary("values"),  1 => Transparent("codes")
-//
-// CHILD 0 IS VALUES AND CHILD 1 IS CODES, which is THE OPPOSITE ORDER FROM THE vortex.dict ARRAY
-// (contract §10.1: array child 0 = codes, child 1 = values). Two components with the same id and
-// the reverse order is exactly the kind of thing that gets "fixed" into a bug, so it is written
-// twice: here and in the parser.
-//
-// The gather itself mirrors the array decoder's
-// (src/Vorticity/Arrays/Decoders/Compressed/DictDecoder.cs) and shares its plumbing rather than
-// re-deriving the VarBinView buffer remap and the validity collapse.
 using System;
 
 using Vorticity.Arrays;
@@ -19,7 +7,14 @@ using Vorticity.Types;
 
 namespace Vorticity.Layouts;
 
-/// <summary>Reads a <c>vortex.dict</c> layout by gathering its values through its codes.</summary>
+/// <summary>
+/// Reads a <c>vortex.dict</c> layout by gathering its values through its codes. The layout owns no
+/// segment and has exactly two children: child 0 is the values and child 1 the codes, the opposite
+/// order from the <c>vortex.dict</c> array, whose child 0 is the codes. The parser states that
+/// order too, deliberately twice, because two components sharing an id with reversed children is
+/// the kind of thing that gets "fixed" into a bug. The gather shares the array decoder's kernels
+/// rather than re-deriving the buffer remap and the validity collapse.
+/// </summary>
 public sealed class DictLayoutReader : LayoutReader
 {
     private const string Id = "vortex.dict";
@@ -47,9 +42,9 @@ public sealed class DictLayoutReader : LayoutReader
         LayoutNode values = node.GetChild(0);
         LayoutNode codes = node.GetChild(1);
 
-        // The values child is always read WHOLE: a code anywhere in the requested rows may name any
+        // The values child is always read whole: a code anywhere in the requested rows may name any
         // dictionary entry. This is the one place a layout materializes something the row range did
-        // not ask for, and it is deliberate (contract §11.3).
+        // not ask for, and it is deliberate.
         RegisterChild(in values, RowRange.FromLength(0, values.RowCount), in fields, segments);
 
         FieldMask all = FieldMask.All;
@@ -62,31 +57,29 @@ public sealed class DictLayoutReader : LayoutReader
         ArgumentNullException.ThrowIfNull(context);
         CheckRange(in node, rows);
 
-        // The selection applies to the CODES and not to the values: this layout's whole point is
+        // The selection applies to the codes and not to the values: this layout's whole point is
         // that the values are shared across the column, so a take reads every one of them and picks
-        // a subset of the codes. That is the `vortex.dict` row of the take table, at the layout
-        // level rather than the array level.
+        // a subset of the codes.
         int length = context.HasSelection ? context.Selection.Length : BatchLength(rows);
         LayoutNode valuesLayout = node.GetChild(0);
         LayoutNode codesLayout = node.GetChild(1);
 
         int valuesLength = NodeLength(in valuesLayout);
 
-        // THE VALUES CHILD IS DECODED ONCE PER SCAN, NOT ONCE PER BATCH. It is asked for WHOLE
+        // The values child is decoded once per scan, not once per batch. It is asked for whole
         // every time -- that is what a dict layout is, one shared set of values behind every row --
-        // so a column split into N batches used to decode all of its values N times to serve them
-        // once each. PERF-AUDIT names it P8.
+        // so without retention a column split into several batches would decode all of its values
+        // again for each one.
         //
         // The mechanism is the one `FlatLayoutReader` already uses for a chunk larger than a batch,
         // under a key in the layout-node namespace rather than the segment one. Its eviction rule
-        // carries over unchanged, and it is the load-bearing part: a batch BORROWS the retained
+        // carries over unchanged, and it is the load-bearing part: a batch borrows the retained
         // arena, so an entry may be freed only once no live batch can be looking at it.
-        // NOTHING IS RETAINED WHEN THERE IS NO SECOND BATCH TO SERVE, for the reason the retention
+        //
+        // Nothing is retained when there is no second batch to serve, for the reason the retention
         // cache is lazy in the first place: it costs an arena, and on a file whose rows are one
-        // batch that arena is pure loss. `WriteAllocationTests` priced it at 6.9 kB on
-        // types/utf8_nullable_r1025 -- one batch, one use -- the moment this retained
-        // unconditionally. The test is on the layout's own range, not on the selection: a take
-        // reads every value whatever it selects.
+        // batch that arena is pure loss. The test is on the layout's own range and not on the
+        // selection, because a take reads every value whatever it selects.
         bool wholeLayout = rows.Start == 0 && BatchLength(rows) == NodeLength(in node);
         long valuesKey = ScanContext.LayoutKey(valuesLayout.Index);
         int valuesIndex;
@@ -149,9 +142,9 @@ public sealed class DictLayoutReader : LayoutReader
 
     /// <summary>The one message for an out-of-range code, from whichever path found it.</summary>
     /// <remarks>
-    /// It reads the code ITSELF rather than taking one, so the three call sites do not each put a
-    /// `ReadInteger` in the file for an error path -- `DictDecoder.ThrowCode` is written the same
-    /// way, and PERF-AUDIT-v2.md annexe A counts every call whether or not it is in a loop.
+    /// It reads the offending code itself rather than taking one as an argument, so none of the
+    /// three call sites carries a `ReadInteger` for an error path; `DictDecoder.ThrowCode` is
+    /// written the same way.
     /// </remarks>
     private static void ThrowCode(
         ReadOnlySpan<byte> codes, PType codesPType, int row, int valuesLength) =>
@@ -184,12 +177,9 @@ public sealed class DictLayoutReader : LayoutReader
         DataBufferSet dataBuffers = DataBufferSet.Collect(arena, in values, false, default);
         try
         {
-            // THE SAME THREE PATHS AS `DictDecoder`, AND FOR THE SAME REASON. PERF-AUDIT-v2.md R6:
-            // this was a hand-rolled row loop -- `ReadInteger`'s switch on the code type, then
-            // `ValueWriter.Copy`'s switch on the kind and a variable-width `memmove` -- while the
-            // array decoder next door had already been wired onto `RowKernels`. Measured by
-            // short-circuiting it on `containers/dict_layout`: the loop is **26,4 %** of that
-            // scan (0,091 ms against 0,067), and the corpus holds **65 dict layouts**.
+            // The same three paths as `DictDecoder`, and for the same reason: a row loop pays a
+            // switch on the code type and a switch on the value kind per row, where the kernels
+            // resolve both once and then move fixed-width rows.
             //
             // A Bool value array keeps the row loop, exactly as it does there: bit-packed values
             // have no fixed-width row to move, so a typed kernel has nothing to specialize on.
@@ -209,12 +199,11 @@ public sealed class DictLayoutReader : LayoutReader
                         continue;
                     }
 
-                    // `RowKernels.CodeAt` and not `ReadInteger`: the same read without the
-                    // general switch, which is what `DictDecoder.GatherBits` uses and why that
-                    // file appears nowhere in annexe A's count.
+                    // `RowKernels.CodeAt` and not `ReadInteger`: the same read without the general
+                    // switch, which is what `DictDecoder.GatherBits` uses too.
                     uint code = RowKernels.CodeAt(codes, codesPType, row);
 
-                    // Class I: untrusted input, so the bound is checked on every row. The
+                    // The codes come off the wire, so the bound is checked on every row. The
                     // metadata's `all_values_referenced` is a hint and never licenses skipping it.
                     if (code >= (uint)valuesLength)
                     {

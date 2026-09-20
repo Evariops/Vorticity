@@ -1,9 +1,3 @@
-// One filtered column's zone map, decoded once per scan and detached from the arena it came out of.
-//
-// Zone z covers rows [z * ZoneLength, min((z + 1) * ZoneLength, RowCount)) -- the same arithmetic
-// ZoneMap documents, and the reason the LAST zone is short rather than padded. RowsInZone spells
-// that out because the null-count rule ("a zone whose nulls fill it cannot satisfy a comparison")
-// is wrong by one row for the last zone if it does not.
 using System;
 using System.Collections.Generic;
 using Vorticity.Expressions;
@@ -11,7 +5,12 @@ using Vorticity.File;
 
 namespace Vorticity.Compute;
 
-/// <summary>The per-zone bounds of one column a filter reads.</summary>
+/// <summary>
+/// The per-zone bounds of one column a filter reads, decoded once per scan and detached from the
+/// arena they came out of. Zone <c>z</c> covers rows
+/// <c>[z * ZoneLength, min((z + 1) * ZoneLength, RowCount))</c>, so the final zone is short rather
+/// than padded.
+/// </summary>
 internal sealed class ZoneColumn
 {
     private readonly ZoneBounds[] _zones;
@@ -41,7 +40,11 @@ internal sealed class ZoneColumn
     internal ZoneBounds Bounds(int index) =>
         (uint)index < (uint)_zones.Length ? _zones[index] : ZoneBounds.Unknown;
 
-    /// <summary>How many rows zone <paramref name="index"/> actually covers.</summary>
+    /// <summary>
+    /// How many rows zone <paramref name="index"/> actually covers. The final zone is short, so a
+    /// rule of the form "a zone whose nulls fill it cannot satisfy a comparison" is wrong by a row
+    /// for it unless it asks this rather than assuming <see cref="ZoneLength"/>.
+    /// </summary>
     /// <param name="index">A zone index.</param>
     internal long RowsInZone(int index)
     {
@@ -54,11 +57,9 @@ internal sealed class ZoneColumn
     /// <param name="rows">A row range in the column's own coordinates.</param>
     /// <returns>The first zone and the one past the last; empty when nothing overlaps.</returns>
     /// <remarks>
-    /// A RANGE AND NOT AN ITERATOR. PERF-AUDIT-v2.md F-5: this was an `IEnumerable&lt;int&gt;` built
-    /// with `yield`, so every call allocated an iterator to hand back consecutive integers -- and it
-    /// is called once per split and per predicate, **128 times** on the corpus filter that
-    /// `PathAllocationTests` holds. Two `int`s say the same thing, and the callers were already
-    /// plain `foreach` loops that a `for` expresses without losing anything.
+    /// A range and not a sequence: the indices are consecutive, so two <c>int</c>s say everything
+    /// an <c>IEnumerable&lt;int&gt;</c> would, and this is asked once per split and per predicate,
+    /// which is often enough that an iterator per call would be felt.
     /// </remarks>
     internal ZoneRange Zones(RowRange rows)
     {

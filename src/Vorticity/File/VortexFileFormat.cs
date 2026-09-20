@@ -1,15 +1,11 @@
-// The frozen constants of the file container, transcribed from vortex-file-0.86.1/src/lib.rs and
-// vortex-file-0.86.1/src/open.rs and cross-checked against docs/02-format.md §1.
-//
-// INITIAL_READ_SIZE is the one that gets "rounded up" by a careless reader: it is 65535, one byte
-// short of 64 KiB, because it is MAX_POSTSCRIPT_SIZE (65527 = u16::MAX - 8) plus EOF_SIZE (8).
-// Matching it exactly keeps our read pattern byte-identical to the reference's, which is what
-// makes the I/O-count assertion in the tests mean anything.
 using System;
 
 namespace Vorticity.File;
 
-/// <summary>Frozen constants of the Vortex file container (docs/02-format.md §1).</summary>
+/// <summary>
+/// Frozen constants of the Vortex file container. They are part of the format, not tuning knobs:
+/// changing one makes this reader disagree with every conformant writer.
+/// </summary>
 public static class VortexFileFormat
 {
     /// <summary>The 4-byte magic, <c>VTXF</c>, written at file offset 0 and again in the EOF marker.</summary>
@@ -20,7 +16,7 @@ public static class VortexFileFormat
 
     /// <summary>
     /// The only file format version this library reads. Compared for <em>exact</em> equality:
-    /// there is no <c>&lt;=</c> forward compatibility (vortex-file-0.86.1/src/footer/deserializer.rs).
+    /// there is no <c>&lt;=</c> forward compatibility.
     /// </summary>
     public const ushort Version = 1;
 
@@ -33,8 +29,9 @@ public static class VortexFileFormat
 
     /// <summary>
     /// Bytes read from the tail on open: <see cref="MaxPostscriptSize"/> + <see cref="EofSize"/>
-    /// = 65535. By construction this always covers the postscript, which is what makes the open
-    /// path 1-2 round trips (docs/02-format.md §1). A caller may raise it, never lower it.
+    /// = 65535, one byte short of 64 KiB and not to be rounded up. By construction it always covers
+    /// the postscript, which is what keeps the open path to one or two round trips. A caller may
+    /// raise it, never lower it.
     /// </summary>
     public const int InitialReadSize = MaxPostscriptSize + EofSize;
 

@@ -1,41 +1,25 @@
-// Deciding whether a row range can contain a matching row, from zone maps alone - F6.
-//
-// THE INVARIANT THIS FILE EXISTS TO NOT BREAK, quoted from docs/08-semantics.md §1:
-//
-//     Pruning may never eliminate a row that full materialization would have returned.
-//
-// The converse -- pruning too little -- is only a performance loss. Every decision below is
-// therefore skewed one way: anything unknown, absent, unresolvable or merely awkward answers "may
-// match", and only a positive proof of impossibility prunes. That asymmetry is why `Unknown`
-// bounds, missing aggregates and unsupported operators all take the same branch.
-//
-// The test is over a ROW RANGE rather than a single zone, because a split rarely lines up with a
-// zone: a range may match if ANY zone overlapping it may match. And the combination across an
-// expression is per-range, not per-row:
-//
-//     A AND B may match in R  <=  A may match in R  and  B may match in R
-//
-// which is weaker than the truth (the two could match on different rows of R) and therefore safe.
-// Reading it the other way round -- pruning R when A and B cannot match the SAME row -- would need
-// per-row evidence a zone map does not carry.
-//
-// NOT is handled by pushing it into the comparison rather than by negating a bound. Negating "this
-// zone may contain a match" gives "this zone may contain a non-match", which is not the same
-// question and is almost always true anyway. One thing the push-down cannot see: NOT (x > v) is
-// TRUE on a NaN row, where x <= v is false (docs/08-semantics.md §2), so under a negation an
-// ordering predicate may match wherever the zone may hold a NaN.
-//
-// THE DUAL, `MustMatch` AND `TryCount` (docs/12-index-reads.md §5.2), errs the other way: it
-// proves only when the statistics point the safe way, in three-valued logic with counts
-// (RangeVerdict), NOT included as the exact operation it is rather than as a push-down. A wrong
-// proof there is a wrong count, and the tests hold every count against the decode.
 using System;
 using Vorticity.Expressions;
 using Vorticity.File;
 
 namespace Vorticity.Compute;
 
-/// <summary>Zone-map pruning for one scan's filter.</summary>
+/// <summary>
+/// Zone-map pruning for one scan's filter. The rule nothing here may break is that pruning never
+/// eliminates a row full materialization would have returned; pruning too little only costs time,
+/// so anything unknown, absent, unresolvable or merely awkward answers "may match" and only a
+/// positive proof of impossibility prunes, which is why missing bounds, unknown aggregates and
+/// unsupported operators all take the same branch.
+/// </summary>
+/// <remarks>
+/// The question is asked of a row range rather than of a single zone, since a split rarely lines
+/// up with a zone: the range may match when any zone overlapping it may match, and a conjunction
+/// may match the range when both sides may match it somewhere in it. That is weaker than the truth
+/// — the two sides could match on different rows — and safe for exactly that reason; reading it the
+/// other way round would need per-row evidence a zone map does not carry. The dual,
+/// <see cref="MustMatch(RowRange)"/> and <c>TryCount</c>, errs the other way and proves only what
+/// the statistics settle, in three-valued logic with counts.
+/// </remarks>
 internal sealed class ZonePruner : IBlockPruner
 {
     /// <summary>Stack bytes a pattern's prefix and its successor each get before the heap.</summary>
@@ -78,16 +62,21 @@ internal sealed class ZonePruner : IBlockPruner
 
     /// <summary>Whether <paramref name="rows"/> may contain a row the filter selects.</summary>
     /// <param name="rows">The candidate range, in file row coordinates.</param>
+    /// <remarks>
+    /// A negation is pushed into the comparison rather than applied to a bound: negating "this zone
+    /// may hold a match" gives "this zone may hold a non-match", which is a different question and
+    /// is almost always true.
+    /// </remarks>
     internal bool MayMatch(RowRange rows) => MayMatch(_filter, rows, negated: false);
 
     /// <summary>
-    /// Whether the filter selects EVERY row of <paramref name="rows"/>, from the zone maps
-    /// alone -- the dual of <see cref="MayMatch(RowRange)"/>, docs/12-index-reads.md §5.2.
+    /// Whether the filter selects every one of <paramref name="rows"/>, from the zone maps alone --
+    /// the dual of <see cref="MayMatch(RowRange)"/>.
     /// </summary>
     /// <param name="rows">The candidate range, in file row coordinates.</param>
     /// <remarks>
     /// Strict: a null or a NaN row is not selected by a comparison, so a range that holds one is
-    /// not proven whole. What the statistics prove of the rows AROUND them is
+    /// not proven whole. What the statistics prove of the rows either side of them is
     /// <see cref="TryCount"/>.
     /// </remarks>
     internal bool MustMatch(RowRange rows) =>
@@ -95,7 +84,7 @@ internal sealed class ZonePruner : IBlockPruner
 
     /// <summary>
     /// How many rows of <paramref name="rows"/> the filter selects, when the zone maps decide
-    /// it: the full-block proof of <c>CountAsync</c> (docs/12-index-reads.md §5.2).
+    /// it: the whole-block proof a count answers from without decoding.
     /// </summary>
     /// <param name="rows">The candidate range, in file row coordinates.</param>
     /// <param name="count">The exact count, when decided.</param>
@@ -113,7 +102,7 @@ internal sealed class ZonePruner : IBlockPruner
 
     /// <summary>
     /// The zone map of <paramref name="path"/>, when the filter reads it and the column has a
-    /// usable one -- the bounds a <c>Min</c> or <c>Max</c> answers from (docs/12 §5.3).
+    /// usable one -- the bounds a <c>Min</c> or <c>Max</c> answers from without decoding.
     /// </summary>
     /// <param name="path">The column, as the filter names it.</param>
     internal ZoneColumn? Column(string path)
@@ -131,10 +120,10 @@ internal sealed class ZonePruner : IBlockPruner
 
     /// <inheritdoc/>
     /// <remarks>
-    /// BLOCK BY BLOCK THROUGH THE RANGE QUESTION ABOVE, so that the mask says of every block
-    /// exactly what the per-split question said of the rows it covers -- the equivalence
-    /// `ZonePruningTests` holds is inherited rather than re-proven. A block that is already dead
-    /// is not asked again: another structure may have killed it, and the zones cannot revive it.
+    /// Block by block through the same range question, so that the mask says of every block
+    /// exactly what a per-split question would say of the rows it covers. A block that is already
+    /// dead is not asked again: another structure may have killed it, and the zones cannot revive
+    /// it.
     /// </remarks>
     public void Refine(BlockMask live)
     {
@@ -232,10 +221,10 @@ internal sealed class ZonePruner : IBlockPruner
     /// is its negation, so a zone of nothing but null lists holds no row either way.
     /// </summary>
     /// <remarks>
-    /// A list column's zone map describes the LIST values — a strict Rust reader reads it — and not
-    /// their elements, so its bounds are never read here (docs/11-write-strategy.md §3.2.4). The
-    /// elements are the Bloom filter's (docs/10-indexes.md §5.1). A null literal is left alone, as
-    /// a comparison's is: pruning on it would rest a correctness claim on a constant.
+    /// A list column's zone map summarizes the list values themselves and not their elements, so
+    /// its bounds say nothing about what a list contains and are never read here; the elements are
+    /// the Bloom filter's business. A null literal is left alone, as a comparison's is: pruning on
+    /// it would rest a correctness claim on a constant.
     /// </remarks>
     private bool MayMatchListContains(ListContainsExpr contains, RowRange rows)
     {
@@ -264,18 +253,17 @@ internal sealed class ZonePruner : IBlockPruner
     }
 
     /// <summary>
-    /// A byte-pattern predicate, pruned through the one of the three that is a RANGE.
+    /// A byte-pattern predicate, pruned through whichever of the three shapes is a range.
     /// </summary>
     /// <remarks>
-    /// <c>StartsWith(p)</c> is exactly <c>x ≥ p AND x &lt; succ(p)</c> over the bytewise order a
-    /// zone map's string bounds already use, so it prunes with no machinery of its own — and a
-    /// <c>LIKE</c> whose pattern does not begin with a wildcard claims that same prefix
-    /// (docs/12-index-reads.md §7). <c>Contains</c> claims nothing until the n-gram structures of
-    /// docs/10-indexes.md §5.2 exist.
+    /// <c>StartsWith(p)</c> is exactly <c>x ≥ p</c> together with <c>x &lt; succ(p)</c> over the
+    /// bytewise order a zone map's string bounds already use, so it prunes with no machinery of
+    /// its own, and a <c>Like</c> pattern that does not open with a wildcard claims that same
+    /// prefix. <c>Contains</c> claims nothing, having no range to stand on.
     /// <para>
-    /// UNDER A NEGATION NOTHING IS CLAIMED, which is the same answer <c>NOT</c> gets from a
-    /// comparison: "this zone may hold a value that does NOT begin with p" is almost always true and
-    /// is not the question the bounds answer.
+    /// A negation claims nothing either, which is the answer a negated comparison gets too: "this
+    /// zone may hold a value that does not begin with p" is almost always true and is not the
+    /// question the bounds answer.
     /// </para>
     /// </remarks>
     private bool MayMatchStringMatch(StringMatchExpr match, RowRange rows, bool negated)
@@ -291,7 +279,7 @@ internal sealed class ZonePruner : IBlockPruner
             return pattern.IsEmpty || PrefixMayMatch(match.Field, pattern, rows);
         }
 
-        // A LIKE claims only what it says before its first wildcard, and the escapes have to come
+        // A pattern claims only what it says before its first wildcard, and the escapes have to come
         // out of it first, so it needs a buffer of its own. The prefix never leaves this frame: it
         // goes straight into the comparison below.
         Span<byte> literal = pattern.Length <= Scratch
@@ -496,7 +484,7 @@ internal sealed class ZonePruner : IBlockPruner
     /// A byte-pattern predicate, decided through the range a prefix is, exactly as
     /// <see cref="MayMatchStringMatch"/> prunes it: <c>StartsWith(p)</c> is
     /// <c>x ≥ p AND x &lt; succ(p)</c>, so its bounds prove it whole as well as impossible; a
-    /// <c>LIKE</c> claims only impossibility through its leading literal, since what follows the
+    /// <c>Like</c> claims only impossibility through its leading literal, since what follows the
     /// prefix is not a range; <c>Contains</c> claims nothing but the empty pattern.
     /// </summary>
     private RangeVerdict StringMatchVerdict(StringMatchExpr match, RowRange rows)
@@ -528,7 +516,7 @@ internal sealed class ZonePruner : IBlockPruner
 
     /// <summary>The prefix question: the range <c>[p, succ(p))</c>, both ends as literals.</summary>
     /// <param name="prefix">The prefix.</param>
-    /// <param name="whole">Whether the predicate IS the prefix test, so that the range proves it whole.</param>
+    /// <param name="whole">Whether the predicate is the prefix test itself, so the range proves it whole.</param>
     private static ZoneQuestion Prefix(ReadOnlySpan<byte> prefix, bool whole)
     {
         if (prefix.IsEmpty)
@@ -553,9 +541,9 @@ internal sealed class ZonePruner : IBlockPruner
     /// <remarks>
     /// A zone the range covers whole contributes its counts. A zone it covers in part is a
     /// count over rows the map cannot tell apart, so it contributes only what is uniform over
-    /// the zone: nothing true, everything true, nothing unknown, everything unknown. A split
-    /// that straddles two blocks (docs/11 §6.1) is the case; a block that IS a zone never
-    /// meets it.
+    /// the zone: nothing true, everything true, nothing unknown, everything unknown. A split that
+    /// straddles two blocks is the case that meets this; a block that is itself one zone never
+    /// does.
     /// </remarks>
     private RangeVerdict Decide(FieldExpr field, RowRange rows, in ZoneQuestion question)
     {
@@ -610,9 +598,9 @@ internal sealed class ZonePruner : IBlockPruner
 
     /// <summary>
     /// What the bounds prove of <c>x op value</c>, over the values the bounds describe: the
-    /// non-null, non-NaN ones (docs/08-semantics.md §2). <see cref="Proof.All"/> reads an
-    /// Inexact bound the way docs/08 §1 allows -- the true minimum is at or above the stated
-    /// one, so <c>min ≥ v</c> proves <c>x ≥ v</c> -- and equality only from Exact bounds.
+    /// non-null, non-NaN ones. <see cref="Proof.All"/> may rest on an inexact bound, since the true
+    /// minimum is at or above the stated one and <c>min ≥ v</c> therefore proves <c>x ≥ v</c>;
+    /// equality is proven only from exact bounds.
     /// </summary>
     private static Proof Prove(ZoneBounds bounds, ComparisonOp op, FilterLiteral value)
     {
@@ -639,7 +627,7 @@ internal sealed class ZonePruner : IBlockPruner
                 return hasLow && hasHigh && low == 0 && high == 0 && bounds.IsExact ? Proof.All : Proof.Open;
             default:
                 // NotEqual: the mirror of Equal, over the values the bounds describe. The NaN
-                // rows, which are outside them and DO satisfy !=, are the caller's to count.
+                // rows, which lie outside them and do satisfy !=, are the caller's to count.
                 if ((hasLow && low > 0) || (hasHigh && high < 0))
                 {
                     return Proof.All;
@@ -689,7 +677,7 @@ internal sealed class ZonePruner : IBlockPruner
             /// <summary><c>x op v</c>.</summary>
             Comparison,
 
-            /// <summary><c>IS NULL</c> or <c>IS NOT NULL</c>.</summary>
+            /// <summary>A null test, either way round.</summary>
             NullCheck,
 
             /// <summary><c>x IN (…)</c>.</summary>
@@ -728,7 +716,7 @@ internal sealed class ZonePruner : IBlockPruner
 
             if (_shape == Shape.NullCheck)
             {
-                // Never unknown (docs/08-semantics.md §3), and the count is the statistic itself.
+                // A null test is never unknown, and its count is the statistic itself.
                 return nulls is long known
                     ? RangeVerdict.Of(rows, _isNull ? known : rows - known, _isNull ? rows - known : known, 0)
                     : RangeVerdict.Undecided(rows);
@@ -780,7 +768,7 @@ internal sealed class ZonePruner : IBlockPruner
             long? nans = NaNs(bounds, rows);
             if (_op == ComparisonOp.NotEqual)
             {
-                // A NaN row satisfies != (docs/08 §2): the trues are every non-null row when the
+                // A NaN row does satisfy !=: the trues are every non-null row when the
                 // bounds prove the values, and exactly the NaN rows when they prove the values
                 // all equal -- the values themselves are then the falses.
                 return proof switch
@@ -791,7 +779,7 @@ internal sealed class ZonePruner : IBlockPruner
                 };
             }
 
-            // An ordering predicate or an equality: false on a NaN row (docs/08 §2), so the bounds
+            // An ordering predicate or an equality: false on a NaN row, so the bounds
             // proving every value leave exactly the NaN rows false, and proving none leaves no
             // true row at all.
             return proof switch
@@ -926,9 +914,8 @@ internal sealed class ZonePruner : IBlockPruner
     {
         ZoneBounds bounds = column.Bounds(zone);
 
-        // "a zone where null_count == row_count can be skipped for any predicate that is not
-        // satisfiable by nulls" (docs/08-semantics.md §3). A comparison is never satisfiable by a
-        // null, so an all-null zone cannot match one.
+        // A zone whose null count fills it can be skipped for any predicate a null cannot satisfy,
+        // and a comparison is never satisfied by a null.
         if (bounds.HasNullCount && bounds.NullCount >= column.RowsInZone(zone))
         {
             return false;
@@ -949,7 +936,7 @@ internal sealed class ZonePruner : IBlockPruner
 
             case ComparisonOp.Equal:
                 // k has to sit inside [min, max]. Inexact bounds only widen that interval, so the
-                // containment test stays sound; what Inexact forbids is the OTHER shortcut,
+                // containment test stays sound; what they forbid is the opposite shortcut,
                 // "min == max means the zone is constant", which is not used here.
                 if (bounds.HasMin && Compare(bounds.Min, value) is int low && low > 0)
                 {
@@ -1014,8 +1001,8 @@ internal sealed class ZonePruner : IBlockPruner
     /// <c>ComparisonKernels.CompareSignedAgainstFloat</c> takes each value there, and that
     /// widening is monotone, so what holds of the widened bound holds of every widened value on
     /// its side of it -- lossy above 2^53 in the same way for the bound and for the rows. A NaN on
-    /// either side is not comparable: a zone's bounds exclude NaN (docs/08-semantics.md §2), and
-    /// a NaN constant compares false against everything.
+    /// either side is not comparable: a zone's bounds exclude NaN rows, and a NaN constant compares
+    /// false against everything.
     /// </remarks>
     internal static bool TryCompare(FilterLiteral bound, FilterLiteral value, out int order)
     {

@@ -1,19 +1,3 @@
-// Reading the zone maps a filter can use, once per scan.
-//
-// The zones child of a `vortex.zoned` layout is a struct with one column per aggregate, one row per
-// zone. Phase 1 parsed its SHAPE and never read it, because nothing consumed it; this is what
-// consumes it.
-//
-// It happens once, before the first batch, in a scan context of its own that is disposed
-// immediately afterwards. That context is the reason ZoneBounds copies its values out: the batch
-// contexts reset their arenas at every boundary, and a pruner that held arena indices would be
-// reading freed memory by the second batch.
-//
-// A column contributes nothing rather than failing, at every step: no zoned layout on its path, a
-// zone map whose aggregates this build does not know, an aggregate with no usable column, a zones
-// child that will not decode -- all of them leave that column unable to prune, and the scan reads
-// everything it would have read anyway. docs/08-semantics.md §4 requires exactly that of an
-// unknown aggregate, and the same reflex is right for every other gap.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -27,12 +11,23 @@ using Vorticity.Types;
 
 namespace Vorticity.Compute;
 
-/// <summary>Builds the zone-map pruner for one scan.</summary>
+/// <summary>
+/// Builds the zone-map pruner for one scan, by reading the zones child of each
+/// <c>vortex.zoned</c> layout the filter touches: a struct with one column per aggregate and one
+/// row per zone. It happens once, before the first batch, in a scan context of its own that is
+/// disposed straight afterwards, which is why the bounds are copied out of its arena.
+/// </summary>
+/// <remarks>
+/// Every step contributes nothing rather than failing: no zoned layout on a column's path, a zone
+/// map whose aggregates this build does not know, an aggregate with no usable column, a zones
+/// child that will not decode -- each of them leaves that column unable to prune, and the scan
+/// then reads everything it would have read without a zone map.
+/// </remarks>
 internal static class ZonePruningPlan
 {
     /// <summary>
     /// The live blocks of one scan: every pruning structure the file carries, run over one mask,
-    /// cheapest first (docs/11-write-strategy.md §6.1).
+    /// cheapest first.
     /// </summary>
     /// <param name="file">The open file.</param>
     /// <param name="tree">Its parsed layout tree.</param>
@@ -50,8 +45,8 @@ internal static class ZonePruningPlan
     /// <param name="indexes">Whether the file's index directory takes part (<c>WithIndexes</c>).</param>
     /// <remarks>
     /// The zone map is first in line: it is already loaded and answers from min/max and null
-    /// counts. The Bloom filters of docs/10-indexes.md §5.1 come next, over the blocks still live,
-    /// and the list stops at an empty mask.
+    /// counts. The Bloom filters come next, over the blocks still live, and the list stops at an
+    /// empty mask.
     /// </remarks>
     internal static async ValueTask<BlockMask?> RefineAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
@@ -64,9 +59,8 @@ internal static class ZonePruningPlan
     internal readonly record struct PruningPlan(BlockMask? Live, ZonePruner? Zones);
 
     /// <summary>
-    /// <see cref="RefineAsync"/>, keeping the structures beside the mask: a terminal
-    /// (docs/12-index-reads.md §5.2) asks the zone maps for a block's count after the mask has
-    /// said the block is live.
+    /// <see cref="RefineAsync"/>, keeping the structures beside the mask: a terminal operation
+    /// asks the zone maps for a block's count after the mask has said the block is live.
     /// </summary>
     /// <param name="file">The open file.</param>
     /// <param name="tree">Its parsed layout tree.</param>
@@ -81,9 +75,9 @@ internal static class ZonePruningPlan
     {
         (ZonePruner? zones, int segments, long bytes) =
             await BuildCountedAsync(file, tree, filter, metrics, cancellationToken).ConfigureAwait(false);
-        // THE PRICE OF CONSULTING A STRUCTURE IS PART OF THE SCAN'S COST: the zone maps read here
-        // are bytes the scan asked its source for, and they go to the same sink the batches feed
-        // (docs/11 §6.4), so that the sink and the source agree to the request.
+        // The price of consulting a structure belongs to the scan's cost: the zone maps read here
+        // are bytes the scan asked its source for, and they go to the same sink the batches feed,
+        // so that the sink and the source agree about what was requested.
         Scan.ScanMetrics.Note(metrics, segments, bytes);
 
         long blockRows = Scan.SplitPlan.NaturalBatchRows(tree);
@@ -103,10 +97,10 @@ internal static class ZonePruningPlan
         if (zones is not null)
         {
             zones.Refine(live);
-            // What each structure pruned, and what consulting it cost, for `Explain` (docs/11
-            // §6.4): the blocks that were live when it ran and are not afterwards -- so a later
-            // structure is credited only with what the earlier ones left it -- against the
-            // segments read for it.
+            // What each structure pruned, and what consulting it cost, for `Explain`: the blocks
+            // that were live when it ran and are not afterwards -- so a later structure is
+            // credited only with what the earlier ones left it -- against the segments read for
+            // it.
             steps?.Add(new Scan.PruningStep("zone map", before - live.LiveCount, segments, bytes));
         }
 
@@ -184,20 +178,19 @@ internal static class ZonePruningPlan
             return (null, 0, 0);
         }
 
-        // PERF-AUDIT-v2.md R30, and it is the whole cost of pruning. This context reads one zone
-        // map per filtered column -- a struct of a few aggregates, one row per zone -- and is
-        // disposed on the next line but one. Sized for a batch it allocated 18 192 bytes, which the
-        // F-9 probe measured as 97,3 % of everything pruning costs over not pruning: the arenas
-        // were dimensioned for millions of rows to hold sixty-four bounds.
+        // Sized for metadata rather than for a batch, and that choice is most of what pruning
+        // costs: this context reads one zone map per filtered column -- a struct of a few
+        // aggregates, one row per zone -- and is disposed as soon as the bounds are out, so arenas
+        // dimensioned for millions of rows would allocate for a handful of bounds.
         ZoneColumn[] columns = new ZoneColumn[candidates.Count];
         using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
         // The zone maps' own rows are values the flat reader materializes, and the sink counts
-        // them like any other -- the same way `FlatLayoutReader.ValuesDecoded` always has.
+        // them like any other value it decodes.
         context.Metrics = metrics;
 
-        // One registration pass over every zones child, then ONE coalesced read for all of them:
-        // the same register-then-execute split a batch uses (docs/03-architecture.md §3.6), which
-        // is what keeps a filter on five columns to one round trip rather than five.
+        // One registration pass over every zones child, then a single coalesced read for all of
+        // them: the same register-then-execute split a batch uses, which is what keeps a filter on
+        // five columns to one round trip rather than five.
         for (int i = 0; i < candidates.Count; i++)
         {
             Candidate candidate = candidates[i];
@@ -238,7 +231,7 @@ internal static class ZonePruningPlan
     /// covers the column it names, if there is one.
     /// </summary>
     /// <remarks>
-    /// Only a zoned node whose own dtype IS the column's is accepted. A zoned layout above a struct
+    /// Only a zoned node whose own dtype is the column's is accepted. A zoned layout above a struct
     /// carries aggregates over the struct, whose state columns are themselves structs; reading a
     /// scalar bound out of one would be reading a different statistic than the filter is asking
     /// about.
@@ -347,10 +340,9 @@ internal static class ZonePruningPlan
                     nullColumn = column;
                     break;
                 case AggregateId.NanCount:
-                    // Only a float column that holds a NaN carries one (the reference writer
-                    // emits it for nothing else), and a count-only proof needs it: the bounds
-                    // exclude NaN rows, so `rows - null_count` overstates a comparison's matches
-                    // by exactly this many (docs/12-index-reads.md §5.2).
+                    // Only a float column that holds a NaN carries one, and a proof that counts
+                    // without decoding needs it: the bounds exclude NaN rows, so
+                    // `rows - null_count` overstates a comparison's matches by exactly this many.
                     nanColumn = column;
                     break;
                 default:
@@ -414,9 +406,8 @@ internal static class ZonePruningPlan
     /// <c>Struct({bound: element?, unknown: bool})</c> (ZoneMapSchema.BoundedMaxPartial): a
     /// maximum bounded to N bytes is the truncated prefix stepped up, which does not exist for an
     /// all-0xFF prefix, and <c>unknown</c> says so for the zone. A zone whose flag is set has no
-    /// bound; one whose flag is clear has it in <c>bound</c>. Until this read the shape, a
-    /// string column's bounded maximum was never seen, and every string predicate pruned and
-    /// proved from its minimum alone.
+    /// bound; one whose flag is clear has it in <c>bound</c>. A reader that does not know this
+    /// shape sees no maximum at all on a string column and prunes from the minimum alone.
     /// </remarks>
     private static bool TryReadBound(CanonicalArena arena, int nodeIndex, int zone, out FilterLiteral literal)
     {

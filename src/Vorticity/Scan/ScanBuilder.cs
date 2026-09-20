@@ -1,10 +1,3 @@
-// PHASE1-CONTRACTS.md §13.1. The fluent front door of the library.
-//
-// WHERE `Where` GOES, and why it sits where it does. docs/03-architecture.md §3.4 fixes the order
-// of application as WHERE THEN PROJECT: the filter sees columns the projection does not. So
-// ExecuteAsync compiles TWO masks - `keep`, what the caller projected, and `read`, that unioned
-// with every field the filter references - plans the scan under `read`, and hands both to the
-// enumerator, which trims `read` down to `keep` after the filter has run.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -21,9 +14,17 @@ namespace Vorticity.Scan;
 
 /// <summary>Builds and launches one scan over an open <see cref="VortexFile"/>.</summary>
 /// <remarks>
+/// <para>
 /// A builder is not thread-safe and is meant to be used and discarded. The
 /// <see cref="IAsyncEnumerable{T}"/> it produces is independent of it: mutating the builder
 /// afterwards does not change an enumeration already handed out.
+/// </para>
+/// <para>
+/// The filter is applied before the projection, so it sees columns the projection does not.
+/// Compiling a scan therefore produces two masks -- what the caller projected, and that unioned
+/// with every field the filter references -- plans the scan under the wider one, and lets the
+/// enumerator trim back down once the filter has run.
+/// </para>
 /// </remarks>
 public sealed class ScanBuilder
 {
@@ -57,11 +58,11 @@ public sealed class ScanBuilder
     /// </summary>
     /// <param name="paths">
     /// <c>.</c>-separated field names: <c>"id"</c>, <c>"payload.size"</c>.
-    /// <b>A Vortex field name may itself contain a <c>.</c> or be empty</b> - corpus
-    /// <c>types/struct_field_names</c> has fields named <c>"a.b"</c> and <c>""</c> - so this
-    /// overload cannot address every column and no escaping syntax is invented for it. Use
+    /// <b>A Vortex field name may itself contain a <c>.</c> or be empty</b> -- names such as
+    /// <c>"a.b"</c> and <c>""</c> are legal -- so this overload cannot address every column and no
+    /// escaping syntax is invented for it. Use
     /// <see cref="ProjectFields(ReadOnlySpan{int})"/> with
-    /// <see cref="StructColumn.GetField(int)"/> for those (§13.2).
+    /// <see cref="StructColumn.GetField(int)"/> for those.
     /// </param>
     /// <returns>This builder.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="paths"/> or an element is null.</exception>
@@ -146,7 +147,7 @@ public sealed class ScanBuilder
     /// <returns>This builder.</returns>
     /// <remarks>
     /// <b>It caps; it does not set.</b> The natural batch size is the file's zone length, or
-    /// <c>8192</c> when it has no zone map, and a cap above that changes nothing (§13 traps).
+    /// <c>8192</c> when it has no zone map, and a cap above that changes nothing.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxRows"/> is not positive.</exception>
     public ScanBuilder WithMaxBatchRows(int maxRows)
@@ -163,15 +164,14 @@ public sealed class ScanBuilder
     /// <returns>This builder.</returns>
     /// <remarks>
     /// <para>
-    /// <b>The filter runs before the projection</b> (docs/03-architecture.md §3.4): a column the
+    /// <b>The filter runs before the projection</b>: a column the
     /// filter names is read even when the caller did not project it, and is dropped from the batch
     /// afterwards. Calling this twice replaces the filter rather than combining the two - use
     /// <see cref="Expr.And"/>, which says what it means.
     /// </para>
     /// <para>
-    /// Three-valued logic, SQL-style: a row is kept only when the predicate is <c>true</c>, so a
-    /// row whose compared column is null is dropped by <c>x = 1</c> AND by <c>x != 1</c> alike
-    /// (docs/08-semantics.md §3).
+    /// Three-valued logic: a row is kept only when the predicate is <c>true</c>, so a
+    /// row whose compared column is null is dropped by <c>x = 1</c> and by <c>x != 1</c> alike.
     /// </para>
     /// <para>
     /// A batch whose rows are all rejected is not produced at all; the scan moves to the next
@@ -213,9 +213,9 @@ public sealed class ScanBuilder
     /// <returns>This builder.</returns>
     /// <remarks>
     /// <para>
-    /// This is F5, Vortex's headline claim over Parquet: the splits the list never touches are
-    /// skipped before a single segment is registered, so a thousand scattered rows out of a billion
-    /// read the splits those rows live in and nothing else.
+    /// The splits the list never touches are skipped before a single segment is registered, so a
+    /// thousand scattered rows out of a billion read the splits those rows live in and nothing
+    /// else.
     /// </para>
     /// <para>
     /// Mutually exclusive with <see cref="Rows(RowRange)"/>, which selects a contiguous range;
@@ -238,8 +238,7 @@ public sealed class ScanBuilder
     }
 
     /// <summary>
-    /// Delivers the rows in the key order of <paramref name="path"/> instead of file order
-    /// (docs/12-index-reads.md §6).
+    /// Delivers the rows in the key order of <paramref name="path"/> instead of file order.
     /// </summary>
     /// <param name="path">The key column, <c>.</c>-separated for a nested field.</param>
     /// <param name="descending">Whether the order is reversed, ties included.</param>
@@ -258,8 +257,8 @@ public sealed class ScanBuilder
     /// <b>A row whose key is null comes last, in both directions</b>: after every keyed row, in row
     /// order ascending and in reverse row order descending. No source holds it, so the scan reads
     /// those rows in file order once the walk is done, under the same filter. A merge of files in
-    /// key order (docs/13-dataset.md §6.6) encodes its keys with nulls last in both directions to
-    /// match, so a key-ordered file and a key-ordered merge of files agree.
+    /// key order encodes its keys with nulls last in both directions to match, so a key-ordered
+    /// file and a key-ordered merge of files agree.
     /// </para>
     /// <para>
     /// <b>What it costs</b> is the key's correlation with file order: a window of a sorted column
@@ -290,8 +289,7 @@ public sealed class ScanBuilder
     }
 
     /// <summary>
-    /// Delivers the rows in the order of a composite key, the tuple of <paramref name="paths"/>
-    /// (docs/12-index-reads.md §4.6, §6).
+    /// Delivers the rows in the order of a composite key, the tuple of <paramref name="paths"/>.
     /// </summary>
     /// <param name="paths">The key's columns, in key order; one path is <see cref="InKeyOrder(string, bool)"/>.</param>
     /// <param name="descending">Whether the order is reversed, ties included.</param>
@@ -346,9 +344,9 @@ public sealed class ScanBuilder
     /// <param name="enabled">Whether the scan may skip splits its zone maps rule out.</param>
     /// <returns>This builder.</returns>
     /// <remarks>
-    /// Pruning never changes which ROWS a scan returns -- docs/08-semantics.md §1 makes "pruning may
-    /// never eliminate a row that full materialization would have returned" the invariant the whole
-    /// feature rests on. Turning it off is therefore a diagnostic, not a semantic: it is how the
+    /// Pruning never changes which rows a scan returns: it may never eliminate a row that full
+    /// materialization would have returned, and that is the invariant the whole feature rests on.
+    /// Turning it off is therefore a diagnostic, not a semantic: it is how the
     /// property test compares a pruned scan against an unpruned one, and how a caller who suspects
     /// a file's statistics can check.
     /// </remarks>
@@ -365,7 +363,7 @@ public sealed class ScanBuilder
     /// <returns>This builder.</returns>
     /// <remarks>
     /// The same diagnostic as <see cref="WithPruning"/>, one layer down: an index is a hint and
-    /// never changes which rows a scan returns (docs/10-indexes.md §6.6), so a scan with indexes
+    /// never changes which rows a scan returns, so a scan with indexes
     /// on and the same scan with them off are the equivalence test every index kind is held to.
     /// </remarks>
     public ScanBuilder WithIndexes(bool enabled)
@@ -379,8 +377,8 @@ public sealed class ScanBuilder
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A host that wants concurrency had otherwise to call
-    /// <see cref="WithDegreeOfParallelism"/> at every call site, and nothing obliged it to: one
+    /// Without this, a host that wants concurrency has to call
+    /// <see cref="WithDegreeOfParallelism"/> at every call site, and nothing obliges it to: one
     /// forgotten site and that scan is sequential, one careless site and it is not. This is the
     /// setting made once, in the place a host configures things — the server-side half of what an
     /// engine spells <c>MAXDOP</c>, where the per-scan call is the query-side half and wins.
@@ -414,9 +412,8 @@ public sealed class ScanBuilder
     /// <remarks>
     /// <para>
     /// Overrides <see cref="DefaultDegreeOfParallelism"/>, which is <c>1</c> unless the host has
-    /// set it: a library must not appropriate the host's thread pool
-    /// (docs/09-contracts.md §2). Each concurrent split gets its <b>own</b>
-    /// <see cref="Vorticity.Arrays.ScanContext"/> with its own arenas (contract §2.2); nothing is
+    /// set it: a library must not appropriate the host's thread pool. Each concurrent split gets
+    /// its <b>own</b> <see cref="Vorticity.Arrays.ScanContext"/> with its own arenas; nothing is
     /// shared. Batches are still delivered in row order.
     /// </para>
     /// <para>
@@ -440,20 +437,20 @@ public sealed class ScanBuilder
     /// </returns>
     /// <remarks>
     /// The layout tree is parsed here, once, and shared by every enumerator this call produces: it
-    /// is immutable after parsing and therefore safe for concurrent scans (docs/09-contracts.md §1).
+    /// is immutable after parsing and therefore safe for concurrent scans.
     /// </remarks>
     /// <exception cref="VortexFormatException">The file's layout tree is malformed.</exception>
     public IAsyncEnumerable<RecordBatch> ExecuteAsync()
     {
-        // Parsed at most once per OPEN FILE rather than once per scan: the tree is a function of
-        // the file's bytes and nothing else. See VortexFile.LayoutTree.
+        // Parsed at most once per open file rather than once per scan: the tree is a function of
+        // the file's bytes and nothing else.
         LayoutTree tree = _file.LayoutTree;
         (RowRange rows, _, long cap) = Frame(tree);
 
         Projection keep = _fields is null ? Projection.All : Projection.Create(_fields.Build());
 
-        // WHERE THEN PROJECT: the scan reads the union so the filter has its columns, and the
-        // enumerator trims back down to `keep` once the filter has decided.
+        // Filter first, projection second: the scan reads the union so the filter has its columns,
+        // and the enumerator trims back down to `keep` once the filter has decided.
         Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
 
@@ -469,9 +466,8 @@ public sealed class ScanBuilder
                 batches, _filter, _orderPath, _orderComposite, _descending, _prune, _indexes, (int)cap, nulls);
         }
 
-        // Only a filtered scan pays for the skip-empty wrapper; an unfiltered one is the same
-        // object graph it has always been, which is what keeps the per-batch allocation figure
-        // the allocation tests pin unchanged.
+        // Only a filtered scan pays for the skip-empty wrapper, so an unfiltered one keeps the
+        // per-batch allocation figure the allocation tests pin.
         // The wrapper exists for the filter's own two jobs -- prune before reading, skip emptied
         // batches after -- and a take needs the second of them too: a split whose wanted rows are
         // all it holds still produces a batch, but one gathered down to nothing must not.
@@ -480,14 +476,14 @@ public sealed class ScanBuilder
             : new FilteredBatches(batches, _filter, _prune, _indexes, rows);
     }
 
-    /// <summary>Hands the scan a sink it adds its counters to as it runs (docs/11 §6.4).</summary>
+    /// <summary>Hands the scan a sink it adds its counters to as it runs.</summary>
     /// <param name="metrics">The caller's sink; a fresh one per fresh count.</param>
     /// <returns>This builder.</returns>
     /// <remarks>
     /// Every enumerator started from this builder adds to the same object, so a scan run twice
     /// reports the sum. What it counts is what <see cref="ExplainAsync"/> planned: the segments
     /// and bytes asked of the source, the values the flat reader materialized, the batches and
-    /// rows produced -- the same quantities, measured.
+    /// rows produced -- the same quantities, once the scan has actually run.
     /// </remarks>
     public ScanBuilder WithMetrics(ScanMetrics metrics)
     {
@@ -497,13 +493,13 @@ public sealed class ScanBuilder
     }
 
     /// <summary>
-    /// The plan of this scan without executing it (docs/11 §6.4): splits and blocks, what each
-    /// structure prunes, the segments and bytes the live splits would read, against the file.
+    /// The plan of this scan without executing it: splits and blocks, what each structure prunes,
+    /// the segments and bytes the live splits would read, against the file.
     /// </summary>
     /// <param name="cancellationToken">Cancels the one read this makes.</param>
     /// <returns>The plan.</returns>
     /// <remarks>
-    /// THE SAME PLANNING THE SCAN DOES BEFORE ITS FIRST BATCH, stopped before any data segment
+    /// The same planning the scan does before its first batch, stopped before any data segment
     /// is read: the layout tree, the split plan under the read projection, the mask of live blocks
     /// refined by every structure the file carries (the zone maps are read for that, one segment
     /// per filtered column, as the scan itself reads them), then a walk of the splits the cursor
@@ -570,7 +566,7 @@ public sealed class ScanBuilder
             }
 
             // The data segments of the live splits, plus what consulting each structure cost:
-            // the same asking the metrics count, so that plan and measurement are one quantity.
+            // the same asking the metrics count, so that plan and outcome are one quantity.
             int toRead = segments.Count;
             long bytes = 0;
             for (int i = 0; i < segments.Count; i++)
@@ -589,8 +585,8 @@ public sealed class ScanBuilder
                 || (_indexes
                     ? await _file.MayMatchAsync(_filter, cancellationToken).ConfigureAwait(false)
                     : Compute.FileStatisticsPruner.MayMatch(_file, _filter));
-            // The exact cover (docs/12 §5.2's first tier, 10 §6.6's row selection): a scan whose
-            // cover holds a batch or fewer reads those rows and evaluates nothing.
+            // The exact cover, the first tier a count takes: a scan whose cover holds a batch or
+            // fewer reads those rows and evaluates nothing.
             CountPlan? count = null;
             long selected = 0;
             if (_filter is not null)
@@ -658,7 +654,7 @@ public sealed class ScanBuilder
         }
     }
 
-    /// <summary>The key source <c>InKeyOrder</c> would walk, and the range it would walk; §6.</summary>
+    /// <summary>The key source <c>InKeyOrder</c> would walk, and the range it would walk.</summary>
     private async System.Threading.Tasks.ValueTask<OrderPlan> OrderAsync(System.Threading.CancellationToken cancellationToken)
     {
         Keys.KeySource? source;
@@ -705,8 +701,7 @@ public sealed class ScanBuilder
     }
 
     /// <summary>
-    /// How many rows the scan would return, exactly, without returning them
-    /// (docs/12-index-reads.md §5.2).
+    /// How many rows the scan would return, exactly, without returning them.
     /// </summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The count.</returns>
@@ -724,15 +719,15 @@ public sealed class ScanBuilder
         Terminal().CountAsync(cancellationToken);
 
     /// <summary>
-    /// Whether the scan would return at least one row (docs/12-index-reads.md §5.1).
+    /// Whether the scan would return at least one row.
     /// </summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>Whether some row matches.</returns>
     /// <remarks>
     /// <see cref="CountAsync"/> stopped at the first split that counts: an empty mask answers
     /// without a read, a split the zone maps prove answers from memory, and the bad case reads
-    /// every live split once and materializes none. This is the membership probe of docs/12 §1,
-    /// exact where <see cref="VortexFilePruningExtensions.MayMatch"/> is a superset.
+    /// every live split once and materializes none. It is an exact membership probe, where
+    /// <see cref="VortexFilePruningExtensions.MayMatch"/> answers with a superset.
     /// </remarks>
     public System.Threading.Tasks.ValueTask<bool> AnyAsync(
         System.Threading.CancellationToken cancellationToken = default) =>
@@ -740,8 +735,7 @@ public sealed class ScanBuilder
 
     /// <summary>
     /// The smallest non-null value of <paramref name="path"/> among the rows the scan would
-    /// return, in the filter's order (docs/12-index-reads.md §5.3); <see cref="FilterLiteral.Null"/>
-    /// when there is none.
+    /// return, in the filter's order; <see cref="FilterLiteral.Null"/> when there is none.
     /// </summary>
     /// <param name="path">The column, <c>.</c>-separated for a nested field.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
@@ -751,7 +745,7 @@ public sealed class ScanBuilder
     /// the statistic is <c>Exact</c> (no read); the zone map's bounds for every split they decide
     /// whole, an <c>Inexact</c> bound being a candidate decoded only when it could still win;
     /// the decode of what is left, with a running extreme and one split of memory at a time. A
-    /// NaN is never the minimum nor the maximum, as the statistics have it (docs/08 §2).
+    /// NaN is never the minimum nor the maximum, as the statistics have it.
     /// <see cref="Where"/>, <see cref="Rows"/>, <see cref="Take"/> and <see cref="WithPruning"/>
     /// are honoured exactly as <see cref="ExecuteAsync"/> honours them.
     /// </remarks>
@@ -763,8 +757,7 @@ public sealed class ScanBuilder
 
     /// <summary>
     /// The largest non-null value of <paramref name="path"/> among the rows the scan would
-    /// return, in the filter's order (docs/12-index-reads.md §5.3); <see cref="FilterLiteral.Null"/>
-    /// when there is none.
+    /// return, in the filter's order; <see cref="FilterLiteral.Null"/> when there is none.
     /// </summary>
     /// <param name="path">The column, <c>.</c>-separated for a nested field.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
@@ -888,9 +881,10 @@ public sealed class ScanBuilder
     /// holds, in file order -- reversed, split by split, when the scan is descending.
     /// </summary>
     /// <remarks>
-    /// A filtered scan under <c>IsNull(key) AND filter</c>, so the zone maps' null counts prune every
-    /// block that holds no null key before a byte of it is read. A split is at most one batch, so the
-    /// descending tail reverses one batch at a time and memory stays one batch.
+    /// A filtered scan under <c>IsNull(key)</c> conjoined with the caller's own filter, so the zone
+    /// maps' null counts prune every block that holds no null key before a byte of it is read. A
+    /// split is at most one batch, so the descending tail reverses one batch at a time and memory
+    /// stays one batch.
     /// </remarks>
     private IAsyncEnumerable<RecordBatch> NullKeysAsync(LayoutTree tree, RowRange rows, Projection keep, long cap)
     {
@@ -910,9 +904,9 @@ public sealed class ScanBuilder
         LayoutTree tree, RowRange rows, Projection read, Projection keep, SplitPlan plan, VortexExpr filter, long cap)
     {
         // One pipeline for the whole walk, reading the plan's splits last one first. Building one
-        // per split cost a plan, an enumerable and a filter for every batch -- a split is a batch,
-        // since both are cut to the same row cap -- which is 40 kB a batch against the 80 of the
-        // RecordBatch every other scan is held to.
+        // per split would cost a plan, an enumerable and a filter for every batch -- a split is a
+        // batch, since both are cut to the same row cap -- which dwarfs the per-batch allocation
+        // every other scan is held to.
         IAsyncEnumerable<RecordBatch> scan = new FilteredBatches(
             new BatchAsyncEnumerable(_file, tree, read, keep, plan, 1, filter, null, _metrics, reverse: true),
             filter, _prune, _indexes, rows);
@@ -971,7 +965,7 @@ public static class VortexFileScanExtensions
     /// <returns>A fresh builder.</returns>
     /// <remarks>
     /// An extension rather than a method on <see cref="VortexFile"/> so that file-open does not
-    /// depend on scan (contract §13.1).
+    /// depend on scan.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="file"/> is null.</exception>
     public static ScanBuilder Scan(this VortexFile file) => new ScanBuilder(file);

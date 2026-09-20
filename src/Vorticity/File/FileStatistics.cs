@@ -1,28 +1,17 @@
-// File-level statistics: one entry per ROOT field (docs/02-format.md §3), parsed once at open.
-//
-// The shape rule and the per-statistic DType rule both come from
-// vortex-file-0.86.1/src/footer/file_statistics.rs and
-// vortex-array-0.86.1/src/stats/flatbuffers.rs (`StatsSet::from_flatbuffer`):
-//
-//   * a struct root needs exactly one entry per top-level field, zipped positionally and SHALLOW -
-//     a nested struct field gets one entry decoded against the nested struct DType and its own
-//     fields get none; any other root needs exactly one entry;
-//   * each statistic has its OWN DType, not the field's: min/max are the field DType, sum is the
-//     widened aggregate DType, and null_count / nan_count / uncompressed_size_in_bytes are u64
-//     read straight off the FlatBuffer. Upstream has a regression test for this because it was
-//     once wrong.
-//
-// Everything here is class II/III (docs/08-semantics.md §5): surfaced faithfully, never trusted
-// for a correctness decision. Two traps the caller must respect and this type deliberately does
-// not paper over: an `Inexact` precision is a BOUND, not a value, and the float `sum` on a column
-// containing an infinity is not the IEEE sum (corpus manifest caveat 0).
 using System;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 
 namespace Vorticity.File;
 
-/// <summary>File-level statistics, one entry per root field (docs/02-format.md §3).</summary>
+/// <summary>
+/// File-level statistics, parsed once when the file opens. A struct root carries exactly one entry
+/// per top-level field, matched by position and never descending: a nested struct field gets a
+/// single entry decoded against the nested DType, and its own fields get none. Any other root
+/// carries exactly one entry. Each statistic is typed against its own DType rather than the
+/// field's, which is why the two are exposed separately here. The values are surfaced as the file
+/// records them, and no correctness decision is ever taken from them on the caller's behalf.
+/// </summary>
 public sealed class FileStatistics
 {
     private readonly DType[] _fieldDTypes;
@@ -57,8 +46,7 @@ public sealed class FileStatistics
     /// The DType field <paramref name="index"/>'s <c>sum</c> statistic is typed against, which is
     /// <em>not</em> the field's: integers widen to <c>i64</c>/<c>u64</c>, floats to <c>f64</c>,
     /// decimals gain ten digits of precision, and every one of them is nullable because an
-    /// overflowing sum is recorded as null
-    /// (vortex-array-0.86.1/src/aggregate_fn/fns/sum/mod.rs, <c>return_dtype</c>).
+    /// overflowing sum is recorded as null.
     /// <see cref="DType.IsDefault"/> when the field has no summable DType, in which case
     /// <see cref="FieldStatistics.HasSum"/> is always <see langword="false"/>.
     /// </summary>
@@ -87,9 +75,9 @@ public sealed class FileStatistics
 /// <summary>One field's file-level statistics.</summary>
 /// <remarks>
 /// Every value is optional and absence is meaningful: an absent statistic licenses nothing, while
-/// a present one that is <see cref="StatPrecision.Inexact"/> is a bound rather than a value
-/// (docs/08-semantics.md §1). The <c>min == max ⇒ constant</c> shortcut is forbidden unless both
-/// are <see cref="StatPrecision.Exact"/>.
+/// a present one that is <see cref="StatPrecision.Inexact"/> is a bound rather than a value. The
+/// <c>min == max ⇒ constant</c> shortcut is forbidden unless both are
+/// <see cref="StatPrecision.Exact"/>.
 /// </remarks>
 public readonly struct FieldStatistics
 {
@@ -190,8 +178,8 @@ public readonly struct FieldStatistics
     /// <summary>
     /// The <c>sum</c> statistic, untyped. Interpret it against
     /// <see cref="FileStatistics.GetSumDType"/>, not the field DType. On a float column that
-    /// contains an infinity this is <em>not</em> the IEEE sum: Vortex binds the aggregate with
-    /// NaN-skipping semantics and still marks the result exact (corpus manifest caveat 0).
+    /// contains an infinity this is <em>not</em> the IEEE sum: the aggregate is bound with
+    /// NaN-skipping semantics and the result is still marked exact.
     /// </summary>
     public ScalarValue Sum => _sum;
 

@@ -1,25 +1,3 @@
-// Key-ordered delivery from the scan - docs/12-index-reads.md §6.
-//
-// THE SCAN IS DRIVEN BY A CURSOR INSTEAD OF THE SPLIT PLANNER. The cursor walks a window of entries
-// -- the batch size -- inside the slices the filter's conjuncts on the key column allow, skips the
-// entries whose block the mask has pruned, and hands the window's rows to the take push-down every
-// scan already has: the splits the window touches are registered, read and executed with the window
-// as their selection, then concatenated in file order. The filter is evaluated on that, and the
-// survivors are gathered in the window's key order -- the gather a filter already performs, fed a
-// permutation instead of a selection. Then the next window.
-//
-// MEMORY IS ONE WINDOW. The whole result is never buffered, which is `Take`'s objection to
-// reordering, met by bounding the reorder to a window; a consumer that stops enumerating never reads
-// the windows past its stop.
-//
-// THE DEGREE APPLIES WITHIN A WINDOW. Its splits are independent, so they are cut into as many
-// contiguous groups as there are lanes, each group decoded in a lane's own context, and the lanes'
-// roots referenced -- records, not bytes -- into the scan's context for the concatenation. The
-// lanes are reset with the batch that borrows from them. Windows stay sequential.
-//
-// WHAT IT COSTS IS THE CURSOR'S CORRELATION WITH FILE ORDER (§6): on a sorted column a window is a
-// contiguous read; on runs over an uncorrelated column, a window of W entries can touch W splits.
-// `ScanMetrics` counts the windows and the splits they touched, so a caller can see which one it is.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -38,6 +16,25 @@ using Vorticity.Layouts;
 namespace Vorticity.Scan;
 
 /// <summary>A scan whose batches come in the key order of one column.</summary>
+/// <remarks>
+/// <para>
+/// A key cursor drives the scan instead of the split planner. It walks one window of entries -- the
+/// batch size -- inside the slices the filter's conjuncts on the key column allow, skips the entries
+/// whose block the mask has pruned, and hands the window's rows to the take push-down as a
+/// selection; the splits the window touches are read and concatenated in file order, the filter runs
+/// on that, and the survivors are gathered in the window's key order. Only one window is ever held,
+/// so reordering never buffers the whole result and a consumer that stops enumerating never reads
+/// past its stop.
+/// </para>
+/// <para>
+/// The scan's degree applies within a window, whose splits are independent: they are cut into as
+/// many contiguous groups as there are lanes, and each lane's root is referenced rather than copied
+/// into the scan's context. Windows themselves stay sequential. What this costs depends on how well
+/// key order correlates with file order -- on a sorted column a window is a contiguous read, while
+/// over an uncorrelated column a window of n entries can touch n splits -- and the metrics sink
+/// counts the windows and the splits they touched so a caller can tell which case it is in.
+/// </para>
+/// </remarks>
 internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
 {
     private readonly BatchAsyncEnumerable _scan;
@@ -56,7 +53,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
     /// <param name="scan">The compiled scan, whose projections, plan and sink this one reads under.</param>
     /// <param name="filter">The predicate, or null.</param>
     /// <param name="path">The key column, or a composite key's first.</param>
-    /// <param name="composite">A composite key's columns in key order (§4.6), or null for one column.</param>
+    /// <param name="composite">A composite key's columns in key order, or null for one column.</param>
     /// <param name="descending">Whether the order is reversed.</param>
     /// <param name="prune">Whether the mask of live blocks skips entries.</param>
     /// <param name="indexes">Whether the index directory may serve.</param>
@@ -85,7 +82,6 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         _nulls = nulls;
     }
 
-    /// <inheritdoc/>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new Enumerator(this, cancellationToken);
 
@@ -244,8 +240,8 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             KeySource source;
             if (_owner._composite is { } composite)
             {
-                // The tuple's run (§4.6). The filter names columns, not tuples, so it does not narrow
-                // the walk: it prunes and filters as it does for one column.
+                // The tuple's own sorted run. The filter names columns, not tuples, so it does not
+                // narrow the walk: it prunes and filters as it does for one column.
                 (SortedRunsSource? runs, string? reason) = _owner._indexes
                     ? await SortedRunsSource.OpenCompositeAsync(file, composite, _token).ConfigureAwait(false)
                     : (null, "the scan was asked not to use indexes");
@@ -416,7 +412,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                 }
 
                 // A window of a sorted column, read ascending with every row kept, is already in
-                // key order: the scan it costs is a plain one (§6).
+                // key order, so it costs no gather at all.
                 ReadOnlySpan<int> order = permutation.AsSpan(0, kept);
                 if (kept != distinct || !IsIdentity(order))
                 {

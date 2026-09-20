@@ -1,38 +1,3 @@
-// PHASE1-CONTRACTS.md §13.3 and §13.4, and docs/03-architecture.md §§3.6-3.7.
-//
-// TWO PHASES, ONE READ. Per batch, in order: plan the split, REGISTER every segment it needs,
-// await ONE ReadManyAsync, then Execute fully synchronously. Register and Execute are separate
-// because coalescing only works when every segment of a split is registered before the read - by
-// decode time there is nothing left to await, which is why no decoder takes a ValueTask.
-// A layout reader that read a segment itself, or registered one during Execute, would break
-// coalescing SILENTLY: the scan still works and the I/O count doubles. That is what
-// Scan_OneReadManyPerBatch exists to catch.
-//
-// HAND-WRITTEN, NOT `yield return`. A compiler-generated async ITERATOR allocates its state machine
-// and can allocate per MoveNextAsync. One allocation per SCAN is acceptable and documented; per
-// BATCH is not. So MoveNextAsync is written out: it plans the split and issues the read itself, and
-// hands the await to one `async ValueTask<bool>` helper.
-//
-// THAT HELPER IS AN ASYNC METHOD AND STILL ALLOCATES NOTHING on the path that matters, because an
-// `async ValueTask<T>` boxes its state machine only at the first await that ACTUALLY SUSPENDS. A
-// memory-mapped read has already completed by the time the helper is entered, so the struct stays
-// on the stack and the builder returns a completed ValueTask by value.
-//
-// This used to be a hand-written state machine as well - IValueTaskSource<bool> over
-// ManualResetValueTaskSourceCore, a stored ValueTaskAwaiter, an UnsafeOnCompleted callback, and
-// GetAwaiter().GetResult() at both ends of the await. It was a faithful transcription of what the
-// compiler emits, it allocated 120 BYTES PER SCAN MORE than the compiler's version (the core and
-// its callback delegate), and it hid every suspension point from anyone reading the class.
-//
-// The one unavoidable per-batch allocation is the RecordBatch itself: §12.1 makes it a sealed class
-// with readonly fields, so it cannot be recycled. Nothing else allocates in steady state, and
-// ScanAllocationTests asserts exactly that bound rather than a round number.
-//
-// THAT SENTENCE IS ABOUT A SEQUENTIAL SCAN, and saying so is the point of this paragraph. A degree
-// above one puts the decode on the pool, where the per-thread probe the sequential axis uses cannot
-// see it -- so "nothing else" there means nothing else the CALLER pays. What a parallel scan costs
-// across every thread is a ceiling of its own, measured over a whole scan, and the two claims are
-// not the same claim.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -54,9 +19,18 @@ namespace Vorticity.Scan;
 
 /// <summary>The batches of one compiled scan.</summary>
 /// <remarks>
+/// <para>
 /// Re-enumerable: every <see cref="GetAsyncEnumerator(System.Threading.CancellationToken)"/> call builds a fresh enumerator with its
-/// own <see cref="ScanContext"/>, so two enumerations may run concurrently over one open file
-/// (docs/09-contracts.md §1: the file is thread-safe, a scan is not).
+/// own <see cref="ScanContext"/>, so two enumerations may run concurrently over one open file --
+/// the file is thread-safe, a scan is not.
+/// </para>
+/// <para>
+/// A batch is built in two phases over a single read: the split is planned and every segment it
+/// needs is registered, one <c>ReadManyAsync</c> is awaited, then the decode runs synchronously,
+/// which is why no decoder takes a <c>ValueTask</c>. Coalescing only works when the whole
+/// split is registered before that read, so a layout reader that read a segment itself, or
+/// registered one during execution, would double the read count without failing anything.
+/// </para>
 /// </remarks>
 internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 {
@@ -80,7 +54,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// <param name="degree">How many splits may decode concurrently.</param>
     /// <param name="filter">The predicate, or null.</param>
     /// <param name="take">The row index list, or null.</param>
-    /// <param name="metrics">The caller's sink for what the scan does (docs/11 §6.4), or null.</param>
+    /// <param name="metrics">The caller's sink for what the scan does, or null.</param>
     /// <param name="reverse">
     /// Whether to deliver the plan's splits last one first, for a descending walk. It asks for
     /// <paramref name="degree"/> one, because the order is the point and lanes do not keep one.
@@ -115,12 +89,12 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 
         // Computed once, here, and into an arena of this enumerable's own. Deriving it lazily from
         // the LayoutTree's arena would mutate a structure the tree promises is immutable and
-        // therefore safe for concurrent scans (docs/09-contracts.md §1), and two threads reading
-        // Schema would race on its arrays.
+        // therefore safe for concurrent scans, and two threads reading Schema would race on its
+        // arrays.
         //
-        // It is the KEEP projection's schema, not the read projection's: a filter's own columns are
+        // It is the keep projection's schema, not the read projection's: a filter's own columns are
         // dropped before the batch is produced, so they were never part of what a caller was
-        // promised (docs/03-architecture.md §3.4).
+        // promised.
         _schema = keep.IsAll
             ? tree.Root.DType
             : keep.ProjectedSchema(tree.Root.DType, new DTypeArena());
@@ -144,13 +118,13 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     public Projection ReadProjection => _read;
 
     /// <summary>Starts a scan.</summary>
-    /// <param name="cancellationToken">Cancels at batch boundaries (contract §13.4).</param>
+    /// <param name="cancellationToken">Cancels at batch boundaries.</param>
     /// <returns>A fresh enumerator, with its own arenas.</returns>
     /// <remarks>
-    /// Contract §13.4 spells this parameter <c>[EnumeratorCancellation]</c>. The attribute is
-    /// rejected here (CS8424, an error under TreatWarningsAsErrors): it only has meaning on an
-    /// async-iterator method, and this enumerator is hand-written precisely so that it is not one.
-    /// The token is honoured directly, so <c>WithCancellation</c> behaves identically.
+    /// An <c>[EnumeratorCancellation]</c> attribute is rejected on this parameter: it only has
+    /// meaning on an async-iterator method, and this enumerator is hand-written precisely so that
+    /// it is not one. The token is honoured directly, so <c>WithCancellation</c> behaves
+    /// identically.
     /// </remarks>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new BatchAsyncEnumerator(
@@ -168,7 +142,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 
     /// <summary>
     /// Starts a scan whose filter an exact index has already answered: it reads exactly the rows
-    /// of <paramref name="proven"/> and evaluates nothing (docs/10-indexes.md §6.6).
+    /// of <paramref name="proven"/> and evaluates nothing.
     /// </summary>
     /// <param name="live">The mask of live blocks, or null.</param>
     /// <param name="proven">The rows the filter selects.</param>
@@ -198,7 +172,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     internal int Degree => _degree;
 }
 
-/// <summary>The hand-written enumerator of docs/03-architecture.md §3.7.</summary>
+/// <summary>The enumerator behind one scan, written out rather than as a <c>yield return</c>.</summary>
 /// <remarks>
 /// <para>
 /// <b>One consumer.</b> <see cref="IAsyncEnumerator{T}"/> requires it and this type does not defend
@@ -207,8 +181,17 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 /// <para>
 /// <b><see cref="Current"/> is invalidated by the next <see cref="MoveNextAsync"/></b>, which
 /// disposes the previous batch on the caller's behalf so the arenas can be reused. Every span
-/// borrowed from a batch dies with it (docs/07-dotnet-mapping.md §4). A caller who needs two
-/// batches alive at once must copy.
+/// borrowed from a batch dies with it. A caller who needs two batches alive at once must copy.
+/// </para>
+/// <para>
+/// <b>Why it is written out.</b> A compiler-generated async iterator allocates its state machine
+/// and can allocate again per <c>MoveNextAsync</c>; one allocation per scan is acceptable, one per
+/// batch is not. So <see cref="MoveNextAsync"/> plans the split and issues the read itself and
+/// hands the await to a single helper. The only unavoidable per-batch allocation is the
+/// <see cref="RecordBatch"/>, a sealed type with readonly fields that cannot be recycled; in a
+/// sequential scan nothing else allocates in steady state. A degree above one puts the decode on
+/// the thread pool, where that claim covers only what the caller's thread pays, not what the scan
+/// costs across every thread.
 /// </para>
 /// </remarks>
 internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
@@ -277,13 +260,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             _lanes[i] = new Lane(new ScanContext(file));
             // The mask and the metrics sink outlive every batch of the scan, so they are set once
-            // here and never by `ResetBatch`; the readers read the mask in file coordinates
-            // (docs/11 §6.1) and add what they materialize to the sink (§6.4).
+            // here and never by `ResetBatch`; the readers read the mask in file coordinates and
+            // add what they materialize to the sink.
             _lanes[i].Context.LiveBlocks = live;
             _lanes[i].Context.Metrics = metrics;
         }
-
-        // Allocated once per scan, so the awaiter's continuation costs nothing per batch.
     }
 
     /// <summary>
@@ -353,19 +334,17 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <returns><see langword="true"/> when a batch was produced.</returns>
     /// <remarks>
     /// <para>
-    /// AN <c>async ValueTask&lt;bool&gt;</c> THAT NEVER SUSPENDS ALLOCATES NOTHING. The state
+    /// An <c>async ValueTask&lt;bool&gt;</c> that never suspends allocates nothing. The state
     /// machine is a struct on the stack and <c>AsyncValueTaskMethodBuilder</c> boxes it only at the
     /// first await that actually yields, so the memory-mapped path -- where
     /// <c>ReadManyAsync</c> has already completed by the time this is entered -- runs to
     /// <c>CompleteBatch</c> without a single allocation, which is what the per-batch ratchet holds.
     /// </para>
     /// <para>
-    /// This class used to be its own <see cref="IValueTaskSource{TResult}"/> to get that property:
-    /// a <c>ManualResetValueTaskSourceCore</c>, a stored <c>ValueTaskAwaiter</c>, an
-    /// <c>UnsafeOnCompleted</c> callback, and <c>GetAwaiter().GetResult()</c> at both ends of the
-    /// hand-written await. It bought nothing the compiler does not already do on the path that
-    /// matters -- and it cost the one thing a reader of an async method can otherwise rely on,
-    /// which is that every suspension and every resumption is visible as an <c>await</c>.
+    /// A hand-rolled <see cref="IValueTaskSource{TResult}"/> would buy nothing the compiler does
+    /// not already do on that path, and it would cost the one thing a reader of an async method
+    /// can otherwise rely on: that every suspension and every resumption is visible as an
+    /// <c>await</c>.
     /// </para>
     /// </remarks>
     private async ValueTask<bool> ReadAndCompleteAsync(Lane lane)
@@ -383,7 +362,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             // does, and completing faulted, which every async one does -- and CompleteBatch resets
             // in its own catch. Without this one the failed split's registrations stay
             // in the SegmentRequestSet (the source's AbandonPending releases the owners but leaves
-            // the set registered and ready to retry, per ISegmentSource), so the NEXT batch
+            // the set registered and ready to retry, per ISegmentSource), so the next batch
             // registers on top of them and issues one coalesced read covering a superset of the
             // split it is actually reading.
             try
@@ -429,11 +408,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// Advances to the next split the mask of live blocks does not rule out.
     /// </summary>
     /// <remarks>
-    /// The prune happens HERE, before RegisterSegments, which is the whole point: a split the mask
+    /// The prune happens here, before RegisterSegments, which is the whole point: a split the mask
     /// excludes costs no segment registration and therefore no bytes read. Skipping is a
-    /// synchronous loop over the cursor because the mask answers from memory -- it was refined
-    /// once, before the first batch, by every structure the file carries (docs/11 §6.1), and a
-    /// split asks it one question where it used to ask each pruner in turn.
+    /// synchronous loop over the cursor because the mask answers from memory: it was refined once,
+    /// before the first batch, by every structure the file carries, so a split asks it a single
+    /// question rather than asking each pruner in turn.
     /// </remarks>
     private bool TryNextSplit(out RowRange split)
     {
@@ -460,7 +439,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
     /// <summary>
     /// Adds what the batch just registered to the scan's sink: the distinct segments and their
-    /// bytes, counted at the asking (docs/11 §6.4) -- a caching source may serve some without a read.
+    /// bytes, counted at the asking -- a caching source may serve some without a read.
     /// </summary>
     private void NoteRequests(ScanContext context) => ScanMetrics.Note(_metrics, context.Segments);
 
@@ -469,8 +448,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         Lane lane = _currentLane!;
         try
         {
-            // Cancellation is honoured before the read and after it, never inside a decode kernel
-            // (docs/03-architecture.md §1: the granularity is the batch).
+            // Cancellation is honoured before the read and after it, never inside a decode kernel:
+            // the granularity of a scan's cancellation is the batch.
             _token.ThrowIfCancellationRequested();
             int root = ExecuteWithTake(lane.Context, _pending, out bool proven);
             root = ApplyFilter(lane.Context, root, proven);
@@ -486,10 +465,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>
-    /// Executes the split, PUSHING the take's rows down the layout tree rather than gathering them
+    /// Executes the split, pushing the take's rows down the layout tree rather than gathering them
     /// back out afterwards -- <see cref="SplitExecution.Execute"/>, the one place that does it,
-    /// shared with the terminals of docs/12 §5 so that a count and a batch cannot disagree on
-    /// which rows a split yields.
+    /// shared with the scan's terminals so that a count and a batch cannot disagree on which rows
+    /// a split yields.
     /// </summary>
     /// <param name="context">The lane's context.</param>
     /// <param name="split">The rows this batch covers.</param>
@@ -553,7 +532,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ScanContext context, RowRange split, ComparisonExpr pushable, out bool proven)
     {
         proven = false;
-        // Resolved against the LAYOUT's struct and not against the batch's schema, which is the
+        // Resolved against the layout's struct and not against the batch's schema, which is the
         // keep projection's: a filter-only column is absent from it, and a projected one can sit at
         // another index. A mask is a path through the file's fields, so the file's dtype is the
         // only one that names them.
@@ -647,7 +626,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// the filter needed.
     /// </summary>
     /// <remarks>
-    /// Two steps, in the order docs/03-architecture.md §3.4 fixes. The gather is skipped entirely
+    /// The rejected rows go first and the trim second. The gather is skipped entirely
     /// when every row passed -- the common case for a filter that selects a whole split -- so a
     /// non-selective filter costs one evaluation pass and no copying at all.
     /// </remarks>
@@ -759,10 +738,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
             Lane lane = _lanes[(int)(_started % lanes)];
             lane.Rows = split;
-            // BOUND ONCE PER LANE, not once per split, and not before the lane is first used. The
-            // pump wrote `Task.Run(() => RunLaneAsync(lane))`, which captured the lane and so built
-            // a closure and a delegate every time a split started; a lane outlives every split it
-            // runs, and the lane is all the closure ever held. Bound here rather than where the
+            // Bound once per lane, not once per split: a lane outlives every split it runs and is
+            // all the closure holds, so starting a split from `Task.Run(() => RunLaneAsync(lane))`
+            // would build a closure and a delegate every time. Bound here rather than where the
             // lane is made, because a scan that never pumps -- which is every sequential one --
             // would otherwise pay for a delegate it does not call.
             lane.Start ??= () => RunLaneAsync(lane);
@@ -774,9 +752,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <summary>
     /// One split on one lane, off the caller's thread: the same three phases and the same two
     /// row-level operations as the sequential path -- the take pushed down, the filter applied --
-    /// so a batch is the same batch whatever the degree. The pipelined path once built its batch
-    /// straight from the decoded split, and a degree above one silently returned every row of a
-    /// filtered or taken scan; the terminals' refactoring of the split's execution found it.
+    /// so a batch is the same batch whatever the degree. Building the batch straight from the
+    /// decoded split instead would silently return every row of a filtered or taken scan.
     /// </summary>
     private async Task<int> RunLaneAsync(Lane lane)
     {
@@ -856,7 +833,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
     }
 
-    /// <summary>One decode flow: its own <see cref="ScanContext"/>, never shared (contract §2.2).</summary>
+    /// <summary>One decode flow: its own <see cref="ScanContext"/>, never shared.</summary>
     private sealed class Lane
     {
         internal Lane(ScanContext context) => Context = context;

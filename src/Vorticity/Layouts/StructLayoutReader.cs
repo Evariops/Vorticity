@@ -1,13 +1,3 @@
-// vortex.struct - vortex-layout-0.86.1/src/layouts/struct_/mod.rs. Zero segments, empty metadata,
-// one child per field plus a leading validity child when the struct dtype is nullable:
-//
-//     slot_to_child(0) = nullable.then_some(0)
-//     slot_to_child(s) = s - 1 + nullable          so field k sits at serialized index k + nullable
-//     slot_dtype(0)    = Bool(NonNullable)         NOT nullable Bool
-//
-// THIS IS THE LAZY-RESOLUTION PATH (docs/08-semantics.md §4). A field the FieldMask excludes is
-// neither registered nor executed, so an unknown layout or an unknown array encoding buried in an
-// unprojected column never throws.
 using System;
 
 using Vorticity.Arrays;
@@ -17,7 +7,15 @@ using Vorticity.Types;
 
 namespace Vorticity.Layouts;
 
-/// <summary>Reads a <c>vortex.struct</c> layout: one child layout per field, plus validity.</summary>
+/// <summary>
+/// Reads a <c>vortex.struct</c> layout: no segments of its own, empty metadata, one child layout
+/// per field, preceded by a non-nullable <c>Bool</c> validity child when the struct dtype is
+/// nullable — so field <c>k</c> sits at child index <c>k + (nullable ? 1 : 0)</c>.
+/// </summary>
+/// <remarks>
+/// This is where projection stays lazy: a field the mask excludes is neither registered nor
+/// executed, so an unknown layout or array encoding buried in an unprojected column never throws.
+/// </remarks>
 public sealed class StructLayoutReader : LayoutReader
 {
     private const string Id = "vortex.struct";
@@ -75,9 +73,9 @@ public sealed class StructLayoutReader : LayoutReader
 
         DType dtype = RequireStruct(in node);
 
-        // With a selection in force every child produces the SELECTED count, so that is the struct's
-        // length too. Getting this from the range instead would build a struct whose declared length
-        // disagreed with its fields'.
+        // With a selection in force every child produces one row per selected index, so that count
+        // is the struct's length too. Taking it from the range instead would build a struct whose
+        // declared length disagreed with its fields'.
         int length = context.HasSelection ? context.Selection.Length : BatchLength(rows);
         int validityChildren = dtype.IsNullable ? 1 : 0;
         int fieldCount = dtype.FieldCount;

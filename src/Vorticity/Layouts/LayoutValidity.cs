@@ -1,11 +1,3 @@
-// The struct layout's validity child, turned into a Validity.
-//
-// ArrayDecodeContext.DecodeValidity (contract §2.6) does this for an ARRAY node: it decodes the
-// child, checks it is a Bool of the right length, and collapses a whole-array constant to AllValid
-// or AllInvalid. A struct LAYOUT's validity arrives as a layout child instead of an array child, so
-// the decode step is different and the checks and the collapse are the same. Rule 3 of §2.6 makes
-// the collapse mandatory, not an optimisation: docs/07-dotnet-mapping.md §1 exposes ValidityKind so
-// callers can skip per-row checks.
 using System;
 
 using Vorticity.Arrays;
@@ -13,6 +5,13 @@ using Vorticity.Types;
 
 namespace Vorticity.Layouts;
 
+/// <summary>
+/// Turns a struct layout's validity child into a <see cref="Validity"/>. The child arrives as a
+/// layout child rather than an array child, but the checks and the collapse match what array
+/// decoding does. Collapsing a constant bitmap to <see cref="ValidityKind.AllValid"/> or
+/// <see cref="ValidityKind.AllInvalid"/> is part of the contract, not an optimisation: callers
+/// read the kind to skip per-row checks.
+/// </summary>
 internal static class LayoutValidity
 {
     /// <summary>Turns a decoded validity child into a <see cref="Validity"/>.</summary>
@@ -52,10 +51,8 @@ internal static class LayoutValidity
     /// same kernel.
     /// </summary>
     /// <remarks>
-    /// This was its own byte-at-a-time loop with an <c>b == firstByte</c> and a <c>b == lastByte</c>
-    /// test inside it -- a second copy of the code that, vectorized, turned out to be the largest
-    /// single measured gain of the whole audit (`masked_*` 1.32 to 0.49; PERF-AUDIT §1.9). Two
-    /// implementations of one question is how one of them stays slow.
+    /// Sharing the vectorized kernel rather than keeping a second byte-at-a-time loop here is what
+    /// keeps both callers fast: two implementations of one question is how one of them stays slow.
     ///
     /// <paramref name="length"/> is at least 1: the caller returns <c>AllValid</c> for a zero-row
     /// layout before reaching here, which is what the kernel's masked ends assume.
