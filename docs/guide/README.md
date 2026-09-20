@@ -47,10 +47,10 @@ and never repeats it.
 | [editions.md](editions.md) | target an edition so that older readers, and Vortex Rust, can read what you write |
 | [encoding-hints.md](encoding-hints.md) | steer the compressor per column, and measure whether it helped |
 | [append-and-repair.md](append-and-repair.md) | add rows to a file you already wrote, and recover one whose tail was torn |
-| `datasets.md` | create a versioned dataset over an object store, import, append, commit |
-| `dataset-maintenance.md` | compact, vacuum, verify, and what each costs in requests |
-| `object-store.md` | implement the store seam for the service you use; also how to open a single file out of one |
-| `row-keys.md` | encode a tuple into bytes whose `memcmp` order is tuple order |
+| [datasets.md](datasets.md) | create a versioned dataset over an object store, import, append, commit |
+| [dataset-maintenance.md](dataset-maintenance.md) | compact, vacuum, verify, and what each costs in requests |
+| [object-store.md](object-store.md) | implement the store seam for the service you use; also how to open a single file out of one |
+| [row-keys.md](row-keys.md) | encode a tuple into bytes whose `memcmp` order is tuple order |
 | [vxdump.md](vxdump.md) | look inside a file: schema, layout tree, encodings, segments, statistics |
 | [native-aot.md](native-aot.md) | publish an application that uses this library ahead of time |
 | [threads.md](threads.md) | what is safe to share, what is not, and how to turn on parallel decoding |

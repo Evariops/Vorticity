@@ -31,6 +31,10 @@ internal static class Program
         ["append-and-repair"] = AppendAndRepair.RunAsync,
         ["threads"] = Threads.RunAsync,
         ["limits"] = Limits.RunAsync,
+        ["datasets"] = Datasets.RunAsync,
+        ["dataset-maintenance"] = DatasetMaintenance.RunAsync,
+        ["object-store"] = ObjectStore.RunAsync,
+        ["row-keys"] = RowKeys.RunAsync,
     };
 
     private static async Task<int> Main(string[] args)
