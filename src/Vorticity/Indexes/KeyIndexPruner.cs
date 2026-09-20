@@ -1,16 +1,3 @@
-// The read side of the two locating kinds (docs/10-indexes.md §6.1, §6.2, §6.6): a pruner in the
-// scan's block-mask chain, after the zone maps and the Bloom filters.
-//
-// A LOCATING RUN IS A POSITIVE ANSWER. A Bloom filter says "maybe"; a run lists every key of its
-// chunk and where each one is. So for `x = v` every block the run covers is dead unless the run
-// places v in it -- the blocks of the postings list, or the blocks of the sorted run's rows -- and a
-// run that does not hold v at all kills its whole chunk. The same AND / OR / IN algebra as the
-// Bloom pruner combines the answers.
-//
-// ONLY THE SEGMENTS THAT CAN HOLD THE KEY ARE READ: a run's options give each segment's first and
-// last key, so a probe reads the segments whose range covers its key and nothing else, all of them
-// in one coalesced read. A run whose table or payloads do not make sense -- the wrong number of
-// arrays, a keys array of the wrong type or length -- claims nothing for its blocks.
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -28,6 +15,15 @@ using Vorticity.Types;
 namespace Vorticity.Indexes;
 
 /// <summary>Kills the blocks a locating index proves cannot hold an equality's value.</summary>
+/// <remarks>
+/// It runs in the scan's block-mask chain, after the zone maps and the Bloom filters. Where a Bloom
+/// filter says "maybe", a locating run lists every key of its chunk and where each one is, so for
+/// <c>x = v</c> every block the run covers is dead unless the run places <c>v</c> in it, and a run
+/// that does not hold <c>v</c> at all kills its whole chunk; the conjunctions, disjunctions and
+/// <c>IN</c> lists combine as they do for the Bloom pruner. Only the segments whose key range can
+/// hold the key are read, all of them in one coalesced read, and a run whose segment table or
+/// payload does not make sense claims nothing for its blocks.
+/// </remarks>
 internal sealed class KeyIndexPruner
 {
     private readonly VortexExpr _filter;
@@ -107,10 +103,9 @@ internal sealed class KeyIndexPruner
                 }
 
                 // The keys a text index holds are trigrams, typed binary; its literals are the
-                // trigrams the predicates require, folded as the index was.
-                // The order is what the slot arrays are indexed by, so the list stays and the set
-                // only answers "seen already" -- which a scan of the list answered in time linear
-                // in the trigrams already found.
+                // trigrams the predicates require, folded as the index was. The list keeps the
+                // order the slot arrays are indexed by, so it stays, and the set beside it answers
+                // "seen already" in constant time.
                 literals = [];
                 HashSet<FilterLiteral> seen = [];
                 foreach (StringMatchExpr predicate in predicates)
@@ -158,10 +153,10 @@ internal sealed class KeyIndexPruner
             }
         }
 
-        // THE DICTIONARY PROBE LAST, and only where no index of runs already answers the column:
-        // its claim is per chunk where theirs is per block, and it reads the column's own bytes.
-        // Nothing is read here -- the chunks are decoded at the refinement, when the zone maps have
-        // had their say (10 §5.3).
+        // The dictionary probe comes last, and only where no index of runs already answers the
+        // column: its claim is per chunk where theirs is per block, and it reads the column's own
+        // bytes. Nothing is read here -- the chunks are decoded at the refinement, once the zone
+        // maps have had their say.
         foreach (IndexEntry entry in directory.Entries)
         {
             if (entry.Kind != IndexKinds.DictProbe || entry.Runs.Count == 0
@@ -214,8 +209,8 @@ internal sealed class KeyIndexPruner
                     continue;
                 }
 
-                // THE SEGMENTS THAT MAY HOLD A KEY, found by a descent per key (13 §6.3): a page
-                // that does not read claims nothing for the run, which is then not covered.
+                // The segments that may hold a key, found by a descent per key: a page that does
+                // not read claims nothing for the run, which is then not covered.
                 List<Fence> fences;
                 int pagesBefore = run.Table.PagesRead;
                 try
@@ -288,8 +283,8 @@ internal sealed class KeyIndexPruner
     }
 
     /// <summary>
-    /// Whether the regions a lookup read are the ones written (13 §7); a lookup over torn bytes
-    /// would prove a key absent from blocks that hold it.
+    /// Whether the regions a lookup read are the ones written; a lookup over torn bytes would
+    /// prove a key absent from blocks that hold it.
     /// </summary>
     private static bool Intact(SegmentRequestSet requests, int[] slots, Fence fence)
     {
@@ -335,10 +330,9 @@ internal sealed class KeyIndexPruner
 
             case InExpr @in:
             {
-                // RESOLVED ONCE, ASKED PER BLOCK. The question "is every one of these literals
-                // absent from this block" is asked for each of the file's blocks against the same
-                // expression, so the literals' slots are found once and the blocks then cost one
-                // array read each (docs/12-index-reads.md §13).
+                // Resolved once, asked per block: "is every one of these literals absent from this
+                // block" is asked for each of the file's blocks against the same expression, so the
+                // literals' slots are found once and each block then costs one array read.
                 (Column? column, int[] slots) = Resolve(@in);
                 if (column is null || slots.Length == 0)
                 {
@@ -357,7 +351,7 @@ internal sealed class KeyIndexPruner
             }
 
             case StringMatchExpr match when _columns.TryGetValue(TrigramKey(match.Field.Path), out Column? text):
-                // Absent when ONE required trigram is: a matching value holds them all.
+                // Absent as soon as one required trigram is: a matching value holds them all.
                 foreach (byte[] trigram in Trigrams.Required(match, text.Fold))
                 {
                     if (text.Absent(FilterLiteral.From(trigram), block))
@@ -378,8 +372,7 @@ internal sealed class KeyIndexPruner
 
     /// <summary>
     /// Fills a dictionary-backed column's claims: opens the column's chunks' dictionaries and asks
-    /// each one whether it holds the filter's literals (10 §5.3, "the cheapest equality index
-    /// there is").
+    /// each one whether it holds the filter's literals.
     /// </summary>
     /// <param name="file">The open file.</param>
     /// <param name="column">The column, whose claims are empty until this runs.</param>
@@ -387,7 +380,7 @@ internal sealed class KeyIndexPruner
     /// <param name="live">The mask as the earlier structures left it.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <remarks>
-    /// A SOURCE THAT REFUSES CLAIMS NOTHING: a chunk the entry claims and that is not a dictionary
+    /// A source that refuses claims nothing: a chunk the entry claims and that is not a dictionary
     /// makes the source refuse whole, and the column then proves no literal absent anywhere --
     /// which is what an index that cannot be read must do.
     /// </remarks>
@@ -478,9 +471,9 @@ internal sealed class KeyIndexPruner
         }
 
         // The list keeps the order the slot arrays are indexed by; the set answers whether a
-        // literal is already in it. Asking the list cost a comparison per literal already found,
-        // so an `IN` of sixteen thousand identifiers paid a hundred and twenty-eight million of
-        // them before the pruner had read a single block.
+        // literal is already in it. Asking the list instead would cost a comparison per literal
+        // already found, which a long `IN` turns into a quadratic cost before a single block is
+        // read.
         static void Add(
             Dictionary<string, List<FilterLiteral>> into,
             Dictionary<string, HashSet<FilterLiteral>> seen,
@@ -558,7 +551,7 @@ internal sealed class KeyIndexPruner
 
         /// <summary>
         /// The keys the filter asks for, in the runs' own order, with their sort keys: the
-        /// merge-join's left side (docs/11-write-strategy.md §4.3). Built at the first segment.
+        /// merge-join's left side. Built at the first segment.
         /// </summary>
         private (int Literal, byte[] Key, ulong Sort)[]? _sorted;
 
@@ -595,8 +588,8 @@ internal sealed class KeyIndexPruner
         internal List<Run> Runs { get; }
 
         /// <summary>
-        /// The column, when its claims come from the chunks' dictionaries (10 §5.3) rather than
-        /// from an index's runs; null for every other kind.
+        /// The column, when its claims come from the chunks' dictionaries rather than from an
+        /// index's runs; null for every other kind.
         /// </summary>
         internal string? DictionaryPath { get; init; }
 
@@ -653,17 +646,17 @@ internal sealed class KeyIndexPruner
         }
 
         /// <summary>
-        /// Claims one chunk's blocks from its dictionary (10 §5.3): a literal the chunk's values do
-        /// not hold is absent from every block the chunk covers whole.
+        /// Claims one chunk's blocks from its dictionary: a literal the chunk's values do not hold
+        /// is absent from every block the chunk covers whole.
         /// </summary>
         /// <param name="source">The column's dictionary source, open over the claimed chunks.</param>
         /// <param name="chunk">The chunk, under the source's count.</param>
         /// <param name="blockRows">Rows per block.</param>
         /// <remarks>
-        /// ONLY THE BLOCKS THE CHUNK COVERS WHOLE. A dictionary says what its own rows hold and
-        /// nothing about the rows around them, so a block a chunk shares with its neighbour is left
-        /// live -- the writer aligns chunks to blocks, so this costs nothing there and stays right
-        /// on a file whose chunks are not aligned.
+        /// Only the blocks the chunk covers whole are claimed. A dictionary says what its own rows
+        /// hold and nothing about the rows around them, so a block a chunk shares with its
+        /// neighbour is left live -- the writer aligns chunks to blocks, so this costs nothing
+        /// there and stays right on a file whose chunks are not aligned.
         /// </remarks>
         internal void Dictionary(Keys.SortedRunsSource source, int chunk, long blockRows)
         {
@@ -687,7 +680,7 @@ internal sealed class KeyIndexPruner
                     continue;
                 }
 
-                // THE TWO ZEROS OF A FLOAT ARE ONE LITERAL, and a dictionary may hold either.
+                // The two zeros of a float are one literal, and a dictionary may hold either.
                 bool holds = source.DictionaryHolds(chunk, key)
                     || (_otherZeros[i] is { } other && source.DictionaryHolds(chunk, other));
                 if (holds)
@@ -733,10 +726,9 @@ internal sealed class KeyIndexPruner
 
         /// <summary>Whether the runs prove <paramref name="value"/> absent from <paramref name="block"/>.</summary>
         /// <remarks>
-        /// ASKED ONCE PER LITERAL PER BLOCK, so the literal's slot is found through a map and not by
-        /// walking the list: an `IN` of a thousand keys over `table_mixed`'s 123 blocks asked this
-        /// 123 000 times, and the walk made it 61 million literal comparisons -- 28 ms of the 28,2
-        /// the whole plan took, where the scan it guards reads 7 MB (docs/12-index-reads.md §13).
+        /// This is asked once per literal per block, so the literal's slot is found through a map
+        /// and not by walking the list: a long `IN` over a file with many blocks would otherwise
+        /// spend more on literal comparisons than the scan it guards spends on reading.
         /// </remarks>
         /// <param name="value">The literal.</param>
         /// <param name="block">The block.</param>
@@ -786,7 +778,7 @@ internal sealed class KeyIndexPruner
                 ulong firstBlock = run.Meta.FirstBlock;
                 if (_rows)
                 {
-                    // A RUN SPANNING 2³² ROWS OR MORE WRITES THEM AT 64 BITS (13 §6.1); its dtype says so.
+                    // A run spanning 2³² rows or more writes them at 64 bits; its dtype says so.
                     bool wide = run.Table.WideRows;
                     PType width = wide ? PType.U64 : PType.U32;
                     int rowsNode = Decode(
@@ -923,17 +915,15 @@ internal sealed class KeyIndexPruner
         }
 
         /// <summary>
-        /// The entries of one segment that hold the filter's keys, as ranges per literal
-        /// (docs/11-write-strategy.md §4.3).
+        /// The entries of one segment that hold the filter's keys, as ranges per literal.
         /// </summary>
         /// <remarks>
-        /// TWO SHAPES, AND THE COUNTS CHOOSE. A binary search per key costs
-        /// <c>2·keys·log₂(entries)</c> comparisons; walking the segment against the sorted keys
-        /// costs <c>entries + keys</c>. Measured on 122 segments of 8 192 entries: at ten keys the
-        /// searches take 0,03 ms and the walk 0,68; at a thousand the searches take 1,53 and the
-        /// walk 0,28. So the cheaper count runs, and both compare SORT KEYS — a fixed-width key is
-        /// one unsigned integer in the run's own order (<see cref="KeyLayout.SortKey"/>), which is
-        /// what took the same searches from 13,6 ms to 1,53.
+        /// Two shapes, and the comparison counts choose between them: a binary search per key costs
+        /// <c>2·keys·log₂(entries)</c> comparisons, while walking the segment against the sorted
+        /// keys costs <c>entries + keys</c>, so few keys favour the searches and many the walk.
+        /// Both compare sort keys rather than bytes — a fixed-width key is one unsigned integer in
+        /// the run's own order (<see cref="KeyLayout.SortKey"/>) — which makes a comparison a
+        /// single integer comparison instead of a span walk.
         /// </remarks>
         /// <param name="keys">The segment's decoded keys.</param>
         private List<(int Literal, int Low, int High)> Match(CanonicalNode keys)

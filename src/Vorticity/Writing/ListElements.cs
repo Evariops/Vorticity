@@ -1,25 +1,3 @@
-// The elements a list's rows name, and whether the ingest may summarize them as the file will hold
-// them - docs/11-write-strategy.md §3.2.4.
-//
-// A LIST'S ELEMENTS ARE A COLUMN WHOSE BLOCKS ARE THE PARENT'S. Block i of the elements covers the
-// elements of parent rows [8192·i, 8192·(i+1)), found through the offsets, so a chunk's elements
-// are the merge of its blocks. That merge describes the array the chunk writes only if the blocks
-// summarized exactly that array, in its order. The writer narrows a chunk's elements to the WINDOW
-// its rows name, [min offset, max end), gaps included (`ChunkCompactor`), and lays batches window
-// after window. So the ingest summarizes each range's window, and the windows of two consecutive
-// ranges of one batch must abut: the second starting exactly where the first ended. Then a chunk's
-// window is its ranges' windows laid end to end, in the order the file holds them, whatever the
-// rows' order inside each range.
-//
-// WHEN THEY DO NOT ABUT, THE BLOCK SAYS SO, and the chooser measures the elements itself. A frame
-// of reference taken from a minimum that missed a gap, or a progression read from elements in the
-// wrong order, would not cost a pass: it would write wrong values. So the check is exact, and a
-// range it cannot vouch for is `Scattered`, never approximated. A batch's first range answers to
-// nothing: batches are narrowed one by one before they are laid together.
-//
-// ONE PASS OVER THE OFFSETS AND SIZES, MONOMORPHIC IN BOTH, the way `ChunkCompactor` walks them: the
-// two physical types are properties of the call, and a switch per row is what PERF-AUDIT-v2.md R7
-// measured at 93,6 % of a listview scan.
 using System;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
@@ -28,21 +6,18 @@ using Vorticity.Types;
 
 namespace Vorticity.Writing;
 
-/// <summary>Where a list range's elements lie, and whether a block may summarize them.</summary>
+/// <summary>
+/// Where a list range's elements lie, and whether a block may summarize them. The check is exact
+/// rather than approximate: a window that missed a gap, or elements read out of order, would not
+/// cost a pass but write wrong values.
+/// </summary>
 internal static class ListElements
 {
     /// <summary>
     /// The window rows <c>[start, start + count)</c> of a list view name, and whether it abuts the
-    /// window of the range before it when <paramref name="cursor"/> says this range continues it.
+    /// window of the range before it. <paramref name="cursor"/> is updated for the next range, and
+    /// <paramref name="length"/> is 0 when no row names an element.
     /// </summary>
-    /// <param name="node">The list view.</param>
-    /// <param name="elements">Its elements child's length.</param>
-    /// <param name="start">The first row.</param>
-    /// <param name="count">How many rows.</param>
-    /// <param name="cursor">The column's record of the range before; updated for the next one.</param>
-    /// <param name="from">The window's first element.</param>
-    /// <param name="length">Its length; 0 when no row names an element.</param>
-    /// <returns>Whether the window may be summarized into the range's block.</returns>
     internal static bool Contiguous(
         CanonicalNode node, int elements, int start, int count, PreviousRow cursor, out int from, out int length)
     {
@@ -54,13 +29,10 @@ internal static class ListElements
         return range.Valid && (!range.Named || expected < 0 || range.First == expected);
     }
 
-    /// <summary>The window rows <c>[start, start + count)</c> name: what the compactor keeps of them.</summary>
-    /// <param name="node">The list view.</param>
-    /// <param name="elements">Its elements child's length.</param>
-    /// <param name="start">The first row.</param>
-    /// <param name="count">How many rows.</param>
-    /// <param name="from">The window's first element.</param>
-    /// <param name="length">Its length; 0 when no row names an element.</param>
+    /// <summary>
+    /// The window rows <c>[start, start + count)</c> name: what the compactor keeps of them.
+    /// <paramref name="length"/> is 0 when no row names an element.
+    /// </summary>
     internal static void Window(CanonicalNode node, int elements, int start, int count, out int from, out int length)
     {
         Range range = Walk(node, elements, start, count);
@@ -68,11 +40,6 @@ internal static class ListElements
         length = range.Named ? checked((int)(range.End - range.First)) : 0;
     }
 
-    /// <summary>What a walk found.</summary>
-    /// <param name="Named">Whether any row named an element.</param>
-    /// <param name="First">The smallest offset a row named.</param>
-    /// <param name="End">The largest end a row named.</param>
-    /// <param name="Valid">Whether every named range lay inside the elements.</param>
     private readonly record struct Range(bool Named, long First, long End, bool Valid);
 
     private static Range Walk(CanonicalNode node, int elements, int start, int count) =>
@@ -109,8 +76,7 @@ internal static class ListElements
         ReadOnlySpan<TOffset> offsets = MemoryMarshal.Cast<byte, TOffset>(node.Offsets.Span).Slice(start, count);
         ReadOnlySpan<TSize> sizes = MemoryMarshal.Cast<byte, TSize>(node.Sizes.Span).Slice(start, count);
 
-        // A row that names nothing takes no part: its offset is not guaranteed to mean anything,
-        // and the compactor writes 0 there.
+        // A row that names nothing takes no part: its offset is not guaranteed to mean anything.
         long low = long.MaxValue;
         long high = -1;
         bool valid = true;
@@ -133,8 +99,7 @@ internal static class ListElements
             return new Range(false, 0, 0, valid);
         }
 
-        // A range that names outside the elements never reaches here from a decoder, which
-        // validates the ranges; the window is still clamped so that nothing reads past them.
+        // Clamped so that nothing reads past the elements even if a range named outside them.
         high = Math.Min(high, elements);
         low = Math.Clamp(low, 0, high);
         return new Range(high > low, low, high, valid);

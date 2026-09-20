@@ -151,7 +151,7 @@ internal sealed class BitPackPlan
         // `v - min` and so does. Hence: zigzag is taken from the pass whenever the pass ran; raw is
         // the framed histogram when the reference is zero — every unsigned column starting at zero,
         // every dictionary's codes, every offsets column — so those walk nothing; and a non-zero
-        // reference still walks, skipping the zigzag half it no longer needs.
+        // reference still walks, skipping the zigzag half the pass already supplied.
         bool ingestedWidths = ingested.Length == BitPackWidths.Length;
         bool framedFromIngest = ingestedWidths && minimum == 0;
         if (ingestedWidths)
@@ -426,7 +426,7 @@ internal sealed class BitPackPlan
     /// The cheapest width for one histogram: <c>packed(w) + exceptions(w) * perException</c>.
     /// </summary>
     /// <remarks>
-    /// Walked from the WIDEST width down, so a tie is resolved in favour of the wider one - which
+    /// Walked from the widest width down, so a tie is resolved in favour of the wider one - which
     /// is the one with fewer exceptions, and therefore the one that decodes faster for the same
     /// bytes. The padding is charged honestly: FastLanes packs in blocks of 1024 and the last block
     /// is full width whatever it holds, so 100 rows at 40 bits cost 1024 of them.
@@ -456,7 +456,7 @@ internal sealed class BitPackPlan
 
     /// <summary>The minimum over the valid rows, as the element width's unsigned bits.</summary>
     /// <remarks>
-    /// Read as SIGNED when the column is signed and unsigned otherwise, because the minimum of
+    /// Read as signed when the column is signed and as unsigned otherwise, because the minimum of
     /// -1 and 1 is -1 under one reading and 1 under the other. The result is then carried as raw
     /// bits, which is what both the subtraction and the serialized reference want.
     /// </remarks>
@@ -531,10 +531,10 @@ internal sealed class BitPackPlan
         /// <remarks>
         /// It is carried rather than recounted: <see cref="Cheapest"/> accumulates it to price the
         /// width, and the pack that writes the column sizes its patch arrays from it and finds the
-        /// rows as it transforms them (<c>ArrayBlobWriter.Pack</c>). A gather of its own used to
-        /// walk the whole column twice — once to count, once to fill — to reach the same rows under
-        /// the same transform; both walks are gone, and a width that holds every row — dictionary
-        /// codes, run-end ends, varbin offsets — costs the pack nothing beyond the pack.
+        /// rows as it transforms them. Gathering the rows here instead would mean walking the whole
+        /// column again under the same transform to reach rows the pack already visits, and a width
+        /// that holds every row — dictionary codes, run-end ends, varbin offsets — would pay for a
+        /// walk that finds nothing.
         /// </remarks>
         internal long Exceptions { get; }
     }

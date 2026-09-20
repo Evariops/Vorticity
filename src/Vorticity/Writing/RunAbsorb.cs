@@ -1,20 +1,3 @@
-// The runs an append merges back - docs/13-dataset.md §6.1, docs/11-write-strategy.md §3.8 as amended.
-//
-// AT MOST K RUNS PER ENTRY. An append keeps the runs that end by its first block and adds its own:
-// one merged run, and the last chunk's when its rows are not whole blocks. When the kept runs and
-// those two would pass K (4), the kept runs are read back -- index bytes, never a data segment --
-// laid raw in a scratch, and merged into the append's run, so a lookup still probes at most K runs.
-// The old runs' bytes become dead weight in the file, as an old postscript does.
-//
-// ONLY A CONTIGUOUS TAIL IS MERGED. A merged run claims every block of its range, so the runs read
-// back must end at the append's first block with no gap between them: a gap is blocks no run
-// covers -- a partial index -- and a merged run over it would say "absent" where it knows nothing.
-// A run before a gap stays as it is.
-//
-// WHAT IT COSTS, HONESTLY. Merging everything past K rewrites the entry's index every K - 1
-// appends: over n appends of one size, the index bytes rewritten grow as n² / K. The in-place
-// append is the single-file mode; a workload of many appends is the dataset's (13 §5), whose
-// compaction is tiered across objects.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -32,25 +15,20 @@ using Vorticity.Types.Serialization;
 
 namespace Vorticity.Writing;
 
-/// <summary>An old entry whose tail of runs an append merges back.</summary>
-/// <param name="Entry">The old entry, restricted to the runs the append keeps.</param>
-/// <param name="Count">How many of those runs, at the end, were read back.</param>
-/// <param name="Runs">Those runs, raw, in block order.</param>
+/// <summary>An old entry, restricted to the runs the append keeps, and the raw tail it merges back.</summary>
 internal sealed record AbsorbedEntry(IndexEntry Entry, int Count, List<RawRun> Runs);
 
-/// <summary>Reads back the runs an append merges.</summary>
+/// <summary>
+/// Reads back the runs an append merges. Only a contiguous tail ending at the append's first block
+/// qualifies: a merged run claims every block of its range, so a gap would make it deny blocks it
+/// knows nothing about.
+/// </summary>
 internal static class RunAbsorb
 {
     /// <summary>
     /// For every locating entry whose kept runs and the append's would pass
-    /// <see cref="KeyIndexBuilder.MaxRuns"/>, its contiguous tail of runs, laid raw in
-    /// <paramref name="scratch"/>.
+    /// <see cref="KeyIndexBuilder.MaxRuns"/>, its contiguous tail of runs, laid raw in the scratch.
     /// </summary>
-    /// <param name="file">The file the append continues.</param>
-    /// <param name="entries">Its directory's entries.</param>
-    /// <param name="boundary">The append's first block.</param>
-    /// <param name="scratch">Where the runs are laid.</param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
     internal static async ValueTask<List<AbsorbedEntry>> ReadAsync(
         VortexFile file, IReadOnlyList<IndexEntry> entries, int boundary, RunScratch scratch,
         CancellationToken cancellationToken)

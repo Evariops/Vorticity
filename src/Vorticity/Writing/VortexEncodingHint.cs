@@ -1,14 +1,9 @@
-// What a caller may pin a column to - docs/11-write-strategy.md §7.1, "EncodingHint per column,
-// for callers who know", and §3.4.3, which says what it IS: plan memory with the tolerance set to
-// infinity.
-//
-// THE NAMES ARE THE SCHEMES THE CHOOSER PICKS FROM, not the encodings on the wire: one scheme can
-// write more than one array id -- a bit-packing writes `fastlanes.bitpacked` under `fastlanes.for`
-// or `vortex.zigzag` as the values ask -- and the caller who knows their data knows the scheme,
-// not the framing.
 namespace Vorticity.Writing;
 
-/// <summary>The scheme a column is written with, when the caller pins one.</summary>
+/// <summary>
+/// The scheme a column is written with, when the caller pins one. These name schemes, not wire
+/// encodings: one scheme may write more than one array id.
+/// </summary>
 public enum VortexEncodingHint : byte
 {
     /// <summary>No hint: the chooser prices the candidates, which is the default.</summary>

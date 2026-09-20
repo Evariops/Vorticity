@@ -1,30 +1,3 @@
-// The streaming builders of the two locating kinds (docs/10-indexes.md §6.1, §6.2).
-//
-// `vorticity.postings.blocks.v1`: per chunk, the chunk's distinct keys in key order, and for each
-// the blocks of the chunk that hold it. A key is noted once per block, the first time the block
-// sees it, so the list is built in the pass and sorted by construction.
-//
-// `vorticity.sorted.runs.v1`: per chunk, every (key, row) of the chunk in key order and, within a
-// key, in row order (docs/12-index-reads.md §14's amendment to §6.2). A sort of one chunk's keys, in
-// flux: a counting sort of the rows by the rank of their key, the ranks from one sort of the
-// chunk's DISTINCT keys -- which is what makes a low-cardinality column cheap to order.
-//
-// ONE RUN PER ENTRY, NOT PER CHUNK (docs/13-dataset.md §6.1, step 22). A chunk's run is still
-// built in flux from the chunk's own table, then laid raw in the writer's scratch; when the data
-// ends, the chunk runs are merged (`RunMerger`) into one run, so a lookup probes one run whatever
-// the number of chunks. The last chunk keeps a run of its own when the file's rows are not a whole
-// number of blocks: an append re-opens that chunk (11 §3.8) and drops its run, and the merged run,
-// which ends before it, stays as it is.
-//
-// BOTH ARE CUT INTO SEGMENTS of at most `segment_entries` entries (10 §4.2), each segment one keys
-// array plus the kind's arrays beside it, and each described in the run's options by its first and
-// last key, so that a probe reads the segments that can hold its key and no other. The arrays are
-// ordinary columns written by the data's own compressor: sorted keys delta- or dictionary-encode,
-// block lists and row offsets bit-pack.
-//
-// POSITIONS ARE RELATIVE TO THE RUN: a block id counts from the run's first block, a row from its
-// first row, which is `first_block × block_len` because a chunk is a whole number of blocks. A row
-// is written at `u32` while the run spans fewer than 2³² rows, and at `u64` beyond.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -39,15 +12,13 @@ using Vorticity.Types;
 namespace Vorticity.Writing;
 
 /// <summary>One locating run, as its payloads and its segment table.</summary>
-/// <param name="FirstBlock">The chunk's first block.</param>
-/// <param name="BlockCount">Its blocks.</param>
-/// <param name="Entries">Its entries, across segments.</param>
-/// <param name="Segments">Its segment table.</param>
-/// <param name="Payloads">Its arrays, `stride` per segment, in segment order.</param>
 internal sealed record KeyRun(
     int FirstBlock, int BlockCount, long Entries, List<KeySegment> Segments, List<PendingPayload> Payloads);
 
-/// <summary>Builds one column's postings or sorted runs, chunk by chunk.</summary>
+/// <summary>
+/// Builds one column's postings or sorted runs, chunk by chunk. Positions are relative to the run:
+/// a block id counts from the run's first block, a row from its first row.
+/// </summary>
 internal sealed class KeyIndexBuilder : IndexBuilder
 {
     private readonly bool _rows;
@@ -62,10 +33,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     private long _row;
     private int _block;
 
-    /// <param name="rows">Sorted runs (every row) rather than postings (every block).</param>
-    /// <param name="layout">The column's key layout.</param>
-    /// <param name="utf8">Whether a bytes key is a string, so the keys array says so.</param>
-    /// <param name="segmentEntries">The most entries a segment holds.</param>
+    /// <summary>Set <c>rows</c> for sorted runs, which hold every row, rather than postings.</summary>
     internal KeyIndexBuilder(bool rows, KeyLayout layout, bool utf8, int segmentEntries = KeyRunOptions.DefaultSegmentEntries)
     {
         _table = new ChunkKeys();
@@ -76,11 +44,9 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     }
 
     /// <summary>
-    /// A trigram postings builder (10 §6.4): the keys are every byte trigram of every value, typed
+    /// A trigram postings builder: the keys are every byte trigram of every value, typed
     /// <c>binary</c> because a trigram may cut a UTF-8 code point in two.
     /// </summary>
-    /// <param name="fold">Whether trigrams are ASCII-lower-cased.</param>
-    /// <param name="segmentEntries">The most entries a segment holds.</param>
     internal static KeyIndexBuilder ForTrigrams(bool fold, int segmentEntries) =>
         new KeyIndexBuilder(fold, segmentEntries);
 
@@ -95,7 +61,6 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         _fold = fold;
     }
 
-    /// <summary>The kind this builder writes.</summary>
     internal string Kind => _trigrams
         ? IndexKinds.PostingsNgram3
         : _rows ? IndexKinds.SortedRuns : IndexKinds.PostingsBlocks;
@@ -106,7 +71,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>The runs the merge produced when the data ended, in block order.</summary>
     internal List<KeyRun> Runs { get; } = [];
 
-    /// <summary>The writer's scratch, where chunk runs wait for the merge; set by the index writer.</summary>
+    /// <summary>Where chunk runs wait for the merge; set by the index writer.</summary>
     internal RunScratch? Scratch { get; set; }
 
     /// <summary>Rows per block, 0 when the caller's batches are the blocks; set by the index writer.</summary>
@@ -115,30 +80,23 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>The row span above which the rows are written at 64 bits; set by the index writer.</summary>
     internal long WideRowsAbove { get; set; } = uint.MaxValue;
 
-    /// <summary>The chunk runs laid in the scratch, in block order.</summary>
     private readonly List<RawRun> _chunkRuns = [];
 
     /// <summary>
     /// Runs read from the file an append continues, merged in front of the chunk runs because the
-    /// entry would otherwise pass <see cref="MaxRuns"/> (13 §6.1); they live in
-    /// <see cref="AbsorbedScratch"/>.
+    /// entry would otherwise hold more than <see cref="MaxRuns"/>.
     /// </summary>
     internal List<RawRun>? Absorbed { get; set; }
 
     /// <summary>Where <see cref="Absorbed"/> lives.</summary>
     internal RunScratch? AbsorbedScratch { get; set; }
 
-    /// <summary>The most runs an entry keeps: K of 13 §6.1.</summary>
+    /// <summary>The most runs an entry keeps.</summary>
     internal const int MaxRuns = 4;
 
-    /// <summary>The segment size the runs are cut at.</summary>
     internal int SegmentEntries => _segmentEntries;
 
     /// <summary>Whether the dtype can be keyed, and why not.</summary>
-    /// <param name="dtype">The column's dtype.</param>
-    /// <param name="layout">Its key layout.</param>
-    /// <param name="utf8">Whether its keys are strings.</param>
-    /// <param name="reason">Why not.</param>
     internal static bool Supports(DType dtype, out KeyLayout layout, out bool utf8, out string? reason)
     {
         DType storage = dtype;
@@ -160,7 +118,6 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         return false;
     }
 
-    /// <inheritdoc/>
     internal override void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
     {
         long first = _row;
@@ -226,7 +183,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
                 return;
 
             case CanonicalKind.Constant:
-                // One key for every valid row; its id is looked up once.
+                // One key for every valid row, so its id is looked up once.
                 int constant = -1;
                 for (int row = start; row < start + count; row++)
                 {
@@ -261,11 +218,9 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     }
 
     /// <summary>
-    /// Feeds encoded keys, one per row, for a composite key (10 §6.5): the rows
-    /// <paramref name="include"/> leaves out -- a null in the tuple -- are counted and not entries.
+    /// Feeds encoded keys, one per row, for a composite key: the rows <paramref name="include"/>
+    /// leaves out -- a null in the tuple -- are counted and not entries.
     /// </summary>
-    /// <param name="keys">The rows' keys.</param>
-    /// <param name="include">Per row, whether it is an entry.</param>
     internal void AccumulateEncoded(IEncodedKeys keys, ReadOnlySpan<bool> include)
     {
         long first = _row;
@@ -285,7 +240,6 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     }
 
     /// <summary>Counts rows that feed nothing, so the next rows keep their numbers.</summary>
-    /// <param name="count">How many.</param>
     internal void Skip(int count) => _row += count;
 
     private void Note(ReadOnlySpan<byte> key, long row) => NoteId(_table.Intern(key), row);
@@ -310,17 +264,14 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         }
     }
 
-    /// <inheritdoc/>
     internal override void CloseBlock() => _block++;
 
-    /// <inheritdoc/>
     internal override void Start(int block, long row)
     {
         _block = block;
         _row = row;
     }
 
-    /// <inheritdoc/>
     internal override void CloseChunk(int firstBlock, int blocks, long firstRow, long rows)
     {
         if (Abandoned is not null)
@@ -404,8 +355,8 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     }
 
     /// <summary>
-    /// The absorbed runs and the chunk runs, merged: in passes of at most
-    /// <see cref="RunMerger.MaxFanIn"/> runs laid back into the scratch, then once into payloads.
+    /// The absorbed runs and the chunk runs, merged in passes of at most
+    /// <see cref="RunMerger.MaxFanIn"/> runs, then once into payloads.
     /// </summary>
     private KeyRun MergeMains(RunScratch scratch, List<RawRun> mains)
     {
@@ -421,8 +372,8 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         List<RawRun> level = mains;
         while (absorbed.Count + level.Count > RunMerger.MaxFanIn)
         {
-            // THE PASS NEVER MIXES ABSORBED RUNS INTO A LAID ONE: they are few (at most K) and first
-            // in block order, so the chunk runs alone are narrowed until they fit beside them.
+            // A pass never mixes absorbed runs into a laid one: they are few and first in block
+            // order, so the chunk runs alone are narrowed until they fit beside them.
             List<RawRun> next = [];
             for (int from = 0; from < level.Count; from += RunMerger.MaxFanIn)
             {
@@ -486,15 +437,14 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         return sink.Finish();
     }
 
-    // EVERY ARRAY BELOW IS RENTED, and goes back once the chunk's run is laid in the scratch.
+    // Every array here is rented, and goes back once the chunk's run is laid in the scratch.
     private RawRun PostingsRaw(RunScratch scratch, ChunkKeys chunk, int firstBlock, int blocks)
     {
         int distinct = chunk.Ranked(_layout, out int[] ranked);
         int[] rank = RankOf(ranked, distinct, chunk);
         int entries = chunk.Log.Count;
 
-        // The block lists, grouped by rank: count, prefix-sum, fill in log order (which is block
-        // order, so each list comes out sorted). The blocks are the file's.
+        // Filling in log order is what makes each block list come out sorted.
         int[] starts = Counts(chunk, rank, distinct);
         uint[] lists = ArrayPool<uint>.Shared.Rent(Math.Max(entries, 1));
         int[] cursor = ArrayPool<int>.Shared.Rent(distinct + 1);
@@ -509,7 +459,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         RawRun run;
         if (scratch.Admit(held))
         {
-            // HELD: the arrays are the run, and the merge reads them in place.
+            // Held: the arrays are the run, and the merge reads them in place.
             (byte[] keys, int[]? offsets) = Gather(chunk, ranked, distinct, keyBytes);
             run = new RawRun
             {
@@ -550,7 +500,6 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         return run;
     }
 
-    /// <summary>The bytes of the keys <paramref name="ids"/> names.</summary>
     private int KeyBytesOf(ChunkKeys chunk, int[] ids, int count)
     {
         if (_layout.Shape != KeyShape.Bytes)
@@ -600,8 +549,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         List<(int Key, long Position)> log = chunk.Log;
         int entries = log.Count;
 
-        // A stable counting sort of the rows by their key's rank; each entry keeps its key's id and
-        // its file row.
+        // A stable counting sort of the rows by their key's rank.
         int[] cursor = Counts(chunk, rank, distinct);
         int[] entryIds = ArrayPool<int>.Shared.Rent(Math.Max(entries, 1));
         long[] rows = ArrayPool<long>.Shared.Rent(Math.Max(entries, 1));
@@ -688,7 +636,6 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         return rank;
     }
 
-    /// <inheritdoc/>
     public override void Dispose()
     {
         _table.Dispose();

@@ -1,16 +1,3 @@
-// One column's state across the whole file - docs/11-write-strategy.md §3.0.
-//
-// The writer keeps a TREE of these, one per column the file summarizes, and each is a state machine
-// fed by every WriteAsync rather than by every emission. That inversion is the point of stage 1:
-// what a column knows about itself now accumulates as the rows arrive, in block coordinates counted
-// from row 0 of the file, instead of being recomputed from whatever chunk the rows happened to land
-// in.
-//
-// WHAT IT HOLDS TODAY is the open block's partial and the closed blocks' summaries - a few hundred
-// bytes plus ~200 per block, which is what §3.7 budgets for it. The stages after this one add the
-// chooser's plan memory (§3.4.3), the running distinct table (§3.2.2) and the index builders
-// (docs/10-indexes.md §7) to the same object, which is why it is a class with a growing state and
-// not a tuple.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -20,84 +7,53 @@ using Vorticity.Types;
 
 namespace Vorticity.Writing;
 
-/// <summary>The per-column state the writer carries from the first batch to the footer.</summary>
-/// <remarks>
-/// A TREE, ONE NODE PER PHYSICAL COLUMN — docs/11-write-strategy.md §3.0, "one per physical leaf (a
-/// struct field, a list's elements child, an extension's storage)". A file's root field is very
-/// often not a column at all: `encodings/variant` is one `variant` dtype whose canonical form is a
-/// two-field struct of varbinviews, and `table_wide` is a struct of structs. Summarizing only the
-/// root fields left every one of those leaves unmeasured, so the chooser fell back to walking them —
-/// which is what WRITE-ARCHITECTURE.md §1 charges `variant` 62 % for.
-/// <para>
-/// A STRUCT'S FIELDS AND AN EXTENSION'S STORAGE ARE ROW-ALIGNED with their parent, so a child's
-/// blocks are the parent's blocks and the row range passes straight down. A LIST'S ELEMENTS ARE NOT
-/// ROW-ALIGNED, and §3.2.4 still gives them the parent's blocks: block <c>i</c> of the elements
-/// covers the elements of parent rows <c>[8192·i, 8192·(i+1))</c>, found through the offsets
-/// (<see cref="ListElements"/>). Element-side counts are not block-aligned and never need to be. A
-/// range whose window of elements does not abut the one before it leaves its block
-/// <c>Scattered</c>, and a chunk covering it measures its elements itself (step 28).
-/// </para>
-/// </remarks>
+/// <summary>
+/// The per-column state the writer carries from the first batch to the footer, accumulated as rows
+/// arrive in block coordinates counted from row 0 of the file. The writer keeps a tree of these,
+/// one node per physical leaf — a struct field, a list's elements child, an extension's storage —
+/// and not per top-level field, since a root field is often a struct whose leaves would otherwise
+/// go unmeasured. A list's elements are not row-aligned with their parent yet still use its blocks:
+/// block <c>i</c> of the elements covers the elements of parent rows <c>[8192·i, 8192·(i+1))</c>,
+/// and a range whose window does not abut the one before it leaves its block scattered, so a chunk
+/// covering it measures its elements itself.
+/// </summary>
 internal sealed class ColumnWriter
 {
     /// <summary>One summary per closed block, in block order, until the zone map is written.</summary>
     private readonly List<BlockStats> _closed = [];
 
     /// <summary>
-    /// One pair of width histograms per closed block, parallel to <see cref="_closed"/>, held only
-    /// until the chunk covering the block has been emitted.
+    /// One pair of width histograms per closed block, parallel to <see cref="_closed"/>. Per block
+    /// rather than a running total because a block closes when its last row is ingested while its
+    /// chunk is emitted when enough rows are pending, so a running accumulator would mix the next
+    /// chunk's blocks into this one's. An entry is nulled and its buffer returned once the chunk is
+    /// written, leaving one buffer per block in transit.
     /// </summary>
-    /// <remarks>
-    /// WHY PER BLOCK AND NOT A RUNNING TOTAL, which is what this looked like it should be: a block
-    /// closes when its last row is INGESTED, and the chunk that carries it is emitted when enough
-    /// rows are PENDING — two different moments. A batch can close several blocks that the writer
-    /// then holds in transit, so a single running accumulator would already be mixing the next
-    /// chunk's blocks into this one's by the time the chooser asked.
-    /// <para>
-    /// The list stays index-aligned with <see cref="_closed"/> forever, but an entry is nulled and
-    /// its buffer returned the moment <see cref="ReleaseChunk"/> says the chunk is written, so what
-    /// is actually held is one buffer per block IN TRANSIT — bounded by
-    /// <c>DataBlockTargetBytes</c>, which is one chunk. That is the "block scratch" row of
-    /// docs/11-write-strategy.md §3.7 and not the "~200 B per closed block" one, which is what the
-    /// 520 bytes of a histogram pair would have blown through by a factor of nine.
-    /// </para>
-    /// </remarks>
     private readonly List<int[]?> _widths = [];
 
     /// <summary>
-    /// The row-aligned children, created the first time a batch shows them; never reordered.
+    /// The row-aligned children, created on the first <see cref="Accumulate"/> and therefore always
+    /// before the first <see cref="CloseBlock"/>, which keeps every node's closed-block list the
+    /// same length as its parent's. Never reordered: the shape is the schema's and cannot change.
     /// </summary>
-    /// <remarks>
-    /// Created on the first <see cref="Accumulate"/> and therefore always before the first
-    /// <see cref="CloseBlock"/>, which is what keeps every node's closed-block list the same length
-    /// as its parent's. The shape cannot change between batches: it is the schema's, and the schema
-    /// is fixed for the file.
-    /// </remarks>
     private ColumnWriter[]? _children;
 
-    /// <summary>The block in progress; every batch that covers part of it folds into this one.</summary>
     private BlockStats _open;
 
-    /// <summary>The open block's width histograms, rented on its first integer range.</summary>
     private int[]? _openWidths;
 
     /// <summary>
-    /// The chunk's running distinct table (docs/11-write-strategy.md §3.2.2), created on the first
-    /// range of a comparable column and reused, reset, for every chunk after.
+    /// The chunk's running distinct table, created on the first range of a comparable column and
+    /// reused, reset, for every chunk after.
     /// </summary>
     private DistinctTable? _table;
 
-    /// <summary>Whether the edition being written can carry <c>vortex.dict</c> at all.</summary>
     internal bool EditionAllowsDictionary { get; init; } = true;
 
     /// <summary>
-    /// The byte limit of the bounded string extremes this column's zones carry, or 0 for none
-    /// (<see cref="VortexWriteOptions.StringBoundBytes"/>).
+    /// The byte limit of the bounded string extremes this column's zones carry, or 0 for none. The
+    /// backing field is null when the feature is off, so a column writer costs nothing for it.
     /// </summary>
-    /// <remarks>
-    /// ONE FIELD FOR THE WHOLE FEATURE, null when it is off: `WriteAllocationTests` holds every
-    /// column writer to its size, and the default write asks for no string bounds.
-    /// </remarks>
     internal int StringBoundBytes
     {
         get => _stringZones?.Limit ?? 0;
@@ -113,69 +69,45 @@ internal sealed class ColumnWriter
     internal IReadOnlyList<ZoneString>? StringZones => _stringZones?.All(_closed.Count);
 
     /// <summary>
-    /// Whether the table has a consumer on the chunk being ingested, so it should run at all —
-    /// docs/11-write-strategy.md §3.2.2's liveness rule.
+    /// Whether the table has a consumer on the chunk being ingested, so it should run at all: only
+    /// on a chunk whose remembered plan is a dictionary that held. A column's first chunk walks
+    /// instead, because the walk abandons early on columns where a dictionary loses and the table
+    /// cannot, not knowing the budget.
     /// </summary>
-    /// <remarks>
-    /// LIVE ONLY ON A CHUNK WHOSE REMEMBERED PLAN IS A DICTIONARY THAT HELD. The spec's first reading
-    /// had the table live on a column's first chunk too, and the end-of-refactor measurement said
-    /// what that costs: a hash and a probe per row of every comparable column, on columns whose
-    /// whole write was a few hundred microseconds — `bool` ×9,5, `primitive` ×10, `sequence` ×13.
-    /// The walk it was meant to replace abandons early on exactly those columns; the table cannot,
-    /// because it does not know the budget. So the first chunk walks, and the table takes over
-    /// from the chunk after a dictionary won. Index builders will add their own consumers.
-    /// </remarks>
     internal bool DictionaryLive => EditionAllowsDictionary && _live;
 
     private bool _live;
 
     /// <summary>
-    /// Whether the width histograms are counted on the chunk being ingested — the same rule as the
-    /// table's, for the same reason: only while bit-packing is the remembered plan that held.
+    /// Counted only while bit-packing is the remembered plan that held, on the table's rule and for
+    /// the table's reason.
     /// </summary>
     private bool _widthsLive;
 
     /// <summary>
     /// Per closed block, in block order: how many distinct values and how many heap bytes the table
-    /// held when that block closed — the two numbers that bound a chunk ending there.
+    /// held when that block closed — the two numbers that bound a chunk ending there. By the time a
+    /// chunk closes the table has probed rows beyond it, but since codes are handed out in order of
+    /// first appearance, the chunk's rows use exactly the codes below the count at close.
     /// </summary>
-    /// <remarks>
-    /// THIS IS WHAT MAKES THE TAIL HARMLESS. A chunk closes at a block boundary, and the table has
-    /// by then probed rows beyond it. Because codes are handed out in order of first appearance,
-    /// the codes used by the chunk's rows are exactly <c>[0, distinct-at-close)</c>, and the heap
-    /// bytes those entries own are exactly <c>heap-at-close</c>: the entries above are the tail's
-    /// and are not part of this chunk. Recorded at every close so that whichever block ends the
-    /// chunk, the answer is one lookup.
-    /// </remarks>
     private readonly List<(int Distinct, long Heap)> _tableAtClose = [];
 
     /// <summary>
-    /// The column's last row, which outlives both the batch it came in and the block it fell in.
+    /// The column's last row, kept because run continuity is a question about the previous row and
+    /// that row's arena is recycled as soon as the next batch is decoded. It outlives a block close
+    /// too: a block boundary is not a run boundary.
     /// </summary>
-    /// <remarks>
-    /// Run continuity is the reason: whether row 8 192 starts a run is a question about row 8 191,
-    /// and that row's arena was recycled the moment the next batch was decoded
-    /// (docs/11-write-strategy.md §3.1). It survives <see cref="CloseBlock"/> for the same reason —
-    /// a block boundary is not a run boundary.
-    /// </remarks>
     private readonly PreviousRow _previous = new PreviousRow();
 
     /// <summary>The closed blocks, in order. Zone <c>z</c> is entry <c>z</c>.</summary>
     internal IReadOnlyList<BlockStats> Blocks => _closed;
 
     /// <summary>
-    /// The statistics of <paramref name="count"/> blocks starting at <paramref name="first"/>: what
-    /// a chunk covering them is, for the chooser.
+    /// The statistics of <paramref name="count"/> blocks from <paramref name="first"/>: what a
+    /// chunk covering them is, a sum and never an approximation since a chunk is a whole number of
+    /// blocks. An out-of-range request returns an absent summary rather than throwing, so that the
+    /// chooser measures the column itself and a plumbing slip costs a pass, never a wrong plan.
     /// </summary>
-    /// <remarks>
-    /// A chunk is a whole number of blocks (docs/11-write-strategy.md §3.1), so this is a sum and
-    /// never an approximation. An out-of-range request returns an absent summary rather than
-    /// throwing: a chooser with no statistics measures the column itself, which is exactly what it
-    /// did before this existed, so a plumbing slip costs a pass and never a wrong plan.
-    /// </remarks>
-    /// <param name="first">The first block of the chunk.</param>
-    /// <param name="count">How many blocks it covers.</param>
-    /// <returns>The merged summary, or a default one when the range is not fully closed.</returns>
     internal BlockStats Chunk(int first, int count)
     {
         if (first < 0 || count <= 0 || first + count > _closed.Count)
@@ -193,19 +125,16 @@ internal sealed class ColumnWriter
     }
 
     /// <summary>
-    /// Folds rows <c>[start, start + count)</c> of <paramref name="nodeIndex"/> into the open block.
+    /// Folds rows <c>[start, start + count)</c> of <paramref name="nodeIndex"/> into the open
+    /// block. The caller has cut the range at the block boundary.
     /// </summary>
-    /// <param name="arena">The arena holding the batch.</param>
-    /// <param name="nodeIndex">This column inside the batch.</param>
-    /// <param name="start">First row of the range, inside the batch.</param>
-    /// <param name="count">How many rows; the caller has cut the range at the block boundary.</param>
     internal void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
     {
         if (count <= 0)
         {
-            // A list range whose rows name no element: nothing to summarize, and the subtree still
-            // has to exist before the block closes, so that every node closes as many blocks as
-            // its parent.
+            // A list range whose rows name no element: nothing to summarize, but the subtree still
+            // has to exist before the block closes, so that every node closes as many blocks as its
+            // parent.
             Shape(arena, nodeIndex);
             return;
         }
@@ -214,14 +143,10 @@ internal sealed class ColumnWriter
         if (_openWidths is null && _widthsLive
             && node.Kind == CanonicalKind.Primitive && node.PType.IsInteger())
         {
-            // Rented on the first integer range of the block and not before: a schema of a thousand
-            // string columns rents nothing, which is what keeps this out of the per-column budget.
-            // And only while bit-packing is the remembered plan (`_widthsLive`): the second
-            // end-of-refactor measurement priced the histograms counted for nobody at +25 % on
-            // `runend`, +24 % on `constant`, +59 % on `chunked` -- integer columns whose plan is
-            // never a bit-packing, paying a leading-zero count and two increments per row for a
-            // candidate the chooser never prices. A column's first chunk walks for its histogram,
-            // as it did before stage R1, and only if bit-packing is priced at all.
+            // Rented on the first integer range of the block and not before, so that a schema of a
+            // thousand string columns rents nothing, and only while bit-packing is the remembered
+            // plan: an integer column whose plan is never a bit-packing would otherwise pay a
+            // leading-zero count and two increments per row for a candidate nobody prices.
             _openWidths = ArrayPool<int>.Shared.Rent(BitPackWidths.Length);
             _openWidths.AsSpan(0, BitPackWidths.Length).Clear();
         }
@@ -234,9 +159,8 @@ internal sealed class ColumnWriter
             _stringZones.Accumulate(arena, node, start, count);
         }
 
-        // THE DISTINCT TABLE RUNS ON THE SAME ROWS, RIGHT AFTER: the statistics pass has just loaded
-        // them, so the probe pays its hash and its compare and none of its loads. Created on the
-        // first range of a comparable column, and only while a dictionary has a consumer.
+        // The distinct table runs on the same rows right after the statistics pass has loaded them,
+        // so the probe pays its hash and its compare and none of its loads.
         if (DictionaryLive)
         {
             _table ??= DistinctTable.For(node);
@@ -247,8 +171,6 @@ internal sealed class ColumnWriter
         {
             case CanonicalKind.Struct:
             {
-                // A variant wears a struct's canonical form and is descended for the same reason:
-                // its two fields are the columns, and they are row-aligned with it.
                 ColumnWriter[] children = Children(node.FieldCount);
                 for (int i = 0; i < children.Length; i++)
                 {
@@ -264,10 +186,9 @@ internal sealed class ColumnWriter
 
             case CanonicalKind.ListView:
             {
-                // §3.2.4: the window of elements the rows name goes into THIS block, whatever its
-                // own count, when it abuts the window before it; otherwise the block is scattered
-                // and summarizes nothing. A map is a list view of entries and takes the same path,
-                // its entries a struct.
+                // The window of elements the rows name goes into this block, whatever its own
+                // count, when it abuts the window before it; otherwise the block is scattered and
+                // summarizes nothing.
                 int elements = node.ElementsIndex;
                 ColumnWriter child = Children(1)[0];
                 if (ListElements.Contiguous(
@@ -298,16 +219,9 @@ internal sealed class ColumnWriter
 
     /// <summary>
     /// Creates the nodes under this one that <paramref name="nodeIndex"/>'s shape calls for,
-    /// summarizing nothing.
+    /// summarizing nothing. A node created a block late would close one block fewer than its
+    /// parent, and every block after it would be summarized under the wrong number.
     /// </summary>
-    /// <remarks>
-    /// A LIST RANGE CAN NAME NO ELEMENT, or a window it cannot vouch for, and the elements'
-    /// subtree must exist all the same before the block closes: a node created a block late would
-    /// close one block fewer than its parent, and every block after would be summarized under the
-    /// wrong number.
-    /// </remarks>
-    /// <param name="arena">The arena holding the batch.</param>
-    /// <param name="nodeIndex">This column inside the batch.</param>
     private void Shape(CanonicalArena arena, int nodeIndex)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
@@ -337,10 +251,6 @@ internal sealed class ColumnWriter
         }
     }
 
-    /// <summary>
-    /// Marks the open block of this node and of every node under it as elements that cannot be
-    /// summarized in place.
-    /// </summary>
     private void Scatter()
     {
         _open.Scattered = true;
@@ -361,9 +271,6 @@ internal sealed class ColumnWriter
     /// blocks; <see langword="null"/> when this is not a list, when a block is scattered, or when
     /// the blocks name another number of elements than the chunk writes.
     /// </summary>
-    /// <param name="first">The chunk's first block.</param>
-    /// <param name="count">How many blocks it covers.</param>
-    /// <param name="elements">The elements the chunk's list node holds, after narrowing.</param>
     internal ColumnWriter? ElementsOver(int first, int count, long elements)
     {
         if (Field(0) is not { } child || _children!.Length != 1)
@@ -383,18 +290,10 @@ internal sealed class ColumnWriter
 
     /// <summary>
     /// Sums the width histograms of <paramref name="count"/> blocks from <paramref name="first"/>
-    /// into <paramref name="destination"/>.
+    /// into <paramref name="destination"/>, which must hold <see cref="BitPackWidths.Length"/>.
+    /// All or nothing, because a partial histogram is a wrong one: a range in which any block lacks
+    /// its widths answers false, and the chooser walks the column instead.
     /// </summary>
-    /// <remarks>
-    /// ALL OR NOTHING, because a partial histogram is a wrong one: a chunk whose blocks do not every
-    /// one carry their widths — a range the progression short-circuit answered, a block already
-    /// released, a column that is not an integer primitive — answers false, and the chooser walks
-    /// the column as it did before this existed.
-    /// </remarks>
-    /// <param name="first">The chunk's first block.</param>
-    /// <param name="count">How many blocks it covers.</param>
-    /// <param name="destination">Receives the sum; must hold <see cref="BitPackWidths.Length"/>.</param>
-    /// <returns>Whether every block in the range had its widths.</returns>
     internal bool Widths(int first, int count, Span<int> destination)
     {
         if (first < 0 || count <= 0 || first + count > _widths.Count)
@@ -424,15 +323,9 @@ internal sealed class ColumnWriter
     }
 
     /// <summary>
-    /// Gives back the per-block scratch of a chunk that has been written, all the way down.
+    /// Gives back the per-block scratch of a chunk that has been written, all the way down. The
+    /// entries are nulled rather than removed so that a block's index stays its index.
     /// </summary>
-    /// <remarks>
-    /// This is the other half of the lifetime <see cref="_widths"/> documents. The entries are
-    /// nulled rather than removed so that a block's index stays its index; what is freed is the
-    /// buffer, which is the part that has a size.
-    /// </remarks>
-    /// <param name="first">The chunk's first block.</param>
-    /// <param name="count">How many blocks it covers.</param>
     internal void ReleaseChunk(int first, int count)
     {
         for (int i = first; i < first + count && i < _widths.Count; i++)
@@ -445,10 +338,8 @@ internal sealed class ColumnWriter
             }
         }
 
-        // THE TABLE FORGETS THE CHUNK HERE, AND THE TAIL COMES BACK THROUGH `Reprobe`. Every entry
-        // it held is either emitted -- and an emitted value is new again in the next chunk -- or
-        // belongs to rows the writer is about to carry over and hand back. Nothing survives a chunk
-        // except the buffers.
+        // The table forgets the chunk here and the tail comes back through `Reprobe`: an emitted
+        // value is new again in the next chunk, so nothing survives a chunk except the buffers.
         _table?.Reset();
 
         ColumnWriter[]? children = _children;
@@ -463,38 +354,23 @@ internal sealed class ColumnWriter
         }
     }
 
-    /// <summary>The chunk's distinct table, or <see langword="null"/> when none runs here.</summary>
     internal DistinctTable? Table => _table;
 
     /// <summary>
     /// What the last chunk of this column was encoded as, what the chooser predicted it would cost,
-    /// and what the encoder actually produced — docs/11-write-strategy.md §3.4.3.
+    /// and what the encoder actually produced. <paramref name="Pinned"/> is the same mechanism with
+    /// the tolerance set to infinity, so a pinned memory holds whatever the bytes did.
     /// </summary>
-    /// <param name="Scheme">The plan's scheme.</param>
-    /// <param name="Predicted">The chooser's bytes for it.</param>
-    /// <param name="Actual">The buffer bytes the encoder wrote for it.</param>
-    /// <param name="Pinned">
-    /// Whether the caller pinned the scheme (<see cref="VortexEncodingHint"/>): the same mechanism
-    /// with the tolerance set to infinity (docs/11 §3.4.3), so the memory holds whatever the bytes
-    /// did and is never replaced by what a chunk was written as.
-    /// </param>
     internal readonly record struct PlanMemory(ColumnScheme Scheme, long Predicted, long Actual, bool Pinned = false)
     {
-        /// <summary>§3.4.3's <c>plan_tolerance</c>: five per cent, as a ratio of the prediction.</summary>
+        /// <summary>Five per cent, as a ratio of the prediction.</summary>
         private const long TolerancePercent = 5;
 
         /// <summary>
-        /// Whether the prediction held: the actual bytes are within the tolerance of it, so the
-        /// next chunk may reuse the plan without pricing the alternatives.
+        /// Whether the prediction held, so the next chunk may reuse the plan without pricing the
+        /// alternatives. Both sides are buffer bytes with framing excluded, so a scheme that
+        /// produces no buffer at all — a progression — holds trivially.
         /// </summary>
-        /// <remarks>
-        /// BUFFER BYTES AGAINST BUFFER BYTES. The end-of-refactor measurement found the table
-        /// alive on every chunk of every progression: the plan predicted the ~32 bytes of framing a
-        /// sequence costs and the encoder produced no buffer at all, so the prediction never held,
-        /// the column never left full pricing, and a million rows were probed for a plan decided
-        /// before the table was ever asked. A prediction is now the bytes the encoder's buffers
-        /// will hold, framing excluded on both sides, and a scheme with no buffer holds trivially.
-        /// </remarks>
         internal bool WithinTolerance =>
             Pinned || (Predicted == 0
                 ? Actual == 0
@@ -510,8 +386,8 @@ internal sealed class ColumnWriter
     /// <summary>
     /// What the chunk covering <paramref name="block"/> was written as, or
     /// <see langword="null"/> when that block's chunk is not out (or never reached this node).
+    /// <paramref name="block"/> is counted from row 0 of the file.
     /// </summary>
-    /// <param name="block">The block, counted from row 0 of the file.</param>
     internal ColumnScheme? SchemeAt(int block) =>
         (uint)block < (uint)_closed.Count && _closed[block].WrittenScheme != 0
             ? (ColumnScheme)(_closed[block].WrittenScheme - 1)
@@ -525,13 +401,11 @@ internal sealed class ColumnWriter
 
     private long _widthsServed;
 
-    /// <summary>Records that a chunk's bit-packing was priced from ingested widths, not a walk.</summary>
     internal void NoteWidthsServed() => _widthsServed++;
 
     /// <summary>
-    /// Chunks of this column and its children whose bit-packing was priced from the ingested
-    /// width histograms rather than from a walk -- what `PlanMemoryTests` holds the carried tail's
-    /// count to.
+    /// Chunks of this column and its children whose bit-packing was priced from the ingested width
+    /// histograms rather than from a walk.
     /// </summary>
     internal long WidthsServed
     {
@@ -552,29 +426,18 @@ internal sealed class ColumnWriter
     }
 
     /// <summary>
-    /// Records what the chunk just written was encoded as, against what it was priced at.
+    /// Records what the chunk just written was encoded as, against what it was priced at, and
+    /// decides from that which ingest state the next chunk runs. A plan that was never priced
+    /// leaves no memory, since a memory predicting zero cannot hold.
     /// </summary>
-    /// <remarks>
-    /// The chooser consults it for the next chunk (<see cref="Memory"/>): a plan that held within
-    /// tolerance is offered first, and the distinct table and the width histograms run only where
-    /// that plan will read them (below). A plan that was never priced (a child a scheme invented,
-    /// the reference chooser's) leaves no memory, because a memory whose prediction is zero can
-    /// never hold.
-    /// </remarks>
-    /// <param name="plan">The plan the encoder just wrote.</param>
-    /// <param name="actualBytes">The buffer bytes it produced, this column's subtree included.</param>
-    /// <param name="firstBlock">The chunk's first block.</param>
-    /// <param name="blockCount">How many blocks the chunk covers.</param>
     internal void Remember(in ColumnPlan plan, long actualBytes, int firstBlock, int blockCount)
     {
-        // A progression predicts zero buffer bytes and is priced all the same; every other priced
-        // plan predicts more than zero. What predicts zero without being a progression was never
-        // priced -- a child a scheme invented -- and leaves no memory.
+        // A progression predicts zero buffer bytes and is priced all the same; anything else
+        // predicting zero was never priced at all.
         bool priced = plan.PredictedBytes > 0 || plan.Scheme == ColumnScheme.Sequence;
 
-        // THE REPORT'S LEDGER, and the dictionary probe's (docs/10-indexes.md §5.3): what each
-        // block's chunk became, in a byte the closed block already had spare. The hit is counted
-        // against the memory the chunk was CHOSEN under, which is the one being replaced.
+        // What each block's chunk became, in a byte the closed block already had spare. The hit is
+        // counted against the memory the chunk was chosen under, which is the one being replaced.
         Span<BlockStats> closed = CollectionsMarshal.AsSpan(_closed);
         byte written = (byte)(plan.Scheme + 1);
         for (int block = Math.Max(firstBlock, 0); block < firstBlock + blockCount && block < closed.Length; block++)
@@ -591,55 +454,34 @@ internal sealed class ColumnWriter
             }
         }
 
-        // A PINNED MEMORY IS NOT REPLACED: the caller's scheme is offered to every chunk, and a
-        // chunk it could not describe -- priced in full, written as something else -- does not
-        // withdraw it (docs/11 §3.4.3).
+        // A pinned memory is not replaced: the caller's scheme is offered to every chunk, and a
+        // chunk written as something else does not withdraw it.
         if (Memory is not { Pinned: true })
         {
             Memory = priced ? new PlanMemory(plan.Scheme, plan.PredictedBytes, actualBytes) : null;
         }
 
-        // THE TABLE'S CONSUMER FOR THE NEXT CHUNK, decided here and nowhere else. The end-of-refactor
-        // measurement settled the rule the other way round from the spec's first reading: the table
-        // runs ONLY on a chunk whose remembered plan is a dictionary that held. A column's first
-        // chunk, and every chunk sent back to full pricing, walks as it did before -- the walk
-        // abandons early on the columns where a dictionary loses, and the table cannot -- so the
-        // probe is paid exactly where its answer is used.
+        // The table's consumer for the next chunk, decided here and nowhere else, so that the probe
+        // is paid exactly where its answer is used.
         _live = Memory is { WithinTolerance: true, Scheme: ColumnScheme.Dict };
-        // AND ONLY IF THE PACK WOULD READ THEM. The ingest histograms are the raw and the zigzag
-        // widths; a frame of reference wants the FRAMED widths, which are the raw ones exactly when
-        // the reference is zero and something the pack has to walk for otherwise. The third
-        // end-of-refactor measurement found `chunked` — `fastlanes.for` over a non-zero reference —
-        // paying the count on every row and the walk on top: +55 %. So the widths are counted for a
-        // zigzag plan, or a frame anchored at zero, and for nothing else.
+        // The ingest histograms are the raw and the zigzag widths. A frame of reference wants the
+        // framed widths, which are the raw ones exactly when the reference is zero and something
+        // the pack has to walk for otherwise, so counting them there would pay twice.
         _widthsLive = Memory is { WithinTolerance: true, Scheme: ColumnScheme.BitPacked }
             && plan.BitPack is { } packed
             && (packed.Transform == BitPackTransform.ZigZag || packed.Reference == 0);
     }
 
-    /// <summary>
-    /// What the table held when block <paramref name="block"/> closed: the distinct count and the
-    /// heap bytes, which bound a chunk ending at that block. <c>(-1, 0)</c> when unknown.
-    /// </summary>
-    /// <param name="block">The block, counted from row 0 of the file.</param>
+    /// <summary>What the table held when block <paramref name="block"/> closed, or <c>(-1, 0)</c>.</summary>
     internal (int Distinct, long Heap) TableAtClose(int block) =>
         (uint)block < (uint)_tableAtClose.Count ? _tableAtClose[block] : (-1, 0);
 
     /// <summary>
     /// Probes rows <c>[start, start + count)</c> into the table only — the statistics already hold
-    /// them — all the way down the tree.
+    /// them — all the way down the tree. This is for the carried tail and nothing else: those rows
+    /// were probed under the emitted chunk's codes, so in the new chunk their values are new, while
+    /// their block statistics are untouched because the open block is still the open block.
     /// </summary>
-    /// <remarks>
-    /// FOR THE CARRIED TAIL, AND FOR NOTHING ELSE. After a chunk is emitted, the rows the writer
-    /// carries into the next one were probed under the OLD chunk's codes, some of them against
-    /// entries that have just been written out; in the new chunk those values are new. Their block
-    /// statistics are untouched — the open block is still the open block — so only the table sees
-    /// them again, in the order the next chunk will hold them, which is first.
-    /// </remarks>
-    /// <param name="arena">The arena holding the carried rows.</param>
-    /// <param name="nodeIndex">This column inside them.</param>
-    /// <param name="start">First row of the range, inside the node.</param>
-    /// <param name="count">How many rows.</param>
     internal void Reprobe(CanonicalArena arena, int nodeIndex, int start, int count)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
@@ -651,12 +493,10 @@ internal sealed class ColumnWriter
             _table?.Probe(arena, node, start, count);
         }
 
-        // THE CARRIED ROWS ARE THE OPEN BLOCK, AND THE OPEN BLOCK HAS NO WIDTHS YET: they were
-        // ingested before the plan that wants widths held. Counted here, the block is whole and the
-        // chunk it opens reads its histograms; left partial, that chunk walks for its histogram and
-        // every later block of it is counted for nobody -- one chunk in four of
-        // `fastlanes_bitpacked`, and all of the +13 % the axis carried. Only when the carry is the
-        // whole block: a count over part of it would be a wrong histogram, not a missing one.
+        // The carried rows are the open block, ingested before the plan that wants widths held, so
+        // the open block has no widths yet. Counting them here makes the block whole and lets the
+        // chunk it opens read its histograms. Only when the carry is the whole block: a count over
+        // part of it would be a wrong histogram rather than a missing one.
         if (_widthsLive && _openWidths is null && _open.IsPresent && count == _open.Rows
             && node.Kind == CanonicalKind.Primitive && node.PType.IsInteger())
         {
@@ -686,9 +526,6 @@ internal sealed class ColumnWriter
 
             case CanonicalKind.ListView:
             {
-                // The carried rows' elements, in the order the next chunk will hold them. A block
-                // whose elements were scattered is never summarized, so what its window holds there
-                // serves no chunk; the table forgets it with the chunk.
                 int elements = node.ElementsIndex;
                 ListElements.Window(node, arena.GetNode(elements).Length, start, count, out int from, out int length);
                 if (length > 0)
@@ -720,24 +557,21 @@ internal sealed class ColumnWriter
     /// Child <paramref name="index"/>, or <see langword="null"/> when this column has no children —
     /// which the caller reads as "measure it yourself".
     /// </summary>
-    /// <param name="index">The field index, in the writer's own order.</param>
     internal ColumnWriter? Field(int index)
     {
         ColumnWriter[]? children = _children;
         return children is not null && (uint)index < (uint)children.Length ? children[index] : null;
     }
 
-    /// <summary>Seals the open block and starts the next one, all the way down.</summary>
-    /// <remarks>
-    /// Called when the block's last row has been seen, which is the moment its statistics are final
-    /// - and, from stage 9 on, the moment its Bloom filter is built from the hash buffer
-    /// (docs/10-indexes.md §4.3). A block with no rows is never closed: the caller only closes a
-    /// boundary it has crossed.
-    /// </remarks>
+    /// <summary>
+    /// Seals the open block and starts the next one, all the way down. Called when the block's last
+    /// row has been seen, which is the moment its statistics are final; a block with no rows is
+    /// never closed, since the caller only closes a boundary it has crossed.
+    /// </summary>
     internal void CloseBlock()
     {
-        // A block whose widths are partial is stored as ABSENT rather than as a wrong count: the
-        // buffer goes straight back to the pool and the chooser measures the column itself.
+        // A block whose widths are partial is stored as absent rather than as a wrong count, so the
+        // chooser measures the column itself.
         if (_open.WidthsBroken && _openWidths is not null)
         {
             ArrayPool<int>.Shared.Return(_openWidths);
@@ -748,8 +582,8 @@ internal sealed class ColumnWriter
         _widths.Add(_openWidths);
         _stringZones?.Close();
 
-        // A DEAD TABLE RECORDS NOTHING, so that the chooser reads "no table" rather than a stale
-        // count and the writer's fallback counter knows the table was never expected to serve.
+        // A dead table records nothing, so that the chooser reads "no table" rather than a stale
+        // count.
         _tableAtClose.Add(
             _table is null || !DictionaryLive ? (-1, 0) : (_table.Distinct, _table.HeapBytes));
         _open = default;
@@ -768,14 +602,10 @@ internal sealed class ColumnWriter
     }
 
     /// <summary>
-    /// Takes an existing file's blocks as closed, for an append (docs/11 §3.8): the zone map is
-    /// written again over them, and the chunks already out keep their block numbers.
+    /// Takes an existing file's blocks as closed, for an append: the zone map is written again over
+    /// them, and the chunks already out keep their block numbers. <paramref name="strings"/> is the
+    /// old zones' string bounds, already cut to <see cref="StringBoundBytes"/>.
     /// </summary>
-    /// <param name="blocks">The summaries, in block order, before any block of this writer.</param>
-    /// <param name="strings">
-    /// The old zones' string bounds, parallel to <paramref name="blocks"/>, already cut to
-    /// <see cref="StringBoundBytes"/>; <see langword="null"/> when the old part has none.
-    /// </param>
     internal void Seed(IReadOnlyList<BlockStats> blocks, IReadOnlyList<ZoneString?>? strings = null)
     {
         for (int i = 0; i < blocks.Count; i++)
@@ -791,14 +621,9 @@ internal sealed class ColumnWriter
 
     /// <summary>
     /// Starts this column, and the child columns the seed names, from what an appended file's last
-    /// chunk was written as (docs/11-write-strategy.md §3.8): a memory that held, and the ingest
-    /// state its scheme reads, exactly as <see cref="Remember"/> would have left them.
+    /// chunk was written as: a memory that held, and the ingest state its scheme reads, exactly as
+    /// <see cref="Remember"/> would have left them.
     /// </summary>
-    /// <param name="seed">The old chunk's plan.</param>
-    /// <remarks>
-    /// The children are created here rather than on the first batch, so that the seed needs no
-    /// field of its own: <see cref="Children"/> hands the first batch the same nodes.
-    /// </remarks>
     internal void SeedPlan(PlanSeed seed)
     {
         if (seed.Scheme is { } scheme)
@@ -825,30 +650,20 @@ internal sealed class ColumnWriter
     }
 
     /// <summary>
-    /// Pins the scheme this column is written with, whatever its chunks cost
-    /// (<see cref="VortexEncodingHint"/>, docs/11 §3.4.3).
+    /// Pins the scheme this column is written with, whatever its chunks cost. Must be set before
+    /// the first batch, because the ingest state the scheme reads starts with it: a pinned
+    /// dictionary needs the distinct table live on the column's first rows.
     /// </summary>
-    /// <remarks>
-    /// Set before the first batch, because the ingest state the scheme reads starts with it: a
-    /// pinned dictionary needs the distinct table live on the column's first rows, which
-    /// <see cref="Remember"/> would only turn on after a chunk had held.
-    /// </remarks>
-    /// <param name="scheme">The scheme.</param>
     internal void Pin(ColumnScheme scheme)
     {
-        // NO NUMBERS: a pin is not a measurement, and the tolerance a prediction of nothing against
-        // a byte count of none would fail is exactly what `Pinned` sets to infinity.
+        // A pin is not a measurement, so it carries no numbers; `Pinned` is what sets the tolerance
+        // they would otherwise fail to infinity.
         Memory = new PlanMemory(scheme, Predicted: 0, Actual: -1, Pinned: true);
         _live = scheme == ColumnScheme.Dict;
         _widthsLive = scheme == ColumnScheme.BitPacked;
     }
 
-    /// <summary>
-    /// Child <paramref name="index"/> of <paramref name="count"/>, creating the nodes if the first
-    /// batch has not yet: what a path resolved against the schema walks down.
-    /// </summary>
-    /// <param name="index">The child.</param>
-    /// <param name="count">How many children this node has.</param>
+    /// <summary>Child <paramref name="index"/>, creating the nodes on the first batch.</summary>
     internal ColumnWriter Descend(int index, int count) => Children(count)[index];
 
     /// <summary>Blocks taken from an existing file, which a child created later is given too.</summary>
@@ -862,10 +677,10 @@ internal sealed class ColumnWriter
             return children;
         }
 
-        // A shape that disagrees with the first batch's is not a state this can be in -- the schema
-        // is the file's -- but growing rather than throwing keeps a surprise costing a pass instead
-        // of a write: the nodes created late have fewer closed blocks than their parent, `Chunk`
-        // sees the range is not covered, and the chooser measures the column itself.
+        // A shape that disagrees with the first batch's is not a state this can be in, the schema
+        // being the file's, but growing rather than throwing keeps a surprise costing a pass
+        // instead of a write: the nodes created late have fewer closed blocks than their parent,
+        // so the chooser sees an uncovered range and measures the column itself.
         ColumnWriter[] grown = new ColumnWriter[count];
         for (int i = 0; i < count; i++)
         {

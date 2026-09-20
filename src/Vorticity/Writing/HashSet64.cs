@@ -1,16 +1,12 @@
-// A set of 64-bit hashes, for the Bloom builder's exact distinct counts.
-//
-// OPEN ADDRESSING OVER THE HASHES THEMSELVES: a hash is already uniform, so its low bits are the
-// slot and there is nothing to mix. Zero marks an empty slot, so a zero hash -- one in 2^64 -- is
-// carried by a flag. The array is pooled and kept across `Clear`, so a builder that clears its
-// block set 122 times per million rows rents it once; `Clear` walks only as far as the table has
-// grown, which is the block's own size.
 using System;
 using System.Buffers;
 
 namespace Vorticity.Writing;
 
-/// <summary>A pooled open-addressing set of 64-bit hashes.</summary>
+/// <summary>
+/// A pooled open-addressing set of 64-bit hashes. Zero marks an empty slot, so a zero hash is
+/// tracked by a flag instead of being stored.
+/// </summary>
 internal sealed class HashSet64 : IDisposable
 {
     private const int InitialSlots = 1 << 10;
@@ -27,11 +23,8 @@ internal sealed class HashSet64 : IDisposable
         _slots.AsSpan(0, InitialSlots).Clear();
     }
 
-    /// <summary>Distinct hashes held.</summary>
     internal int Count => _count + (_hasZero ? 1 : 0);
 
-    /// <summary>Adds a hash; a repeat changes nothing.</summary>
-    /// <param name="hash">The hash.</param>
     internal void Add(ulong hash)
     {
         if (hash == 0)
@@ -66,8 +59,6 @@ internal sealed class HashSet64 : IDisposable
         }
     }
 
-    /// <summary>Adds every hash of another set.</summary>
-    /// <param name="other">The set to fold in.</param>
     internal void AddAll(HashSet64 other)
     {
         foreach (ulong hash in other.Slots)
@@ -84,8 +75,6 @@ internal sealed class HashSet64 : IDisposable
         }
     }
 
-    /// <summary>Inserts every hash into a Bloom filter.</summary>
-    /// <param name="filter">The filter's words.</param>
     internal void InsertInto(Span<uint> filter)
     {
         foreach (ulong hash in Slots)
@@ -102,7 +91,7 @@ internal sealed class HashSet64 : IDisposable
         }
     }
 
-    /// <summary>Empties the set, keeping its table.</summary>
+    /// <summary>Empties the set, keeping its pooled table.</summary>
     internal void Clear()
     {
         Slots.Clear();
@@ -141,7 +130,6 @@ internal sealed class HashSet64 : IDisposable
         _mask = mask;
     }
 
-    /// <inheritdoc/>
     public void Dispose()
     {
         if (_slots.Length > 0)

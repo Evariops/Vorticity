@@ -1,21 +1,3 @@
-// The merge of a locating index's runs - docs/13-dataset.md §6.1, docs/10-indexes.md §6.2 as amended.
-//
-// ONE RUN PER ENTRY, BUILT FROM THE CHUNK RUNS. A builder closes a run per chunk, sorted, and lays
-// it raw in the writer's scratch (`RunScratch`). When the data ends, the chunk runs are merged into
-// one run -- a k-way merge on `(key, row)` for sorted runs, on keys for postings, whose block lists
-// are concatenated in chunk order and so stay sorted -- and cut into segments of `segment_entries`
-// entries, each an array blob like every payload. A lookup then probes one run, whatever the
-// number of chunks.
-//
-// RAW RUNS ARE WINDOWS. A run in the scratch is a list of windows of at most `WindowEntries`
-// entries, each laid as its key offsets (byte keys), its keys, then its rows (sorted runs) or its
-// block-list offsets and blocks (postings). A reader holds one window per run: the merge's memory is
-// its fan-in times a window, and a fan-in above `MaxFanIn` is merged in passes, each pass laying its
-// merged runs back into the scratch.
-//
-// ROWS ARE ABSOLUTE UNTIL THE PAYLOAD. A raw run holds file rows (`long`) and file blocks (`uint`);
-// the payload holds them relative to its run's first row and block, as every reader expects, at
-// `u32` while the run spans fewer than 2³² rows and at `u64` beyond.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -27,11 +9,10 @@ using Vorticity.Types;
 
 namespace Vorticity.Writing;
 
-/// <summary>One window of a raw run in the scratch.</summary>
-/// <param name="Offset">Where the window starts in the scratch.</param>
-/// <param name="Entries">Its entries.</param>
-/// <param name="KeyBytes">For byte keys, the bytes of its keys; otherwise 0.</param>
-/// <param name="BlockCount">For postings, the blocks of its lists; otherwise 0.</param>
+/// <summary>
+/// One window of a raw run in the scratch. <c>KeyBytes</c> counts bytes only for byte keys and
+/// <c>BlockCount</c> counts blocks only for postings; each is 0 otherwise.
+/// </summary>
 internal readonly record struct RawWindow(long Offset, int Entries, int KeyBytes, int BlockCount);
 
 /// <summary>
@@ -46,37 +27,33 @@ internal sealed class RawRun
     /// <summary>Bytes per key, or 0 for byte keys.</summary>
     internal required int KeyWidth { get; init; }
 
-    /// <summary>The first block it covers.</summary>
     internal required int FirstBlock { get; init; }
 
-    /// <summary>The blocks it covers.</summary>
     internal required int BlockCount { get; init; }
 
-    /// <summary>Its entries.</summary>
     internal long Entries { get; set; }
 
     /// <summary>Its windows, in key order, when it is laid in the scratch.</summary>
     internal List<RawWindow> Windows { get; } = [];
 
-    /// <summary>Held in memory: its keys, rented; null when it is laid in the scratch.</summary>
+    /// <summary>Its keys, rented; null when it is laid in the scratch.</summary>
     internal byte[]? HeldKeys { get; set; }
 
-    /// <summary>Held in memory, byte keys: where each key starts, and one past the last; rented.</summary>
+    /// <summary>Byte keys: where each key starts, and one past the last; rented.</summary>
     internal int[]? HeldKeyOffsets { get; set; }
 
-    /// <summary>Held in memory, a sorted run: each entry's file row; rented.</summary>
+    /// <summary>A sorted run: each entry's file row; rented.</summary>
     internal long[]? HeldRows { get; set; }
 
-    /// <summary>Held in memory, postings: where each key's list starts, and one past the last; rented.</summary>
+    /// <summary>Postings: where each key's list starts, and one past the last; rented.</summary>
     internal int[]? HeldBlockOffsets { get; set; }
 
-    /// <summary>Held in memory, postings: the lists end to end; rented.</summary>
+    /// <summary>Postings: the lists end to end; rented.</summary>
     internal uint[]? HeldBlocks { get; set; }
 
     /// <summary>What the scratch admitted for it.</summary>
     internal long Admitted { get; set; }
 
-    /// <summary>Whether it is held in memory.</summary>
     internal bool Held => HeldKeys is not null;
 
     /// <summary>The bytes its arrays hold, for the scratch's budget.</summary>
@@ -84,7 +61,6 @@ internal sealed class RawRun
         keyBytes + ((entries + 1) * sizeof(int)) + (hasRows ? entries * sizeof(long) : ((entries + 1) * sizeof(int)) + (blocks * sizeof(uint)));
 
     /// <summary>Gives its arrays back and its bytes to the scratch.</summary>
-    /// <param name="scratch">The scratch that admitted it.</param>
     internal void Release(RunScratch scratch)
     {
         Return(HeldKeys);
@@ -115,7 +91,6 @@ internal sealed class HeldWindowSource(RawRun run) : IWindowSource
 {
     private bool _done;
 
-    /// <inheritdoc/>
     public bool Fill(RunCursor cursor)
     {
         if (_done || run.Entries == 0)
@@ -128,7 +103,6 @@ internal sealed class HeldWindowSource(RawRun run) : IWindowSource
         return true;
     }
 
-    /// <inheritdoc/>
     public void Dispose()
     {
     }
@@ -138,16 +112,12 @@ internal sealed class HeldWindowSource(RawRun run) : IWindowSource
 internal interface IRunSink
 {
     /// <summary>A sorted run's next entry.</summary>
-    /// <param name="key">The key.</param>
-    /// <param name="row">Its file row.</param>
     void Add(ReadOnlySpan<byte> key, long row);
 
     /// <summary>A postings run's next key; its block lists follow.</summary>
-    /// <param name="key">The key.</param>
     void BeginKey(ReadOnlySpan<byte> key);
 
     /// <summary>Blocks of the current key, in block order.</summary>
-    /// <param name="blocks">File blocks.</param>
     void AddBlocks(ReadOnlySpan<uint> blocks);
 
     /// <summary>The current key is complete.</summary>
@@ -157,9 +127,7 @@ internal interface IRunSink
 /// <summary>Fills a cursor with the next window of a run.</summary>
 internal interface IWindowSource : IDisposable
 {
-    /// <summary>Loads the next window into <paramref name="cursor"/>.</summary>
-    /// <param name="cursor">The cursor whose buffers receive it.</param>
-    /// <returns>Whether a window with at least one entry was loaded.</returns>
+    /// <summary>Loads the next window; false when a window with at least one entry does not come.</summary>
     bool Fill(RunCursor cursor);
 }
 
@@ -169,10 +137,7 @@ internal sealed class RunCursor : IDisposable
     private readonly IWindowSource _source;
     private readonly KeyLayout _layout;
 
-    /// <param name="source">Where the windows come from.</param>
-    /// <param name="layout">The keys' layout.</param>
-    /// <param name="hasRows">Whether entries carry a row.</param>
-    /// <param name="ordinal">The run's place in block order, which breaks a postings tie.</param>
+    /// <summary>The ordinal is the run's place in block order, which breaks a postings tie.</summary>
     internal RunCursor(IWindowSource source, KeyLayout layout, bool hasRows, int ordinal)
     {
         _source = source;
@@ -181,10 +146,8 @@ internal sealed class RunCursor : IDisposable
         Ordinal = ordinal;
     }
 
-    /// <summary>The run's place in block order.</summary>
     internal int Ordinal { get; }
 
-    /// <summary>Whether entries carry a row.</summary>
     internal bool HasRows { get; }
 
     /// <summary>The window's keys: fixed-width keys end to end, or byte keys' heap.</summary>
@@ -210,15 +173,12 @@ internal sealed class RunCursor : IDisposable
     /// <summary>The current entry's fixed-width key as an ordered integer.</summary>
     internal ulong SortKey { get; private set; }
 
-    /// <summary>The current entry's key.</summary>
     internal ReadOnlySpan<byte> Key => _layout.Shape == KeyShape.Bytes
         ? Keys.AsSpan(KeyOffsets[_index], KeyOffsets[_index + 1] - KeyOffsets[_index])
         : Keys.AsSpan(_index * _layout.Width, _layout.Width);
 
-    /// <summary>The current entry's row.</summary>
     internal long Row => Rows[_index];
 
-    /// <summary>The current key's blocks.</summary>
     internal ReadOnlySpan<uint> BlockList =>
         Blocks.AsSpan(BlockOffsets[_index], BlockOffsets[_index + 1] - BlockOffsets[_index]);
 
@@ -244,7 +204,6 @@ internal sealed class RunCursor : IDisposable
         return true;
     }
 
-    /// <summary>The current entry's index in the window.</summary>
     internal int Index => _index;
 
     /// <summary>
@@ -265,7 +224,6 @@ internal sealed class RunCursor : IDisposable
 
     private bool _borrowed;
 
-    /// <summary>Grows the key buffer to at least <paramref name="bytes"/>.</summary>
     internal Span<byte> KeysFor(int bytes)
     {
         OwnBuffers();
@@ -278,7 +236,6 @@ internal sealed class RunCursor : IDisposable
         return Keys.AsSpan(0, bytes);
     }
 
-    /// <summary>Grows the key offsets to at least <paramref name="count"/>.</summary>
     internal Span<int> KeyOffsetsFor(int count)
     {
         OwnBuffers();
@@ -291,7 +248,6 @@ internal sealed class RunCursor : IDisposable
         return KeyOffsets.AsSpan(0, count);
     }
 
-    /// <summary>Grows the rows to at least <paramref name="count"/>.</summary>
     internal Span<long> RowsFor(int count)
     {
         OwnBuffers();
@@ -304,7 +260,6 @@ internal sealed class RunCursor : IDisposable
         return Rows.AsSpan(0, count);
     }
 
-    /// <summary>Grows the block offsets to at least <paramref name="count"/>.</summary>
     internal Span<int> BlockOffsetsFor(int count)
     {
         OwnBuffers();
@@ -317,7 +272,6 @@ internal sealed class RunCursor : IDisposable
         return BlockOffsets.AsSpan(0, count);
     }
 
-    /// <summary>Grows the blocks to at least <paramref name="count"/>.</summary>
     internal Span<uint> BlocksFor(int count)
     {
         OwnBuffers();
@@ -370,7 +324,6 @@ internal sealed class RunCursor : IDisposable
         }
     }
 
-    /// <summary>Gives the buffers back and closes the source.</summary>
     public void Dispose()
     {
         _source.Dispose();
@@ -384,7 +337,6 @@ internal sealed class RawWindowSource(RunScratch scratch, RawRun run) : IWindowS
 {
     private int _next;
 
-    /// <inheritdoc/>
     public bool Fill(RunCursor cursor)
     {
         if (_next >= run.Windows.Count)
@@ -425,7 +377,6 @@ internal sealed class RawWindowSource(RunScratch scratch, RawRun run) : IWindowS
         return true;
     }
 
-    /// <inheritdoc/>
     public void Dispose()
     {
     }
@@ -434,7 +385,7 @@ internal sealed class RawWindowSource(RunScratch scratch, RawRun run) : IWindowS
 /// <summary>Lays a run into the scratch, window by window.</summary>
 internal sealed class RawRunWriter : IRunSink, IDisposable
 {
-    /// <summary>The most entries a window holds.</summary>
+    /// <summary>The most entries a window holds; the merge's memory is its fan-in times a window.</summary>
     internal const int WindowEntries = 4_096;
 
     private readonly RunScratch _scratch;
@@ -448,11 +399,7 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
     private int _keyBytes;
     private int _blockCount;
 
-    /// <param name="scratch">Where the windows go.</param>
-    /// <param name="hasRows">Whether entries carry a row.</param>
-    /// <param name="keyWidth">Bytes per key, or 0 for byte keys.</param>
-    /// <param name="firstBlock">The first block the run covers.</param>
-    /// <param name="blockCount">The blocks it covers.</param>
+    /// <summary>A key width of 0 means byte keys; otherwise it is the bytes per key.</summary>
     internal RawRunWriter(RunScratch scratch, bool hasRows, int keyWidth, int firstBlock, int blockCount)
     {
         _scratch = scratch;
@@ -461,7 +408,6 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
         _blockOffsets[0] = 0;
     }
 
-    /// <inheritdoc/>
     public void Add(ReadOnlySpan<byte> key, long row)
     {
         AddKey(key);
@@ -469,10 +415,8 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
         Next();
     }
 
-    /// <inheritdoc/>
     public void BeginKey(ReadOnlySpan<byte> key) => AddKey(key);
 
-    /// <inheritdoc/>
     public void AddBlocks(ReadOnlySpan<uint> blocks)
     {
         if (_blockCount + blocks.Length > _blocks.Length)
@@ -484,7 +428,6 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
         _blockCount += blocks.Length;
     }
 
-    /// <inheritdoc/>
     public void EndKey()
     {
         _blockOffsets[_count + 1] = _blockCount;
@@ -558,7 +501,6 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
         return grown;
     }
 
-    /// <summary>Gives the buffers back.</summary>
     public void Dispose()
     {
         ArrayPool<byte>.Shared.Return(_keys);
@@ -580,11 +522,10 @@ internal static class RunMerger
     /// <summary>The most runs one pass merges; more are merged in passes.</summary>
     internal const int MaxFanIn = 64;
 
-    /// <summary>Merges <paramref name="cursors"/> into <paramref name="sink"/>, and disposes them.</summary>
-    /// <param name="cursors">The runs, in block order: a postings key's lists are concatenated in this order.</param>
-    /// <param name="layout">The keys' layout.</param>
-    /// <param name="hasRows">Whether entries carry a row.</param>
-    /// <param name="sink">Where the merged entries go.</param>
+    /// <summary>
+    /// Merges the cursors into the sink, and disposes them. They arrive in block order, and a
+    /// postings key's lists are concatenated in that order.
+    /// </summary>
     internal static void Merge(List<RunCursor> cursors, KeyLayout layout, bool hasRows, IRunSink sink)
     {
         try
@@ -601,9 +542,8 @@ internal static class RunMerger
     }
 
     /// <summary>
-    /// A run's head: its ordered key -- the key itself for a fixed width, the first eight bytes
-    /// big-endian for byte keys, which a full comparison settles when they tie -- its row or place,
-    /// and the run.
+    /// A run's head. For byte keys the ordered key is only a prefix, so a tie is settled by a full
+    /// comparison.
     /// </summary>
     private struct Head
     {
@@ -632,9 +572,7 @@ internal static class RunMerger
         width > 0 ? cursor.Keys.AsSpan(cursor.Index * width, width) : cursor.Key;
 
     /// <summary>
-    /// The merge: the heads in a flat array, and a gallop -- the entries of the heap's top that stay
-    /// below the runner-up go out with no heap work, which is every entry of a run whose keys do not
-    /// interleave with the others'.
+    /// The merge. Entries of the heap's top that stay below the runner-up go out with no heap work.
     /// </summary>
     private static void MergeCore(List<RunCursor> cursors, int width, bool hasRows, IRunSink sink)
     {
@@ -778,7 +716,8 @@ internal static class RunMerger
 }
 
 /// <summary>
-/// The final output of a merge: a run's segments as payloads, and its segment table (docs/10 §4.2).
+/// The final output of a merge: a run's segments as payloads, and its segment table. Rows and
+/// blocks are written relative to the run's first row and block.
 /// </summary>
 internal sealed class PayloadRunSink : IRunSink
 {
@@ -802,14 +741,10 @@ internal sealed class PayloadRunSink : IRunSink
     private int _listed;
     private long _entries;
 
-    /// <param name="layout">The keys' layout.</param>
-    /// <param name="utf8">Whether byte keys are strings.</param>
-    /// <param name="hasRows">A sorted run rather than postings.</param>
-    /// <param name="segmentEntries">The most entries a segment holds.</param>
-    /// <param name="firstBlock">The run's first block.</param>
-    /// <param name="blockCount">Its blocks.</param>
-    /// <param name="blockRows">Rows per block, which places the run's first row.</param>
-    /// <param name="wideAbove">The row span above which rows are written at 64 bits.</param>
+    /// <summary>
+    /// Rows per block places the run's first row, and a row span past <c>wideAbove</c> writes its
+    /// rows at 64 bits.
+    /// </summary>
     internal PayloadRunSink(
         KeyLayout layout, bool utf8, bool hasRows, int segmentEntries, int firstBlock, int blockCount, long blockRows,
         long wideAbove = uint.MaxValue)
@@ -825,10 +760,9 @@ internal sealed class PayloadRunSink : IRunSink
         Open();
     }
 
-    /// <summary>Whether its rows need 64 bits: the run spans 2³² rows or more.</summary>
+    /// <summary>Whether its rows need 64 bits, the run spanning too many for 32.</summary>
     internal bool WideRows => _wide;
 
-    /// <inheritdoc/>
     public void Add(ReadOnlySpan<byte> key, long row)
     {
         AddKey(key);
@@ -842,10 +776,8 @@ internal sealed class PayloadRunSink : IRunSink
         Next();
     }
 
-    /// <inheritdoc/>
     public void BeginKey(ReadOnlySpan<byte> key) => AddKey(key);
 
-    /// <inheritdoc/>
     public void AddBlocks(ReadOnlySpan<uint> blocks)
     {
         if (_listed + blocks.Length > _blocks.Length)
@@ -864,7 +796,6 @@ internal sealed class PayloadRunSink : IRunSink
         _listed += blocks.Length;
     }
 
-    /// <inheritdoc/>
     public void EndKey()
     {
         _listOffsets[_count + 1] = (uint)_listed;
@@ -997,10 +928,7 @@ internal sealed class PayloadRunSink : IRunSink
 /// <summary>The keys array of a locating segment, as a payload.</summary>
 internal static class KeyPayloads
 {
-    /// <summary>
-    /// A payload over the first <paramref name="count"/> keys of a rented heap and its rented
-    /// offsets, both given back once laid.
-    /// </summary>
+    /// <summary>A payload over a rented heap and its rented offsets, both given back once laid.</summary>
     internal static PendingPayload Keys(KeyLayout layout, bool utf8, byte[] heap, int length, int[] offsets, int count) =>
         new PendingPayload(
             (arena, types) => layout.Shape == KeyShape.Bytes

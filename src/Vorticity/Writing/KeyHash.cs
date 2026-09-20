@@ -1,28 +1,3 @@
-// The one bucket hash of the write path, shared by the chooser's row comparer and the ingest-time
-// distinct table (docs/11-write-strategy.md §3.2.1), so that "the same value hashes the same" is a
-// property of one function and not an agreement between two.
-//
-// IT CANNOT MOVE A BYTE OF THE FILE, and every consumer relies on that: a hash picks a bucket, an
-// exact comparison settles every collision, and a dictionary code is handed out by order of first
-// appearance, which is row order. Changing this function changes which chain a value lands in and
-// nothing else -- since the values in one chain are distinct, at most one can compare equal
-// whatever the order. `WrittenSizeTests` is the proof and it is byte-exact.
-//
-// TWO ARMS FOR STRINGS, AND THE BRANCH IS ON THE LENGTH so that two equal values always take the
-// same one. The corpus calls this with 3,9 bytes on average (464 MB over 120 M calls), and a value
-// that fits a view fits sixteen: up to sixteen bytes fold into one word with two overlapping loads
-// -- the trick xxhash itself uses for its short inputs -- and take the single multiply-xorshift a
-// fixed-width value takes. Above that, XxHash3-64: dedicated paths under 128 and 240 bytes, a
-// vectorised stripe loop beyond, the hash upstream's Bloom filter uses, from the one first-party
-// package docs/03-architecture.md §1 admits. A Bloom filter needs XxHash3 on EVERY value, short
-// ones included, which is why it hashes its own rows (BloomBuilder) rather than borrowing these:
-// the shared block hash buffer of 11 §3.2.1 was not built, and this arm serves the distinct table.
-//
-// WHAT THE SHORT ARM DOES NOT FIX, recorded because it was guessed wrong twice before it was
-// isolated: `struct` and `varbin` are 3 % to 6 % slower under XxHash3 than under the FNV-1a this
-// replaced (0,47 -> 0,50 and 0,35 -> 0,36 on a restricted axis), and widening the arm from eight
-// bytes to sixteen moved neither -- their values are longer than a view. The same isolation puts
-// `zstd` at 1,25 under FNV-1a and 1,05 under XxHash3. Taken with eyes open.
 using System;
 using System.IO.Hashing;
 using System.Runtime.CompilerServices;
@@ -30,19 +5,19 @@ using System.Runtime.InteropServices;
 
 namespace Vorticity.Writing;
 
-/// <summary>Bucket hashes for the write path's tables. Not checksums: collisions are compared away.</summary>
+/// <summary>
+/// Bucket hashes for the write path's tables. Not checksums: collisions are compared away, so which
+/// hash is used picks a bucket and cannot change a byte of the written file.
+/// </summary>
 internal static class KeyHash
 {
     private const ulong Golden = 0x9E3779B97F4A7C15UL;
     private const ulong Spread = 0xBF58476D1CE4E5B9UL;
 
-    /// <summary>A whole fixed-width value mixed in one step.</summary>
-    /// <remarks>
-    /// Multiply-xorshift: the multiply spreads the low bits upward and the shifts fold them back
-    /// down, so consecutive integers -- the common shape of an id column -- land far apart. The
-    /// final fold is what makes the LOW bits good, which is what a power-of-two mask reads.
-    /// </remarks>
-    /// <param name="value">The value's bits, zero-extended.</param>
+    /// <summary>
+    /// Mixes a whole fixed-width value, zero-extended. The final fold is what makes the low bits
+    /// good, and a power-of-two mask reads exactly those.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static ulong Mix(ulong value)
     {
@@ -53,8 +28,10 @@ internal static class KeyHash
         return hash;
     }
 
-    /// <summary>A byte string's hash: folded when it fits a view, XxHash3-64 beyond.</summary>
-    /// <param name="bytes">The value's bytes.</param>
+    /// <summary>
+    /// A byte string's hash: folded when it fits a view, XxHash3-64 beyond. The branch is on the
+    /// length alone, so two equal values always take the same arm.
+    /// </summary>
     internal static ulong Bytes(ReadOnlySpan<byte> bytes)
     {
         if (bytes.Length > 16)
@@ -72,8 +49,7 @@ internal static class KeyHash
         }
         else if (bytes.Length >= 4)
         {
-            // The two reads OVERLAP for the lengths between the powers, which is what keeps both
-            // arms branchless -- the same trick xxhash itself uses for its short inputs.
+            // The two reads overlap for the lengths between the powers, which keeps the arm branchless.
             ulong low = Unsafe.ReadUnaligned<uint>(ref first);
             ulong high = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref first, bytes.Length - 4));
             word = (high << 32) | low;
@@ -87,8 +63,7 @@ internal static class KeyHash
             }
         }
 
-        // The length is mixed in rather than concatenated: "a" and "a\0" hold the same word and
-        // would otherwise share a bucket for no reason.
+        // The length is mixed in because "a" and "a\0" fold to the same word.
         return Mix(word ^ ((ulong)bytes.Length * Golden));
     }
 }

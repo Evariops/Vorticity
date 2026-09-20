@@ -1,15 +1,3 @@
-// The front door of the order model - docs/12-index-reads.md §8.1, the `Keys` rows.
-//
-// CHEAPEST SOURCE FIRST, AND SAY WHY THE OTHERS WERE NOT CHOSEN. Four sources exist in the spec and
-// the two that deliver rows exist in the code; `Explain` names the chosen one and carries a reason per rejection, so a
-// caller who expected an index learns it was absent rather than guessing from a slow walk. The
-// order the spec fixes is `SortedColumn` before `SortedRuns` -- one zone-map read and one zone
-// decode beats `r` binary searches -- then the key-only sources, which a cursor asking for rows
-// cannot take at all.
-//
-// A COLUMN WITH NO SOURCE IS REFUSED, not emulated. Building the sorted order of an unindexed
-// column means holding the column, and constraint 2 of the spec forbids a read whose memory is
-// bounded by the data rather than by a batch. The refusal names the policy that would have served.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -20,7 +8,12 @@ using Vorticity.Types;
 
 namespace Vorticity.Keys;
 
-/// <summary>Chooses a key source for one column and opens a cursor over it.</summary>
+/// <summary>
+/// Chooses a key source for one column and opens a cursor over it. Sources are tried cheapest
+/// first and every rejection carries its reason, so a caller who expected an index learns it was
+/// absent instead of inferring it from a slow walk; a column no source serves is refused rather
+/// than emulated, because sorting an unindexed column would hold the whole column in memory.
+/// </summary>
 /// <remarks>Not thread-safe, and meant to be used and discarded, like <c>ScanBuilder</c>.</remarks>
 public sealed class KeyCursorBuilder
 {
@@ -58,7 +51,7 @@ public sealed class KeyCursorBuilder
     }
 
     /// <summary>
-    /// Yields every distinct key once, which admits the key-only sources of docs/12 §3.
+    /// Yields every distinct key once, which also admits the sources that hold keys without rows.
     /// </summary>
     /// <returns>This builder.</returns>
     /// <remarks>
@@ -76,7 +69,7 @@ public sealed class KeyCursorBuilder
     }
 
     /// <summary>
-    /// Forces a source, for a test or for a caller who measured; refused when it is absent.
+    /// Forces a source, for a test or for a caller who knows better; refused when it is absent.
     /// </summary>
     /// <param name="source">The source to take.</param>
     /// <returns>This builder.</returns>
@@ -116,7 +109,7 @@ public sealed class KeyCursorBuilder
 
     /// <summary>Opens a cursor over the cheapest source the file offers for this column.</summary>
     /// <param name="cancellationToken">Cancels the reads this makes.</param>
-    /// <returns>A cursor, not yet positioned.</returns>
+    /// <returns>A cursor, unpositioned until the first seek or step.</returns>
     /// <exception cref="VortexUnsupportedException">No source serves this column.</exception>
     /// <exception cref="InvalidOperationException">A source of keys without rows was forced on a cursor that is not <see cref="Distinct"/>.</exception>
     public async ValueTask<KeyCursor> OpenAsync(CancellationToken cancellationToken = default)
@@ -137,8 +130,8 @@ public sealed class KeyCursorBuilder
                 reasons.Add($"{rejection.Source}: {rejection.Reason}");
             }
 
-            // A walk of keys is refused naming the cheapest structure that would serve it (§5.4);
-            // a walk of rows, the one that serves rows.
+            // The refusal names the cheapest structure that would have served: for a walk of keys,
+            // the postings; for a walk of rows, the sorted runs.
             throw new VortexUnsupportedException(
                 _distinct ? IndexKinds.PostingsBlocks : IndexKinds.SortedRuns,
                 "index",
@@ -212,13 +205,13 @@ public sealed class KeyCursorBuilder
     }
 
     /// <summary>
-    /// The cheapest source that serves, and why each other one was not taken: the sorted column
-    /// first, then the sorted runs (docs/12 §3's "cheapest first").
+    /// The cheapest source that serves, and why each other one was not taken.
     /// </summary>
     /// <remarks>
-    /// Rows: the sorted column, then the sorted runs; the key-only sources are rejected by name.
-    /// Keys (<see cref="Distinct"/>): the sorted column, the postings, the dictionaries, the sorted
-    /// runs. A later source is opened only to say why it lost, which is what `Explain` reports.
+    /// Rows: the sorted column, then the sorted runs; the sources that hold keys without rows are
+    /// rejected by name. Keys (<see cref="Distinct"/>): the sorted column, the postings, the
+    /// dictionaries, the sorted runs. A later source is opened only to say why it lost, which is
+    /// what <see cref="ExplainAsync"/> reports.
     /// </remarks>
     private async ValueTask<Choice> ChooseAsync(CancellationToken cancellationToken)
     {
@@ -315,7 +308,7 @@ public static class VortexFileKeyExtensions
 
     /// <summary>
     /// Starts building a cursor over a composite key: the tuple of <paramref name="paths"/>, in key
-    /// order (docs/12-index-reads.md §4.6).
+    /// order.
     /// </summary>
     /// <param name="file">An open file.</param>
     /// <param name="paths">

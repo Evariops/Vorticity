@@ -1,31 +1,3 @@
-// Appending to an existing file - docs/11-write-strategy.md §3.8, docs/10-indexes.md §8.
-//
-// THE OLD BYTES STAY WHERE THEY ARE. The old segments keep their ids and their offsets, and the
-// array encodings their indices, so every chunk already written is referenced again as it is; the
-// new chunks, the zone maps, the new index runs, a new directory, footer and postscript follow the
-// old end of file, and the old postscript becomes dead bytes. Blocks are counted from row 0 of the
-// file, so the new blocks are numbered from the old row count and fall exactly where one write
-// would have put them.
-//
-// ONE CHUNK IS READ AGAIN, AT MOST. A zone map allows only its last zone to be short, and the last
-// block's filters and runs were built on a short block; so when the old row count is not a whole
-// number of blocks, the last chunk is decoded, its rows become the first rows written, its segment
-// is dropped from the layout, and the index runs reaching into it are replaced. Every other old
-// block is taken from what the file already says of it: its zone -- rows, nulls, exact bounds --
-// for the zone map written again over the whole file, and the file statistics for the old rows'
-// bounds and order.
-//
-// THE LAST CHUNK'S PLAN IS REMEMBERED. Each column's last segment is fetched and its encoding tree
-// parsed -- nothing in it is decoded -- to seed the column's plan memory (`PlanSeed`), so the
-// appended rows keep the file's encodings unless their statistics say otherwise.
-//
-// WHAT THE WRITER READS, IT READS FROM ITS OWN SHAPE. The file must be a struct of columns, each a
-// chunked layout of flat segments (a zoned wrapper allowed), with the same chunks in every column
-// -- the shape this writer produces; anything else is refused and a rewrite is the answer.
-//
-// NOT ATOMIC. The caller is single-writer and flushes; a torn append leaves the tail invalid, the
-// new directory records the old end of file, and `VortexFileRepair` truncates back to the last
-// valid postscript.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -47,10 +19,7 @@ namespace Vorticity.Writing;
 
 public sealed partial class VortexFileWriter
 {
-    /// <summary>
-    /// What an append carries, in one field: a plain write pays a reference and nothing else, which
-    /// the write allocation ceilings held to four bytes.
-    /// </summary>
+    /// <summary>What an append carries; null on a plain write, which pays only this reference.</summary>
     private AppendState? _append;
 
     private sealed class AppendState
@@ -67,8 +36,9 @@ public sealed partial class VortexFileWriter
     }
 
     /// <summary>
-    /// Opens <paramref name="path"/> to continue it: the batches written next follow its rows
-    /// (docs/11-write-strategy.md §3.8).
+    /// Opens <paramref name="path"/> to continue it: the batches written next follow its rows. The
+    /// old bytes stay where they are, and the new chunks, indexes and tail follow the old end of
+    /// file.
     /// </summary>
     /// <param name="path">A file this writer produced, or one of the same shape.</param>
     /// <param name="options">
@@ -92,21 +62,9 @@ public sealed partial class VortexFileWriter
         await AppendAsync(path, options, null, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
-    /// The same append, over a sink the caller builds around the file's stream.
+    /// The same append, over a sink <paramref name="wrap"/> builds from the opened stream and the
+    /// offset the next byte lands at.
     /// </summary>
-    /// <param name="path">The file to continue.</param>
-    /// <param name="options">Write-time policy, or null for the file's own.</param>
-    /// <param name="wrap">
-    /// Builds the sink from the opened stream and the offset the next byte lands at, or null for
-    /// the plain one.
-    /// </param>
-    /// <param name="cancellationToken">Cancels the read, and the writes that re-emit a chunk.</param>
-    /// <remarks>
-    /// INTERNAL BECAUSE IT EXISTS FOR A TEST, and the test is one the public surface cannot write:
-    /// the failure that matters here happens between reading the plan and re-emitting the chunk the
-    /// plan re-opened, and nothing a caller can pass reaches inside that. A sink that refuses its
-    /// nth write does, and that is the only way to hold this method to what it does on the way out.
-    /// </remarks>
     internal static async ValueTask<VortexFileWriter> AppendAsync(
         string path,
         VortexWriteOptions? options,
@@ -167,13 +125,10 @@ public sealed partial class VortexFileWriter
         }
         catch
         {
-            // ABANDON BEFORE DISPOSING, or disposal completes the file. The reopened chunk has not
-            // been re-emitted yet at this point, so a footer written here describes the kept rows
-            // alone and the original's last chunk is gone from a file that still parses -- which
-            // `VortexFileRepair` cannot see, because repair looks for a tail that does not parse.
-            // The cancellation token reaches those `WriteAsync` calls, so cancelling an append is
-            // enough to get there. Abandoning leaves that unparseable tail instead, and repair
-            // truncates back to the original's last postscript.
+            // Abandon before disposing, or disposal completes the file: the reopened chunk has not
+            // been re-emitted yet, so a footer written here would drop the original's last chunk
+            // from a file that still parses, which repair cannot see. Abandoning leaves an
+            // unparseable tail instead, which repair truncates back to the last postscript.
             writer.Abandon();
             await writer.DisposeAsync().ConfigureAwait(false);
             throw;
@@ -211,8 +166,8 @@ public sealed partial class VortexFileWriter
             noZoneMap[field] = !plan.Columns[field].HasZones && plan.Boundary > 0;
         }
 
-        // THE SCRATCH CHANGES HANDS HERE: the index writer disposes it, or, when there is no index
-        // writer to merge anything, it is disposed now.
+        // The scratch changes hands here: the index writer disposes it, or it is disposed now when
+        // there is no index writer to merge anything.
         RunScratch? scratch = plan.AbsorbedScratch;
         plan.AbsorbedScratch = null;
         if (_indexes is null)
@@ -418,7 +373,7 @@ public sealed partial class VortexFileWriter
 
         internal FileStatistics? Statistics { get; init; }
 
-        /// <summary>The entries whose tail of runs was read back to be merged (13 §6.1).</summary>
+        /// <summary>The entries whose tail of runs was read back to be merged.</summary>
         internal List<AbsorbedEntry>? Absorbed { get; init; }
 
         /// <summary>Where those runs lie, until the writer takes it; disposed with the writer.</summary>
@@ -577,8 +532,8 @@ public sealed partial class VortexFileWriter
                 keptChunkRows.Add(end - first[c].Start);
             }
 
-            // AT MOST K RUNS PER ENTRY (13 §6.1): the tails the append will merge are read now,
-            // while the file is open for reading, into a scratch the writer takes over.
+            // The run tails the append will merge are read now, while the file is still open for
+            // reading, into a scratch the writer takes over.
             RunScratch? scratch = null;
             List<AbsorbedEntry>? absorbed = null;
             if (directory is { Entries.Count: > 0 })
@@ -626,8 +581,8 @@ public sealed partial class VortexFileWriter
         }
 
         /// <summary>
-        /// Per column, the plan its last chunk was written with (docs/11-write-strategy.md §3.8):
-        /// one segment read per column, the chunk's encoding tree and nothing it points at.
+        /// Per column, the plan its last chunk was written with: one segment read per column, the
+        /// chunk's encoding tree and nothing it points at.
         /// </summary>
         private static async ValueTask<PlanSeed?[]> SeedsAsync(
             VortexFile file, DType schema, List<(LayoutNode Flat, long Start)>[] chunks,
@@ -647,10 +602,6 @@ public sealed partial class VortexFileWriter
         }
 
         /// <summary>What one flat chunk of a column was written as.</summary>
-        /// <param name="file">The file.</param>
-        /// <param name="flat">The chunk's flat layout.</param>
-        /// <param name="dtype">The column's dtype.</param>
-        /// <param name="cancellationToken">Cancels the read.</param>
         internal static async ValueTask<PlanSeed?> SeedAsync(
             VortexFile file, LayoutNode flat, DType dtype, CancellationToken cancellationToken)
         {

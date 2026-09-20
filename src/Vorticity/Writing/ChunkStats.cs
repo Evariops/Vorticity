@@ -1,23 +1,3 @@
-// Where one node of one chunk gets its ingest statistics, and how to reach a child's.
-//
-// `ArrayBlobWriter` walks the CANONICAL tree; `ColumnWriter` is a tree of the same shape built at
-// ingest (docs/11-write-strategy.md §3.0). This is the cursor that keeps the two in step as the
-// writer descends, so that `ColumnCompressor.Choose` is handed the summary of the column it is
-// actually looking at rather than only the one at the top.
-//
-// IT IS A CURSOR AND NOT A VALUE because the merge is per (column, chunk): the block range is the
-// chunk's and never changes on the way down -- a struct's fields and an extension's storage are
-// row-aligned with their parent, so they share its blocks exactly -- while the column changes at
-// every step. Merging at each level costs a loop over the chunk's blocks, a few dozen additions.
-//
-// A LIST'S ELEMENTS DESCEND TOO (step 28): their blocks are the parent's (docs/11 §3.2.4), so the
-// same block range covers them, and the cursor is handed down only when those blocks summarized
-// exactly the elements the chunk writes, in its order.
-//
-// AN ABSENT CURSOR IS THE SAFE ANSWER, and every path that cannot answer takes it: a child a scheme
-// invented (a dictionary's values, ALP's integers), a list whose ranges' windows do not abut, a
-// shape that disagrees with the first batch's. `Choose` then measures the column itself, which is
-// what it did before any of this existed.
 using System;
 
 namespace Vorticity.Writing;
@@ -28,11 +8,23 @@ internal interface IChunkLedger
     /// <summary>Whether a list's elements may be summarized from their blocks at all.</summary>
     bool ElementsServe { get; }
 
-    /// <summary>A list chunk's elements could not be, and will be measured.</summary>
+    /// <summary>Records that a list chunk's elements had to be counted directly.</summary>
     void ElementsUnserved();
 }
 
-/// <summary>A position in the ingest statistics, for one chunk, that can descend to a child.</summary>
+/// <summary>
+/// A position in the ingest statistics, for one chunk, that can descend to a child: the blob writer
+/// walks the canonical tree while the ingest state is a tree of the same shape, and this cursor
+/// keeps the two in step so the chooser is handed the summary of the column it is looking at rather
+/// than only the one at the top.
+/// </summary>
+/// <remarks>
+/// It is a cursor rather than a value because the block range is the chunk's and never changes on
+/// the way down, while the column changes at every step. An absent cursor is the safe answer, and
+/// every path that cannot answer takes it -- a child a scheme invented, a list whose element ranges
+/// do not abut, a shape that disagrees with the first batch's -- because the chooser then measures
+/// the column itself.
+/// </remarks>
 internal readonly struct ChunkStats
 {
     private readonly ColumnWriter? _column;
@@ -87,9 +79,9 @@ internal readonly struct ChunkStats
     /// close is a prefix of what it holds.
     /// </summary>
     /// <remarks>
-    /// THE ONE PREDICATE, used by the chooser to decide and by the writer to count: a fallback the
-    /// writer could not see would be a fallback nobody measures, which is how
-    /// <c>ChunksWithoutStatistics</c> came to exist.
+    /// This is the one predicate, used by the chooser to decide and by the writer to count, so that
+    /// the two never disagree: a fallback the writer could not see would be a fallback nobody
+    /// measures.
     /// </remarks>
     /// <param name="rows">The chunk's row count.</param>
     internal bool TableServes(int rows)
@@ -100,7 +92,7 @@ internal readonly struct ChunkStats
             && distinct > 0 && distinct <= table.Distinct;
     }
 
-    /// <summary>The column's memory of its last chunk (docs/11 §3.4.3), or none.</summary>
+    /// <summary>The column's memory of its last chunk, or none.</summary>
     internal ColumnWriter.PlanMemory? Memory => _column?.Memory;
 
     /// <summary>Tells the column its bit-packing was priced from the ingested widths.</summary>
@@ -126,8 +118,9 @@ internal readonly struct ChunkStats
             : new ChunkStats(_column.Field(index), _firstBlock, _blockCount, _ledger);
 
     /// <summary>
-    /// The cursor for a list's elements over the same blocks (docs/11 §3.2.4), or an absent one
-    /// when those blocks do not describe the <paramref name="elements"/> elements the chunk writes.
+    /// The cursor for a list's elements, which their parent's blocks cover, or an absent one when
+    /// those blocks do not describe the <paramref name="elements"/> elements the chunk writes in
+    /// the order it writes them.
     /// </summary>
     /// <param name="elements">The length of the chunk's elements child, after narrowing.</param>
     internal ChunkStats Elements(long elements)

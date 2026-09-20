@@ -1,15 +1,3 @@
-// What `CompleteAsync` returns: docs/11-write-strategy.md §7.3 and docs/10-indexes.md §7.1.
-//
-// A REPORT, NOT A LOG. Everything in it is a number the writer already held; nothing is measured
-// for the report's sake. Its point is that a caller who expected an index and got none reads the
-// reason here instead of inferring it from a slow scan three weeks later -- which is why every
-// index a policy asked for appears in it, built or abandoned, and an abandoned one always carries
-// its reason.
-//
-// A VIEW, AND FREE UNTIL READ. The write allocation ceilings hold a file to a few dozen bytes of
-// fixed cost, and a report object with its lists refused them by 56 to 800 bytes a file. So the
-// report is a struct over the completed writer, and its lists are built when a caller asks for
-// them -- a caller who discards the result, which is every existing caller, pays nothing.
 using System;
 using System.Collections.Generic;
 
@@ -38,10 +26,7 @@ public sealed record ColumnWriteReport(
     int PlansPriced,
     int PlansHeld)
 {
-    /// <summary>
-    /// How often plan memory held (docs/11-write-strategy.md §3.4.3), or <c>0</c> for a column
-    /// that never had a plan to consult.
-    /// </summary>
+    /// <summary>How often plan memory held, or <c>0</c> for a column that never had a plan to consult.</summary>
     public double PlanMemoryHitRate => PlansPriced == 0 ? 0 : (double)PlansHeld / PlansPriced;
 }
 
@@ -55,14 +40,10 @@ public enum IndexOutcome
     Abandoned = 1,
 }
 
-/// <summary>One index a policy asked for, and what became of it.</summary>
-/// <param name="Path">The column.</param>
-/// <param name="Kind">The kind name.</param>
-/// <param name="Outcome">Built or abandoned.</param>
-/// <param name="Reason">Why it was abandoned; <see langword="null"/> when it was built.</param>
-/// <param name="Bytes">The payload bytes it occupies in the file.</param>
-/// <param name="Generations">Filters coarser than a block that it carries.</param>
-/// <param name="Runs">Runs listed in the directory.</param>
+/// <summary>
+/// One index a policy asked for, and what became of it. <c>Reason</c> is set only when the index
+/// was abandoned, and <c>Generations</c> counts the filters it carries coarser than a block.
+/// </summary>
 public sealed record IndexWriteReport(
     string Path,
     string Kind,
@@ -72,11 +53,10 @@ public sealed record IndexWriteReport(
     int Generations,
     int Runs);
 
-/// <summary>What one <see cref="VortexFileWriter"/> wrote.</summary>
-/// <remarks>
-/// A view over the completed writer: it stays valid after the writer is disposed, and
-/// <c>default</c> reads as an empty file.
-/// </remarks>
+/// <summary>
+/// What one <see cref="VortexFileWriter"/> wrote. A lazy view over the completed writer that stays
+/// valid after it is disposed; <c>default</c> reads as an empty file.
+/// </summary>
 public readonly struct WriteReport : IEquatable<WriteReport>
 {
     private readonly VortexFileWriter? _writer;
@@ -101,7 +81,7 @@ public readonly struct WriteReport : IEquatable<WriteReport>
     /// <summary>The file's bytes, by kind; they sum to its length.</summary>
     public WriteBytes Bytes => _writer?.ReportBytes ?? default;
 
-    /// <summary>One entry per top-level column. Built on the first read.</summary>
+    /// <summary>One entry per top-level column.</summary>
     public IReadOnlyList<ColumnWriteReport> Columns =>
         _writer?.ReportColumns() ?? Array.Empty<ColumnWriteReport>();
 
@@ -110,8 +90,6 @@ public readonly struct WriteReport : IEquatable<WriteReport>
         _writer?.ReportIndexes ?? Array.Empty<IndexWriteReport>();
 
     /// <summary>The report for one column's index of one kind.</summary>
-    /// <param name="path">The column.</param>
-    /// <param name="kind">The kind name.</param>
     /// <returns>The entry, or <see langword="null"/> when the policy never asked for it.</returns>
     public IndexWriteReport? Index(string path, string kind)
     {
@@ -127,9 +105,7 @@ public readonly struct WriteReport : IEquatable<WriteReport>
         return null;
     }
 
-    /// <summary>Whether two reports describe the same write.</summary>
-    /// <param name="other">The other report.</param>
-    /// <returns>Whether both view the same writer.</returns>
+    /// <summary>Two reports are equal when they view the same writer.</summary>
     public bool Equals(WriteReport other) => ReferenceEquals(_writer, other._writer);
 
     /// <inheritdoc/>
@@ -138,15 +114,9 @@ public readonly struct WriteReport : IEquatable<WriteReport>
     /// <inheritdoc/>
     public override int GetHashCode() => _writer?.GetHashCode() ?? 0;
 
-    /// <summary>Whether two reports describe the same write.</summary>
-    /// <param name="left">One report.</param>
-    /// <param name="right">The other.</param>
-    /// <returns>Whether they are equal.</returns>
+    /// <summary>Whether two reports view the same writer.</summary>
     public static bool operator ==(WriteReport left, WriteReport right) => left.Equals(right);
 
-    /// <summary>Whether two reports describe different writes.</summary>
-    /// <param name="left">One report.</param>
-    /// <param name="right">The other.</param>
-    /// <returns>Whether they differ.</returns>
+    /// <summary>Whether two reports view different writers.</summary>
     public static bool operator !=(WriteReport left, WriteReport right) => !left.Equals(right);
 }

@@ -1,30 +1,3 @@
-// Choosing an encoding for one column chunk - the first half of F10.
-//
-// docs/01-scope.md Phase 3 describes a BtrBlocks-style SAMPLING compressor: sample the data, try
-// every candidate scheme the target edition allows, keep the smallest. This is not that yet. It is
-// the rule-based chooser underneath it, measuring the two properties that decide almost every real
-// column and costing one pass each:
-//
-//   * RUN COUNT. A column of long runs -- a sorted key, a status enum, a constant -- is run-end
-//     encoded, and the constant case falls out for free as the single-run degenerate: a 65536-row
-//     constant column becomes two elements, which is as good as vortex.constant would do.
-//   * DISTINCT COUNT. A column of few distinct values -- a category, a repeated string -- is
-//     dictionary encoded, which is where the win on text lives. The values child of both of these
-//     is the ORIGINAL column gathered down to its first occurrences, which is exactly
-//     CanonicalFilter.Apply -- so a dictionary of strings shares the data buffers it came from and
-//     copies only 16-byte views.
-//   * RANGE. A dense integer column -- an id, a measurement, a timestamp -- gets bit-packed, under
-//     whichever of frame-of-reference and zigzag costs less, with the values that do not fit
-//     carried as patches. That decision is BitPackPlan's, because it is a minimization rather than
-//     a rule; this is the pass that asks for it.
-//
-// WHAT IS DELIBERATELY NOT HERE, so its absence is a decision rather than an oversight: OnPair,
-// which is a whole algorithm rather than a kernel, and CASCADING -- dictionary codes that are
-// themselves bit-packed, which is where the last of the reference's ratio lives.
-//
-// The thresholds are ratios, not sizes, and they are conservative on purpose. Compressing a column
-// that barely benefits costs a second array, its metadata and a decode step on every read; the
-// asymmetry favours leaving data alone.
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -55,8 +28,7 @@ internal enum ColumnScheme : byte
     Dict = 2,
 
     /// <summary>
-    /// FSST: the scheme high-cardinality text wants, and the one the reference uses where every
-    /// other rule here falls through.
+    /// FSST: the scheme high-cardinality text wants, taken where every other rule falls through.
     /// </summary>
     Fsst = 4,
 
@@ -75,9 +47,9 @@ internal enum ColumnScheme : byte
     /// Zstd: general-purpose compression, for text no symbol table can capture.
     /// </summary>
     /// <remarks>
-    /// 7 because 6 is taken. The members of this enum are NOT in declaration order - `BitPacked` is
-    /// 3 and sits last - so appending a member and giving it the next number after its neighbour's
-    /// silently aliases `Sequence`, and every sequence column then dispatches to the zstd writer and
+    /// 7 because 6 is taken. The members are not in numeric order — <c>BitPacked</c> is 3 and sits
+    /// last — so appending a member and giving it the number after its neighbour's silently aliases
+    /// <c>Sequence</c>, and every sequence column then dispatches to the zstd writer and
     /// dereferences a null plan. Read the numbers, not the order.
     /// </remarks>
     Zstd = 7,
@@ -120,14 +92,14 @@ internal readonly struct ColumnPlan
     internal ColumnScheme Scheme { get; }
 
     /// <summary>
-    /// The bytes the chooser priced this plan at — docs/11-write-strategy.md §3.4.3's prediction,
-    /// which the encoder's actual output is checked against before the plan is reused.
+    /// The bytes the chooser priced this plan at, which the encoder's actual output is checked
+    /// against before the plan is reused.
     /// </summary>
     /// <remarks>
-    /// For an exact scheme it is the formula's number; for a trial it is the encoded size the trial
-    /// measured; for the plain column it is the plain column's bytes. Zero means "not priced" — a
-    /// plan the reference chooser produced, or a child a scheme invented — and a memory is never
-    /// formed from it.
+    /// For an exactly priced scheme it is the formula's number; for a trial it is the encoded size
+    /// the trial produced; for the plain column it is the plain column's bytes. Zero means "not
+    /// priced" — a plan the reference chooser produced, or a child a scheme invented — and a memory
+    /// is never formed from it.
     /// </remarks>
     internal long PredictedBytes { get; init; }
 
@@ -136,8 +108,8 @@ internal readonly struct ColumnPlan
 
     /// <summary>
     /// For a dictionary the ingest-time table priced: the table itself, which owns the codes and
-    /// the entries the encoder reads directly (docs/11-write-strategy.md §3.5) — nothing is copied
-    /// into <see cref="Codes"/> or <see cref="Gather"/>, which are then empty.
+    /// the entries the encoder reads directly — nothing is copied into <see cref="Codes"/> or
+    /// <see cref="Gather"/>, which are then empty.
     /// </summary>
     /// <remarks>
     /// Valid until the chunk is released: the plan is consumed inside the same emission that chose
@@ -212,12 +184,12 @@ internal readonly struct ColumnPlan
     /// of the arrays it carries. Two plans with the same description write the same bytes.
     /// </summary>
     /// <remarks>
-    /// THE ORACLE OF STAGE R3 (IMPL-PLAN.md §1.2): the chooser by formulas is built beside the one
-    /// it replaces and the two are compared PLAN AGAINST PLAN over the whole corpus, which catches
-    /// what byte identity alone would let through — two divergences that compensate. The arrays are
-    /// fingerprinted rather than printed because a codes buffer is a million entries, and an
-    /// order-sensitive hash of them is as good a witness as the entries themselves for the
-    /// question being asked, which is "did the two choosers decide the same thing".
+    /// This is the oracle the two choosers are compared through: plan against plan over the whole
+    /// corpus, which catches what byte identity alone would let through — two divergences that
+    /// compensate. The arrays are fingerprinted rather than printed because a codes buffer holds one
+    /// entry per row, and an order-sensitive hash of them is as good a witness as the entries
+    /// themselves for the question being asked, which is whether the two choosers decided the same
+    /// thing.
     /// </remarks>
     internal string Describe() => Scheme switch
     {
@@ -257,6 +229,12 @@ internal readonly struct ColumnPlan
 }
 
 /// <summary>Decides how to encode one column chunk.</summary>
+/// <remarks>
+/// The decision is a set of rules over three properties — run count, distinct count and range — each
+/// costing at most one pass, rather than a sampling search over every scheme the edition allows.
+/// The thresholds are ratios and deliberately conservative: a column that barely benefits from an
+/// encoding still pays for a second array, its metadata and a decode step on every read.
+/// </remarks>
 internal static class ColumnCompressor
 {
     /// <summary>
@@ -270,22 +248,22 @@ internal static class ColumnCompressor
     /// </summary>
     /// <remarks>
     /// <para>
-    /// WRITE-AUDIT.md W-33. The pass answers ONE question -- are there at most
-    /// <c>length / RunEndRatio</c> runs -- and the answer is settled the moment the count passes
-    /// that. Running on to the last row afterwards was the whole of the scan on an interleaved
-    /// column, which PERF-AUDIT-v2.md W-7a already names as the common case.
+    /// The pass answers one question — are there at most <c>length / RunEndRatio</c> runs — and the
+    /// answer is settled the moment the count passes that, so it stops there rather than reading on
+    /// to the last row of a column run-end has already lost.
     /// </para>
     /// <para>
-    /// A BITMAP ANSWERS IT SIXTY-FOUR ROWS AT A TIME. <c>w ^ ((w &lt;&lt; 1) | previous)</c> has a
+    /// A bitmap answers it sixty-four rows at a time. <c>w ^ ((w &lt;&lt; 1) | previous)</c> has a
     /// set bit exactly where a row differs from the one before it, so a whole word's boundaries are
-    /// one xor and a popcount, and the positions come out of the word by trailing-zero count --
-    /// which only runs as often as there are boundaries. Measured on the 1M `bool` file, the pass
-    /// was **88,9 % of the write** through <c>RowComparer.Equal</c>, two <c>BitAt</c> calls a row.
+    /// one xor and a popcount, and the positions come out of the word by trailing-zero count, which
+    /// only runs as often as there are boundaries. A <c>bool</c> column walked row by row instead
+    /// spends its whole write inside <see cref="RowComparer.Equal"/>, two bit reads a row.
     /// </para>
     /// <para>
-    /// ALL-VALID ONLY, for the bitmap path: a null row is equal to another null row and unequal to a
-    /// valid one whatever the bits say, and folding the validity mask into the word walk would cost
-    /// a second bitmap and its own offset. The general path below is correct for those.
+    /// The bitmap path takes all-valid columns only: a null row is equal to another null row and
+    /// unequal to a valid one whatever the bits say, and folding the validity mask into the word
+    /// walk would cost a second bitmap and its own offset. The general path below is correct for
+    /// those.
     /// </para>
     /// </remarks>
     private static ColumnPlan TryRuns(
@@ -323,7 +301,7 @@ internal static class ColumnCompressor
         }
     }
 
-    /// <summary>Runs by comparing adjacent rows, abandoning once run-end can no longer win.</summary>
+    /// <summary>Runs by comparing adjacent rows, abandoning once run-end has already lost.</summary>
     /// <returns>The run count, or a value above <paramref name="ceiling"/> when it gave up.</returns>
     private static int ComparedRuns(
         in RowComparer comparer, int length, int ceiling, Span<int> starts, Span<int> ends)
@@ -360,26 +338,25 @@ internal static class ColumnCompressor
     /// </returns>
     /// <remarks>
     /// <para>
-    /// PERF-GAPS.md W3.1. <see cref="ComparedRuns"/> asks <see cref="RowComparer.Equal"/> once per
-    /// row, and that call is two validity lookups, a zero-width test and a switch on the width
-    /// before it reads anything -- per row, for a column whose kind and width were settled when the
-    /// comparer was built. On the `sparse` write axis the pass was 2,68 ms of 4,2, and the profile
-    /// had been charging it to the chooser's own time.
+    /// <see cref="ComparedRuns"/> asks <see cref="RowComparer.Equal"/> once per row, and that call
+    /// is two validity lookups, a zero-width test and a switch on the width before it reads
+    /// anything — per row, for a column whose kind and width were settled when the comparer was
+    /// built. Resolving the width once and reading at it removes all of that from the walk.
     /// </para>
     /// <para>
-    /// RAW BITS, NEVER <c>==</c> ON THE LOGICAL TYPE, and that is what makes generalizing by WIDTH
-    /// rather than by ptype correct. <see cref="RowComparer"/> reads a 4-byte row as
-    /// <see langword="uint"/> and an 8-byte one as <see langword="ulong"/> whatever the column
-    /// holds, and its header says why: -0.0 and +0.0 are different values to a writer, and two NaNs
-    /// with the same payload are the same value. A <c>float ==</c> loop would fuse the zeros and cut
-    /// every run of NaN, changing the runs -- and so the bytes. Reading unsigned at the same width
-    /// reproduces <see cref="RowComparer.Equal"/> exactly, which is also why a `Decimal` stored in
+    /// The comparison is on raw bits, never <c>==</c> on the logical type, and that is what makes
+    /// generalizing by width rather than by ptype correct. <see cref="RowComparer"/> reads a 4-byte
+    /// row as <see langword="uint"/> and an 8-byte one as <see langword="ulong"/> whatever the
+    /// column holds, because -0.0 and +0.0 are different values to a writer and two NaNs with the
+    /// same payload are the same value. A <c>float ==</c> loop would fuse the zeros and cut every
+    /// run of NaN, changing the runs — and so the bytes. Reading unsigned at the same width
+    /// reproduces <see cref="RowComparer.Equal"/> exactly, which is also why a decimal stored in
     /// four bytes may take this path.
     /// </para>
     /// <para>
-    /// ALL-VALID ONLY, for the same reason <see cref="BitmapRuns"/> is: "null equals null, and null
-    /// equals nothing else" is not reproducible from the value bytes, whose contents under a null
-    /// row are unspecified.
+    /// All-valid columns only, for the same reason <see cref="BitmapRuns"/> is: "null equals null,
+    /// and null equals nothing else" is not reproducible from the value bytes, whose contents under
+    /// a null row are unspecified.
     /// </para>
     /// </remarks>
     private static bool FixedRuns(
@@ -420,11 +397,12 @@ internal static class ColumnCompressor
     /// <see cref="FixedRuns"/> with the width resolved to a type, so the comparison is one load.
     /// </summary>
     /// <remarks>
-    /// THE VECTOR STEP SKIPS EQUAL STRETCHES WHOLESALE, which is the shape run-end is being asked
+    /// The vector step skips equal stretches wholesale, which is the shape run-end is being asked
     /// about: a column worth encoding has far fewer boundaries than rows, so most of this walk is
-    /// proving that a block has none. Comparing `v[i..i+W]` with `v[i-1..i-1+W]` answers that for a
-    /// whole vector at once; a vector that holds a boundary falls through to the scalar step, which
-    /// finds its exact position. The unaligned second load is the point, not an oversight.
+    /// proving that a block has none. Comparing a vector of rows with the vector one row behind it
+    /// answers that for the whole vector at once; a vector that holds a boundary falls through to
+    /// the scalar step, which finds its exact position. The unaligned second load is the point, not
+    /// an oversight.
     /// </remarks>
     private static int TypedRuns<T>(
         ReadOnlySpan<byte> bytes, int length, int ceiling, Span<int> starts, Span<int> ends)
@@ -488,11 +466,10 @@ internal static class ColumnCompressor
             int take = Math.Min(64, length - row);
             ulong word = BitWords.Load(bits, firstByte + (row >> 3), shift) & BitWords.Mask(take);
 
-            // ROW 0 HAS NO PREDECESSOR, and seeding `previous` with a zero said otherwise: a column
-            // whose first row is `true` was charged a boundary at row 0 and got an EMPTY leading
-            // run. It decoded correctly -- `starts[0]` and `starts[1]` were both 0, so the run's
-            // value was right and only its extent was empty -- which is why nothing caught it; it
-            // cost one run entry and made the count disagree with the ingest pass's, which is exact.
+            // Row 0 has no predecessor, so it seeds `previous` with its own bit. A zero seed would
+            // charge a boundary at row 0 of a column whose first row is set, adding an empty
+            // leading run that still decodes correctly and only shows up as a run count disagreeing
+            // with the ingest pass's exact one.
             if (row == 0)
             {
                 previous = word & 1;
@@ -528,7 +505,7 @@ internal static class ColumnCompressor
     /// </summary>
     private const int DictionaryOverhead = 512;
 
-    /// <summary>Below this many rows, a column is a candidate only if it is big in BYTES.</summary>
+    /// <summary>Below this many rows, a column is a candidate only if it is big in bytes.</summary>
     private const int MinimumRows = 64;
 
     /// <summary>
@@ -538,24 +515,15 @@ internal static class ColumnCompressor
     /// sixteen-row column holding a megabyte of strings is worth a dictionary; a sixteen-row column
     /// of integers is not, and neither reads as "sixteen".
     /// </summary>
-    /// <remarks>
-    /// Honesty about what this bought: NOTHING on the current corpus, whose one small-row-big-bytes
-    /// file (`distributions/huge_string_r16`, sixteen rows around a string over a mebibyte) has
-    /// sixteen distinct values and so defeats runs and dictionaries alike - the reference gets its
-    /// 268x there with `vortex.onpair`, a string compressor we do not write. The rule is still the
-    /// right rule, and `SmallRowCountLargeBytesColumnIsStillCompressed` pins it, but it is not the
-    /// fix for that file.
-    /// </remarks>
     private const long MinimumBytes = 1024;
 
     /// <summary>
     /// Column bytes below which zstd is not even priced.
     /// </summary>
     /// <remarks>
-    /// A whole zstd pass over a column to discover it loses is the cost §9 caught FSST paying on
-    /// every chunk, so a gate there must be. 16 kB rather than the 64 kB this started at, because
-    /// the f32 columns that need it most are 32 kB and the 64 kB gate declined them outright -
-    /// a threshold picked from one file's shape will exclude the next file's.
+    /// A whole zstd pass over a column only to discover it loses is paid on every chunk, so a gate
+    /// there must be. It is deliberately low: the float columns that need zstd most are small, and
+    /// a gate set from one file's shape excludes the next file's.
     /// </remarks>
     private const long ZstdMinimumBytes = 16 * 1024;
 
@@ -569,16 +537,16 @@ internal static class ColumnCompressor
     /// <param name="cascade">What the parent knows about this child.</param>
     /// <returns>The plan, or <see cref="ColumnPlan.Canonical"/> to expand and price as usual.</returns>
     /// <remarks>
-    /// EXPANDING A CONSTANT COSTS MORE THAN DECIDING FOR IT. A constant node carries one element
+    /// Expanding a constant costs more than deciding for it. A constant node carries one element
     /// and a row count, and the writer tiles it out to <c>rows * width</c> bytes before the chooser
-    /// sees it, because every scheme below reads rows. Doubling that tiling costs 36 % of a
-    /// million-row `constant` write and 72 % of a `variant` one.
+    /// sees it, because every scheme below reads rows; tiling it a second time to decide dominates
+    /// the write of a constant column.
     /// <para>
     /// A progression is the one scheme that needs neither the rows nor a walk — the step between
-    /// two equal values is zero — and it is what the writer produces for an integer constant today.
-    /// Deciding it here skips the expansion entirely. Everything else still expands: the guards
+    /// two equal values is zero — and it is what the writer produces for an integer constant, so
+    /// deciding it here skips the expansion entirely. Everything else still expands: the guards
     /// below are the expanded path's own, in its order, so a constant this accepts is one that path
-    /// would have written the same way, and one it declines takes exactly the route it took before.
+    /// would have written the same way, and one it declines takes exactly that route.
     /// </para>
     /// </remarks>
     internal static ColumnPlan ChooseConstant(
@@ -617,9 +585,9 @@ internal static class ColumnCompressor
             }
         }
 
-        // ONE RUN, THE SAME WAY THE EXPANDED PATH REACHES IT: the pass counted the runs, there is
+        // One run, reached the way the expanded path reaches it: the pass counted the runs, there is
         // one of them, and inside the ratio run-end wins before anything else is priced. A run of
-        // one costs a flat 32 whatever the column holds, so there is no size to reproduce either --
+        // one costs a flat 32 whatever the column holds, so there is no size to reproduce either,
         // and the values child is the constant filtered down to a row, which is a constant.
         if (!Allows(target, "vortex.runend") || cascade.RunsAreDead || length / RunEndRatio < 1
             || !measured || !stats.HasRunBoundaries || stats.RunCount != 1)
@@ -666,60 +634,58 @@ internal static class ColumnCompressor
     /// <param name="arena">The arena holding the node.</param>
     /// <param name="nodeIndex">The column chunk.</param>
     /// <param name="target">
-    /// The edition being written. The candidate list is derived from it BEFORE anything is
-    /// measured, which is what upstream does (`retain_allowed_encodings` on the BtrBlocks builder)
-    /// and the only arrangement that works: otherwise a scheme is elected on suitable data and the
-    /// write then fails at serialization because the target does not contain its id. Failing the
-    /// write is the right last-resort assertion; it must never be the nominal path.
+    /// The edition being written. The candidate list is derived from it before the column is read
+    /// at all, which is the only arrangement that works: otherwise a scheme is elected on suitable
+    /// data and the write then fails at serialization because the target does not contain its id.
+    /// Failing the write is the right last-resort assertion; it must never be the nominal path.
     /// </param>
     /// <param name="stats">
-    /// What the ingest pass already measured over exactly these rows
-    /// (docs/11-write-strategy.md §8 stage 2). A candidate that can be priced from them is priced
-    /// from them and runs no pass of its own.
+    /// What the ingest pass already knows about exactly these rows. A candidate that can be priced
+    /// from them is priced from them and runs no pass of its own.
     /// <para>
-    /// IT IS CHECKED AGAINST THE NODE rather than trusted. A summary whose row count disagrees with
-    /// the column is not this column's, and the only honest answer is to measure — which is what
-    /// every candidate did before this parameter existed, so a plumbing slip costs a pass and can
-    /// never produce a wrong plan. A child of a cascade passes none, and takes that path.
+    /// The summary is checked against the node rather than trusted: one whose row count disagrees
+    /// with the column is not this column's, and the only honest answer is then to measure, so a
+    /// plumbing slip costs a pass and can never produce a wrong plan. A child of a cascade passes
+    /// none, and takes that path.
     /// </para>
     /// </param>
     /// <param name="cascade">
-    /// What the PARENT already knows about this column, when it is a child a scheme produced
-    /// (docs/11-write-strategy.md §3.4.4). Every claim it carries is a proof written out in
-    /// <see cref="Cascade"/>, so a candidate it declares dead is one this method would have
-    /// declined anyway: the plan is the same plan and not a byte moves. An absent cascade — the
-    /// default, and what every top-level column passes — claims nothing.
+    /// What the parent already knows about this column, when it is a child a scheme produced. Every
+    /// claim it carries is a proof written out in <see cref="Cascade"/>, so a candidate it declares
+    /// dead is one this method would have declined anyway: the plan is the same plan and not a byte
+    /// moves. An absent cascade — the default, and what every top-level column passes — claims
+    /// nothing.
     /// </param>
     /// <param name="chunk">
-    /// The cursor the summary came from, for the statistics that are too big to travel inside it —
-    /// today the pair of bit-width histograms, tomorrow the distinct table and its codes buffer.
-    /// Absent means the same thing it means everywhere else here: measure it yourself.
+    /// The cursor the summary came from, for the statistics that are too big to travel inside it:
+    /// the bit-width histograms, the distinct table and its codes buffer. Absent means the same
+    /// thing it means everywhere else here: measure it yourself.
     /// </param>
     /// <returns>The plan; <see cref="ColumnPlan.Canonical"/> when nothing wins.</returns>
     internal static ColumnPlan Choose(
         CanonicalArena arena, int nodeIndex, VortexEdition target = EditionRegistry.Newest,
         in BlockStats stats = default, Cascade cascade = default, ChunkStats chunk = default)
     {
-        // STAGE R4: THE CHOOSER BY FORMULAS IS THE CHOOSER. It decides under today's run-end rule
-        // -- run-end wins outright inside its ratio -- because that is the rule the differential
-        // proved byte-identical on 856 files; the spec's rule changes three chunks and is measured
-        // separately before it is taken.
+        // The chooser by formulas is the one whose plan is returned. It decides under the run-end
+        // rule this writer applies -- run-end wins outright inside its ratio -- because that rule is
+        // the one the differential proves byte-identical over the corpus; pricing run-end against
+        // the other candidates changes a handful of chunks and is weighed on its own before it is
+        // taken.
         DifferentialProbe? probe = Differential.Value;
         ColumnPlan plan = ChooseByFormula(
             arena, nodeIndex, target, in stats, cascade, chunk,
             runEndCompetes: probe is not null && probe.RunEndCompetes);
 
-        // STAGE R3'S ORACLE, ROLES SWAPPED: when a test has installed a probe, the chooser this one
-        // replaced runs on the same chunk with the same inputs and the two decisions are compared
-        // plan against plan. It stays as the reference until stage R5 makes its walks unreachable.
-        // The probe flows with the async write and nowhere else, so two tests writing at once
-        // cannot see each other's chunks.
+        // The oracle: when a test has installed a probe, the other chooser runs on the same chunk
+        // with the same inputs and the two decisions are compared plan against plan, with the
+        // candidate-by-candidate one standing as the reference. The probe flows with the async
+        // write and nowhere else, so two tests writing at once cannot see each other's chunks.
         if (probe is not null)
         {
             ColumnPlan reference = ChooseToday(arena, nodeIndex, target, in stats, cascade, chunk);
             // A plan memory produced is marked as such: the reference prices every candidate on
             // every chunk, so where memory skipped that and reached another verdict the two differ
-            // by design (§3.4.3), and the test counts those apart from real disagreements.
+            // by design, and the test counts those apart from real disagreements.
             string chosen = plan.Describe();
             string expected = reference.Describe();
             if (chosen != expected)
@@ -740,11 +706,11 @@ internal static class ColumnCompressor
 
     /// <summary>What a test installs to compare the two choosers, and which rule to compare under.</summary>
     /// <param name="RunEndCompetes">
-    /// <see langword="false"/> holds the formula chooser to today's rule — run-end wins outright
-    /// once inside its ratio — and the two must then agree on every chunk of the corpus, which is
-    /// the test of the harness itself. <see langword="true"/> lets run-end compete in bytes as
-    /// docs/11-write-strategy.md §3.4.2 prices it, and every disagreement is a plan the spec's rule
-    /// would change, with its cost on both sides.
+    /// <see langword="false"/> holds the formula chooser to the rule in force — run-end wins
+    /// outright once inside its ratio — and the two must then agree on every chunk of the corpus,
+    /// which is the test of the harness itself. <see langword="true"/> lets run-end compete in
+    /// bytes against the other candidates, and every disagreement is then a plan that rule would
+    /// change, with its cost on both sides.
     /// </param>
     /// <param name="Report">Called per disagreeing chunk with the node and the two descriptions.</param>
     internal sealed record DifferentialProbe(bool RunEndCompetes, Action<int, string, string> Report);
@@ -752,7 +718,7 @@ internal static class ColumnCompressor
     /// <summary>The probe in force for the current async flow, or none.</summary>
     internal static readonly AsyncLocal<DifferentialProbe?> Differential = new AsyncLocal<DifferentialProbe?>();
 
-    /// <summary>The chooser as it stands: candidates in a fixed order, the first that wins returns.</summary>
+    /// <summary>The chooser by order: candidates in a fixed order, the first that wins returns.</summary>
     private static ColumnPlan ChooseToday(
         CanonicalArena arena, int nodeIndex, VortexEdition target, in BlockStats stats,
         Cascade cascade, ChunkStats chunk)
@@ -765,16 +731,15 @@ internal static class ColumnCompressor
             return ColumnPlan.Canonical;
         }
 
-        // FIRST, because where it applies nothing else can beat it: an arithmetic progression goes
+        // First, because where it applies nothing else can beat it: an arithmetic progression goes
         // entirely into the metadata, so a `vortex.primitive` node and its whole buffer become one
         // node and about thirty bytes. There is no byte comparison to make - every other scheme
         // costs something per row and this one costs nothing.
         //
-        // AND SINCE STAGE 2e THE INGEST PASS HAS ALREADY ANSWERED IT. Its steps are exact, so a
-        // column it disqualified is not offered the walk at all, and one it confirmed is built in
-        // constant time from `v[1] - v[0]`. W-9 measured that walk reading **78 % of the rows it is
-        // offered** -- most columns that reach it really are progressions, so it runs to the end
-        // rather than bailing at row three.
+        // The ingest pass has already answered it. Its steps are exact, so a column it disqualified
+        // is not offered the walk at all, and one it confirmed is built in constant time from
+        // `v[1] - v[0]`. That is worth having because most columns reaching the walk really are
+        // progressions, so the walk reads almost all of their rows rather than bailing early.
         if (Allows(target, "vortex.sequence") && !cascade.SequenceIsDead)
         {
             bool knownSteps = measured && stats.DeltaKnown;
@@ -788,7 +753,7 @@ internal static class ColumnCompressor
             }
         }
 
-        // THE COMPARER IS BUILT ONLY IF SOMETHING WILL COMPARE. Its two consumers are the run scan
+        // The comparer is built only if something will compare. Its two consumers are the run scan
         // and the dictionary probe, and a cascade that declares both dead -- a dictionary's codes,
         // a run-end's ends -- leaves nothing to compare with.
         RowComparer comparer = cascade.RunsAreDead && cascade.DictionaryIsDead
@@ -797,39 +762,33 @@ internal static class ColumnCompressor
 
         // One pass for runs. It is the cheaper of the two and wins outright when it wins.
         //
-        // RENTED AND SIZED FOR THE WORST CASE, which is one run per row. PERF-AUDIT-v2.md W-7a: two
-        // `List<int>` growing by doubling is cheapest exactly when run-end WINS -- few runs, few
-        // reallocations -- and most expensive when it loses, because a column with no runs at all
-        // makes both lists grow to one entry per row and then throws them away. A column of
-        // distinct measurements is the common case, so the scan paid its worst price on almost
-        // every column: **57,9 % of `table_mixed`'s whole write**, 40,2 % of
-        // `zoned_many_zones_nulls`'s, 34,4 % of `fsst`'s.
+        // The scan's arrays are rented and sized for the worst case, which is one run per row. Two
+        // `List<int>` growing by doubling would be cheapest exactly when run-end wins -- few runs,
+        // few reallocations -- and most expensive when it loses, because a column with no runs at
+        // all makes both lists grow to one entry per row and then throws them away; a column of
+        // distinct measurements is the common case.
         //
         // The `finally` covers the scan and the verdict and nothing after: the arrays are dead the
         // moment the plan has copied the prefixes it keeps, and the schemes weighed below never see
         // them.
         //
-        // IT DOES NOT RUN WHEN ITS ANSWER CANNOT BE USED, and it stops as soon as the answer is
-        // settled -- WRITE-AUDIT.md W-33. `Allows` was tested AFTER the pass, so an edition without
-        // `vortex.runend` paid for a count it then threw away; and the pass ran to the last row even
-        // once the run count had passed the point where run-end can win, which on an interleaved
-        // column is most of it.
+        // The scan does not run when its answer cannot be used, and it stops as soon as the answer
+        // is settled: `Allows` is tested before the pass, so an edition without `vortex.runend`
+        // never pays for a count it would throw away, and a count that has passed the point where
+        // run-end can win ends the walk instead of reading the rest of an interleaved column.
         //
-        // AND SINCE STAGE 2b IT DOES NOT RUN AT ALL WHEN THE ANSWER IS ALREADY KNOWN. The ingest
-        // pass counts run boundaries as it reads the rows for the zone map, so the verdict is one
-        // comparison. What that saves is not only the quarter of a pass W-33 left -- the scan RENTS
-        // TWO `int[length]` ARRAYS before it starts, on every comparable column of every chunk,
-        // and throws them away whenever run-end loses, which is most of the time. They are now
-        // rented only when the plan is going to be kept.
+        // It does not run at all when the answer is already known. The ingest pass counts run
+        // boundaries as it reads the rows for the zone map, so the verdict is one comparison -- and
+        // the two `int[length]` rentals the scan makes on every comparable column of every chunk
+        // happen only for a plan that is going to be kept.
         if (Allows(target, "vortex.runend") && !cascade.RunsAreDead)
         {
             bool known = measured && stats.HasRunBoundaries;
 
-            // ONE RUN NEEDS NO SCAN AT ALL, and this is the 62 % WRITE-ARCHITECTURE.md §1 charges
-            // `variant` for "discovering a constant row by row" -- plus the 56 % it charges
-            // `masked_all_invalid` for "discovering all-null bit by bit". A column whose every row
-            // is equal has exactly one run, its boundaries are [0, length), and the scan that
-            // produced that answer read every row to do it. The count already says so.
+            // One run needs no scan at all: a column whose every row is equal has exactly one run
+            // and its boundaries are [0, length). Discovering that row by row -- or bit by bit, for
+            // an all-null column -- is most of such a column's write, and the count already says
+            // so.
             if (known && stats.RunCount == 1 && length / RunEndRatio >= 1)
             {
                 return ColumnPlan.Runs([0], [length]);
@@ -846,18 +805,17 @@ internal static class ColumnCompressor
         }
 
         // Dense integers: a column of a million distinct measurements has no dictionary worth
-        // building and a very good bit width.
-        // THE FRAME OF REFERENCE IS THE COLUMN'S MINIMUM, which the ingest pass already has: a whole
-        // pass over every row of every integer column, deleted. An all-null column is decided here
-        // too -- `BitPackPlan` has nothing to measure a width against and says so -- so that case
-        // does not walk the rows to rediscover it either.
+        // building and a very good bit width. The frame of reference is the column's minimum, which
+        // the ingest pass already has, so nothing here walks every row of every integer column to
+        // find it. An all-null column is decided here too -- `BitPackPlan` has nothing to measure a
+        // width against and says so -- so that case does not walk the rows either.
         bool integers = node.Kind == CanonicalKind.Primitive && node.PType.IsInteger();
         BitPackPlan? packed = null;
         if (Allows(target, "fastlanes.bitpacked") && !(measured && integers && !stats.HasBounds))
         {
-            // THE WIDTHS COME FROM THE INGEST PASS WHEN IT HAS THEM (11 §3.2), and this is the only
-            // place that asks. The buffer is a stack one because the answer is 130 counters and its
-            // consumer returns before this frame does.
+            // The widths come from the ingest pass when it has them, and this is the only place
+            // that asks. The buffer is on the stack because the answer is a small fixed set of
+            // counters and its consumer returns before this frame does.
             Span<int> ingested = stackalloc int[BitPackWidths.Length];
             bool haveWidths = measured && integers && !stats.WidthsBroken && chunk.Widths(ingested);
 
@@ -874,26 +832,26 @@ internal static class ColumnCompressor
             packed = null;
         }
 
-        // ...but "has a good bit width" is not "is the best scheme", and the two are COMPARED
-        // rather than ordered. This used to return the bit-packed plan the moment it beat
-        // canonical, which was harmless while bit-packing declined often, and became a 37 kB
-        // regression on `containers/zoned_many_zones_nulls` the moment patches let it apply to a
-        // nullable integer column a dictionary was already handling better. Both are priced in
-        // bytes; whichever is cheaper wins.
+        // ...but "has a good bit width" is not "is the best scheme", so the bit-packing and the
+        // dictionary are compared rather than ordered. Returning the bit-packed plan as soon as it
+        // beats the canonical column costs bytes on a nullable integer column a dictionary handles
+        // better, which patches make reachable. Both are priced in bytes; whichever is cheaper
+        // wins.
         long plain = node.Kind == CanonicalKind.VarBinView
             ? PlainBinarySize(arena, node, measured ? stats.TotalBytes : -1)
             : DataBytes(node);
 
         // A second pass for distinct values, over a column the runs did not capture. The run count
         // bounds the distinct count from above, so this only runs when the data is genuinely
-        // interleaved rather than merely repetitive -- and the budget is what the BEST plan so far
+        // interleaved rather than merely repetitive -- and the budget is what the best plan so far
         // costs, so a dictionary that cannot beat the bit-packing abandons that much sooner.
-        // THE TABLE FIRST, THE WALK ONLY WHEN IT CANNOT ANSWER (docs/11-write-strategy.md §3.2.2).
-        // The ingest pass has already handed every row of this chunk its code, in first-seen order,
-        // and owns the distinct values; pricing is arithmetic on its counts and the plan is a copy
-        // of its buffers. The walk stays as the fallback for a cursor that cannot serve -- a child a
-        // scheme produced, a chunk the table abandoned -- and the writer counts every such fallback
-        // through the same predicate, so it cannot go quiet.
+        //
+        // The table answers first, the walk only when it cannot. The ingest pass has already handed
+        // every row of this chunk its code, in first-seen order, and owns the distinct values;
+        // pricing is then arithmetic on its counts and the plan is a copy of its buffers. The walk
+        // stays as the fallback for a cursor that cannot serve -- a child a scheme produced, a chunk
+        // the table abandoned -- and the writer counts every such fallback through the same
+        // predicate, so it cannot go quiet.
         long budget = packed is null ? plain : Math.Min(plain, packed.Cost);
         ColumnPlan dictionary = ColumnPlan.Canonical;
         if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
@@ -917,13 +875,13 @@ internal static class ColumnCompressor
 
     /// <summary>
     /// The three schemes whose cost is not a function of the statistics — ALP, zstd, FSST — each
-    /// tried under <paramref name="budget"/> as its abort bound (docs/11-write-strategy.md §3.4.1,
-    /// step 3).
+    /// tried under <paramref name="budget"/> as its abort bound.
     /// </summary>
     /// <remarks>
-    /// SHARED BY BOTH CHOOSERS, which is what makes their comparison a comparison of the EXACT
-    /// tier alone: whatever the formulas decide, the trials that follow are the same code under
-    /// the same ceiling, so a disagreement between the two can only come from the arithmetic.
+    /// Shared by both choosers, which is what makes their comparison a comparison of the
+    /// exactly-priced candidates alone: whatever the formulas decide, the trials that follow are
+    /// the same code under the same ceiling, so a disagreement between the two can only come from
+    /// the arithmetic.
     /// </remarks>
     /// <param name="arena">The arena holding the node.</param>
     /// <param name="nodeIndex">The column chunk.</param>
@@ -939,13 +897,12 @@ internal static class ColumnCompressor
         CanonicalArena arena, int nodeIndex, CanonicalNode node, VortexEdition target, long budget,
         bool gatesOff = false)
     {
-        // Named as the body has always named it: every ceiling below is derived from this one.
+        // Every ceiling below is derived from this one.
         long plain = budget;
 
-        // LAST, and only for text: a high-cardinality string column defeats runs, defeats
-        // dictionaries and has no frame of reference, which is precisely the case the reference
-        // hands to FSST and we used to write out canonically. Tried here rather than earlier
-        // because a dictionary is cheaper to decode when it applies.
+        // Last, and only for text: a high-cardinality string column defeats runs, defeats
+        // dictionaries and has no frame of reference, which is precisely the case FSST exists for.
+        // Tried here rather than earlier because a dictionary is cheaper to decode when it applies.
         // Floats get their own scheme, for the same reason integers get frame of reference: a
         // column of prices or coordinates is a column of short decimals, and the integer they
         // scale to bit-packs where the double never could.
@@ -958,20 +915,18 @@ internal static class ColumnCompressor
             }
         }
 
-        // ZSTD IS COMPARED WITH FSST, NOT REACHED WHEN FSST FAILS, and the difference is the whole
-        // point. The first version of this ran zstd only after every other scheme had declined,
-        // which is cheap and useless: on `distributions/huge_string_r16` FSST wins - it turns 1.1 MB
-        // into 139 kB - so zstd was never tried, while zstd turns the same bytes into 118. A scheme
+        // Zstd is compared with FSST rather than reached when FSST fails, and the difference is the
+        // whole point: a string column FSST wins on can still be smaller as a zstd frame, so
+        // running zstd only once every other scheme has declined is cheap and useless. A scheme
         // that wins is not a scheme that wins by enough.
         //
-        // THE CHEAP CANDIDATE IS PRICED FIRST, and that ordering is an optimization with no effect
-        // on the outcome. Pricing zstd is one pass to build the value stream and one call into the
-        // library; pricing FSST is a symbol-table training run plus a compression of the whole
-        // column, and it was 54% of the write profile on a file where zstd then won and the entire
-        // result was discarded. Priced this way round, FSST is handed the size it has to beat and
-        // stops as soon as its code stream passes it.
+        // The cheap candidate is priced first, and that ordering changes the cost, not the outcome.
+        // Pricing zstd is one pass to build the value stream and one call into the library; pricing
+        // FSST is a symbol-table training run plus a compression of the whole column, and paying
+        // that on a column zstd then takes throws the entire result away. Priced this way round,
+        // FSST is handed the size it has to beat and stops as soon as its code stream passes it.
         //
-        // What keeps it affordable in the other direction is the SIZE GATE: columns below it are
+        // What keeps it affordable in the other direction is the size gate: columns below it are
         // exactly the ones where the absolute saving cannot repay either pass.
         ZstdPlan? zstd = null;
         if (node.Kind is CanonicalKind.VarBinView or CanonicalKind.Primitive
@@ -984,21 +939,20 @@ internal static class ColumnCompressor
         FsstPlan? fsst = null;
         if (node.Kind == CanonicalKind.VarBinView && Allows(target, "vortex.fsst"))
         {
-            // TWO BARS, AND FSST HAS TO CLEAR BOTH, so the ceiling handed down is the tighter one.
+            // Two bars, and FSST has to clear both, so the ceiling handed down is the tighter one.
             //
-            //   * its own margin against the plain form:  encoded * 10 <= plain * 9. Measured
-            //     against the BEST plain form, not against the view form. A binary column of
-            //     incompressible bytes is smaller as `vortex.varbin` - four-byte offsets rather
-            //     than sixteen-byte views - than as anything FSST can do with it, and comparing
-            //     against the view form made FSST look like a win on exactly those columns. It is
-            //     the reference's own choice there, and it was ours only after this baseline was
-            //     fixed.
+            //   * its own margin against the plain form:  encoded * 10 <= plain * 9, where the
+            //     plain form is the cheaper of the two serializations and not the view form. A
+            //     binary column of incompressible bytes is smaller as `vortex.varbin` - four-byte
+            //     offsets rather than sixteen-byte views - than as anything FSST can do with it,
+            //     so comparing against the view form alone makes FSST look like a win on exactly
+            //     those columns.
             //   * beating a zstd frame that priced: zstd takes the column when
             //     zstdBytes * 10 < encoded * 9, so FSST keeps it only while encoded * 9 <= zstdBytes * 10.
             //
             // Both are integer comparisons and both are turned into a ceiling on `encoded` by
-            // flooring, which is exact because `encoded` is an integer. The two together are
-            // EXACTLY the condition under which FSST was returned when it was priced first.
+            // flooring, which is exact because `encoded` is an integer. The two together are the
+            // condition under which FSST takes the column when it is priced first.
             long ceiling = plain * 9 / 10;
             if (zstd is not null)
             {
@@ -1024,21 +978,18 @@ internal static class ColumnCompressor
     }
 
     /// <summary>
-    /// Builds a dictionary and keeps it only when it is SMALLER, in bytes, than the column.
+    /// Builds a dictionary and keeps it only when it is smaller, in bytes, than the column.
     /// </summary>
     /// <remarks>
-    /// The rule used to be a count ratio: at most one distinct value per four rows. Like the
-    /// frame-of-reference fraction it replaced, it had never been measured against what it stands
-    /// for. `types/binary_nonnull_r8193` has 1153 distinct values in 8193 rows and the reference
-    /// dictionary-encodes it into a quarter of our size; per chunk that is about one in 3.5, so the
-    /// ratio refused it by a hair while the byte arithmetic says it wins by 100 kB.
+    /// The verdict is in bytes, not in a count of distinct values per row: a count ratio stands in
+    /// for the byte arithmetic without matching it, and refuses by a hair columns the arithmetic
+    /// says a dictionary wins by a wide margin.
     ///
-    /// The BUDGET is the cheapest plan found so far rather than the plain column, so this both
+    /// The budget is the cheapest plan found so far rather than the plain column, so this both
     /// decides and abandons against the real competition.
     ///
-    /// The abandonment guard stays, in a form that still bounds the work: a dictionary whose
-    /// ENTRIES alone already cost more than the whole column can never win, whatever the rest of
-    /// the rows hold.
+    /// The abandonment guard bounds the work: a dictionary whose entries alone already cost more
+    /// than that budget can never win, whatever the rest of the rows hold.
     /// </remarks>
     private static ColumnPlan Dictionary(
         CanonicalArena arena, CanonicalNode node, in RowComparer comparer, int length, long budget)
@@ -1051,16 +1002,15 @@ internal static class ColumnCompressor
             _ => 1,
         };
 
-        // A CHAINED HASH IN THREE FLAT ARRAYS, not a `Dictionary<int, List<int>>`. The dictionary
-        // form allocated one `List<int>` per distinct HASH -- 1153 of them on a single 8193-row
-        // column of `types/binary_nonnull_r8193` -- plus the dictionary's own rehashing, and all of
-        // it is thrown away the moment the plan is abandoned. Here `buckets[h]` is the newest code
-        // with that hash and `chain[c]` the one before it, which is the same collision list with no
-        // object per bucket. All three are rented, so a column that abandons allocates NOTHING.
+        // A chained hash in three flat arrays, not a `Dictionary<int, List<int>>`: that form costs
+        // one `List<int>` per distinct hash plus its own rehashing, and all of it is thrown away
+        // the moment the plan is abandoned. Here `buckets[h]` is the newest code with that hash and
+        // `chain[c]` the one before it, which is the same collision list with no object per bucket.
+        // All three are rented, so a column that abandons allocates nothing.
         //
-        // `codes` is rented for the same reason: it was `new int[length]` written before the
-        // abandonment test could fire, so every column that considered a dictionary and refused one
-        // allocated a full row vector to throw away.
+        // `codes` is rented for the same reason: it is written before the abandonment test can
+        // fire, so allocating it would hand every column that considers a dictionary and refuses
+        // one a full row vector to throw away.
         int capacity = BucketCount(length);
         int[] buckets = ArrayPool<int>.Shared.Rent(capacity);
         int[] chain = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
@@ -1093,21 +1043,14 @@ internal static class ColumnCompressor
                     chain[code] = buckets[bucket];
                     buckets[bucket] = code;
 
-                    // GIVE UP AS SOON AS THE DICTIONARY PROVABLY CANNOT WIN, and the bound is the
-                    // price the plan will actually be charged rather than a weaker stand-in for it.
+                    // Give up as soon as the dictionary provably cannot win, against the price the
+                    // plan will actually be charged rather than a weaker stand-in for it. Assuming
+                    // a one-byte code per row holds only while there are at most 256 distinct
+                    // values; past that the codes are wider, and a bound that ignores it walks
+                    // every row of a column whose verdict was settled at the 257th distinct value.
                     //
-                    // The old bound assumed a ONE-BYTE code per row. That is true only while there
-                    // are at most 256 distinct values, and it is what made this loop read every row
-                    // of a column it was going to refuse: `fastlanes_bitpacked` has 1 024 distinct
-                    // values in a 262 144-row chunk, so its codes are two bytes and the dictionary
-                    // costs half a megabyte against a bit-packing that costs 320 kB -- decided at
-                    // the 257th distinct value, and discovered at the 262 144th row.
-                    // WRITE-ARCHITECTURE.md §1 charges that loop **34 %** of that file's write,
-                    // **63 %** of `alp_no_patches`, and 37 to 47 % of `onpair` and `zstd`, in every
-                    // case with the note "cannot win".
-                    //
-                    // IT IS STILL A LOWER BOUND, so nothing that would have been kept is now
-                    // refused and not a byte moves: `distinct` only grows, so the code width only
+                    // It is still a lower bound, so nothing that would have been kept is refused
+                    // here and not a byte moves: `distinct` only grows, so the code width only
                     // grows; and `EntriesSize` is at least `distinct * minimumEntry` for every kind
                     // that reaches this line. The final test below is this same expression with the
                     // entries priced exactly.
@@ -1131,10 +1074,9 @@ internal static class ColumnCompressor
             }
 
             // The entries become a real array: there are `distinct` of them, and the writer keeps
-            // them past the point the rentals go back. The codes do not. There is one per row -- a
-            // full row vector, 16 kB of a 4 096-row write and a fifth of two of the allocation
-            // axes -- and the only thing the writer does with them is narrow them into an arena
-            // buffer, so the rental travels with the plan and is handed back there.
+            // them past the point the rentals go back. The codes do not. There is one per row, a
+            // full row vector, and the only thing the writer does with them is narrow them into an
+            // arena buffer, so the rental travels with the plan and is handed back there.
             kept = true;
             return ColumnPlan.RentedDictionary(firstRows.AsSpan(0, distinct).ToArray(), codes, length)
                 with { PredictedBytes = encoded };
@@ -1273,7 +1215,7 @@ internal static class ColumnCompressor
     /// </summary>
     /// <remarks>
     /// Two's complement for a signed column, the value itself for an unsigned one — which is exactly
-    /// what <c>BitPackPlan.Minimum</c> produced from its own pass over every row.
+    /// what <c>BitPackPlan.Minimum</c> computes from its own pass over every row.
     /// <see langword="null"/> when no row is valid, which is that pass's "nothing to measure a width
     /// against".
     /// </remarks>
@@ -1288,31 +1230,31 @@ internal static class ColumnCompressor
     internal static bool Allows(VortexEdition target, string id) =>
         EditionRegistry.Contains(target, ComponentKind.Array, id);
 
-    /// <summary>Whether a canonical form has a row equality this compressor can compute.</summary>
     /// <summary>
-    /// The chooser of docs/11-write-strategy.md §3.4.1: degenerate cases from the statistics, then
-    /// every exact-cost candidate priced by formula and the cheapest kept, then the trials under
-    /// that cost. Built beside <see cref="ChooseToday"/> and compared with it plan against plan.
+    /// The chooser by pricing: degenerate cases from the statistics, then every exact-cost
+    /// candidate priced by formula and the cheapest kept, then the trials under that cost. Built
+    /// beside <see cref="ChooseToday"/> and compared with it plan against plan.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// WHAT DIFFERS FROM TODAY IS THE SHAPE, NOT THE ARITHMETIC. Today's chooser returns the first
-    /// candidate that wins, in a fixed order; this one prices them all and compares. On every
-    /// candidate but one the two coincide: bit-packing's cost is the same <see cref="BitPackPlan"/>,
-    /// the dictionary's is the same table or walk against the same budget, the trials are the same
-    /// <see cref="Trials"/>. The one that does not is RUN-END, which today wins outright once
-    /// inside its ratio and here is priced at §3.4.2's <c>ends + values + 256</c> — and only when
-    /// <paramref name="runEndCompetes"/> says so. Under <see langword="false"/> it keeps today's
-    /// rule and the two choosers must agree on every chunk; under <see langword="true"/> every
-    /// disagreement is a chunk the spec's rule would encode differently, reported with both costs.
+    /// What differs from <see cref="ChooseToday"/> is the shape, not the arithmetic. That one
+    /// returns the first candidate that wins, in a fixed order; this one prices them all and
+    /// compares. On every candidate but one the two coincide: bit-packing's cost is the same
+    /// <see cref="BitPackPlan"/>, the dictionary's is the same table or walk against the same
+    /// budget, and the trials are the same <see cref="Trials"/>. The one that does not is run-end,
+    /// which under the rule in force wins outright once inside its ratio and here can instead be
+    /// priced at its ends, its values and its framing — but only when
+    /// <paramref name="runEndCompetes"/> says so. Under
+    /// <see langword="false"/> it keeps the rule in force and the two choosers must agree on every
+    /// chunk; under <see langword="true"/> every disagreement is a chunk the other rule would
+    /// encode differently, reported with both costs.
     /// </para>
     /// <para>
-    /// RUN-END IS MATERIALIZED ONLY IF IT WINS. Today the scan gathers the runs before anything else
-    /// has been priced, on every column inside the ratio; here the count from the ingest pass
-    /// prices the candidate and the gather runs once, on the winner. The values child is priced as
-    /// the runs' share of the plain column, which is exact for a fixed-width kind and an estimate
-    /// for strings — the exact bound §3.4.2 gives is per fixed width, and a string run-end's values
-    /// are a gather nobody has made yet.
+    /// Run-end is materialized only if it wins: the count from the ingest pass prices the candidate
+    /// and the gather runs once, on the winner, instead of gathering the runs of every column
+    /// inside the ratio before anything else has been priced. The values child is priced as the
+    /// runs' share of the plain column, which is exact for a fixed-width kind and an estimate for
+    /// strings, whose run-end values are a gather nobody has made at that point.
     /// </para>
     /// </remarks>
     /// <param name="arena">The arena holding the node.</param>
@@ -1338,13 +1280,11 @@ internal static class ColumnCompressor
             ? PlainBinarySize(arena, node, measured ? stats.TotalBytes : -1)
             : DataBytes(node);
 
-        // 1. DEGENERATE FIRST, AND BEFORE MEMORY: a progression costs nothing per row and nothing
-        // can beat it -- and the statistics answer it without a walk, so there is nothing for plan
-        // memory to save by standing in front of it. It did stand there once: on the 1M-row
-        // `chunked` file a bit-packing that held to the byte on the one chunk with a jump in it was
-        // re-priced on every progression that followed, held again, and was written -- 295 KB a
-        // chunk where 32 bytes were exact, the file twice its size, and +70 % on the clock that
-        // six hypotheses about the time never explained. `PlanMemoryTests` holds the shape.
+        // 1. Degenerate cases first, and before memory: a progression costs nothing per row and
+        // nothing can beat it, and the statistics answer it without a walk, so plan memory has
+        // nothing to save by standing in front of it. Letting it stand there writes a remembered
+        // bit-packing over every progression that follows the one chunk with a jump in it: a buffer
+        // per chunk where the metadata alone would have been exact.
         ColumnPlan progression = SequenceOf(arena, node, target, in stats, cascade, measured);
         if (progression.Scheme != ColumnScheme.None)
         {
@@ -1355,11 +1295,12 @@ internal static class ColumnCompressor
             ? default
             : new RowComparer(arena, nodeIndex);
 
-        // 2. RUN-END FROM THE PASS, under today's rule -- inside its ratio it wins before anything
-        // else is priced -- and before memory for the same reason as the progression: a count the
-        // pass took makes the verdict arithmetic, and a constant chunk after a held bit-packing was
-        // written as a width-0 packing with 256 bytes of framing where one run costs 32. A count
-        // the pass did not take is walked further down, after memory has had its say.
+        // 2. Run-end from the pass, under the rule in force -- inside its ratio it wins before
+        // anything else is priced -- and before memory for the same reason as the progression: a
+        // count the pass took makes the verdict arithmetic, and a constant chunk reached through a
+        // remembered bit-packing goes out as a zero-width packing with its framing where one run
+        // costs a flat 32. A count the pass did not take is walked further down, after memory has
+        // had its say.
         bool runEndAllowed =
             Allows(target, "vortex.runend") && !cascade.RunsAreDead && length / RunEndRatio >= 1;
         bool runsCounted = runEndAllowed && measured && stats.HasRunBoundaries;
@@ -1376,14 +1317,14 @@ internal static class ColumnCompressor
             }
         }
 
-        // 3. PLAN MEMORY (§3.4.3): a column whose last plan produced the bytes it was priced at, to
-        // five per cent, is offered that plan again -- re-priced on this chunk's own statistics,
-        // which is arithmetic -- and nothing else is priced. Only a plan that still wins on its
-        // own terms is reused; one that no longer does sends the column back to full pricing, and
-        // so does a column with no memory yet. A child a scheme invented has no cursor and so no
-        // memory, and a chunk the pass did not measure is not trusted with one. What memory skips
-        // is exactly what costs: the walks below and the trials at the end -- never a candidate
-        // the statistics have already answered above.
+        // 3. Plan memory: a column whose last plan produced the bytes it was priced at, within a
+        // small tolerance, is offered that plan again -- re-priced on this chunk's own statistics,
+        // which is arithmetic -- and nothing else is priced. Only a plan that still wins on its own
+        // terms is reused; one that has stopped winning sends the column back to full pricing, as
+        // does a column without a memory. A child a scheme invented has no cursor and so no memory,
+        // and a chunk the pass did not measure is not trusted with one. What memory skips is
+        // exactly what costs: the walks below and the trials at the end, never a candidate the
+        // statistics have already answered above.
         if (measured && chunk.Memory is { WithinTolerance: true } memory)
         {
             ColumnPlan remembered = Reprice(
@@ -1394,12 +1335,12 @@ internal static class ColumnCompressor
             }
         }
 
-        // 4. EXACT CANDIDATES, each priced, the cheapest kept as `best`.
+        // 4. The candidates whose cost is exact, each priced, the cheapest kept as `best`.
         long best = plain;
         ColumnScheme bestScheme = ColumnScheme.None;
 
-        // Run-end, when the pass did not count it: walked now, as today, because nothing else can
-        // price it; the gather still waits for the verdict.
+        // Run-end, when the pass did not count it: walked here, because nothing else can price it;
+        // the gather still waits for the verdict.
         if (runEndAllowed && !runsCounted)
         {
             walkedRuns = TryRuns(arena, in node, in comparer, length);
@@ -1407,14 +1348,13 @@ internal static class ColumnCompressor
             runEndCost = RunEndCostOf(runs, length, plain);
             if (!runEndCompetes && runEndCost != long.MaxValue)
             {
-                // Today's rule: inside the ratio, run-end wins before anything else is priced.
+                // The rule in force: inside the ratio, run-end wins before anything else is priced.
                 return MaterializeRuns(arena, in node, in comparer, length, runs, in walkedRuns, runEndCost);
             }
         }
 
-        // Bit-packing: exact, patches included. Frame of reference's histogram comes from the
-        // ingest when the reference is zero and from its own walk otherwise (BitPackPlan; 11 §3.2.3
-        // as delivered: the bound and its second sweep were superseded by the exact walk).
+        // Bit-packing: exact, patches included. The frame of reference's histogram comes from the
+        // ingest pass when the reference is zero, and from `BitPackPlan`'s own walk otherwise.
         bool integers = node.Kind == CanonicalKind.Primitive && node.PType.IsInteger();
         BitPackPlan? packed = null;
         if (Allows(target, "fastlanes.bitpacked") && !(measured && integers && !stats.HasBounds))
@@ -1463,14 +1403,11 @@ internal static class ColumnCompressor
             }
         }
 
-        // AN EXACT WINNER STANDS, AND THE TRIALS ARE NOT OFFERED THE COLUMN. This is where §3.4.1's
-        // "trials under the best cost in hand" met §2's "bytes identical" and lost: read literally,
-        // a zstd frame is allowed to beat a bit-packing, and on this corpus it does -- 149 chunks in
-        // the first differential run, `fastlanes_bitpacked` among them at 1 961 bytes of zstd
-        // against 5 376 of packing. Smaller on disk, slower to decode, and not what the reference
-        // writes. The reading that keeps the guarantee is today's: a trial is tried on the columns
-        // no exact scheme took, under the plain column's bytes as its ceiling. The number is kept
-        // in IMPL-PLAN.md as an open question for a later stage, not decided here by accident.
+        // An exactly priced winner stands, and the trials are not offered the column. Running the
+        // trials under the best cost in hand instead would let a zstd frame take a column a
+        // bit-packing already holds -- smaller on disk, slower to decode, and different bytes -- so
+        // a trial is offered only the columns no exactly priced scheme took, under the plain
+        // column's bytes as its ceiling.
         switch (bestScheme)
         {
             case ColumnScheme.RunEnd:
@@ -1486,8 +1423,9 @@ internal static class ColumnCompressor
 
     /// <summary>
     /// Run-end's bytes for <paramref name="runs"/> runs over <paramref name="length"/> rows, or
-    /// <see cref="long.MaxValue"/> outside its ratio: 32 for a constant, and docs/11 §3.4.2's
-    /// <c>ends + values + 256</c> otherwise, the values priced as the runs' share of the plain column.
+    /// <see cref="long.MaxValue"/> outside its ratio: a flat 32 for a constant, and the ends plus
+    /// the values plus a framing allowance otherwise, the values priced as the runs' share of the
+    /// plain column.
     /// </summary>
     /// <param name="runs">The run count, from the pass or from a walk.</param>
     /// <param name="length">The chunk's rows.</param>
@@ -1533,15 +1471,15 @@ internal static class ColumnCompressor
     }
 
     /// <summary>
-    /// Prices ONE remembered scheme on this chunk, and nothing else: the plan when it still wins on
-    /// its own terms, canonical (with the plain bytes) when it no longer does or never applied.
+    /// Prices one remembered scheme on this chunk, and nothing else: the plan when it still wins on
+    /// its own terms, canonical (with the plain bytes) when it has stopped winning or never applied.
     /// </summary>
     /// <remarks>
     /// The verdict is "still wins" against the plain column alone, not against the field, because
     /// the field is exactly what memory exists to not price. A remembered scheme that has stopped
     /// winning returns a plan of another scheme, which the caller reads as "back to full pricing";
-    /// a remembered CANONICAL is the cheapest case of all, and the one docs/11 §3.2.2 turns the
-    /// distinct table off for.
+    /// a remembered canonical is the cheapest case of all, and the one the distinct table is turned
+    /// off for.
     /// </remarks>
     private static ColumnPlan Reprice(
         ColumnScheme scheme, CanonicalArena arena, int nodeIndex, CanonicalNode node,
@@ -1688,16 +1626,16 @@ internal static class ColumnCompressor
     /// reaches by walking the chunk, reached by arithmetic on what the table already holds.
     /// </summary>
     /// <remarks>
-    /// THE FINAL TEST IS THE SAME EXPRESSION, on the same numbers. The walk prices
+    /// The final test is the same expression, on the same numbers. The walk prices
     /// <c>rows × codeWidth(entries) + EntriesSize(entries)</c> against the budget once it has seen
     /// every row; its early abandonment is a lower bound of that test and never fires on a plan the
-    /// test would have kept. So the plan here is the plan there — <c>WrittenSizeTests</c> is the
-    /// proof — and what changes is that no row is read to reach it.
+    /// test would have kept. So the plan here is the plan there, and what changes is that no row is
+    /// read to reach it.
     /// <para>
-    /// THE ENTRIES ARE THE COUNT AT THE LAST BLOCK'S CLOSE, not the table's current count: the table
-    /// has since probed the tail the writer will carry into the next chunk, and codes are handed out
-    /// in first-seen order, so the chunk's rows use exactly the codes below that count and its heap
-    /// bytes are exactly the heap at that moment.
+    /// The entries are the count at the last block's close, not the table's current count: the
+    /// table has since probed the tail the writer will carry into the next chunk, and codes are
+    /// handed out in first-seen order, so the chunk's rows use exactly the codes below that count
+    /// and its heap bytes are exactly the heap at that moment.
     /// </para>
     /// </remarks>
     /// <param name="node">The column chunk.</param>
@@ -1717,9 +1655,9 @@ internal static class ColumnCompressor
             return ColumnPlan.Canonical;
         }
 
-        // NO COPY: the plan points at the table, and the encoder reads the codes and lays out the
-        // entries from it directly (§3.5). The table lives until the segment is written, which is
-        // after the plan has been consumed.
+        // No copy: the plan points at the table, and the encoder reads the codes and lays out the
+        // entries from it directly. The table lives until the segment is written, which is after
+        // the plan has been consumed.
         return ColumnPlan.Dictionary([], []) with
         {
             Table = table,
@@ -1730,18 +1668,17 @@ internal static class ColumnCompressor
     }
 
     /// <summary>
-    /// The bytes the dictionary LAYER was priced at, measured on what the encoder built: the codes
-    /// at the narrowest width that indexes <paramref name="values"/>, plus the entries in the form
+    /// The bytes the dictionary layer was priced at, over what the encoder built: the codes at the
+    /// narrowest width that indexes <paramref name="values"/>, plus the entries in the form
     /// <see cref="EntriesSize(CanonicalArena, CanonicalNode, ReadOnlySpan{int})"/> prices them.
     /// </summary>
     /// <remarks>
-    /// THIS IS WHAT PLAN MEMORY HOLDS A DICTIONARY TO, and not the bytes its subtree produced. The
+    /// This is what plan memory holds a dictionary to, and not the bytes its subtree produced. The
     /// prediction is codes plus entries; the children then take their own schemes -- the codes
-    /// zstd, the values FSST or zstd -- and the buffers they append are a fraction of that. On the
-    /// 1M-row `dict_u8_codes` every chunk predicted 66 738 bytes and produced 363: the memory
-    /// "broke" sixteen times out of sixteen, the distinct table was never expected to serve, and
-    /// every chunk walked for the dictionary the table had already built. What the children make
-    /// of the layer is theirs; the dictionary's own decision held exactly.
+    /// zstd, the values FSST or zstd -- and the buffers they append are a fraction of that.
+    /// Comparing the prediction against the subtree instead breaks the memory on every chunk of a
+    /// dictionary column, which then walks for a dictionary the table has already built. What the
+    /// children make of the layer is theirs; the dictionary's own decision is what is checked.
     /// </remarks>
     /// <param name="arena">The arena holding the values child.</param>
     /// <param name="values">The values child as the encoder built it, one row per entry.</param>
@@ -1754,8 +1691,8 @@ internal static class ColumnCompressor
 
     /// <summary>
     /// <see cref="EntriesSize(CanonicalArena, CanonicalNode, ReadOnlySpan{int})"/> over the first
-    /// <paramref name="count"/> rows of <paramref name="node"/> in order -- a node that IS the
-    /// entries.
+    /// <paramref name="count"/> rows of <paramref name="node"/> in order -- a node that is itself
+    /// the entries.
     /// </summary>
     private static long EntriesSize(CanonicalArena arena, CanonicalNode node, int count)
     {
@@ -1819,6 +1756,7 @@ internal static class ColumnCompressor
         }
     }
 
+    /// <summary>Whether a canonical form has a row equality this compressor can compute.</summary>
     private static bool IsComparable(CanonicalKind kind) =>
         kind is CanonicalKind.Primitive or CanonicalKind.Bool or CanonicalKind.VarBinView
             or CanonicalKind.Decimal;
@@ -1827,15 +1765,15 @@ internal static class ColumnCompressor
     /// Row equality and hashing over one canonical column.
     /// </summary>
     /// <remarks>
-    /// NULLNESS IS PART OF THE VALUE. Two null rows are equal and a null is equal to nothing else,
-    /// which is what makes a run of nulls one run and a dictionary hold at most one null entry. It
-    /// is NOT the filter's three-valued logic -- that answers "does this row match a predicate" and
-    /// this answers "are these two rows the same value", and conflating them would make a run of
-    /// nulls unrepresentable.
+    /// Nullness is part of the value. Two null rows are equal and a null is equal to nothing else,
+    /// which is what makes a run of nulls one run and a dictionary hold at most one null entry.
+    /// This is not the filter's three-valued logic -- that answers "does this row match a
+    /// predicate" and this answers "are these two rows the same value", and conflating them would
+    /// make a run of nulls unrepresentable.
     ///
-    /// Floats are compared by their RAW BITS for the same reason the sidecar does: -0.0 and +0.0
-    /// are different values to a writer even though they compare equal, and collapsing them into
-    /// one dictionary entry would change the data.
+    /// Floats are compared by their raw bits: -0.0 and +0.0 are different values to a writer even
+    /// though they compare equal, and collapsing them into one dictionary entry would change the
+    /// data.
     /// </remarks>
     private readonly ref struct RowComparer
     {
@@ -1847,12 +1785,11 @@ internal static class ColumnCompressor
         /// Bytes per row for a fixed-width column, or 0 for <c>Bool</c> and <c>VarBinView</c>.
         /// </summary>
         /// <remarks>
-        /// PERF-AUDIT-v2.md W-7b. The kind and the width are properties of the COLUMN, and they were
-        /// being re-derived on every call: `switch` on the kind, then `PType.ByteWidth()` or
-        /// `DecimalStorage.ByteWidth()`. Measured on `--throughput --write` at a million rows,
-        /// `Equal` is called **349 446 863 times** and `Hash` **120 108 814 times** for one pass over
-        /// the corpus's columns, and doubling the pair costs **30,6 %** of a `dict` write. Resolving
-        /// both once in the constructor turns the hot path into a width test the JIT can fold.
+        /// The kind and the width are properties of the column, so they are resolved once in the
+        /// constructor rather than re-derived per call — a `switch` on the kind, then
+        /// `PType.ByteWidth()` or `DecimalStorage.ByteWidth()`. `Equal` and `Hash` are called once
+        /// or more per row of every column of the file, so what is left of them is what the write
+        /// costs; a single width test is something the compiler can fold away.
         /// </remarks>
         private readonly int _width;
 
@@ -1882,9 +1819,9 @@ internal static class ColumnCompressor
                 return true;
             }
 
-            // THE ZERO-WIDTH KINDS FIRST, and not as a style choice: `CanonicalNode.Values` THROWS on
-            // a Bool or a VarBinView, so the span may not be taken before the width has ruled them
-            // out. The suite caught exactly that, on 23 tests.
+            // The zero-width kinds first, and not as a style choice: `CanonicalNode.Values` throws
+            // on a Bool or a VarBinView, so the span may not be taken before the width has ruled
+            // them out.
             if (_width == 0)
             {
                 return _node.Kind == CanonicalKind.Bool
@@ -1893,9 +1830,9 @@ internal static class ColumnCompressor
                     : Bytes(a).SequenceEqual(Bytes(b));
             }
 
-            // THE WIDTHS THAT ARE ONE LOAD ARE ONE LOAD. `SequenceEqual` over four bytes is a call
-            // with a length check in front of it, and four bytes is what the average row of this
-            // corpus actually is -- 464 MB hashed over 120 M calls, 3,9 bytes a call.
+            // The widths that are one load are read as one load. `SequenceEqual` over four bytes is
+            // a call with a length check in front of it, and a handful of bytes is what the average
+            // row actually is.
             ReadOnlySpan<byte> values = _node.Values.Span;
             return _width switch
             {
@@ -1942,10 +1879,9 @@ internal static class ColumnCompressor
         /// would have taken one step per byte.
         /// </summary>
         /// <remarks>
-        /// IT NEED NOT AGREE WITH FNV-1a, and does not. Nothing persists this hash: it picks a
-        /// bucket, collisions are settled by <see cref="Equal"/>, and a dictionary code is handed
-        /// out by order of first appearance -- so the FILE's bytes do not depend on it at all.
-        /// `WrittenSizeTests` is the proof and it is byte-exact.
+        /// It need not agree with the byte-wise hash, and does not. Nothing persists this hash: it
+        /// picks a bucket, collisions are settled by <see cref="Equal"/>, and a dictionary code is
+        /// handed out by order of first appearance, so the file's bytes do not depend on it at all.
         /// </remarks>
         private static int Mix(ulong value) => (int)KeyHash.Mix(value);
 
@@ -1969,9 +1905,7 @@ internal static class ColumnCompressor
         /// <summary>
         /// The write path's one byte-string hash, <see cref="KeyHash.Bytes"/>: it lives there so
         /// that this comparer and the ingest-time <see cref="DistinctTable"/> cannot disagree on
-        /// what a value hashes to. Its history — FNV-1a measured at 21 % to 57 % of a string
-        /// column's write, XxHash3 with a folded short arm, and the 3 % to 6 % it costs `struct`
-        /// and `varbin` — is written at the top of that file.
+        /// what a value hashes to.
         /// </summary>
         /// <param name="bytes">The value's bytes.</param>
         private static int Hash(ReadOnlySpan<byte> bytes) => (int)KeyHash.Bytes(bytes);

@@ -1,46 +1,3 @@
-// The index directory of docs/10-indexes.md §4.1: one postscript metadata entry, key
-// `vorticity.index`, whose segment is this message preceded by one version byte.
-//
-// WHY A METADATA ENTRY AND NOTHING ELSE (§3). A strict Rust 0.86.1 reader fails the open on an
-// unknown aggregate id and on an unknown layout id, and ignores a metadata key it is not asked
-// for. So the directory rides in the one place every reader already tolerates, and the runs it
-// points at are file regions no layout references and no footer lists: a reader that does not ask
-// for the key never touches a byte of them.
-//
-// AN INDEX IS A HINT, AND THE READ RULES SAY SO IN CODE (§4.1, docs/08-semantics.md §5). A
-// directory whose row count disagrees with the file is ignored WHOLE -- a stale directory after a
-// failed append proves nothing. An entry whose kind is unknown, whose options do not parse, whose
-// runs overlap or step outside the file is ignored ALONE. Nothing here ever fails the open: the
-// worst a lying index can do is cost pruning.
-//
-//   message IndexDirectory {
-//     uint32 version = 1; uint64 row_count = 2; uint64 previous_eof = 3; bytes policy = 4;
-//     repeated IndexEntry entries = 5;
-//   }
-//   message IndexEntry {
-//     string kind = 1; repeated uint32 column_path = 2; uint64 block_len = 3; bytes options = 4;
-//     repeated Run runs = 5;
-//   }
-//   message Run {
-//     uint64 first_block = 1; uint32 block_count = 2; repeated Segment payload = 3;
-//     repeated bytes payload_dtype = 4;
-//     uint64 entry_count = 5;          // docs/12-index-reads.md §14's amendment
-//     bytes options = 6;               // the per-segment bounds 10 §4.2 puts "in the run's options"
-//   }
-//   message Segment {
-//     uint64 offset = 1; uint32 length = 2; uint32 alignment_exponent = 3;
-//     fixed64 checksum = 4;            // version 2: the XXH3-64 of the region's bytes
-//   }
-//
-// VERSION 2 CHECKS WHAT IT READS (docs/13-dataset.md §7, step 20 of IMPL-PLAN.md's plan, 21). The
-// segment is `[2][message][u64 XXH3-64 of everything before it]`, and every payload region carries
-// the XXH3-64 of its bytes. A directory whose trailer does not match is refused whole, like a stale
-// one; a region whose bytes do not match makes its entry claim nothing for the blocks it covers,
-// and a key source that needs it is refused. Until then a zeroed Bloom filter was well formed and
-// dropped rows (10 §5.1). The reader hashes nothing it does not read. Version 1, which had neither,
-// is refused like any unknown version, with the reason: nothing has written it since step 21, the
-// Rust forge fixture that was said to be one never existed, and an index is a hint a file reads
-// correctly without.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -55,7 +12,7 @@ namespace Vorticity.Indexes;
 /// <param name="Length">Length in bytes.</param>
 /// <param name="AlignmentExponent">The region's alignment is <c>1 &lt;&lt; AlignmentExponent</c>.</param>
 /// <param name="Checksum">
-/// The XXH3-64 of the region's bytes, or null for a region a version 1 directory lists.
+/// The XXH3-64 of the region's bytes, or null when the directory listed the region without one.
 /// </param>
 public readonly record struct IndexSegment(ulong Offset, uint Length, byte AlignmentExponent, ulong? Checksum = null)
 {
@@ -77,10 +34,7 @@ public readonly record struct IndexSegment(ulong Offset, uint Length, byte Align
         bytes.Length == Length && (Checksum is not { } expected || XxHash3.HashToUInt64(bytes) == expected);
 }
 
-/// <summary>
-/// One immutable run: the filters or keys that cover a contiguous range of blocks
-/// (docs/10-indexes.md §4.2).
-/// </summary>
+/// <summary>One immutable run: the filters or keys that cover a contiguous range of blocks.</summary>
 /// <param name="FirstBlock">The first block covered.</param>
 /// <param name="BlockCount">How many consecutive blocks.</param>
 /// <param name="Payload">The file regions, in kind-defined order.</param>
@@ -90,11 +44,11 @@ public readonly record struct IndexSegment(ulong Offset, uint Length, byte Align
 /// </param>
 /// <param name="EntryCount">
 /// The entries of a locating run, so that a cursor's <c>EntryCount</c> and <c>Explain</c> cost no
-/// payload read (docs/12-index-reads.md §14's amendment to §4.1); <c>0</c> for a skipping kind.
+/// payload read; <c>0</c> for a skipping kind.
 /// </param>
 /// <param name="Options">
 /// Kind-defined bytes for this run alone: the per-segment bounds of a locating run's blocked
-/// payload (docs/10-indexes.md §4.2); empty otherwise.
+/// payload; empty otherwise.
 /// </param>
 public sealed record IndexRun(
     ulong FirstBlock,
@@ -111,9 +65,8 @@ public sealed record IndexRun(
     public ulong EndBlock => FirstBlock + BlockCount;
 
     /// <summary>
-    /// Where the run's bytes are read: 0 for the file's own directory,
-    /// then one per fragment attached at the open, in the order they were given
-    /// (docs/13-dataset.md §6.4).
+    /// Where the run's bytes are read: 0 for the file's own directory, then one per fragment
+    /// attached at the open, in the order they were given.
     /// </summary>
     /// <remarks>
     /// Every offset a run holds counts from the start of its origin: its payload regions, and the
@@ -137,7 +90,21 @@ public sealed record IndexEntry(
     byte[] Options,
     IReadOnlyList<IndexRun> Runs);
 
-/// <summary>The index directory of one file (docs/10-indexes.md §4.1).</summary>
+/// <summary>
+/// The index directory of one file: a single postscript metadata entry whose segment is this
+/// message behind one version byte, pointing at runs that are file regions no layout references and
+/// no footer lists.
+/// </summary>
+/// <remarks>
+/// It rides in a metadata entry because that is the one place a strict reader tolerates something it
+/// does not know -- an unknown aggregate or layout id would fail its open -- so a reader that never
+/// asks for the key never touches a byte of an index. An index is only a hint, and the read rules
+/// say so in code: a directory whose row count disagrees with the file, or whose trailing checksum
+/// does not match its bytes, is ignored whole; an entry whose kind is unknown, whose options do not
+/// parse, or whose runs overlap or leave the file is ignored alone. Nothing here ever fails the
+/// open, so the worst a lying index can cost is pruning. Every payload region carries the hash of
+/// its bytes as well, since a filter read back as zeroes would be well formed and would drop rows.
+/// </remarks>
 /// <param name="RowCount">The file's row count when the directory was written.</param>
 /// <param name="PreviousEof">The file length before the append that wrote it; 0 for a first write.</param>
 /// <param name="Policy">The policy the file was written under, so an append needs no options.</param>
@@ -170,9 +137,8 @@ public sealed record IndexDirectory(
     public ulong FileLength { get; init; }
 
     /// <summary>
-    /// For a fragment: the identity of the version of the file it indexes (field 10,
-    /// docs/13-dataset.md §7), the binding a reader checks without reading the file; null for a
-    /// file written without one.
+    /// For a fragment: the identity of the version of the file it indexes (field 10), the binding a
+    /// reader checks without reading the file; null for a file written without one.
     /// </summary>
     public Guid? FileIdentity { get; init; }
 
@@ -204,8 +170,7 @@ public sealed record IndexDirectory(
     private const int DirBudget = 6;
     private const int DirFileLength = 7;
 
-    // Field 8 was the file's SHA-256 until step 26 (13 §7); it is retired and never reused, and a
-    // reader skips it like any unknown field.
+    // Field 8 is retired and never reused; a reader skips it like any unknown field.
     private const int DirArrayEncodings = 9;
     private const int DirFileIdentity = 10;
     private const int DirFileToken = 11;
@@ -241,9 +206,9 @@ public sealed record IndexDirectory(
 
     /// <summary>
     /// Whether the budget may abandon this index (<c>IndexPolicy.AsRequired</c>). It is stored
-    /// because an append reuses the directory's policy rather than being told one again
-    /// (docs/11-write-strategy.md §3.8): a requirement that did not survive the round trip would
-    /// hold for the first write and quietly stop holding for every one after it.
+    /// because an append reuses the directory's policy rather than being told one again: a
+    /// requirement that did not survive the round trip would hold for the first write and quietly
+    /// stop holding for every one after it.
     /// </summary>
     private const int ColumnRequired = 11;
 
@@ -342,10 +307,10 @@ public sealed record IndexDirectory(
     }
 
     /// <remarks>
-    /// AN OPTION AT ITS DEFAULT IS NOT WRITTEN: every file carries its directory since `Auto` became
-    /// the default, and the defaults are the reader's as much as the writer's (a zero reads back as
-    /// the default). `min_distinct` is the one option whose zero is a request, so it goes out
-    /// whenever it differs from its default.
+    /// An option at its default is not written: the defaults are the reader's as much as the
+    /// writer's, so an absent field reads back as the default. `min_distinct` is the one option
+    /// whose zero is a request rather than an absence, so it goes out whenever it differs from its
+    /// default.
     /// </remarks>
     private static void WriteColumnPolicy(ref ProtoWriter writer, string path, IndexPolicy policy)
     {
@@ -404,7 +369,8 @@ public sealed record IndexDirectory(
     }
 
     /// <summary>
-    /// Parses a directory and applies the reader rules of docs/10-indexes.md §4.1.
+    /// Parses a directory, keeping only what checks out: a stale or torn directory is refused whole,
+    /// and an entry that does not hold up is dropped on its own.
     /// </summary>
     /// <param name="bytes">The metadata segment.</param>
     /// <param name="fileRowCount">The file's own row count.</param>
@@ -431,8 +397,8 @@ public sealed record IndexDirectory(
             return false;
         }
 
-        // THE TRAILER FIRST: a torn or corrupt directory is refused before a byte of it is
-        // believed, which is what the row count alone could never promise.
+        // The trailer first, so that a torn or corrupt directory is refused before a byte of it is
+        // believed: the row count alone cannot tell one apart from a sound directory.
         if (bytes.Length < 1 + ChecksumSize
             || XxHash3.HashToUInt64(bytes[..^ChecksumSize]) != BinaryPrimitives.ReadUInt64LittleEndian(bytes[^ChecksumSize..]))
         {
@@ -446,8 +412,8 @@ public sealed record IndexDirectory(
         }
         catch (VortexFormatException e)
         {
-            // A malformed message is a malformed HINT: the directory is ignored and the file is
-            // read without it (§4.1). The reason carries the parser's words.
+            // A malformed message is only a malformed hint: the directory is ignored and the file
+            // is read without it. The reason carries the parser's words.
             reason = "the directory does not parse: " + e.Message;
             directory = null;
             return false;
@@ -557,7 +523,7 @@ public sealed record IndexDirectory(
 
     /// <summary>
     /// Runs disjoint and in order, each segment inside the file and before the footer, and a
-    /// payload wherever the kind needs one. A failure costs the ENTRY, never the file.
+    /// payload wherever the kind needs one. A failure costs that one entry, never the file.
     /// </summary>
     private static bool RunsAreSound(IndexEntry entry, ulong dataEnd)
     {
@@ -637,8 +603,8 @@ public sealed record IndexDirectory(
             }
         }
 
-        // An unknown kind is ignored, not rejected (§4.1): a newer writer's index costs an older
-        // reader nothing but the bytes.
+        // An unknown kind is ignored, not rejected: a newer writer's index costs an older reader
+        // nothing but the bytes it does not read.
         if (kind is null || !IndexKinds.IsKnown(kind) || blockLength == 0)
         {
             return false;

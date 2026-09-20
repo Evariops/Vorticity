@@ -1,27 +1,3 @@
-// Serializing a canonical array back to the blob format - docs/02-format.md §5.1.
-//
-//     [padding] [buffer 0] [padding] [buffer 1] ... [Array flatbuffer] [u32 flatbuffer length]
-//
-// The reader's own header comment lists four details the prose gets wrong, and three of them are
-// this file's obligations rather than the reader's:
-//
-//   * `padding` is what was ACTUALLY written before each buffer, and the reader accumulates it from
-//     zero within the segment. So the padding computed here has to place each buffer at its
-//     alignment relative to the SEGMENT START, and the segment itself is then written at a
-//     64-byte file offset -- which is what turns "aligned within the blob" into "aligned in the
-//     mapped file", the thing that makes the read zero-copy.
-//   * the padding in front of the FlatBuffer is recorded nowhere, because the FlatBuffer is located
-//     from the end. It can therefore be whatever the 8-byte alignment needs.
-//   * the FlatBuffer is finished MINIMALLY: no file identifier.
-//
-// The fourth -- the reference's leading zero-length max-alignment buffer -- is deliberately not
-// reproduced. It contributes no bytes and no Buffer entry, so a reader that accumulates from zero
-// cannot tell whether it was there, and emitting it would be cargo cult.
-//
-// VALIDITY IS WHERE A WRITER QUIETLY LOSES DATA. A nullable array with no validity child reads back
-// as AllValid, so AllValid may be omitted and ALL-INVALID MAY NOT: an all-null column written
-// without its bitmap comes back as a column of zeros that claims every row is present. The
-// asymmetry is the reason Validity is switched on rather than tested for "has a bitmap".
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -47,6 +23,20 @@ using Vorticity.Types.Serialization;
 namespace Vorticity.Writing;
 
 /// <summary>Turns a canonical array into the bytes of one <c>vortex.flat</c> segment.</summary>
+/// <remarks>
+/// A segment is the buffers in order, each preceded by the padding that puts it on its alignment,
+/// then the Array flatbuffer and its length as a trailing <c>u32</c>. Padding is counted from the
+/// start of the segment rather than of the file, and the segment itself lands on a 64-byte file
+/// offset, which is what carries a buffer's alignment through into the mapped file and makes the
+/// read zero-copy; the padding in front of the flatbuffer is recorded nowhere, since the reader
+/// locates the flatbuffer from the end, so it is only what 8-byte alignment needs.
+/// <para>
+/// Validity is the asymmetry to respect: a nullable array with no validity child reads back as
+/// all-valid, so an all-valid bitmap may be omitted and an all-invalid one may not — omitting that
+/// one turns an all-null column into zeros claiming to be present. Hence validity is switched on
+/// its kind rather than tested for the presence of a bitmap.
+/// </para>
+/// </remarks>
 internal static class ArrayBlobWriter
 {
     private const int ViewSize = 16;
@@ -59,9 +49,8 @@ internal static class ArrayBlobWriter
     /// <param name="encodings">The file's array-encoding dictionary, extended as needed.</param>
     /// <param name="compress">Whether to let ColumnCompressor pick an encoding for the column.</param>
     /// <param name="stats">
-    /// What the ingest pass measured over this chunk's rows, when the caller has it; a default
-    /// summary makes every candidate measure the column itself, as it did before stage 2 of
-    /// docs/11-write-strategy.md §8.
+    /// What the ingest pass found over this chunk's rows, when the caller has it; a default summary
+    /// leaves every candidate to walk the column itself.
     /// </param>
     /// <returns>The blob.</returns>
     /// <exception cref="NotSupportedException">The canonical form has no writer.</exception>
@@ -73,7 +62,7 @@ internal static class ArrayBlobWriter
         using FlatBufferBuilder builder = new FlatBufferBuilder();
         try
         {
-        // The compressed forms are chosen and MATERIALIZED before the builder starts, because both
+        // The compressed forms are chosen and materialized before the builder starts, because both
         // of them add canonical nodes to the arena -- the gathered values child -- and a
         // FlatBuffers table cannot be open while that happens.
         // A constant is expanded where it is read. The uncompressed path reads rows and nothing
@@ -110,15 +99,14 @@ internal static class ArrayBlobWriter
         long flatStart = Align(offset, 8);
         long total = flatStart + flatBuffer.Length + sizeof(uint);
 
-        // Rented, not allocated (W-4). The rental is longer than `total` and its tail holds
-        // whatever the last renter wrote, so the padding between buffers has to be cleared rather
-        // than assumed zero the way a fresh array allowed -- a file is byte-exact or it is wrong.
+        // Rented, not allocated. The rental is longer than `total` and its tail holds whatever the
+        // last renter wrote, so the padding between buffers has to be cleared rather than assumed
+        // zero the way a fresh array allowed -- a file is byte-exact or it is wrong.
         //
-        // ASSEMBLING THE BLOB COSTS NOTHING WORTH AVOIDING, and the alternative is a real design:
-        // handing the sink each buffer and each run of padding in turn, so the bytes go out from
-        // where they already are. Doubling the copy below reads 0,999 on a million-row `table_mixed`
-        // write and 1,006 on a `varbin` one -- a per cent at the outside, against many small writes
-        // to a FileStream and a native view that is only memory through a manager.
+        // The blob is assembled here rather than handed to the sink buffer by buffer and padding
+        // run by padding run: the copy below is not what a write costs, while streaming it would
+        // mean many small writes to a FileStream and a native view that is only memory through a
+        // manager.
         int exact = checked((int)total);
         byte[] blob = ArrayPool<byte>.Shared.Rent(exact);
         long cursor = 0;
@@ -149,7 +137,7 @@ internal static class ArrayBlobWriter
         }
         finally
         {
-            // AFTER THE COPY INTO `blob` AND NOWHERE EARLIER. A pooled array handed back while the
+            // After the copy into `blob` and nowhere earlier. A pooled array handed back while the
             // blob still had to read it would be handed to the next renter and overwritten, and the
             // file would be wrong in a way no exception reports. In a `finally` so that a throw
             // between the rent and the copy does not quietly drain the pool either.
@@ -167,16 +155,14 @@ internal static class ArrayBlobWriter
     /// Writes the column under whichever scheme ColumnCompressor chose.
     /// </summary>
     /// <remarks>
-    /// Compression is applied to the TOP of a column and nowhere else. A cascade -- dictionary
+    /// Compression is applied to the top of a column and nowhere else. A cascade -- dictionary
     /// codes that are themselves bit-packed, which is where the reference's ratios come from --
-    /// needs the integer kernels this build does not have yet, and applying a scheme inside a
-    /// struct or a list would change shapes the reader derives top-down. One level is what can be
-    /// done correctly today (docs/90-registry.md).
+    /// would need integer kernels this build does not carry, and applying a scheme inside a struct
+    /// or a list would change shapes the reader derives top-down.
     /// <para>
     /// <c>stats</c> is the chunk's ingest statistics when this node is one of the file's own
-    /// columns, and a default summary for a child a scheme invented — which the chooser then
-    /// measures itself (docs/11-write-strategy.md §3.4.4 turns those into cascade context in a later
-    /// stage).
+    /// columns, and a default summary for a child a scheme invented, which the chooser then walks
+    /// for itself.
     /// </para>
     /// </remarks>
     private static int WriteCompressed(
@@ -188,17 +174,16 @@ internal static class ArrayBlobWriter
         ChunkStats stats = default,
         Cascade cascade = default)
     {
-        // Z1b-c2b: a constant node is materialized HERE, before the compressor looks at it, and the
-        // first attempt did it lower down -- inside WriteNode -- which produced a file of 33 676
-        // bytes against 996. The compressor never saw the column, so the encoding that made a
-        // constant 4 096-row i64 cost under a kilobyte was simply not chosen. Materializing above
-        // `Choose` puts the writer back on exactly the path it took before the switch existed, which
-        // is what makes the bytes identical rather than merely close.
+        // A constant node is materialized here, before the compressor looks at it. Expanding it
+        // lower down -- inside WriteNode -- hides the column from the compressor, and a constant
+        // integer column then goes out flat instead of taking the encoding that reduces it to a
+        // handful of bytes. Materializing above `Choose` keeps the writer on the same path it takes
+        // for any other column, which is what makes the bytes identical rather than merely close.
         //
-        // What a constant can be decided to be WITHOUT being expanded is asked first, because the
+        // What a constant can be decided to be without being expanded is asked first, because the
         // expansion is most of what writing a constant column costs. A progression is the answer
         // for an integer constant and needs neither the rows nor a walk; every other constant falls
-        // through to the line below and takes the route it always took.
+        // through to the line below and takes the ordinary route.
         BlockStats summary = stats.Stats;
         ColumnPlan plan = ColumnCompressor.ChooseConstant(
             arena, nodeIndex, encodings.Target, in summary, cascade);
@@ -209,19 +194,18 @@ internal static class ArrayBlobWriter
                 arena, nodeIndex, encodings.Target, in summary, cascade, stats);
         }
 
-        // THE BYTES THE PLAN ACTUALLY PRODUCED, handed back to the column for docs/11 §3.4.3's plan
-        // memory: every buffer this node and its subtree appended, measured against what the chooser
-        // priced the plan at. Buffer bytes rather than the blob's, because the blob is one per root
-        // field and a struct's children are priced one by one; the framing they leave out is the
-        // same framing chunk after chunk, which is all a tolerance needs.
+        // The bytes the plan actually produced, handed back to the column for its plan memory:
+        // every buffer this node and its subtree appended, against what the chooser priced the plan
+        // at. Buffer bytes rather than the blob's, because the blob is one per root field and a
+        // struct's children are priced one by one; the framing they leave out is the same framing
+        // chunk after chunk, which is all a tolerance needs.
         //
-        // A DICTIONARY IS HELD TO ITS OWN LAYER, not to its subtree: the plan priced codes plus
-        // entries, and the children then take schemes of their own -- on `dict_u8_codes` the codes
-        // zstd to 220 bytes and the values to 150, against a layer of 66 738. Measured by the
-        // subtree, the prediction "broke" on every chunk of every dictionary column, the distinct
-        // table was never expected to serve, and each chunk walked for the dictionary the table
-        // had already built. `WriteChosen` reports the layer as built; the children's bytes are
-        // the children's.
+        // A dictionary is held to its own layer, not to its subtree: the plan priced codes plus
+        // entries, and the children then take schemes of their own that can shrink them by orders
+        // of magnitude. Judged by the subtree, a dictionary column's prediction would miss on every
+        // chunk, the distinct table would never be trusted to serve, and each chunk would walk for
+        // a dictionary the table had already built. `WriteChosen` reports the layer as built; the
+        // children's bytes are the children's.
         int firstBuffer = buffers.Count;
         int written = WriteChosen(
             builder, arena, nodeIndex, in plan, buffers, encodings, stats, out long dictionaryLayer);
@@ -286,9 +270,9 @@ internal static class ArrayBlobWriter
             return WriteSequence(builder, arena, nodeIndex, plan.Sequence!, encodings);
         }
 
-        // THE VALUES CHILD COMES FROM THE TABLE WHEN THE TABLE CHOSE THE PLAN (docs/11 §3.5): the
-        // entries laid out in code order from the keys it owns, no gather over the chunk, and for
-        // strings the key heap as the data buffer. A run-end, or a dictionary the reference chooser
+        // The values child comes from the table when the table chose the plan: the entries laid out
+        // in code order from the keys it owns, no gather over the chunk, and for strings the key
+        // heap as the data buffer. A run-end, or a dictionary the reference chooser
         // walked for, is still the original column gathered down to its representative rows -- a
         // dictionary of strings then shares the data buffers it came from. Either way the child is
         // itself a column, and a dictionary of long strings is exactly the shape FSST wants
@@ -302,8 +286,8 @@ internal static class ArrayBlobWriter
             return WriteRunEnd(builder, arena, nodeIndex, values, plan, buffers, encodings);
         }
 
-        // Measured on the values child as built and the rows the codes index, with the formula the
-        // plan was priced by: the number plan memory compares the prediction to.
+        // Computed over the values child as built and the rows the codes index, with the formula
+        // the plan was priced by: the number plan memory compares the prediction to.
         dictionaryLayer = ColumnCompressor.DictionaryLayerBytes(
             arena, arena.GetNode(values), arena.GetNode(nodeIndex).Length);
         return WriteDict(builder, arena, nodeIndex, values, plan, buffers, encodings);
@@ -317,15 +301,15 @@ internal static class ArrayBlobWriter
     /// <remarks>
     /// The nesting is not arbitrary. Neither wrapper has a validity of its own -- both take their
     /// child's -- so the validity child belongs to the bitpacked node underneath, which is where
-    /// this puts it, AFTER the patch children, because the decoder derives the validity child's
+    /// this puts it, after the patch children, because the decoder derives the validity child's
     /// position from the metadata (2 with patches, 0 without) and never from the child count.
     ///
-    /// The frame subtraction is on RAW BITS, unsigned, and that is what makes a signed column work:
+    /// The frame subtraction is on raw bits, unsigned, and that is what makes a signed column work:
     /// a column spanning -1000 to 1000 has a span of 2000 and needs 11 bits, which a signed
-    /// per-value subtraction would have overflowed on. The reader's own kernel is `wrapping_add`
-    /// for exactly this reason.
+    /// per-value subtraction would have overflowed on. The reader's own kernel adds back with
+    /// wrapping arithmetic for exactly this reason.
     ///
-    /// The PATCH VALUES are in the encoded domain -- after the transform, before the packing --
+    /// The patch values are in the encoded domain -- after the transform, before the packing --
     /// because that is the buffer the decoder overwrites: it applies patches to the unpacked
     /// values and only then hands them to the wrapper.
     /// </remarks>
@@ -405,22 +389,15 @@ internal static class ArrayBlobWriter
         return bytes;
     }
 
-    /// <summary>Applies the transform and bit-packs, one 1024-element block at a time.</summary>
-    /// <remarks>
-    /// A patched row is packed like any other and its low bits are simply lost to the mask; the
-    /// patch child puts the value back. Writing a zero there instead would cost a branch per row
-    /// to produce bytes nothing reads.
-    /// </remarks>
     /// <summary>
     /// The patches the pack finds for <paramref name="plan"/> over <paramref name="node"/>: the rows
     /// whose transformed value does not fit the width, and those values in the encoded domain.
     /// </summary>
     /// <remarks>
-    /// FOR THE TESTS THAT USED TO READ THEM OFF THE PLAN. The gather moved from the chooser into the
-    /// pack (docs/11-write-strategy.md §3.5), and the assertions that pin its positions and its
-    /// domain — a patch value is the offset from the reference, not the raw value; a null row is
-    /// never a patch — moved with it rather than being dropped. The packed bytes are computed and
-    /// discarded, which is what the assertions cost.
+    /// Exposed so tests can pin the patches' positions and their domain — a patch value is the
+    /// offset from the reference, not the raw value, and a null row is never a patch. The pack finds
+    /// them as it encodes, so reaching them from outside means packing the column and discarding the
+    /// bytes, which is what the assertions cost.
     /// </remarks>
     /// <param name="arena">The arena holding the node.</param>
     /// <param name="node">The integer column chunk.</param>
@@ -432,15 +409,21 @@ internal static class ArrayBlobWriter
         return (indices, values);
     }
 
+    /// <summary>Applies the transform and bit-packs, one block at a time.</summary>
+    /// <remarks>
+    /// A patched row is packed like any other and its low bits are simply lost to the mask; the
+    /// patch child puts the value back. Writing a zero there instead would cost a branch per row
+    /// to produce bytes nothing reads.
+    /// </remarks>
     private static byte[] Pack(
         CanonicalArena arena, CanonicalNode node, BitPackPlan plan, PType ptype, int length,
         out int[] patchIndices, out ulong[] patchValues)
     {
-        // THE PATCHES ARE FOUND HERE, NOT BY A WALK OF THEIR OWN (docs/11-write-strategy.md §3.5):
-        // every row is transformed below anyway, and an exception is a transformed value that does
-        // not fit the width. The chooser counted them from its histogram, which sizes the arrays;
-        // the loop fills them; a count that disagrees is an exception rather than a short array
-        // padded with row 0 in silence.
+        // The patches are found here rather than by a walk of their own: every row is transformed
+        // below anyway, and an exception is a transformed value that does not fit the width. The
+        // chooser counted them from its histogram, which sizes the arrays; the loop fills them; a
+        // count that disagrees is an exception rather than a short array padded with row 0 in
+        // silence.
         int exceptions = checked((int)plan.Exceptions);
         patchIndices = exceptions == 0 ? [] : new int[exceptions];
         patchValues = exceptions == 0 ? [] : new ulong[exceptions];
@@ -449,18 +432,17 @@ internal static class ArrayBlobWriter
         int bitWidth = plan.BitWidth;
         int blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
 
-        // UNINITIALIZED, because `PackBlock` clears its own destination before it ORs into it, so
-        // every byte returned here is written twice and zeroed once for nothing. WRITE-ARCHITECTURE
-        // §3.6 charges `ZeroMemoryNative` **17,0 %** of a `fastlanes_bitpacked` write and **17,6 %**
-        // of a `dict_nullable_codes` one, and this array is the first of its two sources. The two
+        // Uninitialized, because `PackBlock` clears its own destination before it ORs into it, so
+        // every byte returned here would be written twice and zeroed once for nothing -- and
+        // zeroing is a large share of what a bit-packed or dictionary-coded write spends. The two
         // early returns below are the empty array in both cases -- `BlockByteLength(0)` is 0, and
         // `length == 0` gives no blocks -- so nothing is ever returned unwritten.
         byte[] destination = GC.AllocateUninitializedArray<byte>(
             checked((int)((long)blocks * FastLanes.BlockByteLength(bitWidth))));
-        // WIDTH ZERO STILL WALKS: a column packed at zero bits is a constant with exceptions, and the
-        // exceptions are exactly what the loop below has to find. Only an empty column has nothing
-        // to look at. The packed bytes are empty either way -- `BlockByteLength(0)` is 0 -- and the
-        // pack itself is skipped block by block below.
+        // Width zero still walks: a column packed at zero bits is a constant with exceptions, and
+        // the exceptions are exactly what the loop below has to find. Only an empty column has
+        // nothing to look at. The packed bytes are empty either way -- `BlockByteLength(0)` is 0 --
+        // and the pack itself is skipped block by block below.
         if (length == 0)
         {
             return destination;
@@ -471,10 +453,8 @@ internal static class ArrayBlobWriter
         int blockBytes = FastLanes.BlockByteLength(bitWidth);
         int elementBits = ptype.ByteWidth() * 8;
 
-        // BOTH SCRATCH BUFFERS ARE RENTED AND LIVE FOR THE WHOLE COLUMN. `block` was allocated per
-        // column, but the NARROW copy inside `PackInto` was allocated per 1024-ROW BLOCK -- a fresh
-        // `byte[1024]`, `ushort[1024]` or `uint[1024]` for every block of every bit-packed column
-        // in the file. The narrow buffer is sized in BYTES here so one rental serves whichever
+        // Both scratch buffers are rented once and live for the whole column rather than for one
+        // block, and the narrow one is sized in bytes so a single rental serves whichever element
         // width the column turns out to be.
         // An exception is a transformed value at or above 2^width; at the element's own width
         // nothing can be one, and the chooser then counted none.
@@ -491,19 +471,16 @@ internal static class ArrayBlobWriter
                 int start = b * FastLanes.BlockSize;
                 int count = Math.Min(FastLanes.BlockSize, length - start);
 
-                // ONLY THE TAIL OF THE LAST BLOCK NEEDS CLEARING. The loop below writes every one
-                // of the block's 1 024 slots when the block is full, which is every block but the
-                // last; clearing the whole 8 KiB each time was zeroing bytes that were about to be
-                // overwritten -- a megabyte of `wide` cleared per 128 blocks, for one partial block
-                // at the end of the column.
+                // Only the tail of the last block needs clearing: the loop below writes every slot
+                // of a full block, which is every block but the last, so clearing the whole block
+                // each time would zero bytes that are about to be overwritten.
                 if (count < FastLanes.BlockSize)
                 {
                     wide[count..].Clear();
                 }
 
-                // TWO METHODS, NEITHER INLINED: with the masked loop left in this one, the lanes'
-                // call moved its code enough to cost `chunked_mixed_validity` 14 % on the blocks
-                // that still take it, bytes unchanged.
+                // Two methods, neither inlined: with both loops in one body the masked path's code
+                // crowds the lanes' and slows the blocks that take them, for identical bytes.
                 if (mask.AllValid)
                 {
                     TransformValid(values, ptype, start, count, plan, elementBits, wide);
@@ -513,11 +490,10 @@ internal static class ArrayBlobWriter
                     TransformMasked(values, in mask, ptype, start, count, plan, elementBits, wide);
                 }
 
-                // THE PATCHES ARE GATHERED FROM `wide`, IN A LOOP OF THEIR OWN, and not from the
-                // transform loop above with a branch per row: stage R5b-2 put the test inside that
-                // loop and a trace of `chunked` showed `Pack` at four times its former share, the
-                // same effect a never-taken branch had on the bounds loop (R7c). The block's 1 024
-                // transformed values are in L1, a second walk over them costs their compares and
+                // The patches are gathered from `wide` in a loop of their own, and not from the
+                // transform loop above with a branch per row: a per-row test there costs the pack
+                // several times over, even when the branch is never taken. The block's transformed
+                // values are still in cache, a second walk over them costs their compares and
                 // nothing else, and it runs only when the chooser counted an exception at all. A
                 // null row is zero, zero always fits, so a null is never a patch.
                 if (patching)
@@ -551,11 +527,11 @@ internal static class ArrayBlobWriter
     }
 
     /// <summary>
-    /// The transform of an all-valid block applied on the load (docs/11-write-strategy.md §4.2):
-    /// two 64-bit values or four 32-bit ones per step, widened into <paramref name="wide"/>.
+    /// The transform of an all-valid block applied on the load: two 64-bit values or four 32-bit
+    /// ones per step, widened into <paramref name="wide"/>.
     /// </summary>
     /// <remarks>
-    /// THE ELEMENT WIDTH'S OWN ARITHMETIC IS THE MASK. <see cref="BitPackPlan.Encode"/> computes
+    /// The element width's own arithmetic is the mask. <see cref="BitPackPlan.Encode"/> computes
     /// in 64 bits and masks to the element width; a 32-bit lane wraps at 32 bits and its arithmetic
     /// shift by 31 is the sign word, so its result, zero-extended, is the same number. Only the
     /// low word of the reference takes part, which is all the mask kept of it. The narrower widths
@@ -780,21 +756,19 @@ internal static class ArrayBlobWriter
     }
 
     /// <remarks>
-    /// ARITHMETIC RATHER THAN A SWITCH, and the enum is what makes it legitimate: U8..U64 are 0..3
+    /// Arithmetic rather than a switch, and the enum is what makes it legitimate: U8..U64 are 0..3
     /// and I8..I64 are 4..7, so the signed block sits exactly <c>I8</c> above the unsigned one --
-    /// the same fact <see cref="PTypeExtensions.IsSignedInteger"/> is already written from. Four
-    /// mappings enumerated by hand said nothing this does not, and left the other seven PTypes to a
-    /// <c>_</c> arm that read as a fallthrough.
+    /// the same fact <see cref="PTypeExtensions.IsSignedInteger"/> is already written from. Naming
+    /// the four mappings by hand would say nothing more and would leave every other PType to a
+    /// <c>_</c> arm that reads as a fallthrough.
     /// </remarks>
     private static PType ToUnsigned(PType ptype) =>
         ptype.IsSignedInteger() ? (PType)(ptype - PType.I8) : ptype;
 
     /// <remarks>
-    /// WHAT THIS FAMILY OF COPIES COSTS, measured: doubling all twelve of them, together with the
-    /// zero bitmap an all-null validity writes, moves the write allocation axes by 32 to 192 bytes
-    /// each and by 712 on the widest of them -- a tenth of a per cent. A node's metadata is a
-    /// handful of protobuf fields, and there are as many of these per file as there are nodes, not
-    /// as there are rows.
+    /// The copy out of the protobuf writer is deliberately left alone: a node's metadata is a
+    /// handful of fields, and there are as many of these per file as there are nodes, not as there
+    /// are rows.
     /// </remarks>
     private static byte[] BitPackedBytes(uint bitWidth, bool hasPatches, in PatchesMetadata patches)
     {
@@ -813,36 +787,27 @@ internal static class ArrayBlobWriter
         }
     }
 
-    /// <summary>
-    /// The FoR reference: a bare protobuf ScalarValue, without its dtype.
-    /// </summary>
-    /// <remarks>
-    /// An EMPTY metadata decodes to a null reference, which the reference implementation's own
-    /// validate_parts rejects with "Reference value cannot be null" -- so this is one of the places
-    /// where writing nothing is not the same as writing the default.
-    /// </remarks>
     /// <summary>Nodes a metadata store has to hold, which is two.</summary>
     /// <remarks>
-    /// PERF-AUDIT-v2.md W-3. `new ScalarStore()` is five allocations, not one -- the store, a
-    /// `ScalarNode[16]`, an `int[16]`, a `byte[64]` and a `DType[4]` -- and its default capacity is
-    /// sized for a file's statistics, not for the two integers these two helpers put in it. Measured
-    /// at **992 bytes** per node written with a frame of reference or a sequence, which is 1,8 % of
-    /// `table_wide`'s whole write, 1,1 % of `table_mixed`'s and 4,7 % of a file that is nothing but
-    /// a sequence column. At four it is **416 bytes**.
-    ///
-    /// FOUR AND NOT TWO because the constructor floors it there anyway. The store still grows if
-    /// something ever puts more in it, so this is a size hint and not an invariant.
-    ///
-    /// THE REST OF THE POINT IS DELIBERATELY NOT DONE. Reusing one store instead of sizing it would
-    /// take the remaining 416 bytes, and the audit proposes a field with `Clear()` -- but the only
-    /// correct home for it is `VortexFileWriter`, because `[ThreadStatic]` is banned in this project
-    /// (RS0030, and the reason is exactly this library: an `await` can separate taking the state
-    /// from finishing with it). Getting a field from there to here means a parameter through
-    /// `WriteCompressed`, which has six callers of its own, and about thirty signatures in all. That
-    /// is not a trade worth making for the 0,3 to 0,5 % of a write that is left.
+    /// A default-sized <c>ScalarStore</c> is several arrays at once, dimensioned for a file's
+    /// statistics rather than for the two integers these helpers put in it, and one is built per
+    /// node written with a frame of reference or a sequence. Four and not two because the
+    /// constructor floors it there anyway; the store still grows if something ever puts more in it,
+    /// so this is a size hint and not an invariant.
+    /// <para>
+    /// Sharing one store instead would mean threading a field through the whole writer, since
+    /// <c>[ThreadStatic]</c> cannot hold it — an <c>await</c> can separate taking the state from
+    /// finishing with it — and the saving left does not pay for that many signatures.
+    /// </para>
     /// </remarks>
     private const int Scalars = 4;
 
+    /// <summary>The frame-of-reference value: a bare protobuf ScalarValue, without its dtype.</summary>
+    /// <remarks>
+    /// An empty metadata decodes to a null reference, which the reference implementation rejects
+    /// outright -- so this is one of the places where writing nothing is not the same as writing
+    /// the default.
+    /// </remarks>
     private static byte[] ReferenceBytes(ulong reference, PType ptype)
     {
         ScalarStore store = new ScalarStore(Scalars);
@@ -854,11 +819,10 @@ internal static class ArrayBlobWriter
 
     /// <summary>Widens a narrow signed value's raw bits back to 64 bits.</summary>
     /// <remarks>
-    /// THE WIDTH IS THE ANSWER, not the tag: shifting the value up to the top of a 64-bit word and
-    /// back down arithmetically is what sign extension IS, and it is written once instead of once
-    /// per narrow signed type. The three cases a switch spelled out were I8, I16 and I32 -- that
-    /// is <c>ByteWidth</c> 1, 2 and 4 -- and everything else returned its bits unchanged, which
-    /// here is the shift of zero that <c>I64</c> produces.
+    /// The width is the answer, not the tag: shifting the value up to the top of a 64-bit word and
+    /// back down arithmetically is what sign extension is, written once instead of once per narrow
+    /// signed type. <c>I64</c> falls out of it as a shift of zero, and an unsigned type returns its
+    /// bits unchanged.
     /// </remarks>
     private static ulong SignExtend(ulong bits, PType ptype)
     {
@@ -876,7 +840,7 @@ internal static class ArrayBlobWriter
     /// </summary>
     /// <remarks>
     /// The shape is the one FsstDecoder reads, and its unusual property is worth restating at the
-    /// writing end: THE ROW BOUNDARIES ARE ON THE DECODED SIDE. `codes_offsets` bounds each row's
+    /// writing end: the row boundaries are on the decoded side. `codes_offsets` bounds each row's
     /// codes, but the reader decompresses the whole stream in one pass and then cuts the result
     /// with `uncompressed_lengths` - so the lengths are not a hint, they are the only thing that
     /// says where a value ends, and they must account for the decoded heap exactly.
@@ -906,9 +870,8 @@ internal static class ArrayBlobWriter
         int symbolBuffer = buffers.Count - 1;
         buffers.Add(new PendingBuffer(symbolLengths, 0));
         int lengthBuffer = buffers.Count - 1;
-        // No copy: `FsstPlan` now keeps a code array of exactly `CodeLength` bytes, because the
-        // oversized one it used to carry was a rental it had to let go of anyway. This line was
-        // PERF-AUDIT §4.3's `WriteFsst (:469)`.
+        // No copy: `FsstPlan` keeps a code array of exactly `CodeLength` bytes, so the buffer goes
+        // straight into the blob.
         buffers.Add(new PendingBuffer(plan.Codes, 0));
         int codeBuffer = buffers.Count - 1;
 
@@ -959,9 +922,9 @@ internal static class ArrayBlobWriter
         EncodingDictionary encodings)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
-        // THE FRAME IS THE POOL'S, AND OWNERSHIP MOVES HERE. `ZstdPlan` kept the buffer it
-        // compressed into rather than copying it out; from this line the plan's `Frame` must not be
-        // read again, and `Write` is what hands it back after the blob has been laid out.
+        // The frame is the pool's, and ownership moves here: `ZstdPlan` keeps the buffer it
+        // compressed into rather than copying it out, so from this line the plan's `Frame` must not
+        // be read again, and `Write` is what hands it back after the blob has been laid out.
         buffers.Add(new PendingBuffer(plan.Frame, plan.FrameLength, 0, rented: true));
         int frameBuffer = buffers.Count - 1;
 
@@ -1011,10 +974,9 @@ internal static class ArrayBlobWriter
     /// Writes <c>vortex.alp</c>: no buffers, and one, three or four children.
     /// </summary>
     /// <remarks>
-    /// There is NO validity child, and that is not an omission. The decoder takes the array's
-    /// validity off the ENCODED child - `decompress_unchunked_core` does - so an ALP array's
-    /// nullability rides on the integers, and writing a validity child here would leave the real
-    /// one unread.
+    /// There is no validity child, and that is not an omission: the decoder takes the array's
+    /// validity off the encoded child, so an ALP array's nullability rides on the integers, and
+    /// writing a validity child here would leave the real one unread.
     ///
     /// The encoded child goes through the compressor like any other column, which is where the
     /// saving actually lands: ALP turns doubles into small integers, and frame-of-reference plus
@@ -1036,7 +998,7 @@ internal static class ArrayBlobWriter
         // The dtype arena is the column's own: a DType carries the arena it belongs to, and a
         // node whose dtype came from a different one would not compare equal downstream.
         DType encodedType = node.DType.Arena.Primitive(plan.EncodedPType, node.DType.Nullability);
-        // Uninitialized: the CopyTo on the next line fills it whole (WRITE-ARCHITECTURE.md §3.6).
+        // Uninitialized: the CopyTo on the next line fills it whole.
         VortexBuffer encodedBuffer = arena.AllocateUninitialized(
             plan.Encoded.Length, plan.EncodedPType.ByteWidth(), out Span<byte> destination);
         plan.Encoded.CopyTo(destination);
@@ -1089,7 +1051,7 @@ internal static class ArrayBlobWriter
     /// Writes <c>vortex.sequence</c>: no children, no buffers, the whole column in the metadata.
     /// </summary>
     /// <remarks>
-    /// The one encoding here that REPLACES a node rather than wrapping one, so it has no overhead
+    /// The one encoding here that replaces a node rather than wrapping one, so it has no overhead
     /// to weigh against: the primitive node and its buffer both disappear.
     ///
     /// There is no validity child because there is nowhere to put one - the encoding has neither
@@ -1132,7 +1094,7 @@ internal static class ArrayBlobWriter
 
         // Both fields are bare ScalarValues, and the base is interpreted against the array's own
         // dtype - so its signedness must match the column's, exactly as the frame of reference's
-        // does. The multiplier's does not: the wire preserves the STEP's signedness, and the
+        // does. The multiplier's does not: the wire preserves the step's own signedness, and the
         // decoder reads its physical type from the proto tag rather than from the dtype.
         ScalarValue baseValue = ptype.IsSignedInteger()
             ? store.Int64(unchecked((long)plan.BaseBits))
@@ -1201,14 +1163,14 @@ internal static class ArrayBlobWriter
         int entries = arena.GetNode(values).Length;
         PType codesPType = IndexPType(entries);
 
-        // is_nullable_codes = false: a null row is a code pointing at a null DICTIONARY ENTRY, not
+        // is_nullable_codes = false: a null row is a code pointing at a null dictionary entry, not
         // a null code. Nullness is part of the value the compressor deduplicated, so at most one
         // entry is null and every row still has a code.
         byte[] metadata = DictBytes((uint)entries, codesPType);
 
         // The codes are the table's own buffer when the table chose the plan -- one code per row,
-        // written by the probe as the rows arrived, never copied (docs/11 §3.5) -- and the plan's
-        // array when the reference chooser walked for them.
+        // written by the probe as the rows arrived, never copied -- and the plan's array when the
+        // reference chooser walked for them.
         ReadOnlySpan<int> codeOfRow = plan.Table is not null
             ? plan.Table.Codes[..plan.Rows]
             : plan.Codes.AsSpan(0, plan.Rows);
@@ -1239,16 +1201,14 @@ internal static class ArrayBlobWriter
         _ => PType.U32,
     };
 
-    /// <summary>Writes an int array as a non-nullable primitive node of the narrowest width.</summary>
     /// <summary>
-    /// Writes a column of indices - dictionary codes, run ends - THROUGH THE COMPRESSOR.
+    /// Writes a column of indices - dictionary codes, run ends - through the compressor.
     /// </summary>
     /// <remarks>
-    /// This is the cascade docs/90-registry.md has been calling "where the rest lives": codes are
-    /// the one part of a dictionary that costs a byte per ROW rather than per distinct value, and
-    /// they are the most bit-packable data in the file by construction - non-negative, dense, and
-    /// bounded by the entry count. A column with 1153 distinct values carries u16 codes and needs
-    /// eleven bits.
+    /// Codes are the one part of a dictionary that costs a byte per row rather than per distinct
+    /// value, and they are the most bit-packable data in the file by construction - non-negative,
+    /// dense, and bounded by the entry count. A column with a thousand-odd distinct values carries
+    /// u16 codes and needs eleven bits.
     ///
     /// Legal because the reader derives the codes child's dtype from the metadata's
     /// `codes_ptype` and then decodes it like any other child: `fastlanes.for` over
@@ -1265,7 +1225,7 @@ internal static class ArrayBlobWriter
     {
         int width = ptype.ByteWidth();
 
-        // Uninitialized: `WriteIndices` writes every byte of it (WRITE-ARCHITECTURE.md §3.6).
+        // Uninitialized: `WriteIndices` writes every byte of it.
         VortexBuffer buffer = arena.AllocateUninitialized(
             values.Length * width, width, out Span<byte> destination);
         WriteIndices(values, width, destination);
@@ -1280,13 +1240,11 @@ internal static class ArrayBlobWriter
     /// sizes - through the compressor, without copying it.
     /// </summary>
     /// <remarks>
-    /// docs/90-registry.md used to say offsets and sizes "are index machinery, and they are small".
-    /// The first half is true and the second is not: a list of 8193 rows carries 8193 offsets and
-    /// 8193 sizes, 64 kB between them, against elements that may be a fraction of that. They are
+    /// Offsets and sizes are index machinery, but they are not small: a list carries one of each
+    /// per row, which between them can outweigh elements that are a fraction of a word. They are
     /// also the most compressible data in the file - offsets are monotone by construction, and a
     /// list of fixed-width rows has offsets that are an exact arithmetic progression and sizes that
-    /// are constant, which is to say both are `vortex.sequence` and cost nothing at all. The
-    /// reference bit-packs them; `types/list_i32_nonnull_r8193` was 1.95x our size because of it.
+    /// are constant, which is to say both are `vortex.sequence` and cost nothing at all.
     ///
     /// Validity bitmaps are still written raw. They genuinely are small - one bit per row - and
     /// they are the one child the compressor has no scheme for.
@@ -1304,21 +1262,19 @@ internal static class ArrayBlobWriter
         return WriteCompressed(builder, arena, node, buffers, encodings, cascade: cascade);
     }
 
-    /// <summary>Writes an index per element, filling EVERY byte of <paramref name="destination"/>.</summary>
+    /// <summary>Writes an index per element, filling every byte of <paramref name="destination"/>.</summary>
     /// <remarks>
-    /// THE 8-BYTE CASE IS NOT DEAD CODE, it is the eligibility argument. Its callers hand widths of
-    /// 1, 2 or 4 today -- <c>IndexPType</c> tops out at <c>u32</c>, and the varbin path refuses a
-    /// heap above <c>int.MaxValue</c> before it picks a type -- but this function now writes into
-    /// buffers from <c>CanonicalArena.AllocateUninitialized</c>, whose contract is "provably writes
-    /// every byte, not probably" (its own docstring). A <c>default</c> arm writing four bytes into
-    /// an eight-byte slot would put pooled bytes from another file into a column the day a caller
-    /// passes <c>u64</c>, and the only oracle for that is the Rust cross-check.
-    /// </remarks>
-    /// <remarks>
-    /// The width switch is inside the loop and it does not matter: doubling this whole call costs
-    /// 0,2 ms of a 14,3 ms `dict_u8_codes` write, one and a half per cent, under the bar the plan
-    /// sets for the per-row family. The index arrays are short -- one entry a patch, one a
-    /// dictionary entry -- so what would be a per-row switch elsewhere is a per-entry one here.
+    /// The 8-byte case is not dead code, it is the eligibility argument. Its callers hand widths of
+    /// 1, 2 or 4 -- <c>IndexPType</c> tops out at <c>u32</c>, and the varbin path refuses a heap
+    /// above <c>int.MaxValue</c> before it picks a type -- but this writes into buffers from
+    /// <c>CanonicalArena.AllocateUninitialized</c>, whose contract is that every byte is provably
+    /// written. A <c>default</c> arm writing four bytes into an eight-byte slot would put pooled
+    /// bytes from another file into a column the day a caller passes <c>u64</c>.
+    /// <para>
+    /// The width switch is inside the loop and it does not matter: the index arrays are short --
+    /// one entry a patch, one a dictionary entry -- so what would be a per-row switch elsewhere is
+    /// a per-entry one here.
+    /// </para>
     /// </remarks>
     private static void WriteIndices(ReadOnlySpan<int> values, int width, Span<byte> destination)
     {
@@ -1418,12 +1374,11 @@ internal static class ArrayBlobWriter
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
 
-        // EXHAUSTIVE BY CONSTRUCTION (PERF-AUDIT-v2.md §2.4bis, Z1b-c1), and this is the site where
-        // it matters most. Every kind is NAMED and the `_` arm throws; it used to be
-        // `default: WriteExtension`, so a tenth kind was written as `vortex.ext` -- a COHERENT file
-        // carrying the wrong array, which byte-exact WrittenSizeTests cannot catch because the
-        // bytes agree with themselves. IDE0072 -- error, see .editorconfig -- now fails the build
-        // when a named kind is missing.
+        // Exhaustive by construction, and this is the site where it matters most. Every kind is
+        // named and the `_` arm throws: a `default` arm that fell through to one of the encodings
+        // would write a new kind as the wrong array and produce a coherent file, which the
+        // byte-exact size tests cannot catch because the bytes agree with themselves. The analyzer
+        // that demands every named kind is an error here, so a missing one fails the build.
         return node.Kind switch
         {
             CanonicalKind.Null => Node(builder, encodings, "vortex.null"u8, default, [], []),
@@ -1432,10 +1387,10 @@ internal static class ArrayBlobWriter
             CanonicalKind.Decimal => WriteDecimal(builder, arena, node, buffers, encodings),
             CanonicalKind.VarBinView => WriteVarBinView(builder, arena, node, buffers, encodings),
 
-            // A map node IS a ListView wearing the map dtype - see MapDecoder - so the kind alone
-            // does not say which id to write. Emitting `vortex.listview` under a map schema
-            // produces a file THIS READER REFUSES, correctly: "vortex.listview produces a List
-            // dtype; it was asked for Map".
+            // A map node is a ListView wearing the map dtype, so the kind alone does not say which
+            // id to write. Emitting `vortex.listview` under a map schema produces a file this
+            // reader refuses, correctly: the encoding yields a List dtype where a Map was asked
+            // for.
             CanonicalKind.ListView => node.DType.Kind == DTypeKind.Map
                 ? WriteMap(builder, arena, node, buffers, encodings, compress, stats)
                 : WriteListView(builder, arena, node, buffers, encodings, compress, stats),
@@ -1443,7 +1398,7 @@ internal static class ArrayBlobWriter
             CanonicalKind.FixedSizeList =>
                 WriteFixedSizeList(builder, arena, node, buffers, encodings, compress, stats),
 
-            // THE DTYPE DECIDES, as it does for a map above: a Struct wearing a VARIANT dtype is a
+            // The dtype decides, as it does for a map above: a Struct wearing a variant dtype is a
             // variant column in this library's canonical form, and writing it as `vortex.struct`
             // would produce a file whose array says "two fields" and whose schema says "variant" --
             // which every reader, this one included, refuses.
@@ -1468,25 +1423,21 @@ internal static class ArrayBlobWriter
     /// <param name="nodeIndex">The node about to be compressed and written.</param>
     /// <returns>A node index the rest of the writer already knows how to handle.</returns>
     /// <remarks>
-    /// PERF-AUDIT-v2.md Z1b-c2b, AND THE CHOICE IS THE POINT. The design note says the writer
-    /// "converts"; converting to WHAT was the ambiguity. Emitting `vortex.constant` on the wire
-    /// would make the file smaller -- a real gain, and a different one: Z1b's claim is the memory a
-    /// reader holds, not the size of a file. It would also move `WrittenSizeTests`, whose whole
-    /// value is being byte-exact, and folding a size change into a memory refactor is how a
-    /// regression hides behind an improvement.
+    /// Expanded rather than emitted as `vortex.constant`. Writing the constant encoding on the wire
+    /// would make the file smaller, but that is a change of size, while the constant form exists to
+    /// spare the memory a reader holds; folding the two together is how a regression hides behind
+    /// an improvement.
     /// <para>
     /// So the element is expanded back to the form the writer already emits, and the file does not
     /// depend on how the read stored the column: the canonicalizer keeps the element and the writer
     /// tiles it to the buffer a primitive would have arrived in.
-    /// `ConstantFormTests.WritingBackIsDeterministic` is what makes that a measured fact rather
-    /// than a claim.
     /// </para>
     /// <para>
-    /// THE EXPANSION ITSELF IS THE ARENA'S, not a second copy here. This used to tile the element
-    /// with the element's own LENGTH as the buffer alignment, which is a power of two for every
-    /// primitive and is 3 or 14 for a string -- so the day the constant form learned strings, the
-    /// writer refused its own file. One expansion, in one place, is what stops the reader's form
-    /// and the writer's from drifting apart again.
+    /// The expansion itself is the arena's, not a second copy here. Tiling the element at this end
+    /// means choosing a buffer alignment, and the element's own length is not one: it is a power of
+    /// two for a primitive and anything at all for a string, so the writer would refuse its own
+    /// file. One expansion, in one place, keeps the reader's form and the writer's from drifting
+    /// apart.
     /// </para>
     /// </remarks>
     internal static int Materialize(CanonicalArena arena, int nodeIndex) =>
@@ -1555,7 +1506,7 @@ internal static class ArrayBlobWriter
     }
 
     /// <remarks>
-    /// Chooses between the two serializations of a binary column, which is a SIZE decision and not
+    /// Chooses between the two serializations of a binary column, which is a size decision and not
     /// a compression one.
     ///
     /// A canonical VarBinView costs 16 bytes of view per row whatever the values are; `vortex.varbin`
@@ -1565,7 +1516,7 @@ internal static class ArrayBlobWriter
     /// varbinview and is usually much better. The reference reaches the same conclusion: every
     /// plain binary and utf8 column in the corpus is written `vortex.varbin`.
     ///
-    /// What it costs US is a copy: the view form can hand the existing data buffers straight to the
+    /// What it costs here is a copy: the view form can hand the existing data buffers straight to the
     /// writer, and this has to gather the values into one heap. That is paid once at write time for
     /// a saving every reader keeps.
     /// </remarks>
@@ -1580,7 +1531,7 @@ internal static class ArrayBlobWriter
             return varbin;
         }
 
-        // Data buffers first, views LAST: the reader reaches for views at index `dataBufferCount`.
+        // Data buffers first, views last: the reader reaches for views at index `dataBufferCount`.
         ushort[] indices = new ushort[dataCount + 1];
         for (int i = 0; i < dataCount; i++)
         {
@@ -1635,10 +1586,9 @@ internal static class ArrayBlobWriter
             return false;
         }
 
-        // Uninitialized and written ONCE. `heapBytes` is the sum of the valid values' lengths, so
-        // the loop below fills exactly this array; it was allocated zeroed and then copied whole a
-        // second time by a `ToArray()` that served nothing -- WRITE-ARCHITECTURE.md §3.6 measures
-        // that pair at `fsst` allocating 103 MB to write 52.
+        // Uninitialized and written once. `heapBytes` is the sum of the valid values' lengths, so
+        // the loop below fills exactly this array; zeroing it first and then copying it out again
+        // would roughly double what writing a string column allocates.
         byte[] heap = GC.AllocateUninitializedArray<byte>(Math.Max((int)heapBytes, 1));
         int[] offsets = GC.AllocateUninitializedArray<int>(rows + 1);
         int written = 0;
@@ -1732,9 +1682,10 @@ internal static class ArrayBlobWriter
 
     /// <summary>
     /// What a test installs to see every list chunk's elements beside the summary the chooser is
-    /// handed for them (docs/11 §3.2.4): the arena, the elements node, and the summary, absent when
-    /// the chooser measures. It flows with the async write, as <c>ColumnCompressor.Differential</c>
-    /// does, so two tests writing at once never see each other's chunks.
+    /// handed for them: the arena, the elements node, and that summary, which is absent when the
+    /// chooser has to walk the elements itself. It flows with the async write, as
+    /// <c>ColumnCompressor.Differential</c> does, so two tests writing at once never see each
+    /// other's chunks.
     /// </summary>
     internal static readonly System.Threading.AsyncLocal<Action<CanonicalArena, int, BlockStats>?> ElementsHanded =
         new System.Threading.AsyncLocal<Action<CanonicalArena, int, BlockStats>?>();
@@ -1753,10 +1704,10 @@ internal static class ArrayBlobWriter
     }
 
     /// <remarks>
-    /// THE ELEMENTS ARE A COLUMN WITH STATISTICS OF THEIR OWN (docs/11 §3.2.4, step 28): the
-    /// ingest summarized them into the list's blocks, so the chooser reads them as it reads a
-    /// struct field's — when the blocks name exactly the elements this chunk holds, which the
-    /// cursor checks, and measures them otherwise.
+    /// The elements are a column with statistics of their own: the ingest summarized them into the
+    /// list's blocks, so the chooser reads them as it reads a struct field's — when the blocks name
+    /// exactly the elements this chunk holds, which the cursor checks — and walks them itself
+    /// otherwise.
     /// </remarks>
     private static int WriteListView(
         FlatBufferBuilder builder, CanonicalArena arena, CanonicalNode node,
@@ -1805,11 +1756,11 @@ internal static class ArrayBlobWriter
     /// Writes a variant column as <c>vortex.parquet.variant</c>: the unshredded metadata and value.
     /// </summary>
     /// <remarks>
-    /// ONE SPELLING OUT, TWO IN. Both `vortex.variant` and `vortex.parquet.variant` decode to
+    /// One spelling out, two in. Both `vortex.variant` and `vortex.parquet.variant` decode to
     /// `Struct{metadata, value}`, and the information that distinguished them -- whether the value
     /// arrived as a typed scalar or as bytes -- is gone by then, because the canonical form is the
     /// bytes. So everything goes out as the parquet spelling, which is the one that stores exactly
-    /// what this form holds. A file round-trips to a DIFFERENT ENCODING and the same values, which
+    /// what this form holds. A file round-trips to a different encoding and the same values, which
     /// is what `vortex.varbin` already does (it reads as a VarBinView and writes as one).
     /// </remarks>
     private static int WriteParquetVariant(
@@ -1871,8 +1822,8 @@ internal static class ArrayBlobWriter
         List<PendingBuffer> buffers, EncodingDictionary encodings, bool compress,
         ChunkStats stats = default)
     {
-        // A struct puts its validity FIRST, unlike every other canonical kind
-        // (vortex-array's slot_to_child: `nullable.then_some(0)`).
+        // A struct puts its validity first, unlike every other canonical kind; upstream's own
+        // child-slot mapping does the same.
         int fields = node.FieldCount;
         int[] children = new int[fields + 1];
         Span<int> validity = stackalloc int[1];
@@ -1940,13 +1891,12 @@ internal static class ArrayBlobWriter
 
             case ValidityKind.AllInvalid:
             {
-                // NOT omittable: without the child the reader derives AllValid and every null row
+                // Not omittable: without the child the reader derives AllValid and every null row
                 // comes back as a zero that claims to be present.
                 //
                 // Allocated rather than taken from a shared array of zeros or from the pool: an
-                // all-null column is one node's worth of bitmap, and doubling this allocation
-                // alongside the twelve metadata copies moves the widest write allocation axis by
-                // 712 bytes of 709 152.
+                // all-null column is one node's worth of bitmap, which is not where a write spends
+                // its allocations.
                 int bytes = CanonicalSupport.BitmapByteCount(node.Length);
                 byte[] zeros = new byte[Math.Max(bytes, 1)];
                 destination[0] = BitmapNode(builder, buffers, encodings, zeros);
@@ -1983,7 +1933,7 @@ internal static class ArrayBlobWriter
             builder, encodings.Intern(idUtf8), metadata, children, bufferIndices, statsOffset: 0);
 
     /// <summary>
-    /// Records a buffer the arena already owns, as a VIEW: the blob copies it once, not twice.
+    /// Records a buffer the arena already owns, as a view: the blob copies it once, not twice.
     /// </summary>
     private static int Buffer(List<PendingBuffer> buffers, VortexBuffer buffer, int alignmentExponent)
     {
@@ -2049,13 +1999,11 @@ internal static class ArrayBlobWriter
     /// <summary>One serialized array, in a buffer the caller gives back.</summary>
     /// <remarks>
     /// <para>
-    /// PERF-AUDIT-v2.md W-4. A blob was <c>new byte[total]</c>, allocated and dropped once per
-    /// column per chunk — 20 of them and 305 kio for a 65 536-row rewrite, 950 and 5,1 Mio for a
-    /// million-row <c>varbinview</c>. None of it survives the <c>WriteAsync</c> that consumes it,
-    /// so none of it needs to be allocated.
+    /// The blob is rented rather than allocated: there is one per column per chunk, and none of
+    /// them survives the <c>WriteAsync</c> that consumes it, so none of them needs to be allocated.
     /// </para>
     /// <para>
-    /// THE LENGTH IS SEPARATE FROM THE ARRAY, for the same reason
+    /// The length is separate from the array, for the same reason
     /// <see cref="PendingBuffer.Length"/> is: a rented array is at least as long as asked for and
     /// usually longer, so <c>Bytes.Length</c> is not the number of bytes that belong in the file.
     /// Every consumer takes <see cref="Memory"/> or <see cref="Length"/> and never the array's own.
@@ -2088,24 +2036,21 @@ internal static class ArrayBlobWriter
         }
     }
 
-    /// <summary>One buffer waiting to be laid into the blob, and whether the pool owns it.</summary>
-    /// <remarks>
-    /// THE LENGTH IS SEPARATE FROM THE ARRAY because of <see cref="Rented"/>: an array from
-    /// `ArrayPool` is at least as long as asked for and usually longer, so `Bytes.Length` stops
-    /// being the number of bytes that belong in the file the moment one of these is pooled.
-    /// PERF-AUDIT-v2.md W-5.
-    /// </remarks>
     /// <summary>One buffer waiting to be placed in the blob: either bytes, or a view onto them.</summary>
     /// <remarks>
-    /// A VIEW, WHEREVER THE BYTES ALREADY EXIST — docs/11-write-strategy.md §3.5, and
-    /// WRITE-ARCHITECTURE.md §3.6 is the measurement that asks for it. A canonical column's values,
-    /// views, data buffers and validity bits are all already in the arena, correctly laid out, and
-    /// they were being copied into a fresh <c>byte[]</c> with <c>ToArray()</c> and then copied AGAIN
-    /// into the blob. The array served nothing: the blob is assembled before <c>Write</c> returns,
-    /// while the arena that owns the bytes is still alive by construction.
+    /// A view wherever the bytes already exist. A canonical column's values, views, data buffers
+    /// and validity bits are all in the arena, correctly laid out, so copying them into a fresh
+    /// <c>byte[]</c> only to copy that again into the blob would serve nothing: the blob is
+    /// assembled before <c>Write</c> returns, while the arena that owns the bytes is still alive by
+    /// construction.
     /// <para>
-    /// The bytes form stays for the buffers a scheme actually PRODUCES — a packed block, an FSST
+    /// The bytes form stays for the buffers a scheme actually produces — a packed block, an FSST
     /// symbol table, a zstd frame — which have no home but their own array.
+    /// </para>
+    /// <para>
+    /// The length is separate from the array because of <see cref="Rented"/>: an array from
+    /// <c>ArrayPool</c> is at least as long as asked for and usually longer, so <c>Bytes.Length</c>
+    /// stops being the number of bytes that belong in the file the moment one of these is pooled.
     /// </para>
     /// </remarks>
     private readonly struct PendingBuffer

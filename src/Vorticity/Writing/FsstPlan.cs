@@ -1,9 +1,3 @@
-// One column, compressed with FSST, ready to serialize.
-//
-// The plan is built during Choose rather than during the write for one reason: deciding whether
-// FSST pays MEANS compressing the column. There is no cheap estimate - the whole question is how
-// well a trained table covers this particular data - so the work is done once and the bytes are
-// kept, rather than done twice.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -13,7 +7,11 @@ using Vorticity.Types;
 
 namespace Vorticity.Writing;
 
-/// <summary>A column's FSST encoding: the table, the code stream, and the two index children.</summary>
+/// <summary>
+/// A column's FSST encoding: the table, the code stream, and the two index children. The plan is
+/// built while choosing an encoding because deciding whether FSST pays means compressing the
+/// column, so the bytes are kept rather than produced twice.
+/// </summary>
 internal sealed class FsstPlan
 {
     private FsstPlan(
@@ -27,19 +25,17 @@ internal sealed class FsstPlan
         EncodedSize = encodedSize;
     }
 
-    /// <summary>The trained symbol table.</summary>
     internal FsstSymbols Table { get; }
 
     /// <summary>The concatenated code stream; only the first <see cref="CodeLength"/> bytes are live.</summary>
     internal byte[] Codes { get; }
 
-    /// <summary>How many bytes of <see cref="Codes"/> are live.</summary>
     internal int CodeLength { get; }
 
     /// <summary>Where each row's codes begin, plus a final total: <c>rows + 1</c> entries.</summary>
     internal int[] Offsets { get; }
 
-    /// <summary>Each row's DECODED length. The row boundaries live on the decoded side.</summary>
+    /// <summary>Each row's decoded length; the row boundaries live on the decoded side.</summary>
     internal int[] Lengths { get; }
 
     /// <summary>Total bytes this encoding will occupy, table and children included.</summary>
@@ -47,23 +43,10 @@ internal sealed class FsstPlan
 
     /// <summary>
     /// Trains a table on the column and compresses it, or returns null when FSST does not pay.
+    /// <paramref name="sizeCeiling"/> is also an abort threshold: the caller derives it from every
+    /// bar the plan has to clear, and since the encoded size is never below the code stream's own
+    /// length, a stream past the ceiling is already a decided loss.
     /// </summary>
-    /// <param name="arena">The arena holding the column.</param>
-    /// <param name="nodeIndex">A canonical VarBinView node.</param>
-    /// <param name="sizeCeiling">
-    /// The largest <see cref="EncodedSize"/> worth returning. The caller derives it from every bar
-    /// the plan has to clear, so this method neither knows nor applies a margin of its own.
-    /// </param>
-    /// <returns>The plan, or null when it cannot come in at or below the ceiling.</returns>
-    /// <remarks>
-    /// THE CEILING IS ALSO AN ABORT THRESHOLD, and that is most of what it is for. Pricing FSST
-    /// means training a symbol table and then compressing the ENTIRE column, which was 54% of the
-    /// write profile on a file whose one text column FSST then LOST - the caller prices zstd too,
-    /// and threw the whole result away. <see cref="EncodedSize"/> is never below the code stream's
-    /// own length, so the moment the stream passes the ceiling the plan is already rejected and the
-    /// remaining rows cannot change that. Stopping there is not an approximation: the answer is the
-    /// same null it would have returned after compressing the rest.
-    /// </remarks>
     internal static FsstPlan? TryBuild(CanonicalArena arena, int nodeIndex, long sizeCeiling)
     {
         if (sizeCeiling <= 0)
@@ -74,35 +57,14 @@ internal sealed class FsstPlan
         CanonicalNode node = arena.GetNode(nodeIndex);
         int rows = node.Length;
 
-        // THE ROW TABLES ALONE CAN ALREADY LOSE, and that is decidable before a single byte is
-        // trained or compressed. `EncodedSize` is
-        //
-        //     table.Count * (MaxSymbolLength + 1) + written + rows * Width(max length)
-        //         + (rows + 1) * Width(written)
-        //
-        // in which the first two terms are non-negative and `Width` never returns less than one --
-        // `IndexPType(0)` is `U8` -- so `EncodedSize >= 2 * rows + 1` for every possible outcome.
-        // When that floor is already past the ceiling, no training run and no code stream can bring
-        // it back, so this returns exactly the null the full attempt would have returned.
-        //
-        // It is not a heuristic and it cannot drop a winner: the bound is a floor on the real
-        // value, not an estimate of it. What it buys is the case the profile actually shows -- a
-        // dictionary's VALUES child, a couple of hundred rows against a ceiling of a couple of
-        // hundred bytes, where FSST is trained and run in full every chunk to lose by arithmetic
-        // that was decided in advance (PERF-GAPS.md W1.2: -1.0 ms on `dict_u8_codes`, -2.4 on
-        // `onpair`).
+        // The two row tables alone put a floor of `2 * rows + 1` on the encoded size, since every
+        // index width is at least one byte. This is a floor on the real value rather than an
+        // estimate, so it cannot drop a winner: past the ceiling, no training run can bring it back.
         if ((2L * rows) + 1 > sizeCeiling)
         {
             return null;
         }
 
-        // ONE HEAP, NOT ONE ARRAY PER ROW. This was `ValueOf(node, i).ToArray()` per row: a managed
-        // allocation for every string in the column, 65 536 of them on the witness file, which is
-        // most of what puts the write path at 314x the read path's allocation and 43% of its time
-        // inside the finalizer queue. The values have to be copied at all only because they live in
-        // NATIVE arena buffers and `ReadOnlyMemory<byte>` cannot point at those -- so they are
-        // copied once, contiguously, and the rows become slices of that.
-        // Resolved once: the validity KIND belongs to the node and was being switched on per row.
         ValidityReader valid = ValidityReader.Of(arena, node.Validity);
         long plain = 0;
         for (int i = 0; i < rows; i++)
@@ -118,15 +80,9 @@ internal sealed class FsstPlan
             return null;
         }
 
-        // EVERYTHING TRANSIENT IS RENTED, because most of this work is thrown away: FSST is PRICED
-        // against zstd and against the plain form, and on a column it loses the heap, the row
-        // table and the code stream are all garbage the moment `null` is returned. On a megabyte
-        // text column each of those is a large-object allocation, and together they were most of
-        // why the write profile spent 14% of itself inside the pool trimmer that a Gen2 collection
-        // runs.
-        //
-        // A row is two ints into the heap rather than a `ReadOnlyMemory<byte>`, which also removes
-        // the per-row memory struct and the `List` that held them.
+        // Everything transient is rented: the values live in native arena buffers and have to be
+        // copied to be trained on, and the heap, row table and code stream are all garbage the
+        // moment this column is priced against zstd and loses.
         int heapBytes = Math.Max((int)plain, 1);
         byte[] heap = ArrayPool<byte>.Shared.Rent(heapBytes);
         int[] starts = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
@@ -137,9 +93,8 @@ internal sealed class FsstPlan
             int at = 0;
             for (int i = 0; i < rows; i++)
             {
-                // A null row contributes nothing to the corpus AND nothing to the stream: its
-                // bytes are unspecified, and encoding them would pay for values no reader will
-                // ever ask for. It still occupies a row slot, of length zero.
+                // A null row's bytes are unspecified, so it contributes nothing to the corpus and
+                // nothing to the stream, but it still occupies a row slot of length zero.
                 starts[i] = at;
                 if (!valid.IsValid(i))
                 {
@@ -160,8 +115,7 @@ internal sealed class FsstPlan
                 return null;
             }
 
-            // An escape costs two bytes, so the worst case is twice the input; sized once for the
-            // whole column rather than per row.
+            // An escape costs two bytes, so the worst case is twice the input.
             codes = ArrayPool<byte>.Shared.Rent((int)Math.Max(plain * 2, 1));
             int[] offsets = new int[rows + 1];
             int written = 0;
@@ -172,8 +126,6 @@ internal sealed class FsstPlan
                 written += table.Compress(
                     heap.AsSpan(starts[i], lengths[i]), codes.AsSpan(written));
 
-                // The code stream alone is already a lower bound on EncodedSize, so a stream past
-                // the ceiling is a decided loss whatever the remaining rows do.
                 if (written > sizeCeiling)
                 {
                     return null;
@@ -186,10 +138,8 @@ internal sealed class FsstPlan
                 + ((long)rows * Width(MaxOf(lengths)))
                 + ((long)(rows + 1) * Width(written));
 
-            // THE KEPT ARRAY IS EXACT. The rental is sized for the worst case -- twice the column
-            // -- and a stream that compressed at all uses a fraction of it, so the plan copies out
-            // what is live instead of carrying the rest into the writer. `ArrayBlobWriter` used to
-            // make that copy itself, one line later.
+            // The rental is sized for the worst case, so the kept array is an exact copy of what is
+            // live rather than the rest of the rental carried into the writer.
             return encoded <= sizeCeiling
                 ? new FsstPlan(table, codes.AsSpan(0, written).ToArray(), written, offsets, lengths, encoded)
                 : null;
@@ -207,8 +157,6 @@ internal sealed class FsstPlan
     }
 
     /// <summary>The narrowest unsigned physical type that holds <paramref name="maximum"/>.</summary>
-    /// <param name="maximum">The largest value the array carries.</param>
-    /// <returns>The physical type.</returns>
     internal static PType IndexPType(long maximum) => maximum switch
     {
         <= byte.MaxValue => PType.U8,
@@ -218,8 +166,6 @@ internal sealed class FsstPlan
     };
 
     /// <summary>The largest value in <paramref name="values"/>, or zero.</summary>
-    /// <param name="values">The array to scan.</param>
-    /// <returns>The maximum.</returns>
     internal static long MaxOf(int[] values)
     {
         long maximum = 0;
@@ -236,14 +182,11 @@ internal sealed class FsstPlan
 
     private static int Width(long maximum) => IndexPType(maximum).ByteWidth();
 
-    /// <summary>Whether row <paramref name="row"/> of a canonical varbinview node holds a value.</summary>
-    /// <remarks>
-    /// WHAT THE SWITCH COST WHERE IT WAS, measured by doubling this call on a million-row `fsst`
-    /// write: +2,3 ms on 57,1 and +3,1 on 56,1, four to five and a half per cent of the axis. The
-    /// callers inside this file and in the zstd plan now resolve a reader once per node instead,
-    /// which took that write from 56 523 to 54 129 us and a `varbin` one from 34 730 to 31 962.
-    /// This stays for the callers that ask about one row rather than a run of them.
-    /// </remarks>
+    /// <summary>
+    /// Whether row <paramref name="row"/> of a canonical varbinview node holds a value. This is for
+    /// callers asking about one row; a run of rows should resolve a <see cref="ValidityReader"/>
+    /// once per node instead of switching on the validity kind per row.
+    /// </summary>
     internal static bool IsValid(CanonicalArena arena, CanonicalNode node, int row)
     {
         Validity validity = node.Validity;

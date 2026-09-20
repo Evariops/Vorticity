@@ -1,46 +1,3 @@
-// The running distinct table of docs/11-write-strategy.md §3.2.2: one per column, opened with a
-// chunk's first row and closed with the chunk, mapping each value to the CODE it was handed in
-// order of first appearance -- which is exactly what `ColumnCompressor.Dictionary` computed by
-// walking the assembled chunk at emit time, moved to where the rows arrive.
-//
-// WHY IT MOVES. The probe was 21 % to 57 % of the write on every string-bearing encoding of the axis
-// (57 % of `dict`, 50 % of `onpair`, 43 % of `varbinview`), measured by running it twice. Not because
-// hashing is slow but because it was a WHOLE SECOND WALK over a column the ingest pass had just read
-// -- and, on the columns where the dictionary loses, a walk to discover that it loses. Here the
-// value is already in a register when the statistics pass loads it; probing it is the hash and one
-// compare, on rows that are in cache for free. §3.2.2's other consumers -- the Bloom sizing, the
-// postings and sorted-run builders of docs/10-indexes.md §7 -- are fed from this same table, which
-// is why 10 §7.3 can say that no index builder adds a pass over the column.
-//
-// IT OWNS ITS KEYS AND NEVER REFERENCES A ROW OF THE BATCH, because a chunk straddles batches and
-// the previous batch's arena is recycled the moment the next one is decoded. A string's bytes are
-// copied into the key heap the first time the value is seen, one copy per DISTINCT value, and the
-// heap in code order is what the dictionary's values child becomes (§3.5): `BuildValues` lays the
-// entries out as a canonical column straight from the table, and the gather over the chunk's rows
-// that used to produce that child is not made. What the table does keep per row is the row's
-// chunk-relative POSITION: `FirstRows[code]` is where a code first occurred, kept for the reference
-// chooser and the differential that compares the two.
-//
-// THE LIFETIME IS THE CHUNK'S, AND THE CHUNK IS DECIDED LATE. The writer emits all the WHOLE blocks
-// pending when the byte threshold is crossed and carries the partial tail into the next chunk
-// (`VortexFileWriter.EmitBlockAsync`), so by the time a chunk closes this table has already probed
-// rows that belong to the next one. First-seen order makes half of that harmless: the codes the
-// chunk's rows use are exactly [0, C) where C is the count when its last block closed, so the tail's
-// entries sit above C and are simply not part of the chunk. The other half is not harmless -- a tail
-// row may hold a value whose first occurrence was EMITTED, and in the next chunk that value is new
-// -- so the tail is re-probed into a fresh table after every emission. It is less than a block.
-//
-// CODES ARE BYTE-IDENTICAL TO TODAY'S BY CONSTRUCTION: `code = distinct++` in row order is the rule
-// of the walk this replaces, and the hash decides which slot a value lands in and nothing else. The
-// one place the plan could differ is the entry cap, which the old walk did not have: a chunk with
-// more than `MaxEntries` distinct values loses its dictionary candidate here where the old walk
-// would have priced it. On this corpus it does not happen, and `WrittenSizeTests` is what says so.
-//
-// EVERY BUFFER IS RENTED PER CHUNK AND RETURNED AT RESET, as the walk's were: the old form rented
-// three `int[rows]` per chunk and returned them, so a thousand columns shared one pool, and
-// `WriteAllocationTests` holds the writer to that. A first version allocated the slot arrays with
-// `new` and held them per column, and a high-cardinality column of 8 193 rows cost a megabyte of
-// garbage against a 70 kB ceiling.
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -54,21 +11,20 @@ using Vorticity.Types.Numerics;
 
 namespace Vorticity.Writing;
 
-/// <summary>A column's distinct values over one chunk, with a code per row, built as rows arrive.</summary>
+/// <summary>
+/// A column's distinct values over one chunk, with a code per row in order of first appearance,
+/// built as rows arrive. The table owns its keys and never references a row of the batch, because a
+/// chunk straddles batches and the previous batch's arena is recycled as soon as the next one is
+/// decoded; a chunk's tail carried into the next chunk is re-probed into a fresh table.
+/// </summary>
 internal sealed class DistinctTable
 {
-    /// <summary>Slots at open, doubled as entries grow; a low-cardinality column stays here.</summary>
     private const int InitialCapacity = 64;
 
     /// <summary>
     /// Entries beyond which the chunk refuses its dictionary candidate rather than keep growing.
+    /// This is a bound on memory, not a pricing rule; pricing is the chooser's.
     /// </summary>
-    /// <remarks>
-    /// The writer's budget of §3.2.2, in entries rather than bytes for now. A dictionary with a
-    /// million entries wins only on a chunk with many more rows than that, which
-    /// <c>DataBlockTargetBytes</c> does not produce; the cap is a safety bound on memory, not a
-    /// pricing rule, and the pricing rule -- the exact size formula -- is the chooser's.
-    /// </remarks>
     private const int MaxEntries = 1 << 20;
 
     /// <summary>A view is sixteen bytes: length, then twelve of value inline or a buffer and an offset.</summary>
@@ -76,17 +32,12 @@ internal sealed class DistinctTable
 
     private enum Shape : byte
     {
-        /// <summary>A bool column: the key is the bit.</summary>
         Bits,
 
         /// <summary>One, two, four or eight bytes: the key is the value's bits, zero-extended.</summary>
         Fixed,
 
-        /// <summary>
-        /// The key is a byte string owned in the heap: a view column's values, or a decimal wider
-        /// than a word -- i128 and i256 are sixteen and thirty-two bytes, and a key that does not
-        /// fit a slot is a key that lives in the heap, whatever its dtype.
-        /// </summary>
+        /// <summary>A key that does not fit a slot, whatever its dtype: it lives in the heap.</summary>
         Bytes,
     }
 
@@ -96,10 +47,8 @@ internal sealed class DistinctTable
     /// <summary>Bytes per value for a fixed-width column, 0 for a view column.</summary>
     private readonly int _width;
 
-    // THE SLOTS, as parallel arrays rather than a struct array so that the probe touches only the
-    // arrays its shape needs. `_slotCode` is code + 1 so that zero means empty and the clear at
-    // reset is one memset. The capacity is `_mask + 1`, never an array's length: a rented array is
-    // as long as the pool felt like.
+    // `_slotCode` holds code + 1 so that zero means empty. The capacity is `_mask + 1`, never an
+    // array's length: a rented array is as long as the pool felt like.
     private int[] _slotCode;
     private ulong[] _slotKey;
     private int[]? _slotOffset;
@@ -109,9 +58,8 @@ internal sealed class DistinctTable
     private byte[]? _heap;
     private int _heapUsed;
 
-    // PER CODE, what the values child needs: the row of first occurrence, and the key itself --
-    // the word for a fixed-width kind, the heap span for a byte kind -- in code order, which is
-    // the order the entries are written in.
+    // Per code, in code order: the row of first occurrence and the key itself -- the word for a
+    // fixed-width kind, the heap span for a byte kind.
     private int[] _firstRows;
     private ulong[] _codeKey;
     private int[]? _codeOffset;
@@ -147,7 +95,7 @@ internal sealed class DistinctTable
     /// <summary>Distinct values seen, the null counting as one.</summary>
     internal int Distinct => _distinct;
 
-    /// <summary>For a view column, the bytes of the distinct non-null values: the heap's size.</summary>
+    /// <summary>For a view column, the bytes of the distinct non-null values.</summary>
     internal long HeapBytes => _heapUsed;
 
     /// <summary>
@@ -165,24 +113,18 @@ internal sealed class DistinctTable
     /// A table for the column <paramref name="node"/> is an instance of, or <see langword="null"/>
     /// for a kind that has no row equality and is offered no dictionary.
     /// </summary>
-    /// <param name="node">Any node of the column; only its kind and width are read.</param>
     internal static DistinctTable? For(CanonicalNode node) => node.Kind switch
     {
-        // NO TABLE BELOW THREE BYTES OF WIDTH, and it is arithmetic, not policy: a column of `w`
-        // bytes has at most 2^(8w) distinct values, so its codes are `w` bytes wide too -- as wide
-        // as the values they replace -- and the entries and the framing come on top. A dictionary
-        // of a bool, a byte or a short can never be smaller than the column, so a table over one
-        // is a hash and a probe per row for a verdict the chooser reaches without it. The end-of-
-        // refactor measurement priced that at ×6 to ×9,5 on the bool family.
+        // No table below three bytes of width, by arithmetic rather than policy: a column of `w`
+        // bytes has at most 2^(8w) distinct values, so its codes are `w` bytes wide too and the
+        // entries and framing come on top. Such a dictionary can never be smaller than the column.
         CanonicalKind.Bool => null,
         CanonicalKind.Primitive => node.PType.ByteWidth() <= 2
             ? null
             : new DistinctTable(Shape.Fixed, node.Kind, node.PType.ByteWidth()),
 
-        // A constant batch wears the canonical constant form, whose dtype is Primitive by
-        // construction (ConstantCanonicalizer builds it for no other kind); the next batch of the
-        // same column may well be an ordinary primitive, so the table is the PRIMITIVE one and the
-        // constant is a way of feeding it, not a kind of its own.
+        // The next batch of the same column may be an ordinary primitive, so a constant batch feeds
+        // the primitive table rather than getting a table of its own.
         CanonicalKind.Constant => node.DType.PType.ByteWidth() <= 2
             ? null
             : new DistinctTable(Shape.Fixed, CanonicalKind.Primitive, node.DType.PType.ByteWidth()),
@@ -194,25 +136,18 @@ internal sealed class DistinctTable
     };
 
     /// <summary>
-    /// Whether a column of this kind gets a table at all — the kinds the chooser offers a
-    /// dictionary, so that the writer can count a chunk the table failed to serve.
+    /// Whether a column of this kind gets a table at all, so that the writer can count a chunk the
+    /// table failed to serve.
     /// </summary>
-    /// <param name="kind">The chunk's canonical kind, as the emitter sees it.</param>
     internal static bool Serves(CanonicalKind kind) => kind is CanonicalKind.Bool
         or CanonicalKind.Primitive or CanonicalKind.Constant or CanonicalKind.Decimal
         or CanonicalKind.VarBinView;
 
     /// <summary>
-    /// Rents the chunk's buffers on its first probe, sized by the previous chunk's needs.
+    /// Rents the chunk's buffers on its first probe, sized by the previous chunk's needs. Buffers
+    /// are rented per chunk and returned at reset rather than held per column, so that a thousand
+    /// columns share one pool.
     /// </summary>
-    /// <remarks>
-    /// RENTED PER CHUNK AND RETURNED AT RESET, not held per column for the writer's lifetime -- the
-    /// discipline the walk this replaces had, and the one docs/11-write-strategy.md §3.7 asks for:
-    /// a thousand columns share one pool, not a thousand tables. Sized from the last chunk so that
-    /// a steady column rents once and grows never; the very first chunk of a column starts small
-    /// and doubles, which is the price of not knowing.
-    /// </remarks>
-    /// <param name="rows">Rows the first range brings, a floor for the codes buffer.</param>
     private void Open(int rows)
     {
         int capacity = Math.Max(
@@ -235,9 +170,7 @@ internal sealed class DistinctTable
         _codes = ArrayPool<int>.Shared.Rent(Math.Max(Math.Max(256, rows), _lastRows));
     }
 
-    /// <summary>
-    /// Forgets the chunk: every buffer back to the pool, its size remembered for the next one.
-    /// </summary>
+    /// <summary>Forgets the chunk: every buffer back to the pool, its size kept for the next one.</summary>
     internal void Reset()
     {
         _lastDistinct = _distinct;
@@ -283,10 +216,6 @@ internal sealed class DistinctTable
     /// Probes rows <c>[start, start + count)</c> of <paramref name="node"/>, in order, as the next
     /// rows of the chunk.
     /// </summary>
-    /// <param name="arena">The arena holding the batch.</param>
-    /// <param name="node">The column inside the batch.</param>
-    /// <param name="start">First row of the range, inside the node.</param>
-    /// <param name="count">How many rows.</param>
     internal void Probe(CanonicalArena arena, CanonicalNode node, int start, int count)
     {
         if (_abandoned || count <= 0)
@@ -297,9 +226,8 @@ internal sealed class DistinctTable
         bool constant = node.Kind == CanonicalKind.Constant;
         if ((constant ? CanonicalKind.Primitive : node.Kind) != _kind)
         {
-            // The schema is the file's and does not change between batches; a node of another
-            // kind is not a state this can be in, and abandoning is the answer that costs a pass
-            // rather than a wrong plan.
+            // The schema is the file's and does not change between batches, so a node of another
+            // kind is not a state this can be in; abandoning costs a pass rather than a wrong plan.
             _abandoned = true;
             return;
         }
@@ -349,29 +277,11 @@ internal sealed class DistinctTable
     /// <summary>
     /// The dictionary's values child, laid out in code order straight from what the table owns:
     /// the entries <c>[0, entries)</c> as a canonical column of <paramref name="column"/>'s kind,
-    /// with the null entry null.
+    /// with the null entry null. <paramref name="entries"/> is the code count at the chunk's last
+    /// block close; codes above it belong to the carried tail. The child's validity has to be
+    /// chosen exactly as a filter over the first row of each code would choose it, since the wire
+    /// form of the child depends on which of the three forms it takes.
     /// </summary>
-    /// <remarks>
-    /// THE SAME COLUMN THE GATHER USED TO PRODUCE, without the gather. `CanonicalFilter.Apply` over
-    /// the first rows of each code read every entry back out of the chunk and, for strings, copied
-    /// its view while sharing the chunk's whole heap; this writes the entry from the key the table
-    /// already owns, and for strings the data buffer is the key heap itself -- exactly the entries'
-    /// bytes, in code order, which is what the varbin form of the child writes either way.
-    /// <para>
-    /// THE VALIDITY IS THE FILTER'S, RULE FOR RULE: a column whose validity is not a bitmap keeps
-    /// it; a bitmap column whose entries hold no null becomes all-valid, one whose only entry is
-    /// the null all-invalid, and any other gets a bitmap with one bit clear. The wire form of the
-    /// child depends on which of the three it is, so the choice has to be the same choice.
-    /// </para>
-    /// <para>
-    /// A NULL ENTRY'S PAYLOAD IS ZERO. The gather copied whatever bytes the null row happened to
-    /// hold; the format says nothing about them and nothing reads them. Sizes are identical.
-    /// </para>
-    /// </remarks>
-    /// <param name="arena">The arena the child is built in — the chunk's.</param>
-    /// <param name="column">The chunk's own node, for its dtype, width and validity.</param>
-    /// <param name="entries">How many codes are the chunk's: the count at its last block's close.</param>
-    /// <returns>The child's node index.</returns>
     internal int BuildValues(CanonicalArena arena, in CanonicalNode column, int entries)
     {
         Validity validity = ValuesValidity(arena, column.Validity, entries);
@@ -394,10 +304,8 @@ internal sealed class DistinctTable
 
             case Shape.Fixed:
             {
-                // UNINITIALIZED, AND EVERY BYTE WRITTEN BELOW: the trace of the write axis charged
-                // `ZeroMemoryNative` a third of a second per eight on a dictionary column, for
-                // buffers this method overwrites whole the moment it gets them. Only the bitmaps,
-                // where a clear bit is a value, are still zeroed.
+                // Uninitialized because the loop below writes every byte. Only the bitmaps, where a
+                // clear bit is a value, are still zeroed.
                 VortexBuffer values = arena.AllocateUninitialized(
                     entries * _width, _width, out Span<byte> destination);
                 for (int code = 0; code < entries; code++)
@@ -425,9 +333,8 @@ internal sealed class DistinctTable
                 int[] lengths = _codeLength!;
                 if (_width > 0)
                 {
-                    // A wide decimal: the key heap holds each value at its full width, so the
-                    // child's buffer is the entries gathered from it by code. Every slot is written
-                    // -- copied, or cleared for the null entry -- so nothing is zeroed up front.
+                    // A wide decimal: the key heap holds each value at its full width. Every slot is
+                    // written, copied or cleared for the null entry, so nothing is zeroed up front.
                     VortexBuffer values = arena.AllocateUninitialized(
                         entries * _width, _width, out Span<byte> wide);
                     for (int code = 0; code < entries; code++)
@@ -448,18 +355,17 @@ internal sealed class DistinctTable
                         column.Scale, values);
                 }
 
-                // Strings: the heap is the data buffer, the views point into it. The heap is copied
-                // into the arena once -- it is a rented buffer that goes back to the pool at reset,
-                // and the child has to outlive that.
+                // Strings: the heap is the data buffer and the views point into it. It is copied
+                // into the arena because the key heap is rented and goes back to the pool at reset,
+                // which the child has to outlive.
                 int heapBytes = 0;
                 for (int code = 0; code < entries; code++)
                 {
                     heapBytes += lengths[code] > 12 ? lengths[code] : 0;
                 }
 
-                // BOTH BUFFERS UNINITIALIZED: the heap is written end to end by the copies, and
-                // every one of a view's sixteen bytes is written below -- the inline padding
-                // included, explicitly, rather than by clearing the whole buffer first.
+                // Both buffers uninitialized: the copies write the heap end to end, and every one
+                // of a view's bytes is written below, the inline padding explicitly included.
                 VortexBuffer heap = VortexBuffer.Empty;
                 Span<byte> data = default;
                 if (heapBytes > 0)
@@ -497,9 +403,7 @@ internal sealed class DistinctTable
         }
     }
 
-    /// <summary>
-    /// The values child's validity, chosen as <c>CanonicalFilter.FilterValidity</c> chooses it.
-    /// </summary>
+    /// <summary>The values child's validity, chosen as a filter over the entries would choose it.</summary>
     private Validity ValuesValidity(CanonicalArena arena, Validity validity, int entries)
     {
         if (validity.Kind != ValidityKind.Bitmap)
@@ -535,9 +439,8 @@ internal sealed class DistinctTable
     }
 
     /// <summary>
-    /// A constant range: one element, <paramref name="count"/> rows. The element is probed once and
-    /// its code repeated, which is the whole point of the form -- the column is never materialized
-    /// to be read row by row.
+    /// A constant range: the element is probed once and its code repeated, so the column is never
+    /// materialized to be read row by row.
     /// </summary>
     private void ProbeConstant(CanonicalNode node, in ValidityMask mask, int start, int count)
     {
@@ -592,12 +495,11 @@ internal sealed class DistinctTable
         }
     }
 
-    /// <summary>The physical width resolved once; the loop reads the bits, whatever they mean.</summary>
-    /// <remarks>
-    /// A float column is probed by its raw bits (§3.2.4), which is also what the row comparer this
-    /// replaces did: <c>-0.0</c> and <c>+0.0</c> are two values, and every NaN payload is its own.
-    /// That is what makes the codes identical rather than merely equivalent.
-    /// </remarks>
+    /// <summary>
+    /// The physical width resolved once; the loop reads the bits, whatever they mean. A float
+    /// column is keyed by its raw bits, so <c>-0.0</c> and <c>+0.0</c> are two values and every NaN
+    /// payload is its own.
+    /// </summary>
     private void ProbeFixed<T>(CanonicalNode node, in ValidityMask mask, int start, int count)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
@@ -651,8 +553,6 @@ internal sealed class DistinctTable
                 continue;
             }
 
-            // The same resolution `RowComparer.Bytes` makes: a view is the length, then either the
-            // value inline or a (buffer, offset) pair into the column's data buffers.
             ReadOnlySpan<byte> view = views.Slice((start + i) * ViewSize, ViewSize);
             int size = BinaryPrimitives.ReadInt32LittleEndian(view);
             if (size <= 12)
@@ -668,8 +568,8 @@ internal sealed class DistinctTable
     }
 
     /// <summary>
-    /// A null row: the null is a value like any other, with a code of its own, so that a nullable
-    /// dictionary has at most one null entry and every row still has a code.
+    /// The null is a value like any other, with a code of its own, so a nullable dictionary has at
+    /// most one null entry and every row still has a code.
     /// </summary>
     private void NullRow()
     {
@@ -741,9 +641,6 @@ internal sealed class DistinctTable
                     return;
                 }
 
-                // COPIED ONCE, HERE, and never again: this is the one copy per distinct value the
-                // header promises, and the heap it lands in is the values child's data buffer in
-                // waiting.
                 int offset = Append(bytes);
                 _slotCode[slot] = code + 1;
                 _slotKey[slot] = hash;
@@ -756,8 +653,8 @@ internal sealed class DistinctTable
                 return;
             }
 
-            // EQUALITY IS ON BYTES, never on the hash alone: the stored hash and the length are
-            // the two cheap rejections in front of the compare, not a substitute for it.
+            // Equality is on bytes: the stored hash and the length are cheap rejections in front of
+            // the compare, never a substitute for it.
             if (_slotKey[slot] == hash && lengths[slot] == bytes.Length
                 && _heap.AsSpan(offsets[slot], bytes.Length).SequenceEqual(bytes))
             {
@@ -844,8 +741,8 @@ internal sealed class DistinctTable
     }
 
     /// <summary>
-    /// Doubles the slots once the load passes one half, re-inserting from the stored key or hash --
-    /// never from the bytes, which is the point of storing the hash.
+    /// Doubles the slots once the load passes one half, re-inserting from the stored key or hash
+    /// rather than from the bytes, which is the point of storing the hash.
     /// </summary>
     private void GrowIfLoaded()
     {

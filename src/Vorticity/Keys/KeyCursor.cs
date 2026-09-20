@@ -1,10 +1,3 @@
-// The order model - docs/12-index-reads.md §4. The scan answers "which rows"; a cursor answers
-// "what is next", which no set can.
-//
-// THE SURFACE IS THE SAME WHATEVER SERVES IT. A sorted column walks as one contiguous run; sorted
-// runs walk as a k-way merge. The cursor checks the arguments and the lifetime, and the source
-// (`KeySource`) walks: the argument rules of §4.1 -- a key of the column's domain, never null -- and
-// "not positioned" are the same for every source, and are said once here.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,9 +7,16 @@ namespace Vorticity.Keys;
 
 /// <summary>A position in one column's entries, in key order.</summary>
 /// <remarks>
-/// Not thread-safe, like the builder that made it. Every positioning method is asynchronous
-/// because it may read a zone or a run the file has not loaded yet; a step inside a loaded one
-/// completes synchronously and allocates nothing.
+/// A scan answers "which rows"; a cursor answers "what is next", which no set of rows can. The
+/// surface is the same whatever serves it: a sorted column walks as one contiguous run, sorted runs
+/// walk as a k-way merge. The cursor itself only checks the arguments and the lifetime — a key of
+/// the column's domain, never null, and a position to be on — so those rules are stated once here
+/// and the source does the walking.
+/// <para>
+/// Not thread-safe, like the builder that made it. Every positioning method is asynchronous because
+/// it may read a zone or a run the file has not loaded yet; a step inside a loaded one completes
+/// synchronously and allocates nothing.
+/// </para>
 /// </remarks>
 public sealed class KeyCursor : IAsyncDisposable
 {
@@ -35,7 +35,7 @@ public sealed class KeyCursor : IAsyncDisposable
 
     /// <summary>
     /// Whether an entry can say which file row it came from: false for a <c>Distinct()</c> cursor
-    /// served by postings or a dictionary, which hold keys without rows (docs/12-index-reads.md §4.3).
+    /// served by postings or a dictionary, which hold keys without rows.
     /// </summary>
     public bool HasRows => _source.HasRows;
 
@@ -46,9 +46,9 @@ public sealed class KeyCursor : IAsyncDisposable
     public bool IsDistinct => _distinct;
 
     /// <summary>
-    /// For a composite key, what its bytes follow -- the writer's <c>IKeyEncoder.Format</c>, e.g.
-    /// <c>vortex-row 0.86.1 asc-nf,asc-nf</c>; a seek key is comparable only when built the same
-    /// way. Null for a single column.
+    /// For a composite key, what its bytes follow -- the writer's <c>IKeyEncoder.Format</c>, which
+    /// names the encoding and the per-column direction and null placement. A seek key is comparable
+    /// only when built the same way. Null for a single column.
     /// </summary>
     public string? KeyFormat => _source.KeyFormat;
 
@@ -105,18 +105,17 @@ public sealed class KeyCursor : IAsyncDisposable
     }
 
     /// <summary>
-    /// Orders two keys in the total order of docs/12-index-reads.md §4.4, so that a consumer
-    /// merging two cursors does not write a comparator that disagrees with theirs.
+    /// Orders two keys in the keys' own total order, so that a consumer merging two cursors does
+    /// not write a comparator that disagrees with theirs.
     /// </summary>
     /// <param name="left">One key.</param>
     /// <param name="right">The other, of the same domain.</param>
     /// <returns>The sign of <c>left - right</c>.</returns>
     /// <remarks>
-    /// THIS IS THE TOTAL ORDER, which separates <c>-0.0</c> from <c>+0.0</c> and places NaN at the
-    /// ends, and it is the order sorted runs are in. A cursor over a sorted COLUMN walks the order
-    /// its file is actually in, which is IEEE, so on that source the two zeros are one key and no
-    /// NaN occurs at all -- a float column holding one is not <c>is_sorted</c>. The two orders
-    /// differ nowhere else.
+    /// The total order separates <c>-0.0</c> from <c>+0.0</c> and places NaN at the ends, and it is
+    /// the order sorted runs are in. A cursor over a sorted column walks the order its file is
+    /// actually in, which is IEEE, so on that source the two zeros are one key and no NaN occurs at
+    /// all -- a float column holding one is not marked sorted. The two orders differ nowhere else.
     /// </remarks>
     /// <exception cref="ArgumentException">The two keys are of different domains.</exception>
     public static int Compare(FilterLiteral left, FilterLiteral right) => KeyOrder.Total(left, right);
@@ -141,7 +140,7 @@ public sealed class KeyCursor : IAsyncDisposable
 
     /// <summary>
     /// A distinct cursor's backward landing, moved to its key's first entry: a backward seek lands
-    /// on a key's last one, and a distinct entry is the key's first (§4.4).
+    /// on a key's last one, and a distinct entry is the key's first.
     /// </summary>
     private async ValueTask<bool> FirstOfKeyAsync(ValueTask<bool> landing, CancellationToken cancellationToken) =>
         await landing.ConfigureAwait(false)
@@ -182,7 +181,7 @@ public sealed class KeyCursor : IAsyncDisposable
             return new ValueTask<bool>(false);
         }
 
-        // A distinct step is a seek past the key's other entries (§4.2).
+        // A distinct step is a seek past the key's other entries.
         if (_distinct)
         {
             Diagnostics.VortexEventSource.Seek();
@@ -200,7 +199,7 @@ public sealed class KeyCursor : IAsyncDisposable
     /// <returns>Whether there was one; the cursor is invalid past the start.</returns>
     /// <remarks>
     /// Over sorted runs, stepping against the direction of the last step re-seeks at the current
-    /// entry (docs/12-index-reads.md §4.2): a min-heap of run positions does not run backwards.
+    /// entry: a min-heap of run positions does not run backwards.
     /// </remarks>
     public ValueTask<bool> PrevAsync(CancellationToken cancellationToken = default)
     {
@@ -233,7 +232,7 @@ public sealed class KeyCursor : IAsyncDisposable
         return _source.IsValid ? _source.NextKeyAsync(cancellationToken) : new ValueTask<bool>(false);
     }
 
-    /// <summary>Steps to the LAST entry of the previous distinct key.</summary>
+    /// <summary>Steps to the last entry of the previous distinct key.</summary>
     /// <param name="cancellationToken">Cancels the reads this makes.</param>
     /// <returns>Whether there was a previous key.</returns>
     public ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken = default)
@@ -243,7 +242,7 @@ public sealed class KeyCursor : IAsyncDisposable
         return _source.IsValid ? _source.PrevKeyAsync(cancellationToken) : new ValueTask<bool>(false);
     }
 
-    /// <summary>How many entries have a key below <paramref name="key"/> (docs/12 §4.5).</summary>
+    /// <summary>How many entries have a key below <paramref name="key"/>.</summary>
     /// <param name="key">The key to rank, in the column's domain.</param>
     /// <param name="cancellationToken">Cancels the reads this makes.</param>
     /// <returns>The rank, between zero and <see cref="EntryCount"/>.</returns>

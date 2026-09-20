@@ -1,14 +1,3 @@
-// What a caller asks for, per column, from docs/10-indexes.md §5.5 and §7.1.
-//
-// THE DECISION IS WHEN TO ABANDON, NEVER WHEN TO START. `Auto` starts every cheap builder at block
-// 0 and drops the ones the statistics disqualify or the budget refuses, which is what lets block 0
-// be indexed like every other block -- a policy that decided at block 0 would have to decide on
-// nothing. Everything abandoned is named in the `WriteReport` with its reason, so a caller who
-// expected an index learns why there is none instead of inferring it from a slow scan.
-//
-// A POLICY IS ALSO WIRE FORMAT: it is serialized into the directory so that an append reuses it
-// without being told (§4.1 `bytes policy`, §7.1 `Append(path)`). That is why the options are plain
-// integers with fixed meanings and not a lambda.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -24,19 +13,19 @@ public enum IndexPolicyKind
     /// <summary>Every cheap builder starts; the statistics and the budget decide what survives.</summary>
     Auto = 1,
 
-    /// <summary>A split-block Bloom filter (docs/10-indexes.md §5.1).</summary>
+    /// <summary>A split-block Bloom filter.</summary>
     Bloom = 2,
 
-    /// <summary>A trigram Bloom for <c>LIKE</c> (§5.2).</summary>
+    /// <summary>A trigram Bloom for <c>Like</c>.</summary>
     NgramBloom = 3,
 
-    /// <summary>Value to blocks (§6.1).</summary>
+    /// <summary>Value to blocks.</summary>
     Postings = 4,
 
-    /// <summary>Value to rows, exact (§6.2).</summary>
+    /// <summary>Value to rows, exact.</summary>
     SortedRuns = 5,
 
-    /// <summary>Trigram to blocks (§6.4).</summary>
+    /// <summary>Trigram to blocks.</summary>
     NgramPostings = 6,
 }
 
@@ -44,8 +33,8 @@ public enum IndexPolicyKind
 public enum BloomHash
 {
     /// <summary>
-    /// XxHash3-64, the default and what <c>vortex.bloom_filter.sbbf</c> uses at 0.86.1, so our
-    /// filter is bit-identical to the reference's for as long as upstream keeps its layout.
+    /// XxHash3-64, the default and the hash the reference split-block filter uses, so a filter
+    /// built here is bit-identical to one built there.
     /// </summary>
     XxHash3 = 0,
 
@@ -57,6 +46,15 @@ public enum BloomHash
 }
 
 /// <summary>The index policy of one column.</summary>
+/// <remarks>
+/// A policy decides when to abandon an index, never when to start one: <see cref="Auto"/> starts
+/// every cheap builder at the first block and drops the ones the statistics disqualify or the
+/// budget refuses, which is what lets the first block be indexed like every other. Everything
+/// abandoned is named in the write report with its reason, so a caller who expected an index learns
+/// why there is none. A policy is also wire format — it is serialized into the directory so that an
+/// append reuses it without being told — which is why its options are plain integers with fixed
+/// meanings rather than a callback.
+/// </remarks>
 public readonly struct IndexPolicy : IEquatable<IndexPolicy>
 {
     /// <summary>1 %, as parts per million: the default false-positive rate of a Bloom filter.</summary>
@@ -74,7 +72,7 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     /// <summary>One filter per block, and one per generation of sixteen.</summary>
     public const int DefaultResolutions = 2;
 
-    // ZERO MEANS "THE DEFAULT" in every field, so that `default(IndexPolicy)` is a usable `None`
+    // Zero means "the default" in every field, so that `default(IndexPolicy)` is a usable `None`
     // with every option at its documented value. `MinDistinct` is the one option whose zero is also
     // a legitimate request -- a filter on every block -- so it is stored shifted by one.
     private readonly int _fppPpm;
@@ -83,9 +81,7 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     private readonly int _minDistinctPlusOne;
     private readonly int _segmentEntries;
 
-    /// <summary>
-    /// 10 §4.2's `payload_block_rows`: the most entries one segment of a locating run holds.
-    /// </summary>
+    /// <summary>The default for the most entries one segment of a locating run holds.</summary>
     public const int DefaultSegmentEntries = 65_536;
 
     private IndexPolicy(
@@ -107,15 +103,14 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     /// Whether the budget of <c>VortexWriteOptions.IndexBudgetPerMille</c> may abandon this index.
     /// </summary>
     /// <remarks>
-    /// THE BUDGET IS A GUARD AGAINST <see cref="Auto"/>, and this is how a caller says the index is
-    /// not a suggestion. The share of the data an index may take is the right question for a filter
-    /// nobody asked for; it is the wrong question for one a structure depends on, and the case that
-    /// forced it is docs/13-dataset.md §6.1's <em>mandatory</em> run on a dataset's clustering key:
-    /// on a narrow table a run over one column is intrinsically comparable in size to that column,
-    /// so no object is ever big enough to bring it under a tenth of the file. A required index still
-    /// counts toward the budget — it has first claim on it, not immunity from arithmetic — so the
-    /// optional ones around it are abandoned first and, if it alone is over, it survives and the
-    /// report says what it cost.
+    /// The budget guards against <see cref="Auto"/>, and this is how a caller says the index is not
+    /// a suggestion. The share of the data an index may take is the right question for a filter
+    /// nobody asked for and the wrong one for an index a structure depends on: a dataset's
+    /// clustering run is mandatory, and on a narrow table a run over one column is intrinsically
+    /// comparable in size to that column, so no object is ever big enough to bring it under the
+    /// budget. A required index still counts toward the budget — it has first claim on it, not
+    /// immunity from arithmetic — so the optional ones around it are abandoned first and, if it
+    /// alone is over, it survives and the report says what it cost.
     /// </remarks>
     public bool Required { get; }
 
@@ -157,10 +152,9 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     public int FalsePositivePpm => _fppPpm == 0 ? DefaultFalsePositivePpm : _fppPpm;
 
     /// <summary>
-    /// How much of a Bloom filter's tree carries filters (docs/13-dataset.md §6.2): 1 = the blocks
-    /// alone; 2 = the blocks and every node above them, generations and root included, each while it
-    /// fits <see cref="MaxBlocks"/>; 3 = the same, with the root under the file-level ceiling
-    /// (docs/10-indexes.md §4.3, §5.4).
+    /// How much of a Bloom filter's tree carries filters: 1 = the blocks alone; 2 = the blocks and
+    /// every node above them, generations and root included, each while it fits
+    /// <see cref="MaxBlocks"/>; 3 = the same, with the root under the file-level ceiling.
     /// </summary>
     public int Resolutions => _resolutions == 0 ? DefaultResolutions : _resolutions;
 
@@ -184,21 +178,21 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
     public static IndexPolicy Auto => new IndexPolicy(
         IndexPolicyKind.Auto, 0, 0, 0, -1, BloomHash.XxHash3, false);
 
-    /// <summary>Value to blocks (docs/10-indexes.md §6.1).</summary>
+    /// <summary>Value to blocks.</summary>
     public static IndexPolicy Postings => new IndexPolicy(
         IndexPolicyKind.Postings, 0, 0, 0, -1, BloomHash.XxHash3, false);
 
-    /// <summary>Value to rows, exact (§6.2).</summary>
+    /// <summary>Value to rows, exact.</summary>
     public static IndexPolicy SortedRuns => new IndexPolicy(
         IndexPolicyKind.SortedRuns, 0, 0, 0, -1, BloomHash.XxHash3, false);
 
-    /// <summary>Trigram to blocks, for <c>LIKE</c> and <c>CONTAINS</c> (§6.4).</summary>
+    /// <summary>Trigram to blocks, for <c>Like</c> and <c>Contains</c>.</summary>
     /// <param name="caseInsensitive">Whether trigrams are ASCII-lower-cased on both sides.</param>
     /// <returns>The policy.</returns>
     public static IndexPolicy NgramPostings(bool caseInsensitive = false) => new IndexPolicy(
         IndexPolicyKind.NgramPostings, 0, 0, 0, -1, BloomHash.XxHash3, caseInsensitive);
 
-    /// <summary>A split-block Bloom filter (§5.1).</summary>
+    /// <summary>A split-block Bloom filter.</summary>
     /// <param name="falsePositivePpm">
     /// The target false-positive rate as parts per million, in <c>[1, 500 000]</c>. Default 1 %.
     /// </param>
@@ -221,7 +215,7 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
             false);
     }
 
-    /// <summary>A trigram Bloom for <c>LIKE</c> and <c>CONTAINS</c> (§5.2).</summary>
+    /// <summary>A trigram Bloom for <c>Like</c> and <c>Contains</c>.</summary>
     /// <param name="falsePositivePpm">As <see cref="Bloom"/>.</param>
     /// <param name="resolutions">As <see cref="Bloom"/>.</param>
     /// <param name="maxBlocks">As <see cref="Bloom"/>.</param>
@@ -242,7 +236,7 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
 
     /// <summary>
     /// Rebuilds a policy from the integers a directory stores, clamping rather than throwing: these
-    /// bytes come from a file and a bad option must cost the entry, never the open (§4.1).
+    /// bytes come from a file and a bad option must cost the entry, never the open.
     /// </summary>
     /// <param name="kind">The policy kind; an unknown value becomes <see cref="None"/>.</param>
     /// <param name="fppPpm">The false-positive rate in ppm, clamped into range.</param>
@@ -349,12 +343,12 @@ public sealed class WritePolicy
         _keys = keys ?? [];
     }
 
-    /// <summary>The composite keys, in the order they were added (docs/10-indexes.md §6.5).</summary>
+    /// <summary>The composite keys, in the order they were added.</summary>
     public IReadOnlyList<CompositeKeyPolicy> Keys => _keys;
 
     /// <summary>
     /// The same policy with a locating index over the tuple of <paramref name="columnPaths"/>,
-    /// keyed by its row encoding (docs/10-indexes.md §6.5, docs/12-index-reads.md §4.6).
+    /// keyed by its row encoding.
     /// </summary>
     /// <param name="columnPaths">Two or more columns, in key order, <c>.</c>-separated for a nested field.</param>
     /// <param name="policy"><see cref="IndexPolicy.SortedRuns"/>, with its options.</param>

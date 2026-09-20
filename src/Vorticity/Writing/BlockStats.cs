@@ -27,17 +27,16 @@ internal enum BoundDomain : byte
 /// </remarks>
 internal struct BlockStats
 {
-    // ONE PAIR OF WORDS, NOT THREE. The three domains are mutually exclusive -- `Domain` says which
-    // one a summary is in -- so they share the storage and `BlockStats` goes from 88 bytes to 56.
-    // That is not tidiness: the writer keeps one of these per (column, closed block) until the zone
-    // map is written, which at a million rows is 123 per column, and one per NODE of the schema tree
-    // since the column writers became a tree.
+    // One pair of words, not three. The three domains are mutually exclusive -- `Domain` says which
+    // one a summary is in -- so they share the storage. That is not tidiness: the writer keeps one
+    // of these per (column, closed block) until the zone map is written, and one per node of the
+    // schema tree, so the struct's own size is multiplied by every block of a whole file.
     private ulong _minBits;
     private ulong _maxBits;
 
     /// <summary>Rows accumulated into this block so far.</summary>
     /// <remarks>
-    /// ALSO THE PRESENCE TEST. A block or a chunk always has rows, so <c>Rows == 0</c> means "no
+    /// Also the presence test. A block or a chunk always has rows, so <c>Rows == 0</c> means "no
     /// statistics were computed for this node" -- which is what a child of a cascade gets, since the
     /// ingest pass summarizes the file's columns and not the arrays a scheme invents beneath them.
     /// </remarks>
@@ -53,7 +52,7 @@ internal struct BlockStats
     internal long TotalBytes;
 
     /// <summary>
-    /// Rows of this block that differ from the row before them IN THE FILE, the block's own first
+    /// Rows of this block that differ from the row before them in the file, the block's own first
     /// row included; row 0 of the file has no predecessor and is never counted.
     /// </summary>
     /// <remarks>
@@ -75,7 +74,7 @@ internal struct BlockStats
     /// <remarks>
     /// A `long` and not an `Int128`: the difference of two w-bit values lies in (-2^w, 2^w), so for
     /// a column narrower than 64 bits it always fits, and for a 64-bit one a step outside `long`
-    /// cannot be CONSTANT over three rows -- the values would have to wrap, and a wrapped difference
+    /// cannot be constant over three rows -- the values would have to wrap, and a wrapped difference
     /// is not the same number. `ColumnCompressor` never offers a sequence to a column of fewer than
     /// 64 rows, so the two-row case `SequencePlan` guards against is unreachable from here.
     /// </remarks>
@@ -89,7 +88,7 @@ internal struct BlockStats
     /// steps, a null, or a step no wire field can hold.
     /// </summary>
     /// <remarks>
-    /// Stated in the NEGATIVE so that a default summary -- which knows nothing -- is not already
+    /// Stated in the negative so that a default summary -- which knows nothing -- is not already
     /// claiming to be a sequence. <see cref="DeltaKnown"/> is what says the claim was ever made.
     /// </remarks>
     internal bool DeltaBroken;
@@ -99,15 +98,14 @@ internal struct BlockStats
     /// range opened a block and a row came before it. Kept apart from the block's own steps.
     /// </summary>
     /// <remarks>
-    /// A BLOCK USED TO BE STEPPED FROM ITS PREDECESSOR'S LAST ROW AS IF THAT ROW WERE ITS OWN, so
-    /// that a merge had the seam for free -- and the first block of a chunk, stepped from the last
-    /// row of the chunk BEFORE, called itself broken when the only break was between the two
-    /// chunks. The chunk it opened was a progression, the merge said it was not, the chooser
-    /// trusted the merge over the walk it makes when the steps are unknown, and packed 8 192 rows of
-    /// <c>200 000 + i</c> at 13 bits each. `PlanMemoryTests` has the file. The seam is recorded
-    /// here instead, and <see cref="Merge"/> reads it only for a block that is not the first of the
-    /// range: the first block's seam is with whatever came before the range, which is nothing the
-    /// range describes.
+    /// Stepping a block from its predecessor's last row as if that row were its own would give a
+    /// merge the seam for free, at the price of making the first block of a chunk call itself
+    /// broken when the only break is between the two chunks: the chunk it opens is a progression,
+    /// the merge says it is not, the chooser trusts the merge over the walk it makes when the steps
+    /// are unknown, and bit-packs a column <c>vortex.sequence</c> describes in a handful of bytes.
+    /// The seam is recorded here instead, and <see cref="Merge"/> reads it only for a block that is
+    /// not the first of the range: the first block's seam is with whatever came before the range,
+    /// which is nothing the range describes.
     /// </remarks>
     private long _leading;
 
@@ -141,7 +139,7 @@ internal struct BlockStats
     /// <summary>Whether the block held a value that could bound it.</summary>
     /// <remarks>
     /// False for an all-null block and for a float block whose every value is NaN - the two cases
-    /// docs/08-semantics.md §2 says must say "no bound" rather than invent one.
+    /// that must say "no bound" rather than invent one.
     /// </remarks>
     internal bool HasBounds;
 
@@ -150,13 +148,13 @@ internal struct BlockStats
     /// them is a partial count and not a summary.
     /// </summary>
     /// <remarks>
-    /// A BLOCK IS FED BY AS MANY RANGES AS THE CALLER'S BATCHING GIVES IT, and two of those ranges
+    /// A block is fed by as many ranges as the caller's batching gives it, and two of those ranges
     /// can take different paths through the pass: a range whose steps all agree is answered from
-    /// its endpoints without a value being read (§3.2's progression short-circuit), and a later
-    /// range of the same block may break the progression and read every value. The histogram would
-    /// then hold the second range and not the first. Merging is an AND over the blocks, so one
-    /// partial block disqualifies the chunk, and the chooser measures the column itself — the same
-    /// safe fallback every other absent statistic takes.
+    /// its endpoints without a value being read, and a later range of the same block may break the
+    /// progression and read every value. The histogram would then hold the second range and not the
+    /// first. Merging is a conjunction over the blocks, so one partial block disqualifies the
+    /// chunk, and the chooser walks the column itself — the same safe fallback every other absent
+    /// statistic takes.
     /// </remarks>
     internal bool WidthsBroken;
 
@@ -165,23 +163,22 @@ internal struct BlockStats
     /// window before it, so that no chunk covering the block can be summarized from it.
     /// </summary>
     /// <remarks>
-    /// docs/11-write-strategy.md §3.2.4 gives a list's elements the parent's blocks, and the merge
-    /// of those blocks describes the elements array a chunk writes only when the ranges' windows
-    /// lie end to end (<c>ListElements</c>). A block that cannot vouch for that carries this flag,
-    /// even when nothing was summarized into it, and <see cref="Merge"/> keeps it from an absent
-    /// block too: the chooser must then measure the elements, because a bound or a step read from
-    /// the wrong elements would write wrong values rather than cost a pass. It takes one of the
-    /// spare bytes the struct's padding already had.
+    /// A list's elements are summarized into the parent's blocks, and the merge of those blocks
+    /// describes the elements array a chunk writes only when the ranges' windows lie end to end
+    /// (<c>ListElements</c>). A block that cannot vouch for that carries this flag, even when
+    /// nothing was summarized into it, and <see cref="Merge"/> keeps it from an absent block too:
+    /// the chooser must then walk the elements, because a bound or a step read from the wrong
+    /// elements would write wrong values rather than cost a pass. It takes one of the spare bytes
+    /// the struct's padding already has.
     /// </remarks>
     internal bool Scattered;
 
-    // ORDER, FOR THE FILE STATISTICS' is_sorted / is_strict_sorted. Tracked the way the reference
-    // computes them (vortex-array-0.86.1 aggregate_fn/fns/is_sorted): a null sorts below every
-    // value, so a sorted nullable column has its nulls first; two equal neighbours -- two values
-    // or two nulls -- keep it sorted and make it not strict. A witness is sticky: one value below
-    // its predecessor and the column is unsorted for good. What is not tracked claims nothing
-    // (OrderUntracked): a NaN, whose place in the reference's order this pass does not reproduce,
-    // and the kinds without a scalar order.
+    // Order, for the file statistics' is_sorted / is_strict_sorted. Tracked the way the reference
+    // implementation computes them: a null sorts below every value, so a sorted nullable column has
+    // its nulls first; two equal neighbours -- two values or two nulls -- keep it sorted and make
+    // it not strict. A witness is sticky: one value below its predecessor and the column is
+    // unsorted for good. What is not tracked claims nothing (OrderUntracked): a NaN, whose place in
+    // the reference's order this pass does not reproduce, and the kinds without a scalar order.
 
     /// <summary>
     /// Whether some range tracked the rows' order at all: a primitive or a string column. A
@@ -216,10 +213,10 @@ internal struct BlockStats
     /// is out. Not folded by <see cref="Merge"/>: it describes the block's chunk, not its rows.
     /// </summary>
     /// <remarks>
-    /// THE REPORT'S LEDGER, AND IT COSTS NO BYTE. The struct ends in thirteen one-byte fields after
-    /// its last word, so it is padded to 96 bytes with three to spare; this takes one of them.
-    /// A per-column list of chunks -- the first form -- put a list and its array on every write,
-    /// which the write allocation ceilings refused by 56 to 800 bytes a file.
+    /// The report's ledger, and it costs no byte: the struct ends in a run of one-byte fields after
+    /// its last word, and the padding already had room for one more. Keeping the same ledger as a
+    /// per-column list of chunks would put a list and its array on every write, which the write
+    /// path's allocation ceilings refuse.
     /// </remarks>
     internal byte WrittenScheme;
 
@@ -277,7 +274,7 @@ internal struct BlockStats
     internal readonly bool IsPresent => Rows > 0;
 
     /// <summary>
-    /// A block an append does not read again (docs/11 §3.8): what its zone says -- rows, nulls, and
+    /// A block an append does not read again: what its zone says -- rows, nulls, and
     /// the bounds when they are exact -- and nothing else, so that the zone map can be written
     /// again over it. The order is not tracked: the file statistics answer it for the old rows.
     /// </summary>
@@ -340,10 +337,9 @@ internal struct BlockStats
     /// Folds a whole summary in, which is how a chunk is made from the blocks it covers.
     /// </summary>
     /// <remarks>
-    /// Exact, and that is the property stage 1 built the accumulators for: counts add, bounds take
-    /// the extreme of the two, and the domain comes from whichever side has one. A chunk is a whole
-    /// number of blocks by construction (docs/11-write-strategy.md §3.1), so this is the only merge
-    /// the chooser ever needs.
+    /// Exact, which is the property the accumulators are built for: counts add, bounds take the
+    /// extreme of the two, and the domain comes from whichever side has one. A chunk is a whole
+    /// number of blocks by construction, so this is the only merge the chooser ever needs.
     /// </remarks>
     /// <param name="other">The summary to fold in; a default one is a no-op.</param>
     internal void Merge(in BlockStats other)
@@ -394,9 +390,9 @@ internal struct BlockStats
             Repeats |= other.OrderSeamRepeat;
         }
 
-        // A progression survives a merge only if both halves are one AND they climb by the same
+        // A progression survives a merge only if both halves are one and they climb by the same
         // step, across the seam included. The seam is `other`'s leading step, and it is a step of
-        // THIS range only when a block of this range came before `other`: the first block's seam
+        // this range only when a block of this range came before `other`: the first block's seam
         // is with the chunk before, and a jump there is no jump inside this one.
         if (first)
         {
@@ -462,9 +458,8 @@ internal struct BlockStats
     /// Records the step a range walked, the range having already checked that every pair agrees.
     /// </summary>
     /// <remarks>
-    /// The check belongs in the caller's loop, on LOCALS: a method call and a field read per row was
-    /// measurably more expensive than the walk this replaces (`sequence` 0,16 -&gt; 0,22 before it
-    /// was moved out).
+    /// The check belongs in the caller's loop, on locals: a method call and a field read per row
+    /// costs more than the separate walk this folds in.
     /// </remarks>
     /// <param name="delta">The difference between a row and the row before it.</param>
     internal void SetDelta(long delta)
@@ -547,8 +542,8 @@ internal struct BlockStats
     /// <remarks>
     /// <see cref="Math.Min(double, double)"/> rather than <c>&lt;</c>, and that is not a detail:
     /// <c>-0.0 &lt; +0.0</c> is false, so a raw compare would keep whichever arrived first and make
-    /// the bound depend on the batching. docs/07-dotnet-mapping.md counts the two as distinct
-    /// values, and Math.Min/Max are the functions that order them.
+    /// the bound depend on the batching. The two are distinct values here, and Math.Min/Max are the
+    /// functions that order them.
     /// </remarks>
     /// <param name="min">The smallest value the caller saw; never NaN.</param>
     /// <param name="max">The largest; never NaN.</param>

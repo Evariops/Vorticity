@@ -1,29 +1,3 @@
-// The read side of the split-block Bloom filters (docs/10-indexes.md §5.1, docs/13-dataset.md §6.2):
-// a pruner in the scan's block-mask chain (docs/11-write-strategy.md §6.1), after the zone maps.
-//
-// ONLY EQUALITY PROVES ANYTHING. `x = v` kills a block whose filter does not hold v; `x IN (...)`
-// one that holds none of them; an AND kills what any conjunct kills, an OR what every arm kills.
-// Nothing else -- `!=`, an ordering, a NOT -- claims anything; a string match claims through the
-// trigram filters. A LIST'S FILTER HOLDS ITS ELEMENTS (10 §5.1, step 28b): `list_contains(x, v)`
-// kills a block whose filter does not hold v, and an equality on a list column claims nothing.
-//
-// THE LITERAL IS HASHED AS THE COLUMN STORES IT, and only when that is exact. The kernels compare in
-// three domains -- i64, u64, f64 -- so `x = 5` on an i32 column is the four bytes of 5, and `x = 5.0`
-// on an f32 column is the four bytes of 5.0f. A literal that does not convert exactly makes no
-// claim, rather than a proof built on a rounding: past 2^53 several integers share a double, and
-// hashing one of them would lose the others. A float zero asks for BOTH zeros, since the filter
-// stores bit patterns and the scan's equality is IEEE; a NaN asks for nothing.
-//
-// A PROBE DESCENDS EACH TREE A LEVEL AT A TIME (13 §6.2). Every run's root first, in one read; then,
-// level by level, the children of the nodes that still cover a live block -- a node's children are
-// one region, and a level's regions one coalesced read. A node whose filter proves the predicate
-// false kills its blocks, so its children are never read; a node without a filter proves nothing,
-// and the probe goes through it. A value present in one block costs 1 + 16 × depth filters, depth
-// being log16 of the blocks, for as long as the nodes fit their ceiling.
-//
-// WHAT DOES NOT CHECK OUT CLAIMS NOTHING: a region whose bytes are not its checksum's, a node that is
-// not what its parent says, words that do not decode. Its blocks stay live, and nothing beneath it
-// is read: a lying index may cost pruning, never rows.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -39,7 +13,18 @@ using Vorticity.Types;
 
 namespace Vorticity.Indexes;
 
-/// <summary>Kills the blocks a column's Bloom filters prove cannot hold an equality's value.</summary>
+/// <summary>
+/// Kills the blocks a column's Bloom filters prove cannot hold an equality's value; a probe reads
+/// every tree's root in one read, then descends a level at a time through the nodes that still cover
+/// a live block.
+/// </summary>
+/// <remarks>
+/// Only equality, membership, list containment and a string match claim anything, and only when the
+/// literal converts exactly to the bytes the column stores; a conversion that rounds claims nothing
+/// rather than proving something on the wrong value. Anything that does not check out -- a region
+/// whose bytes are not its checksum's, a node that is not what its parent says -- leaves its blocks
+/// live and stops the descent there, so a lying index may cost pruning but never rows.
+/// </remarks>
 internal sealed class BloomPruner
 {
     private readonly VortexExpr _filter;
@@ -68,9 +53,8 @@ internal sealed class BloomPruner
     internal static async ValueTask<BloomPruner?> BuildAsync(
         VortexFile file, VortexExpr filter, long blockRows, CancellationToken cancellationToken)
     {
-        // A FILE WITHOUT A DIRECTORY PAYS NOTHING, not even the collectors: the read-path
-        // allocation ceilings hold a filtered scan to the byte, and every file written before
-        // step 12 is such a file.
+        // A file without a directory pays nothing, not even the collectors: a filtered scan's
+        // allocation ceiling is held to the byte.
         if (!file.HasIndexDirectory)
         {
             return null;
@@ -139,8 +123,8 @@ internal sealed class BloomPruner
     }
 
     /// <summary>
-    /// Whether the roots leave room for a match (10 §5.4): the multi-file question, answered with one
-    /// read per filtered column and no zone map.
+    /// Whether the roots leave room for a match: the whole-file question, answered with one read per
+    /// filtered column and no zone map.
     /// </summary>
     /// <param name="file">The open file.</param>
     /// <param name="filter">The predicate.</param>
@@ -393,7 +377,7 @@ internal sealed class BloomPruner
                 return Absent(equal.Field.Path, equal.Value, block, level, elements: false);
 
             case ListContainsExpr contains:
-                // A list's filter holds its elements, each in its row's block (10 §5.1).
+                // A list's filter holds its elements, each in its row's block.
                 return Absent(contains.Field.Path, contains.Value, block, level, elements: true);
 
             case StringMatchExpr match:
@@ -441,7 +425,7 @@ internal sealed class BloomPruner
 
     /// <summary>
     /// A string predicate is absent from a block when one trigram it requires is absent from the
-    /// filter over the block (10 §5.2); a predicate that requires none claims nothing.
+    /// filter over the block; a predicate that requires no trigram claims nothing.
     /// </summary>
     private bool AbsentTrigrams(StringMatchExpr match, int block, int level)
     {
@@ -523,7 +507,7 @@ internal sealed class BloomPruner
         /// <summary>Whether the column is a list, whose filter answers for its elements.</summary>
         internal bool IsList { get; }
 
-        /// <summary>The column's trees, in block order; their runs are disjoint (10 §4.1).</summary>
+        /// <summary>The column's trees, in block order; their runs are disjoint.</summary>
         internal List<Tree> Trees { get; } = [];
 
         /// <summary>The tree whose run covers <paramref name="block"/>, or null.</summary>

@@ -1,21 +1,3 @@
-// vortex.sequence on the write side - vortex-sequence-0.86.1/src/compress.rs.
-//
-// A[i] = base + i * multiplier, in the METADATA, with no children and no buffers. It is the only
-// encoding here that costs nothing per row, so where it applies it is not merely the best choice,
-// it is the smallest representation the format can express: a `vortex.primitive` node plus its
-// buffer becomes one node and about thirty bytes.
-//
-// IT BECAME REACHABLE WHEN THE DEFAULT TARGET WAS CORRECTED. docs/90-registry.md listed
-// `vortex.sequence` under "not in the default target" for as long as that target was believed to be
-// `core2025.05.0`; it arrived in `core2025.06.0`, and the default is now `core2026.08.3`. What had
-// been recorded as an edition difference was an implementation gap the whole time - three of the
-// corpus files we were worst on (`types/fsl_i32_3_*` at 23x, `types/date_ms_nonnull_r8193` at 18x,
-// `types/struct_field_names` at 5.2x) are sequences and nothing else.
-//
-// The wire shape is read off the reference's own files rather than inferred. `fsl_i32_3`'s metadata
-// is `0a02 1800 1202 1802`: base and multiplier are both `int64_value`, sint64-encoded, for an i32
-// column. Signedness is preserved on the wire, width is not, which is exactly what
-// `multiplier_ptype_from_proto` says.
 using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -24,7 +6,11 @@ using Vorticity.Types;
 
 namespace Vorticity.Writing;
 
-/// <summary>An arithmetic progression: the value at row 0 and the step between rows.</summary>
+/// <summary>
+/// An arithmetic progression: the value at row 0 and the step between rows. The encoding carries
+/// both in its metadata and has no children, so there is nowhere for a validity bitmap to live and a
+/// column with a null row cannot be one.
+/// </summary>
 internal sealed class SequencePlan
 {
     private SequencePlan(ulong baseBits, Int128 step)
@@ -38,30 +24,14 @@ internal sealed class SequencePlan
 
     /// <summary>
     /// The step, exact. Held as <see cref="Int128"/> because the difference of two values of a
-    /// 64-bit column does not fit in 64 bits in general, and a checked width test is what decides
-    /// whether the sequence is expressible at all.
+    /// 64-bit column does not fit in 64 bits in general.
     /// </summary>
     internal Int128 Step { get; }
 
     /// <summary>
-    /// Whether the column is an arithmetic progression with no nulls.
+    /// Whether the column is an arithmetic progression with no nulls. A caller that has already
+    /// established a constant step passes it, which skips the walk.
     /// </summary>
-    /// <param name="arena">The arena holding the node.</param>
-    /// <param name="node">The column chunk.</param>
-    /// <returns>The plan, or <see langword="null"/>.</returns>
-    /// <remarks>
-    /// NULLS DISQUALIFY IT OUTRIGHT, and not as a simplification: the encoding has no children, so
-    /// there is nowhere for a validity bitmap to live. A nullable dtype whose rows all happen to be
-    /// valid is fine - the decoder derives AllValid from the nullability - but one null row is not.
-    ///
-    /// Two rows are enough to define a step and the check is O(n) with no allocation, so this runs
-    /// before the run and distinct passes rather than after: when it applies it ends the search.
-    /// </remarks>
-    /// <param name="stepsAreConstant">
-    /// Whether the ingest pass has already established that every consecutive pair of rows climbs
-    /// by the same step (docs/11-write-strategy.md §3.4.1). The walk below is then skipped: the step
-    /// is <c>v[1] - v[0]</c> and there is nothing left to verify.
-    /// </param>
     internal static SequencePlan? TryBuild(
         CanonicalArena arena, CanonicalNode node, bool stepsAreConstant = false)
     {
@@ -78,15 +48,8 @@ internal sealed class SequencePlan
         ReadOnlySpan<byte> values = node.Values.Span;
         int length = node.Length;
 
-        // PERF-AUDIT-v2.md W-9. THE WALK IS NOT CHEAP, which the point recorded as a suspicion and
-        // the probe settled: on `--throughput --write` at a million rows it reads **78 % of the rows
-        // it is offered** -- 1 352 columns of 1 728 really are sequences, so the loop runs to the
-        // end rather than bailing at row 3 -- and doubling it costs **26 %** of a `sequence` write
-        // and **25 %** of a `primitive` one. Two `switch`es per row, on a property of the CALL.
-        //
-        // Resolved once instead, the way `RowKernels.Gather` resolves its codes. `Int128` stays in
-        // the arithmetic: a step is the difference of two 64-bit values and does not fit in 64 bits
-        // in general, which is the whole reason this class holds one.
+        // The physical type is resolved once here, not per row: most columns offered really are
+        // sequences, so the walk runs to the end rather than bailing on the third row.
         return node.PType switch
         {
             PType.U8 => Build<byte>(values, length, stepsAreConstant),
@@ -100,30 +63,13 @@ internal sealed class SequencePlan
         };
     }
 
-    /// <summary>Whether the step is written as <c>uint64_value</c> rather than <c>int64_value</c>.</summary>
-    /// <remarks>
-    /// Only for the one case the signed field cannot hold: an unsigned column climbing by more than
-    /// <see cref="long.MaxValue"/> a row. Everything else takes the signed field, which is what the
-    /// reference emits for both the i32 and i64 sequences in the corpus.
-    /// </remarks>
+    /// <summary>
+    /// Whether the step is written as <c>uint64_value</c> rather than <c>int64_value</c>: only for
+    /// the one case the signed field cannot hold.
+    /// </summary>
     internal bool StepIsUnsigned => Step > long.MaxValue;
 
     /// <summary>The walk, with the physical type resolved and the span cast once.</summary>
-    /// <remarks>
-    /// <para>
-    /// <see cref="Int128.CreateTruncating{TOther}(TOther)"/> reproduces what the two helpers it
-    /// replaces did, and does it from the TYPE rather than from a flag: a signed
-    /// <typeparamref name="T"/> sign-extends as <c>CanonicalSupport.ReadInteger</c> did, an
-    /// unsigned one zero-extends as <c>CompressedValues.ReadUnsigned</c> did. `ReadInteger`'s
-    /// saturation of a <c>u64</c> never applied here -- it is only reached through the signed
-    /// branch, which an unsigned column never took.
-    /// </para>
-    /// <para>
-    /// The base is the column's OWN raw bits, so it is re-read from the typed value rather than
-    /// narrowed from the <see cref="Int128"/>: for a signed column that is the two's-complement
-    /// pattern, for an unsigned one the value itself.
-    /// </para>
-    /// </remarks>
     private static SequencePlan? Build<T>(ReadOnlySpan<byte> raw, int length, bool stepsAreConstant)
         where T : unmanaged, IBinaryInteger<T>
     {
@@ -133,10 +79,6 @@ internal sealed class SequencePlan
         Int128 step = Int128.CreateTruncating(values[1]) - first;
         Int128 previous = first + step;
 
-        // WHEN THE INGEST PASS HAS ALREADY WALKED THE ROWS, this is the whole of the work: the step
-        // is the first difference and every other one equals it by hypothesis. The walk below is the
-        // 78 % of offered rows W-9 measured -- and the 25 to 26 % of a `primitive` or `sequence`
-        // write it costs -- now paid once, in the pass that was reading the values anyway.
         for (int row = 2; !stepsAreConstant && row < values.Length; row++)
         {
             Int128 value = Int128.CreateTruncating(values[row]);
@@ -149,9 +91,7 @@ internal sealed class SequencePlan
         }
 
         // The wire carries the multiplier as either int64_value or uint64_value, so a step outside
-        // both is not expressible. Only reachable on a two-row column of 64-bit extremes - a third
-        // row would have overflowed the column itself - but the write must fail the check rather
-        // than truncate.
+        // both is not expressible and the write must refuse rather than truncate.
         if (step < long.MinValue || step > (Int128)ulong.MaxValue)
         {
             return null;
@@ -160,16 +100,10 @@ internal sealed class SequencePlan
         return new SequencePlan(BaseBitsOf(values[0]), step);
     }
 
-    /// <summary>The progression a constant column is, read off its element.</summary>
-    /// <param name="node">A canonical Constant node.</param>
-    /// <returns>The plan, or <see langword="null"/> when the column is not expressible as one.</returns>
-    /// <remarks>
-    /// The same answer <see cref="TryBuild"/> reaches on the expanded column, taken from the one
-    /// element instead of the million copies of it: the difference between two equal values is
-    /// zero, so there is no walk to run and no step to verify. The guards are
-    /// <see cref="TryBuild"/>'s own — an integer column of at least two rows with no nulls — read
-    /// off the dtype, because a constant node has no physical type of its own until it is expanded.
-    /// </remarks>
+    /// <summary>
+    /// The progression a constant column is, read off its element rather than its rows. The guards
+    /// read the dtype, because a constant node has no physical type until it is expanded.
+    /// </summary>
     internal static SequencePlan? OfConstant(CanonicalNode node)
     {
         DType dtype = node.DType;

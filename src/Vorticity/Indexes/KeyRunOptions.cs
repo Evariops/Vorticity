@@ -1,25 +1,3 @@
-// The options of the two locating kinds, `vorticity.postings.blocks.v1` and
-// `vorticity.sorted.runs.v1` (docs/10-indexes.md §6.1, §6.2, §4.2).
-//
-//   message KeyIndexOptions {           // the entry's options
-//     uint32 version = 1;                // 1
-//     uint32 segment_entries = 2;        // 10 §4.2's payload_block_rows: the most entries a segment holds
-//     bool   case_insensitive = 3;       // postings.ngram3 only: trigrams ASCII-lower-cased
-//   }
-//   message KeyRunOptions {             // each run's options
-//     uint32 version = 1;                // 1
-//     repeated KeySegment segments = 2;  // in key order
-//   }
-//   message KeySegment {
-//     uint64 entries = 1;                // keys for postings, (key, row) pairs for sorted runs
-//     bytes  min = 2;                    // the segment's first key, as the column's key bytes
-//     bytes  max = 3;                    // its last
-//   }
-//
-// A RUN IS BLOCKED LIKE DATA. Its payload is `stride` arrays per segment -- postings: keys, the
-// offsets into the block lists, the block lists; sorted runs: keys, rows -- and a probe reads only
-// the segments whose [min, max] can hold its key: "zones do the job of B-tree leaves and zone maps
-// the job of internal nodes" (#9024), through the directory rather than a layout.
 using System;
 using System.Collections.Generic;
 using Vorticity.Serialization.Protobuf;
@@ -33,9 +11,16 @@ namespace Vorticity.Indexes;
 internal sealed record KeySegment(ulong Entries, byte[] Min, byte[] Max);
 
 /// <summary>The codecs of a locating entry's and run's options.</summary>
+/// <remarks>
+/// A run is blocked like data: its payload is <see cref="StrideOf"/> arrays per segment — keys,
+/// offsets into the block lists and the block lists for postings, keys and rows for sorted runs —
+/// and each segment carries its first and last key, so a probe reads only the segments whose range
+/// can hold its key. The segment bounds play the part a B-tree's internal nodes would, through the
+/// directory rather than through a layout of their own.
+/// </remarks>
 internal static class KeyRunOptions
 {
-    /// <summary>10 §4.2's default `payload_block_rows`.</summary>
+    /// <summary>The default for the most entries one segment holds.</summary>
     internal const int DefaultSegmentEntries = 65_536;
 
     private const uint Version = 1;
@@ -48,7 +33,7 @@ internal static class KeyRunOptions
 
     /// <summary>
     /// The serialized dtype of a sorted run's rows written at 64 bits, which a run spanning 2³² rows
-    /// or more carries (13 §6.1); any other rows are 32-bit.
+    /// or more carries; any other rows are 32-bit.
     /// </summary>
     private static readonly byte[] WideRowsDType = SerializeU64();
 
@@ -69,7 +54,7 @@ internal static class KeyRunOptions
     /// <param name="dtype">The dtype's bytes.</param>
     internal static bool IsWideRowsDType(ReadOnlySpan<byte> dtype) => dtype.SequenceEqual(WideRowsDType);
 
-    /// <summary>The version of a run's options whose segment table is in fence pages (13 §6.3).</summary>
+    /// <summary>The version of a run's options whose segment table is in fence pages.</summary>
     private const uint PagedVersion = 2;
 
     /// <summary>Serializes a paged run's options: its inline root and its arrays' dtypes.</summary>
@@ -221,7 +206,7 @@ internal static class KeyRunOptions
     /// <param name="segmentEntries">The segment size the runs were cut at.</param>
     /// <param name="caseInsensitive">For trigram postings, whether trigrams were ASCII-lower-cased.</param>
     /// <param name="keyColumns">
-    /// For a composite key (10 §6.5), each key column's field indices from the root, in key order;
+    /// For a composite key, each key column's field indices from the root, in key order;
     /// the entry's own <c>column_path</c> is then empty, which a reader that does not know this field
     /// resolves to the root struct and ignores.
     /// </param>

@@ -1,16 +1,3 @@
-// A column value as bytes, and the order of those bytes: what every index over values shares.
-//
-// ONE ENCODING FOR THE WRITER AND THE READER. A Bloom filter hashes these bytes, a postings run and
-// a sorted run order and search them. The writer takes them straight from the canonical column --
-// a primitive at its width, a decimal at its storage width, a string's bytes -- and the reader has
-// to produce the same bytes from a filter literal, which is where a probe can go wrong: the kernels
-// compare in three domains (i64, u64, f64), so the literal has to be narrowed into the column's own
-// type, and a narrowing that is not exact claims nothing rather than a proof built on a rounding.
-//
-// THE ORDER IS docs/12-index-reads.md §4.4's TOTAL ORDER: numeric for integers and decimals,
-// bytewise for strings and binaries, and for floats the row-encoding order -- negative NaN, the
-// negatives, -0.0, +0.0, the positives, positive NaN. An equality probe asks for both zeros,
-// because the scan's equality is IEEE and a run holds bit patterns.
 using System;
 using System.Buffers.Binary;
 using Vorticity.Expressions;
@@ -38,6 +25,16 @@ internal enum KeyShape : byte
 /// <param name="Shape">How the bytes read.</param>
 /// <param name="Width">Bytes per key; <c>0</c> for <see cref="KeyShape.Bytes"/>.</param>
 /// <param name="PType">The primitive type, when there is one.</param>
+/// <remarks>
+/// One encoding serves the writer and the reader: a Bloom filter hashes these bytes, a postings run
+/// and a sorted run order and search them. The writer takes them straight from the canonical column,
+/// so the reader has to produce the same bytes from a filter literal — and since the kernels compare
+/// in only three domains, the literal is narrowed into the column's own type, a narrowing that
+/// claims nothing when it is not exact rather than resting a proof on a rounding. The order is
+/// total: numeric for integers, bytewise for strings and binaries, and for floats the row-encoding
+/// order — negative NaN, the negatives, -0.0, +0.0, the positives, positive NaN. An equality probe
+/// asks for both zeros, because the scan's equality is IEEE while a run holds bit patterns.
+/// </remarks>
 internal readonly record struct KeyLayout(KeyShape Shape, int Width, PType PType)
 {
     /// <summary>The layout of a column, through any extension, or none for a dtype no index keys.</summary>
@@ -45,9 +42,9 @@ internal readonly record struct KeyLayout(KeyShape Shape, int Width, PType PType
     /// <param name="layout">The layout.</param>
     /// <returns>Whether the dtype can be keyed.</returns>
     /// <remarks>
-    /// NO DECIMAL. The kernels have no literal domain for one, so no probe could ever claim
-    /// anything from a decimal key, and a chunk may store a decimal at a narrower width than its
-    /// precision implies, which would make one column's keys two layouts.
+    /// A decimal is never keyed: the kernels have no literal domain for one, so no probe could
+    /// claim anything from a decimal key, and a chunk may store a decimal at a narrower width than
+    /// its precision implies, which would make one column's keys two layouts.
     /// </remarks>
     internal static bool TryOf(DType dtype, out KeyLayout layout)
     {
@@ -141,7 +138,7 @@ internal readonly record struct KeyLayout(KeyShape Shape, int Width, PType PType
         return 0;
     }
 
-    /// <summary>A float's bits mapped onto an unsigned integer in total order (docs/06 §3).</summary>
+    /// <summary>A float's bits mapped onto an unsigned integer in the total order.</summary>
     private ulong TotalFloat(ReadOnlySpan<byte> bytes)
     {
         ulong bits;

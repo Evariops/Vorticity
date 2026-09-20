@@ -1,36 +1,3 @@
-// The key source of a `vorticity.sorted.runs.v1` index - docs/12-index-reads.md §3, §4, §9.
-//
-// A K-WAY MERGE OVER RUNS THAT ARE EACH IN ORDER. A streaming writer sorts one chunk at a time
-// (docs/10-indexes.md §6.2), so a key order exists inside each run and the union is a set; the
-// cursor over the union is the merging iterator of every log-structured store: a heap of run
-// positions, `O(log r)` per step, `O(r log n)` per seek. Forward it is a min-heap; backward a
-// max-heap; a step against the heap's direction re-seeks at the current entry, which is what a
-// merging iterator charges (§4.2).
-//
-// ONE PRIMITIVE. Every positioning is "the first entry at or after (key, row)" in each run, and the
-// five operators, the steps across a flip, rank, select and the count of a key are all that
-// primitive with a row of `long.MinValue` (before every row of the key), `long.MaxValue` (after
-// every one) or a real row. Rows are unique across runs, so `(key, row)` is a total order on the
-// entries and `rank` of an entry is exact.
-//
-// THE ORDER IS THE TOTAL ONE (§4.4): the writer ranks keys with `KeyOrder.Total`'s twin on bytes,
-// so -0.0 and +0.0 are two keys here, where a sorted column holds them as one.
-//
-// ONLY THE SEGMENTS THAT CAN HOLD THE ANSWER ARE READ. A run's options give each segment's first and
-// last key; a run whose range excludes the key costs nothing, and inside one only the segment the
-// search lands in is decoded -- into the file's run cache, where the next seek finds it.
-//
-// THE SAME MERGE WALKS KEYS WITHOUT ROWS. A `postings.blocks` run is a chunk's distinct keys, sorted,
-// and a dictionary is a chunk's values, sorted at open (SortedRunsSource.Dictionary.cs): each is a
-// run whose keys are unique within it, so the run's ordinal stands in for the row and `(key,
-// ordinal)` is still a total order on the entries. Such a source has no rows to give (§4.3), and
-// its entries are not the column's distinct keys -- a key in two chunks is two entries -- so it
-// counts none; a `Distinct()` cursor walks it by `NextKey`, which skips them.
-//
-// A RUN THAT DOES NOT MAKE SENSE REFUSES THE SOURCE WHOLE. The pruner can ignore one bad run and
-// lose pruning; a cursor that skipped one would return a wrong walk. A payload that decodes to the
-// wrong shape, or a row outside its run, is a `VortexFormatException` (Class I); keys out of order
-// or bounds that lie give a wrong order and never a fault (Class II, docs/08-semantics.md §5).
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -48,6 +15,20 @@ using Vorticity.Types;
 namespace Vorticity.Keys;
 
 /// <summary>One column's runs -- sorted runs, postings keys or dictionaries -- merged into one walk.</summary>
+/// <remarks>
+/// Each run is in key order on its own, so the union is walked by a heap of run positions: a
+/// min-heap forward, a max-heap backward, and a step against the heap's direction re-seeks from the
+/// current entry. Every positioning reduces to one primitive -- the first entry at or after a
+/// <c>(key, row)</c> pair -- with a row before or after every row of the key standing for the open
+/// ends; rows are unique across runs, so that pair orders the entries totally and a rank is exact.
+/// Keys are ordered the way the writer ranked them, so <c>-0.0</c> and <c>+0.0</c> are two keys
+/// here where a sorted column holds them as one. Only the segments that can hold the answer are
+/// read: a run whose stated range excludes the key costs nothing. A run of keys without rows -- a
+/// chunk's distinct keys, or a dictionary's values -- merges the same way, the run's ordinal
+/// standing in for the row; such a source gives no rows, and its entries are not the column's
+/// distinct keys, since a key present in two chunks is two entries. One run that does not make
+/// sense refuses the source whole, because a cursor that skipped it would return a wrong walk.
+/// </remarks>
 internal sealed partial class SortedRunsSource : KeySource
 {
     private readonly VortexFile _file;
@@ -197,10 +178,10 @@ internal sealed partial class SortedRunsSource : KeySource
     /// Why an entry's runs do not cover every block of the file, or null when they do.
     /// </summary>
     /// <remarks>
-    /// A PRUNER MAY USE A PARTIAL INDEX, A SOURCE MAY NOT: a block no run covers is simply live
-    /// (10 §4.1), but a walk that misses it misses its keys, and a count over the walk is wrong. An
-    /// append whose builder was abandoned, and a dictionary probe over a column some of whose chunks
-    /// are not dictionaries, both leave blocks uncovered.
+    /// A pruner may use a partial index, a source may not: a block no run covers is simply left
+    /// live for the pruner, but a walk that misses it misses its keys, and a count over the walk is
+    /// wrong. An append whose builder was abandoned, and a dictionary probe over a column some of
+    /// whose chunks are not dictionaries, both leave blocks uncovered.
     /// </remarks>
     internal static string? Uncovered(VortexFile file, IndexEntry entry)
     {
@@ -242,8 +223,8 @@ internal sealed partial class SortedRunsSource : KeySource
     }
 
     /// <summary>
-    /// Opens the sorted runs of a composite key (docs/12-index-reads.md §4.6): keys that are the
-    /// row encoding of the tuple, bytes ordered bytewise.
+    /// Opens the sorted runs of a composite key: keys that are the row encoding of the tuple, bytes
+    /// ordered bytewise.
     /// </summary>
     /// <param name="file">The open file.</param>
     /// <param name="paths">The key's columns, in key order.</param>
@@ -490,7 +471,7 @@ internal sealed partial class SortedRunsSource : KeySource
     /// The entry of rank <c>i</c> lies in exactly one run. In each run in turn, the rank of its
     /// p-th entry is <c>p</c> plus the entries of the other runs before it, strictly increasing in
     /// <c>p</c>, so a bisection finds the p whose rank is <c>i</c> or proves the run does not hold
-    /// it: <c>O(r² log² n)</c>, which docs/12 §4.5 allows until a measurement asks for better.
+    /// it, at the cost of a bisection per run over bisections in the others.
     /// </remarks>
     internal override async ValueTask<bool> SeekRankAsync(long rank, CancellationToken cancellationToken)
     {
@@ -779,7 +760,7 @@ internal sealed partial class SortedRunsSource : KeySource
         }
 
         // The first segment whose last key does not come before the key: a binary search over the
-        // bounds in memory, or a descent through the fence pages (13 §6.3).
+        // bounds in memory, or a descent through the fence pages when they are paged out.
         ISegmentSource source = _file.IndexSourceOf(run.Meta);
         long low = await table.LowerBoundAsync(source, new MaxProbe(this, key), cancellationToken).ConfigureAwait(false);
         for (long s = low; s < table.SegmentCount; s++)
@@ -894,8 +875,8 @@ internal sealed partial class SortedRunsSource : KeySource
             await _file.IndexSourceOf(run.Meta).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             Diagnostics.VortexEventSource.RunsRead(requests.Count);
 
-            // A WALK OVER TORN BYTES WOULD BE WRONG, NOT SLOW (13 §7): the source refuses, as it
-            // does for a run that decodes to the wrong shape.
+            // A walk over torn bytes would be wrong and not merely slow, so the source refuses, as
+            // it does for a run that decodes to the wrong shape.
             if (!keys.Holds(requests.GetBuffer(keySlot).Span)
                 || (rowSlot >= 0 && !fence.Regions[1].Holds(requests.GetBuffer(rowSlot).Span)))
             {
@@ -976,7 +957,7 @@ internal sealed partial class SortedRunsSource : KeySource
         context.ResetBatch();
         if (wideRows)
         {
-            // A run spanning 2³² rows or more writes them at 64 bits (13 §6.1).
+            // A run spanning more rows than a u32 can name writes its rows at 64 bits.
             DType u64 = types.Primitive(PType.U64, Nullability.NonNullable);
             CanonicalNode wideNode = context.Canonical.GetNode(DecodeRoot(context, rowBlob, u64, entries));
             if (wideNode.Kind != CanonicalKind.Primitive || wideNode.PType != PType.U64 || wideNode.Length != entries)
@@ -1015,11 +996,10 @@ internal sealed partial class SortedRunsSource : KeySource
     }
 
     /// <summary>
-    /// The Class II checks <see cref="VortexReadOptions.VerifyStatistics"/> asks for
-    /// (docs/12-index-reads.md §13): a segment's entries in `(key, row)` order — keys strictly
-    /// ascending in a run without rows, where a key is unique — and every key inside the bounds
-    /// the directory states for the segment. Without the option a lie gives a wrong walk and never
-    /// a fault; with it, the walk refuses to go on.
+    /// The checks <see cref="VortexReadOptions.VerifyStatistics"/> asks for: a segment's entries in
+    /// <c>(key, row)</c> order — keys strictly ascending in a run without rows, where a key is
+    /// unique — and every key inside the bounds the directory states for the segment. Without the
+    /// option a lie gives a wrong walk and never a fault; with it, the walk refuses to go on.
     /// </summary>
     private void Verify(RunSegment segment, KeySegment declared)
     {
@@ -1121,7 +1101,7 @@ internal sealed partial class SortedRunsSource : KeySource
 
         internal IndexRun Meta { get; } = meta;
 
-        /// <summary>The run's segments, in memory or in fence pages (13 §6.3).</summary>
+        /// <summary>The run's segments, held in memory or reached through fence pages.</summary>
         internal FenceTable Table { get; } = table;
 
         internal long FirstRow { get; } = firstRow;

@@ -1,46 +1,19 @@
-// The filter tree of docs/13-dataset.md §6.2: where a column's Bloom filters lie, and how a probe
-// finds the few it needs.
-//
-// A LEAF IS A BLOCK'S FILTER, and a NODE covers up to sixteen children -- leaves at level 1, nodes
-// above it -- with the filter of their union when that fits its ceiling. A node's children are one
-// region, written before the node, so a probe the node does not stop reads them in one ranged read
-// and descends: at most 1 + 16 × depth filters for one value, the depth being log16 of the blocks.
-// A node whose union passes its ceiling has no filter, and a probe goes through it; a column whose
-// generations pass it is the wrong column for a Bloom filter (13 §6.5).
-//
-// A node is a run of 32-bit words, little-endian, inside a u32 array blob:
-//
-//   [0]  1 | level << 8 | children << 16 | bare << 24
-//                                            // the layout's version; level 1..15; 1..16 children;
-//                                            //   bare: a level-1 node none of whose blocks has a filter
-//   [1]  leaves                              // blocks under the node
-//   [2]  filter blocks                       // 0: no filter
-//   [3]  children offset, low                // the children's region, written before the node: a
-//   [4]  children offset, high               //   u32 array blob of their words, concatenated; all
-//   [5]  children bytes                      //   zero when the node is bare
-//   [6]  children XXH3-64, low
-//   [7]  children XXH3-64, high
-//   [8]  children alignment exponent
-//   [9]  words of each child                 // a leaf's filter, 0 for none; a node, its own words;
-//                                            //   absent when the node is bare
-//   [..] the filter                          // filter blocks × 8 words
-//
-// A BARE NODE SAVES SIXTEEN WORDS where they are most of the cost: a column of a few values a block
-// has no block filter, and its generation filters are a few words each.
-//
-// A run's root is its payload, and since an array blob does not carry its own length, the run's
-// options say how many words the root has:
-//
-//   message BloomTreeRun { uint32 root_words = 1; }
-//
-// A NODE IS CHECKED AGAINST ITS PARENT: its level, its leaves, its word count, and the region of its
-// children against the checksum it carries. What fails claims nothing for the blocks beneath it.
 using System;
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Indexes;
 
-/// <summary>One node of a filter tree, parsed in place over the words that hold it.</summary>
+/// <summary>
+/// One node of a filter tree, parsed in place over the little-endian words that hold it: a leaf is a
+/// block's filter, and a node covers up to sixteen children with the filter of their union when that
+/// union fits the filter's ceiling, having none at all when it does not.
+/// </summary>
+/// <remarks>
+/// A node's children are one region, written before the node, so a probe the node does not stop
+/// reads a whole level in one ranged read. Every node is checked against what its parent says of it
+/// -- its level, its blocks, its word count -- and its children's region against the checksum the
+/// node carries, since a node that does not check out must claim nothing for the blocks beneath it.
+/// </remarks>
 internal sealed class BloomNode
 {
     /// <summary>The words before a node's child sizes.</summary>
@@ -100,6 +73,10 @@ internal sealed class BloomNode
         checked(HeaderWords + childWords + (filterBlocks * SplitBlockBloom.WordsPerBlock));
 
     /// <summary>Whether a node of <paramref name="level"/> with these children is bare: level 1, no leaf with a filter.</summary>
+    /// <remarks>
+    /// A bare node lists no child size, which is most of what it would cost: a column with too few
+    /// values a block to earn any block filter would otherwise pay sixteen empty words per node.
+    /// </remarks>
     /// <param name="level">Its level.</param>
     /// <param name="childWords">Each child's words.</param>
     internal static bool IsBare(int level, ReadOnlySpan<int> childWords) =>
@@ -251,7 +228,10 @@ internal sealed class BloomNode
     }
 }
 
-/// <summary>The options of a filter tree's run.</summary>
+/// <summary>
+/// The options of a filter tree's run: a run's payload is its root, and an array blob does not carry
+/// its own length, so the options state how many words the root has.
+/// </summary>
 internal static class BloomTreeRun
 {
     private const int RootWordsField = 1;

@@ -1,8 +1,3 @@
-// The local case of ISegmentSink: a Stream.
-//
-// It tracks its own position rather than asking the stream, because the seam's contract is
-// forward-only and a non-seekable stream has no Position at all. That is the whole point of
-// carrying it here: a writer over a network stream behaves exactly like one over a file.
 using System;
 using System.IO;
 using System.Threading;
@@ -10,7 +5,10 @@ using System.Threading.Tasks;
 
 namespace Vorticity.Writing;
 
-/// <summary>An <see cref="ISegmentSink"/> over a <see cref="Stream"/>.</summary>
+/// <summary>
+/// An <see cref="ISegmentSink"/> over a <see cref="Stream"/>. The position is counted here, so the
+/// stream need not be seekable.
+/// </summary>
 public sealed class StreamSegmentSink : ISegmentSink, IAsyncDisposable
 {
     private readonly Stream _stream;
@@ -27,10 +25,7 @@ public sealed class StreamSegmentSink : ISegmentSink, IAsyncDisposable
     {
     }
 
-    /// <summary>Wraps a stream already holding <paramref name="position"/> bytes of the file: an append.</summary>
-    /// <param name="stream">The destination, positioned at its end.</param>
-    /// <param name="ownsStream">Whether disposing this sink disposes the stream.</param>
-    /// <param name="position">The file offset the next byte lands at.</param>
+    /// <summary>Wraps a stream already holding part of the file: an append.</summary>
     internal StreamSegmentSink(Stream stream, bool ownsStream, long position)
     {
         ArgumentNullException.ThrowIfNull(stream);
@@ -64,7 +59,6 @@ public sealed class StreamSegmentSink : ISegmentSink, IAsyncDisposable
         new ValueTask(_stream.FlushAsync(cancellationToken));
 
     /// <summary>Flushes, and disposes the stream when this sink owns it.</summary>
-    /// <returns>A task that completes when the stream is released.</returns>
     public async ValueTask DisposeAsync()
     {
         await _stream.FlushAsync().ConfigureAwait(false);

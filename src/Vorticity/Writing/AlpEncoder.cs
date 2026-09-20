@@ -1,20 +1,3 @@
-// ALP encoding: a float stored as the integer it scales to, plus the values that would not survive
-// the trip.
-//
-// "Adaptive Lossless floating-Point". Most real-world doubles are decimals with few significant
-// digits - prices, measurements, coordinates - and `round(v * 10^e / 10^f)` turns those into small
-// integers that bit-pack like any other. The encoder's whole job is choosing (e, f), and its
-// correctness rests on one check: a value is only encoded if decoding the integer reproduces its
-// EXACT BIT PATTERN. Everything else is carried verbatim as a patch, which is what makes a lossy
-// transform into a lossless encoding.
-//
-// Transcribed from alp-0.0.4/src/alp/mod.rs (`find_best_exponents`, `encode_chunk_unchecked`), the
-// crate vortex-alp uses.
-//
-// THE BITWISE COMPARISON IS LOAD-BEARING. `-0.0` must not round-trip to `+0.0` and a NaN must not
-// round-trip to a different NaN, because a writer that let either through would silently change
-// values that compare equal but are not the same - the same rule the row encoder follows for the
-// same reason (docs/08-semantics.md §5).
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -27,7 +10,16 @@ using Vorticity.Types;
 
 namespace Vorticity.Writing;
 
-/// <summary>One column encoded with ALP: the exponents, the integers, and the exceptions.</summary>
+/// <summary>
+/// One column encoded with ALP: the exponents, the integers, and the exceptions. A float with few
+/// significant digits scales to a small integer that bit-packs like any other, and the encoder's
+/// whole job is choosing the pair of exponents; a value is encoded only when decoding its integer
+/// reproduces the original bit pattern exactly, and every other value is carried verbatim as a
+/// patch, which is what turns a lossy transform into a lossless encoding. The comparison is bitwise
+/// on purpose: <c>-0.0</c> must not round-trip to <c>+0.0</c> and a NaN must not round-trip to a
+/// different NaN, or the writer would silently change values that compare equal without being the
+/// same.
+/// </summary>
 internal sealed class AlpPlan
 {
     private byte[] _encoded;
@@ -133,29 +125,23 @@ internal sealed class AlpPlan
         double back = AlpTables.F10Double[f];
         double backInverse = AlpTables.If10Double[e];
 
-        // ENCODED IS WRITTEN STRAIGHT INTO THE BYTES THE PLAN WILL CARRY. PERF-AUDIT-v2.md W-6: this
-        // was a `long[rows]` filled here and then copied into a `byte[rows * 8]` below, so every ALP
-        // candidate allocated the column TWICE and threw one copy away -- while being PRICED,
-        // whether or not it ends up elected.
-        //
-        // UNINITIALIZED IS SAFE HERE because every slot is written before it is read: the loop
-        // writes the valid unpatched ones and `FillGaps` writes the invalid and the patched ones.
-        // That is not an accident of the code below, it is what `FillGaps` is for.
-        //
-        // RENTED, for the same reason the patch buffers below are: every float column is PRICED
-        // with ALP whether or not ALP wins, and these integers are the column itself, eight bytes a
-        // row. A candidate that loses allocated all of that and dropped it -- 524 kB of a 65 536-row
-        // write, a quarter of two 4 096-row ones. The rental goes back when the plan is refused
-        // here, or when the writer has laid the integers in the arena.
+        // The integers go straight into the bytes the plan will carry, so a candidate never builds
+        // the column twice. Leaving the rental uninitialized is safe because every slot is written
+        // before it is read: the loop writes the valid unpatched rows and `FillGaps` writes the
+        // invalid and the patched ones, which is what `FillGaps` is for. It is rented for the same
+        // reason as the patch buffers below: every float column is priced with ALP whether or not
+        // ALP wins, and these integers are the column itself, so a losing candidate would otherwise
+        // hand the heap a whole copy of it. The rental goes back when the plan is refused here, or
+        // when the writer has laid the integers in the arena.
         int encodedLength = rows * sizeof(long);
         byte[] encodedBytes = ArrayPool<byte>.Shared.Rent(Math.Max(encodedLength, 1));
         Span<long> encoded = MemoryMarshal.Cast<byte, long>(encodedBytes.AsSpan(0, encodedLength));
 
-        // THE PATCH BUFFERS ARE RENTED AND SIZED FOR THE WORST CASE, which is every row a patch. A
-        // `List` that grows by doubling is cheap when ALP fits and ruinous when it does not:
-        // `encodings/alprd` is a column built to defeat ALP, so every row becomes a patch, and the
-        // two lists reallocating their way up were 43 % of that file's whole write. Rented, so the
-        // worst case costs the pool rather than the heap.
+        // The patch buffers are rented and sized for the worst case, which is every row a patch. A
+        // `List` that grows by doubling is cheap when ALP fits and ruinous when it does not: a
+        // column built to defeat ALP turns every row into a patch, and the two lists reallocating
+        // their way up dominate the write. Rented, so the worst case costs the pool and not the
+        // heap.
         int[] indices = ArrayPool<int>.Shared.Rent(rows);
         double[] patches = ArrayPool<double>.Shared.Rent(rows);
         int patchCount = 0;
@@ -307,7 +293,7 @@ internal sealed class AlpPlan
     /// convert back, and compare the bit patterns, as the scalar loop does per row.
     /// </summary>
     /// <remarks>
-    /// THE SAME ARITHMETIC IN THE SAME ORDER, element-wise, so every lane rounds as the scalar row
+    /// The same arithmetic in the same order, element-wise, so every lane rounds as the scalar row
     /// would: the products are left to right, and <see cref="Vector128.ConvertToInt64(Vector128{double})"/>
     /// saturates and sends a NaN to zero, which is <see cref="ToInt64(double)"/>. A lane that does
     /// not come back is a patch; its integer is stored anyway and <see cref="FillGaps"/> overwrites it.
@@ -401,11 +387,12 @@ internal sealed class AlpPlan
         return length;
     }
 
-    /// <summary>The branchless round-to-nearest of the reference: add the sweet spot and take it away.</summary>
+    /// <summary>Branchless round-to-nearest: add the sweet spot and take it away.</summary>
     /// <remarks>
-    /// Adding 1.5 * 2^52 forces every fractional bit out of the mantissa under the FPU's own
-    /// rounding mode, and subtracting it leaves the rounded value. It is not `Math.Round`: it is
-    /// what the reference does, and the two disagree on halfway cases.
+    /// Adding 1.5 * 2^52 forces every fractional bit out of the mantissa under the hardware's own
+    /// rounding mode, and subtracting it leaves the rounded value. It is deliberately not
+    /// <c>Math.Round</c>, which disagrees on halfway cases: the integers have to be the ones every
+    /// other writer of this encoding produces, or a file would not decode to the same floats.
     /// </remarks>
     private static double FastRound(double value)
     {
@@ -506,9 +493,9 @@ internal sealed class AlpPlan
     /// Picks (e, f) by estimating the encoded size of a sample under every candidate pair.
     /// </summary>
     /// <remarks>
-    /// The search runs e downward and f up to e, which is the reference's order and matters for
-    /// the tie-break: among pairs of equal estimated size the smaller `e - f` wins, because that
-    /// is the one that scales least and therefore rounds least.
+    /// The search runs e downward and f up to e, and that order decides the tie-break: among pairs
+    /// of equal estimated size the smaller `e - f` wins, because that is the one that scales least
+    /// and therefore rounds least.
     /// </remarks>
     private static (int E, int F) BestExponentsDouble(
         ReadOnlySpan<double> values, ValidityMask mask, int rows)
@@ -637,7 +624,7 @@ internal sealed class AlpPlan
         span == 0 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount(span);
 
     /// <summary>
-    /// Samples in RUNS rather than at a stride: adjacent values share a magnitude and a number of
+    /// Samples in runs rather than at a stride: adjacent values share a magnitude and a number of
     /// significant digits, and a stride would see one value from each run and miss that entirely.
     /// </summary>
     private static double[] SampleDouble(ReadOnlySpan<double> values, ValidityMask mask, int rows)

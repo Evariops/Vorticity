@@ -1,30 +1,3 @@
-// The canonical, uncompressed writer - docs/01-scope.md Phase 3's first milestone, and the one that
-// unlocks cross-testing in the Vorticity -> Rust direction: until a file exists, the writer is
-// untested in any meaningful sense, because our own reader will happily read back our own mistakes.
-//
-// The file it produces is deliberately the simplest valid one:
-//
-//     vortex.struct                 one child per root field (a tabular file)
-//       └ vortex.zoned              one zone per batch, when the batches are uniform
-//           ├ vortex.chunked        one child per batch written
-//           │   └ vortex.flat       one segment: the batch's column, canonical and uncompressed
-//           └ vortex.flat           one segment: the zones, one row each
-//
-// A file whose root dtype is NOT a struct -- `i64`, `utf8?` -- is legal and common in the corpus,
-// and drops the struct level: the root is the chunked layout itself. Refusing those was the first
-// thing the round-trip test caught.
-//
-// No compression yet. Zone maps ARE emitted (F11), but only when the batches handed in are uniform
-// except for the last: a zone map declares ONE zone length and zone z covers
-// [z * len, (z + 1) * len), so a ragged chunking has no zone length to declare. Rather than buffer
-// and re-chunk -- which would throw away the streaming property the sink seam exists for -- the
-// writer emits a plain chunked layout in that case, which every reader already handles.
-//
-// THE ORDER OF WRITES IS THE FORMAT'S, NOT A CHOICE. Segments go out as batches arrive, so nothing
-// is buffered; the layout, footer and postscript can only be written once every segment's offset is
-// known, which is why they are all in CompleteAsync. A sink that cannot seek loses nothing, which
-// is the property that makes an S3 multipart upload trivial in the layer above
-// (docs/03-architecture.md §3.8).
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -47,7 +20,11 @@ using Vorticity.Types.Serialization;
 
 namespace Vorticity.Writing;
 
-/// <summary>Writes a Vortex file, one batch at a time, in a single forward pass.</summary>
+/// <summary>
+/// Writes a Vortex file, one batch at a time, in a single forward pass. Segments go out as batches
+/// arrive; the layout, footer and postscript can only be written once every segment's offset is
+/// known, so they all belong to <see cref="CompleteAsync"/> and the sink never has to seek.
+/// </summary>
 public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 {
     private readonly ISegmentSink _sink;
@@ -77,21 +54,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     private readonly int _rowBlock;
 
     /// <summary>
-    /// Rows per BLOCK, which is the zone length - docs/11-write-strategy.md §3.1.
+    /// Rows per block, which is the zone length. A block is counted from row 0 of the file and owes
+    /// nothing to the caller's batching. Zero means the batch is the block, and the zone map then
+    /// needs the uniformity check <see cref="TryZoneLength"/> makes.
     /// </summary>
-    /// <remarks>
-    /// A block is counted from row 0 of the file and owes nothing to the caller's batching or to the
-    /// chunk the rows land in, which is the whole reason the zone map is no longer hostage to a
-    /// uniform chunking. It is <see cref="VortexWriteOptions.RowBlockSize"/> -- upstream's
-    /// <c>row_block_size</c>, the same quantity under the same name.
-    /// <para>
-    /// ZERO MEANS "THE BATCH IS THE BLOCK", which is what <c>RowBlockSize = null</c> asks for: that
-    /// caller has taken the file's shape into its own hands and said its batches are its pruning
-    /// unit. The zone map then needs the uniformity check <see cref="TryZoneLength"/> makes, because
-    /// a ragged batching has no single zone length to declare -- the one case where that is still
-    /// true.
-    /// </para>
-    /// </remarks>
     private readonly int _blockRows;
 
     /// <summary>Rows already folded into the open block, below <see cref="_blockRows"/>.</summary>
@@ -102,83 +68,54 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
     /// <summary>
     /// (Column chunk, field) pairs the chooser had to measure itself because the block range handed
-    /// to it did not cover them.
+    /// to it did not cover them. The fallback is silent, so only this counter can catch it.
     /// </summary>
-    /// <remarks>
-    /// THE FALLBACK IS SILENT BY DESIGN AND THAT IS EXACTLY WHY THIS EXISTS. `Choose` checks the row
-    /// count and measures the column when it disagrees, so a wrong block range costs a pass and
-    /// never a wrong plan -- which means `WrittenSizeTests` would stay byte-exact while every
-    /// candidate quietly went back to walking the rows, and the whole of stage 2 would be undone by
-    /// an off-by-one nobody could see. `StatisticsTests` holds this at zero over a range of batch
-    /// shapes; it is the only thing that can.
-    /// </remarks>
     internal long ChunksWithoutStatistics => _chunksWithoutStatistics;
 
     private long _chunksWithoutStatistics;
 
     /// <summary>
-    /// List chunks whose elements the chooser measured itself, because their blocks did not name
-    /// exactly the elements the chunk writes (docs/11 §3.2.4) — the elements' counterpart of
+    /// List chunks whose elements the chooser counted itself, because their blocks did not name
+    /// exactly the elements the chunk writes — the elements' counterpart of
     /// <see cref="ChunksWithoutStatistics"/>, and silent for the same reason.
     /// </summary>
-    /// <remarks>
-    /// A list whose ranges name windows of elements laid end to end leaves this at zero; one whose
-    /// windows overlap or leave a gap between two blocks counts here, and is written from a
-    /// measurement, which is the safe answer rather than a loss of bytes.
-    /// </remarks>
     internal long ElementChunksWithoutStatistics => _elementChunksWithoutStatistics;
 
     private long _elementChunksWithoutStatistics;
 
     private readonly bool _elementStatistics;
 
-    /// <summary>Column <paramref name="field"/>'s ingest state, for the tests that follow a child's memory.</summary>
-    /// <param name="field">The top-level field.</param>
+    /// <summary>Column <paramref name="field"/>'s ingest state.</summary>
     internal ColumnWriter ColumnState(int field) => _columns[field];
 
-    /// <inheritdoc/>
     bool IChunkLedger.ElementsServe => _elementStatistics;
 
-    /// <inheritdoc/>
     void IChunkLedger.ElementsUnserved() => _elementChunksWithoutStatistics++;
 
     /// <summary>
     /// (Column chunk, field) pairs of a comparable kind whose distinct table could not answer, so the
     /// chooser walked the chunk to build the dictionary it would otherwise have read off the table.
+    /// The walk is byte-identical to the table, so a table that stopped serving would cost a second
+    /// pass without changing a byte.
     /// </summary>
-    /// <remarks>
-    /// The same argument as <see cref="ChunksWithoutStatistics"/>, for docs/11 §3.2.2's table: the
-    /// walk is byte-identical to the table by construction, so a table that quietly stopped serving
-    /// would keep every byte-exact test green while every chunk paid the second pass again. Decided
-    /// by <see cref="ChunkStats.TableServes"/>, the one predicate the chooser also uses.
-    /// </remarks>
     internal long ChunksWithoutTable => _chunksWithoutTable;
 
     private long _chunksWithoutTable;
 
     /// <summary>
     /// (Column chunk, field) pairs whose distinct table answered: the dictionary was read off the
-    /// table rather than walked for.
+    /// table rather than walked for. The positive half of <see cref="ChunksWithoutTable"/>, since a
+    /// table that never runs leaves that counter at zero too.
     /// </summary>
-    /// <remarks>
-    /// The positive half of <see cref="ChunksWithoutTable"/>, and the one a test needs: a table
-    /// that is never expected to serve leaves the fallback counter at zero all the same. Whether a
-    /// dictionary column's memory holds -- and so whether its table runs at all -- is exactly what
-    /// `PlanMemoryTests` holds this counter to.
-    /// </remarks>
     internal long ChunksFromTable => _chunksFromTable;
 
     private long _chunksFromTable;
 
     /// <summary>
     /// (Column chunk, field) pairs whose bit-packing was priced from the ingested width histograms
-    /// rather than from a walk of the chunk, the columns' children included.
+    /// rather than from a walk of the chunk, the columns' children included. The width counterpart
+    /// of <see cref="ChunksFromTable"/>.
     /// </summary>
-    /// <remarks>
-    /// The width counterpart of <see cref="ChunksFromTable"/>: whether the chunk after a held
-    /// bit-packing reads its widths at all -- its first block is already open with the carried
-    /// tail when the plan holds -- is what `PlanMemoryTests` holds this counter to.
-    /// </remarks>
     internal long ChunksFromWidths
     {
         get
@@ -196,18 +133,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <summary>Canonical bytes to accumulate before emitting, or 0 for no byte threshold.</summary>
     private readonly long _blockBytes;
 
-    /// <summary>Whether the schema holds a list or a map, so W-35's narrowing has anything to do.</summary>
+    /// <summary>Whether the schema holds a list or a map, so a chunk may share a batch's children.</summary>
     private readonly bool _mayShareChildren;
 
     /// <summary>
-    /// The two arenas the accumulation ping-pongs between.
+    /// The two arenas the accumulation ping-pongs between: a block's remainder is copied into the
+    /// other one before the first is reset, since one arena would mean resetting storage the
+    /// remainder still views.
     /// </summary>
-    /// <remarks>
-    /// TWO, BECAUSE A BLOCK'S REMAINDER HAS TO SURVIVE THE BLOCK. The pending batches are
-    /// materialized into <c>_transit[_current]</c>; emitting a block concatenates them, slices off
-    /// the rows that go out, writes those, then copies what is LEFT into the other arena and resets
-    /// the first. One arena would mean resetting storage the remainder still views.
-    /// </remarks>
     private ScanContext?[]? _transit;
     private int _current;
     private readonly List<int> _pending = [];
@@ -223,28 +156,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     private bool _completed;
     private bool _abandoned;
 
-    /// <summary>The path this writer created, or null when the caller brought the sink.</summary>
-    /// <remarks>
-    /// Only <see cref="Create(string, DType, VortexWriteOptions)"/> sets it, and that is the whole
-    /// distinction <see cref="Abandon"/> needs: a file this writer created holds nothing but a
-    /// half-written attempt, while an appended file holds the caller's rows under a tail this
-    /// writer never finished. Owning the stream does not separate the two -- an append owns its
-    /// stream as well.
-    /// </remarks>
+    /// <summary>
+    /// The path this writer created, or null when the caller brought the sink: what
+    /// <see cref="Abandon"/> may delete, since a created file holds nothing but a half-written
+    /// attempt while an appended one holds the caller's rows.
+    /// </summary>
     private string? _createdPath;
-    // SHARED, BECAUSE NOTHING WRITES TO IT: the sink takes `ReadOnlyMemory<byte>`. One array per
-    // writer was 88 bytes on every file for 64 zeros, which is what pays for the report's fields.
+    // Shared, because nothing writes to them and the sink takes memory rather than a span.
     private static readonly byte[] Padding = new byte[VortexLimits.MaxAlignment];
-    // The same, for the same reason: the magic is four bytes nobody writes to, and the sink takes
-    // memory rather than a span. Twenty-eight bytes a file, which is what it is -- the point is
-    // that there is now one rule here and not two.
     private static readonly byte[] Magic = VortexFileFormat.MagicBytes.ToArray();
     private readonly bool _fileStatistics;
 
-    /// <summary>The identity the options pinned, or null for a fresh one (docs/13-dataset.md §7).</summary>
+    /// <summary>The identity the options pinned, or null for a fresh one.</summary>
     private readonly Guid? _identity;
-    // NULL WHEN THE POLICY ASKS FOR NOTHING, which is the default: the index machinery then costs a
-    // write not one allocation, and the file is byte for byte what it was (docs/10-indexes.md §7.3).
+    // Null when the policy asks for nothing, so such a write allocates none of the index machinery.
     private readonly IndexWriter? _indexes;
     private WriteBytes _reportBytes;
     private ColumnWriteReport[]? _reportColumns;
@@ -278,8 +203,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         for (int i = 0; i < _columnSegments.Length; i++)
         {
             _columnSegments[i] = [];
-            // THE TABLE HAS A CONSUMER ONLY IF THE EDITION CAN WRITE A DICTIONARY: docs/11 §3.2.2's
-            // first liveness rule, the one the edition decides; plan memory adds the per-chunk one.
+            // The distinct table has a consumer only if the edition can write a dictionary.
             _columns[i] = new ColumnWriter
             {
                 EditionAllowsDictionary = ColumnCompressor.Allows(target, "vortex.dict"),
@@ -307,17 +231,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     public long RowCount => _rowCount;
 
     /// <summary>
-    /// The row count a caller should batch in multiples of (docs/11-write-strategy.md §7.1): a
-    /// batch of a multiple of it, carrying at least
+    /// The row count a caller should batch in multiples of: such a batch, carrying at least
     /// <see cref="VortexWriteOptions.DataBlockTargetBytes"/> bytes, is written where it lies and
-    /// pays no transit copy at all.
+    /// pays no transit copy. Any other batch waits in transit for the rows completing its last
+    /// block.
     /// </summary>
-    /// <remarks>
-    /// The file's block length, 8 192 by default, because a chunk is a whole number of blocks
-    /// (§3.1) and a batch that is not one has to wait in transit for the rows that complete its
-    /// last block. With <see cref="VortexWriteOptions.RowBlockSize"/> null every batch is its own
-    /// chunk and nothing waits, which is what 1 says.
-    /// </remarks>
     public int PreferredBatchRows => _rowBlock > 0 ? _rowBlock : 1;
 
     /// <summary>
@@ -327,12 +245,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     internal bool Buffered => _transit is not null;
 
     /// <summary>
-    /// Pins the scheme of every column the caller named (docs/11 §7.1, §3.4.3), before the first
-    /// batch, since the ingest state a scheme reads starts with it.
+    /// Pins the scheme of every column the caller named, before the first batch, since the ingest
+    /// state a scheme reads starts with it.
     /// </summary>
-    /// <param name="hints">The hints, by column path.</param>
-    /// <exception cref="ArgumentException">A hint names no column of the schema.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">A hint is not one of the defined values.</exception>
     private void Pin(IReadOnlyDictionary<string, VortexEncodingHint> hints)
     {
         foreach ((string path, VortexEncodingHint hint) in hints)
@@ -369,8 +284,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <c>.</c>-separated path through structs and the extensions around them, or the empty path
     /// for the one column of a file whose root is not a struct.
     /// </summary>
-    /// <param name="path">The path, as <see cref="WritePolicy"/> spells it.</param>
-    /// <param name="column">The column's ingest state.</param>
     private bool TryDescend(string path, out ColumnWriter? column)
     {
         column = null;
@@ -458,9 +371,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             throw new ArgumentException("The schema has not been set.", nameof(schema));
         }
 
-        // The schema's extension ids are checked HERE rather than where the dtype is serialized:
-        // the answer cannot change once the writer exists, and "this schema cannot be written to
-        // this edition" is worth hearing before the first batch rather than at Complete.
+        // Checked before the first batch rather than at serialization: the answer cannot change
+        // once the writer exists, and the caller should hear it early.
         RequireSchemaInTarget(schema, options.TargetEdition);
 
         int rowBlock = options.RowBlockSize ?? 0;
@@ -550,18 +462,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
     /// <summary>Gives up on the file: nothing more is written, and a created file is removed.</summary>
     /// <remarks>
-    /// THE EXIT <see cref="DisposeAsync"/> DOES NOT GIVE. Disposal completes an unfinished file,
-    /// so a producer that throws half way through still leaves a valid one holding the rows it
-    /// managed to write, and nothing downstream can tell that apart from a file that was meant to
-    /// end there. `Abandon` is how a caller says the rows are not worth keeping.
-    ///
-    /// On a file this writer created, the partial file is deleted when the sink releases the
-    /// stream. On an append it is not, and must not be: those bytes are the caller's rows. What an
-    /// abandoned append leaves is a tail that does not parse, which is the state
-    /// <see cref="File.VortexFileRepair"/> was written for -- unlike a completed one, which parses
-    /// and reports the rows the append had kept so far, losing the rest without a trace.
-    ///
-    /// It is safe to call more than once, and after it the writer accepts no further rows.
+    /// The exit <see cref="DisposeAsync"/> does not give: disposal completes an unfinished file, so
+    /// a producer that throws half way through still leaves a valid one holding the rows it managed
+    /// to write. An abandoned append deletes nothing -- those bytes are the caller's rows -- and
+    /// leaves a tail that does not parse, which is what <see cref="File.VortexFileRepair"/> is for.
+    /// Safe to call more than once; after it the writer accepts no further rows.
     /// </remarks>
     public void Abandon()
     {
@@ -591,25 +496,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         RequireMatchingSchema(batch);
         await StartAsync(cancellationToken).ConfigureAwait(false);
 
-        // THE STATISTICS PASS RUNS HERE, BEFORE ANY COPY OR EMISSION - docs/11-write-strategy.md
-        // §2. The batch is on the caller's own arena and the decode that produced it has just
-        // touched every byte, so this is the one moment the column is in cache for free. It also
-        // makes the summary independent of what happens next: whether these rows go out where they
-        // lie, wait in transit, or straddle two chunks, their block is the same block.
+        // The statistics pass runs before any copy or emission: the decode that produced the batch
+        // has just touched every byte, and a row's block does not depend on where the row ends up.
         Ingest(batch);
 
         if (_rowBlock == 0)
         {
-            // One call, one chunk: the shape before repartitioning existed, kept as an explicit
-            // choice rather than as the absence of one.
+            // One call, one chunk.
             await EmitChunkAsync(batch.Arena, batch.RootIndex, batch.RowCount, cancellationToken)
                 .ConfigureAwait(false);
             return;
         }
 
-        // NOTHING PENDING AND ALREADY BIG ENOUGH: write it where it lies. A caller handing over
-        // batches that already satisfy both thresholds -- which is the shape a bulk load has --
-        // then pays no transit copy at all, and the repartitioner costs it nothing.
+        // Nothing pending and already big enough: write it where it lies, with no transit copy.
         if (_pending.Count == 0 &&
             batch.RowCount >= _rowBlock &&
             batch.Arena.ByteSize(batch.RootIndex) >= _blockBytes &&
@@ -620,16 +519,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             return;
         }
 
-        // MATERIALIZED, not borrowed. The batch's arena is the scan's and is reset the moment the
-        // caller asks for the next batch, so rows that are going to be held have to own their
-        // bytes -- which is exactly what CopyFrom is for.
-        // NARROWED BEFORE IT IS OWNED, in three steps that copy nothing until the last -- W-35. A
-        // batch cut from a large list chunk shares that chunk's elements WHOLE, so copying it as it
-        // comes materializes the column to hold one batch of it (measured: 6 065 048 bytes for the
-        // 48 KB the rows name, on the 1M-row `list` file). Referencing first costs records only,
-        // compacting then works on views, and the copy pays for the window alone. Doing it here
-        // rather than after the copy also makes the concatenation tight: `ConcatListView` rebases by
-        // each chunk's WHOLE child length, so a wide child poisons every offset downstream of it.
+        // Materialized, not borrowed: the batch's arena is the scan's and is reset as soon as the
+        // caller asks for the next batch, so held rows must own their bytes. Narrowed before it is
+        // owned, since a batch cut from a large list chunk shares that chunk's elements whole and
+        // copying it as it comes would materialize the whole child; referencing then compacting
+        // works on views, so the copy pays for the window alone. Narrowing here also keeps the
+        // concatenation tight, because rebasing uses each chunk's whole child length.
         CanonicalArena transit = Transit();
         _pending.Add(_mayShareChildren
             ? transit.CopyFrom(
@@ -645,13 +540,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     }
 
     /// <summary>
-    /// Folds one batch into the open block of every column, closing blocks as it crosses them.
+    /// Folds one batch into the open block of every column, closing blocks as it crosses them: a
+    /// batch that straddles a boundary is cut there and its leftover continues the next block.
     /// </summary>
-    /// <remarks>
-    /// A batch straddles blocks - 8 131 rows never line up with 8 192 - so the range handed to a
-    /// column is cut at the boundary and the leftover continues the next block. Nothing here reads a
-    /// row twice and nothing allocates: the field nodes go into the writer's own scratch.
-    /// </remarks>
     private void Ingest(RecordBatch batch)
     {
         CanonicalArena arena = batch.Arena;
@@ -671,8 +562,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         int rows = batch.RowCount;
         if (_blockRows == 0)
         {
-            // The batch IS the block: the caller turned repartitioning off and its batches are its
-            // own pruning unit.
+            // The batch is the block: repartitioning is off, so batches are the pruning unit.
             for (int field = 0; field < _fieldCount; field++)
             {
                 _columns[field].Accumulate(arena, _fieldNodes[field], 0, rows);
@@ -706,8 +596,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// Feeds the rows of <paramref name="rootIndex"/> to every column's distinct table only, with
     /// the field resolution <see cref="Ingest"/> makes.
     /// </summary>
-    /// <param name="arena">The arena holding the carried rows.</param>
-    /// <param name="rootIndex">A carried node: a whole batch, or the cut tail of one.</param>
     private void Reprobe(CanonicalArena arena, int rootIndex)
     {
         CanonicalNode root = arena.GetNode(rootIndex);
@@ -749,8 +637,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     }
 
     /// <summary>
-    /// Writes every index payload the builders have closed, between data chunks (10 §4.2's run
-    /// segments: regions no layout references and no footer lists).
+    /// Writes every index payload the builders have closed, between data chunks, as regions no
+    /// layout references and no footer lists.
     /// </summary>
     private async ValueTask FlushIndexesAsync(CancellationToken cancellationToken)
     {
@@ -776,10 +664,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <summary>The arena the pending rows live in, created on first use.</summary>
     private CanonicalArena Transit()
     {
-        // A detached scan context: the writer needs an arena and the decode plumbing that
-        // CanonicalConcat and CanonicalSlice take, and it has no file to scan. The SECOND one is
-        // created only when a block actually splits, which for a file small enough to leave as one
-        // chunk never happens.
+        // A detached scan context: the writer needs the arena and decode plumbing CanonicalConcat
+        // and CanonicalSlice take, and has no file to scan. The second one is created only when a
+        // block actually splits.
         _transit ??= new ScanContext?[2];
         return (_transit[_current] ??= new ScanContext([])).Canonical;
     }
@@ -787,15 +674,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <summary>
     /// Emits whole multiples of <see cref="_rowBlock"/> rows and carries the remainder forward.
     /// </summary>
-    /// <remarks>
-    /// THE CONCATENATION IS THE SECOND COPY THE PENDING ROWS PAY, and what it would take to make it
-    /// a borrow is an append buffer per column, where every batch lays its bytes down in order --
-    /// with the rule below surviving it, that what is carried is cut from one batch and never from
-    /// the concatenation. Doubling both concatenations here prices that design: on a million-row
-    /// write it reads 1,084 then 1,075 on `chunked`, whose whole axis is 2,3 ms and whose interval
-    /// is as wide as the effect, 1,025 on `table_mixed`, whose axis is 91, and 1,006 on `fsst`.
-    /// Two and a half per cent where the time actually is.
-    /// </remarks>
     private async ValueTask EmitBlockAsync(CancellationToken cancellationToken)
     {
         ScanContext from = _transit![_current]!;
@@ -815,17 +693,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             return;
         }
 
-        // WHAT IS CARRIED IS CUT FROM ONE BATCH, NEVER FROM THE CONCATENATION -- WRITE-AUDIT.md
-        // W-31b. Slicing the concatenated block and carrying that was the shape before, and it made
-        // the remainder grow without bound: a slice keeps the whole of what it was cut from for the
-        // forms that share storage (`ListView`'s elements child, a `VarBinView`'s data buffers), so
-        // the carry dragged every byte of every block already emitted and the next copy paid for all
-        // of it again. `list`, `listview` and `map` did not merely slow down, they stopped: 270 MB
-        // asked for in one buffer, above the 256 MiB ceiling.
-        //
-        // The boundary falls inside at most ONE pending batch. Everything before it goes out whole,
-        // that one is cut in two, and what is carried is its tail plus whatever whole batches follow
-        // -- each of them bounded by its own batch, whatever the file's length.
+        // What is carried is cut from one batch, never from the concatenation: a slice keeps the
+        // whole of what it was cut from for the forms that share storage, so carrying a slice of
+        // the concatenated block would drag every byte already emitted and grow without bound. The
+        // boundary falls inside at most one pending batch; everything before it goes out whole,
+        // that one is cut in two, and the carry is its tail plus the whole batches that follow.
         int consumed = 0;
         int split = 0;
         while (split < _pending.Count)
@@ -859,7 +731,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
                 System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending)[..going]);
         await EmitChunkAsync(from.Canonical, head, emit, cancellationToken).ConfigureAwait(false);
 
-        // The remainder moves to the other arena BEFORE this one is reset, because a slice is a
+        // The remainder moves to the other arena before this one is reset, because a slice is a
         // view onto the storage the reset would hand back.
         ScanContext to = _transit[_current ^ 1] ??= new ScanContext([]);
         _carry.Clear();
@@ -879,11 +751,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             carriedBytes += to.Canonical.ByteSize(_carry[i]);
         }
 
-        // THE TAIL IS PROBED AGAIN, INTO THE TABLES THE EMISSION JUST RESET. These rows were probed
-        // under the chunk that has just gone out, some against entries that are now written; in
-        // the chunk they will open they are new, and their codes must say so. Their statistics are
-        // not touched -- the open block is still the open block -- only the tables see them again,
-        // in the order the next chunk will hold them, which is first. Less than a block.
+        // The tail is probed again, into the tables the emission just reset: these rows were probed
+        // under the chunk that has gone out, and in the chunk they open they are new. Only the
+        // tables see them again; their statistics belong to the still-open block.
         for (int i = 0; i < _carry.Count; i++)
         {
             Reprobe(to.Canonical, _carry[i]);
@@ -906,14 +776,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         _pendingBytes = 0;
     }
 
-    /// <summary>How many blocks a chunk of <paramref name="rows"/> rows covers.</summary>
-    /// <remarks>
-    /// A chunk is emitted in whole multiples of the block length and chunks start at row 0, so a
-    /// chunk is a contiguous, block-aligned range and its statistics are the sum of its blocks' --
-    /// docs/11-write-strategy.md §3.3. The last chunk of the file may end inside a block, which is
-    /// why the count rounds up. With repartitioning off the batch is both the chunk and the block,
-    /// so the range is one. The index builders replay the chunk sizes through this same rule.
-    /// </remarks>
+    /// <summary>
+    /// How many blocks a chunk of <paramref name="rows"/> rows covers, rounding up because the
+    /// file's last chunk may end inside a block. The index builders replay chunk sizes through this
+    /// same rule.
+    /// </summary>
     /// <param name="rows">The chunk's rows.</param>
     /// <param name="blockRows">Rows per block, or 0 with repartitioning off.</param>
     internal static int ChunkBlocks(long rows, int blockRows) =>
@@ -929,34 +796,26 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         {
             int node = _isTabular ? arena.GetNode(rootIndex).GetFieldIndex(field) : rootIndex;
 
-            // THE CONSTANT FORM TRAVELS AS FAR AS THE FIRST READER THAT WANTS ROWS. There is no
-            // `vortex.constant` on the wire, so the element is expanded before the file is written
-            // -- but expanding it here expanded it for everyone, and neither the statistics pass
-            // nor the compactor needs it: both read the element. The blob writer does the expansion
-            // where it happens to need the rows, and an integer constant never gets there, because
-            // the progression it becomes is decided from the element alone.
 
-            // W-35: a chunk cut from a batch
-            // shares that batch's list elements whole, and what the blob writer is handed is what
-            // lands in the file. Both calls below must see the narrowed node or the zone map would
-            // summarise rows the segment no longer holds.
+            // A chunk cut from a batch shares that batch's list elements whole, and what the blob
+            // writer is handed is what lands in the file: the calls below must see the narrowed
+            // node, or the zone map would summarise rows the segment has dropped.
             if (_mayShareChildren)
             {
                 node = ChunkCompactor.Compact(arena, node);
             }
 
-            // THE CHUNK'S STATISTICS, HANDED TO THE CHOOSER. They were computed at ingest over
-            // exactly these rows, so every candidate that used to measure the column again reads
-            // them instead. `Choose` checks the row count against the node it is given and falls
-            // back to measuring when they disagree, so this can only ever cost a pass.
+            // The chunk's statistics, computed at ingest over exactly these rows. The chooser
+            // checks the row count against the node it is given and measures the column again when
+            // they disagree, so a mismatch costs a pass and never a wrong plan.
             ChunkStats stats = new ChunkStats(_columns[field], _emittedBlocks, blocks, this);
             if (stats.Stats.Rows != rows)
             {
                 _chunksWithoutStatistics++;
             }
 
-            // A table plan memory turned off (docs/11 §3.2.2) was never expected to serve, and is
-            // not a fallback; a table that was running and cannot answer is.
+            // A table plan memory turned off was never expected to serve, and is not a fallback;
+            // a table that was running and cannot answer is.
             if (DistinctTable.Serves(arena.GetNode(node).Kind) && stats.TableExpected)
             {
                 if (stats.TableServes(checked((int)rows)))
@@ -975,15 +834,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             _columnSegments[field].Add(segment);
             _indexes?.AddColumnBytes(field, _segments[segment].Length);
 
-            // The chunk is written, so the per-block scratch behind it has no further reader. The
-            // compact summaries stay — the zone map wants them at `CompleteAsync` — and only the
+            // The compact summaries stay -- the zone map wants them at completion -- and only the
             // sized buffers go back to the pool.
             _columns[field].ReleaseChunk(_emittedBlocks, blocks);
         }
 
-        // The chunk's locating runs close with it; they and the generations its blocks closed go out
-        // right behind it.
-        // JUDGED BEFORE ANYTHING IS WRITTEN: a builder `Auto` gives up on leaves no dead weight.
+        // The chunk's locating runs close with it and go out right behind it, and the builders are
+        // judged before anything is written, so one `Auto` gives up on leaves no dead weight.
         _indexes?.CloseChunk(_emittedBlocks, blocks, _rowCount, rows);
         _indexes?.Judge();
         _emittedBlocks += blocks;
@@ -998,7 +855,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <param name="cancellationToken">Cancels the writes.</param>
     /// <returns>
     /// What was written: bytes by kind, each column's encodings, and every index the policy asked
-    /// for, built or abandoned with its reason (docs/11-write-strategy.md §7.3).
+    /// for, built or abandoned with its reason.
     /// </returns>
     /// <exception cref="InvalidOperationException">The file has already been completed.</exception>
     public async ValueTask<WriteReport> CompleteAsync(CancellationToken cancellationToken = default)
@@ -1009,21 +866,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         // A file with no batches still has to start with the magic.
         await StartAsync(cancellationToken).ConfigureAwait(false);
 
-        // THE TRAILING BLOCK IS CLOSED BEFORE THE LAST CHUNK GOES OUT, and the order is
-        // load-bearing: the chunk emitted below covers this block, and `EmitChunkAsync` reads the
-        // CLOSED blocks to hand the chooser its statistics. Closing afterwards would hand it an
-        // absent summary for the one chunk most files have.
-        //
-        // The file's last block is short unless the row count is a multiple of the block length, and
-        // a short LAST zone is exactly what the format allows. Closing it here rather than at ingest
-        // is what makes "short" mean "the file ended", never "the batch ended".
+        // The trailing block is closed before the last chunk goes out: that chunk covers this
+        // block, and emission reads the closed blocks for the chooser's statistics. Closing it here
+        // rather than at ingest is also what makes a short last zone mean the file ended, never the
+        // batch ended.
         if (_blockFilled > 0)
         {
             CloseBlock();
         }
 
         // The last chunk goes out whatever its size: the row-block multiple and the byte target are
-        // conditions on the chunks BEFORE the last one, exactly as upstream has it.
+        // conditions on the chunks before the last one.
         if (_pendingRows > 0)
         {
             ScanContext from = _transit![_current]!;
@@ -1037,9 +890,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             ResetTransit();
         }
 
-        // THE LAST RUNS, after the last data segment and before the zone maps (docs/10-indexes.md
-        // §7.2): the generation the end of the data left open, and the file-level filter. The
-        // others already went out behind the chunks that closed them.
+        // The last runs, after the last data segment and before the zone maps: the generation the
+        // end of the data left open, and the file-level filter.
         long dataEnd = _sink.Position;
         long interleaved = _indexes?.FileBytes ?? 0;
         _indexes?.EndOfData();
@@ -1047,7 +899,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         await FlushIndexesAsync(cancellationToken).ConfigureAwait(false);
         _indexes?.Close(_columns, _chunkRows, _blockRows, dataEnd - interleaved);
 
-        // A long run's fence pages (13 §6.3), which name the regions just written.
+        // A long run's fence pages, which name the regions just written.
         if (_indexes is { } closed)
         {
             await closed.WriteFencePagesAsync(_sink, cancellationToken).ConfigureAwait(false);
@@ -1055,13 +907,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
         long indexStart = _sink.Position;
 
-        // The zones arrays are segments like any other and must be written BEFORE the footer that
-        // records them.
+        // The zones arrays are segments like any other, so they precede the footer recording them.
         await WriteZoneMapsAsync(cancellationToken).ConfigureAwait(false);
         long zoneMapsEnd = _sink.Position;
 
-        // The file statistics, after the zone maps and before the footer (docs/11 §3.6): the
-        // merge of every closed block per top-level field, which is exact by construction.
+        // The file statistics: the merge of every closed block per top-level field.
         long statisticsOffset = 0;
         int statisticsLength = 0;
         if (_fileStatistics)
@@ -1072,8 +922,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             await _sink.WriteAsync(statistics, cancellationToken).ConfigureAwait(false);
         }
 
-        // The index directory, last before the footer (§7.2): one postscript metadata entry, the
-        // only carrier a strict Rust 0.86.1 reader tolerates without being told (§3.2).
+        // The index directory, last before the footer: one postscript metadata entry, the only
+        // carrier a strict reference reader tolerates without being told about it.
         long directoryOffset = _sink.Position;
         byte[]? directory = _indexes?.Directory(_rowCount);
         if (directory is not null)
@@ -1113,10 +963,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         return new WriteReport(this);
     }
 
-    // ------------------------------------------------------------------------------------ report
-    //
-    // What `WriteReport` reads. Only the column list is built, and only on the first read; the rest
-    // is state the writer held anyway.
 
     internal int ReportBlockRows => _blockRows;
 
@@ -1157,12 +1003,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
     /// <summary>Completes the file if it is not complete, then releases the sink.</summary>
     /// <remarks>
-    /// COMPLETING IS WHAT DISPOSAL DOES, AND ON AN ERROR PATH THAT IS RARELY WHAT IS WANTED. A
-    /// producer that writes two batches and throws on the third leaves, through an `await using`
-    /// alone, a file that exists, opens, reports no torn tail and holds the two batches: the
-    /// failure is invisible in the artefact. Nothing downstream can separate it from a file that
-    /// was meant to end there, because there is nothing to separate -- the bytes are the same.
-    /// <see cref="Abandon"/> is the exit; call it before disposing when the rows are not wanted.
+    /// Completing is what disposal does, which on an error path is rarely what is wanted: a
+    /// producer that throws part way through leaves, through an <c>await using</c> alone, a file
+    /// that opens and holds the batches it managed to write, indistinguishable from one meant to
+    /// end there. <see cref="Abandon"/> is the exit; call it before disposing when the rows are not
+    /// wanted.
     /// </remarks>
     /// <returns>A task that completes when everything is released.</returns>
     public async ValueTask DisposeAsync()
@@ -1172,10 +1017,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             await CompleteAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
-        // The transit contexts own pooled native blocks. Dropping them on the floor sends every
-        // one through ~NativeSegmentOwner instead of back to AlignedBufferPool.Shared, which is
-        // the leak `ZoneMapWriter` had too: a finalizer-thread free per block, and a pool that
-        // never refills. CompleteAsync resets the arena it emitted from; this returns the storage.
+        // The transit contexts own pooled native blocks: dropped rather than disposed, each block
+        // is freed on the finalizer thread instead of returning to the pool.
         if (_transit is not null)
         {
             for (int i = 0; i < _transit.Length; i++)
@@ -1185,8 +1028,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             }
         }
 
-        // The index builders hold pooled hash sets and a payload arena; the report reads nothing of
-        // them but their results, which survive.
+        // The index builders hold pooled hash sets and a payload arena; their results survive.
         _indexes?.Dispose();
 
         if (_sink is IAsyncDisposable disposable)
@@ -1204,15 +1046,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             }
             catch (System.IO.IOException)
             {
-                // A file that is already gone is the outcome asked for, and a file the caller has
-                // since replaced is not this writer's to judge: neither is an error on a path whose
-                // whole job is to leave nothing behind.
+                // A file already gone is the outcome asked for, and one the caller has since
+                // replaced is not this writer's to judge.
             }
             catch (UnauthorizedAccessException)
             {
-                // The same answer for the arrivals File.Delete reports as this one: a read-only
-                // file, a path that has become a directory, a permission the process no longer
-                // holds.
+                // The same answer for a read-only file or a path that has become a directory.
             }
         }
     }
@@ -1221,22 +1060,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// Builds and writes one zones segment per column, when the chunking allows a zone map at all.
     /// </summary>
     /// <remarks>
-    /// ZoneMap documents zone z as covering [z * ZoneLength, (z + 1) * ZoneLength) with only the
-    /// last zone short. A CHUNK cannot honour that -- its size is the caller's batching and the byte
-    /// target together, so a ragged chunking has no zone length to declare and five corpus files
-    /// lost their zone map for it (WRITE-ARCHITECTURE.md §3.7). A BLOCK honours it by construction:
-    /// it is counted from row 0 of the file, so zone z is [z * _blockRows, (z+1) * _blockRows)
-    /// whatever the chunks did, and the last one is short exactly when the file's row count is not a
-    /// multiple. Zones therefore no longer line up with segments, which costs nothing: pruning a
-    /// zone inside a live segment saves decode rather than bytes read, and
-    /// docs/11-write-strategy.md §6.2 is that trade written down.
+    /// A zone map declares one zone length, zone z covering [z * length, (z + 1) * length) with
+    /// only the last zone short. Blocks honour that by construction, since they are counted from
+    /// row 0 of the file whatever the chunks did; zones therefore need not line up with segments,
+    /// and pruning a zone inside a live segment saves decode rather than bytes read.
     /// </remarks>
     private async ValueTask WriteZoneMapsAsync(CancellationToken cancellationToken)
     {
-        // Below core2026.08.0 there is no `vortex.zoned` layout to put one in. Omitted rather than
-        // approximated with the legacy `vortex.stats`: pruning is an optimization, so dropping it
-        // costs correctness nothing, while writing a layout no release of Vortex has ever produced
-        // - 0.86.1 cannot emit `vortex.stats` at all - would ship an untestable format path.
+        // An edition without `vortex.zoned` has nowhere to put a zone map. Omitted rather than
+        // approximated with the legacy `vortex.stats`, which no reference release emits: pruning is
+        // an optimization, so dropping it costs correctness nothing.
         if (!EditionRegistry.Contains(_target, ComponentKind.Layout, "vortex.zoned"))
         {
             return;
@@ -1277,15 +1110,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         }
     }
 
-    /// <summary>The one zone length the closed blocks can be described by, if there is one.</summary>
-    /// <remarks>
-    /// With repartitioning on -- the default -- this is a formality: every block but the last is
-    /// <see cref="_blockRows"/> rows by construction, so the answer is always yes and always that.
-    /// It can still say no for a caller who set <c>RowBlockSize = null</c> and then handed over
-    /// batches of 700 and 1024: those blocks have no single length, and a zone map that declared one
-    /// anyway would attach every bound to the wrong rows -- the one failure docs/08-semantics.md §1
-    /// says must never happen. Such a file gets a plain chunked layout, which every reader handles.
-    /// </remarks>
+    /// <summary>
+    /// The one zone length the closed blocks can be described by, if there is one. It can say no
+    /// only with repartitioning off, where ragged batches have no single length and a zone map
+    /// declaring one anyway would attach every bound to the wrong rows; such a file gets a plain
+    /// chunked layout instead.
+    /// </summary>
     private bool TryZoneLength(out uint zoneLength)
     {
         zoneLength = 0;
@@ -1319,14 +1149,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         return true;
     }
 
-    /// <summary>
-    /// Writes the leading <c>VTXF</c> magic, once, before anything else.
-    /// </summary>
-    /// <remarks>
-    /// docs/02-format.md §1 puts it at offset 0 and every reader checks it there. Forgetting it
-    /// produces a file whose footer, layout and segments are all perfectly correct and which no
-    /// reader will open -- which is exactly what the first run of the round-trip test reported.
-    /// </remarks>
+    /// <summary>Writes the leading <c>VTXF</c> magic, once, before anything else.</summary>
     private async ValueTask StartAsync(CancellationToken cancellationToken)
     {
         if (_started)
@@ -1339,21 +1162,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     }
 
     /// <summary>
-    /// Pads to 64 bytes, writes <paramref name="blob"/>, and records where it landed.
+    /// Pads to the format's widest alignment, writes <paramref name="blob"/>, and records where it
+    /// landed. The blob's buffers are placed at their own width relative to its start, so the blob
+    /// has to start somewhere satisfying the widest of them.
     /// </summary>
-    /// <remarks>
-    /// The alignment is the segment's, and it is what makes the blob's own internal alignments real:
-    /// ArrayBlobWriter placed each buffer at its width relative to the blob's start, so the blob has
-    /// to start somewhere that satisfies the widest of them. 64 is the format's ceiling
-    /// (VortexLimits.MaxAlignment), so one choice covers every buffer a canonical array can have.
-    /// </remarks>
     private async ValueTask<int> WriteSegmentAsync(
         ArrayBlobWriter.BlobLease blob, CancellationToken cancellationToken)
     {
         long aligned = await PadAsync(cancellationToken).ConfigureAwait(false);
         await _sink.WriteAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
 
-        // blob.Length, never blob.Memory.Length's array: the rental is longer than the blob (W-4).
+        // blob.Length, never the rented array's: the rental is longer than the blob.
         _segments.Add(new SegmentSpec(
             (ulong)aligned, (uint)blob.Length, (byte)VortexLimits.MaxAlignmentExponent, 0, 0));
         return _segments.Count - 1;
@@ -1417,13 +1236,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     }
 
     /// <summary>
-    /// Wraps a column's data layout in a <c>vortex.zoned</c> one, when it has a zone map.
+    /// Wraps a column's data layout in a <c>vortex.zoned</c> one, when it has a zone map. Child 0
+    /// is the data and child 1 is the zones; the wrong order produces a file that decodes the zones
+    /// as data and is caught by nothing until a value comes out wrong.
     /// </summary>
-    /// <remarks>
-    /// Child 0 is the data and child 1 is the zones, which is the order ZonedLayoutReader reads and
-    /// the order upstream writes. Getting them the wrong way round produces a file that decodes the
-    /// zones as data and is caught by nothing until a value comes out wrong.
-    /// </remarks>
     private int Zone(FlatBufferBuilder builder, int field, int data, ref ushort zoned)
     {
         if (_zoneSegments is null || _zoneMetadata is null || _zoneSegments[field] < 0)
@@ -1440,8 +1256,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         Span<uint> segment = stackalloc uint[1];
         segment[0] = (uint)_zoneSegments[field];
 
-        // The zones child's row count IS the zone count, and it is the closed blocks' count -- which
-        // is ceil(_rowCount / _blockRows) by construction, the shape ZoneMap documents.
+        // The zones child's row count is the zone count, which is the closed blocks' count.
         int zoneCount = _columns[field].Blocks.Count;
         int zones = LayoutWriter.Write(builder, flat, (ulong)zoneCount, default, [], segment);
 
@@ -1489,10 +1304,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <param name="identity">The identity the options pinned, or null for a fresh one.</param>
     /// <param name="cancellationToken">Cancels the writes.</param>
     /// <remarks>
-    /// THE IDENTITY GOES LAST BEFORE THE POSTSCRIPT (docs/13-dataset.md §7), so the tail every open
-    /// reads covers it. NOTHING HERE IS ALLOCATED PER FILE: the postscript is written from the
-    /// builder's rented buffer and the EOF record from a rented one, which is what pays for the
-    /// identity's entry on the write-path ceilings.
+    /// The identity goes last before the postscript, so the tail every open reads covers it.
     /// </remarks>
     internal static async ValueTask WriteEndAsync(
         ISegmentSink sink, PostscriptPlacement placement, Guid? identity, CancellationToken cancellationToken)
@@ -1576,13 +1388,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// a struct root, one for any other root, each the merge of the column's closed blocks.
     /// </summary>
     /// <remarks>
-    /// EXACT, AND ONLY WHAT THE PASS KNOWS. The bounds are the block summaries' own, so they are
-    /// <see cref="StatPrecision.Exact"/> and exist for the numeric domains the summaries hold
-    /// (a string column has no bound here: docs/11 §3.2 leaves the bounded prefixes to a policy);
-    /// the null count is the sum; the two order flags are stated when the pass tracked the
-    /// column's order and stay absent otherwise -- a NaN, a bool, a nested field -- because an
-    /// absent statistic licenses nothing and a wrong one lies (docs/08 §1). The reader needs
-    /// exactly one entry per field (VortexFile.ParseStatistics), which is what the loop writes.
+    /// Only what the pass knows: bounds for the numeric domains the summaries hold, the summed null
+    /// count, and the order flags when the pass tracked the column's order. They stay absent
+    /// otherwise, because an absent statistic licenses nothing while a wrong one lies. The reader
+    /// needs exactly one entry per field.
     /// </remarks>
     private byte[] BuildFileStatistics()
     {

@@ -1,20 +1,3 @@
-// The `Dictionary` key source - docs/12-index-reads.md §3 and §5.4, over a
-// `vorticity.dict.probe.v1` entry (docs/10-indexes.md §5.3).
-//
-// A DICTIONARY IS A RUN WITHOUT ROWS. The probe entry has no payload: it says which chunks of the
-// column are `vortex.dict`, and a chunk's values child is the set of its distinct values -- in the
-// order the writer met them, not in key order. So each claimed chunk is read, its values child
-// decoded alone (the codes are never touched), and the values sorted in the total order of §4.4 and
-// deduplicated: `O(d log d)` for the chunk's `d` values, bounded by the chunk. The merge of the
-// other key sources then walks them, one run per chunk, the run's ordinal standing in for the row.
-//
-// THE RUNS ARE LOADED AT OPEN AND HELD BY THE SOURCE, not by the file's run cache: a merge needs
-// every run's head from its first seek, so a dictionary that could be evicted would only be read
-// again. A dictionary is small by construction -- the writer abandons one past its cap -- and the
-// reads are one segment per chunk, one chunk at a time.
-//
-// A CHUNK THE PROBE CLAIMS AND THAT IS NOT A DICTIONARY REFUSES THE SOURCE: a walk that skipped it
-// would miss its keys, which is a wrong answer and not a slow one.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -36,6 +19,20 @@ namespace Vorticity.Keys;
 
 internal sealed partial class SortedRunsSource
 {
+    /// <summary>
+    /// Opens a source over the distinct values of the chunks a dictionary probe claims, or says why
+    /// none can be had.
+    /// </summary>
+    /// <remarks>
+    /// A dictionary is a run without rows: the probe names only the chunks stored as a dictionary,
+    /// and a chunk's values child holds its distinct values in the order the writer met them, so
+    /// each claimed chunk is read, its values child decoded alone, then sorted and deduplicated
+    /// into a run whose ordinal stands in for a row. The runs are held by the source rather than by
+    /// the file's run cache, because a merge needs every run's head from its first seek and an
+    /// evicted dictionary would only have to be read again. A claimed chunk that is not a
+    /// dictionary refuses the source whole: a walk that skipped it would miss its keys, which is a
+    /// wrong answer and not a slow one.
+    /// </remarks>
     private static async ValueTask<(SortedRunsSource? Source, string? Reason)> OpenDictionaryAsync(
         VortexFile file, IndexEntry entry, string path, DType dtype, CancellationToken cancellationToken)
     {
@@ -222,8 +219,8 @@ internal sealed partial class SortedRunsSource
 
     /// <summary>
     /// The chunks this dictionary source read, for a caller that wants the sets themselves rather
-    /// than a walk over their union: the block pruner of 10 §5.3, which answers `x = v` from the
-    /// values child alone.
+    /// than a walk over their union: the block pruner answers an equality from the values child
+    /// alone.
     /// </summary>
     internal int Dictionaries => _source == KeySourceKind.Dictionary ? _runs.Length : 0;
 

@@ -1,24 +1,3 @@
-// The fused pass of docs/11-write-strategy.md §3.2, at the size stage 1 of its §8 asks for: one
-// loop per (column, block) that produces everything the zone map needs, run on the batch's own
-// arena while the decode that produced it is still in cache.
-//
-// THREE THINGS IT DOES THAT `ZoneStatistics` DID NOT:
-//
-//   * IT RUNS AT INGEST, over a row RANGE of the batch, so a block is summarized from the batches
-//     that cover it rather than from the chunk it lands in. That is what decouples the zone map from
-//     the chunk shape.
-//   * IT RESOLVES THE PHYSICAL TYPE ONCE, before the loop, into a generic instantiation the JIT
-//     monomorphizes - the form of R7, W-9 and W-33. `ZoneStatistics` called `ReadInteger` per row
-//     and paid a switch on `PType` for every value; those are the two calls PerRowDispatchTests
-//     charged it under W-12.
-//   * IT COUNTS NULLS BY WORDS. `BitmapKernels.CountSet` popcounts the range; the old loop asked
-//     `IsValid` once per row to add up the same number.
-//
-// A CONSTANT BLOCK IS ANSWERED WITHOUT READING A VALUE. The canonical constant form (PERF-AUDIT-v2
-// Z1b) holds one element and a count, and its bounds are that element whatever the row count; going
-// through `node.Values` here would materialize the very column the form exists to not build. The
-// emitted chunk still materializes today - `ArrayBlobWriter.Materialize` does it at the boundary -
-// but the summary no longer forces it.
 using System;
 using System.Buffers.Binary;
 using System.Numerics;
@@ -33,6 +12,14 @@ using Vorticity.Types.Numerics;
 namespace Vorticity.Writing;
 
 /// <summary>Fills a <see cref="BlockStats"/> from a row range of a canonical column.</summary>
+/// <remarks>
+/// One loop per (column, block) produces everything the zone map needs, at ingest and over a row
+/// range of the batch, so a block is summarized from the batches that cover it rather than from the
+/// chunk it lands in — which is what lets the zone map be independent of the chunk shape. The
+/// physical type is resolved once, before the loop, into a generic instantiation rather than a
+/// switch on it for every value, and a constant column is summarized from its single element
+/// without the column the constant form exists to not build ever being materialized.
+/// </remarks>
 internal static class BlockStatsPass
 {
     /// <summary>
@@ -70,7 +57,7 @@ internal static class BlockStatsPass
         stats.Rows += count;
         int valid = Nulls(in mask, start, count, ref stats);
 
-        // BROKEN UNTIL THIS RANGE PROVES OTHERWISE. Every kind but an integer primitive contributes
+        // Broken until this range proves otherwise. Every kind but an integer primitive contributes
         // nothing to the width histograms, and so does an integer range the progression
         // short-circuit answers without reading a value; the one path that does contribute restores
         // the flag to what the ranges before it had left it.
@@ -105,15 +92,12 @@ internal static class BlockStatsPass
                     }
                 }
 
-                // THE STEPS, WHICH THIS ARM USED NOT TO TOUCH AT ALL, and the corpus cross-check
-                // against Vortex Rust is what found it: `containers/zoned_many_zones` came back
-                // with `banded` reading one zone's value for the next one's. `Deltas` runs from the
-                // Primitive arm only, so a chunk whose blocks are constants left `DeltaKnown` set
-                // by whichever block was not one -- and `stepsAreConstant` then tells
-                // `SequencePlan` its walk has already been done. It skips it, reads the step as
-                // `v[1] - v[0]` = 0 off the first block, and writes `vortex.sequence(base, 0)` over
-                // rows that climb. A claim that the steps are verified has to be made by whoever
-                // verified them.
+                // The steps have to be recorded here too. `Deltas` runs from the Primitive arm
+                // only, so a chunk whose blocks are all constants would carry a `DeltaKnown` set by
+                // some other block -- and that claim tells `SequencePlan` its walk has already been
+                // done. It skips the walk, reads the step as `v[1] - v[0]` off the wrong block, and
+                // writes `vortex.sequence(base, 0)` over rows that climb. A claim that the steps
+                // are verified has to be made by whoever verified them.
                 if (!bytes && node.DType.PType.IsInteger())
                 {
                     ConstantDeltas(
@@ -161,10 +145,10 @@ internal static class BlockStatsPass
             {
                 stats.IsSummarizable = true;
 
-                // THE ORDER'S SEAM IS TAKEN FIRST TOO (the file statistics' is_sorted): the range's
-                // first row against the row before it, while `previous` still holds that row. The
-                // range's own pairs follow -- by the step when the range is a progression, by a
-                // second walk over the range otherwise (Order<T>) -- and only while the column
+                // The order's seam is taken first too, for the file statistics' is_sorted: the
+                // range's first row against the row before it, while `previous` still holds that
+                // row. The range's own pairs follow -- by the step when the range is a progression,
+                // by a second walk over the range otherwise (Order<T>) -- and only while the column
                 // can still be sorted: a witness is sticky.
                 stats.OrderTracked = true;
                 if (!stats.OrderUntracked && !stats.Unsorted)
@@ -185,15 +169,14 @@ internal static class BlockStatsPass
                     }
                 }
 
-                // THE STEPS ARE TAKEN FIRST, and while `previous` still holds the row before this
+                // The steps are taken first, and while `previous` still holds the row before this
                 // range: `FixedRuns` overwrites it with the range's last row.
                 //
-                // A PROGRESSION ANSWERS THE OTHER TWO WITHOUT READING A VALUE. If every pair in this
-                // range climbs by the same step, the range is monotone -- a wrap would have made one
-                // step differ from the others -- so its extremes are its ENDPOINTS, and its runs are
-                // one if the step is zero and one per row otherwise. That leaves a progression
-                // costing ONE walk instead of three, which is what `ext` -- a column of timestamps,
-                // ten times faster than the reference -- was paying the tree for.
+                // A progression answers the other two without reading a value. If every pair in
+                // this range climbs by the same step, the range is monotone -- a wrap would have
+                // made one step differ from the others -- so its extremes are its endpoints, and
+                // its runs are one if the step is zero and one per row otherwise. That leaves a
+                // progression costing one walk instead of three.
                 bool progression = false;
                 if (node.PType.IsInteger())
                 {
@@ -223,19 +206,19 @@ internal static class BlockStatsPass
                     }
                 }
 
-                // THE WIDTHS ARE COUNTED HERE OR NOWHERE. A progression is answered from its
+                // The widths are counted here or nowhere. A progression is answered from its
                 // endpoints, so its values are never loaded and there is nothing to histogram --
                 // and nothing that needs one either, since `vortex.sequence` claims the column
-                // before bit-packing is offered it. What matters is that the block SAYS so, because
+                // before bit-packing is offered it. What matters is that the block says so, because
                 // a later range may break the progression and fill half a histogram.
                 Span<int> counts = !progression && node.PType.IsInteger() ? widths : default;
                 if (!counts.IsEmpty)
                 {
                     stats.WidthsBroken = widthsBefore;
 
-                    // A null row PACKS as zero, which is width zero in both domains. Counting it
+                    // A null row packs as zero, which is width zero in both domains. Counting it
                     // here rather than in the loops keeps the typed walk free of the branch, and it
-                    // is the rule `BitPackPlan` has always applied.
+                    // is the rule `BitPackPlan` applies.
                     counts[0] += count - valid;
                     counts[BitPackWidths.ZigZagOffset] += count - valid;
                 }
@@ -256,8 +239,8 @@ internal static class BlockStatsPass
             }
 
             case CanonicalKind.Decimal:
-                // No bounds: a decimal's comparison domain is outside this iteration's kernels. Its
-                // rows still compare byte for byte, which is all run-end needs.
+                // No bounds: a decimal's comparison domain is not one these kernels cover. Its rows
+                // still compare byte for byte, which is all run-end needs.
                 FixedRuns(
                     node.Values.Span, DecimalStorage.ByteWidth(node.Storage), in mask, start, count,
                     startsBlock, ref stats, previous);
@@ -269,22 +252,20 @@ internal static class BlockStatsPass
 
             case CanonicalKind.VarBinView:
                 // No bounds: utf8 and binary have a perfectly good lexicographic min/max and no
-                // place to put it without a second varbinview per zone. Their BYTES, on the other
-                // hand, are what `ColumnCompressor.PlainBinarySize` walked the views to add up, once
-                // per column, to price the varbin form against the view form -- so the sum is taken
-                // here, where the views are in cache and the pass is already reading them.
+                // place to put it without a second varbinview per zone. Their bytes, on the other
+                // hand, are what `ColumnCompressor.PlainBinarySize` needs to price the varbin form
+                // against the view form -- so the sum is taken here, where the views are in cache
+                // and the pass is already reading them.
                 if (valid > 0)
                 {
                     stats.TotalBytes += ViewBytes(node, in mask, start, count, valid);
                 }
 
-                // WHAT THE TWO OF THEM COST, measured by doubling them: 13,1 ms of a 54,7 ms write
-                // of a million `fsst` rows, 8,2 of 31,0 on `onpair`, 5,9 of 33,7 on `varbin` --
-                // a quarter of the axis on the string encodings. Merging them with the dictionary
-                // probe was the plan and cannot reach them: the probe runs only on a chunk whose
-                // remembered plan is a dictionary that held (`ColumnWriter.cs:608`), and a
-                // dictionary does not hold on these columns. Making the two cheaper in themselves,
-                // or skipping them where nothing consumes them, is the shape that would.
+                // The byte sum and the run walk are a real share of a write on the string
+                // encodings, and they cannot be merged into the dictionary probe: the probe runs
+                // only on a chunk whose remembered plan is a dictionary that held, and a dictionary
+                // does not hold on the columns that pay most here. Making the two cheaper in
+                // themselves, or skipping them where nothing consumes them, is what would help.
                 //
                 // Order, bytewise: the seam here, the pairs inside ViewRuns, which reads them
                 // for the run boundaries anyway.
@@ -302,29 +283,27 @@ internal static class BlockStatsPass
 
             default:
                 // Every other kind has no scalar bound at all, and still gets a zone map with the
-                // null count alone, which is what IS NULL pruning runs on.
+                // null count alone, which is what a null-check predicate prunes on.
                 return;
         }
     }
 
     // -------------------------------------------------------------------------------------- steps
     //
-    // `vortex.sequence` is the one encoding that costs NOTHING per row: a column that is an
-    // arithmetic progression becomes one node and about thirty bytes. `SequencePlan` found out by
-    // walking the rows, and W-9 measured that walk reading **78 % of the rows it is offered** --
-    // 1 352 columns of 1 728 really are sequences, so it runs to the end rather than bailing at row
-    // three -- for 26 % of a `sequence` write and 25 % of a `primitive` one.
+    // `vortex.sequence` is the one encoding that costs nothing per row: a column that is an
+    // arithmetic progression becomes one node and about thirty bytes. Finding one deserves no walk
+    // of its own -- most of the columns offered to it really are progressions, so such a walk reads
+    // nearly every row rather than bailing at row three -- so it is folded into the pass that is
+    // already reading the values. It stops the moment two steps disagree, so a column that is not a
+    // progression pays a compare per row until row three and nothing after: a branch the predictor
+    // gets right every time.
     //
-    // The walk is here now, folded into the pass that was already reading the values. It stops the
-    // moment two steps disagree, so a column that is not a progression pays a compare per row until
-    // row three and nothing after: a branch the predictor gets right every time.
-    //
-    // ONLY THE FACT IS KEPT, NOT THE PLAN. When the steps agree, the step itself is `v[1] - v[0]`,
+    // Only the fact is kept, not the plan. When the steps agree, the step itself is `v[1] - v[0]`,
     // which `SequencePlan` reads from the node in constant time; there is nothing to carry.
 
     /// <summary>The bounds of a progression: its first and last rows, in step order.</summary>
     /// <remarks>
-    /// Exact because a range whose steps all agree is MONOTONE. It cannot wrap: a wrap would make
+    /// Exact because a range whose steps all agree is monotone. It cannot wrap: a wrap would make
     /// one step differ from the others in the widened arithmetic <see cref="Deltas"/> uses, and the
     /// range would not be a progression at all.
     /// </remarks>
@@ -354,7 +333,7 @@ internal static class BlockStatsPass
     /// <remarks>
     /// A step of zero makes every row equal — one run, no boundary. Any other step makes every row
     /// differ from the one before it, so every row of the range starts a run. Both are exactly what
-    /// a walk would have counted, and neither needs one. THE FIRST ROW IS THE SEAM'S TO DECIDE:
+    /// a walk would have counted, and neither needs one. The first row is the seam's to decide:
     /// inside a block the row before it stepped like every other, so it differs exactly when the
     /// step is not zero; at a block's first row the row before belongs to the block before, and
     /// whether the two differ is the seam <see cref="Deltas"/> recorded — a step of zero across it
@@ -392,13 +371,13 @@ internal static class BlockStatsPass
 
     /// <summary>Folds this range's steps into <paramref name="stats"/>.</summary>
     /// <remarks>
-    /// THE ROW BEFORE THE RANGE IS STEPPED FROM IN TWO DIFFERENT WAYS. Inside a block -- a range
+    /// The row before the range is stepped from in two different ways. Inside a block -- a range
     /// that continues one -- that row is the block's own and its step is one of the block's. At a
-    /// block's first row it belongs to the block before, and the step into it is the SEAM: recorded
+    /// block's first row it belongs to the block before, and the step into it is the seam: recorded
     /// on its own (<see cref="BlockStats.SetLeading"/>) for the merge to read when the block is not
-    /// the first of a chunk, and ignored when it is. Folding it into the block's steps, which is
-    /// what this did, made the first block of every chunk carry the jump between it and the chunk
-    /// before as its own break.
+    /// the first of a chunk, and ignored when it is. Folded into the block's own steps instead, it
+    /// would make the first block of every chunk carry the jump between it and the chunk before as
+    /// a break of its own.
     /// </remarks>
     private static void Deltas(
         CanonicalNode node, in ValidityMask mask, int start, int count, int valid, bool startsBlock,
@@ -432,10 +411,10 @@ internal static class BlockStatsPass
             hadPrevious = false;
         }
 
-        // The physical type is resolved ONCE, into a generic instantiation, exactly as W-9 resolved
-        // `SequencePlan`'s own walk: the alternative is two switches per row for a property of the
-        // call. Narrow types step in `long` because the difference of two 32-bit values always fits
-        // in one; only 64-bit columns need the wider arithmetic, and they get their own loop.
+        // The physical type is resolved once, into a generic instantiation: the alternative is two
+        // switches per row for a property of the call. Narrow types step in `long` because the
+        // difference of two 32-bit values always fits in one; only 64-bit columns need the wider
+        // arithmetic, and they get their own loop.
         ReadOnlySpan<byte> values = node.Values.Span;
         ReadOnlySpan<byte> seed = hadPrevious ? previous!.Bytes : default;
         bool seam = startsBlock && hadPrevious;
@@ -463,14 +442,14 @@ internal static class BlockStatsPass
     /// <remarks>
     /// <para>
     /// <see cref="Deltas"/>'s rules, without its walk: a range of one value repeated has
-    /// <c>count - 1</c> steps of ZERO, plus the seam from the row before it. So there is nothing to
-    /// read per row -- two subtractions answer a million rows -- but the answer must still be
-    /// RECORDED, because what the chooser reads is the claim, not the rows.
+    /// <c>count - 1</c> steps of zero, plus the seam from the row before it. So there is nothing to
+    /// read per row -- two subtractions answer the whole range -- but the answer must still be
+    /// recorded, because what the chooser reads is the claim, not the rows.
     /// </para>
     /// <para>
     /// <see cref="Int128"/> throughout, for <see cref="Wide{T}"/>'s reason: the difference of two
     /// 64-bit values does not fit in 64 bits in general, and the wire field is a signed 64. The
-    /// cost of the wider arithmetic is two subtractions per RANGE, not per row.
+    /// cost of the wider arithmetic is two subtractions per range, not per row.
     /// </para>
     /// </remarks>
     private static void ConstantDeltas(
@@ -513,8 +492,8 @@ internal static class BlockStatsPass
             if (startsBlock)
             {
                 // The seam is recorded apart, for the merge to read when this block is not the
-                // chunk's first; folding it into the block's own steps is the defect the remarks on
-                // `Deltas` describe.
+                // chunk's first; folded into the block's own steps it would make that block claim
+                // the jump from the chunk before as a break of its own.
                 if (delta < long.MinValue || delta > long.MaxValue)
                 {
                     stats.BreakLeading();
@@ -544,7 +523,7 @@ internal static class BlockStatsPass
             }
         }
 
-        // Every step INSIDE the range is zero: one value, repeated.
+        // Every step inside the range is zero: one value, repeated.
         if (count > 1)
         {
             if (known && step != 0)
@@ -578,15 +557,15 @@ internal static class BlockStatsPass
 
     /// <summary>Steps of a column narrower than 64 bits, where a difference always fits a long.</summary>
     /// <remarks>
-    /// THE STATE IS IN LOCALS AND WRITTEN BACK ONCE. The first version called a method on the
-    /// accumulator and re-read one of its fields for every row, which put a call and two branches
-    /// inside the hot loop and made this pass MORE expensive than the `SequencePlan` walk it
-    /// replaces: `sequence` 0,16 -&gt; 0,22 and `ext` 0,098 -&gt; 0,12, measured. In this shape the
-    /// steady state is one subtract and one compare, which is what the walk it replaces costs.
+    /// The state is in locals and written back once. Calling a method on the accumulator and
+    /// re-reading one of its fields for every row puts a call and two branches inside the hot loop,
+    /// enough to make this pass more expensive than the separate `SequencePlan` walk it folds in.
+    /// In this shape the steady state is one subtract and one compare, which is what that walk
+    /// costs.
     /// <para>
-    /// AND A REGISTER OF THEM WHERE THE LANES ARE WIDE ENOUGH (step 28a): a list's elements go
-    /// through here too, and on the 1M-row `fixed_size_list` — three million rows of 0, 1, 2… —
-    /// that one compare a row cost 0,65 ns in place, against 0,41 for the walk it had replaced.
+    /// And a register of them where the lanes are wide enough: a list's elements go through here
+    /// too, millions of rows at a time, and there even one compare a row is more than the separate
+    /// walk cost.
     /// </para>
     /// </remarks>
     private static void Narrow<T>(
@@ -619,9 +598,9 @@ internal static class BlockStatsPass
             first = 0;
         }
 
-        // A REGISTER AT A TIME once the step is known and the previous row is inside the span
-        // (docs/11-write-strategy.md §4.1): a list's elements put millions of rows of a progression
-        // through here, where the scalar loop cost more than the `SequencePlan` walk it replaced.
+        // A register at a time once the step is known and the previous row is inside the span: a
+        // list's elements put millions of rows of a progression through here, where the scalar loop
+        // costs more than the separate `SequencePlan` walk it stands in for.
         int i = first;
         if (Vector128.IsHardwareAccelerated && Vector128<T>.IsSupported && Vector128<T>.Count >= 4
             && count - first > 4 * Vector128<T>.Count)
@@ -683,16 +662,16 @@ internal static class BlockStatsPass
     /// time.
     /// </summary>
     /// <remarks>
-    /// THE LANES SUBTRACT IN THE TYPE'S OWN WIDTH, so a difference that wraps would compare equal
-    /// to a step it is not. The ENDPOINT closes that: a progression is monotone, so when its last
+    /// The lanes subtract in the type's own width, so a difference that wraps would compare equal
+    /// to a step it is not. The endpoint closes that: a progression is monotone, so when its last
     /// row, <c>previous + (end - from)·step</c>, lies in the type's range, every row before it does
     /// too, and two values of that range that agree modulo 2^w are the same value. A range whose
     /// endpoint leaves the type's range is no progression, and says so before a lane is loaded.
     /// <para>
-    /// FOUR LANES OR MORE, as <see cref="OrderLanes"/>: the 64-bit columns keep their scalar walk.
+    /// Four lanes or more, as <see cref="OrderLanes"/>: the 64-bit columns keep their scalar walk.
     /// The tail is the scalar twin, and so is the caller's loop under
-    /// <c>DOTNET_EnableHWIntrinsic=0</c> (11 §4, §5.2). <paramref name="from"/> is at least one
-    /// past the span's first row, so the first window's previous row is in the span.
+    /// <c>DOTNET_EnableHWIntrinsic=0</c>. <paramref name="from"/> is at least one past the span's
+    /// first row, so the first window's previous row is in the span.
     /// </para>
     /// </remarks>
     private static bool Progression<T>(ReadOnlySpan<T> values, int from, int end, long previous, long step)
@@ -816,13 +795,13 @@ internal static class BlockStatsPass
 
     // ------------------------------------------------------------------------------ run boundaries
     //
-    // WHAT THESE COUNT, AND WHY IT HAS TO BE EXACT. `ColumnCompressor` declines run-end when a chunk
-    // has more than `rows / 4` runs, so the verdict turns on a single comparison: a count that is
-    // off by one changes the plan and therefore the file's bytes. The rule reproduced here is
+    // What these count has to be exact. `ColumnCompressor` declines run-end when a chunk has more
+    // than `rows / 4` runs, so the verdict turns on a single comparison: a count that is off by one
+    // changes the plan and therefore the file's bytes. The rule reproduced here is
     // `RowComparer.Equal`'s, in full -- two nulls are equal, a null and a value are not, two values
-    // are equal byte for byte -- and `RunEndPlanTests` compares the two counts over the corpus.
+    // are equal byte for byte.
     //
-    // A boundary belongs to the row that STARTS the new run, so it is counted in that row's block
+    // A boundary belongs to the row that starts the new run, so it is counted in that row's block
     // whatever batch it arrived in; the row before it may be in another batch, on an arena the scan
     // has already reset, which is what `PreviousRow` is for.
 
@@ -894,19 +873,18 @@ internal static class BlockStatsPass
     }
 
     /// <summary>
-    /// Adjacent rows that differ, with the element width resolved into the loop
-    /// (docs/11-write-strategy.md §4.1, "run boundaries": <c>Equals(v, v_shifted_by_one)</c> then
-    /// <c>ExtractMostSignificantBits</c>, ×8 to ×16).
+    /// Adjacent rows that differ, with the element width resolved into the loop: a vector equality
+    /// against the vector one element behind, then <c>ExtractMostSignificantBits</c>.
     /// </summary>
     /// <remarks>
-    /// THE SHIFT IS A SECOND LOAD, not a lane shuffle. Comparing a row against the row before it
+    /// The shift is a second load, not a lane shuffle. Comparing a row against the row before it
     /// means comparing the vector at <c>i</c> with the vector at <c>i - 1</c>, and an unaligned load
     /// one element back is one instruction where shuffling a lane across the vector's own boundary
     /// would need the previous iteration's last lane carried forward -- a dependency between
-    /// iterations, which is exactly what this kernel exists to remove. The two loads overlap in L1
-    /// and the second is free.
+    /// iterations, which is exactly what this kernel exists to remove. The two loads overlap in
+    /// cache and the second is free.
     /// <para>
-    /// The mask is EQUALITY, so the boundaries are the lanes it does not set:
+    /// The mask is an equality, so the boundaries are the lanes it does not set:
     /// <c>lanes - PopCount</c>. Counting the zero bits directly would need the complement masked
     /// back to the lane count, which is the same instruction with one more step.
     /// </para>
@@ -919,7 +897,7 @@ internal static class BlockStatsPass
     /// <para>
     /// The tail is the scalar twin, and the whole method under
     /// <c>DOTNET_EnableHWIntrinsic=0</c>, where <see cref="Vector128.IsHardwareAccelerated"/> is
-    /// false (11 §4, §5.2).
+    /// false.
     /// </para>
     /// </remarks>
     private static long Differing<T>(ReadOnlySpan<T> values)
@@ -971,8 +949,8 @@ internal static class BlockStatsPass
     /// <remarks>
     /// The width is resolved before the loop, exactly as in the uniform case: a
     /// <see cref="MemoryExtensions.SequenceEqual{T}(ReadOnlySpan{T}, ReadOnlySpan{T})"/> per row over
-    /// four bytes is a call with a length check in front of it, which is what W-7b measured on the
-    /// comparer this replaces.
+    /// four bytes is a call with a length check in front of it, for a comparison the width makes
+    /// into one instruction.
     /// </remarks>
     private static long InteriorNullable(
         ReadOnlySpan<byte> values, int width, in ValidityMask mask, int start, int count)
@@ -1073,11 +1051,10 @@ internal static class BlockStatsPass
 
     /// <summary>Booleans, sixty-four rows at a time.</summary>
     /// <remarks>
-    /// THE WORD TRICK OF W-33, WHICH THIS PASS MUST NOT LOSE. <c>w ^ ((w &lt;&lt; 1) | previous)</c>
-    /// has a set bit exactly where a row differs from the one before it, so a whole word's
-    /// boundaries are one xor and a popcount. The bit-at-a-time version of this function cost
-    /// **1,52 against a 0,78 reference** on the 1M `bool` file — measured, and the reason the trick
-    /// is here rather than in a later SIMD stage.
+    /// <c>w ^ ((w &lt;&lt; 1) | previous)</c> has a set bit exactly where a row differs from the one
+    /// before it, so a whole word's boundaries are one xor and a popcount. Asking the question a
+    /// bit at a time is what dominates a boolean write, which is why the word trick is here rather
+    /// than left to a later vector pass.
     /// <para>
     /// Validity folds into the same words. A boundary is a change of validity, or a change of value
     /// between two rows that are both valid: <c>(V ^ V₋₁) | (V &amp; V₋₁ &amp; (B ^ B₋₁))</c>, whose
@@ -1129,7 +1106,7 @@ internal static class BlockStatsPass
             int take = Math.Min(64, count - row);
             ulong word = BitWords.Load(bits, firstBit + row) & BitWords.Mask(take);
 
-            // The range's own first row has no predecessor HERE -- `Leading` already decided it
+            // The range's own first row has no predecessor here -- `Leading` already decided it
             // against the previous batch -- so the first word is seeded with its own bit 0 and
             // contributes nothing for it.
             if (!seeded)
@@ -1190,10 +1167,10 @@ internal static class BlockStatsPass
     /// be.
     /// </summary>
     /// <remarks>
-    /// Equal views prove equal values. When the views differ and the LENGTHS agree the bytes are
+    /// Equal views prove equal values. When the views differ and the lengths agree the bytes are
     /// compared, so that two equal out-of-line strings at different offsets — the common case after
-    /// a compaction — do not split a run (docs/11-write-strategy.md §3.2.4). Different lengths are
-    /// different values and need no comparison at all.
+    /// a compaction — do not split a run. Different lengths are different values and need no
+    /// comparison at all.
     /// </remarks>
     private static void ViewRuns(
         CanonicalNode node, in ValidityMask mask, int start, int count, bool startsBlock,
@@ -1210,13 +1187,12 @@ internal static class BlockStatsPass
 
         // A view is sixteen bytes: two 64-bit loads and two compares, never a `SequenceEqual` call.
         //
-        // ONE COMPARISON ANSWERS BOTH QUESTIONS while the column can still be sorted. A run
+        // One comparison answers both questions while the column can still be sorted. A run
         // boundary asks "are these two values different"; the order asks "is the second below the
-        // first"; and `SequenceCompareTo` answers the first by answering the second. The first
-        // version asked them separately -- `SameValue` and then a comparison of its own -- which
-        // doubled the byte compare on exactly the column that pays it most, one whose values are
-        // all the same length and all distinct (the `fsst` axis: +27 % of the write, measured with
-        // the tracking switched off). Equal views are equal values and need neither.
+        // first"; and `SequenceCompareTo` answers the first by answering the second. Asking them
+        // separately -- `SameValue` and then a comparison of its own -- doubles the byte compare on
+        // exactly the column that pays it most, one whose values are all the same length and all
+        // distinct. Equal views are equal values and need neither.
         ReadOnlySpan<ulong> pairs = MemoryMarshal.Cast<byte, ulong>(views);
 
         // Resolved once: which buffer a row's bytes live in is a property of the node, and a column
@@ -1306,9 +1282,9 @@ internal static class BlockStatsPass
     /// </summary>
     /// <remarks>
     /// Different sizes are different values and need no comparison at all — which is the whole of
-    /// the answer for most pairs. Only two values of the SAME length that sit at different offsets
-    /// reach the byte comparison, and that is the case docs/11 §3.2.4 exists for: two equal
-    /// out-of-line strings written twice must not split a run.
+    /// the answer for most pairs. Only two values of the same length that sit at different offsets
+    /// reach the byte comparison, and that is the case it exists for: two equal out-of-line strings
+    /// written twice must not split a run.
     /// </remarks>
     private static bool SameValue(
         CanonicalNode node, ReadOnlySpan<byte> views, ReadOnlySpan<ulong> pairs, int a, int b)
@@ -1341,7 +1317,7 @@ internal static class BlockStatsPass
     /// The same, over a heap already resolved for a column that keeps its bytes in one buffer.
     /// </summary>
     /// <remarks>
-    /// Which buffer a row lives in belongs to the NODE, not to the row, and nearly every string
+    /// Which buffer a row lives in belongs to the node, not to the row, and nearly every string
     /// column has exactly one. Asking the node per row costs a kind check, a bound and a span built
     /// over native memory, twice for every pair the run pass compares.
     /// </remarks>
@@ -1449,13 +1425,13 @@ internal static class BlockStatsPass
         stats.MergeUnsigned(bits, bits);
     }
 
-    /// <summary>Dispatches on the physical type ONCE, then runs a monomorphic loop.</summary>
+    /// <summary>Dispatches on the physical type once, then runs a monomorphic loop.</summary>
     /// <remarks>
     /// <paramref name="widths"/> is the pair of histograms of <see cref="BitPackWidths"/> when the
-    /// caller wants them and empty otherwise, and the integer loops branch on it ONCE rather than
-    /// per row: docs/11-write-strategy.md §3.2 puts the widths in this walk precisely because the
-    /// value is already in a register here, so counting it costs a leading-zero count and an
-    /// increment instead of the whole second walk `BitPackPlan` used to make.
+    /// caller wants them and empty otherwise, and the integer loops branch on it once rather than
+    /// per row. The widths belong in this walk precisely because the value is already in a register
+    /// here, so counting it costs a leading-zero count and an increment instead of a whole second
+    /// walk over the column by `BitPackPlan`.
     /// </remarks>
     private static void Values(
         CanonicalNode node, in ValidityMask mask, int start, int count, ref BlockStats stats,
@@ -1480,12 +1456,12 @@ internal static class BlockStatsPass
 
     /// <summary>The raw and zigzag widths of one value, counted into the pair of histograms.</summary>
     /// <remarks>
-    /// THE RAW WIDTH IS TAKEN ON THE UNSIGNED READING of the bits, which is what the packer writes:
+    /// The raw width is taken on the unsigned reading of the bits, which is what the packer writes:
     /// a signed <c>-1</c> is an <c>sbyte</c> of eight set bits, so its raw width is eight and not
     /// sixty-four. The zigzag form interleaves the sign so that magnitude rather than position
     /// decides the width, and the mask keeps it inside the element — the same two expressions
-    /// <c>BitPackPlan</c> prices with, which is why the histograms this produces are the ones it
-    /// used to walk the column for.
+    /// <c>BitPackPlan</c> prices with, so the histograms this produces are the ones it would
+    /// otherwise walk the column for.
     /// </remarks>
     /// <param name="bits">The row's value, masked to the element width.</param>
     /// <param name="elementBits">8, 16, 32 or 64.</param>
@@ -1501,11 +1477,11 @@ internal static class BlockStatsPass
 
     // ------------------------------------------------------------------------------------ order
     //
-    // The file statistics' is_sorted / is_strict_sorted, tracked as the reference computes them
-    // (vortex-array-0.86.1 aggregate_fn/fns/is_sorted): nulls below every value, equal neighbours
-    // allowed by the first flag and refused by the second. A block is fed range by range, so a
-    // range's first row is judged against the row before it (the seam) and its own rows against
-    // each other; the seam of a block's first range is the block's, and the merge reads it.
+    // The file statistics' is_sorted / is_strict_sorted, tracked as the reference implementation
+    // computes them: nulls below every value, equal neighbours allowed by the first flag and
+    // refused by the second. A block is fed range by range, so a range's first row is judged
+    // against the row before it (the seam) and its own rows against each other; the seam of a
+    // block's first range is the block's, and the merge reads it.
 
     /// <summary>Whether every null of the range comes before every value.</summary>
     private static bool NullsFirst(in ValidityMask mask, int start, int count)
@@ -1620,7 +1596,7 @@ internal static class BlockStatsPass
     };
 
     /// <summary>
-    /// The order of a range's rows, in a SECOND walk over the range: the bounds loop keeps the
+    /// The order of a range's rows, in a second walk over the range: the bounds loop keeps the
     /// two-compare shape the JIT vectorises (see <see cref="Signed{T}"/>), and this one runs only
     /// while the column can still be sorted -- a witness is sticky, so an unsorted column pays it
     /// once, for the rows up to its first descent.
@@ -1693,12 +1669,12 @@ internal static class BlockStatsPass
     /// witnesses kept in locals so the loop writes nothing through the <c>ref</c>.
     /// </summary>
     /// <remarks>
-    /// SCALAR ON PURPOSE. The first version compared a vector of values against the vector one
-    /// element behind it, which reads well and measures badly: a 128-bit register holds TWO
-    /// <see cref="long"/>s, so each iteration paid two span constructions with their bounds checks
+    /// Scalar where the register is narrow. Comparing a vector of values against the vector one
+    /// element behind it reads well and measures badly there: a 128-bit register holds two
+    /// <see cref="long"/>s, so each iteration pays two span constructions with their bounds checks
     /// and three vector compares to advance two elements. Against a loop whose every branch is
     /// perfectly predicted -- a sorted column never takes the first, an unsorted one takes it once
-    /// and leaves -- the vector form was the slower of the two.
+    /// and leaves -- the vector form is the slower of the two.
     /// <para>
     /// A NaN is not ordered by this comparison and would sail through as "not below", so it is
     /// asked for by name. The check folds away for an integer <typeparamref name="T"/>, where
@@ -1754,17 +1730,16 @@ internal static class BlockStatsPass
     }
 
     /// <summary>
-    /// The pairs of an all-valid range, a register at a time (docs/11-write-strategy.md §4.1, the
-    /// sorted / strict row): each element against the one before it, by a second load one element
-    /// behind, so no lane crosses from one iteration to the next.
+    /// The pairs of an all-valid range, a register at a time: each element against the one before
+    /// it, by a second load one element behind, so no lane crosses from one iteration to the next.
     /// </summary>
     /// <returns>
     /// Where the scalar loop resumes: the end of the last whole window, or the start of the first
     /// window where a lane fell or a NaN showed -- the scalar loop meets it there in row order.
     /// </returns>
     /// <remarks>
-    /// FOUR LANES OR MORE ONLY. Two-lane registers (64-bit values) measured slower than the
-    /// predicted scalar loop (the first version of this method), and are left to it.
+    /// Four lanes or more only. Two-lane registers -- 64-bit values -- are slower than the
+    /// perfectly predicted scalar loop, and are left to it.
     /// </remarks>
     private static int OrderLanes<T>(ReadOnlySpan<T> values, ref bool repeats)
         where T : unmanaged, INumber<T>
@@ -1793,19 +1768,18 @@ internal static class BlockStatsPass
     }
 
     /// <summary>
-    /// The extremes of a range, four to sixteen lanes at a time (docs/11-write-strategy.md §4.1,
-    /// the first row of its table).
+    /// The extremes of a range, four to sixteen lanes at a time.
     /// </summary>
     /// <param name="values">The range; every element counts, so the caller owes it all-valid.</param>
     /// <param name="min">The smallest element.</param>
     /// <param name="max">The largest.</param>
     /// <remarks>
-    /// TWO ACCUMULATORS PER EXTREME, because the loop is latency-bound and not throughput-bound: a
+    /// Two accumulators per extreme, because the loop is latency-bound and not throughput-bound: a
     /// single running vector makes every iteration wait for the previous one's `Min`, and the
     /// second pair hides that behind the load. The horizontal reduce runs once per range, not once
     /// per iteration, and the tail is the scalar twin this method keeps -- which is also the whole
     /// method under <c>DOTNET_EnableHWIntrinsic=0</c>, where
-    /// <see cref="Vector128.IsHardwareAccelerated"/> is false and the suite runs it (§4).
+    /// <see cref="Vector128.IsHardwareAccelerated"/> is false and the suite runs it.
     /// <para>
     /// A 64-bit lane has no NEON minimum and is emulated as a compare and a select, so the gain
     /// there is smaller than on the narrower widths; it is still a gain, and writing the kernel
@@ -1882,13 +1856,11 @@ internal static class BlockStatsPass
         T max = T.MinValue;
         Order(values, in mask, start, ref stats);
 
-        // THE BOUNDS LOOP STAYS AS IT WAS: two compares per value and nothing else, which is the
-        // shape the JIT vectorises. Stage R1 put an `if (counting)` inside it, and the fourth
-        // end-of-refactor measurement found `chunked` -- a column that takes this loop on every
-        // row, where `primitive` is a progression and never does -- at +52 % with the count
-        // switched OFF: a branch that is never taken still costs the loop its vectorisation. The
-        // widths are counted in a second walk over the same range, which is a block or less and
-        // already in L1, and only while a plan will read them.
+        // The bounds loop holds two compares per value and nothing else, which is the shape the JIT
+        // vectorises. An `if (counting)` inside it costs the loop that vectorisation even on the
+        // rows where the branch is never taken, which is most of the cost of a column that reaches
+        // this loop at all. The widths are counted in a second walk over the same range, which is a
+        // block or less and still in cache, and only while a plan will read them.
         if (mask.AllValid)
         {
             Bounds(values, out min, out max);
@@ -1939,13 +1911,11 @@ internal static class BlockStatsPass
     /// statistics already hold them.
     /// </summary>
     /// <remarks>
-    /// THE CARRIED TAIL, COUNTED LATE. A plan holds at the end of a chunk, and the next chunk's
+    /// The carried tail, counted late. A plan holds at the end of a chunk, and the next chunk's
     /// first block is already open with the rows the emission carried: rows the pass walked before
     /// anyone wanted widths. Without them that block's histogram is partial, the chunk it opens
     /// walks for its histogram all the same, and the count on the chunk's every other block is
-    /// paid for nobody -- on `fastlanes_bitpacked` one chunk of four counted for nothing, and the
-    /// histograms switched off measured exactly the +13 % the axis carried since they were
-    /// switched on. Counting the carried rows here, when the table sees them again
+    /// paid for nobody. Counting the carried rows here, when the table sees them again
     /// (`ColumnWriter.Reprobe`), completes the block, and the chunk it opens is the first to read
     /// its widths instead of the second.
     /// </remarks>
@@ -2000,15 +1970,13 @@ internal static class BlockStatsPass
 
     /// <summary>
     /// The width histograms over a range the bounds loop has just read, valid rows only, the
-    /// element's bits masked to its width so a signed value is measured as the packer sees it.
+    /// element's bits masked to its width so a signed value is sized as the packer sees it.
     /// </summary>
     /// <remarks>
-    /// ONLY THE DOMAINS A PLAN CAN READ. Zigzag is offered to signed columns alone
+    /// Only the domains a plan can read. Zigzag is offered to signed columns alone
     /// (<c>BitPackPlan.TryBuild</c> prices it under <c>signed &amp;&amp; zigzag</c>), so on an
-    /// unsigned column the zigzag half was a leading-zero count and an increment per row for
-    /// nobody: `fastlanes_bitpacked` -- a `u32` -- measured +13 % against the writer before the
-    /// pass counted anything, on identical bytes, with the count as the one difference on the
-    /// chunks whose plan came from memory.
+    /// unsigned column the zigzag half would be a leading-zero count and an increment per row for
+    /// nobody -- enough to show on the write of a plain unsigned column, for identical bytes.
     /// </remarks>
     /// <param name="values">The range's values, already sliced to it.</param>
     /// <param name="mask">The column's validity.</param>
@@ -2032,10 +2000,10 @@ internal static class BlockStatsPass
             }
             else
             {
-                // TWO HISTOGRAMS, ROWS ALTERNATING, SUMMED AT THE END. A run of equal widths -- 512
-                // rows at ten bits in `fastlanes_bitpacked`'s `i % 1024` -- increments one counter
-                // 512 times in a row, and each increment waits on the store before it. Split over
-                // two counters the chain is half as long, and the fold is 65 adds per range.
+                // Two histograms, rows alternating, summed at the end. A run of equal widths
+                // increments one counter over and over, and each increment waits on the store
+                // before it; split over two counters the dependency chain is half as long, and the
+                // fold costs one pass over the histogram per range.
                 Span<int> odd = stackalloc int[65];
                 odd.Clear();
                 int i = 0;
@@ -2100,7 +2068,7 @@ internal static class BlockStatsPass
         Order(values, in mask, start, ref stats);
 
         // Same discipline as the signed loop: bounds alone in the hot loop, widths in a second walk
-        // over the range already in L1, and only when a plan will read them.
+        // over the range still in cache, and only when a plan will read them.
         if (mask.AllValid)
         {
             Bounds(values, out min, out max);
@@ -2150,7 +2118,7 @@ internal static class BlockStatsPass
     /// <c>&lt;</c>.
     /// </summary>
     /// <remarks>
-    /// SKIPPING NaN IS LOAD-BEARING, not tidy: the reference computes min/max with `skip_nans()` and
+    /// Skipping NaN is load-bearing, not tidy: the reference computes min/max with `skip_nans()` and
     /// counts NaN in its own aggregate, which is what makes "a zone with max &lt;= 10 may be pruned
     /// for x &gt; 10 even when it contains NaN" sound. A NaN that reached `max` would compare false
     /// with everything and the bound would stop meaning anything.
@@ -2214,10 +2182,9 @@ internal static class BlockStatsPass
     }
 
     /// <summary>
-    /// The bounds of an all-valid float range, a register at a time (docs/11-write-strategy.md
-    /// §4.1, "floats with NaN"): a NaN lane is replaced by the neutral element -- +∞ for the
-    /// minimum, -∞ for the maximum -- before `Min` and `Max`, which then follow <c>Math.Min</c>'s
-    /// rule on the two zeros.
+    /// The bounds of an all-valid float range, a register at a time: a NaN lane is replaced by the
+    /// neutral element -- +∞ for the minimum, -∞ for the maximum -- before `Min` and `Max`, which
+    /// then follow <c>Math.Min</c>'s rule on the two zeros.
     /// </summary>
     /// <returns>Where the scalar tail starts.</returns>
     /// <remarks>
@@ -2336,9 +2303,9 @@ internal static class BlockStatsPass
         return T.IsNegative(a) ? b : a;
     }
 
-    // The three below read ONE value, the element of a constant column. They switch on the physical
-    // type, which is what `CanonicalSupport.ReadInteger` does and what PerRowDispatchTests counts --
-    // written out here rather than called so that the ratchet's table stays a list of loops.
+    // The three below read one value, the element of a constant column. They switch on the physical
+    // type, as `CanonicalSupport.ReadInteger` does, and are written out here rather than calling it
+    // so that a switch made once per range stays distinguishable from one made per row.
 
     private static double ElementFloat(ReadOnlySpan<byte> element, PType ptype) => ptype switch
     {

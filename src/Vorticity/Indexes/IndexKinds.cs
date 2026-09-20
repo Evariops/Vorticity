@@ -13,7 +13,7 @@ public static class IndexKinds
     /// <summary>A split-block Bloom filter per block or generation.</summary>
     public const string BloomSbbf = "vorticity.bloom.sbbf.v1";
 
-    /// <summary>A trigram Bloom for <c>LIKE</c> and <c>CONTAINS</c>.</summary>
+    /// <summary>A trigram Bloom, for the substring and pattern predicates on a string column.</summary>
     public const string BloomNgram3 = "vorticity.bloom.ngram3.v1";
 
     /// <summary>

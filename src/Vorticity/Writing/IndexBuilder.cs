@@ -1,15 +1,3 @@
-// What every streaming index builder answers to (docs/10-indexes.md §7.2).
-//
-// THE WRITER'S RHYTHM, AND NOTHING ELSE. Rows arrive in ranges while their batch is live; blocks
-// close; chunks close, each a whole number of blocks; the data ends. A builder turns those events
-// into payloads, which the index writer lays into blobs between chunks, and it can give up at any
-// of them -- whole, with a reason.
-//
-// `AUTO` JUDGES AS EARLY AS IT CAN (10 §5.5): the decision is when to abandon, never when to start.
-// A builder born of `Auto` hears whether the column's first block climbed, sizes its filters against
-// the column's raw bytes at every block, and is judged against the column's written bytes at every
-// chunk -- always before its payloads are written, so a builder given up on leaves nothing in the
-// file, and a column it does not serve costs at most a generation of hashing.
 using System;
 using System.Collections.Generic;
 using Vorticity.Arrays;
@@ -17,81 +5,67 @@ using Vorticity.Arrays;
 namespace Vorticity.Writing;
 
 /// <summary>What the writer knows about a column when one of its chunks closes.</summary>
-/// <param name="ColumnBytes">The column's data bytes written so far.</param>
 internal readonly record struct ColumnFacts(long ColumnBytes);
 
-/// <summary>One column's index, built as the column is written.</summary>
+/// <summary>
+/// One column's index, built as the column is written. It may give up whole at any of the writer's
+/// events, with a reason; the judgement always runs before its own payloads go out, so a builder
+/// given up on leaves nothing in the file.
+/// </summary>
 internal abstract class IndexBuilder : IDisposable
 {
     private long _pending;
 
-    /// <summary>Payloads closed and waiting to be written.</summary>
     internal Queue<PendingPayload> Pending { get; } = new Queue<PendingPayload>();
 
     /// <summary>Why the whole index was dropped; <see langword="null"/> while it lives.</summary>
     internal string? Abandoned { get; private set; }
 
     /// <summary>
-    /// The share of the column's bytes, in parts per thousand, this builder may take before
-    /// <c>Auto</c> gives it up; <c>0</c> for a builder the caller asked for by name.
+    /// The share of the column's bytes, in parts per thousand, this builder may take before it is
+    /// given up; <c>0</c> for a builder the caller asked for by name.
     /// </summary>
     internal int AutoShare { get; init; }
 
-    /// <summary>
-    /// The bytes its payloads took in the file, the estimate of those waiting, and what it holds
-    /// that is not a payload yet.
-    /// </summary>
+    /// <summary>Everything it costs: written payloads, queued estimates, and what is still open.</summary>
     internal long Bytes => WrittenBytes + _pending + OpenBytes;
 
-    /// <summary>The bytes its payloads took in the file.</summary>
     internal long WrittenBytes { get; private set; }
 
-    /// <summary>What the builder has built and not yet queued: a Bloom generation's open filters.</summary>
+    /// <summary>What the builder has built but still holds unqueued.</summary>
     protected virtual long OpenBytes => 0;
 
     /// <summary>Feeds rows <c>[start, start + count)</c> of the column's node.</summary>
-    /// <param name="arena">The batch's arena.</param>
-    /// <param name="nodeIndex">The column in it.</param>
-    /// <param name="start">The first row.</param>
-    /// <param name="count">How many rows.</param>
     internal abstract void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count);
 
     /// <summary>Seals the open block.</summary>
     internal abstract void CloseBlock();
 
     /// <summary>
-    /// What the statistics say of the column's first block, before it is sealed: the earliest fact
-    /// `Auto` can act on.
+    /// What the statistics say of the column's first block, before it is sealed: the earliest fact a
+    /// builder can decide on.
     /// </summary>
-    /// <param name="sorted">The block's `is_sorted`, when tracked.</param>
     internal virtual void FirstBlock(bool? sorted)
     {
     }
 
     /// <summary>
-    /// Numbers the builder's first block and row, for an append (docs/11 §3.8): its runs cover the
-    /// file's blocks from <paramref name="block"/>, the ones before being the old file's.
+    /// Numbers the builder's first block and row, for an append: the blocks before this one belong
+    /// to the old file.
     /// </summary>
-    /// <param name="block">The first block this builder sees.</param>
-    /// <param name="row">Its first row.</param>
     internal virtual void Start(int block, long row)
     {
     }
 
     /// <summary>A chunk went out: its blocks and its rows.</summary>
-    /// <param name="firstBlock">Its first block.</param>
-    /// <param name="blocks">How many blocks it covers.</param>
-    /// <param name="firstRow">Its first row.</param>
-    /// <param name="rows">How many rows.</param>
     internal virtual void CloseChunk(int firstBlock, int blocks, long firstRow, long rows)
     {
     }
 
     /// <summary>
-    /// <c>Auto</c>'s verdict after a chunk: gives up when the builder costs more of the column than
-    /// its share, or when the column's facts say it cannot serve.
+    /// The verdict after a chunk: gives up when the builder costs more of the column than its share,
+    /// or when the column's facts say it cannot serve.
     /// </summary>
-    /// <param name="facts">What the writer knows of the column.</param>
     internal virtual void Judge(ColumnFacts facts)
     {
         if (AutoShare <= 0 || Abandoned is not null || facts.ColumnBytes <= 0)
@@ -112,8 +86,7 @@ internal abstract class IndexBuilder : IDisposable
     {
     }
 
-    /// <summary>Drops the whole index, with its reason; what was written stays dead weight.</summary>
-    /// <param name="reason">Why.</param>
+    /// <summary>Drops the whole index; anything already written stays in the file as dead weight.</summary>
     internal virtual void Abandon(string reason)
     {
         Abandoned ??= reason;
@@ -121,11 +94,7 @@ internal abstract class IndexBuilder : IDisposable
         _pending = 0;
     }
 
-    /// <summary>
-    /// Queues a payload, counting its estimate toward the builder; a helper that assembles the
-    /// builder's regions (<see cref="BloomTreeWriter"/>) queues through it too.
-    /// </summary>
-    /// <param name="payload">The payload.</param>
+    /// <summary>Queues a payload, counting its estimate toward the builder.</summary>
     internal void Enqueue(PendingPayload payload)
     {
         payload.Owner = this;
@@ -133,16 +102,13 @@ internal abstract class IndexBuilder : IDisposable
         Pending.Enqueue(payload);
     }
 
-    /// <summary>A payload of this builder landed: its estimate becomes its length.</summary>
-    /// <param name="payload">The payload.</param>
-    /// <param name="length">Its bytes in the file.</param>
+    /// <summary>A payload of this builder landed: its estimate becomes its real length.</summary>
     internal void Placed(PendingPayload payload, long length)
     {
         _pending = Math.Max(0, _pending - payload.Estimate);
         WrittenBytes += length;
     }
 
-    /// <inheritdoc/>
     public virtual void Dispose()
     {
     }

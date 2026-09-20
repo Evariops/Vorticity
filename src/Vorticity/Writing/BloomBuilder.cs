@@ -1,36 +1,3 @@
-// The streaming builder of `vorticity.bloom.sbbf.v1` (docs/10-indexes.md §5.1, §4.3, §5.4, §7.2).
-//
-// FED BY THE INGEST, ONE ROW RANGE AT A TIME, while the batch's arena is live. Each valid row is
-// hashed -- XxHash3-64 over the bytes §5.1's table names -- into the open block's hash set, which is
-// also its exact distinct count. When the block closes, the set sizes and fills the block's filter
-// and is folded into the generation's set; when the k-th block closes, the generation's filter is
-// sized and filled from that set. Nothing is re-read.
-//
-// EXACT COUNTS AT EVERY LEVEL, where 10 §4.3 allows the sum. A generation "sized from the sum of its
-// blocks' distinct counts" over-sizes by the overlap, and a status column with five values per
-// block would get a generation filter sized for eighty; the union set is one insert per block
-// distinct, and it sizes the generation for five -- below the policy's floor, so no filter at all,
-// which is the right answer for a column the zone map already prunes. The file-level set is the
-// same union over the whole file, which is why that resolution is opt-in and gives up past a
-// ceiling.
-//
-// THE HASH PER ROW IS THE COST, and `Auto` stops paying it as early as a fact allows: +24 % on a
-// string column and +37 % on an i64 one whose filters were kept, +27 % on a dictionary column whose
-// filter was dropped only at the end. A memo of hashes already computed was measured and removed:
-// on those columns its lookup costs what the hash did. What pays is not hashing -- the verdicts
-// below come within the first block or the first generation.
-//
-// THE FILTERS GO OUT WHEN THEIR GENERATION CLOSES, not at `CompleteAsync`. 10 §7.2 says both
-// "nothing is buffered across chunks" and "runs are written at CompleteAsync"; holding every filter
-// to the end is megabytes per column per million rows, so the streaming half wins and the regions
-// land between data chunks. A region is a file region no layout references, so where it lies
-// changes nothing for any reader (10 §3.2).
-//
-// THEY GO OUT AS A TREE (13 §6.2, step 24): a generation's sixteen block filters are the leaves of a
-// level-1 node, whose filter is the generation's, and `BloomTreeWriter` stacks the nodes sixteen to
-// a level up to one root, the run's payload. The bits of every filter are what they were; a node
-// whose union passes `max_blocks` is now not built, where a generation filter used to be clamped
-// into uselessness.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -44,25 +11,31 @@ using Vorticity.Types.Numerics;
 
 namespace Vorticity.Writing;
 
-/// <summary>Builds one column's split-block Bloom filters, block by block.</summary>
+/// <summary>
+/// Builds one column's split-block Bloom filters, block by block, from the row ranges the ingest
+/// hands it while the batch's arena is live: each valid row is hashed into the open block's set,
+/// which is also its exact distinct count, and nothing is ever re-read.
+/// </summary>
+/// <remarks>
+/// A block's set is folded into the generation's and, when the policy asks for it, into a file-wide
+/// one, so every level is sized from an exact union rather than from the sum of its children's
+/// counts, which would over-size by their overlap. Filters leave as soon as their generation closes
+/// rather than at completion, because holding a column's filters to the end of the file would cost
+/// more memory than the writer may spend; where the regions land is invisible to a reader, since no
+/// layout references them.
+/// </remarks>
 internal sealed class BloomBuilder : IndexBuilder
 {
-    /// <summary>
-    /// Blocks per generation: 10 §4.3's `k`, which is the tree's fanout and not a free parameter.
-    /// </summary>
+    /// <summary>Blocks per generation, which is the tree's fanout and not a free parameter.</summary>
     /// <remarks>
-    /// STEP 33 TRIED TO CALIBRATE IT AND FOUND IT WAS NOT A KNOB. `k` is how many blocks one
-    /// generation covers; <see cref="BloomIndexOptions.Fanout"/> is how many children a node of the
-    /// tree takes, it is written into every entry's options and a reader rejects a file whose
-    /// fanout is not its own. They are one number: at `k` = 8 with the fanout left at 16 the
-    /// generations no longer line up with the nodes, `table_mixed`'s filters grow from 10 672 264
-    /// bytes to 20 019 048 and every probe measured prunes nothing at all; moving both to 8 fails
-    /// 28 tests of the index suite, the file filter among them. Changing it is a format version,
-    /// a code change and a fresh calibration, not a default to tune (docs/10-indexes.md §11).
+    /// How many blocks a generation covers and how many children a node takes are one number: the
+    /// fanout is written into every entry's options and a reader rejects a file whose fanout is not
+    /// its own, and generations that do not line up with the nodes give filters that prune nothing.
+    /// Moving it is a format version and a code change, not a default to tune.
     /// </remarks>
     internal const int GenerationBlocks = BloomIndexOptions.Fanout;
 
-    /// <summary>The file-level filter's own ceiling, 10 §5.4: 1 MiB blocks, 32 MiB.</summary>
+    /// <summary>The file-level filter's own ceiling, in filter blocks.</summary>
     internal const int FileMaxBlocks = 1 << 20;
 
     /// <summary>Distinct values the file-level resolution may hold before it gives up.</summary>
@@ -116,10 +89,9 @@ internal sealed class BloomBuilder : IndexBuilder
     /// <summary>The kind this builder writes.</summary>
     internal string Kind => _trigrams ? IndexKinds.BloomNgram3 : IndexKinds.BloomSbbf;
 
-    /// <inheritdoc/>
     /// <remarks>
-    /// The open generation's block filters and the node filters waiting for their level to go out:
-    /// uncompressed, so their size is their size.
+    /// The open generation's block filters and the node filters waiting for their level to go out.
+    /// They are uncompressed, so what they take in memory is what they will take in the file.
     /// </remarks>
     protected override long OpenBytes => ((long)_generationBlockWordCount * sizeof(uint)) + (_tree?.OpenBytes ?? 0);
 
@@ -175,7 +147,7 @@ internal sealed class BloomBuilder : IndexBuilder
 
         if (dtype.Kind is DTypeKind.List or DTypeKind.FixedSizeList)
         {
-            // 10 §5.1: a list's elements, each into its row's block (step 28b).
+            // A list is indexed through its elements, each into the block of the row that holds it.
             if (trigrams)
             {
                 reason = $"a trigram index needs text, and this column is {dtype.Kind}";
@@ -234,8 +206,8 @@ internal sealed class BloomBuilder : IndexBuilder
     }
 
     /// <summary>
-    /// A list column's rows: each element of a valid row, into the row's block (10 §5.1, step 28b),
-    /// so the filter answers "does any element of a row in this block equal v".
+    /// A list column's rows: each element of a valid row, into the row's block, so the filter
+    /// answers "does any element of a row in this block equal v".
     /// </summary>
     /// <remarks>
     /// A null list names nothing, and a null element is not inserted. The ranges of consecutive
@@ -508,7 +480,7 @@ internal sealed class BloomBuilder : IndexBuilder
 
     /// <summary>
     /// Rows <c>[start, stop)</c> of an all-valid fixed-width column, hashed by XxHash3's own short
-    /// path for the width, resolved once (docs/11-write-strategy.md §4.1, "hashing, fixed width").
+    /// path for the width, resolved once for the whole range instead of per row.
     /// </summary>
     private static void HashRows(ReadOnlySpan<byte> values, int width, int start, int stop, HashSet64 block)
     {
@@ -602,13 +574,14 @@ internal sealed class BloomBuilder : IndexBuilder
         int filterBlocks = 0;
         if (distinct > 0 && distinct >= _policy.MinDistinct)
         {
-            // A LEAF IS CLAMPED, as it always was: its bits are the reference's (BloomVectorTests).
+            // A leaf is clamped to the ceiling rather than dropped, so its bits stay those of the
+            // reference implementation.
             filterBlocks = SplitBlockBloom.BlocksFor(distinct, _policy.FalsePositivePpm, _maxBlocks);
             int words = filterBlocks * SplitBlockBloom.WordsPerBlock;
 
-            // `AUTO` GIVES UP BEFORE BUILDING when the filters would already outweigh their share of
-            // the column's RAW bytes: the column compresses to no more than those, so the verdict
-            // the chunk would reach is already known, and the filter is never laid out.
+            // `Auto` gives up before building when the filters would already outweigh their share
+            // of the column's raw bytes: the column compresses to no more than those, so the
+            // verdict the chunk would reach is already known and the filter is never laid out.
             long projected = Bytes + ((long)words * sizeof(uint));
             if (AutoShare > 0 && projected * 1000 > _rawBytes * AutoShare)
             {
@@ -663,8 +636,8 @@ internal sealed class BloomBuilder : IndexBuilder
 
     /// <summary>
     /// The open generation holds more values than a node of the ceiling: its node gets no filter.
-    /// `Auto` gives the column up when that is its first generation (13 §6.5's symmetric rule): the
-    /// probe would read every block's filter, and a sorted run is the structure for such a column.
+    /// `Auto` gives the column up when that is its first generation, because a probe would then
+    /// have to read every block's filter, and a sorted run serves such a column instead.
     /// </summary>
     /// <returns>Whether the builder gave up.</returns>
     private bool PassesTheCeiling()
@@ -688,21 +661,16 @@ internal sealed class BloomBuilder : IndexBuilder
     /// </summary>
     /// <remarks>
     /// The sets are equal exactly when, after each block's fold, the union is as large as the block
-    /// and as the first block: no block lacked a value another had. A cycle of seventeen values
-    /// over a million rows -- the corpus's `zstd_buffers` -- is this column.
+    /// and as the first block: no block lacked a value another had. A column cycling through a
+    /// handful of values over a whole file is the case this catches.
     /// <para>
-    /// WHAT STEP 33 MEASURED, and why the rule stays although it is not the whole truth: the LEAVES
-    /// prune nothing, as the name says -- on `table_mixed`'s `label`, a present value reads 5 840
-    /// bytes of filters and keeps all 123 blocks -- but the ROOT of that same tree answers an
-    /// ABSENT value in 180 bytes and prunes all 123, where the bare zone map reads 7 385 628. The
-    /// cost of owning that root is not its bytes (6 kB) but the pass that fills it: one hash and
-    /// one set insert per row, ~9 ms per million rows. On a column the chooser writes for almost
-    /// nothing -- `zstd_buffers`, 630 724 bytes for a million rows -- that pass takes the write
-    /// from 5 ms to 14, far past the +10 % 11 §5.3 allows; on `table_mixed`, where five other
-    /// columns pay the bill, it does not show at all. A writer cannot tell those two apart without
-    /// timing itself, which would make its bytes depend on the machine, so `Auto` keeps the
-    /// pessimistic verdict and an explicit <see cref="IndexPolicy"/> Bloom buys the root back at
-    /// a measured 9 ms and 6 kB per million rows (docs/10-indexes.md §11).
+    /// The verdict is deliberately pessimistic, and it is not the whole truth: the leaves of such a
+    /// column prune nothing, but the root of its tree still prunes the whole file for a value that
+    /// is absent everywhere. What that root costs is not its bytes but the pass that fills it, one
+    /// hash and one set insert per row, which is invisible on a wide table and doubles the write of
+    /// a column the chooser already encodes for almost nothing. A writer cannot tell those two
+    /// apart without timing itself, which would make the bytes it produces depend on the machine,
+    /// so it declines here and an explicit <see cref="IndexPolicy"/> Bloom buys the root back.
     /// </para>
     /// </remarks>
     /// <param name="block">The block just sealed.</param>
@@ -737,7 +705,6 @@ internal sealed class BloomBuilder : IndexBuilder
     /// <summary>The first block this builder saw: 0, or an append's boundary.</summary>
     private int _start;
 
-    /// <inheritdoc/>
     internal override void Start(int block, long row)
     {
         _start = block;
@@ -778,7 +745,7 @@ internal sealed class BloomBuilder : IndexBuilder
         }
     }
 
-    /// <summary>The file-wide filter under the file-level ceiling (10 §5.4), or null with the reason kept.</summary>
+    /// <summary>The file-wide filter under the file-level ceiling, or null with the reason kept.</summary>
     private uint[]? FileFilter(HashSet64 file)
     {
         int distinct = file.Count;
@@ -802,7 +769,7 @@ internal sealed class BloomBuilder : IndexBuilder
         if (Abandoned is null && _policy.Resolutions >= 2 && AutoShare > 0 && first == 0
             && count == GenerationBlocks && !(_tree?.GenerationPassed ?? false) && union < _policy.MinDistinct)
         {
-            // A FULL FIRST GENERATION UNDER THE FLOOR IS A DICTIONARY'S COLUMN: no block and no
+            // A full first generation under the floor is a dictionary's column: no block and no
             // generation of it got a filter, the dictionary probe answers its equalities, and
             // hashing the rest of the file would buy nothing.
             Abandon(
@@ -812,7 +779,7 @@ internal sealed class BloomBuilder : IndexBuilder
 
         if (Abandoned is null)
         {
-            // NOT COMPRESSED: a filter is uniform bits by construction, and pricing the column's
+            // Left uncompressed: a filter is uniform bits by construction, so pricing the column's
             // candidates over it is work whose answer is known. The leaves go out before the node
             // that names them.
             PendingPayload? leaves = _generationBlockWordCount > 0
@@ -838,12 +805,11 @@ internal sealed class BloomBuilder : IndexBuilder
         _generationBlockWordCount = 0;
     }
 
-    /// <inheritdoc/>
     /// <remarks>
-    /// A BLOOM ON A SORTED COLUMN IS WASTED (10 §5.5): the zone map already prunes every equality,
-    /// block by block, from bounds it holds anyway. The first block is the evidence -- a column whose
-    /// first block climbs is taken to be sorted -- because waiting for the file statistics would be
-    /// waiting for the end, after every filter had been paid for.
+    /// A Bloom filter on a sorted column is wasted: the zone map already prunes every equality,
+    /// block by block, from bounds it holds anyway. The first block is the evidence, a column whose
+    /// first block climbs being taken for sorted, because waiting for the file's statistics would
+    /// mean waiting for the end, once every filter had been paid for.
     /// </remarks>
     internal override void FirstBlock(bool? sorted)
     {
@@ -853,7 +819,6 @@ internal sealed class BloomBuilder : IndexBuilder
         }
     }
 
-    /// <inheritdoc/>
     internal override void Abandon(string reason)
     {
         base.Abandon(reason);
@@ -881,7 +846,6 @@ internal sealed class BloomBuilder : IndexBuilder
         words = grown;
     }
 
-    /// <inheritdoc/>
     public override void Dispose()
     {
         _block.Dispose();

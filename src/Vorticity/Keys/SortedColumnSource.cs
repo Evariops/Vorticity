@@ -1,22 +1,3 @@
-// The key source that needs no index - docs/12-index-reads.md §3, the `SortedColumn` row.
-//
-// A COLUMN WHOSE STATISTICS SAY IT IS SORTED IS ALREADY A KEY INDEX. Its rows are its entries, in
-// row order, and row order IS key order; the zone map's per-zone min and max are the separator
-// keys of a one-level B-tree over it. So a seek is a walk down the bounds, which are already in
-// memory, and then a bisection inside ONE decoded zone -- the cost docs/12 §10 states, `O(log z)`
-// then `O(log 8192)`, without a byte of index on disk.
-//
-// NULLS COME FIRST AND ARE NOT ENTRIES. The reference computes `is_sorted` over `Option<T>`, where
-// `None` sorts below every value (vortex-array-0.86.1 `aggregate_fn/fns/is_sorted`), so a sorted
-// nullable column holds its nulls at the front; 10 §5.1 puts no null in any index and §3 says a
-// cursor never visits one. The entries are therefore the rows `[null_count, RowCount)`, contiguous,
-// which is what makes rank and select arithmetic rather than a search.
-//
-// THE BOUNDS MAY BE INEXACT AND THE SEARCH STILL LANDS. `vortex.bounded_min` / `bounded_max` widen
-// the interval rather than approximate it (docs/08-semantics.md §1), so a zone whose stated maximum
-// is below the sought key truly holds nothing at or above it and is skipped; a zone whose stated
-// maximum is above may hold nothing, and the search simply moves to the next one. Over-inclusion
-// costs a decode, never an answer.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -30,7 +11,15 @@ using Vorticity.Types;
 
 namespace Vorticity.Keys;
 
-/// <summary>One column of one file, walked in key order.</summary>
+/// <summary>
+/// One column of one file, walked in key order. A column the statistics call sorted is already a
+/// key index: row order is key order, and the zone map's per-zone minimum and maximum act as
+/// separator keys, so a seek bisects the bounds in memory and then bisects inside a single decoded
+/// zone, with no index on disk. Nulls sort below every value and are not entries, so the entries
+/// are the contiguous rows after the null count, which makes rank and select arithmetic rather
+/// than a search. Zone bounds may be widened rather than exact, so a zone that turns out to hold
+/// nothing costs a decode and never an answer.
+/// </summary>
 internal sealed class SortedColumnSource : IAsyncDisposable
 {
     private readonly VortexFile _file;
@@ -164,7 +153,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     }
 
     /// <summary>
-    /// Orders two keys the way THIS source's entries are ordered: IEEE for floats, because
+    /// Orders two keys the way this source's own entries are ordered: IEEE for floats, because
     /// <c>is_sorted</c> is computed with IEEE comparisons, so <c>-0.0</c> and <c>+0.0</c> are one
     /// key here (see <see cref="KeyOrder"/>).
     /// </summary>
@@ -177,8 +166,8 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the zone decode this may make.</param>
     /// <remarks>
     /// The whole of what a step costs. When the entry is in the loaded zone this returns without
-    /// awaiting anything, and an <c>async ValueTask</c> that never suspends allocates nothing --
-    /// the property docs/12 §11 pins at zero bytes per step.
+    /// awaiting anything, and an <c>async ValueTask</c> that never suspends allocates nothing,
+    /// which is what keeps a step free of allocation.
     /// </remarks>
     internal ValueTask EnsureEntryAsync(long entry, CancellationToken cancellationToken) =>
         EnsureLoadedAsync(RowOf(entry), cancellationToken);
@@ -212,7 +201,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
 
     /// <summary>
     /// The number of entries whose key is below <paramref name="key"/>, which is also the index of
-    /// the first entry at or after it: <c>lower_bound</c>, and <c>rank</c> (docs/12 §4.5).
+    /// the first entry at or after it: a lower bound, and the key's rank.
     /// </summary>
     /// <param name="key">The sought key.</param>
     /// <param name="cancellationToken">Cancels the decodes this makes.</param>
@@ -225,7 +214,6 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     internal ValueTask<long> UpperBoundAsync(FilterLiteral key, CancellationToken cancellationToken) =>
         BoundAsync(key, strict: true, cancellationToken);
 
-    /// <inheritdoc/>
     public ValueTask DisposeAsync()
     {
         _context?.Dispose();
@@ -404,12 +392,12 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     }
 
     /// <summary>
-    /// The Class II checks <see cref="VortexReadOptions.VerifyStatistics"/> asks for
-    /// (docs/12-index-reads.md §3): the loaded zone's leading rows null exactly as the null count
-    /// says, its entries non-null and in IEEE key order, inside the zone's own stated bounds, and
-    /// ordered against its neighbours' — at or after the previous zone's minimum, at or before the
-    /// next zone's maximum, which holds however much a bound was widened. Without the option a lie
-    /// gives a wrong walk and never a fault; with it, the walk refuses to go on.
+    /// The checks <see cref="VortexReadOptions.VerifyStatistics"/> asks for: the loaded zone's
+    /// leading rows null exactly as the null count says, its entries non-null and in IEEE key
+    /// order, inside the zone's own stated bounds, and ordered against its neighbours' — at or
+    /// after the previous zone's minimum, at or before the next zone's maximum, which holds
+    /// however much a bound was widened. Without the option a lie gives a wrong walk and never a
+    /// fault; with it, the walk refuses to go on.
     /// </summary>
     private void Verify(int zone, long start, long end)
     {
@@ -480,9 +468,8 @@ internal sealed class SortedColumnSource : IAsyncDisposable
 
     /// <summary>The comparison domain of a column, or none when it has no key order.</summary>
     /// <remarks>
-    /// docs/12-index-reads.md §4.4: bool is not a key source, a decimal is outside this
-    /// iteration's kernels, and an extension orders as its storage type -- a timestamp as its
-    /// integer.
+    /// A bool is not a key source, a decimal has no comparison kernel here, and an extension
+    /// orders as its storage type -- a timestamp as its integer.
     /// </remarks>
     /// <param name="dtype">The column's dtype.</param>
     /// <param name="kind">Its comparison domain.</param>

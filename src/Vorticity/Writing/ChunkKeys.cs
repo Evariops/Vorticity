@@ -1,20 +1,3 @@
-// The keys a locating index sees between two chunk closes (docs/10-indexes.md §6.1, §6.2).
-//
-// INTERNED BYTES AND A LOG OF (key, position). A value is interned once -- its bytes in one heap,
-// an id per distinct value -- and every occurrence the index cares about is appended as a pair: for
-// postings the first time a key is seen in a block, for sorted runs every row. The log is in
-// ingest order, so positions ascend, and a key's positions ascend with them.
-//
-// WHY ITS OWN TABLE AND NOT THE DISTINCT TABLE. The writer's running table (11 §3.2.2) lives and
-// dies by plan memory: it is off when the last chunk was not a dictionary, and it forgets at every
-// chunk. An index cannot share those rules, so it keeps its own, and pays a second hash per row on
-// the columns that ask for one -- which the budget and the report account for.
-//
-// A CHUNK CLOSE CUTS THE LOG. Ingest runs ahead of emission by the rows the writer carries, so when
-// a chunk of rows [r, r + n) goes out the log may hold the carried rows' pairs after its own. When
-// it does not -- the common case -- the whole table becomes the run and the builder's emptied spare
-// takes its place; when it does, the table keeps its ids for the run and only the carried suffix is
-// re-interned. The two tables trade places at every chunk, so their buffers are grown once.
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -24,7 +7,17 @@ using Vorticity.Indexes;
 
 namespace Vorticity.Writing;
 
-/// <summary>Distinct key bytes and the positions they were seen at, for one open chunk.</summary>
+/// <summary>
+/// Distinct key bytes and the positions they were seen at, for one open chunk: a value's bytes are
+/// interned once in a heap under an id, and every occurrence a locating index cares about is
+/// appended to a log of (id, position) pairs. The log is in ingest order, so positions ascend and a
+/// key's positions ascend with them.
+/// </summary>
+/// <remarks>
+/// This table is the index's own and not the writer's running distinct table, which lives and dies
+/// by plan memory and forgets at every chunk; an index cannot follow those rules, so it keeps its
+/// own table and pays a second hash per row on the columns that ask for one.
+/// </remarks>
 internal sealed class ChunkKeys : IDisposable
 {
     private byte[] _heap = ArrayPool<byte>.Shared.Rent(1 << 12);
@@ -50,9 +43,9 @@ internal sealed class ChunkKeys : IDisposable
     /// <summary>The id of <paramref name="bytes"/>, interning it on first sight.</summary>
     /// <param name="bytes">The key.</param>
     /// <remarks>
-    /// THE SLOT HASH IS THE WRITE PATH'S SHORT ONE (<see cref="KeyHash.Bytes"/>): a key up to
-    /// sixteen bytes folds in one multiply, where XxHash3 would cost a call and three times the
-    /// time -- and the table only needs a bucket, since an exact comparison settles every collision.
+    /// The slot comes from the write path's short hash, <see cref="KeyHash.Bytes"/>, which folds a
+    /// small key in a multiply where a general-purpose hash costs a call: the table only needs a
+    /// bucket, since an exact comparison settles every collision.
     /// </remarks>
     internal int Intern(ReadOnlySpan<byte> bytes)
     {
@@ -167,7 +160,7 @@ internal sealed class ChunkKeys : IDisposable
     /// carried pairs move into it and the two trade places again, <paramref name="spent"/> ending
     /// empty.
     /// </summary>
-    /// <param name="spent">The chunk's table, read and no longer needed.</param>
+    /// <param name="spent">The chunk's table, already read and free to reuse.</param>
     internal void Reclaim(ChunkKeys spent)
     {
         spent.Reset();
@@ -263,10 +256,10 @@ internal sealed class ChunkKeys : IDisposable
             return count;
         }
 
-        // A FIXED WIDTH SORTS AS INTEGERS: the layout maps each key one-to-one onto an unsigned
+        // A fixed width sorts as integers: the layout maps each key one-to-one onto an unsigned
         // integer in its total order, so the primitive sort -- no comparer, no byte reads per
-        // comparison -- gives the order the comparer would, ties being impossible. On a million
-        // i32 keys with 100 000 distinct, the comparer's sort was most of a sorted-runs write.
+        // comparison -- gives the order the comparer would, ties being impossible. Sorting such a
+        // column through the comparer instead dominates the cost of writing a sorted run.
         for (int i = 0; i < count; i++)
         {
             _order[i] = layout.SortKey(KeyBytes(ranked[i]));
@@ -287,13 +280,13 @@ internal sealed class ChunkKeys : IDisposable
     /// on the next eight.
     /// </summary>
     /// <remarks>
-    /// THE COMPARER'S ORDER, WITHOUT ITS COST. A window is the key's bytes from
+    /// This gives the comparer's order without its cost. A window is the key's bytes from
     /// <paramref name="offset"/>, zero-padded past its end, so a smaller window is a smaller key and
     /// only equal windows need more: keys that go on past the window are sorted on the next one, and
     /// keys that all end inside it differ only by trailing zeros, which the comparer orders by
-    /// length. Keys are distinct, so the order is total and the same as one comparer sort's -- which
-    /// on a composite key, whose row encoding repeats its leading column's bytes across whole
-    /// chunks, cost more than half of the write.
+    /// length. Keys are distinct, so the order is total and the same the comparer would give, while
+    /// a comparer sort re-reads the bytes at every comparison -- ruinous on a composite key, whose
+    /// row encoding repeats its leading column's bytes across whole chunks.
     /// <paramref name="windows"/> is indexed like <paramref name="ids"/>, so a nested sort
     /// overwrites only the entries of its own run.
     /// </remarks>
@@ -386,7 +379,6 @@ internal sealed class ChunkKeys : IDisposable
         public int Compare(int x, int y) => layout.Compare(table.KeyBytes(x), table.KeyBytes(y));
     }
 
-    /// <inheritdoc/>
     public void Dispose()
     {
         if (_heap.Length > 0)

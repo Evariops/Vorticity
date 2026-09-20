@@ -1,32 +1,3 @@
-// The segment table of a locating run, bounded whatever the run's length - docs/13-dataset.md §6.3.
-//
-// A RUN'S FENCES ARE ITS SEGMENTS' BOUNDS: for each segment its entry count, its first and last key
-// and the regions of its arrays. A run of a few segments keeps them where it always did -- the
-// bounds in the run's options, the regions in the directory -- and nothing about those files moves.
-// A run of more (one merged run over a ten-gibibyte object has thousands) keeps them in FENCE PAGES:
-// file regions like any payload, each a protobuf message of at most about 64 KiB, arranged as a
-// tree whose top page is inlined in the run's options. A lookup reads the pages on its way down --
-// two for any run this format can hold -- and the directory stays a few kilobytes whatever the
-// run's length.
-//
-//   message KeyRunOptions {              // version 2, a paged run
-//     uint32 version = 1;                 // 2
-//     FencePage root = 3;                 // the top page, inline
-//     repeated bytes stride_dtypes = 4;   // the serialized dtype of each array of a segment
-//   }
-//   message FencePage {
-//     uint32 level = 1;                   // 0: its fences are segments; > 0: pages of level - 1
-//     repeated Fence fences = 2;          // in key order
-//   }
-//   message Fence {
-//     uint64 entries = 1;  bytes min = 2;  bytes max = 3;
-//     repeated Segment regions = 4;       // level 0: the segment's `stride` arrays; above: the child page
-//     uint64 segments = 5;                // above level 0: the segments under the child
-//   }
-//
-// A PAGE IS READ LIKE EVERY REGION: its checksum first (13 §7), then its shape -- the level its
-// parent says, fences in order, counts that add up to what the parent claims. A page that fails is
-// a `VortexFormatException`, which a pruner turns into "no claim" and a key source into a refusal.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -53,7 +24,16 @@ internal interface IFenceProbe
     bool Below(ReadOnlySpan<byte> max);
 }
 
-/// <summary>A page of fences, decoded.</summary>
+/// <summary>
+/// A page of fences, decoded: a file region like any payload, holding a protobuf message small
+/// enough to be read whole, whose fences are either segments or the pages one level down.
+/// </summary>
+/// <remarks>
+/// A page is trusted only after its checksum and then its shape -- the level its parent says, fences
+/// in key order, counts that add up to what the parent claims -- since a page that lies would
+/// otherwise cost rows. What fails is a format exception, which a pruner turns into no claim and a
+/// key source into a refusal.
+/// </remarks>
 internal sealed class FencePage
 {
     /// <summary>0 when its fences are segments; the child pages' level plus one otherwise.</summary>
@@ -290,8 +270,9 @@ internal sealed class FencePage
 }
 
 /// <summary>
-/// A run's segment table, in memory for a run of few segments and in pages read on the way down
-/// for a longer one.
+/// A run's segment table -- for each segment its entry count, its first and last key and the regions
+/// of its arrays -- held in memory for a run of few segments and in pages read on the way down for a
+/// longer one, so that the directory stays a few kilobytes whatever the run's length.
 /// </summary>
 internal sealed class FenceTable
 {
@@ -452,7 +433,7 @@ internal sealed class FenceTable
     /// <summary>The serialized dtype of array <paramref name="array"/> of every segment.</summary>
     internal ReadOnlySpan<byte> DTypeOf(int array) => array < _dtypes.Length ? _dtypes[array] : [];
 
-    /// <summary>Whether a sorted run's rows are 64-bit (13 §6.1).</summary>
+    /// <summary>Whether a sorted run's rows are 64-bit.</summary>
     internal bool WideRows => _stride == KeyRunOptions.SortedStride && KeyRunOptions.IsWideRowsDType(DTypeOf(1));
 
     /// <summary>Segment <paramref name="index"/>.</summary>
@@ -589,8 +570,8 @@ internal sealed class FenceTable
     }
 
     /// <summary>
-    /// A segment's regions, built once per segment: a step that crosses into a loaded segment
-    /// allocates nothing (12 §11).
+    /// A segment's regions, built once per segment, so that a step crossing into a segment already
+    /// loaded allocates nothing.
     /// </summary>
     private IndexSegment[] InlineRegions(int segment)
     {

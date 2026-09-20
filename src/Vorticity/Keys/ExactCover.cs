@@ -1,22 +1,3 @@
-// The exact cover of a predicate - docs/12-index-reads.md §5.1 and §5.2's first tier, and the row
-// selection of docs/10-indexes.md §6.6.
-//
-// A PREDICATE ON ONE KEYED COLUMN IS A SET OF SLICES OF ITS ENTRIES. An equality is the slice
-// between the key's two bounds, a comparison the slice from one end to a bound, `IN` a union of
-// points, `StartsWith(p)` the slice from `p` to its successor, and AND and OR the intersection and
-// union of those. The slices are counted in rank space -- the number of entries below a bound --
-// which both exact sources answer in `O(r log n)` without reading a data segment, so a count is a
-// sum of lengths and a membership is a non-empty sum.
-//
-// THE IEEE MEANING MEETS THE TOTAL ORDER BY CONSTRUCTION OF THE BOUNDS (§4.4). The scan's `x = 0.0`
-// matches both zeros, so its slice runs from `-0.0` to `+0.0`; `x > v` never matches a NaN, so its
-// slice ends at `+inf`; a NaN literal matches nothing. On a sorted column, whose order is IEEE and
-// holds no NaN, the same bounds give the same slices. `!=` on a float is left to the decode: IEEE
-// makes a NaN unequal to itself, and the slice algebra has no room for that.
-//
-// ANYTHING ELSE DECLINES, and the scan takes its other tiers: another column, a literal of another
-// domain, `NOT`, `Contains`, `LIKE`, a null check. A declined cover costs the source's open and
-// nothing more.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -27,6 +8,26 @@ using Vorticity.File;
 namespace Vorticity.Keys;
 
 /// <summary>The slices of a keyed column a predicate selects, exactly.</summary>
+/// <remarks>
+/// A predicate on one keyed column is a set of slices of its entries: an equality is the slice
+/// between the key's two bounds, a comparison the slice from one end to a bound, <c>IN</c> a union
+/// of points, <c>StartsWith</c> the slice from the prefix to its successor, and conjunction and
+/// disjunction the intersection and union of those. The slices live in rank space — the number of
+/// entries below a bound — which an exact source answers without reading a data segment, so a count
+/// is a sum of lengths and a membership a non-empty sum.
+/// <para>
+/// The bounds are built so that the scan's IEEE meaning and the keys' total order agree: <c>x =
+/// 0.0</c> runs from <c>-0.0</c> to <c>+0.0</c>, <c>x &gt; v</c> stops at <c>+inf</c> because no
+/// comparison matches a NaN, and a NaN literal matches nothing. On a sorted column, whose order is
+/// IEEE and holds no NaN, the same bounds give the same slices. <c>!=</c> on a float is left to the
+/// decode, since IEEE makes a NaN unequal to itself and the slice algebra has no room for that.
+/// </para>
+/// <para>
+/// Anything else declines and the scan falls back: another column, a literal of another domain,
+/// negation, <c>Contains</c>, <c>Like</c>, a null check. A declined cover costs the source's open
+/// and nothing more.
+/// </para>
+/// </remarks>
 internal sealed class ExactCover : IAsyncDisposable
 {
     private readonly KeySource _source;
@@ -88,8 +89,8 @@ internal sealed class ExactCover : IAsyncDisposable
         }
         catch (VortexFormatException)
         {
-            // A run that does not decode costs the cover and never the scan: an index is a hint
-            // (docs/10-indexes.md §4.1), and the scan's other tiers still answer.
+            // A run that does not decode costs the cover and never the scan: an index is a hint,
+            // and the scan's other tiers still answer.
             slices = null;
         }
 
@@ -103,8 +104,8 @@ internal sealed class ExactCover : IAsyncDisposable
     }
 
     /// <summary>
-    /// The slices of <paramref name="source"/> a key-ordered scan walks (docs/12-index-reads.md §6):
-    /// every entry, narrowed by each top-level <c>AND</c> conjunct that tests
+    /// The slices of <paramref name="source"/> a key-ordered scan walks: every entry, narrowed by
+    /// each top-level <c>AND</c> conjunct that tests
     /// <paramref name="path"/> alone. The other conjuncts are the filter's to evaluate on the rows;
     /// the slices only have to contain every row the filter keeps, and they contain exactly the
     /// ones the narrowing conjuncts keep.
@@ -145,9 +146,9 @@ internal sealed class ExactCover : IAsyncDisposable
     }
 
     /// <summary>
-    /// The smallest or largest key the predicate selects -- §5.3's third resolution, a seek inside
-    /// the range -- <see cref="FilterLiteral.Null"/> when it selects nothing; not answered when a
-    /// run the seek reads does not decode.
+    /// The smallest or largest key the predicate selects, found by a seek inside the range, or
+    /// <see cref="FilterLiteral.Null"/> when it selects nothing; not answered when a run the seek
+    /// reads does not decode.
     /// </summary>
     /// <param name="wantMin">Whether the smallest is wanted.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
@@ -224,7 +225,6 @@ internal sealed class ExactCover : IAsyncDisposable
         return rows;
     }
 
-    /// <inheritdoc/>
     public ValueTask DisposeAsync() => _source.DisposeAsync();
 
     /// <summary>Whether every leaf tests the same column, and which.</summary>
@@ -278,11 +278,9 @@ internal sealed class ExactCover : IAsyncDisposable
             case InExpr @in:
                 List<(long, long)> points = [];
 
-                // IN KEY ORDER, WHICH IS THE MERGE-JOIN OF docs/11-write-strategy.md §4.3 in the
-                // shape this path can take it: every lookup lands in the segment the one before it
-                // left decoded, so a long list reads each segment once instead of once per literal.
-                // Measured on a million-row run of 62 500-entry segments, `IN` of a thousand keys:
-                // 117 ms of planning against 17.
+                // The literals are looked up in key order, which turns the lookups into a merge
+                // join: each one lands in the segment the one before it left decoded, so a long
+                // list reads each segment once instead of once per literal.
                 FilterLiteral[] ordered = [.. @in.Values];
                 Array.Sort(ordered, (left, right) => left.Kind == right.Kind ? KeyOrder.Total(left, right) : 0);
                 foreach (FilterLiteral value in ordered)
@@ -294,9 +292,9 @@ internal sealed class ExactCover : IAsyncDisposable
                         return null;
                     }
 
-                    // GATHERED, THEN MERGED ONCE. Merging in the loop sorts the slices found so far
-                    // on every literal, which is the whole list a thousand times over: 117 ms of
-                    // planning for a thousand keys, 8 when the merge runs once.
+                    // Gathered here and merged once at the end: merging inside the loop would sort
+                    // every slice found so far on each literal, so the cost would grow with the
+                    // square of the list's length.
                     points.AddRange(point);
                 }
 

@@ -1,23 +1,3 @@
-// The writer side of docs/13-dataset.md §6.2: a column's Bloom filters assembled into a tree as its
-// generations close.
-//
-// A GENERATION CLOSES INTO A LEVEL-1 NODE. Its sixteen leaves go out as one region, and the node,
-// which must name that region, waits in its level's group. When sixteen nodes of a level have
-// closed, they go out as one region -- the children of the node above -- and so on up. At the end
-// of the data the partial groups close from the bottom, and the first level left with one node is
-// the root, which is the run's payload. A level holds at most sixteen nodes in memory, and the
-// tree's depth is log16 of the blocks.
-//
-// A NODE'S FILTER IS ITS UNION'S, from one hash set per open level, the generation's included: the
-// builder hashes into the level-1 set, and a closed node's set moves into the node above -- handed
-// over when it is the first child, folded in and recycled otherwise, so that a tree of one
-// generation copies nothing and a long one reuses the same few tables. A set that passes what a
-// node of `max_blocks` holds at the target rate is dropped, and its node gets no filter, nor any
-// node above it under the same ceiling. So no set ever holds more than a node can: about 108 000
-// hashes at 1 % under the default ceiling.
-//
-// THE ROOT'S CEILING IS THE FILE'S when the policy asks for three resolutions (10 §5.4): its filter
-// then comes from the builder's file-wide set, which has a ceiling of its own.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -69,7 +49,6 @@ internal sealed class PendingBloomNode(int level, long leaves, int[] childWords,
     }
 
     /// <summary>Lays the node alone: the root's region.</summary>
-    /// <inheritdoc/>
     public int Lay(CanonicalArena arena, DTypeArena types) => BloomTreeWriter.Lay(arena, types, this, null);
 }
 
@@ -87,7 +66,19 @@ internal sealed record BloomTree(int FirstBlock, PendingBloomNode Root, PendingP
     internal int RootWords => Root.Words;
 }
 
-/// <summary>Assembles one column's filter tree, a generation at a time.</summary>
+/// <summary>
+/// Assembles one column's filter tree, a generation at a time: a closing generation becomes a
+/// level-1 node over the region of its leaves, a full group of nodes becomes one region and one
+/// node above it, and at the end of the data the partial groups close from the bottom until a
+/// level is left holding a single node, the root.
+/// </summary>
+/// <remarks>
+/// A node's filter is the union of its children's values, kept as one hash set per open level. A
+/// closed node's set moves into the node above, handed over when it is the first child and folded
+/// in and recycled otherwise, so a short tree copies nothing and a long one reuses the same few
+/// tables. A set that grows past what a node of the ceiling can hold at the target rate is dropped
+/// and its node gets no filter, nor does any node above it, which also bounds what a set may hold.
+/// </remarks>
 internal sealed class BloomTreeWriter : IDisposable
 {
     private readonly int _fpp;
@@ -96,13 +87,13 @@ internal sealed class BloomTreeWriter : IDisposable
     private readonly bool _filters;
     private readonly IndexBuilder _owner;
 
-    /// <summary>[level − 1]: the closed nodes of that level not yet written, sixteen at most.</summary>
+    /// <summary>[level − 1]: the closed nodes of that level still waiting to go out, a fanout at most.</summary>
     private readonly List<List<PendingBloomNode>> _groups = [];
 
     /// <summary>[level − 1]: the union under the open node of that level; null until something comes, or once passed.</summary>
     private readonly List<HashSet64?> _sets = [];
 
-    /// <summary>Bit level − 1: whether that union passed the ceiling. Fifteen levels fit.</summary>
+    /// <summary>Bit level − 1: whether that union passed the ceiling. The word holds every level a tree can reach.</summary>
     private uint _passed;
 
     /// <summary>Sets emptied and kept with their tables, for the next node that needs one.</summary>
@@ -284,7 +275,6 @@ internal sealed class BloomTreeWriter : IDisposable
         OpenBytes = 0;
     }
 
-    /// <inheritdoc/>
     public void Dispose() => Abandon();
 
     private bool Above(int level)
@@ -411,9 +401,8 @@ internal sealed class BloomTreeWriter : IDisposable
             return;
         }
 
-        // THE TABLE IS KEPT for the next node, which is as large as this one on the columns where it
-        // matters: growing a set again from a kilobyte cost a million distinct integers 15 % of
-        // their forced-Bloom write.
+        // The table is kept for the next node, which on the columns where this matters holds about
+        // as much: growing every set again from nothing is a large share of such a column's write.
         set.Clear();
         (_spare ??= new Stack<HashSet64>()).Push(set);
     }
@@ -449,7 +438,7 @@ internal sealed class BloomTreeWriter : IDisposable
             words = checked(words + node.Words);
         }
 
-        // NOT COMPRESSED, like every filter: the words are uniform bits, and the headers are few.
+        // Left uncompressed, like every filter: the words are uniform bits and the headers are few.
         return new PendingPayload(new NodeGroup(nodes), compress: false, (long)words * sizeof(uint));
     }
 
@@ -483,7 +472,6 @@ internal sealed class BloomTreeWriter : IDisposable
     /// <summary>The children of a node, laid as one region.</summary>
     private sealed class NodeGroup(PendingBloomNode[] nodes) : IPayloadLayout
     {
-        /// <inheritdoc/>
         public int Lay(CanonicalArena arena, DTypeArena types) => BloomTreeWriter.Lay(arena, types, null, nodes);
     }
 }

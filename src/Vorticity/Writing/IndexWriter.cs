@@ -1,15 +1,3 @@
-// The writer side of docs/10-indexes.md §7: which index each column gets, what is built, what is
-// abandoned and why, and the directory that lists what survived.
-//
-// ONE OWNER, SO `VortexFileWriter` ONLY CALLS IT. The file writer knows segments and layouts; this
-// knows policies, kinds and runs. Every kind lands here with its builder, and the file writer's
-// part stays a handful of calls: feed the ingest, close the blocks and the chunks, write what is
-// pending between chunks, and write the directory before the footer.
-//
-// WHAT A POLICY ASKS FOR IS ALWAYS IN THE REPORT. A kind this writer cannot build yet is reported
-// ABANDONED with that reason rather than silently skipped or thrown: a caller who asked for an
-// index reads what happened to it, and an index is a hint whose absence costs no correctness
-// (docs/08-semantics.md §5).
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -24,16 +12,16 @@ using Vorticity.Types.Serialization;
 namespace Vorticity.Writing;
 
 /// <summary>
-/// What binds an index fragment to the version of the file it indexes (docs/13-dataset.md §7).
+/// What binds an index fragment to the version of the file it indexes. <c>Hash</c> is the XXH3-128
+/// of the file's bytes when the indexer happens to know it; no reader computes it.
 /// </summary>
-/// <param name="Length">The file's length.</param>
-/// <param name="Identity">Its identity, when it has one.</param>
-/// <param name="Token">The store's token for it, when the store gives one.</param>
-/// <param name="Hash">The XXH3-128 of its bytes, when the indexer knows it; no reader computes it.</param>
-/// <param name="Encodings">The encodings the container's payloads name.</param>
 internal sealed record FragmentBinding(long Length, Guid? Identity, string? Token, UInt128? Hash, IReadOnlyList<string> Encodings);
 
-/// <summary>Builds the indexes of one file and the directory that lists them.</summary>
+/// <summary>
+/// Builds the indexes of one file and the directory that lists them. A kind that cannot be built is
+/// reported abandoned with its reason rather than skipped or thrown: an index is a hint whose
+/// absence costs no correctness, and a caller who asked for one reads what happened to it.
+/// </summary>
 internal sealed class IndexWriter : IDisposable
 {
     private readonly WritePolicy _policy;
@@ -60,29 +48,22 @@ internal sealed class IndexWriter : IDisposable
     private bool _firstBlockClosed;
 
     /// <summary>
-    /// `Auto`'s share of a column's bytes a Bloom filter may take (10 §5.5: "a filter whose
-    /// projected bytes exceed 2 % of the column's written bytes").
+    /// The share of a column's written bytes, in parts per thousand, a Bloom filter may take before
+    /// `Auto` gives it up.
     /// </summary>
     internal const int AutoBloomShare = 20;
     private readonly List<IndexEntry> _entries = [];
     private readonly List<IndexWriteReport> _reports = [];
 
-    // The payloads' own arena and dtypes, created on the first payload: a policy that builds only
-    // payload-free kinds never makes one.
+    // Created on the first payload, so a policy of payload-free kinds never makes one.
     private ScanContext? _payloads;
     private DTypeArena? _payloadTypes;
     private long _payloadBytes;
 
-    /// <param name="policy">The policy, already <see cref="WritePolicy.None"/> under <see cref="WriteProfile.Fastest"/>.</param>
-    /// <param name="schema">The file's dtype.</param>
-    /// <param name="isTabular">Whether the root is a struct whose fields are the columns.</param>
-    /// <param name="fieldCount">How many columns.</param>
-    /// <param name="budgetPerMille">The share of the data bytes all indexes together may take.</param>
-    /// <param name="blockRows">Rows per block, 0 when the caller's batches are the blocks.</param>
-    /// <param name="keyEncoder">The encoder of the policy's composite keys, or null.</param>
-    /// <param name="scratchDirectory">Where the locating builders' chunk runs spill, or null for the system's.</param>
-    /// <param name="scratchMemoryBytes">What those runs may hold in memory before they spill.</param>
-    /// <param name="wideRowsAbove">The row span above which a sorted run writes its rows at 64 bits.</param>
+    /// <summary>
+    /// The budget is a share per mille of the data bytes. Rows per block is 0 when the caller's
+    /// batches are the blocks, and a row span past <c>wideRowsAbove</c> writes rows at 64 bits.
+    /// </summary>
     internal IndexWriter(
         WritePolicy policy, DType schema, bool isTabular, int fieldCount, int budgetPerMille = 100, int blockRows = 0,
         IKeyEncoder? keyEncoder = null, string? scratchDirectory = null, long scratchMemoryBytes = DefaultScratchMemoryBytes,
@@ -94,14 +75,9 @@ internal sealed class IndexWriter : IDisposable
         _fieldCount = fieldCount;
         _keyEncoder = keyEncoder;
 
-        // A COMPOSITE KEY IS ONE MORE COLUMN, after the real ones: every loop over the builders --
-        // blocks, chunks, the budget, the payloads, the close -- serves it with no second path, and
-        // only the feed differs, because its rows are several columns encoded together.
-        //
-        // SO IS A NESTED COLUMN AN OVERRIDE NAMES, after the keys (10 §4.1: `column_path` resolves
-        // to a leaf column). It is fed from its top-level column's node, descended through the
-        // structs, and a row one of its parents nulls out is no entry. An override naming nothing
-        // in the schema takes a slot too, so that the report says so rather than skip it.
+        // A composite key is one more column after the real ones, and a nested column one more after
+        // the keys, so every loop over the builders serves them with no second path; only the feed
+        // differs. An override naming nothing in the schema takes a slot too, so the report says so.
         List<string>? nested = Unmatched(policy, schema, isTabular);
         int keys = policy.Keys.Count;
         int total = fieldCount + keys + (nested?.Count ?? 0);
@@ -158,16 +134,9 @@ internal sealed class IndexWriter : IDisposable
             switch (column.Kind)
             {
                 case IndexPolicyKind.Auto:
-                    // EVERY CHEAP BUILDER THAT APPLIES STARTS AT BLOCK 0 (10 §5.5); a dtype one does
-                    // not apply to is not a candidate, and is not reported as refused. Sorted runs are
-                    // not cheap -- a sort per chunk -- and are never Auto's.
-                    //
-                    // POSTINGS ARE NOT AUTO'S, AND THE REASON IS A MEASUREMENT. 10 §5.5 counts them
-                    // among the cheap builders because they would come "from the tables we already
-                    // build"; the writer's distinct table lives by plan memory and cannot feed them,
-                    // so here they cost an intern per row of their own -- +7 % on `table_mixed` on
-                    // top of the Bloom filter's +7 %, past the +10 % 11 §5.3 allows. They stay one
-                    // `IndexPolicy.Postings` away.
+                    // Every cheap builder that applies starts at block 0; a dtype one does not apply
+                    // to is not a candidate, and is not reported as refused. Sorted runs cost a sort
+                    // per chunk and postings an intern per row, so neither is ever Auto's.
                     if (BloomBuilder.Supports(dtype, out _))
                     {
                         builders.Add(new BloomBuilder(IndexPolicy.Bloom())
@@ -186,9 +155,7 @@ internal sealed class IndexWriter : IDisposable
             _refusals[field] = reason;
         }
 
-        // THE LOCATING BUILDERS SHARE ONE SCRATCH (13 §6.1): their chunk runs wait there for the
-        // merge, in memory up to its budget and in a file beyond. A write with no locating index
-        // makes none.
+        // The locating builders share one scratch, made only when there is one such builder.
         foreach (List<IndexBuilder> builders in _builders)
         {
             foreach (IndexBuilder builder in builders)
@@ -212,7 +179,7 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>The scratch the locating builders lay their chunk runs in, when there is one.</summary>
     internal RunScratch? Scratch => _scratch;
 
-    /// <summary>The builder a policy names for a column of <paramref name="dtype"/>, or why there is none.</summary>
+    /// <summary>The builder a policy names for a column, or why there is none.</summary>
     private static string? Explicit(IndexPolicy column, DType dtype, List<IndexBuilder> builders)
     {
         string? reason = null;
@@ -255,8 +222,8 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// The override paths that are not a top-level column, in ordinal order so that one policy lays
-    /// its slots out one way; <see langword="null"/> when there is none.
+    /// The override paths that are not a top-level column, in ordinal order so that one policy
+    /// always lays its slots out the same way; null when there is none.
     /// </summary>
     private static List<string>? Unmatched(WritePolicy policy, DType schema, bool isTabular)
     {
@@ -276,14 +243,9 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>
     /// A column path as field indices from the root, through structs and the extensions around
-    /// them, and the dtype it ends on; or why it names nothing.
+    /// them, and the dtype it ends on; or why it names nothing. The path is <c>.</c>-separated, as
+    /// the scan spells it.
     /// </summary>
-    /// <param name="schema">The file's dtype.</param>
-    /// <param name="isTabular">Whether the root is a struct of columns.</param>
-    /// <param name="path">The path, <c>.</c>-separated as the scan spells it.</param>
-    /// <param name="chain">The field indices.</param>
-    /// <param name="leaf">The dtype the path ends on.</param>
-    /// <param name="reason">Why the path names nothing.</param>
     internal static bool TryResolve(
         DType schema, bool isTabular, string path, out int[] chain, out DType leaf, out string? reason)
     {
@@ -333,7 +295,6 @@ internal sealed class IndexWriter : IDisposable
     /// Whether a policy can ask for anything at all: a default of <see cref="IndexPolicyKind.None"/>
     /// with no override is the one that cannot, and the writer then builds no index writer.
     /// </summary>
-    /// <param name="policy">The policy.</param>
     internal static bool Asks(WritePolicy policy) =>
         policy.Default.Kind != IndexPolicyKind.None || policy.Columns.Count > 0 || policy.Keys.Count > 0;
 
@@ -369,10 +330,6 @@ internal sealed class IndexWriter : IDisposable
     /// Feeds every composite key the same rows: the key columns cut to the range -- records, not
     /// bytes -- encoded together, and every row whose tuple holds a null left out.
     /// </summary>
-    /// <param name="arena">The batch's arena.</param>
-    /// <param name="fieldNodes">Every real column's node in it, in field order.</param>
-    /// <param name="start">The first row.</param>
-    /// <param name="count">How many rows.</param>
     internal void AccumulateKeys(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int start, int count)
     {
         for (int field = _fieldCount; field < _builders.Length; field++)
@@ -441,10 +398,6 @@ internal sealed class IndexWriter : IDisposable
     /// stands when no parent is null, and otherwise re-published over the range with the parents'
     /// nulls folded into its validity -- so a builder reads a nested column as it reads any other.
     /// </summary>
-    /// <param name="arena">The batch's arena.</param>
-    /// <param name="fieldNodes">Every real column's node in it, in field order.</param>
-    /// <param name="start">The first row.</param>
-    /// <param name="count">How many rows.</param>
     internal void AccumulateNested(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int start, int count)
     {
         if (_nested is not { } nested || count <= 0)
@@ -497,17 +450,10 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>
     /// The node a field-index path ends on in a batch, with the rows its parents null out cleared
-    /// in <paramref name="include"/>; -1 when the batch does not have the path.
+    /// in <paramref name="include"/>; -1 when the batch does not have the path. The first parent
+    /// with a null fills <c>include</c> and sets <c>masked</c>, which says whether it holds
+    /// anything yet.
     /// </summary>
-    /// <param name="arena">The batch's arena.</param>
-    /// <param name="fieldNodes">Every real column's node in it.</param>
-    /// <param name="chain">The path.</param>
-    /// <param name="start">The first row.</param>
-    /// <param name="include">Per row of the range, whether it may be an entry.</param>
-    /// <param name="masked">
-    /// Whether <paramref name="include"/> holds anything yet: filled with <see langword="true"/> by
-    /// the first parent that has a null.
-    /// </param>
     private static int Descend(
         CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int[] chain, int start, Span<bool> include, ref bool masked)
     {
@@ -595,8 +541,8 @@ internal sealed class IndexWriter : IDisposable
             CanonicalKind.Constant => slices.AddConstant(dtype, count, validity, node.ConstantElement),
             CanonicalKind.VarBinView => MaskedViews(slices, node, dtype, count, validity),
 
-            // A list under a null parent names no element (10 §5.1, step 28b): the same offsets and
-            // elements, under the folded validity.
+            // A list under a null parent names no element: the same offsets and elements, under the
+            // folded validity.
             CanonicalKind.ListView => slices.AddListView(
                 dtype, count, validity, node.ElementsIndex, node.Offsets, node.OffsetPType, node.Sizes, node.SizePType),
             CanonicalKind.FixedSizeList => slices.AddFixedSizeList(
@@ -618,28 +564,18 @@ internal sealed class IndexWriter : IDisposable
         return slices.AddVarBinView(dtype, count, validity, node.Views, data);
     }
 
-    // ------------------------------------------------------------------------------ an append
-
     // Both created by the call that fills them: a plain write allocates neither.
     private List<IndexEntry>? _prior;
     private ulong _previousEof;
 
     /// <summary>
-    /// Continues an existing file's indexes (docs/11 §3.8, docs/10-indexes.md §8): every builder
-    /// starts at <paramref name="boundary"/>, and the old entries' runs that end at or before it
-    /// are listed again beside the new ones. A run reaching past it covered rows the append writes
-    /// again -- a re-opened chunk, a short last block -- and is dropped; a dictionary probe is
-    /// recomputed from the chunks' schemes.
+    /// Continues an existing file's indexes: every builder starts at <paramref name="boundary"/>,
+    /// and the old entries' runs that end at or before it are listed again beside the new ones. A
+    /// run reaching past it covered rows the append writes again -- a re-opened chunk, a short last
+    /// block -- and is dropped; a dictionary probe is recomputed from the chunks' schemes.
+    /// The absorbed entries are the old ones whose tail of runs was read back to be merged into the
+    /// append's run, and the writer disposes the scratch they lie in.
     /// </summary>
-    /// <param name="entries">The old directory's entries.</param>
-    /// <param name="boundary">The first block the append writes.</param>
-    /// <param name="row">Its first row.</param>
-    /// <param name="previousEof">The old file's length, which the new directory records.</param>
-    /// <param name="absorbed">
-    /// The old entries whose tail of runs was read back to be merged into the append's run
-    /// (13 §6.1: at most K runs per entry); null when none was.
-    /// </param>
-    /// <param name="absorbedScratch">Where those runs lie; the writer disposes it.</param>
     internal void Continue(
         IReadOnlyList<IndexEntry> entries, int boundary, long row, long previousEof,
         List<AbsorbedEntry>? absorbed = null, RunScratch? absorbedScratch = null)
@@ -655,8 +591,8 @@ internal sealed class IndexWriter : IDisposable
                 continue;
             }
 
-            // A TAIL READ BACK IS MERGED ONLY BY THE BUILDER THAT CONTINUES THE ENTRY: same kind,
-            // column and options, the very test `Merged` applies. Without one, the runs stay listed.
+            // A tail read back is merged only by the builder that continues the entry -- same kind,
+            // column and options. Without one, the runs stay listed.
             int count = 0;
             if (absorbed?.Find(a => Same(a.Entry, entry)) is { } tail && Continuing(entry) is { } builder)
             {
@@ -672,18 +608,10 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>
     /// Numbers the first block and row this pass is about to be fed, so its runs say which blocks of
-    /// the file they cover.
+    /// the file they cover. Separate from <see cref="Continue"/> because indexing a block range
+    /// wants only this half: <see cref="Continue"/> also drops every old run reaching past its
+    /// boundary, which is right for a suffix and wrong for a range.
     /// </summary>
-    /// <param name="firstBlock">The first block the caller will feed.</param>
-    /// <param name="firstRow">Its first row.</param>
-    /// <remarks>
-    /// EXTRACTED FROM <see cref="Continue"/> FOR THE RANGE INDEXER (13 §6.4: "an indexer works by
-    /// `(object, block range)`"). Continuing a file's indexes is two things at once — start the
-    /// builders at a block, and list the old entries trimmed at it — and a fragment over a range
-    /// wants only the first. They were welded together while the append was the only caller, and the
-    /// weld is what made "index blocks 40 to 80" impossible to ask for: <see cref="Continue"/> drops
-    /// every old run reaching past its boundary, which is right for a suffix and wrong for a range.
-    /// </remarks>
     internal void Begin(int firstBlock, long firstRow)
     {
         foreach (List<IndexBuilder> builders in _builders)
@@ -733,13 +661,11 @@ internal sealed class IndexWriter : IDisposable
             keys.SegmentEntries, keys.CaseInsensitive, KeyColumns(field),
             _keyFields[field] is null ? null : _keyEncoder!.Format);
 
-    /// <summary>An old entry restricted to the runs that end by <paramref name="boundary"/>, or null.</summary>
-    /// <remarks>
-    /// A FILTER TREE IS CUT, NOT DROPPED (13 §6.2): its nodes over the blocks the append writes again
-    /// hold values those blocks no longer have, which only makes them say "maybe" more often, and the
-    /// run's shorter range keeps every probe of those blocks for the append's own tree. A Bloom entry
-    /// this reader cannot parse -- version 1 -- is dropped, as the reader ignores it.
-    /// </remarks>
+    /// <summary>
+    /// An old entry restricted to the runs that end by <paramref name="boundary"/>, or null. A
+    /// filter tree is cut rather than dropped: its nodes over the rewritten blocks only say "maybe"
+    /// more often, and the shorter range leaves those blocks to the append's own tree.
+    /// </summary>
     private static IndexEntry? Kept(IndexEntry entry, int boundary)
     {
         bool bloom = IsBloom(entry.Kind);
@@ -769,12 +695,12 @@ internal sealed class IndexWriter : IDisposable
     private List<IndexEntry>? _preserved;
 
     /// <summary>
-    /// For an index built after the fact (docs/10-indexes.md §8): the old directory's entries,
-    /// listed again unless a new entry indexes the same column with the same kind -- the new one
-    /// covers every block and replaces it.
+    /// For an index built after the fact: the old directory's entries, listed again unless a new
+    /// entry indexes the same column with the same kind -- the new one covers every block and
+    /// replaces it.
+    /// The previous end of file is the old file's length when the new runs are appended to it, and
+    /// 0 for a fragment.
     /// </summary>
-    /// <param name="entries">The old entries.</param>
-    /// <param name="previousEof">The old file's length, when the new runs are appended to it; 0 for a fragment.</param>
     internal void Preserve(IReadOnlyList<IndexEntry> entries, long previousEof)
     {
         (_preserved ??= []).AddRange(entries);
@@ -850,8 +776,8 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// Whether a new entry continues an old one: same kind, column, block length and options. A
-    /// Bloom entry's options hold nothing that grows with the file since step 24, so the bytes decide.
+    /// Whether a new entry continues an old one: same kind, column, block length and options. No
+    /// entry's options hold anything that grows with the file, so the bytes decide.
     /// </summary>
     private static bool Continues(IndexEntry old, IndexEntry current) =>
         old.Kind == current.Kind
@@ -893,14 +819,6 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
-    // ------------------------------------------------------------------------------ the stream
-
-    /// <summary>Feeds one column's rows to its builder.</summary>
-    /// <param name="field">The column.</param>
-    /// <param name="arena">The batch's arena.</param>
-    /// <param name="nodeIndex">The column's node in it.</param>
-    /// <param name="start">The first row.</param>
-    /// <param name="count">How many rows.</param>
     internal void Accumulate(int field, CanonicalArena arena, int nodeIndex, int start, int count)
     {
         foreach (IndexBuilder builder in _builders[field])
@@ -909,11 +827,7 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
-    /// <summary>
-    /// Seals the open block of every builder; the first time, tells them what the statistics say
-    /// of it.
-    /// </summary>
-    /// <param name="columns">The column writers, whose last closed block is the one sealed here.</param>
+    /// <summary>Seals every builder's open block, telling them once what the statistics say of it.</summary>
     internal void CloseBlock(IReadOnlyList<ColumnWriter> columns)
     {
         for (int field = 0; field < _builders.Length; field++)
@@ -933,15 +847,8 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>Counts a chunk's data bytes toward its column, for `Auto`'s shares.</summary>
-    /// <param name="field">The column.</param>
-    /// <param name="bytes">The segment's length.</param>
     internal void AddColumnBytes(int field, long bytes) => _columnBytes[field] += bytes;
 
-    /// <summary>A chunk went out; each builder closes its run.</summary>
-    /// <param name="firstBlock">Its first block.</param>
-    /// <param name="blocks">Its blocks.</param>
-    /// <param name="firstRow">Its first row.</param>
-    /// <param name="rows">Its rows.</param>
     internal void CloseChunk(int firstBlock, int blocks, long firstRow, long rows)
     {
         foreach (List<IndexBuilder> builders in _builders)
@@ -954,9 +861,8 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// `Auto`'s verdict, before the payloads a chunk or the end of the data closed are written:
-    /// a Bloom filter is uncompressed, so its estimate is its size, and a builder given up on here
-    /// leaves nothing in the file.
+    /// `Auto`'s verdict, run before the payloads a chunk closed are written, so a builder given up
+    /// on here leaves nothing in the file.
     /// </summary>
     internal void Judge()
     {
@@ -982,7 +888,6 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
-    /// <summary>Whether a payload is waiting to be written.</summary>
     internal bool HasPending
     {
         get
@@ -1003,12 +908,10 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// Serializes the next waiting payload as an array blob (10 §4.2), or reports there is none.
+    /// Serializes the next waiting payload as an array blob, or reports there is none. The caller
+    /// disposes <paramref name="blob"/> and hands <paramref name="payload"/> back to
+    /// <see cref="Placed"/> once it is written.
     /// </summary>
-    /// <param name="encodings">The file's array-encoding dictionary.</param>
-    /// <param name="blob">The blob to write; the caller disposes it.</param>
-    /// <param name="payload">What to tell <see cref="Placed"/> once it is written.</param>
-    /// <returns>Whether a payload was produced.</returns>
     internal bool TryTakePayload(
         EncodingDictionary encodings, out ArrayBlobWriter.BlobLease blob, out PendingPayload? payload)
     {
@@ -1043,11 +946,10 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>Every byte the payloads took in the file, their alignment padding included.</summary>
     internal long FileBytes { get; private set; }
 
-    /// <summary>Records where a payload landed, and checks the file's index budget.</summary>
-    /// <param name="payload">What <see cref="TryTakePayload"/> said.</param>
-    /// <param name="segment">Where it was written.</param>
-    /// <param name="fileBytes">The bytes the write took, padding included.</param>
-    /// <param name="position">The sink's position after the write.</param>
+    /// <summary>
+    /// Records where a payload landed, and checks the file's index budget. The file bytes include
+    /// the write's padding.
+    /// </summary>
     internal void Placed(PendingPayload payload, IndexSegment segment, long fileBytes, long position)
     {
         payload.Segment = segment;
@@ -1056,7 +958,7 @@ internal sealed class IndexWriter : IDisposable
         FileBytes += fileBytes;
         _payloads!.Canonical.Reset();
 
-        // THE BUDGET IS A SHARE OF THE DATA, and a share of a few kilobytes says nothing: it is
+        // The budget is a share of the data, and a share of a few kilobytes says nothing: it is
         // enforced once the data passes a mebibyte, and again at the end over the whole file.
         long dataBytes = position - FileBytes;
         if (dataBytes >= 1L << 20 && OverBudget(dataBytes))
@@ -1088,11 +990,7 @@ internal sealed class IndexWriter : IDisposable
 
     private bool OverBudget(long dataBytes) => LivingBytes * 1000 > dataBytes * _budgetPerMille;
 
-    /// <summary>
-    /// Abandons every index the budget may abandon — which is every one the caller did not mark
-    /// required (<c>IndexPolicy.AsRequired</c>).
-    /// </summary>
-    /// <param name="dataBytes">The data bytes the budget is a share of.</param>
+    /// <summary>Abandons every index the caller did not mark required.</summary>
     private void AbandonForBudget(long dataBytes)
     {
         long living = LivingBytes;
@@ -1112,15 +1010,10 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
-    // ------------------------------------------------------------------------------ the close
-
     /// <summary>
-    /// Decides every column's indexes once the data is written, from what the columns recorded.
+    /// Decides every column's indexes once the data is written. Rows per block is the zone length
+    /// the runs are counted in, and the budget is a share of the data bytes.
     /// </summary>
-    /// <param name="columns">The column writers, in field order.</param>
-    /// <param name="chunkRows">Every chunk's row count, in order.</param>
-    /// <param name="blockRows">Rows per block: the zone length the runs are counted in.</param>
-    /// <param name="dataBytes">The file's data bytes, which the budget is a share of.</param>
     internal void Close(
         IReadOnlyList<ColumnWriter> columns, IReadOnlyList<long> chunkRows, int blockRows, long dataBytes = 0)
     {
@@ -1139,7 +1032,7 @@ internal sealed class IndexWriter : IDisposable
                 case IndexPolicyKind.None:
                     break;
                 case IndexPolicyKind.Auto when field >= _fieldCount:
-                    // An override that names no column, or a nested one, under Auto: said, not skipped.
+                    // An override naming no column, or a nested one, under Auto: said, not skipped.
                     Abandoned(field, "auto", _refusals[field] ?? "Auto chooses among the top-level columns");
                     break;
                 case IndexPolicyKind.Auto:
@@ -1182,8 +1075,8 @@ internal sealed class IndexWriter : IDisposable
         _reports.Add(new IndexWriteReport(_paths[field], kind, IndexOutcome.Abandoned, reason, 0, 0, 0));
 
     /// <summary>
-    /// <c>vorticity.bloom.sbbf.v1</c> and <c>vorticity.bloom.ngram3.v1</c>: one entry per
-    /// resolution the builder kept, each listing the runs whose payload is written.
+    /// A Bloom entry: one per resolution the builder kept, each listing the runs whose payload is
+    /// written.
     /// </summary>
     private void Bloom(int field, string kind, BloomBuilder? bloom, int blockRows)
     {
@@ -1195,7 +1088,7 @@ internal sealed class IndexWriter : IDisposable
 
         IndexPolicy policy = bloom.Policy;
 
-        // ONE ENTRY, ONE RUN, ONE ROOT (13 §6.2): the tree names every other region itself.
+        // One entry, one run, one root: the tree names every other region itself.
         if (bloom.Tree is not { Payload: { Segment: { } root, DType: { } dtype } } tree)
         {
             Abandoned(field, kind, "the column wrote no block");
@@ -1226,8 +1119,7 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// <c>vorticity.postings.blocks.v1</c> and <c>vorticity.sorted.runs.v1</c>: one entry, one run
-    /// per chunk, its payloads `stride` per segment.
+    /// A locating entry: one entry, one run per chunk, its payloads `stride` per segment.
     /// </summary>
     private void Locating(int field, string kind, KeyIndexBuilder? keys, int blockRows)
     {
@@ -1291,12 +1183,10 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
-    // ------------------------------------------------------------------------------ fence pages
-
-    /// <summary>13 §6.3's bounds, lowered only by the tests that page a short run.</summary>
+    /// <summary>When a run's table goes to fence pages; lowered only by the tests that page a short run.</summary>
     internal FenceShape Fences { get; init; } = FenceShape.Default;
 
-    /// <summary>The runs whose tables go to pages, in the order the pages are written; null until one does.</summary>
+    /// <summary>The runs whose tables go to pages, in the order the pages are written.</summary>
     private List<PagedRun>? _paged;
 
     /// <summary>The first of <see cref="_paged"/> whose root is not known yet.</summary>
@@ -1315,7 +1205,7 @@ internal sealed class IndexWriter : IDisposable
         /// <summary>The dtype of each array of a segment.</summary>
         internal byte[][] DTypes { get; } = dtypes;
 
-        /// <summary>The entry's report, whose bytes the pages add to.</summary>
+        /// <summary>Which report's bytes the pages add to.</summary>
         internal int Report { get; set; }
     }
 
@@ -1344,8 +1234,8 @@ internal sealed class IndexWriter : IDisposable
             regions.Add(segments.GetRange(s * stride, stride).ToArray());
         }
 
-        // The run holds its place with no payload, which no directory lists: `Directory` refuses to
-        // run before the pages are placed.
+        // The run holds its place with no payload; the directory refuses to run before the pages
+        // are placed, so no such run is ever listed.
         IndexRun placeholder = new IndexRun(
             (ulong)run.FirstBlock, checked((uint)run.BlockCount), [], [], (ulong)run.Entries);
         PagedRun pages = new PagedRun(
@@ -1355,11 +1245,9 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// Writes every fence page (13 §6.3), one level after the other, and lists each paged run once
-    /// its root is known. Called after <see cref="Close"/>, before the directory.
+    /// Writes every fence page, one level after the other, and lists each paged run once its root
+    /// is known. Called after <see cref="Close"/>, before the directory.
     /// </summary>
-    /// <param name="sink">The sink the payloads went to.</param>
-    /// <param name="cancellationToken">Cancels the writes.</param>
     internal async ValueTask WriteFencePagesAsync(ISegmentSink sink, CancellationToken cancellationToken)
     {
         while (_paged is not null && _pagedNext < _paged.Count)
@@ -1392,15 +1280,10 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// <c>vorticity.dict.probe.v1</c> (docs/10-indexes.md §5.3): no payload, one run per
-    /// maximal range of consecutive dictionary-encoded chunks.
+    /// The dictionary probe: no payload, one run per maximal range of consecutive
+    /// dictionary-encoded chunks. The run is the claim, so a chunk that is not a dictionary lies
+    /// between two runs and the reader gets no claim for it.
     /// </summary>
-    /// <remarks>
-    /// A RUN IS THE CLAIM, so a chunk that is NOT a dictionary lies between two runs and the reader
-    /// gets no claim for it -- "a block that no run covers is simply live" (§4.1). Consecutive
-    /// dictionary chunks are merged into one run because a run carries no payload here and the
-    /// directory has no reason to spend a message per chunk.
-    /// </remarks>
     private void DictProbe(int field, ColumnWriter column, IReadOnlyList<long> chunkRows, int blockRows)
     {
         List<IndexRun> runs = [];
@@ -1462,17 +1345,13 @@ internal sealed class IndexWriter : IDisposable
 
     private static uint[] Unsigned(int[] chain) => Array.ConvertAll(chain, f => checked((uint)f));
 
-    /// <summary>The directory's bytes, or <see langword="null"/> when there is nothing to list.</summary>
-    /// <param name="rowCount">The file's row count.</param>
-    /// <returns>The segment, or <see langword="null"/>.</returns>
-    /// <remarks>
-    /// A DIRECTORY WITH NO ENTRY IS STILL WRITTEN when the policy was the caller's own: it carries
-    /// that policy, which is what an append reads to index its new blocks the same way. Under the
-    /// default policy an empty directory says nothing an append would not assume from its absence,
-    /// and since `Auto` became the default it would have cost every file of a sorted or numeric
-    /// schema a hundred and fifty bytes for that nothing.
-    /// </remarks>
-    /// <param name="fragment">For a fragment: what binds it to the indexed file, and the payloads' encoding table.</param>
+    /// <summary>
+    /// The directory's bytes, or null when there is nothing to list. A directory with no entry is
+    /// still written when the policy was the caller's own, since it carries that policy and an
+    /// append reads it to index its new blocks the same way; under the default policy it would say
+    /// nothing an append would not assume from its absence.
+    /// A fragment passes what binds it to the indexed file, along with the payloads' encoding table.
+    /// </summary>
     internal byte[]? Directory(long rowCount, FragmentBinding? fragment = null)
     {
         if (!Enabled && _preserved is not { Count: > 0 })
@@ -1503,7 +1382,6 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>What became of every index the policy asked for.</summary>
     internal IReadOnlyList<IndexWriteReport> Reports => _reports;
 
-    /// <inheritdoc/>
     public void Dispose()
     {
         foreach (List<IndexBuilder> builders in _builders)
