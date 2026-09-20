@@ -97,6 +97,13 @@ public sealed class ScanContext : IDisposable
         Scalars = new ScalarStore();
         Nodes = new ArrayNodeArena(capacity);
         _batchCanonical = new CanonicalArena(capacity);
+
+        // NOT SIZED FROM THE ARENA CAPACITY, and measured before being left alone. A batch
+        // registers one segment per leaf it reads, so the set's own default of sixteen is the
+        // question; giving it the arena's sixty-four instead costs 2 736 B on every read-path axis
+        // and saves nothing, because the delta is exactly the forty-eight slots added -- no growth
+        // was being avoided, the corpus never reaching sixteen. Sizing it from the projection's
+        // leaf count would, on a file wide enough to grow it, which no axis here is.
         Segments = new SegmentRequestSet();
         Decode = new ArrayDecodeContext(this);
     }
