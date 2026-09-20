@@ -71,11 +71,11 @@ are written for someone implementing the format, not using it.
 
 | | |
 |---|---|
-| [../02-format.md](../02-format.md) | the binary format, byte by byte |
-| [../03-architecture.md](../03-architecture.md) | the .NET architecture and its performance invariants |
-| [../07-dotnet-mapping.md](../07-dotnet-mapping.md) | which .NET type each dtype becomes, and where a naive mapping loses data |
-| [../08-semantics.md](../08-semantics.md) | pruning algebra, predicate semantics, unknown components, resource caps |
-| [../10-indexes.md](../10-indexes.md) | the skipping and locating indexes |
-| [../11-write-strategy.md](../11-write-strategy.md) | how the writer chooses an encoding, block by block |
-| [../12-index-reads.md](../12-index-reads.md) | the key cursor, and answers that need no rows |
-| [../90-registry.md](../90-registry.md) | every encoding, layout and dtype, and its state |
+| [02-format.md](../design/02-format.md) | the binary format, byte by byte |
+| [03-architecture.md](../design/03-architecture.md) | the .NET architecture and its performance invariants |
+| [07-dotnet-mapping.md](../design/07-dotnet-mapping.md) | which .NET type each dtype becomes, and where a naive mapping loses data |
+| [08-semantics.md](../design/08-semantics.md) | pruning algebra, predicate semantics, unknown components, resource caps |
+| [10-indexes.md](../design/10-indexes.md) | the skipping and locating indexes |
+| [11-write-strategy.md](../design/11-write-strategy.md) | how the writer chooses an encoding, block by block |
+| [12-index-reads.md](../design/12-index-reads.md) | the key cursor, and answers that need no rows |
+| [90-registry.md](../design/90-registry.md) | every encoding, layout and dtype, and its state |

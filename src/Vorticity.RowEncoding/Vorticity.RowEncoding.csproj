@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- A package of its own, deliberately. docs/09-contracts.md §3: upstream marks the row format
+  <!-- A package of its own, deliberately. docs/design/09-contracts.md §3: upstream marks the row format
        experimental and reserves the right to change its byte layout between releases. Folding it
        into the core would force a choice between breaking the core's own compatibility promise to
        follow upstream and diverging from Rust, which would cost the byte-exactness that is this

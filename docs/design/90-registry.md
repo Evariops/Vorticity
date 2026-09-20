@@ -431,7 +431,7 @@ configuration". Most of the remaining 0.8% is an edition difference rather than 
 gap.
 
 **`vortex.sequence` is written**, and the story of why it was not is worth more than the encoding.
-docs/90 listed it under "not in the default target" for as long as that target was believed to be
+docs/design/90 listed it under "not in the default target" for as long as that target was believed to be
 `core2025.05.0`. It arrived in `core2025.06.0`, and once edition targeting was actually implemented
 the default became `core2026.08.3` — so what had been filed as an edition difference was an
 implementation gap the whole time. Three of the files we were worst on were sequences and nothing

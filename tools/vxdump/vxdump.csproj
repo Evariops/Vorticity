@@ -6,7 +6,7 @@
     <AssemblyName>vxdump</AssemblyName>
     <Description>Inspects a Vortex file: schema, layout tree, encodings, segments and statistics.</Description>
 
-    <!-- Application properties, which docs/03-architecture.md §1 says belong here and never on the
+    <!-- Application properties, which docs/design/03-architecture.md §1 says belong here and never on the
          library: InvariantGlobalization has no effect on a class library, and PublishAot is what
          invariant 5 ("a test publishes vxdump as Native AOT and runs it over the corpus") needs. -->
     <InvariantGlobalization>true</InvariantGlobalization>

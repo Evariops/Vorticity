@@ -1,7 +1,7 @@
 # Per-encoding metadata: the transcribed wire contract
 
 `ArrayNode.metadata` and `Layout.metadata` are opaque `[ubyte]` at the FlatBuffers layer
-([02-format.md](../docs/02-format.md) §5.2, §6). Their contents are **Protobuf messages defined in
+([02-format.md](../docs/design/02-format.md) §5.2, §6). Their contents are **Protobuf messages defined in
 Rust rather than in `.proto` files** — `prost` derive structs declared next to each encoding — so
 there is nothing to vendor verbatim and the tag numbers had to be transcribed. That is what this
 file is: the transcription, with the upstream source path recorded for every message so it can be
@@ -9,7 +9,7 @@ re-verified.
 
 Transcribed 2026-09-12 from `vortex-data/vortex@develop`. **The tag numbers are the contract.**
 An encoding id is frozen: a reader-visible change gets a new id, never a silent extension
-([02-format.md](../docs/02-format.md) §5.3). Unknown *field numbers* are skipped; values outside a
+([02-format.md](../docs/design/02-format.md) §5.3). Unknown *field numbers* are skipped; values outside a
 contract's domain are rejected.
 
 Enum `PType` is the one from [`proto/dtype.proto`](proto/dtype.proto):
@@ -62,7 +62,7 @@ message DictMetadata {
   optional bool all_values_referenced = 4; // absent/false = unknown (conservative)
 }
 ```
-`values_len` is class I ([08-semantics.md](../docs/08-semantics.md) §5): validate it against the
+`values_len` is class I ([08-semantics.md](../docs/design/08-semantics.md) §5): validate it against the
 actual values length and every code against `[0, values_len)`.
 
 ### `vortex.list` — `vortex-array/src/arrays/list/vtable/mod.rs`
@@ -181,7 +181,7 @@ message DateTimePartsMetadata {
 message DecimalBytesPartsMetadata { PType zeroth_child_ptype = 1; uint32 lower_part_count = 2; }
 ```
 Readers must require `lower_part_count == 0`; wide decimals belong to a future `_v2` id
-([90-registry.md](../docs/90-registry.md)).
+([90-registry.md](../docs/design/90-registry.md)).
 
 ### `vortex.zstd` — `encodings/zstd/src/lib.rs`
 ```proto
@@ -192,7 +192,7 @@ message ZstdMetadata {
 }
 ```
 `uncompressed_size` is file-supplied: validate against the decompression cap
-([08-semantics.md](../docs/08-semantics.md) §6) **before** allocating.
+([08-semantics.md](../docs/design/08-semantics.md) §6) **before** allocating.
 
 ### `vortex.zstd_buffers` — `encodings/zstd/src/lib.rs` (draft `zstd2026.02.0`, deferred to 1.1)
 ```proto
@@ -248,7 +248,7 @@ wrong on 569 of the 819 corpus files.
 ### `Patched` — in-memory only, never serialized
 `vortex-array/src/arrays/patched/vtable/mod.rs` defines a `PatchedMetadata`
 (`n_patches = 1`, `n_lanes = 2`, `offset = 3`), but `Patched` appears in **no edition**
-([90-registry.md](../docs/90-registry.md)). A patched BitPacked or ALP array is *read as* a
+([90-registry.md](../docs/design/90-registry.md)). A patched BitPacked or ALP array is *read as* a
 `Patched` node wrapping a patch-free array; on the wire the patches live in the encoding's own
 metadata. Do not implement a decoder keyed on a `Patched` id.
 
@@ -262,7 +262,7 @@ message FlatLayoutMetadata { optional bytes array_encoding_tree = 1; }
 ```
 When present, the Array FlatBuffer is inlined here and the segment holds only buffers — a
 different offset-reconstruction path, and one the default writer does not exercise
-([04-conformance.md](../docs/04-conformance.md) §3 forces it in the corpus).
+([04-conformance.md](../docs/design/04-conformance.md) §3 forces it in the corpus).
 
 ### `vortex.dict` — `vortex-layout/src/layouts/dict/mod.rs`
 ```proto
@@ -292,7 +292,7 @@ message ZonedMetadataProto {
 message AggregateSpecProto { string id = 1; bytes options = 2; }   // zoned/schema.rs
 ```
 An unknown aggregate `id` disables that aggregate's pruning and must never fail the read
-([08-semantics.md](../docs/08-semantics.md) §4).
+([08-semantics.md](../docs/design/08-semantics.md) §4).
 
 ### `vortex.chunked`, `vortex.struct`
 Empty metadata. Chunk offsets derive from children `row_count`s, whose sum must equal the parent's.
@@ -318,10 +318,10 @@ wrong; they are recorded here and fixed at their source.
    `MAX_SCALE = 76`, and `DecimalType` has an `I256 = 5` case selected for precision 39–76.
    `DecimalDType::try_new` validates: `1 <= precision <= 76`; `scale <= 76`; and
    `scale <= precision` **only when `scale > 0`** — negative scale is legal and is not bounded
-   below beyond `i8`. [07-dotnet-mapping.md](../docs/07-dotnet-mapping.md) §2 claimed precision 38 /
+   below beyond `i8`. [07-dotnet-mapping.md](../docs/design/07-dotnet-mapping.md) §2 claimed precision 38 /
    `i128` and that "Decimal256 does not exist in the DType union". It does, and .NET has no
    `Int256`, so one has to be written. (The row encoder's own 19–38 → `i128` table stays correct:
-   `vortex-row` genuinely does not support `Decimal256` — [06-row-encoding.md](../docs/06-row-encoding.md) §6.)
+   `vortex-row` genuinely does not support `Decimal256` — [06-row-encoding.md](../docs/design/06-row-encoding.md) §6.)
 
 2. **`vortex.constant` metadata is empty and its scalar is in buffer 0**, and **`fastlanes.for`
    carries a bare `ScalarValue` in its metadata** rather than nothing. Both are documented in
@@ -336,7 +336,7 @@ wrong; they are recorded here and fixed at their source.
    an Extension DType resolves through its storage type.
 
 4. **Our `alignment_exponent` cap of 6 is stricter than upstream's, which is 16.**
-   [08-semantics.md](../docs/08-semantics.md) §6 justifies 64 bytes as covering every legitimate
+   [08-semantics.md](../docs/design/08-semantics.md) §6 justifies 64 bytes as covering every legitimate
    alignment. Parsing the footers of all 819 corpus files gives an observed maximum of 4
    (16 bytes, the varbinview views buffer), so the cap is safe against real files — but it is a
    deliberate divergence, not an equivalence, and a file upstream considers legal can be rejected

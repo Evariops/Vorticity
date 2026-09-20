@@ -3,7 +3,7 @@
 Generates the golden Vortex corpus for Vorticity's L2 conformance layer, plus one
 expected-value sidecar per file so day-to-day .NET test runs need no Rust toolchain.
 
-The problem it exists to solve is stated in [docs/04-conformance.md](../../docs/04-conformance.md):
+The problem it exists to solve is stated in [docs/design/04-conformance.md](../../docs/design/04-conformance.md):
 an implementation that only tests against itself proves nothing, because a round trip through our
 own writer and reader is self-consistent and can be uniformly wrong. Everything must be anchored
 to files produced by the Rust reference implementation.
@@ -14,11 +14,11 @@ to files produced by the Rust reference implementation.
 vortex = "=0.86.1"
 ```
 
-Exact, and deliberately so. This is a conformance decision recorded in docs/04-conformance.md §3,
+Exact, and deliberately so. This is a conformance decision recorded in docs/design/04-conformance.md §3,
 not a dependency choice: **a version bump is a corpus regeneration**, and the version that
 produced a corpus is recorded in `manifest.json` and in every file record.
 
-0.86.1 is the release [docs/99-sources.md](../../docs/99-sources.md) derived the specification
+0.86.1 is the release [docs/design/99-sources.md](../../docs/design/99-sources.md) derived the specification
 against, and the newest at the time of writing. It can target every frozen core edition through
 `core2026.08.3`, so the corpus reaches every component in the 1.0 scope. It needs rustc ≥ 1.95
 (built here with 1.98.1).
@@ -148,11 +148,11 @@ strings from a per-zone-disjoint alphabet so `bounded_min/max(64)` differ too.
 `containers/zoned_many_zones_nulls` adds columns whose per-zone `null_count` sweeps 0 → 1024
 (the last zone is entirely null) and whose `nan_count` sweeps 0 → 63. Without these, no predicate
 could eliminate a strict non-trivial subset of zones anywhere in the corpus, and the
-prune-on/prune-off equivalence test of docs/04-conformance.md §6 would pass on a reader that
+prune-on/prune-off equivalence test of docs/design/04-conformance.md §6 would pass on a reader that
 prunes the wrong zone.
 
 **E — edition spread.** One file per frozen core edition, `core2025.05.0` through `core2026.08.3`,
-for the read-forever test of docs/04-conformance.md §8. Each file's table is **shaped to elect
+for the read-forever test of docs/design/04-conformance.md §8. Each file's table is **shaped to elect
 what that edition adds** — a sequence column for `core2025.06.0`, fixed-size-list and list columns
 for `core2025.10.0`, the long-shared-prefix distribution for `core2026.08.1`'s `vortex.onpair`, a
 map column for `core2026.08.2`, a uuid column for `core2026.08.3` — and the claim is asserted
@@ -173,7 +173,7 @@ rather than taken on trust.
 `vortex.primitive` in the footer's `array_specs` overwritten by `vortex.unknown01`, an id
 registered nowhere. Equal length matters: the id is a length-prefixed flatbuffer string, an
 equal-length overwrite leaves every offset valid, and Vortex checksums nothing. It serves both
-tests of docs/04-conformance.md §6, and `examples/verify_forged.rs` asserts all three of its
+tests of docs/design/04-conformance.md §6, and `examples/verify_forged.rs` asserts all three of its
 manifest expectations against the Rust reader:
 
 ```
@@ -239,7 +239,7 @@ that.
 
 ## Coverage gate## Coverage gate
 
-docs/04-conformance.md §3: *the union of `array_specs` and `layout_specs` across the corpus must
+docs/design/04-conformance.md §3: *the union of `array_specs` and `layout_specs` across the corpus must
 cover every component we claim to support.* Two readings of that, both computed and both
 reported, because they differ:
 
@@ -254,7 +254,7 @@ reported, because they differ:
   `declared_array_ids`, so the gap stays visible. The walk is the same one the sidecar records as
   `array_tree`, so there is one extraction path rather than two that can drift.
 
-Result against [docs/90-registry.md](../../docs/90-registry.md):
+Result against [docs/design/90-registry.md](../../docs/design/90-registry.md):
 
 | kind | in 1.0 scope | covered | gap |
 |---|---|---|---|
@@ -322,11 +322,11 @@ each is a `SkipRecord` in `manifest.json` with the source reference that establi
 | Zstd-compressed *segments* | The format reserves per-segment compression; the 0.86.1 writer hard-codes it off — `PostscriptSegment::write_flatbuffer` passes `_compression: None` (`footer/postscript.rs:251`) and `FileLayout` passes `compression_specs: None` (`footer/file_layout.rs:75`). No public API sets either. `containers/zstd_arrays_in_segments` is the closest reachable variant: array-level, not segment-level. |
 | LZ4-compressed buffer | Same mechanism, and additionally no LZ4 codec is registered anywhere in 0.86.1 — no `lz4` dependency in any `vortex-*` crate. |
 | postscript near the 65527-byte ceiling | The writer's own ceiling is two orders of magnitude lower: four segment locators plus at most `MAX_METADATA_SEGMENTS` (16) entries with keys capped at `MAX_METADATA_KEY_BYTES` (64) (`footer/mod.rs:44,51`) — about 1 KiB of key budget. `containers/postscript_max_metadata` is the largest postscript actually achievable. |
-| deliberately false min/max | docs/04-conformance.md §3 already says this one must be forged. The forged-fixture set now exists, but this fixture is not in it: a zone's min/max live inside a compressed, encoded stats array, so inverting one is a re-encode rather than a byte patch. `negative/unknown_encoding_id` is the one forged fixture this release ships. |
-| **row-encoding golden vectors** (docs/04 §7) | There is no `vortex-row` crate. `cargo info vortex-row` reports it is not in the crates.io index, and `RowSortField` / `row_encode` / `RowEncoding` appear nowhere in the sources of `vortex-0.86.1` or any `vortex-*` crate at that version. §7 assigns byte-exactness of the row encoder to this crate on the assumption that such a crate exists; it does not, so the row encoder of docs/06-row-encoding.md has **no cross-implementation anchor in this release** and its property tests remain self-consistent only. Re-check when the crate is published; the fixture shape §7 asks for is unchanged. |
+| deliberately false min/max | docs/design/04-conformance.md §3 already says this one must be forged. The forged-fixture set now exists, but this fixture is not in it: a zone's min/max live inside a compressed, encoded stats array, so inverting one is a re-encode rather than a byte patch. `negative/unknown_encoding_id` is the one forged fixture this release ships. |
+| **row-encoding golden vectors** (docs/design/04 §7) | There is no `vortex-row` crate. `cargo info vortex-row` reports it is not in the crates.io index, and `RowSortField` / `row_encode` / `RowEncoding` appear nowhere in the sources of `vortex-0.86.1` or any `vortex-*` crate at that version. §7 assigns byte-exactness of the row encoder to this crate on the assumption that such a crate exists; it does not, so the row encoder of docs/design/06-row-encoding.md has **no cross-implementation anchor in this release** and its property tests remain self-consistent only. Re-check when the crate is published; the fixture shape §7 asks for is unchanged. |
 | `vortex.chunked` LAYOUT with one chunk | `ChunkedLayoutStrategy::write_stream` collapses a single-child layout into that child — `if child_layouts.len() == 1 { return child }` (`layouts/chunked/writer.rs:86`). The equivalent array shape is in the corpus as `encodings/chunked_one_chunk`. |
 | `vortex.chunked` LAYOUT with a zero-row chunk | The file writer filters empty chunks out of the write stream before any layout strategy sees them — `.try_filter(\|chunk\| ready(!chunk.is_empty()))` (`vortex-file-0.86.1/src/writer.rs:270`); verified empirically with a 100/0/100 stream, which produces a two-child layout. The equivalent array shape is in the corpus as `encodings/chunked_empty_chunks`. |
-| unknown encoding id (docs/04 §6) | Not producible by any writer by definition: the per-kind allowlist rejects an unregistered id, and `disable_editions()` only widens it to ids the session has registered. Produced by byte-patching instead, and shipped in the forged-fixture set. |
+| unknown encoding id (docs/design/04 §6) | Not producible by any writer by definition: the per-kind allowlist rejects an unregistered id, and `disable_editions()` only widens it to ids the session has registered. Produced by byte-patching instead, and shipped in the forged-fixture set. |
 | nullable top-level struct | Unwritable by any configuration. `write_internal` always calls `accumulate_stats`, which constructs a `FileStatsAccumulator` before looking at the requested statistics, and that constructor panics on a nullable top-level struct (`layouts/file_stats.rs:461`). `with_file_statistics(vec![])` does not help. Nullable structs are still covered as non-root columns. |
 | `DType::Union` | `vortex.union` is in no core edition, and the generic builder refuses it outright (`todo!("TODO(connor)[Union]: unimplemented")`, `builders/mod.rs:462`). |
 | `preview2026.08.0` edition | Preview editions are not frozen, so a file written against one carries no read-forever guarantee and has no place in an interoperability-regression corpus. |
@@ -337,7 +337,7 @@ Two entries that were previously on this list are **not** gaps and are now gener
 edition contains it" is a weaker claim than "this release cannot write one", and the corpus
 should not assert the stronger one — `encodings/fastlanes_delta` and `encodings/zstd_buffers`
 write them with `disable_editions()`, and both round-trip through the Rust reader to their exact
-input values. They are the fixtures docs/04-conformance.md §6 needs: structurally valid files
+input values. They are the fixtures docs/design/04-conformance.md §6 needs: structurally valid files
 carrying an encoding a conformant reader may legitimately not know.
 
 ## Determinism

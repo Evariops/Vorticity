@@ -17,7 +17,7 @@ rather than just reporting a ratio.
 
 ## 1b. Where this actually stands
 
-The FFI harness of §2 now exists ([`tools/vxbench-rs`](../tools/vxbench-rs)), so the numbers below
+The FFI harness of §2 now exists ([`tools/vxbench-rs`](../../tools/vxbench-rs)), so the numbers below
 **are** ratios against Rust, measured in one process on the same bytes with the same clock.
 
 **They come from `--ratio-check`, not from a BenchmarkDotNet table, and that is a correction rather
@@ -275,7 +275,7 @@ that makes a 1.4× ratio unreadable.
 This section used to name `vortex-ffi` as that cdylib. It is not: `vortex-ffi` is `publish = false`
 upstream, so using it would mean a second git dependency, and it is a general-purpose C API with
 its own object model whose per-call overhead would land inside the measurement. The shim in
-[`tools/vxbench-rs`](../tools/vxbench-rs) is built against the same crates.io pin the corpus was
+[`tools/vxbench-rs`](../../tools/vxbench-rs) is built against the same crates.io pin the corpus was
 generated with (`vortex = "=0.86.1"`), exposes one entry point per axis, and returns a row count —
 no handles, no allocation across the boundary, nothing to measure but the scan. It is built by
 hand and is not a CI dependency; the comparison benchmarks fail loudly when it is absent rather
@@ -298,7 +298,7 @@ a sanity check that the in-process numbers are not an artifact of the harness.
 | **Open latency** | time to first batch, local **and** over a simulated HTTP source with injected latency | The 1–2 round trip promise ([02-format.md](02-format.md) §1) is the object-storage metric, and it is invisible on a local file where round trips are free |
 | **Per-encoding decode** | ns/value on 1M values, isolated | Localizes a regression to one kernel |
 | **Filter pushdown** | scan with a 1%/10%/50%-selectivity predicate | Tests pruning and mask propagation |
-| **Write** | MB/s and compression ratio | Output size ≤ **105%** of Rust's on the same data, edition and configuration, with the delta reported per dataset; `WrittenSizeTests` measures it over the whole corpus and holds it, and `docs/90-registry.md` carries the figure. Not byte-parity: the two sides choose schemes by different means — the reference samples, this writer measures the whole block in one fused pass — so they diverge on borderline data by design, and an absolute gate would be permanently red or silently overfitted to the corpus |
+| **Write** | MB/s and compression ratio | Output size ≤ **105%** of Rust's on the same data, edition and configuration, with the delta reported per dataset; `WrittenSizeTests` measures it over the whole corpus and holds it, and `docs/design/90-registry.md` carries the figure. Not byte-parity: the two sides choose schemes by different means — the reference samples, this writer measures the whole block in one fused pass — so they diverge on borderline data by design, and an absolute gate would be permanently red or silently overfitted to the corpus |
 | **Row encoding** | MB/s and ns/row, vs `vortex-row` | Pure CPU, no I/O — the cleanest signal of code-generation quality we have |
 | **Allocations** | bytes/op, gen0/1/2 | Must be zero per batch in steady state |
 | **Peak RSS** | on a large scan | Detects buffer accumulation |

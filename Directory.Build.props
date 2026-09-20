@@ -20,7 +20,7 @@
   </PropertyGroup>
 
   <!-- Library-only properties. InvariantGlobalization is an application property and is set on
-       the executable projects (vxdump, benchmarks), never here - see docs/09-contracts.md §7. -->
+       the executable projects (vxdump, benchmarks), never here - see docs/design/09-contracts.md §7. -->
   <PropertyGroup Condition="'$(OutputType)' != 'Exe'">
     <IsAotCompatible>true</IsAotCompatible>
     <IsTrimmable>true</IsTrimmable>

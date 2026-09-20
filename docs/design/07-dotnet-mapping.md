@@ -36,7 +36,7 @@ digits. A default mapping to `decimal` would therefore be **silently lossy over 
 the format** — the exact failure mode this library must not have.
 
 The exact bounds, from `vortex-array/src/dtype/decimal/mod.rs` (`MAX_PRECISION` is
-`<i256>::MAX_PRECISION`), transcribed in [spec/METADATA.md](../spec/METADATA.md):
+`<i256>::MAX_PRECISION`), transcribed in [spec/METADATA.md](../../spec/METADATA.md):
 
 * `1 ≤ precision ≤ 76`
 * `scale ≤ 76`

@@ -1,7 +1,7 @@
 # vxbench-rs
 
 Vortex's Rust reader behind a C ABI, so that
-[docs/05-benchmarks.md](../../docs/05-benchmarks.md) §2 can happen: **both implementations measured
+[docs/design/05-benchmarks.md](../../docs/design/05-benchmarks.md) §2 can happen: **both implementations measured
 in one process**, on the same bytes, with the same clock and the same page-cache state. Two runs of
 two binaries can differ by more than the thing being measured, which is how a 1.4× ratio becomes
 unreadable.
@@ -51,7 +51,7 @@ surface to measure except the scan. The empty-call floor is 2.5 ns.
   cache the other is not offered.
 * **Single-threaded on both sides.** The shim uses `vortex::io::runtime::single::block_on` rather
   than the default multi-threaded runtime; our reader has no worker pool. Otherwise the ratio
-  measures a threading-model difference (docs/05 §5).
+  measures a threading-model difference (docs/design/05 §5).
 * **Panics are caught** at the boundary: unwinding across a C ABI is undefined behaviour. Every
   entry point returns a count, or a negative status.
 

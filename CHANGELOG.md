@@ -27,7 +27,7 @@ contain.
   what makes a sample unnecessary rather than unaffordable.
 * The same rows written in different batch sizes produce a valid file of a different size. The
   determinism promised is *the same batches give the same bytes*, not *the same rows give the same
-  bytes*; `docs/11-write-strategy.md` states the limit and its cost.
+  bytes*; `docs/design/11-write-strategy.md` states the limit and its cost.
 * No encryption. The format reserves a slot for it and this library writes it empty.
 * No S3 client. `Vorticity.Dataset` defines the store seam; an implementation is a caller's.
 

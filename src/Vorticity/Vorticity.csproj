@@ -16,8 +16,8 @@
     <InternalsVisibleTo Include="Vorticity.Benchmarks" />
   </ItemGroup>
 
-  <!-- THE ONE RUNTIME DEPENDENCY, and docs/03-architecture.md §1 names it by name: XxHash3-64 for
-       the write path's distinct table and the Bloom filters of docs/10-indexes.md. It is
+  <!-- THE ONE RUNTIME DEPENDENCY, and docs/design/03-architecture.md §1 names it by name: XxHash3-64 for
+       the write path's distinct table and the Bloom filters of docs/design/10-indexes.md. It is
        first-party (dotnet/runtime, MIT) but is not carried by the shared framework, so it has to
        be referenced. The alternative was porting it, which would be our own hash to maintain
        against upstream's; the alternative to THAT was keeping FNV-1a byte-at-a-time, which cost

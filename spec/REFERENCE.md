@@ -22,14 +22,14 @@ a behaviour between the version our corpus is pinned to and the newest release.
 
 Reading these is not "translating from reference code" for licensing purposes — consulting the
 reference for *semantics* is the project's declared default working mode
-([09-contracts.md](../docs/09-contracts.md) §6). Copying a kernel line for line is, and must be
+([09-contracts.md](../docs/design/09-contracts.md) §6). Copying a kernel line for line is, and must be
 noted in the file header when it happens.
 
 ---
 
 ## FastLanes: the two index functions, which are not the same
 
-[02-format.md](../docs/02-format.md) §8 gives one formula. There are actually **two distinct
+[02-format.md](../docs/design/02-format.md) §8 gives one formula. There are actually **two distinct
 permutations** in `fastlanes-0.7.2`, and using one where the other belongs produces plausible,
 wrong output that only shows up on real data.
 
@@ -61,7 +61,7 @@ row      = o * 8 + s
 ```
 
 This is the one that matters for `fastlanes.bitpacked`, and the one
-[90-registry.md](../docs/90-registry.md) means by "O(1) positional access via the inverse
+[90-registry.md](../docs/design/90-registry.md) means by "O(1) positional access via the inverse
 transposition" in the `take` strategy table.
 
 Special case worth having a branch for: `W == T` packs nothing, and
@@ -109,7 +109,7 @@ paper.
 
 ## The array blob, read off the writer rather than the prose
 
-`vortex-array/src/serde.rs`, `ArrayRef::serialize`. [02-format.md](../docs/02-format.md) §5.1
+`vortex-array/src/serde.rs`, `ArrayRef::serialize`. [02-format.md](../docs/design/02-format.md) §5.1
 describes the shape correctly; these are the details it leaves out, each of which is a plausible
 wrong guess.
 
@@ -136,7 +136,7 @@ The writer emits, in order:
 
 `max_alignment` is the max over all buffer alignments and the FlatBuffer's own alignment, so it is
 at least 8. Combined with the `alignment_exponent <= 6` cap in
-[08-semantics.md](../docs/08-semantics.md) §6, a segment's own alignment is enough to make every
+[08-semantics.md](../docs/design/08-semantics.md) §6, a segment's own alignment is enough to make every
 inner buffer aligned once the segment start is.
 
 One writer-side note for Phase 3: *"Serializers may choose historical IDs and may provide

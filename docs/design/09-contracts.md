@@ -14,7 +14,7 @@ site.
 | `IAsyncEnumerator<RecordBatch>` | Single consumer, as the language requires |
 | `RecordBatch` | **Affine to its consumer.** Not thread-safe, and disposal must happen on the consuming flow. Its spans die with it |
 | Decoders / kernels | Pure functions over borrowed memory; no shared mutable state |
-| `KeyCursorBuilder` / `KeyCursor` | Not thread-safe, like the scan builder (docs/12-index-reads.md §8.3) |
+| `KeyCursorBuilder` / `KeyCursor` | Not thread-safe, like the scan builder (docs/design/12-index-reads.md §8.3) |
 | The run cache on `VortexFile` | **Thread-safe**, like the layout tree; a load happens outside its lock, and the first insert wins a race |
 | `KeyPlan` / `ScanPlan` / `CountPlan` / `OrderPlan` | Immutable records |
 | `VortexFileWriter` (including an append) / `VortexFileIndexer` | One writer per file; an append is not atomic, and `VortexFileRepair` truncates a torn one |
@@ -100,7 +100,7 @@ bucket" report is diagnosable without a debugger:
 
 Zero-cost when no listener is attached, which `EventSource` gives us for free.
 
-docs/12-index-reads.md §8.1 adds the counters that say whether an index earns its bytes:
+docs/design/12-index-reads.md §8.1 adds the counters that say whether an index earns its bytes:
 
 | Counter | Diagnoses |
 |---|---|

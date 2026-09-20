@@ -5,7 +5,7 @@
     <RootNamespace>Vorticity.Benchmarks</RootNamespace>
     <AssemblyName>Vorticity.Benchmarks</AssemblyName>
 
-    <!-- Application properties, per docs/03-architecture.md §1: they belong to the executables. -->
+    <!-- Application properties, per docs/design/03-architecture.md §1: they belong to the executables. -->
     <InvariantGlobalization>true</InvariantGlobalization>
 
     <!-- BenchmarkDotNet's generated bootstrapper trips a handful of analyzers that the library's

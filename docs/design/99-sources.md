@@ -22,7 +22,7 @@ Raw doc sources are fetchable directly, which avoids paraphrase:
 
 These are the paths on `develop`. **At tag `0.86.1`, which is what we pin, the schemas live
 under `vortex-flatbuffers/` and `vortex-proto/` instead** — upstream relocated them afterwards,
-with byte-identical contents. All of them are vendored in [spec/](../spec/), which records both
+with byte-identical contents. All of them are vendored in [spec/](../../spec/), which records both
 layouts; read them from there rather than fetching.
 
 ```
@@ -52,11 +52,11 @@ vortex-ffi/cinclude/vortex.h                         C API used for cross-testin
 Per-encoding metadata messages are **not** in `.proto` files: they are `prost` derive structs
 declared next to each encoding (`encodings/*/src/**.rs`, `vortex-array/src/arrays/**/vtable/mod.rs`).
 Transcribing them is a per-encoding task; the tag numbers are the contract. **That transcription
-is done** and lives in [spec/METADATA.md](../spec/METADATA.md), with the upstream source path
+is done** and lives in [spec/METADATA.md](../../spec/METADATA.md), with the upstream source path
 recorded per message. It also records two errors it found in these docs.
 
 The whole reference tree is unpacked locally as a side effect of building
-`tools/conformance-gen` — see [spec/REFERENCE.md](../spec/REFERENCE.md) for the paths. Read the
+`tools/conformance-gen` — see [spec/REFERENCE.md](../../spec/REFERENCE.md) for the paths. Read the
 reference there rather than fetching it.
 
 ## Local toolchain assumptions

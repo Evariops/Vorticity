@@ -10,7 +10,7 @@
 # blown allocation ceiling costs four seconds rather than forty.
 #
 #   1. the nine ratchet tests    counts and ceilings, deterministic, ~10 s; the ninth is the
-#                                dataset's counting matrix (docs/13 §9.2), which step 40 promised
+#                                dataset's counting matrix (docs/design/13 §9.2), which step 40 promised
 #   2. --ffi-check               ours and the reference agree on row counts, < 1 s
 #   3. --ratio-check             every ratio against the reference, key order included, ~45 s
 #

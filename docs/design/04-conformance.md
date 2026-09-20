@@ -160,7 +160,7 @@ correctness condition is a single crisp property rather than a format match.
   internally consistent and still disagree, which would silently break any cross-language
   comparison.
 
-  It lives in [`tools/row-vectors`](../tools/row-vectors) rather than in `conformance-gen`, because
+  It lives in [`tools/row-vectors`](../../tools/row-vectors) rather than in `conformance-gen`, because
   `vortex-row` is marked `publish = false` upstream — it exists only inside the vortex monorepo and
   is not on crates.io, so the exact crates.io pin `conformance-gen` uses cannot reach it. It is
   taken as a **git dependency pinned to the tag `0.86.1`**, the only git dependency in the

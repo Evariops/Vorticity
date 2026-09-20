@@ -225,7 +225,7 @@ the metadata and stops finds nothing. `fastlanes.for` is **not** empty: its meta
 
 The examples above are illustrative. The **complete transcription of all thirty-odd metadata
 messages**, with the upstream Rust source path recorded per message so each can be re-verified,
-is in [spec/METADATA.md](../spec/METADATA.md). Those tag numbers are the contract; transcribe from
+is in [spec/METADATA.md](../../spec/METADATA.md). Those tag numbers are the contract; transcribe from
 that file, not from this one.
 
 #### Unknown Protobuf fields: skip, never reject
@@ -314,7 +314,7 @@ Two important caveats:
   `FL_ORDER = [0,4,2,6,1,5,3,7]` is its own inverse; the transposition itself is not, so
   `untranspose` is the inverse mapping and not a second `transpose`. Both derivations, their
   inverses, and the known-value table to test against are in
-  [spec/REFERENCE.md](../spec/REFERENCE.md).
+  [spec/REFERENCE.md](../../spec/REFERENCE.md).
 * **FSST**: 255-entry symbol table; code 255 is the escape code. Symbol buffers are padded to that
   fixed size.
 * **ALP**: the encoded integer is `i32` or `i64`; `exp_e`/`exp_f` must be validated in range for

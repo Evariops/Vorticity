@@ -32,7 +32,7 @@ Upstream relocated these after 0.86.1. The **contents are byte-identical across 
 | File | What it is |
 |---|---|
 | [`METADATA.md`](METADATA.md) | The per-encoding metadata messages, **transcribed**. They are not `.proto` files upstream — they are `prost` derive structs declared next to each encoding — so there is nothing to copy verbatim. Each message records the upstream Rust path it came from. The tag numbers are the contract. |
-| [`editions/`](editions/) | The seven frozen `core` edition manifests, verbatim TOML. These are the authoritative scope list: which array / layout / dtype / aggregate ids are legal in which edition, and the minimum upstream library version that can read each. The writer derives its candidate scheme list from these *before* sampling ([docs/90-registry.md](../docs/90-registry.md)). |
+| [`editions/`](editions/) | The seven frozen `core` edition manifests, verbatim TOML. These are the authoritative scope list: which array / layout / dtype / aggregate ids are legal in which edition, and the minimum upstream library version that can read each. The writer derives its candidate scheme list from these *before* sampling ([docs/design/90-registry.md](../docs/design/90-registry.md)). |
 
 Transcribing `METADATA.md` also surfaced two errors in our own design docs, both since corrected
 at source; the corrections are recorded at the end of that file.
@@ -46,8 +46,8 @@ git diff -- spec/            # a non-empty diff is upstream format drift: read i
 ```
 
 A change here is a format change. It must be reviewed against
-[docs/90-registry.md](../docs/90-registry.md) and the conformance corpus regenerated
-([docs/04-conformance.md](../docs/04-conformance.md) §3), not merged on the grounds that the build
+[docs/design/90-registry.md](../docs/design/90-registry.md) and the conformance corpus regenerated
+([docs/design/04-conformance.md](../docs/design/04-conformance.md) §3), not merged on the grounds that the build
 still passes.
 
 Last refreshed: 2026-09-12, from tag `0.86.1` (commit `d1fe2dc46d`).

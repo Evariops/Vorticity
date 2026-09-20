@@ -1036,7 +1036,7 @@ the text above is kept as the record of what was decided when. Code paths are un
 | 6 Key-ordered delivery | ✅ | `Scan/ScanBuilder.cs:277`, `:311` (composite); `Scan/KeyOrderedBatches.cs:64` (the null tail) |
 | 7 Three predicates | ✅ | `Expressions/VortexExpr.cs:499-516`; `Compute/BytePattern.cs`; `ILIKE` ⤳ (§13) |
 | 8.1 Listing | ✅ | `File/VortexFile.Indexes.cs:164` `Indexes`; `File/VortexOpenOptions.cs:118` `PreloadIndexes`; `Scan/ScanBuilder.cs:371` `WithIndexes`, `:515` `ExplainAsync` |
-| 8.2, 8.3 | ✅ | `docs/09-contracts.md` §1; `Indexes/LyingIndexTests.cs` |
+| 8.2, 8.3 | ✅ | `docs/design/09-contracts.md` §1; `Indexes/LyingIndexTests.cs` |
 | 9 Inside the reader | ✅ (shape amended) | `Indexes/IndexRunCache.cs:60`; `Keys/ExactCover.cs:30` |
 | 10 Costs | ✅ as statements, two corrected below | — |
 | 11 Tests | ✅, two narrowed (below) | — |

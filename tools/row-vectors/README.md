@@ -12,7 +12,7 @@ This crate takes it as a **git dependency pinned to the tag `0.86.1`**, and take
 vortex crate from the same tag so that one resolved copy of `vortex-array` serves them all. It is
 the only git dependency in the repository.
 
-[docs/04-conformance.md](../../docs/04-conformance.md) §7 is why the trouble is worth taking:
+[docs/design/04-conformance.md](../../docs/design/04-conformance.md) §7 is why the trouble is worth taking:
 
 > Being merely order-compatible is not enough — two implementations could each be internally
 > consistent and still disagree, which would silently break any cross-language comparison.
