@@ -395,9 +395,9 @@ internal static class Program
 
         MODES, decided by the first argument:
 
-          (nothing)                every class, fast profile, ~2 min
+          (nothing)                every class, fast profile, ~2 min 40
           <word> [<word>…]         bare words become a filter: `fsst` is `--filter *fsst*`
-          --ratio-check [axis…]    16 axes, ours over the reference, one clock, ~35 s
+          --ratio-check [axis…]    24 axes, ours over the reference, one clock, ~55 s
                                      NEVER under DOTNET_TieredCompilation=0: the pin costs our
                                      side dynamic PGO and the native reference nothing, which
                                      turns nine green axes red. ab.sh pins both its sides and
@@ -407,7 +407,7 @@ internal static class Program
                                      --ab-same         with --rebase, let it rise where ab.sh
                                                        reports no change in our own time
                                      --lanes N         adds `full scan, N lanes`, threads pinned
-          --throughput [family…]   50 encodings at a million rows, ~55 s
+          --throughput [family…]   57 encodings at a million rows, ~55 s
                                      --check           hold each ratio to its ceiling. Refused
                                                        with a family filter: a short run is +32%
                                                        on our side (BENCH-AUDIT.md B8)

@@ -12,7 +12,7 @@
 // unchanged, so its SHARE falls by roughly the row ratio, and what is left is the decoder.
 //
 // THE INPUTS ARE NOT IN THE REPOSITORY, and Corpus.cs already drew that line for real datasets:
-// "those are gigabytes that do not belong in a repository". These are 330 MB for 50 encodings.
+// "those are gigabytes that do not belong in a repository". These are 468 MB for 57 encodings.
 // Generate them once, into the cache directory this looks in by default:
 //
 //   bench/gen-throughput.sh
@@ -1001,7 +1001,7 @@ internal static class ThroughputCheck
         {
             Console.Error.WriteLine(
                 $"No throughput inputs at {root}.\n" +
-                "They are generated, not committed -- 330 MB for 50 encodings. Produce them with:\n" +
+                "They are generated, not committed -- 468 MB for 57 encodings. Produce them with:\n" +
                 "  bench/gen-throughput.sh\n" +
                 $"or point {Variable} at a directory that already holds them.");
             return 2;

@@ -14,27 +14,26 @@ dotnet run -c Release PROJ -- <arguments>
 | you changed | you run | it costs | what it answers |
 |---|---|---|---|
 | a kernel | `-- fastlanes` (its class) | 1–8 s | did the kernel move, against the ported arm on the same clock |
-| anything, want a direction | no argument at all | **14 s** | the four default classes, 10 cases, fast profile |
+| anything, want a direction | no argument at all | **2 min 40** | the ten default classes, 49 cases, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
-| a read path | `-- --ratio-check [axis…]` | 29 s, or 5 s for one axis | the thirteen axes against Rust, interleaved, each held to a ceiling |
+| a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-four axes against Rust, interleaved, each held to a ceiling |
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
 | a gather, a tile, a dictionary | `-- RowKernel` | 9 s | `Gather`, `GatherMasked`, `Tile` against the per-row type switch each replaced |
 | a string heap cut into views | `-- ViewKernel` | 9 s | `SumLengths`, `BuildFromLengths`, `RequireAscending` against the per-row loops |
 | the OnPair token concatenation | `-- OnPairKernel` | 6 s | 48% of an OnPair scan, against the per-code switch it replaced |
-| doubting a kernel figure's buffers | `-- --explore Alignment` | 25 s | the same kernels 64-byte aligned and eight bytes past: 0.3-1.8% on M4 Pro |
 | whether your change moved anything | `bench/compare.sh --record before <filter>`, then `--record after`, then `bench/compare.sh before after` | 2x the class | Mann-Whitney per case: Faster / Same / Slower |
 | a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust. **Reports, never gates**: a run of one file is +32% on our side (B8) |
-| the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 50 files |
-| a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 50 files, against Rust |
+| the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 57 files |
+| a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 57 files, against Rust |
 | a lane, or the degree of parallelism | `-- LanesBench` (`--full` walks 1, 2, 4, 8) | 15 s | ours at n lanes against the reference's pool at n workers, threads pinned both sides |
 | the compressor's decision | `-- CompressorBench` | 12 s | `Choose` and one arm per candidate; `--full` adds the utf8 and f64 columns |
-| the writer, per encoding | `-- --throughput --write --check` | 9 min | each file read back out to a discarding sink, against Rust. **Gates since B14** — 56 references, recalibrated 2026-09-15 after W-31 and W-35 took the median from 1.96 to 1.17. Three are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`) : re-run before believing a red. Only `zstd_nullable` produces no ratio, and that is **the reference** refusing to write it. What is left above ×2 is `WRITE-AUDIT.md` §6 |
-| every file we write, read by Rust | `bench/crosscheck.sh` | 79 s | 819 files compared scalar by scalar; needs cargo. `gate.sh --crosscheck` folds it in |
-| **anything, before you push** | `bench/gate.sh` | 35 s | the eight ratchets, `--ffi-check`, `--ratio-check`; exit 1 if one is red. `--throughput` adds the full axis (92 s) |
+| the writer, per encoding | `-- --throughput --write --check` | 9 min | each file read back out to a discarding sink, against Rust. **Gates since B14** — 56 references, median **0.290**, nothing above ×2 and the slowest axis `parquet_variant` at 1.01. Three are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`): re-run before believing a red. Only `zstd_nullable` produces no ratio, and that is **the reference** refusing to write it |
+| every file we write, read by Rust | `bench/crosscheck.sh` | 80 s | 854 files compared scalar by scalar, 2 538 751 rows; needs cargo. `gate.sh --crosscheck` folds it in |
+| **anything, before you push** | `bench/gate.sh` | 68 s | the nine ratchets, `--ffi-check`, `--ratio-check`; exit 1 if one is red. `--throughput` adds the full axis (92 s) |
 | a change too big for a ported arm | `bench/ab.sh <commit> [--after <commit>] <file> [scenario…]` | 7 s | two builds of the library in one process, interleaved, ratio per round |
 | the FFI harness, or before trusting any ratio | `-- --ffi-check` | < 1 s | both readers return the same rows on the same files |
 | a hot path you want to profile | `-- --profile <scenario> [seconds]` | as asked | a bare loop for `dotnet-trace`, no harness in the profile |
-| a ratchet | `dotnet test Vorticity.slnx -c Release` | ~1 min | the suite plus the eight allocation and count ratchets |
+| a ratchet | `dotnet test Vorticity.slnx -c Release` | ~1 min | the suite plus the nine allocation, count and budget ratchets |
 
 **A fast-profile figure is a direction, not a number.** Anything under about 5 % on a kernel, and
 every figure that goes into `bench-BASELINE.md`, is confirmed with `--full` on the one class
@@ -87,7 +86,7 @@ VORTICITY_THROUGHPUT_CORPUS=/tmp/pair \
 
 That pair is how BENCH-AUDIT.md A5 was attributed: our rewrite scans in 914 µs against 342 µs for
 the same rewrite without zstd, while the reference reads both in 140 µs. Note that
-`vxdump --encodings` cannot answer the same question by itself — the reference interns all 34
+`vxdump --encodings` cannot answer the same question by itself — the reference interns all 37
 encodings of the registry whatever the file uses, so only OUR dictionary is informative. What does
 answer it is `vxdump --layout`, whose `encoding=` column names the array encoding of every terminal
 node (B10):
@@ -133,37 +132,53 @@ asked for. Branch mispredictions and cache misses need a Windows machine (BENCH-
 class to run, which makes the default run do nothing under a script or in CI. `Program.cs` supplies
 `--filter *` when nothing else has said what to run.
 
-## The classes, and why there are only six
+## The classes
 
-| class | category | in the default run |
-|---|---|---|
-| `FastLanesKernelBenchmarks` | `kernel` | yes — 17 bits; `--full` adds 10 and 33 |
-| `FsstKernelBenchmarks` | `kernel` | yes |
-| `FilterKernelBenchmarks` | `kernel` | yes |
-| `RowEncodingBenchmarks` | `path` | yes |
-| `RandomAccessBenchmarks` | `explore` | no — `--explore` |
-| `FilterSelectivityBenchmarks` | `explore` | no — `--explore` |
+Sixteen, and `-- --list flat` is what answers this question for real: ten in the default run,
+six more behind `--explore`.
 
-`explore` holds the **curves** — a selectivity sweep, a take sweep — which answered their question
-once and do not guard against anything. They stay runnable and stay out of the default run.
+| class | in the default run |
+|---|---|
+| `FastLanesKernelBenchmarks` | yes — 17 bits; `--full` adds 10 and 33 |
+| `FsstKernelBenchmarks` | yes |
+| `OnPairKernelBenchmarks` | yes |
+| `FilterKernelBenchmarks` | yes |
+| `BitmapKernelBenchmarks` | yes |
+| `RowKernelBenchmarks` | yes |
+| `ViewKernelBenchmarks` | yes |
+| `RowEncodingBenchmarks` | yes |
+| `CompressorBenchmarks` | yes |
+| `LanesBenchmarks` | yes |
+| `RandomAccessBenchmarks` | no — `--explore` |
+| `FilterSelectivityBenchmarks` | no — `--explore` |
+| `ConstantFormBenchmarks` | no — `--explore` |
+| `VarBinFormBenchmarks` | no — `--explore` |
+| `ComplexityProbes` | no — `--explore` |
+| `MergeProbes` | no — `--explore` |
 
-Nine other classes were deleted rather than demoted: each measured something another instrument
-measures with a better estimator, and BENCH-AUDIT.md §3.1 names the replacement for every one. The
-last to go was `RewrittenComparison`, whose unique question — our own bytes, read by both readers —
-is now the four `rewritten` axes of `--ratio-check`. The numbers they produced are not lost: they are
-in `bench-BASELINE.md` and in the commits.
+`explore` holds the **curves** — a selectivity sweep, a take sweep, a complexity probe — which
+answered their question once and do not guard against anything. They stay runnable and stay out of
+the default run: 49 cases become 71 with `--explore`.
+
+Classes have been deleted rather than demoted whenever another instrument measured the same thing
+with a better estimator, and the journals name the replacement for each. `RewrittenComparison` went
+that way, its unique question — our own bytes, read by both readers — being the four `rewritten`
+axes of `--ratio-check`. The numbers they produced are not lost: they are in `bench-BASELINE.md`
+and in the commits.
 
 ## The gates, and their ceilings
 
-* **`--ratio-check`** — thirteen axes, ours against Rust, **interleaved against one clock** so that
-  drift is common to both arms. Nine on the dataset (full scan, full scan upstream-lazy, projected,
-  first batch, footer only, read-and-write-back, filtered 1 %, filtered half, scattered take), and
-  four `rewritten` ones that read a file **our writer produced** beside the reference's — the only
-  place our own encoding choices are measured at all. Each has a ceiling in `RatioCheck.cs`; over it,
-  non-zero exit. 29 s.
+* **`--ratio-check`** — twenty-four axes, ours against Rust, **interleaved against one clock** so
+  that drift is common to both arms. Nine on the dataset (full scan, full scan upstream-lazy,
+  projected, first batch, footer only, read-and-write-back, filtered 1 %, filtered half, scattered
+  take); four `rewritten` ones that read a file **our writer produced** beside the reference's — the
+  only place our own encoding choices are measured at all; two on key order and one on the exact
+  count; six on predicates pushed into a string or a packed column (equality and prefix over `fsst`
+  and over `dict`, a band over `runend` and over `bitpacked`); and two on a fifty-column table. Each
+  has a ceiling in `RatioCheck.cs`; over it, non-zero exit. 56 s.
   A bare word narrows it to the axes whose name contains it — `-- --ratio-check write`, `--
-  --ratio-check rewritten` — which is the difference between checking one change and waiting for
-  thirteen axes.
+  --ratio-check rewritten`, `-- --ratio-check string` — which is the difference between checking one
+  change and waiting for twenty-four axes.
 
   **Do not pin tiered compilation for this gate.** `DOTNET_TieredCompilation=0` costs our side
   dynamic profile-guided optimization while the reference, being native, loses nothing: the same
@@ -171,15 +186,15 @@ in `bench-BASELINE.md` and in the commits.
   among them at 0.417 against a 0.385 ceiling. `bench/ab.sh` pins on purpose and says why — both of
   its sides are the same runtime and the pin removes a JIT difference between them. A ratio against
   native code is the opposite case.
-* **`--throughput [family…] [--check]`** — 50 encodings at a million rows, where the fixed
+* **`--throughput [family…] [--check]`** — 57 encodings at a million rows, where the fixed
   open-and-walk cost is under a percent instead of most of the measurement. `--check` makes it a
-  gate. Its inputs are 330 MB and are not committed: run `bench/gen-throughput.sh` once, and it
+  gate. Its inputs are 468 MB and are not committed: run `bench/gen-throughput.sh` once, and it
   finds them in `~/.cache/vorticity/throughput-1M` by itself (`VORTICITY_THROUGHPUT_CORPUS`
   overrides). `--check` refuses a corpus with no `manifest.json`, one generated at another row
-  count, or one whose files do not match their recorded sha256 — fifty ratchets against bytes that
-  live outside the repository need to know *which* bytes.
+  count, or one whose files do not match their recorded sha256 — fifty-seven ratchets against bytes
+  that live outside the repository need to know *which* bytes.
 
-  **`--take`** asks the same fifty files for 64 rows spread evenly over each (one every 15 625),
+  **`--take`** asks the same fifty-seven files for 64 rows spread evenly over each (one every 15 625),
   against `vxbench_take`, with its own ratchet table — the two axes do not move together, and that
   is the point: a decoder without a `DecodeSelected` override decodes the whole split around each
   taken row. Nine of them have none (PERF-AUDIT-v2.md R17), and the axis prices it: `zstd` 64×,
@@ -189,10 +204,9 @@ in `bench-BASELINE.md` and in the commits.
 
   **`--write`** reads each file back out into a sink that keeps nothing, against `vxbench_write`,
   which does the same into a `Vec<u8>`: the read is inside the measurement on both sides, so
-  subtract the scan axis before reading the quotient as a statement about writers. It has no
-  ratchet table yet — one pass is 8 minutes, so a five-process calibration is 40 — and it reports
-  five encodings it cannot write at all (`list`, `listview`, `map`, `variant`, `parquet_variant`;
-  PERF-AUDIT-v2.md W-8) rather than dying on them.
+  subtract the scan axis before reading the quotient as a statement about writers. It has had its
+  own ratchet table of 56 references since B14, and it reports an encoding it cannot write rather
+  than dying on it — today that is `zstd_nullable` alone, and it is the reference that declines.
 
   `--quick` (23 s instead of 70) shortens the warm-up and the per-file budget: a direction, not a
   gate. `--recalibrate N` prints a replacement reference table, as it does for `--ratio-check`.
@@ -241,7 +255,7 @@ in a row are a *warm* path where a single timed call was cache-cold. Use it when
 never when the number did, and say which change in the commit message.
 
 **A red gate is not believed on the first run, yet.** Measured run-to-run spread is +12 to +22 % on
-four of the nine ratio axes (BENCH-AUDIT.md annexe A.1), and two invocations in four were red with
+four of the nine axes the dataset then had (BENCH-AUDIT.md annexe A.1), and two invocations in four were red with
 no byte changed. Replay three times: two reds out of three is a regression, otherwise it is noise —
 and either way the observation is data for B2, the statistical gate that is meant to end this
 paragraph.

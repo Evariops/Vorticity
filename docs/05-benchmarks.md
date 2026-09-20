@@ -82,7 +82,7 @@ BenchmarkDotNet class that no longer exists, on 4096-row files, against the lazy
 carries both defects at once: a fixed cost larger than the signal, and a reference that did not
 decode what it was being compared on. The instrument now is **`--throughput`**: the same question on
 files of a million rows, against `execute::<Canonical>`, with a ceiling per encoding and a non-zero
-exit over it. Its fifty rows live in the `bench-BASELINE.md` journal under "The 1M axis";
+exit over it. Its fifty-seven rows live in the `bench-BASELINE.md` journal under "The 1M axis";
 `bench/README.md` says how to run it. The correction is not cosmetic — published as `fsst`
 "1.74× rather than 10.6×" — and it is why nothing should be quoted from here.
 
@@ -298,15 +298,15 @@ a sanity check that the in-process numbers are not an artifact of the harness.
 | **Open latency** | time to first batch, local **and** over a simulated HTTP source with injected latency | The 1–2 round trip promise ([02-format.md](02-format.md) §1) is the object-storage metric, and it is invisible on a local file where round trips are free |
 | **Per-encoding decode** | ns/value on 1M values, isolated | Localizes a regression to one kernel |
 | **Filter pushdown** | scan with a 1%/10%/50%-selectivity predicate | Tests pruning and mask propagation |
-| **Write** | MB/s and compression ratio | Output size ≤ **105%** of Rust's on the same data, edition and configuration, with the delta reported per dataset. Not byte-parity: the compressor is a sampler, so two honest implementations of the same algorithm diverge on borderline data — an absolute gate would be permanently red or silently overfitted to the corpus |
+| **Write** | MB/s and compression ratio | Output size ≤ **105%** of Rust's on the same data, edition and configuration, with the delta reported per dataset; `WrittenSizeTests` measures it over the whole corpus and holds it, and `docs/90-registry.md` carries the figure. Not byte-parity: the two sides choose schemes by different means — the reference samples, this writer measures the whole block in one fused pass — so they diverge on borderline data by design, and an absolute gate would be permanently red or silently overfitted to the corpus |
 | **Row encoding** | MB/s and ns/row, vs `vortex-row` | Pure CPU, no I/O — the cleanest signal of code-generation quality we have |
 | **Allocations** | bytes/op, gen0/1/2 | Must be zero per batch in steady state |
 | **Peak RSS** | on a large scan | Detects buffer accumulation |
 
-Per-encoding decode is the axis that matters most during development: `fastlanes.bitpacked`,
-`fastlanes.for`, `fastlanes.rle`, `vortex.runend`, `vortex.dict`, `vortex.alp`, `vortex.alprd`,
-`vortex.fsst`, `vortex.sparse`, `vortex.zigzag`, `vortex.varbinview`, `vortex.bool`, and
-`vortex.zstd` — the last being a comparison of BCL Zstd bindings against Rust's, where any gap is
+Per-encoding decode is the axis that matters most during development. It covers **57 files**, one
+per encoding and per notable shape of one, each a million rows: `dotnet run -c Release --project
+bench/Vorticity.Benchmarks -- --throughput` names them all, and `--check` holds each to a ceiling.
+`vortex.zstd` among them is a comparison of BCL Zstd bindings against Rust's, where any gap is
 interop overhead rather than our code.
 
 Row encoding is measured on the mix that matters: all-fixed-width schemas (where the encoder
@@ -315,16 +315,20 @@ structure dominates).
 
 ## 4. Datasets
 
-Reuse upstream's benchmark datasets so numbers are comparable with published Vortex figures. The
-upstream repository ships `compress-bench`, `random-access-bench`, `string-bench`, plus engine
-benchmarks; mirroring their data choices and methodology is cheaper than inventing our own and
-makes external comparison possible.
+The intention was to reuse upstream's benchmark datasets — TPC-H `lineitem`, ClickBench `hits`, NYC
+taxi — so that numbers would be comparable with published Vortex figures. **None of them is wired
+up, and TPC-H was decided against** (2026-09-13): they are gigabytes that do not belong in a
+repository, and the property that makes a comparison honest is *both implementations read identical
+bytes*, which holds whatever the bytes are. `Corpus.cs` keeps the seam — a path, resolved once — so
+wiring one up later is a path and not a redesign.
 
-* **TPC-H** `lineitem`, SF1 and SF10 — mixed numeric/date/string, the standard reference.
-* **ClickBench** `hits` — wide (100+ columns), string-heavy, the projection-pushdown case.
-* **NYC taxi** — floats and timestamps, where ALP and DateTimeParts matter.
-* **Synthetic per-encoding** — a generator producing data that provably selects one encoding, for
-  the kernel microbenchmarks.
+What is measured instead, and it is enough:
+
+* **The conformance corpus**, 856 files written by the Rust writer with real distributions, which
+  is also what every correctness gate reads.
+* **Synthetic per-encoding**, a generator producing a million rows that provably select one
+  encoding — 57 files, 468 MB, outside the repository and rebuilt by `bench/gen-throughput.sh`.
+  This is the `--throughput` axis.
 
 Every dataset is written once by the Rust writer with default settings and read by both
 implementations. Reading identical bytes is what makes the comparison honest.
