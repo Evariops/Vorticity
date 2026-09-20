@@ -1218,6 +1218,12 @@ internal static class BlockStatsPass
         // all the same length and all distinct (the `fsst` axis: +27 % of the write, measured with
         // the tracking switched off). Equal views are equal values and need neither.
         ReadOnlySpan<ulong> pairs = MemoryMarshal.Cast<byte, ulong>(views);
+
+        // Resolved once: which buffer a row's bytes live in is a property of the node, and a column
+        // that keeps them in one buffer -- which is nearly every one -- can be read straight from
+        // it. A column with several falls through to the slow pair below, which asks the node.
+        bool oneHeap = node.DataBufferCount == 1;
+        ReadOnlySpan<byte> heap = oneHeap ? node.GetDataBuffer(0).Span : default;
         bool allValid = mask.AllValid;
         bool previousValid = firstValid;
         bool tracking = !stats.OrderUntracked && !stats.Unsorted;
@@ -1259,7 +1265,11 @@ internal static class BlockStatsPass
 
             if (!tracking)
             {
-                if (!SameValue(node, views, pairs, row - 1, row))
+                bool same = (uint)pairs[a] == (uint)pairs[b]
+                    && (oneHeap
+                        ? Value(views, heap, row - 1).SequenceEqual(Value(views, heap, row))
+                        : SameValue(node, views, pairs, row - 1, row));
+                if (!same)
                 {
                     stats.RunBoundaries++;
                 }
@@ -1267,7 +1277,9 @@ internal static class BlockStatsPass
                 continue;
             }
 
-            int order = Value(node, views, row - 1).SequenceCompareTo(Value(node, views, row));
+            int order = oneHeap
+                ? Value(views, heap, row - 1).SequenceCompareTo(Value(views, heap, row))
+                : Value(node, views, row - 1).SequenceCompareTo(Value(node, views, row));
             if (order == 0)
             {
                 repeats = true;
@@ -1323,6 +1335,24 @@ internal static class BlockStatsPass
         int buffer = BinaryPrimitives.ReadInt32LittleEndian(view[8..12]);
         int offset = BinaryPrimitives.ReadInt32LittleEndian(view[12..16]);
         return node.GetDataBuffer(buffer).Span.Slice(offset, size);
+    }
+
+    /// <summary>
+    /// The same, over a heap already resolved for a column that keeps its bytes in one buffer.
+    /// </summary>
+    /// <remarks>
+    /// Which buffer a row lives in belongs to the NODE, not to the row, and nearly every string
+    /// column has exactly one. Asking the node per row costs a kind check, a bound and a span built
+    /// over native memory, twice for every pair the run pass compares.
+    /// </remarks>
+    private static ReadOnlySpan<byte> Value(
+        ReadOnlySpan<byte> views, ReadOnlySpan<byte> heap, int row)
+    {
+        ReadOnlySpan<byte> view = views.Slice(row * 16, 16);
+        int size = BinaryPrimitives.ReadInt32LittleEndian(view);
+        return size <= 12
+            ? view.Slice(4, size)
+            : heap.Slice(BinaryPrimitives.ReadInt32LittleEndian(view[12..16]), size);
     }
 
     private static void Store(PreviousRow? previous, bool valid, ReadOnlySpan<byte> value)
