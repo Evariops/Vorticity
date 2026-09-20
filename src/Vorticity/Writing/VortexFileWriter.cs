@@ -916,14 +916,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         {
             int node = _isTabular ? arena.GetNode(rootIndex).GetFieldIndex(field) : rootIndex;
 
-            // Z1b-c2b: the constant form stops here. The writer has no `vortex.constant` on the wire
-            // and the zone summariser has no case for the kind, so the element is expanded ONCE, at
-            // the boundary, and both of the calls below see what they have always seen. Doing it
-            // inside the blob writer alone left the zone map out and the file 112 bytes short of the
-            // bytes the corpus was written with -- close enough to pass a ratio and wrong.
-            node = ArrayBlobWriter.Materialize(arena, node);
+            // THE CONSTANT FORM TRAVELS AS FAR AS THE FIRST READER THAT WANTS ROWS. There is no
+            // `vortex.constant` on the wire, so the element is expanded before the file is written
+            // -- but expanding it here expanded it for everyone, and neither the statistics pass
+            // nor the compactor needs it: both read the element. The blob writer does the expansion
+            // where it happens to need the rows, and an integer constant never gets there, because
+            // the progression it becomes is decided from the element alone.
 
-            // W-35, and it is at the boundary for Z1b-c2b's reason above: a chunk cut from a batch
+            // W-35: a chunk cut from a batch
             // shares that batch's list elements whole, and what the blob writer is handed is what
             // lands in the file. Both calls below must see the narrowed node or the zone map would
             // summarise rows the segment no longer holds.

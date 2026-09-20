@@ -76,9 +76,13 @@ internal static class ArrayBlobWriter
         // The compressed forms are chosen and MATERIALIZED before the builder starts, because both
         // of them add canonical nodes to the arena -- the gathered values child -- and a
         // FlatBuffers table cannot be open while that happens.
+        // A constant is expanded where it is read. The uncompressed path reads rows and nothing
+        // else, so it expands here; the compressed one asks first what the element alone decides.
         int root = compress
             ? WriteCompressed(builder, arena, nodeIndex, buffers, encodings, stats)
-            : WriteNode(builder, arena, nodeIndex, buffers, encodings, compress: false, stats);
+            : WriteNode(
+                builder, arena, Materialize(arena, nodeIndex), buffers, encodings,
+                compress: false, stats);
 
         // The Buffer vector records what the layout below will actually write, so the paddings have
         // to be settled before the table that carries them is built.
@@ -184,10 +188,20 @@ internal static class ArrayBlobWriter
         // constant 4 096-row i64 cost under a kilobyte was simply not chosen. Materializing above
         // `Choose` puts the writer back on exactly the path it took before the switch existed, which
         // is what makes the bytes identical rather than merely close.
-        nodeIndex = Materialize(arena, nodeIndex);
+        //
+        // What a constant can be decided to be WITHOUT being expanded is asked first, because the
+        // expansion is most of what writing a constant column costs. A progression is the answer
+        // for an integer constant and needs neither the rows nor a walk; every other constant falls
+        // through to the line below and takes the route it always took.
         BlockStats summary = stats.Stats;
-        ColumnPlan plan = ColumnCompressor.Choose(
-            arena, nodeIndex, encodings.Target, in summary, cascade, stats);
+        ColumnPlan plan = ColumnCompressor.ChooseConstant(
+            arena, nodeIndex, encodings.Target, in summary, cascade);
+        if (plan.Scheme == ColumnScheme.None)
+        {
+            nodeIndex = Materialize(arena, nodeIndex);
+            plan = ColumnCompressor.Choose(
+                arena, nodeIndex, encodings.Target, in summary, cascade, stats);
+        }
 
         // THE BYTES THE PLAN ACTUALLY PRODUCED, handed back to the column for docs/11 §3.4.3's plan
         // memory: every buffer this node and its subtree appended, measured against what the chooser
@@ -1077,7 +1091,11 @@ internal static class ArrayBlobWriter
         SequencePlan plan,
         EncodingDictionary encodings)
     {
-        PType ptype = arena.GetNode(nodeIndex).PType;
+        // A progression writes no buffer, so this is the one scheme a constant reaches without
+        // being expanded, and an unexpanded node has no physical type of its own yet. Its dtype's
+        // is the one the expansion would have given it.
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        PType ptype = node.Kind == CanonicalKind.Constant ? node.DType.PType : node.PType;
         return Node(builder, encodings, "vortex.sequence"u8, SequenceBytes(plan, ptype), [], []);
     }
 

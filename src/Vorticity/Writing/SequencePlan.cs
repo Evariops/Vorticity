@@ -160,6 +160,49 @@ internal sealed class SequencePlan
         return new SequencePlan(BaseBitsOf(values[0]), step);
     }
 
+    /// <summary>The progression a constant column is, read off its element.</summary>
+    /// <param name="node">A canonical Constant node.</param>
+    /// <returns>The plan, or <see langword="null"/> when the column is not expressible as one.</returns>
+    /// <remarks>
+    /// The same answer <see cref="TryBuild"/> reaches on the expanded column, taken from the one
+    /// element instead of the million copies of it: the difference between two equal values is
+    /// zero, so there is no walk to run and no step to verify. The guards are
+    /// <see cref="TryBuild"/>'s own — an integer column of at least two rows with no nulls — read
+    /// off the dtype, because a constant node has no physical type of its own until it is expanded.
+    /// </remarks>
+    internal static SequencePlan? OfConstant(CanonicalNode node)
+    {
+        DType dtype = node.DType;
+        if (node.Kind != CanonicalKind.Constant || dtype.Kind != DTypeKind.Primitive
+            || !dtype.PType.IsInteger() || node.Length < 2)
+        {
+            return null;
+        }
+
+        if (node.Validity.Kind is not (ValidityKind.NonNullable or ValidityKind.AllValid))
+        {
+            return null;
+        }
+
+        ReadOnlySpan<byte> element = node.ConstantElement;
+        return dtype.PType switch
+        {
+            PType.U8 => Flat<byte>(element),
+            PType.U16 => Flat<ushort>(element),
+            PType.U32 => Flat<uint>(element),
+            PType.U64 => Flat<ulong>(element),
+            PType.I8 => Flat<sbyte>(element),
+            PType.I16 => Flat<short>(element),
+            PType.I32 => Flat<int>(element),
+            _ => Flat<long>(element),
+        };
+    }
+
+    /// <summary>The element's bits as a base, with a step of zero.</summary>
+    private static SequencePlan Flat<T>(ReadOnlySpan<byte> element)
+        where T : unmanaged, IBinaryInteger<T> =>
+        new SequencePlan(BaseBitsOf(MemoryMarshal.Cast<byte, T>(element)[0]), Int128.Zero);
+
     /// <summary>Row 0 as the column's own raw bits, which is what the metadata carries.</summary>
     private static ulong BaseBitsOf<T>(T value)
         where T : unmanaged, IBinaryInteger<T> =>

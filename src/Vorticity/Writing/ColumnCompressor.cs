@@ -559,6 +559,63 @@ internal static class ColumnCompressor
     /// </remarks>
     private const long ZstdMinimumBytes = 16 * 1024;
 
+    /// <summary>
+    /// The scheme a constant column takes without being expanded, or canonical when it has to be.
+    /// </summary>
+    /// <param name="arena">The arena holding the node.</param>
+    /// <param name="nodeIndex">The column chunk, constant or not.</param>
+    /// <param name="target">The edition being written.</param>
+    /// <param name="stats">The ingest statistics over exactly these rows, or absent.</param>
+    /// <param name="cascade">What the parent knows about this child.</param>
+    /// <returns>The plan, or <see cref="ColumnPlan.Canonical"/> to expand and price as usual.</returns>
+    /// <remarks>
+    /// EXPANDING A CONSTANT COSTS MORE THAN DECIDING FOR IT. A constant node carries one element
+    /// and a row count, and the writer tiles it out to <c>rows * width</c> bytes before the chooser
+    /// sees it, because every scheme below reads rows. Doubling that tiling costs 36 % of a
+    /// million-row `constant` write and 72 % of a `variant` one.
+    /// <para>
+    /// A progression is the one scheme that needs neither the rows nor a walk — the step between
+    /// two equal values is zero — and it is what the writer produces for an integer constant today.
+    /// Deciding it here skips the expansion entirely. Everything else still expands: the guards
+    /// below are the expanded path's own, in its order, so a constant this accepts is one that path
+    /// would have written the same way, and one it declines takes exactly the route it took before.
+    /// </para>
+    /// </remarks>
+    internal static ColumnPlan ChooseConstant(
+        CanonicalArena arena, int nodeIndex, VortexEdition target, in BlockStats stats,
+        Cascade cascade)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        if (node.Kind != CanonicalKind.Constant
+            || !Allows(target, "vortex.sequence") || cascade.SequenceIsDead)
+        {
+            return ColumnPlan.Canonical;
+        }
+
+        DType dtype = node.DType;
+        if (dtype.Kind != DTypeKind.Primitive || !dtype.PType.IsInteger())
+        {
+            return ColumnPlan.Canonical;
+        }
+
+        // The small-column guard, on the bytes the expansion would have produced.
+        int length = node.Length;
+        if (length < MinimumRows && ((long)length * dtype.PType.ByteWidth()) < MinimumBytes)
+        {
+            return ColumnPlan.Canonical;
+        }
+
+        if (stats.IsPresent && stats.Rows == length && stats.DeltaKnown && stats.DeltaBroken)
+        {
+            return ColumnPlan.Canonical;
+        }
+
+        SequencePlan? sequence = SequencePlan.OfConstant(node);
+        return sequence is null
+            ? ColumnPlan.Canonical
+            : ColumnPlan.ForSequence(sequence) with { PredictedBytes = 0 };
+    }
+
     /// <summary>Picks a scheme for the canonical node at <paramref name="nodeIndex"/>.</summary>
     /// <param name="arena">The arena holding the node.</param>
     /// <param name="nodeIndex">The column chunk.</param>
