@@ -15,10 +15,10 @@
 // probleme"; the driver picks the invocation count).
 //
 // ALIGNMENT MEASURED, NOT ASSUMED: these buffers are plain GC arrays, and §4.4 asked whether that
-// changes the number against the library's aligned arena allocations. `AlignmentBenchmarks`
-// (`--explore Alignment`) answers on M4 Pro: eight bytes past a 64-byte boundary costs 0.3% to
-// 1.8% over two runs, the same sign every time but under the fast profile's own +-3% fidelity.
-// Not re-measured on x64.
+// changes the number against the library's aligned arena allocations. Answered on M4 Pro: eight
+// bytes past a 64-byte boundary costs 0.3% to 1.8% over two runs, the same sign every time but
+// under the fast profile's own +-3% fidelity. Not re-measured on x64. The curve that answered it
+// is gone, the answer being wanted once.
 //
 // THE SECOND ARM IS NOT A STRAW MAN. Each scalar arm is the loop the library's own remarks describe
 // as the previous state: a per-byte edge mask in `Classify`, a bit at a time in `CountSet` and

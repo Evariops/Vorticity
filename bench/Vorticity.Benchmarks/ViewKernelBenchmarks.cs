@@ -13,10 +13,10 @@
 // only add a way to be wrong.
 //
 // ALIGNMENT MEASURED, NOT ASSUMED: these buffers are plain GC arrays, and §4.4 asked whether that
-// changes the number against the library's aligned arena allocations. `AlignmentBenchmarks`
-// (`--explore Alignment`) answers on M4 Pro: eight bytes past a 64-byte boundary costs 0.3% to
-// 1.8% over two runs, the same sign every time but under the fast profile's own +-3% fidelity.
-// Not re-measured on x64.
+// changes the number against the library's aligned arena allocations. Answered on M4 Pro: eight
+// bytes past a 64-byte boundary costs 0.3% to 1.8% over two runs, the same sign every time but
+// under the fast profile's own +-3% fidelity. Not re-measured on x64. The curve that answered it
+// is gone, the answer being wanted once.
 //
 // 65 536 rows of 8 bytes: a 512 KiB heap, which is the size at which the per-row call is the cost
 // and not the memory. Eight bytes is also under the twelve that a view inlines, so the rows take

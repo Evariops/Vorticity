@@ -10,10 +10,10 @@
 // which IS that switch, still in the library for the single-code callers.
 //
 // ALIGNMENT MEASURED, NOT ASSUMED: these buffers are plain GC arrays, and §4.4 asked whether that
-// changes the number against the library's aligned arena allocations. `AlignmentBenchmarks`
-// (`--explore Alignment`) answers on M4 Pro: eight bytes past a 64-byte boundary costs 0.3% to
-// 1.8% over two runs, the same sign every time but under the fast profile's own +-3% fidelity.
-// Not re-measured on x64.
+// changes the number against the library's aligned arena allocations. Answered on M4 Pro: eight
+// bytes past a 64-byte boundary costs 0.3% to 1.8% over two runs, the same sign every time but
+// under the fast profile's own +-3% fidelity. Not re-measured on x64. The curve that answered it
+// is gone, the answer being wanted once.
 //
 // 65 536 rows of 8 bytes gathered out of a 4 096-row dictionary: half a mebibyte of destination and
 // 32 KiB of values, so the values stay in L1 and the destination is a streaming write. That is the
