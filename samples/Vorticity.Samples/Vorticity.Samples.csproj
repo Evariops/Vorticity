@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Vorticity.Samples</RootNamespace>
+    <AssemblyName>vortex-samples</AssemblyName>
+    <Description>The programs the user guide quotes: one per page, compiled by the build.</Description>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
+  </ItemGroup>
+
+</Project>
