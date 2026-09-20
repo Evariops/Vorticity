@@ -8,6 +8,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Types;
 
 namespace Vorticity.Writing;
@@ -101,10 +102,12 @@ internal sealed class FsstPlan
         // inside the finalizer queue. The values have to be copied at all only because they live in
         // NATIVE arena buffers and `ReadOnlyMemory<byte>` cannot point at those -- so they are
         // copied once, contiguously, and the rows become slices of that.
+        // Resolved once: the validity KIND belongs to the node and was being switched on per row.
+        ValidityReader valid = ValidityReader.Of(arena, node.Validity);
         long plain = 0;
         for (int i = 0; i < rows; i++)
         {
-            if (IsValid(arena, node, i))
+            if (valid.IsValid(i))
             {
                 plain += ValueOf(node, i).Length;
             }
@@ -138,7 +141,7 @@ internal sealed class FsstPlan
                 // bytes are unspecified, and encoding them would pay for values no reader will
                 // ever ask for. It still occupies a row slot, of length zero.
                 starts[i] = at;
-                if (!IsValid(arena, node, i))
+                if (!valid.IsValid(i))
                 {
                     lengths[i] = 0;
                     continue;
@@ -235,11 +238,11 @@ internal sealed class FsstPlan
 
     /// <summary>Whether row <paramref name="row"/> of a canonical varbinview node holds a value.</summary>
     /// <remarks>
-    /// WHAT THE SWITCH COSTS WHERE IT IS, measured by doubling this call on a million-row `fsst`
+    /// WHAT THE SWITCH COST WHERE IT WAS, measured by doubling this call on a million-row `fsst`
     /// write: +2,3 ms on 57,1 and +3,1 on 56,1, four to five and a half per cent of the axis. The
-    /// validity KIND is a property of the node and the same for all million rows, so what a reader
-    /// hoisted out of the loop would take is that switch; the bit test itself stays. Above the bar
-    /// the plan sets for this family, and still open.
+    /// callers inside this file and in the zstd plan now resolve a reader once per node instead,
+    /// which took that write from 56 523 to 54 129 us and a `varbin` one from 34 730 to 31 962.
+    /// This stays for the callers that ask about one row rather than a run of them.
     /// </remarks>
     internal static bool IsValid(CanonicalArena arena, CanonicalNode node, int row)
     {
