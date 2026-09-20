@@ -234,6 +234,13 @@ internal sealed class FsstPlan
     private static int Width(long maximum) => IndexPType(maximum).ByteWidth();
 
     /// <summary>Whether row <paramref name="row"/> of a canonical varbinview node holds a value.</summary>
+    /// <remarks>
+    /// WHAT THE SWITCH COSTS WHERE IT IS, measured by doubling this call on a million-row `fsst`
+    /// write: +2,3 ms on 57,1 and +3,1 on 56,1, four to five and a half per cent of the axis. The
+    /// validity KIND is a property of the node and the same for all million rows, so what a reader
+    /// hoisted out of the loop would take is that switch; the bit test itself stays. Above the bar
+    /// the plan sets for this family, and still open.
+    /// </remarks>
     internal static bool IsValid(CanonicalArena arena, CanonicalNode node, int row)
     {
         Validity validity = node.Validity;
