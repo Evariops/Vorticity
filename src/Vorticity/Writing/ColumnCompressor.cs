@@ -148,8 +148,11 @@ internal readonly struct ColumnPlan
     /// <summary>With <see cref="Table"/>, how many codes are the chunk's entries.</summary>
     internal int Entries { get; init; }
 
-    /// <summary>With <see cref="Table"/>, how many rows the chunk has.</summary>
+    /// <summary>How many rows the chunk has: how much of <see cref="Codes"/> is a code.</summary>
     internal int Rows { get; init; }
+
+    /// <summary>Whether <see cref="Codes"/> came from the pool and the encoder owes it back.</summary>
+    internal bool CodesRented { get; init; }
 
     /// <summary>
     /// The rows to gather as the values child: one per run for <see cref="ColumnScheme.RunEnd"/>,
@@ -167,7 +170,18 @@ internal readonly struct ColumnPlan
         new ColumnPlan(ColumnScheme.RunEnd, starts, ends);
 
     internal static ColumnPlan Dictionary(int[] firstOccurrences, int[] codes) =>
-        new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes);
+        new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes) { Rows = codes.Length };
+
+    /// <summary>
+    /// The same, over a <paramref name="codes"/> array rented for <paramref name="rows"/> entries
+    /// and longer than them, which the encoder hands back once it has narrowed it into the arena.
+    /// </summary>
+    internal static ColumnPlan RentedDictionary(int[] firstOccurrences, int[] codes, int rows) =>
+        new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes)
+        {
+            Rows = rows,
+            CodesRented = true,
+        };
 
     internal static ColumnPlan ForFsst(FsstPlan plan) =>
         new ColumnPlan(ColumnScheme.Fsst, [], []) { Fsst = plan };
@@ -183,6 +197,15 @@ internal readonly struct ColumnPlan
 
     internal static ColumnPlan ForSequence(SequencePlan plan) =>
         new ColumnPlan(ColumnScheme.Sequence, [], []) { Sequence = plan };
+
+    /// <summary>Hands a rented codes array back, for a plan that will not be written.</summary>
+    internal void ReleaseCodes()
+    {
+        if (CodesRented)
+        {
+            ArrayPool<int>.Shared.Return(Codes);
+        }
+    }
 
     /// <summary>
     /// One line that says what this plan would write: the scheme, its parameters, and a fingerprint
@@ -205,7 +228,7 @@ internal readonly struct ColumnPlan
             $"dict entries={Entries} rows={Rows} codes={Fingerprint(Table.Codes[..Rows]):x} " +
             $"first={Fingerprint(Table.FirstRows[..Entries]):x}",
         ColumnScheme.Dict =>
-            $"dict entries={Gather.Length} rows={Codes.Length} codes={Fingerprint(Codes):x} " +
+            $"dict entries={Gather.Length} rows={Rows} codes={Fingerprint(Codes.AsSpan(0, Rows)):x} " +
             $"first={Fingerprint(Gather):x}",
         ColumnScheme.BitPacked =>
             $"bitpacked {BitPack!.Transform} reference={BitPack.Reference} width={BitPack.BitWidth} " +
@@ -601,9 +624,12 @@ internal static class ColumnCompressor
                 probe.Report(nodeIndex, (plan.FromMemory ? "memory " : "") + chosen, expected);
             }
 
-            // The reference plan is thrown away, and a zstd frame among its candidates is holding
-            // a pooled buffer that nothing will write.
+            // The reference plan is thrown away, and a zstd frame, a set of ALP integers or a row
+            // of dictionary codes among its candidates is holding a pooled buffer that nothing
+            // will write.
             reference.Zstd?.Release();
+            reference.Alp?.Release();
+            reference.ReleaseCodes();
         }
 
         return plan;
@@ -937,6 +963,7 @@ internal static class ColumnCompressor
         int[] chain = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
         int[] firstRows = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
         int[] codes = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        bool kept = false;
         try
         {
             buckets.AsSpan(0, capacity).Fill(-1);
@@ -1000,14 +1027,22 @@ internal static class ColumnCompressor
                 return ColumnPlan.Canonical;
             }
 
-            // Only here, where the plan is kept, does anything become a real array.
-            return ColumnPlan.Dictionary(
-                    firstRows.AsSpan(0, distinct).ToArray(), codes.AsSpan(0, length).ToArray())
+            // The entries become a real array: there are `distinct` of them, and the writer keeps
+            // them past the point the rentals go back. The codes do not. There is one per row -- a
+            // full row vector, 16 kB of a 4 096-row write and a fifth of two of the allocation
+            // axes -- and the only thing the writer does with them is narrow them into an arena
+            // buffer, so the rental travels with the plan and is handed back there.
+            kept = true;
+            return ColumnPlan.RentedDictionary(firstRows.AsSpan(0, distinct).ToArray(), codes, length)
                 with { PredictedBytes = encoded };
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(codes);
+            if (!kept)
+            {
+                ArrayPool<int>.Shared.Return(codes);
+            }
+
             ArrayPool<int>.Shared.Return(firstRows);
             ArrayPool<int>.Shared.Return(chain);
             ArrayPool<int>.Shared.Return(buckets);

@@ -1013,6 +1013,11 @@ internal static class ArrayBlobWriter
         VortexBuffer encodedBuffer = arena.AllocateUninitialized(
             plan.Encoded.Length, plan.EncodedPType.ByteWidth(), out Span<byte> destination);
         plan.Encoded.CopyTo(destination);
+
+        // The integers live in the arena from here on, so the pool can have its array back. Every
+        // float column is priced with ALP, and one that loses now costs the pool a rental instead
+        // of the heap a column.
+        plan.Release();
         int encodedNode = arena.AddPrimitive(
             encodedType, rows, node.Validity, plan.EncodedPType, encodedBuffer);
 
@@ -1173,10 +1178,19 @@ internal static class ArrayBlobWriter
         // The codes are the table's own buffer when the table chose the plan -- one code per row,
         // written by the probe as the rows arrived, never copied (docs/11 §3.5) -- and the plan's
         // array when the reference chooser walked for them.
-        ReadOnlySpan<int> codeOfRow = plan.Table is not null ? plan.Table.Codes[..plan.Rows] : plan.Codes;
+        ReadOnlySpan<int> codeOfRow = plan.Table is not null
+            ? plan.Table.Codes[..plan.Rows]
+            : plan.Codes.AsSpan(0, plan.Rows);
         int codes = WriteIndexColumn(
             builder, arena, nodeIndex, codeOfRow, codesPType, buffers, encodings,
             Cascade.DictionaryCodes(entries));
+
+        // The codes are in the arena now, narrowed to the width the file carries, so a rental the
+        // chooser handed over goes back to the pool rather than becoming a row vector of garbage.
+        if (plan.CodesRented)
+        {
+            ArrayPool<int>.Shared.Return(plan.Codes);
+        }
         int valuesNode = WriteCompressed(
             builder, arena, values, buffers, encodings, cascade: Cascade.ValuesChild());
 

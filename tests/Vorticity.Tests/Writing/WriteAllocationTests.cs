@@ -147,11 +147,16 @@ public sealed class WriteAllocationTests
     // prenait 17 kB.
     private static readonly (string Id, long Ceiling)[] Files =
     [
-        ("containers/zoned_many_zones_nulls", 2_130_000),   // 2 098 360 mesurés
+        // LES SEPT AXES QUE LA LOCATION A FAIT BAISSER, le 2026-09-20 : les entiers ALP et les codes
+        // de dictionnaire étaient deux tableaux gérés par colonne -- la colonne elle-même, huit
+        // octets par ligne pour les premiers, quatre pour les seconds -- alloués pendant le TARIF,
+        // donc y compris par le candidat qui perd. Ils viennent du pool et y retournent, et les
+        // plafonds descendent d'autant. Le corpus se réécrit à 10 265 948 octets, inchangé.
+        ("containers/zoned_many_zones_nulls", 709_800),   // 709 368 mesurés ; était 2 130 000 (1 233 728 mesurés, -42,5 %)
         ("distributions/high_cardinality_i64_r8193", 73_700),   // 73 256 mesurés (12e) : +1,3 kB, Auto. Était 72 600 : 71 936 mesurés (11a, 2026-09-16) : +2,2 kB par fichier pour le segment de statistiques de fichier -- un FlatBufferBuilder, un ScalarStore, les bornes en protobuf -- par fichier, pas par ligne. Était 70 800 (69 736 mesurés, -48 %)
         ("encodings/fsst", 235_800),   // 235 320 mesurés (12e) : Auto ; était 235 100
-        ("encodings/onpair", 224_400),   // 223 904 mesurés (12e) : Auto ; était 223 400 (220 048 mesurés)
-        ("types/utf8_nullable_r1025", 219_200),   // 218 736 mesurés (12e) : Auto ; était 218 000 (214 752 mesurés)
+        ("encodings/onpair", 69_200),   // 68 768 mesurés ; était 224 400 (85 176 mesurés, -19,3 %)
+        ("types/utf8_nullable_r1025", 215_000),   // 214 568 mesurés ; était 219 200 (218 696 mesurés, -1,9 %)
 
         // THE LATE COMPONENTS, on the write side, for PERF-AUDIT-v2.md F2's reason: `fastlanes.delta`,
         // `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant` were watched by no
@@ -171,16 +176,16 @@ public sealed class WriteAllocationTests
         // vers le comparatif qu'un encodage peut répondre sans décoder ; ce qu'elle achète est en
         // lecture — `filtered scan, string equality, dict` passe de 380,6 à 276,4 µs contre la
         // référence, 2,856 à 1,83. Rien du chemin d'écriture n'a bougé.
-        ("encodings/zstd", 225_032),   // 224 592 mesurés (12e) : Auto ; était 223 400
-        ("encodings/map", 105_500),   // 104 952 mesurés (28a, 2026-09-17) : +2 984 B, les trois nœuds que l'arbre des colonnes gagne sous une map -- les entrées, la clé, la valeur (11 §3.2.4) -- chacun avec ses listes de blocs, sa ligne précédente, et le curseur de fenêtre de la map ; par colonne, pas par ligne. Ce qu'ils achètent : l'écriture de `map` à 0,893 de HEAD sur l'axe 1M, `list` 0,901, `listview` 0,911, octets identiques. Les autres fichiers prennent +8 B, le compteur du rédacteur. Était 102 500 : 102 008 mesurés (12e) : Auto. Était 101 600 : 101 368 mesurés (11a) : +1,2 kB par fichier, le segment de statistiques ; était 100 200
+        ("encodings/zstd", 209_100),   // 208 624 mesurés ; était 225 032 (225 032 mesurés, -7,3 %)
+        ("encodings/map", 89_100),   // 88 616 mesurés ; était 105 500 (105 024 mesurés, -15,6 %). Avant cela : 104 952 mesurés (28a, 2026-09-17) : +2 984 B, les trois nœuds que l'arbre des colonnes gagne sous une map -- les entrées, la clé, la valeur (11 §3.2.4) -- chacun avec ses listes de blocs, sa ligne précédente, et le curseur de fenêtre de la map ; par colonne, pas par ligne. Ce qu'ils achètent : l'écriture de `map` à 0,893 de HEAD sur l'axe 1M, `list` 0,901, `listview` 0,911, octets identiques. Les autres fichiers prennent +8 B, le compteur du rédacteur. Était 102 500 : 102 008 mesurés (12e) : Auto. Était 101 600 : 101 368 mesurés (11a) : +1,2 kB par fichier, le segment de statistiques ; était 100 200
         ("encodings/variant", 68_200),   // 67 792 mesurés (12e) : Auto. Était 67 300 : 67 128 mesurés (11a, 2026-09-16) : +1,8 kB par fichier, le segment de statistiques de fichier. Était 65 400 : 65 336 mesurés (étape 8d, 2026-09-16) : +32 B pour deux champs de référence par ScanContext -- le masque de blocs vivants et le puits de métriques du contrat de lecture (8b, 8d) -- sur les deux contextes de transit que l'écrivain instancie ; par fichier, pas par ligne, pour un état qu'il n'utilise pas (un contexte réduit à l'arène est le correctif si ça compte un jour). Était 65 300 (65 232 mesurés, R5a : +32 B pour le champ PlanMemory? de trois ColumnWriter), 65 200 (R2 : +436 B pour trois DistinctTable), 64 700 (63 920 : +320 B pour deux ColumnWriter de plus)
 
         // THE TWO ALP SHAPES, added with W-6 because that point moved them and nothing watched it:
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a
         // patch. The second is the case that made the patch buffers worth renting, and a ratchet
         // that only held the easy shape would have said nothing about it.
-        ("encodings/alp", 121_900),   // 121 480 mesurés (12e) : +1,0 kB, Auto. Était 120 600 : 120 432 mesurés (11a) : +0,9 kB par fichier, le segment de statistiques ; était 119 600
-        ("encodings/alprd", 99_900),   // 99 480 mesurés (12e) : Auto. Était 98 300 : 98 120 mesurés (11a) : idem ; était 97 400 (95 968 mesurés, -25 %)
+        ("encodings/alp", 89_500),   // 89 064 mesurés ; était 121 900 (121 856 mesurés, -26,9 %)
+        ("encodings/alprd", 67_300),   // 66 800 mesurés ; était 99 900 (99 592 mesurés, -32,9 %)
     ];
 
     // FOUR OF THESE FIVE CAME DOWN AGAIN WHEN FSST STOPPED ALLOCATING WHAT IT THROWS AWAY.

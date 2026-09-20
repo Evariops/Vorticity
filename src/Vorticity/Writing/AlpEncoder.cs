@@ -30,13 +30,16 @@ namespace Vorticity.Writing;
 /// <summary>One column encoded with ALP: the exponents, the integers, and the exceptions.</summary>
 internal sealed class AlpPlan
 {
+    private byte[] _encoded;
+
     private AlpPlan(
-        byte exponentE, byte exponentF, byte[] encoded, PType encodedPType,
+        byte exponentE, byte exponentF, byte[] encoded, int encodedLength, PType encodedPType,
         int[] patchIndices, byte[] patchValues, long encodedSize)
     {
         ExponentE = exponentE;
         ExponentF = exponentF;
-        Encoded = encoded;
+        _encoded = encoded;
+        EncodedLength = encodedLength;
         EncodedPType = encodedPType;
         PatchIndices = patchIndices;
         PatchValues = patchValues;
@@ -50,7 +53,10 @@ internal sealed class AlpPlan
     internal byte ExponentF { get; }
 
     /// <summary>The encoded integers, little-endian, one per row.</summary>
-    internal byte[] Encoded { get; }
+    internal ReadOnlySpan<byte> Encoded => _encoded.AsSpan(0, EncodedLength);
+
+    /// <summary>How many bytes of the rental the integers occupy.</summary>
+    internal int EncodedLength { get; private set; }
 
     /// <summary>Their physical type: <c>i32</c> for f32, <c>i64</c> for f64.</summary>
     internal PType EncodedPType { get; }
@@ -63,6 +69,24 @@ internal sealed class AlpPlan
 
     /// <summary>The estimated size of this encoding once the integers are bit-packed.</summary>
     internal long EncodedSize { get; }
+
+    /// <summary>Hands the integers back to the pool, once they live somewhere else.</summary>
+    /// <remarks>
+    /// Called where the plan stops being needed: by the encoder once it has laid the integers in
+    /// the arena, and by the chooser for a plan nothing will write. Safe twice — the second call
+    /// has nothing to give back — and a plan that has released reads as empty rather than as
+    /// whatever the next renter wrote.
+    /// </remarks>
+    internal void Release()
+    {
+        byte[] encoded = _encoded;
+        _encoded = [];
+        EncodedLength = 0;
+        if (encoded.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(encoded);
+        }
+    }
 
     /// <summary>The largest <c>e</c> each width searches: 10^18 is the last power of ten an i64 holds.</summary>
     private const int MaxExponentDouble = 18;
@@ -117,8 +141,15 @@ internal sealed class AlpPlan
         // UNINITIALIZED IS SAFE HERE because every slot is written before it is read: the loop
         // writes the valid unpatched ones and `FillGaps` writes the invalid and the patched ones.
         // That is not an accident of the code below, it is what `FillGaps` is for.
-        byte[] encodedBytes = GC.AllocateUninitializedArray<byte>(rows * sizeof(long));
-        Span<long> encoded = MemoryMarshal.Cast<byte, long>(encodedBytes);
+        //
+        // RENTED, for the same reason the patch buffers below are: every float column is PRICED
+        // with ALP whether or not ALP wins, and these integers are the column itself, eight bytes a
+        // row. A candidate that loses allocated all of that and dropped it -- 524 kB of a 65 536-row
+        // write, a quarter of two 4 096-row ones. The rental goes back when the plan is refused
+        // here, or when the writer has laid the integers in the arena.
+        int encodedLength = rows * sizeof(long);
+        byte[] encodedBytes = ArrayPool<byte>.Shared.Rent(Math.Max(encodedLength, 1));
+        Span<long> encoded = MemoryMarshal.Cast<byte, long>(encodedBytes.AsSpan(0, encodedLength));
 
         // THE PATCH BUFFERS ARE RENTED AND SIZED FOR THE WORST CASE, which is every row a patch. A
         // `List` that grows by doubling is cheap when ALP fits and ruinous when it does not:
@@ -128,6 +159,7 @@ internal sealed class AlpPlan
         int[] indices = ArrayPool<int>.Shared.Rent(rows);
         double[] patches = ArrayPool<double>.Shared.Rent(rows);
         int patchCount = 0;
+        bool kept = false;
         try
         {
         long? fill = null;
@@ -175,14 +207,20 @@ internal sealed class AlpPlan
         byte[] patchBytes = new byte[patchCount * sizeof(double)];
         MemoryMarshal.Cast<double, byte>(patches.AsSpan(0, patchCount)).CopyTo(patchBytes);
 
-        return new AlpPlan(
-            (byte)e, (byte)f, encodedBytes, PType.I64,
+        AlpPlan plan = new AlpPlan(
+            (byte)e, (byte)f, encodedBytes, encodedLength, PType.I64,
             indices.AsSpan(0, patchCount).ToArray(), patchBytes, size);
+        kept = true;
+        return plan;
         }
         finally
         {
             ArrayPool<int>.Shared.Return(indices);
             ArrayPool<double>.Shared.Return(patches);
+            if (!kept)
+            {
+                ArrayPool<byte>.Shared.Return(encodedBytes);
+            }
         }
     }
 
@@ -198,11 +236,13 @@ internal sealed class AlpPlan
         float back = AlpTables.F10Single[f];
         float backInverse = AlpTables.If10Single[e];
 
-        byte[] encodedBytes = GC.AllocateUninitializedArray<byte>(rows * sizeof(int));
-        Span<int> encoded = MemoryMarshal.Cast<byte, int>(encodedBytes);
+        int encodedLength = rows * sizeof(int);
+        byte[] encodedBytes = ArrayPool<byte>.Shared.Rent(Math.Max(encodedLength, 1));
+        Span<int> encoded = MemoryMarshal.Cast<byte, int>(encodedBytes.AsSpan(0, encodedLength));
         int[] indices = ArrayPool<int>.Shared.Rent(rows);
         float[] patches = ArrayPool<float>.Shared.Rent(rows);
         int patchCount = 0;
+        bool kept = false;
         try
         {
         int? fill = null;
@@ -245,14 +285,20 @@ internal sealed class AlpPlan
         byte[] patchBytes = new byte[patchCount * sizeof(float)];
         MemoryMarshal.Cast<float, byte>(patches.AsSpan(0, patchCount)).CopyTo(patchBytes);
 
-        return new AlpPlan(
-            (byte)e, (byte)f, encodedBytes, PType.I32,
+        AlpPlan plan = new AlpPlan(
+            (byte)e, (byte)f, encodedBytes, encodedLength, PType.I32,
             indices.AsSpan(0, patchCount).ToArray(), patchBytes, size);
+        kept = true;
+        return plan;
         }
         finally
         {
             ArrayPool<int>.Shared.Return(indices);
             ArrayPool<float>.Shared.Return(patches);
+            if (!kept)
+            {
+                ArrayPool<byte>.Shared.Return(encodedBytes);
+            }
         }
     }
 
