@@ -142,6 +142,11 @@ internal sealed class ZstdPlan
         // makes once a row; the rest is the length write and the copy. The primitive form below
         // skips its own version of this loop entirely when nothing is null, and there is no such
         // shortcut here: a length-prefixed stream has to be built.
+        //
+        // The copy is the encoding, not an artefact of it. What a zstd string column carries on the
+        // wire is `u32 length` then the bytes, value after value, and the column's own views point
+        // at bytes that are neither contiguous nor length-prefixed, so there is nothing to compress
+        // in place.
         int offset = 0;
         for (int i = 0; i < rows; i++)
         {

@@ -247,6 +247,11 @@ public sealed class CommitObject
     /// <param name="cancellationToken">Cancels the read.</param>
     /// <returns>The page's bytes.</returns>
     /// <exception cref="CommitFormatException">The page does not hash to what the reference says.</exception>
+    /// <remarks>
+    /// The page is copied out of the range because the range is a lease on the store's own
+    /// buffer and the caller outlives it; a commit's pages are a few kibibytes of metadata, which
+    /// is the scale that makes owning them the simpler choice rather than the costly one.
+    /// </remarks>
     public static async ValueTask<byte[]> ReadPageAsync(
         IObjectStore store,
         string key,

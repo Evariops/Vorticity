@@ -488,6 +488,10 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         }
 
         /// <summary>Takes the next batch and row-encodes its keys.</summary>
+        /// <remarks>
+        /// A key of several columns has no ordering to compare in place: the merge needs one value
+        /// per row that sorts the way the key does, and encoding the row is what produces it.
+        /// </remarks>
         private async ValueTask NextAsync()
         {
             _keys?.Dispose();
