@@ -45,6 +45,13 @@ jobs:
         env:
           DOTNET_EnableHWIntrinsic: '0'
 
+      # The three packages are what a consumer gets, and nothing else here builds them. Most of
+      # what can go wrong is visible at pack time and nowhere else: a readme or a NOTICE that stops
+      # being found, a license expression that stops parsing, a project that becomes packable by
+      # accident. Warnings are errors, so a pack warning fails the job.
+      - name: Pack
+        run: dotnet pack Vorticity.slnx --no-build -c Release
+
   aot:
     name: native aot over the corpus
     runs-on: ubuntu-latest
@@ -74,8 +81,8 @@ jobs:
             fi
           done < <(find tests/Vorticity.Conformance/corpus -name '*.vortex')
           echo "AOT vxdump: $opened opened, $refused refused"
-          # One file uses the experimental vortex.list LAYOUT, which is in no core edition and
-          # fails at open by design (docs/90-registry.md). Anything beyond that is a regression.
+          # One file, types/no_dtype_segment, embeds no schema, so opening it without one supplied
+          # through VortexOpenOptions is refused by design. Anything beyond that is a regression.
           test "$refused" -le 1
 
       # The row encoder is generic over eleven value types and dispatches through static abstract
