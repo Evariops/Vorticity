@@ -29,9 +29,12 @@ namespace Vorticity.Serialization.Protobuf;
 /// first write.
 /// </para>
 /// <para>
-/// <b>This is a mutable struct.</b> Pass it as <c>ref ProtoWriter</c>, never by value — a copy
-/// writes into the same pooled array as the original and the two <see cref="Length"/> counters
-/// then disagree. <c>using var w = new ProtoWriter();</c> mutates in place (a <c>using</c> local is
+/// <b>This is a mutable struct, and the language cannot enforce that for us.</b> Pass it as
+/// <c>ref ProtoWriter</c>, never by value — a copy writes into the same pooled array as the
+/// original and the two <see cref="Length"/> counters then disagree. A <c>ref struct</c> would not
+/// fix it: that forbids boxing and heap capture, not copying, and it is unavailable here anyway
+/// because <see cref="MessageScope"/> holds a <c>ref ProtoWriter</c> and a ref field may not point
+/// at a ref struct. <c>using var w = new ProtoWriter();</c> mutates in place (a <c>using</c> local is
 /// read-only but is not defensively copied) and <see cref="BeginMessage"/> works on one, but C#
 /// forbids passing a <c>using</c> variable as a <c>ref</c> argument (CS1657). A codec that hands
 /// its writer to a <c>Write(ref ProtoWriter, …)</c> helper therefore needs a plain local disposed
