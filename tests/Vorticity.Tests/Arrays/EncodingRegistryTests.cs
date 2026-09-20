@@ -50,24 +50,23 @@ public sealed class EncodingRegistryTests
     }
 
     /// <summary>
-    /// THERE ARE NO DEFERRED ARRAY IDS LEFT, which is what this test now asserts.
+    /// THERE ARE NO DEFERRED ARRAY IDS LEFT, which is what this test asserts.
     /// </summary>
     /// <remarks>
     /// It used to be a theory over `vortex.variant` and `vortex.parquet.variant`, and before that
     /// over `fastlanes.delta`, `vortex.patched`, `vortex.map`, `vortex.zstd_buffers` and
     /// `vortex.pco` -- each one leaving the list when it gained a decoder. The variants were the
-    /// last, so `DescribeUnsupported` has nothing to describe: every id docs/90-registry.md names
-    /// resolves. A file carrying a shredded variant is still refused, but by the DECODER, with a
-    /// message naming the child rather than a table entry naming the id.
+    /// last: every id docs/90-registry.md names now resolves. A file carrying a shredded variant is
+    /// still refused, but by the DECODER, with a message naming the child rather than a table entry
+    /// naming the id.
     /// </remarks>
     [Fact]
     public void NoArrayIdIsDeferredAnyMore()
     {
         foreach (string id in new[] { "vortex.variant", "vortex.parquet.variant" })
         {
-            byte[] utf8 = Encoding.UTF8.GetBytes(id);
-            Assert.NotEqual(ArrayEncodingId.Unknown, EncodingRegistry.ResolveArray(utf8));
-            Assert.Null(EncodingRegistry.DescribeUnsupported(utf8));
+            Assert.NotEqual(
+                ArrayEncodingId.Unknown, EncodingRegistry.ResolveArray(Encoding.UTF8.GetBytes(id)));
         }
     }
 
@@ -110,21 +109,6 @@ public sealed class EncodingRegistryTests
     public void EveryImplementedLayoutIdResolves(string id, LayoutEncodingId expected)
     {
         Assert.Equal(expected, EncodingRegistry.ResolveLayout(Encoding.UTF8.GetBytes(id)));
-    }
-
-     [Fact]
-    public void ContractTwoPointEightsPinnedNotesAreRetired()
-    {
-        Assert.Null(EncodingRegistry.DescribeUnsupported("fastlanes.delta"u8));
-        Assert.Null(EncodingRegistry.DescribeUnsupported("vortex.patched"u8));
-        Assert.Null(EncodingRegistry.DescribeUnsupported("vortex.list"u8));
-    }
-
-    [Fact]
-    public void AGenuinelyUnknownIdHasNoNote()
-    {
-        Assert.Null(EncodingRegistry.DescribeUnsupported("vortex.acme.future"u8));
-        Assert.Null(EncodingRegistry.DescribeUnsupported(ReadOnlySpan<byte>.Empty));
     }
 
     [Fact]

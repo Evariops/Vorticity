@@ -351,61 +351,6 @@ public static class EncodingRegistry
         }
     }
 
-    /// <summary>
-    /// A short note for ids we know of but do not decode, used as the <c>detail</c> argument of
-    /// <see cref="VortexUnsupportedException"/>. <see langword="null"/> when we have nothing
-    /// useful to say - a genuinely unknown id from a future edition.
-    /// </summary>
-    /// <param name="idUtf8">The id exactly as the file carries it.</param>
-    /// <remarks>
-    /// The one note contract §2.8 still pins verbatim is the <c>vortex.list</c> <em>layout</em>;
-    /// <c>fastlanes.delta</c> and <c>vortex.patched</c> were two more until they gained decoders.
-    /// The array <c>vortex.list</c> is implemented, so it never reaches a throw site and the layout
-    /// note is unambiguous here.
-    /// </remarks>
-    public static string? DescribeUnsupported(ReadOnlySpan<byte> idUtf8)
-    {
-        // Cold path: readability beats a second hand-rolled trie.
-        //
-        // ALL THREE of contract §2.8's pinned notes have left this method, each when its component
-        // gained a reader: `fastlanes.delta`, `vortex.patched`, and the `vortex.list` LAYOUT. Every
-        // one of those sentences was true of UPSTREAM and none was ever a reason not to READ the
-        // component, which is why the entries went rather than the wording being softened.
-        //
-        // THE REMAINING NOTE NO LONGER SAYS "deferred to 1.1", because the scope decision of
-        // 2026-09-13 made full parity with Vortex Rust the target for 1.0 (docs/01-scope.md).
-        // `vortex.map` and `vortex.zstd_buffers` were on this list and are now read; what is left is
-        // in scope and unwritten, which is a different thing from out of scope.
-        // NOTHING IS LEFT HERE, and that is the point: every array id docs/90-registry.md names now
-        // has a decoder. `vortex.variant` and `vortex.parquet.variant` were the last two, and they
-        // read the unshredded form -- a file carrying a SHREDDED child is refused by the decoder
-        // itself, with a message naming the child, which is a better place for that sentence than
-        // a table of ids.
-        return null;
-    }
-
-    /// <summary>
-    /// <see cref="DescribeUnsupported(ReadOnlySpan{byte})"/> for a caller that only has the id as
-    /// a <see cref="string"/>. Cold path only: it transcodes onto the stack.
-    /// </summary>
-    /// <param name="id">The id text.</param>
-    internal static string? DescribeUnsupported(string id)
-    {
-        if (id is null)
-        {
-            return null;
-        }
-
-        // Every id we have a note for is far below this; a longer one has no note by definition.
-        Span<byte> utf8 = stackalloc byte[64];
-        if (!System.Text.Encoding.UTF8.TryGetBytes(id, utf8, out int written))
-        {
-            return null;
-        }
-
-        return DescribeUnsupported(utf8[..written]);
-    }
-
     /// <summary>Guards a value cast from a file-supplied index.</summary>
     /// <param name="id">The candidate.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

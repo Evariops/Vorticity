@@ -111,10 +111,6 @@ public static class LayoutReaderTable
     [DoesNotReturn]
     private static LayoutReader ThrowUnsupported(string idText)
     {
-        string id = idText ?? "<unnamed>";
-        string? detail = EncodingRegistry.DescribeUnsupported(id);
-        throw detail is null
-            ? new VortexUnsupportedException(id, VortexComponentKind.Layout)
-            : new VortexUnsupportedException(id, VortexComponentKind.Layout, detail);
+        throw new VortexUnsupportedException(idText ?? "<unnamed>", VortexComponentKind.Layout);
     }
 }

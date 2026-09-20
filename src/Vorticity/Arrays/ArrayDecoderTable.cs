@@ -172,10 +172,6 @@ public static class ArrayDecoderTable
     [DoesNotReturn]
     private static ArrayDecoder ThrowUnsupported(string idText)
     {
-        string id = idText ?? "<unnamed>";
-        string? detail = EncodingRegistry.DescribeUnsupported(id);
-        throw detail is null
-            ? new VortexUnsupportedException(id, VortexComponentKind.Array)
-            : new VortexUnsupportedException(id, VortexComponentKind.Array, detail);
+        throw new VortexUnsupportedException(idText ?? "<unnamed>", VortexComponentKind.Array);
     }
 }

@@ -640,8 +640,8 @@ public sealed class LayoutTreeStructureTests
             () => LayoutReaderTable.Get(tree.Root.Encoding, tree.Root.EncodingIdText));
         Assert.Equal("vortex.zzzzz", error.ComponentId);
         Assert.Equal(VortexComponentKind.Layout, error.Kind);
-        // No note: a forged id is not one this build has anything to say about, and
-        // DescribeUnsupported returning null for it is the honest answer.
+        // The id and the kind, and nothing else: a forged id is not one this build has anything to
+        // say about.
         Assert.Contains("layout", error.Message, StringComparison.Ordinal);
     }
 

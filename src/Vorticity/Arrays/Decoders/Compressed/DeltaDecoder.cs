@@ -16,8 +16,8 @@
 // whatever the sign. This decoder works on raw bytes for the same reason.
 //
 // NOT IN ANY CORE EDITION, which is why the corpus reaches it only through the generator's forced
-// path, and why `EncodingRegistry.DescribeUnsupported` used to name it. A default writer upstream
-// cannot emit one; that is a statement about writers and has never been a reason not to read.
+// path. A default writer upstream cannot emit one; that is a statement about writers and has never
+// been a reason not to read.
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;

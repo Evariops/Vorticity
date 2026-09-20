@@ -111,6 +111,21 @@ a patch-free array, with the patches carried in the encoding's own metadata — 
 | `vortex.stats` | legacy zone map | required for older files |
 | `vortex.dict` | dictionary shared across a child layout | required |
 
+## What an unknown id gets told
+
+An id this library does not decode raises `VortexUnsupportedException` naming the id and which kind
+of component it was — an array, a layout or an extension dtype. Nothing more, and the registry is
+why: there is no id in this document that has no reader, so an id that reaches a throw site is one
+from a future edition, about which this library has nothing useful to say.
+
+There used to be a table of notes for ids we knew of but did not decode. Every entry left it when
+its component gained a reader: `fastlanes.delta` and `vortex.patched`, then the `vortex.list`
+layout, then `vortex.map` and `vortex.zstd_buffers`, and last `vortex.variant` and
+`vortex.parquet.variant`. None of those sentences was ever a reason not to read the component, which
+is why the entries went rather than the wording being softened. A file carrying a *shredded* variant
+child is still refused, by the decoder itself and with a message naming the child — which is a
+better place for that sentence than a table of ids.
+
 ## Extension dtypes (4) — Phase 1
 
 `vortex.date`, `vortex.time`, `vortex.timestamp` (all `core2025.05.0`), `vortex.uuid`

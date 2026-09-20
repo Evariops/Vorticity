@@ -395,10 +395,7 @@ public static class ExtensionDTypeRegistry
     [DoesNotReturn]
     private static void ThrowUnsupportedDType(ReadOnlySpan<byte> idUtf8)
     {
-        string id = System.Text.Encoding.UTF8.GetString(idUtf8);
-        string? detail = EncodingRegistry.DescribeUnsupported(idUtf8);
-        throw detail is null
-            ? new VortexUnsupportedException(id, VortexComponentKind.DType)
-            : new VortexUnsupportedException(id, VortexComponentKind.DType, detail);
+        throw new VortexUnsupportedException(
+            System.Text.Encoding.UTF8.GetString(idUtf8), VortexComponentKind.DType);
     }
 }

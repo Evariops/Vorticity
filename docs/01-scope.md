@@ -71,8 +71,8 @@ wrong.
 | **`vortex.pco`** | 4 | full pcodec — a real compression algorithm. Canonical form is `Primitive`, which exists, so no new kind: the whole cost is the codec | **large**, but bounded and verifiable value-for-value against the sidecar |
 | ~~**`fastlanes.delta`**~~ | 4 | ~~per-lane prefix sum over 1024-element FastLanes blocks~~ | **DONE.** The estimate held: one decoder, one metadata reader |
 
-**Three of these are pinned by contract §2.8, not merely absent**, with reasons that stay true after
-implementation. `EncodingRegistry.DescribeUnsupported` returns them verbatim:
+**Three of these were pinned by contract §2.8, not merely absent**, with reasons that stay true
+after implementation. The registry used to return them verbatim beside the refusal:
 
 * ~~`fastlanes.delta`~~ and ~~`vortex.patched`~~ — both now read; their notes were true of upstream
   and were never reasons not to read one;
