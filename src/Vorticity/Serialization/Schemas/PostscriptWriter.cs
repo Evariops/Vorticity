@@ -12,7 +12,8 @@ using Vorticity.Serialization.FlatBuffers;
 namespace Vorticity.Serialization.Schemas;
 
 /// <summary>Builds the <c>Postscript</c>, <c>PostscriptMetadata</c> and <c>PostscriptSegment</c> tables.</summary>
-public static class PostscriptWriter
+/// <inheritdoc cref="ArrayWriter" path="/remarks"/>
+internal static class PostscriptWriter
 {
     /// <summary>Writes one <c>PostscriptSegment</c> table.</summary>
     /// <param name="b">The builder. No table may be open.</param>

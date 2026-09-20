@@ -58,7 +58,7 @@ namespace Vorticity.Scan;
 /// own <see cref="ScanContext"/>, so two enumerations may run concurrently over one open file
 /// (docs/09-contracts.md §1: the file is thread-safe, a scan is not).
 /// </remarks>
-public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
+internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 {
     private readonly VortexFile _file;
     private readonly LayoutTree _tree;
@@ -211,7 +211,7 @@ public sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 /// batches alive at once must copy.
 /// </para>
 /// </remarks>
-public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
+internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 {
     private readonly LayoutTree _tree;
     private readonly ISegmentSource _source;

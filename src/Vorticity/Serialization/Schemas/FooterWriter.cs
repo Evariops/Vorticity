@@ -7,7 +7,8 @@ using Vorticity.Serialization.FlatBuffers;
 namespace Vorticity.Serialization.Schemas;
 
 /// <summary>Builds the <c>Footer</c> table and its four spec dictionaries.</summary>
-public static class FooterWriter
+/// <inheritdoc cref="ArrayWriter" path="/remarks"/>
+internal static class FooterWriter
 {
     /// <summary>Writes the <c>Footer</c> table.</summary>
     /// <param name="b">The builder. No table may be open.</param>
@@ -149,7 +150,8 @@ public static class FooterWriter
 }
 
 /// <summary>Builds the <c>FileStatistics</c> table.</summary>
-public static class FileStatisticsWriter
+/// <inheritdoc cref="ArrayWriter" path="/remarks"/>
+internal static class FileStatisticsWriter
 {
     /// <summary>Writes the <c>FileStatistics</c> table.</summary>
     /// <param name="b">The builder. No table may be open.</param>

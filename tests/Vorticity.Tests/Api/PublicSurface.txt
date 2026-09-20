@@ -35,9 +35,6 @@ Vorticity:     property ArrayEncodingId EncodingId { get; }
 Vorticity:     property ReadOnlySpan<byte> IdUtf8 { get; }
 Vorticity:     property bool EvaluatesWithoutFullDecode { get; }
 Vorticity:     property bool SelectsWithoutFullDecode { get; }
-Vorticity: static class Vorticity.Arrays.ArrayDecoderTable
-Vorticity:     method ArrayDecoder Get(ArrayEncodingId, string)
-Vorticity:     method bool IsImplemented(ArrayEncodingId)
 Vorticity: enum Vorticity.Arrays.ArrayEncodingId
 Vorticity:     const ArrayEncodingId Alp = 32
 Vorticity:     const ArrayEncodingId AlpRd = 33
@@ -1750,9 +1747,6 @@ Vorticity:     method void RegisterChild(in LayoutNode, RowRange, in FieldMask, 
 Vorticity:     method void RegisterSegments(in LayoutNode, RowRange, in FieldMask, SegmentRequestSet)
 Vorticity:     property LayoutEncodingId EncodingId { get; }
 Vorticity:     property ReadOnlySpan<byte> IdUtf8 { get; }
-Vorticity: static class Vorticity.Layouts.LayoutReaderTable
-Vorticity:     method LayoutReader Get(LayoutEncodingId, string)
-Vorticity:     method bool IsImplemented(LayoutEncodingId)
 Vorticity: sealed class Vorticity.Layouts.LayoutTree
 Vorticity:     method LayoutNode GetNode(int)
 Vorticity:     method LayoutTree Parse(ReadOnlySpan<byte>, DType, ReadOnlySpan<string>, int)
@@ -1809,16 +1803,6 @@ Vorticity:     property bool IsEmpty { get; }
 Vorticity:     property long End { get; }
 Vorticity:     property long Length { get; }
 Vorticity:     property long Start { get; }
-Vorticity: sealed class Vorticity.Scan.BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
-Vorticity:     method IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken = default)
-Vorticity:     property DType Schema { get; }
-Vorticity:     property Projection Projection { get; }
-Vorticity:     property Projection ReadProjection { get; }
-Vorticity: sealed class Vorticity.Scan.BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
-Vorticity:     method ValueTask DisposeAsync()
-Vorticity:     method ValueTask<bool> MoveNextAsync()
-Vorticity:     property RecordBatch Current { get; }
-Vorticity:     property ScanRequest CurrentRequest { get; }
 Vorticity: static class Vorticity.Scan.ColumnSummaries
 Vorticity:     method IReadOnlyList<ColumnSummary> Of(VortexFile, IReadOnlyList<string>)
 Vorticity:     method IReadOnlyList<ColumnSummary> Of(VortexFile, int = default)
@@ -2134,10 +2118,6 @@ Vorticity: ref struct Vorticity.Serialization.Schemas.ArrayView
 Vorticity:     method ArrayView Root(ReadOnlySpan<byte>, ref int)
 Vorticity:     property ArrayNodeView Root_ { get; }
 Vorticity:     property ReadOnlySpan<BufferSpec> Buffers { get; }
-Vorticity: static class Vorticity.Serialization.Schemas.ArrayWriter
-Vorticity:     method int Write(FlatBufferBuilder, int, ReadOnlySpan<BufferSpec>)
-Vorticity:     method int WriteNode(FlatBufferBuilder, ushort, ReadOnlySpan<byte>, ReadOnlySpan<int>, ReadOnlySpan<ushort>, int)
-Vorticity:     method int WriteStats(FlatBufferBuilder, in ArrayStatsValues)
 Vorticity: enum Vorticity.Serialization.Schemas.BufferCompression
 Vorticity:     const BufferCompression LZ4 = 1
 Vorticity:     const BufferCompression None = 0
@@ -2158,8 +2138,6 @@ Vorticity: ref struct Vorticity.Serialization.Schemas.FileStatisticsView
 Vorticity:     method ArrayStatsView GetFieldStats(int)
 Vorticity:     method FileStatisticsView Root(ReadOnlySpan<byte>, ref int)
 Vorticity:     property int FieldStatsCount { get; }
-Vorticity: static class Vorticity.Serialization.Schemas.FileStatisticsWriter
-Vorticity:     method int Write(FlatBufferBuilder, ReadOnlySpan<int>)
 Vorticity: ref struct Vorticity.Serialization.Schemas.FooterView
 Vorticity:     method CompressionScheme GetCompressionScheme(int)
 Vorticity:     method FooterView Root(ReadOnlySpan<byte>, ref int)
@@ -2170,8 +2148,6 @@ Vorticity:     property int ArraySpecCount { get; }
 Vorticity:     property int CompressionSpecCount { get; }
 Vorticity:     property int EncryptionSpecCount { get; }
 Vorticity:     property int LayoutSpecCount { get; }
-Vorticity: static class Vorticity.Serialization.Schemas.FooterWriter
-Vorticity:     method int Write(FlatBufferBuilder, ReadOnlySpan<int>, ReadOnlySpan<int>, ReadOnlySpan<SegmentSpec>, ReadOnlySpan<CompressionScheme>, int)
 Vorticity: ref struct Vorticity.Serialization.Schemas.LayoutView
 Vorticity:     method LayoutView GetChild(int)
 Vorticity:     method LayoutView Root(ReadOnlySpan<byte>, ref int)
@@ -2181,8 +2157,6 @@ Vorticity:     property bool IsNull { get; }
 Vorticity:     property int ChildCount { get; }
 Vorticity:     property ulong RowCount { get; }
 Vorticity:     property ushort Encoding { get; }
-Vorticity: static class Vorticity.Serialization.Schemas.LayoutWriter
-Vorticity:     method int Write(FlatBufferBuilder, ushort, ulong, ReadOnlySpan<byte>, ReadOnlySpan<int>, ReadOnlySpan<uint>)
 Vorticity: ref struct Vorticity.Serialization.Schemas.PostscriptMetadataView
 Vorticity:     property PostscriptSegmentView Segment { get; }
 Vorticity:     property ReadOnlySpan<byte> KeyUtf8 { get; }
@@ -2203,10 +2177,6 @@ Vorticity:     property PostscriptSegmentView Statistics { get; }
 Vorticity:     property bool HasDType { get; }
 Vorticity:     property bool HasStatistics { get; }
 Vorticity:     property int MetadataCount { get; }
-Vorticity: static class Vorticity.Serialization.Schemas.PostscriptWriter
-Vorticity:     method int Write(FlatBufferBuilder, int, int, int, int, ReadOnlySpan<int>)
-Vorticity:     method int WriteMetadata(FlatBufferBuilder, ReadOnlySpan<byte>, int)
-Vorticity:     method int WriteSegment(FlatBufferBuilder, in SegmentSpec, CompressionScheme)
 Vorticity: struct Vorticity.Serialization.Schemas.SegmentSpec
 Vorticity:     ctor SegmentSpec(ulong, uint, byte, byte, ushort)
 Vorticity:     field byte AlignmentExponent

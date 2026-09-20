@@ -51,7 +51,12 @@ public struct ArrayStatsValues
 }
 
 /// <summary>Builds the <c>Array</c>, <c>ArrayNode</c> and <c>ArrayStats</c> tables.</summary>
-public static class ArrayWriter
+/// <remarks>
+/// Internal with the other four table writers: a caller writes a file through
+/// <c>VortexFileWriter</c>, and the views on the read side are public for the opposite reason —
+/// the bytes they parse are handed out by <c>ArrayNode.Metadata</c> and its neighbours.
+/// </remarks>
+internal static class ArrayWriter
 {
     /// <summary>Writes one <c>ArrayStats</c> table.</summary>
     /// <param name="b">The builder. No table may be open.</param>
@@ -173,7 +178,8 @@ public static class ArrayWriter
 }
 
 /// <summary>Builds the <c>Layout</c> table.</summary>
-public static class LayoutWriter
+/// <inheritdoc cref="ArrayWriter" path="/remarks"/>
+internal static class LayoutWriter
 {
     /// <summary>Writes one <c>Layout</c> table.</summary>
     /// <param name="b">The builder. No table may be open.</param>

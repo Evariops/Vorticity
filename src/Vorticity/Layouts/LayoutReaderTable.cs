@@ -12,7 +12,8 @@ using Vorticity.Arrays;
 namespace Vorticity.Layouts;
 
 /// <summary>Maps a resolved <see cref="LayoutEncodingId"/> to its reader.</summary>
-public static class LayoutReaderTable
+/// <inheritdoc cref="Vorticity.Arrays.ArrayDecoderTable" path="/remarks"/>
+internal static class LayoutReaderTable
 {
     private static readonly LayoutReader?[] Readers =
         new LayoutReader?[EncodingRegistry.MaxLayoutEncodingId + 1];

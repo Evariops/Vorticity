@@ -16,7 +16,11 @@ namespace Vorticity.Arrays;
 /// Maps a resolved <see cref="ArrayEncodingId"/> to its decoder. Built once at type-init and
 /// shared by every scan.
 /// </summary>
-public static class ArrayDecoderTable
+/// <remarks>
+/// Internal: the table answers a dispatch question the scan asks and a caller does not, and there
+/// is no registration on it, so nothing outside could add to what it maps.
+/// </remarks>
+internal static class ArrayDecoderTable
 {
     private static readonly ArrayDecoder?[] Decoders = new ArrayDecoder?[EncodingRegistry.MaxArrayEncodingId + 1];
 
