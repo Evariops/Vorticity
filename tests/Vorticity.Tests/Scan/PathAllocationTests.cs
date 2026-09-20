@@ -188,10 +188,15 @@ public sealed class PathAllocationTests
         // bytes buy: a dictionary column answers an equality from its values and expands through
         // its codes, taking `filtered scan, string equality, dict` from 380,6 to 276,4 us against
         // the reference implementation, 2,856 to 1,83 (--ratio-check, 21 rounds, two runs).
-        ("open, first batch", File, 133_760, FirstBatch),
+        // +8 B ON FOUR AXES, le 2026-09-20 : une lane porte une référence de plus, le délégué qui
+        // lance son corps, lié une fois au premier split au lieu d'être reconstruit à chacun. Huit
+        // octets par scan contre quatre-vingts par split au degré 2 — 3 514 → 3 434 par lot, tous
+        // threads confondus — donc l'échange se rembourse au deuxième split d'un scan parallèle et
+        // coûte huit octets une fois à tous les autres.
+        ("open, first batch", File, 133_768, FirstBatch),
         ("full scan", File, 190_976, FullScan),
         ("projected scan, 1 of 5 columns", File, 134_144, ProjectedScan),
-        ("take 64 rows from 64 splits", File, 192_008, ScatteredTake),
+        ("take 64 rows from 64 splits", File, 192_016, ScatteredTake),
         ("selective filter, pruning on", File, 141_824, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
@@ -217,7 +222,7 @@ public sealed class PathAllocationTests
         // reference each on the enumerable, the enumerator and the lane's context, 32 B in all --
         // and this axis had none of the headroom the others carry. Loosened by exactly that, plus
         // the 32 B of headroom the neighbouring axes have.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_720, FullScan),
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_728, FullScan),
         ("scan, vortex.pco", "encodings/pco", 29_184, FullScan),
         // 27 648 -> 27 712 on 2026-09-19, and here is the argument. Decompressing a node's frames
         // used the one-shot `ZstandardDecoder.TryDecompress`, which builds and tears down a native
@@ -226,7 +231,7 @@ public sealed class PathAllocationTests
         // `zstd` axis from 7 476 to 6 844 us and `zstd_nullable` from 2 170 to 2 012 (bench/ab.sh,
         // 21 rounds, intervals [0,913; 0,937] and [0,921; 0,936]). Sixty-four bytes once, against
         // seven and a half per cent of both axes.
-        ("scan, vortex.zstd", "encodings/zstd", 27_720, FullScan),
+        ("scan, vortex.zstd", "encodings/zstd", 27_728, FullScan),
         ("scan, vortex.map", "encodings/map", 28_160, FullScan),
         ("scan, vortex.variant", "encodings/variant", 27_648, FullScan),
     ];

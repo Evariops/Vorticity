@@ -26,7 +26,13 @@
 //
 // The one unavoidable per-batch allocation is the RecordBatch itself: §12.1 makes it a sealed class
 // with readonly fields, so it cannot be recycled. Nothing else allocates in steady state, and
-// ZeroAllocationsPerBatch asserts exactly that bound rather than a round number.
+// ScanAllocationTests asserts exactly that bound rather than a round number.
+//
+// THAT SENTENCE IS ABOUT A SEQUENTIAL SCAN, and saying so is the point of this paragraph. A degree
+// above one puts the decode on the pool, where the per-thread probe the sequential axis uses cannot
+// see it -- so "nothing else" there means nothing else the CALLER pays. What a parallel scan costs
+// across every thread is a ceiling of its own, measured over a whole scan, and the two claims are
+// not the same claim.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -758,7 +764,14 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
             Lane lane = _lanes[(int)(_started % lanes)];
             lane.Rows = split;
-            lane.Work = Task.Run(() => RunLaneAsync(lane), _token);
+            // BOUND ONCE PER LANE, not once per split, and not before the lane is first used. The
+            // pump wrote `Task.Run(() => RunLaneAsync(lane))`, which captured the lane and so built
+            // a closure and a delegate every time a split started; a lane outlives every split it
+            // runs, and the lane is all the closure ever held. Bound here rather than where the
+            // lane is made, because a scan that never pumps -- which is every sequential one --
+            // would otherwise pay for a delegate it does not call.
+            lane.Start ??= () => RunLaneAsync(lane);
+            lane.Work = Task.Run(lane.Start, _token);
             _started++;
         }
     }
@@ -858,5 +871,8 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         internal RowRange Rows { get; set; }
 
         internal Task<int>? Work { get; set; }
+
+        /// <summary>This lane's body, bound to it once so the pump allocates nothing to start it.</summary>
+        internal Func<Task<int>>? Start { get; set; }
     }
 }

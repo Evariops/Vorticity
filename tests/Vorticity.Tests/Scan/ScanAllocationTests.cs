@@ -29,9 +29,19 @@ using Xunit;
 
 namespace Vorticity.Tests.Scan;
 
+// IN THE SERIALISED COLLECTION since the degree-2 axis joined: that axis counts every thread's
+// bytes, so anything else the process allocates while it runs lands in its figure. Measured in the
+// suite without this, it read 560 805 B a batch against 3 434 alone.
+[Collection(nameof(AllocationCollection))]
 public sealed class ScanAllocationTests
 {
     private const string Multi = "distributions/high_cardinality_i64_r8193";
+
+    /// <summary>
+    /// What a batch of a degree-2 scan may cost across every thread: 3 434 measured, three runs
+    /// apart, to the byte. Was 3 514 while the pump built a closure and a delegate for every split.
+    /// </summary>
+    private const long ParallelPerBatchCeiling = 3_500;
     private const string Struct = "containers/uncompressed_canonical";
 
     /// <summary>65536 rows in 64 zones of 1024.</summary>
@@ -131,6 +141,34 @@ public sealed class ScanAllocationTests
         Assert.Equal(batchObject, perBatch);
     }
 
+    /// <summary>What a scan at a degree above one allocates per batch, across every thread.</summary>
+    /// <remarks>
+    /// MEASURED ACROSS THE PROCESS AND NOT THE CALLER'S THREAD, unlike every other axis here, and
+    /// the parallel path is why: a lane decodes on the pool, so the bytes it allocates belong to a
+    /// thread the caller never touches, and `GetAllocatedBytesForCurrentThread` would report a
+    /// figure that leaves out most of what a degree buys or costs. The per-thread instrument also
+    /// cannot span an await, which the first batch of a parallel scan always is.
+    /// <para>
+    /// So the claim is coarser than the sequential one -- a ceiling, not an equality with one
+    /// <see cref="RecordBatch"/> -- and it covers what the sequential axis cannot see at all: a
+    /// per-split closure, a per-split delegate, anything the pump allocates to start a lane.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ADegreeAboveOneAllocatesWithinItsPerBatchCeiling()
+    {
+        ReleaseOnlyCeilings.Require();
+        Decoders.EnsureRegistered();
+
+        long perBatch = await MeasureWholeScan(Multi, 500, degree: 2);
+
+        Assert.True(
+            perBatch <= ParallelPerBatchCeiling,
+            string.Create(
+                CultureInfo.InvariantCulture,
+                $"{perBatch} B per batch at degree 2 against a ceiling of {ParallelPerBatchCeiling}"));
+    }
+
     /// <summary>
     /// A descending key-ordered scan costs the two <see cref="RecordBatch"/> objects a reversal
     /// needs, and nothing else.
@@ -224,7 +262,46 @@ public sealed class ScanAllocationTests
         return after - before;
     }
 
-    private static async Task<long> MeasurePerBatch(string entry, int cap)
+    /// <summary>Every thread's bytes over one whole scan, divided by the batches it produced.</summary>
+    private static async Task<long> MeasureWholeScan(string entry, int cap, int degree)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(
+            Corpus.Path(entry), CancellationToken.None);
+
+        // Warm-ups for the same reason the per-thread probe has them: the first scan JITs, the
+        // second lets a fresh enumerator's arenas reach the size the file needs.
+        for (int warm = 0; warm < 2; warm++)
+        {
+            await DrainAt(file, cap, degree);
+        }
+
+        long before = GC.GetTotalAllocatedBytes(precise: true);
+        int batches = await DrainAt(file, cap, degree);
+        long after = GC.GetTotalAllocatedBytes(precise: true);
+
+        Assert.True(batches >= 5, "the measurement needs several batches");
+        return (after - before) / batches;
+    }
+
+    private static async Task<int> DrainAt(VortexFile file, int cap, int degree)
+    {
+        int batches = 0;
+        await foreach (RecordBatch batch in file.Scan()
+            .WithMaxBatchRows(cap)
+            .WithDegreeOfParallelism(degree)
+            .ExecuteAsync())
+        {
+            Assert.True(batch.RowCount > 0);
+            batches++;
+        }
+
+        return batches;
+    }
+
+    private static async Task<long> MeasurePerBatch(string entry, int cap) =>
+        await MeasurePerBatch(entry, cap, degree: 1);
+
+    private static async Task<long> MeasurePerBatch(string entry, int cap, int degree)
     {
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(entry), CancellationToken.None);
 
@@ -235,8 +312,11 @@ public sealed class ScanAllocationTests
             await Drain(file, cap);
         }
 
-        IAsyncEnumerator<RecordBatch> enumerator =
-            file.Scan().WithMaxBatchRows(cap).ExecuteAsync().GetAsyncEnumerator();
+        IAsyncEnumerator<RecordBatch> enumerator = file.Scan()
+            .WithMaxBatchRows(cap)
+            .WithDegreeOfParallelism(degree)
+            .ExecuteAsync()
+            .GetAsyncEnumerator();
         try
         {
             // Skip the first batches of this enumerator: its own arenas grow on the way in, which
