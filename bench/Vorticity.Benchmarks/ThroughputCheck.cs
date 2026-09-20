@@ -849,7 +849,7 @@ internal static class ThroughputCheck
         new("chunked_mixed_validity", 0.70, 0.064),   // raised deliberately: three processes never measured under it
         new("chunked_one_chunk", 0.14, 0.020),   // raised deliberately: three processes never measured under it
         new("chunked_varbinview", 0.24, 0.018),   // raised deliberately: three processes never measured under it
-        new("constant", 0.072, 0.023),   // 3 passes, spread 0.069-0.072; was 0.34, -78.7% (ConstantForm par defaut)
+        new("constant", 0.049, 0.061),   // 3 passes, spread 0.046-0.049; was 0.072, -32.2%
         new("datetimeparts", 0.23, 0.040),   // raised deliberately: three processes never measured under it
         new("decimal", 0.14, 0.025),   // raised deliberately: three processes never measured under it
         new("decimal_byte_parts", 0.14, 0.059),   // raised deliberately: three processes never measured under it
@@ -882,7 +882,7 @@ internal static class ThroughputCheck
         new("table_wide", 0.35, 0.061),   // axe entier, 3 passes, spread 0.35-0.35; was 0.43. Le +7 % d'après le refacto est rattrapé (7i, 7k)
         new("varbin", 0.18, 0.017),   // 3 passes, spread 0.18-0.18; was 0.19, -6.2%
         new("varbinview", 0.22, 0.028),   // raised deliberately: three processes never measured under it
-        new("variant", 0.39, 0.015),   // 3 passes, spread 0.38-0.39; was 3.48, -88.8%. Le pendant en ecriture du meme fait : la constante traversait le transit du writer en etant re-tuilee, elle le traverse maintenant comme un element et un compte
+        new("variant", 0.093, 0.240),   // 3 passes, spread 0.071-0.093; was 0.39, -76.1%. Dispersion 0.24, the widest of this table: re-run before believing a red
         new("zigzag", 0.33, 0.010),   // 3 passes, spread 0.32-0.33; was 0.34, -1.6%
         new("zstd", 0.91, 0.005),   // raised deliberately: three processes never measured under it
         new("zstd_buffers", 0.060, 0.110),   // raised deliberately: three processes never measured under it
