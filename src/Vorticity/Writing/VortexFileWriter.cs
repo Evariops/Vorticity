@@ -640,9 +640,21 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// Writes every index payload the builders have closed, between data chunks, as regions no
     /// layout references and no footer lists.
     /// </summary>
-    private async ValueTask FlushIndexesAsync(CancellationToken cancellationToken)
+    /// <param name="cancellationToken">Cancels the writes.</param>
+    /// <param name="judged">
+    /// Whether the budget has already ruled on these payloads. True only on the completion path,
+    /// which judges over the whole file before it flushes; between chunks the budget is asked here.
+    /// </param>
+    private async ValueTask FlushIndexesAsync(CancellationToken cancellationToken, bool judged = false)
     {
         if (_indexes is not { HasPending: true } indexes)
+        {
+            return;
+        }
+
+        // Between chunks the budget is asked first, and holds the payloads back when it cannot yet
+        // answer. The completion path has already judged by the time it flushes, so it says so.
+        if (!judged && !indexes.TryOpenFlush(_sink.Position))
         {
             return;
         }
@@ -896,7 +908,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         long interleaved = _indexes?.FileBytes ?? 0;
         _indexes?.EndOfData();
         _indexes?.Judge();
-        await FlushIndexesAsync(cancellationToken).ConfigureAwait(false);
+        _indexes?.SettleBudget(dataEnd - interleaved);
+        await FlushIndexesAsync(cancellationToken, judged: true).ConfigureAwait(false);
         _indexes?.Close(_columns, _chunkRows, _blockRows, dataEnd - interleaved);
 
         // A long run's fence pages, which name the regions just written.

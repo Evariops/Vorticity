@@ -331,11 +331,18 @@ public static class VortexFileIndexer
                 int firstBlock = checked((int)(from / blockRows));
                 indexes.CloseChunk(firstBlock, VortexFileWriter.ChunkBlocks(to - from, blockRows), from, to - from);
                 indexes.Judge();
-                await FlushAsync(indexes, sink, encodings, cancellationToken).ConfigureAwait(false);
+
+                // The budget before the bytes, as on the write path: the file's own data bytes are
+                // known here, the indexer reading a file that is already whole.
+                if (indexes.TryOpenFlush(file.FileLength + indexes.FileBytes))
+                {
+                    await FlushAsync(indexes, sink, encodings, cancellationToken).ConfigureAwait(false);
+                }
             }
 
             indexes.EndOfData();
             indexes.Judge();
+            indexes.SettleBudget(file.FileLength);
             await FlushAsync(indexes, sink, encodings, cancellationToken).ConfigureAwait(false);
             indexes.Close(columns, chunkRows, blockRows, file.FileLength);
             await indexes.WriteFencePagesAsync(sink, cancellationToken).ConfigureAwait(false);

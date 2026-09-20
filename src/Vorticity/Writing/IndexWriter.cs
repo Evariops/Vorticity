@@ -876,6 +876,25 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
+    /// <summary>
+    /// Settles the budget over the whole file, before the last payloads are written.
+    /// </summary>
+    /// <param name="dataBytes">The file's data bytes, the index regions excluded.</param>
+    /// <remarks>
+    /// <see cref="Close"/> asks the same question and used to be the only one asking it, which was
+    /// one flush too late: everything it abandoned had already been written. It also asked only
+    /// once a payload had been placed, so a file whose indexes all fit between two chunks was never
+    /// judged at all while it was being written. Asked here, over the living bytes rather than the
+    /// placed ones, the verdict lands before the bytes do.
+    /// </remarks>
+    internal void SettleBudget(long dataBytes)
+    {
+        if (dataBytes >= BudgetFloor && LivingBytes > 0 && OverBudget(dataBytes))
+        {
+            AbandonForBudget(dataBytes);
+        }
+    }
+
     /// <summary>Closes what the end of the data closes: partial generations, file-level filters.</summary>
     internal void EndOfData()
     {
@@ -905,6 +924,45 @@ internal sealed class IndexWriter : IDisposable
 
             return false;
         }
+    }
+
+    /// <summary>
+    /// Whether the payloads queued so far may be written now, the budget having been asked first.
+    /// </summary>
+    /// <param name="position">Where the sink stands, so the data written so far can be derived.</param>
+    /// <returns><see langword="false"/> when nothing is to be written between chunks this time.</returns>
+    /// <remarks>
+    /// <para>
+    /// Asked before a byte goes out, where the budget used to be asked after. The order is the
+    /// whole difference: an index the budget refuses used to be abandoned having already written
+    /// itself, and what it wrote stayed in the file -- up to a mebibyte of it, because that is how
+    /// much data has to arrive before the share of it means anything.
+    /// </para>
+    /// <para>
+    /// Below that threshold the payloads are held rather than judged. Judging them there would
+    /// refuse an index that a full file would have afforded, which is what the threshold has always
+    /// been for; holding them costs the memory of an index over one mebibyte of data, and costs it
+    /// only until the data arrives. At or above it the verdict is the same one
+    /// <see cref="Placed"/> reached a moment too late.
+    /// </para>
+    /// </remarks>
+    internal bool TryOpenFlush(long position)
+    {
+        long dataBytes = position - FileBytes;
+        if (dataBytes < BudgetFloor)
+        {
+            return false;
+        }
+
+        if (!OverBudget(dataBytes))
+        {
+            return true;
+        }
+
+        AbandonForBudget(dataBytes);
+
+        // A required builder keeps its payloads, and they are still owed their write.
+        return HasPending;
     }
 
     /// <summary>
@@ -961,11 +1019,17 @@ internal sealed class IndexWriter : IDisposable
         // The budget is a share of the data, and a share of a few kilobytes says nothing: it is
         // enforced once the data passes a mebibyte, and again at the end over the whole file.
         long dataBytes = position - FileBytes;
-        if (dataBytes >= 1L << 20 && OverBudget(dataBytes))
+        if (dataBytes >= BudgetFloor && OverBudget(dataBytes))
         {
             AbandonForBudget(dataBytes);
         }
     }
+
+    /// <summary>
+    /// The data a file must hold before its index budget means anything: a share of a few kilobytes
+    /// says nothing, and refusing an index on one would refuse it on a file that could afford it.
+    /// </summary>
+    private const long BudgetFloor = 1L << 20;
 
     /// <summary>
     /// The bytes of the indexes still alive. What an abandoned builder already wrote is dead weight
