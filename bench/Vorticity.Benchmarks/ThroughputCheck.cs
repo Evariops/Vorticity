@@ -548,12 +548,19 @@ internal static class ThroughputCheck
     /// <c>zstd_nullable</c> is the only entry, and it is the LAST of the fifty-seven, so its abort
     /// cost the whole pass every time -- exit 134 after fifty-six files measured. Vortex Rust
     /// 0.86.1 READS it (the scan axis has referenced it since R23) and refuses to write it back:
-    /// <c>Other error: append_to_builder for Zstd requires a variable-binary builder</c>. The
-    /// non-nullable <c>zstd</c> writes fine at 225x, so it is validity plus zstd on the reference's
-    /// write path, inside its own writer, on arrays its own scan produced. Nothing here can fix it;
-    /// what this repository owed was to say which file, which call and what the reference actually
-    /// refused -- see <c>tools/vxbench-rs/src/lib.rs</c>, which now prints the error instead of
-    /// flattening it into an i64 nobody can read.
+    /// <c>Other error: append_to_builder for Zstd requires a variable-binary builder</c>. Nothing
+    /// here can fix it; what this repository owed was to say which file, which call and what the
+    /// reference actually refused -- see <c>tools/vxbench-rs/src/lib.rs</c>, which now prints the
+    /// error instead of flattening it into an i64 nobody can read.
+    /// <para>
+    /// What separates this file from the <c>zstd</c> that writes fine at 225x is the dtype, not the
+    /// validity. <c>zstd</c> is a <c>VarBinView</c> column; this one is a <c>vortex.zstd</c> over an
+    /// <c>i64?</c>, and a bare frame over a non-nullable <c>f64</c> is refused the same way. The
+    /// reference's Zstd array replaces the vtable's canonicalize-then-append default with a path
+    /// that takes variable-binary builders only, and bails on anything else -- while its own
+    /// <c>Zstd::from_primitive</c> is public API and is what builds this very corpus file. So the
+    /// shape is one the reference creates, decodes and ships, and cannot re-encode.
+    /// </para>
     /// </para>
     /// </remarks>
     private static readonly string[] ReferenceCannotWrite = ["zstd_nullable"];

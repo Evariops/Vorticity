@@ -145,10 +145,10 @@ internal static class Report
 
             foreach (Scenario scenario in Scenarios)
             {
-                Measurement? ours = await MeasureAsync(
+                (Measurement? ours, _) = await MeasureAsync(
                     OurCommand(scenario.Name, path, rows), runs).ConfigureAwait(false);
-                Measurement? theirs = scenario.Reference is null
-                    ? null
+                (Measurement? theirs, string? refusal) = scenario.Reference is null
+                    ? (null, null)
                     : await MeasureAsync(
                         (reference, scenario.Reference(path, rows)), runs).ConfigureAwait(false);
 
@@ -160,10 +160,11 @@ internal static class Report
                         $"reference {other.Rows}. A ratio between two different answers is not a ratio.");
                 }
 
-                table.Add(new Row(rows, bytes, scenario, ours, theirs));
+                table.Add(new Row(rows, bytes, scenario, ours, theirs, refusal));
                 Console.Error.WriteLine($"  {scenario.Name}: " +
                     (ours is null ? "refused" : $"{ours.WallMs.Median:F0} ms") + " against " +
-                    (theirs is null ? "no reference" : $"{theirs.WallMs.Median:F0} ms"));
+                    (theirs is not null ? $"{theirs.WallMs.Median:F0} ms"
+                        : scenario.Reference is null ? "no reference" : "a refusal"));
             }
         }
 
@@ -182,7 +183,12 @@ internal static class Report
         return disagreed ? 1 : 0;
     }
 
-    private static async Task<Measurement?> MeasureAsync((string Exe, string[] Args) command, int runs)
+    /// <summary>Runs one side of one scenario, or says why it declined.</summary>
+    /// <param name="command">The executable and its arguments.</param>
+    /// <param name="runs">Timed runs, after one discarded.</param>
+    /// <returns>The measurement, or null with the first line the process wrote to its error stream.</returns>
+    private static async Task<(Measurement? Measurement, string? Refusal)> MeasureAsync(
+        (string Exe, string[] Args) command, int runs)
     {
         List<double> wall = [];
         List<double> cpu = [];
@@ -217,10 +223,20 @@ internal static class Report
             {
                 // A side that refuses a scenario is reported, not thrown: a table with one hole and
                 // the reason beside it is worth more than no table.
+                // The shim prefixes its message with its own name and the file it was given. Both
+                // are this machine's, and the published page quotes what is left.
+                string reason = First(error);
+                foreach (string argument in command.Args)
+                {
+                    reason = reason.Replace(argument + ": ", string.Empty, StringComparison.Ordinal);
+                }
+
+                reason = reason.Replace(
+                    Path.GetFileName(command.Exe) + ": ", string.Empty, StringComparison.Ordinal);
                 Console.Error.WriteLine(
                     $"  refused: {Path.GetFileName(command.Exe)} {string.Join(' ', command.Args.Take(2))} " +
-                    $"exited {child.ExitCode}: {First(error)}");
-                return null;
+                    $"exited {child.ExitCode}: {reason}");
+                return (null, reason);
             }
 
             if (run == 0)
@@ -234,7 +250,7 @@ internal static class Report
             rss.Add(Value(output, "rss_bytes="));
         }
 
-        return new Measurement(rows, Spread.Of(wall), Spread.Of(cpu), Spread.Of(rss));
+        return (new Measurement(rows, Spread.Of(wall), Spread.Of(cpu), Spread.Of(rss)), null);
     }
 
     private static long Value(string output, string key)
@@ -458,7 +474,15 @@ internal static class Report
 
     private sealed record Measurement(long Rows, Spread WallMs, Spread CpuMs, Spread RssBytes);
 
-    private sealed record Row(int Rows, long Bytes, Scenario Scenario, Measurement? Ours, Measurement? Theirs);
+    /// <param name="Rows">The fixture's row count.</param>
+    /// <param name="Bytes">The fixture's size.</param>
+    /// <param name="Scenario">What was asked of both sides.</param>
+    /// <param name="Ours">Our measurement, or null when we refused.</param>
+    /// <param name="Theirs">The reference's, or null when it refused or was not asked.</param>
+    /// <param name="Refusal">What the reference said when it refused, so the page can quote it.</param>
+    private sealed record Row(
+        int Rows, long Bytes, Scenario Scenario, Measurement? Ours, Measurement? Theirs,
+        string? Refusal);
 
     private static string Text(List<Row> table, int runs)
     {
@@ -469,28 +493,40 @@ internal static class Report
             "ours MiB  rust MiB  rows out");
         foreach (Row row in table)
         {
+            bool asked = row.Scenario.Reference is not null;
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"{row.Rows,-10:N0} {row.Scenario.Name,-14} {Wall(row.Ours),-20} {Wall(row.Theirs),-20} " +
+                $"{row.Rows,-10:N0} {row.Scenario.Name,-14} {Wall(row.Ours),-20} {Wall(row.Theirs, asked),-20} " +
                 $"{Ratio(row),-7} {Side(row.Ours, m => m.RssBytes.Median / (1024 * 1024)),8}  " +
-                $"{Side(row.Theirs, m => m.RssBytes.Median / (1024 * 1024)),8}  " +
+                $"{Side(row.Theirs, m => m.RssBytes.Median / (1024 * 1024), asked: asked),8}  " +
                 $"{(row.Ours is null ? "refused" : row.Ours.Rows.ToString("N0", CultureInfo.InvariantCulture)),10}"));
         }
 
         return text.ToString();
     }
 
-    private static string Side(Measurement? measurement, Func<Measurement, double> of, string unit = "") =>
+    private static string Side(
+        Measurement? measurement, Func<Measurement, double> of, string unit = "", bool asked = true) =>
         measurement is null
-            ? "refused"
+            ? Absent(asked)
             : string.Create(CultureInfo.InvariantCulture, $"{of(measurement):F0}{unit}");
 
     /// <summary>The median with the spread the runs actually showed, which is what says whether a
     /// difference is one.</summary>
-    private static string Wall(Measurement? measurement) =>
+    private static string Wall(Measurement? measurement, bool asked = true) =>
         measurement is null
-            ? "refused"
+            ? Absent(asked)
             : string.Create(CultureInfo.InvariantCulture,
                 $"{measurement.WallMs.Median:F0} ({measurement.WallMs.Low:F0}-{measurement.WallMs.High:F0})");
+
+    /// <summary>
+    /// Why a cell is empty: a side that was asked and declined, or one that was never asked.
+    /// </summary>
+    /// <remarks>
+    /// The two are not the same claim, and printing "refused" for both says the reference failed at
+    /// something it was never given. The shim has no append entry point; that is a gap in this
+    /// harness, not a verdict on the reference.
+    /// </remarks>
+    private static string Absent(bool asked) => asked ? "refused" : "not asked";
 
     private static string Markdown(List<Row> table, int runs)
     {
@@ -536,11 +572,12 @@ internal static class Report
             text.AppendLine("|---|---|---|---|---|---|---|");
             foreach (Row row in of)
             {
+                bool asked = row.Scenario.Reference is not null;
                 text.AppendLine(string.Create(CultureInfo.InvariantCulture,
                     $"| `{row.Scenario.Name}` | {row.Scenario.What} | {Wall(row.Ours)} | " +
-                    $"{Wall(row.Theirs)} | {Ratio(row)} | " +
+                    $"{Wall(row.Theirs, asked)} | {Ratio(row)} | " +
                     $"{Side(row.Ours, m => m.RssBytes.Median / (1024 * 1024), " MiB")} | " +
-                    $"{Side(row.Theirs, m => m.RssBytes.Median / (1024 * 1024), " MiB")} |"));
+                    $"{Side(row.Theirs, m => m.RssBytes.Median / (1024 * 1024), " MiB", asked)} |"));
             }
 
             text.AppendLine();
@@ -599,8 +636,20 @@ internal static class Report
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
                 $"**Where the reference refused.** No figure for it on " +
                 $"{string.Join(", ", refused.Select(r => $"`{r.Scenario.Name}` at {r.Rows:N0} rows"))}."));
+            foreach (string reason in refused
+                .Select(r => r.Refusal).OfType<string>().Distinct())
+            {
+                text.AppendLine(string.Create(CultureInfo.InvariantCulture, $"It said: *{reason}*."));
+            }
+
             text.AppendLine("The harness records the refusal rather than dropping the row: a table that shows only");
-            text.AppendLine("what worked is not a comparison.");
+            text.AppendLine("what worked is not a comparison. Where the reason is a `vortex.zstd` array over a");
+            text.AppendLine("numeric column, the shape is one the reference itself builds — `Zstd::from_primitive`");
+            text.AppendLine("is public API and its own conformance corpus ships a `vortex.zstd` over an `i64?`. It");
+            text.AppendLine("reads such a file everywhere; what it cannot do is append one to a builder, its Zstd");
+            text.AppendLine("array replacing the canonicalize-then-append fallback with a path that takes");
+            text.AppendLine("variable-binary builders only. So the gap is in re-encoding, not in reading, and it is");
+            text.AppendLine("upstream rather than in the bytes we wrote.");
             text.AppendLine();
         }
 
@@ -610,7 +659,8 @@ internal static class Report
         {
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
                 $"**Where there is nothing to compare against.** {string.Join(", ", alone)}: the reference shim"));
-            text.AppendLine("exposes no such entry point, so the figure is ours alone and is not a ratio.");
+            text.AppendLine("exposes no such entry point, so the figure is ours alone and is not a ratio. Those");
+            text.AppendLine("cells read `not asked`, which is not the same claim as `refused`.");
             text.AppendLine();
         }
 
