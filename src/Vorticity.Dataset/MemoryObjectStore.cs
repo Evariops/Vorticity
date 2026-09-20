@@ -1,18 +1,3 @@
-// The store the tests run against - docs/13-dataset.md §11: "an in-memory store with injectable
-// latency, failures and crashes for the tests".
-//
-// WHY THE THREE INJECTIONS ARE NOT TEST HELPERS BUT PART OF THE STORE. §9.2's third invariant is
-// about a LATENCY, not a count: "the in-memory store injects a latency λ and no CPU cost; a cold
-// clustering-key lookup completes within D × λ, D the count of §9.1, which no total of requests can
-// prove, since parallel requests hide in a total". A store that could not be told to be slow could
-// not prove that invariant at all. Failures and crashes are the same argument applied to §8's
-// protocol: a commit is a conditional creation, and the interesting states are the ones where the
-// writer never learns the answer.
-//
-// A CRASH IS NOT A FAILURE, and the distinction is the whole reason both exist. A failure throws
-// and changes nothing. A crash STORES THE OBJECT AND THEN THROWS -- the put succeeded, the writer
-// was never told, and the next attempt will find the key taken by bytes it wrote itself. §8.2's
-// rebase exists for exactly that state, and a test that cannot produce it tests the easy half.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -20,11 +5,10 @@ using System.Threading.Tasks;
 
 namespace Vorticity.Dataset;
 
-/// <summary>An <see cref="IObjectStore"/> in memory, with injectable latency and faults.</summary>
-/// <remarks>
-/// Thread-safe, as the seam requires: one lock over a sorted map, held for the map's own work and
-/// never across an await.
-/// </remarks>
+/// <summary>
+/// An <see cref="IObjectStore"/> in memory, with injectable latency and faults. Thread-safe: one
+/// lock over a sorted map, never held across an await.
+/// </summary>
 public sealed class MemoryObjectStore : IObjectStore
 {
     private readonly object _gate = new object();
@@ -32,22 +16,19 @@ public sealed class MemoryObjectStore : IObjectStore
     private long _tokens;
     private bool _disposed;
 
-    /// <summary>One stored object: its bytes, the token it was created with, and when.</summary>
     private readonly record struct Entry(byte[] Bytes, string Token, DateTimeOffset Created);
 
     /// <summary>
-    /// The store's clock, which stamps every object it creates (<see cref="ObjectHead.LastModified"/>).
-    /// The system's by default; a test that needs an object older than a retention window moves its
-    /// own instead of waiting for one (§10).
+    /// The store's clock, which stamps every object it creates
+    /// (<see cref="ObjectHead.LastModified"/>). The system's by default.
     /// </summary>
     public TimeProvider Clock { get; set; } = TimeProvider.System;
 
-    /// <summary>The delay every operation waits before doing anything. Zero by default.</summary>
-    /// <remarks>
-    /// The delay is per OPERATION, so operations a caller issues together overlap and operations it
-    /// issues one after another do not: that is what makes the wall clock measure §9.1's dependent
-    /// depth rather than the request count.
-    /// </remarks>
+    /// <summary>
+    /// The delay every operation waits before doing anything, zero by default. It is per operation,
+    /// so operations issued together overlap and the wall clock measures the depth of the dependent
+    /// chain rather than the request count.
+    /// </summary>
     public TimeSpan Latency { get; set; }
 
     /// <summary>
@@ -58,7 +39,7 @@ public sealed class MemoryObjectStore : IObjectStore
 
     /// <summary>
     /// Asked after a <see cref="PutIfAbsentAsync"/> has stored its bytes; when it returns true the
-    /// call throws anyway, so the object exists and its writer never learned it (§8.2).
+    /// call throws anyway, so the object exists and its writer never learned it.
     /// </summary>
     public Func<string, bool>? CrashesAfterPut { get; set; }
 
@@ -142,8 +123,8 @@ public sealed class MemoryObjectStore : IObjectStore
         ObjectKey.Check(key);
         await StartAsync(ObjectOperation.PutIfAbsent, key, cancellationToken).ConfigureAwait(false);
 
-        // COPIED BEFORE THE LOCK, because the seam says the store copies what it needs before
-        // returning and a caller's buffer may be rented.
+        // Copied before the lock: the caller's buffer may be rented, and the store owes a copy
+        // before it returns.
         byte[] bytes = content.ToArray();
         PutOutcome outcome;
         lock (_gate)
@@ -227,9 +208,6 @@ public sealed class MemoryObjectStore : IObjectStore
     }
 
     /// <summary>The latency and the failure injection, in that order, before any operation's work.</summary>
-    /// <param name="operation">What is about to run.</param>
-    /// <param name="key">Its key, or the prefix for a listing.</param>
-    /// <param name="cancellationToken">Cancels the wait.</param>
     private async ValueTask StartAsync(ObjectOperation operation, string key, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed), this);
@@ -253,18 +231,13 @@ public sealed class MemoryObjectStore : IObjectStore
 /// <summary>The five operations of <see cref="IObjectStore"/>, for fault injection and counting.</summary>
 public enum ObjectOperation
 {
-    /// <summary><see cref="IObjectStore.GetRangeAsync"/>.</summary>
     GetRange = 0,
 
-    /// <summary><see cref="IObjectStore.HeadAsync"/>.</summary>
     Head = 1,
 
-    /// <summary><see cref="IObjectStore.PutIfAbsentAsync"/>.</summary>
     PutIfAbsent = 2,
 
-    /// <summary><see cref="IObjectStore.DeleteAsync"/>.</summary>
     Delete = 3,
 
-    /// <summary><see cref="IObjectStore.ListAsync"/>.</summary>
     List = 4,
 }

@@ -1,18 +1,3 @@
-// The read adapter of docs/13-dataset.md §11: "the reader's `ISegmentSource` over a data object is
-// an adapter on it, with 03 §3.5's coalescing".
-//
-// COALESCING IS THE WHOLE POINT, and 03 §3.5 says why: "the reader registers every segment of a
-// split before reading, which allows coalescing nearby ranges and parallelizing. This makes or
-// breaks performance on object storage." A source that turned each of a split's forty segments into
-// a request would pay forty round trips for what is often three. So the plan comes from the core's
-// own `SegmentCoalescer` -- the same gaps and budgets the local sources use -- and the runs it
-// produces are issued TOGETHER, which is what makes them one step of §9.2's critical path rather
-// than one each.
-//
-// IT COPIES, once per segment, and that is not laziness. A `VortexBuffer`'s contract is that its
-// base address satisfies its declared alignment; a run's bytes arrive in a pooled array where no
-// offset guarantees anything. `MemorySegmentSource` in the core made the same trade for the same
-// reason, and here the bytes crossed a network first, which dwarfs the copy.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -24,7 +9,12 @@ using Vorticity.Serialization.Schemas;
 
 namespace Vorticity.Dataset;
 
-/// <summary>An <see cref="ISegmentSource"/> over one object of an <see cref="IObjectStore"/>.</summary>
+/// <summary>
+/// An <see cref="ISegmentSource"/> over one object of an <see cref="IObjectStore"/>. Nearby
+/// segments are coalesced into runs and the runs issued together, so a split costs a few round
+/// trips instead of one per segment; each segment is then copied, since a buffer must sit at its
+/// declared alignment and a run's bytes arrive in a pooled array that guarantees nothing.
+/// </summary>
 public sealed class ObjectSegmentSource : ISegmentSource
 {
     private readonly IObjectStore _store;
@@ -35,12 +25,11 @@ public sealed class ObjectSegmentSource : ISegmentSource
     private string? _token;
     private bool _disposed;
 
-    /// <summary>Opens a source over <paramref name="key"/>.</summary>
-    /// <param name="store">The store.</param>
-    /// <param name="key">The object's key.</param>
-    /// <param name="options">The coalescing budgets, or null for the defaults.</param>
-    /// <param name="ownsStore">Whether disposing this source disposes the store.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="store"/> is null.</exception>
+    /// <summary>
+    /// Opens a source over <paramref name="key"/>, with null <paramref name="options"/> for the
+    /// default coalescing budgets. With <paramref name="ownsStore"/>, disposing the source disposes
+    /// the store.
+    /// </summary>
     public ObjectSegmentSource(
         IObjectStore store, string key, SegmentReadOptions? options = null, bool ownsStore = false)
     {
@@ -53,13 +42,10 @@ public sealed class ObjectSegmentSource : ISegmentSource
     }
 
     /// <summary>
-    /// The object's token as of the first call that learned it, or null before any call.
+    /// The object's token as of the first call that learned it, or null before any call. A caller
+    /// holding a token from a commit compares it to this one: a difference means the key was
+    /// deleted and created again, the only way an immutable object's bytes change.
     /// </summary>
-    /// <remarks>
-    /// §7 binds what a reader believes to the object it read. A caller that holds a token from a
-    /// commit compares it to this one; a difference means the key was deleted and created again,
-    /// which is the only way an immutable object's bytes change.
-    /// </remarks>
     public string? Token => Volatile.Read(ref _token);
 
     /// <inheritdoc/>
@@ -146,8 +132,7 @@ public sealed class ObjectSegmentSource : ISegmentSource
             runCount = SegmentCoalescer.Plan(sorted.AsSpan(0, slots.Count), runs.AsSpan(0, slots.Count), _options);
             ranges = new ObjectRange?[runCount];
 
-            // ISSUED TOGETHER. The store sees `runCount` requests in flight at once, which is one
-            // step of §9.2's critical path however many they are.
+            // Issued together, so the runs cost one step of the critical path however many they are.
             Task<ObjectRange>[] reads = new Task<ObjectRange>[runCount];
             for (int r = 0; r < runCount; r++)
             {
@@ -166,14 +151,9 @@ public sealed class ObjectSegmentSource : ISegmentSource
             }
             catch
             {
-                // Every read that did succeed still owns a buffer; none of them is the caller's.
-                //
-                // AND THE ONES STILL RUNNING OWN ONE THEY HAVE NOT PRODUCED YET. They were issued
-                // together, so a failure leaves the rest in flight: skipping them sent whatever
-                // they returned to the finalizer instead of the pool, and left their faults
-                // unobserved. Waiting for them costs the error the time of the slowest sibling,
-                // and buys a batch that owns nothing by the time it throws -- the reads carry the
-                // same cancellation token, so what cancels one is already cancelling the rest.
+                // A failure leaves the other reads in flight, each owning a buffer this batch must
+                // return: skipping them would send those buffers to the finalizer instead of the
+                // pool and leave their faults unobserved, so they are all awaited before throwing.
                 for (int r = 0; r < runCount; r++)
                 {
                     if (ranges[r] is { } taken)
@@ -272,7 +252,7 @@ public sealed class ObjectSegmentSource : ISegmentSource
         }
         catch (ArgumentOutOfRangeException cause) when (cause.ParamName == "offset")
         {
-            // The seam's own wording: "a range that starts wholly past the end is a format error".
+            // A range that starts wholly past the end is a format error, not an argument error.
             throw new VortexFormatException($"Range {offset}+{length} starts past the end of '{_key}'.", cause);
         }
     }
@@ -285,7 +265,6 @@ public sealed class ObjectSegmentSource : ISegmentSource
     }
 
     /// <summary>Records the object's token, and refuses a read of an object that changed under us.</summary>
-    /// <param name="range">What the store just handed back.</param>
     private void Note(ObjectRange range)
     {
         string? known = Volatile.Read(ref _token);

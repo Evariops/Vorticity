@@ -1,33 +1,14 @@
-// A compacted fragment - docs/13-dataset.md §6.4: "An entry with more than K fragments is compacted
-// by merging them (index bytes only) into one fragment in a new commit".
-//
-// A BUNDLE OF CONTAINERS, NOT A REBUILT INDEX, and what was measured decides it. Two of the index
-// kinds cannot be merged from their own bytes into one run. A Bloom tree's upper filters are sized
-// from the exact union of their blocks' hashes, which leaf filters do not give back; and a run's
-// payload -- fence pages, filter-tree children -- holds offsets into its own container, which a
-// copy into another container would have to find and rewrite, kind by kind. What §6.4 asks for is
-// the cost: one fragment, one ranged read, index bytes only. So the K containers are copied as they
-// are, one after another, each on its own alignment, behind a table that says where each begins;
-// the reader splits them back into containers and reads each as the fragment it was. Every offset
-// in every part still counts from that part's own first byte, which is why nothing is rewritten.
-//
-//   "VXFB" | padding | part 0 | padding | part 1 | ... | (u64 offset, u64 length) x n | u32 n | u32 version | "VXFB"
-//
-// WHAT IT DOES NOT MERGE is the runs: an entry indexed by n block ranges keeps n runs, one per
-// range, where a rebuild would write one. A pruner reads a run per range at no extra request, the
-// bundle being one read; a key cursor merges them as it merges any runs. Bundling a bundle flattens
-// it, so the parts never nest.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 
 namespace Vorticity.Dataset;
 
-/// <summary>Several index containers carried as one fragment (§6.4).</summary>
-/// <remarks>
-/// Internal: a bundle is how the indexer packs containers into one fragment, and no public member
-/// hands one to a caller or takes one back.
-/// </remarks>
+/// <summary>
+/// Several index containers carried as one fragment, so that many fragments cost one ranged read.
+/// The containers are copied byte for byte behind a table of offsets rather than merged: every
+/// offset inside a part still counts from that part's own first byte.
+/// </summary>
 internal static class FragmentBundle
 {
     /// <summary>The magic that opens and closes a bundle.</summary>
@@ -38,21 +19,16 @@ internal static class FragmentBundle
     /// <summary>The trailer: the part count, the version, the magic.</summary>
     private const int TrailerBytes = sizeof(uint) + sizeof(uint) + 4;
 
-    /// <summary>One table row: a part's offset and length.</summary>
     private const int RowBytes = sizeof(ulong) + sizeof(ulong);
 
-    /// <summary>Where every part starts: the alignment a container's own regions assume.</summary>
+    /// <summary>Every part starts here, because a container's own regions assume it.</summary>
     private const int Alignment = VortexLimits.MaxAlignment;
 
-    /// <summary>Whether <paramref name="fragment"/> is a bundle rather than one container.</summary>
-    /// <param name="fragment">A fragment's bytes.</param>
-    /// <returns>Whether it ends with the bundle's magic.</returns>
+    /// <summary>Whether a fragment is a bundle rather than a single container.</summary>
     public static bool IsBundle(ReadOnlySpan<byte> fragment) =>
         fragment.Length >= Magic.Length + TrailerBytes && fragment[^Magic.Length..].SequenceEqual(Magic);
 
     /// <summary>The containers a fragment carries: itself, or a bundle's parts.</summary>
-    /// <param name="fragment">A fragment's bytes, checked against its reference already.</param>
-    /// <returns>The containers, each one whole.</returns>
     /// <exception cref="CommitFormatException">A bundle whose table does not describe its bytes.</exception>
     public static IReadOnlyList<ReadOnlyMemory<byte>> Unpack(ReadOnlyMemory<byte> fragment)
     {
@@ -94,10 +70,10 @@ internal static class FragmentBundle
         return parts;
     }
 
-    /// <summary>One fragment carrying every container of <paramref name="fragments"/>, flattened.</summary>
-    /// <param name="fragments">Fragments: containers, or bundles whose parts are taken one by one.</param>
-    /// <returns>The bundle's bytes.</returns>
-    /// <exception cref="ArgumentException">No container is given.</exception>
+    /// <summary>
+    /// One fragment carrying every container of the given fragments; bundling a bundle flattens it,
+    /// so parts never nest.
+    /// </summary>
     public static byte[] Pack(IReadOnlyList<ReadOnlyMemory<byte>> fragments)
     {
         ArgumentNullException.ThrowIfNull(fragments);

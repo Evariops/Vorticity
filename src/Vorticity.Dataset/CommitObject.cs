@@ -1,22 +1,3 @@
-// Opens a commit object - docs/13-dataset.md §3: "A reader opens a commit with one ranged read of
-// its first 256 KiB, which covers the header by construction, exactly as a Vortex file is opened by
-// its tail (02 §1)."
-//
-// ONE READ, AND WHAT IT TAKES TO MEAN IT. The header is at offset zero, so the first read covers it
-// whenever the object is that read or larger. What the first read does NOT cover is the trailer of
-// a large object -- and the trailer is where the checksum and the intended length live. So opening
-// has two shapes and this class says which one it is in: a SMALL object (the read reached its end)
-// is verified whole, header and table and length; a LARGE one is opened on its header alone and
-// `VerifyAsync` is the offline pass that reads the trailer and the table. That is the honest
-// reading of §7's "no reader ever computes it. `verify` does, offline, object by object", applied
-// to the object's own checksum rather than to a data object's.
-//
-// A TEAR IS A SENTENCE, NEVER A GUESS. Every field a reader takes from these bytes is bounded by
-// the bytes themselves before it is used: the preamble's magic, the header's length against what
-// was read, the trailer's magic, the table's offset and length against the object's length, and the
-// checksum last. The tear test walks a real object truncating it at every byte and requires a
-// CommitFormatException with a reason at each one -- never a wrong answer, never an
-// IndexOutOfRangeException.
 using System;
 using System.Buffers.Binary;
 using System.IO.Hashing;
@@ -25,7 +6,13 @@ using System.Threading.Tasks;
 
 namespace Vorticity.Dataset;
 
-/// <summary>A commit object, as a reader sees it.</summary>
+/// <summary>
+/// A commit object, as a reader sees it. Opening it reads only its first bytes, so an object short
+/// enough for that read is checked whole while a larger one is opened on its header alone and
+/// leaves its trailer, table and checksum to the offline verification pass. Every field taken from
+/// the bytes is bounded against them first, so a truncated object raises
+/// <see cref="CommitFormatException"/> rather than answering wrongly.
+/// </summary>
 public sealed class CommitObject
 {
     private CommitObject(CommitHeader header, CommitTable table, CommitTrailer? trailer, long length, long headerEnd)
@@ -41,12 +28,10 @@ public sealed class CommitObject
     public CommitHeader Header { get; }
 
     /// <summary>
-    /// The table, when the open read reached the end of the object; empty otherwise.
+    /// The table, when the open read reached the end of the object; empty otherwise. A reader needs
+    /// no table — a page is found by the reference that names it — so only verification and repack,
+    /// which read the object whole, depend on it.
     /// </summary>
-    /// <remarks>
-    /// A reader needs no table: a page is found by the reference that names it. The table is for
-    /// `verify` and for repack, which read the object whole anyway.
-    /// </remarks>
     public CommitTable Table { get; }
 
     /// <summary>The trailer, when the open read reached the end of the object.</summary>
@@ -59,18 +44,11 @@ public sealed class CommitObject
     public long HeaderEnd { get; }
 
     /// <summary>
-    /// Opens a commit object from the first bytes of it, as §3's one ranged read hands them over.
+    /// Opens a commit object from its first bytes, at least <see cref="CommitFormat.MinimumBytes"/>
+    /// of them. <paramref name="objectLength"/> is what the store says the object measures, or
+    /// negative when the caller does not know; it decides whether these bytes are the whole object,
+    /// and so whether everything or only the header is checked.
     /// </summary>
-    /// <param name="bytes">
-    /// The object's first bytes, at least <see cref="CommitFormat.MinimumBytes"/> of them. When
-    /// they are the whole object, everything is checked; when they are a prefix, the header is.
-    /// </param>
-    /// <param name="objectLength">
-    /// What the store says the object measures, or a negative number when the caller does not know.
-    /// Used to tell "this read is the whole object" from "this read is its first 256 KiB".
-    /// </param>
-    /// <returns>The commit object.</returns>
-    /// <exception cref="CommitFormatException">The bytes are not a commit object.</exception>
     public static CommitObject Open(ReadOnlySpan<byte> bytes, long objectLength = -1)
     {
         if (bytes.Length < CommitFormat.PreambleBytes)
@@ -108,8 +86,8 @@ public sealed class CommitObject
         ReadOnlySpan<byte> headerBytes = bytes.Slice(CommitFormat.PreambleBytes, (int)headerLength);
         CommitHeader header = CommitHeader.Read(headerBytes);
 
-        // WHOLE OR PREFIX. The read is the whole object when the store said so, or when the caller
-        // did not say and the bytes end in a trailer that claims exactly this length.
+        // The read is the whole object when the store said so, or when the caller did not say and
+        // the bytes end in a trailer that claims exactly this length.
         bool whole = objectLength >= 0
             ? objectLength == bytes.Length
             : ClaimsOwnLength(bytes);
@@ -153,15 +131,7 @@ public sealed class CommitObject
         return new CommitObject(header, CommitTable.Read(tableBytes), trailer, bytes.Length, headerEnd);
     }
 
-    /// <summary>
-    /// Opens the commit object at <paramref name="key"/> with one ranged read (§3).
-    /// </summary>
-    /// <param name="store">The store.</param>
-    /// <param name="key">The object's key.</param>
-    /// <param name="cancellationToken">Cancels the read.</param>
-    /// <returns>The commit object.</returns>
-    /// <exception cref="ObjectNotFoundException">No object has that key.</exception>
-    /// <exception cref="CommitFormatException">The object is not a commit object.</exception>
+    /// <summary>Opens the commit object at a key with one ranged read.</summary>
     public static async ValueTask<CommitObject> OpenAsync(
         IObjectStore store, string key, CancellationToken cancellationToken)
     {
@@ -174,14 +144,11 @@ public sealed class CommitObject
         return Open(range.Bytes.Span, length);
     }
 
-    /// <summary>The bytes of a page this object holds, from a buffer that holds the object.</summary>
-    /// <param name="bytes">The object's bytes, from offset zero.</param>
-    /// <param name="reference">The reference, which must name this object's version.</param>
-    /// <returns>The page's bytes.</returns>
-    /// <exception cref="CommitFormatException">
-    /// The reference names another version, lies outside the object, or the page does not hash to
-    /// what the reference says.
-    /// </exception>
+    /// <summary>
+    /// The bytes of a page this object holds, taken from a buffer holding the object from offset
+    /// zero. The reference must name this object's version, and the page is checked against its
+    /// hash.
+    /// </summary>
     public ReadOnlySpan<byte> Page(ReadOnlySpan<byte> bytes, PageReference reference)
     {
         if (reference.Version != Header.Version)
@@ -208,17 +175,11 @@ public sealed class CommitObject
         return page;
     }
 
-    /// <summary>The offset one past an object's header, which every page offset is relative to.</summary>
-    /// <param name="store">The store.</param>
-    /// <param name="key">The object's key.</param>
-    /// <param name="cancellationToken">Cancels the read.</param>
-    /// <returns>Where the pages region starts.</returns>
-    /// <exception cref="CommitFormatException">The object is not a commit object.</exception>
-    /// <remarks>
-    /// Sixteen bytes: the magic, the format and the header's length. A reader that holds a commit
-    /// already knows this and should not ask; a reader following a reference into an OLDER commit
-    /// asks once per version and remembers.
-    /// </remarks>
+    /// <summary>
+    /// The offset one past an object's header, which every page offset is relative to. A reader
+    /// holding the commit already knows it; one following a reference into an older commit asks
+    /// once per version and remembers.
+    /// </summary>
     public static async ValueTask<long> PagesStartAsync(
         IObjectStore store, string key, CancellationToken cancellationToken)
     {
@@ -239,19 +200,12 @@ public sealed class CommitObject
         return CommitFormat.PreambleBytes + BinaryPrimitives.ReadUInt32LittleEndian(preamble[12..]);
     }
 
-    /// <summary>Reads one page through the store, checking it against its reference.</summary>
-    /// <param name="store">The store.</param>
-    /// <param name="key">The key of the object the reference names.</param>
-    /// <param name="reference">The reference, whose offset is relative to the pages region.</param>
-    /// <param name="pagesStart">Where that object's pages region starts (<see cref="PagesStartAsync"/>).</param>
-    /// <param name="cancellationToken">Cancels the read.</param>
-    /// <returns>The page's bytes.</returns>
-    /// <exception cref="CommitFormatException">The page does not hash to what the reference says.</exception>
-    /// <remarks>
-    /// The page is copied out of the range because the range is a lease on the store's own
-    /// buffer and the caller outlives it; a commit's pages are a few kibibytes of metadata, which
-    /// is the scale that makes owning them the simpler choice rather than the costly one.
-    /// </remarks>
+    /// <summary>
+    /// Reads one page through the store, checking it against its reference, whose offset is
+    /// relative to the pages region given by <see cref="PagesStartAsync"/>. The page is copied out
+    /// of the range because the range is only a lease on the store's buffer and the caller outlives
+    /// it; a commit's pages are small enough that owning them is the simpler choice.
+    /// </summary>
     public static async ValueTask<byte[]> ReadPageAsync(
         IObjectStore store,
         string key,
@@ -285,7 +239,6 @@ public sealed class CommitObject
     }
 
     /// <summary>Whether the bytes end in a trailer that claims exactly their length.</summary>
-    /// <param name="bytes">The bytes read.</param>
     private static bool ClaimsOwnLength(ReadOnlySpan<byte> bytes)
     {
         if (bytes.Length < CommitFormat.MinimumBytes)
@@ -299,7 +252,6 @@ public sealed class CommitObject
     }
 
     /// <summary>Reads and bounds-checks the trailer of a complete object.</summary>
-    /// <param name="bytes">The whole object.</param>
     private static CommitTrailer ReadTrailer(ReadOnlySpan<byte> bytes)
     {
         if (bytes.Length < CommitFormat.MinimumBytes)

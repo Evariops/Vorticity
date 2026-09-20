@@ -1,25 +1,3 @@
-// The compaction itself - docs/13-dataset.md §5.3: "a k-way merge of the inputs on the clustering
-// key when there is one (the row encoding compares by memcmp, 06), a concatenation otherwise, and
-// the writer builds the embedded indexes of the outputs once".
-//
-// THE MERGE IS `KeyOrderedMerge`, the one a key-ordered scan reads with (§6.6): runs of rows rather
-// than rows, compared by the row encoding, an input opened only once it could hold the next row. The
-// inputs are offered by their leaf keys, which on the clustering key are their exact minima (§4.1),
-// so the key-disjoint objects of the destination level are read one after another rather than held
-// open together. What stays here is what only a WRITER needs of a run: its first and last keys, so
-// that a roll never splits a key across two outputs.
-//
-// READING AN INPUT IN KEY ORDER IS `InKeyOrder`, which is §5.3's own sentence: "the compaction
-// reads each input in key order through that run, the permuted read InKeyOrder already performs".
-// Level 0's objects have the mandatory run of §6.1; an object of a level above is stated sorted and
-// `InKeyOrder` takes the cheaper source by itself.
-//
-// ONE REFUSAL LEFT, NAMED RATHER THAN WORKED AROUND. A composite key is read through its run by
-// `InKeyOrder(paths)`, and one column's null keys come last, where the row encoding sorts them.
-// A composite key's column holding nulls is refused: its run holds no tuple with a null, whose
-// encoded place is inside its leading column's group, so the merge would drop those rows. The row
-// count is checked against the inputs' at the end regardless, because a silent row loss is the one
-// failure a rewrite must never have.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -31,7 +9,7 @@ using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
 
-/// <summary>What one compaction did (§5.3).</summary>
+/// <summary>What one compaction did.</summary>
 /// <param name="Version">The version it created, or the one it found when it was abandoned.</param>
 /// <param name="FromLevel">The level it read.</param>
 /// <param name="ToLevel">The level it wrote.</param>
@@ -40,9 +18,9 @@ namespace Vorticity.Dataset;
 /// <param name="ObjectsIn">The objects it read.</param>
 /// <param name="ObjectsOut">The objects it wrote.</param>
 /// <param name="Rows">The rows it rewrote.</param>
-/// <param name="BytesIn">The bytes it read — §5.4's write amplification, measured.</param>
+/// <param name="BytesIn">The bytes it read, the denominator of write amplification.</param>
 /// <param name="BytesOut">The bytes it wrote.</param>
-/// <param name="Outcome">What the commit made of it (§8.2).</param>
+/// <param name="Outcome">What the commit made of it.</param>
 public sealed record CompactionResult(
     ulong Version,
     int FromLevel,
@@ -56,19 +34,17 @@ public sealed record CompactionResult(
     long BytesOut,
     OperationOutcome Outcome);
 
-/// <summary>Runs one compaction (§5.3).</summary>
+/// <summary>Runs one compaction: a k-way merge of the inputs on the clustering key when there is
+/// one, a concatenation otherwise.</summary>
 public static class DatasetCompactor
 {
-    /// <summary>Reads the job's inputs and replaces them by the objects it writes.</summary>
-    /// <param name="dataset">The dataset, which moves to the version the commit creates.</param>
-    /// <param name="job">What to compact, as <see cref="CompactionPolicy"/> planned it.</param>
-    /// <param name="cancellationToken">Cancels the reads, the writes and the commit.</param>
-    /// <returns>What it did.</returns>
+    /// <summary>Reads the job's inputs and replaces them by the objects it writes; the dataset moves
+    /// to the version the commit creates.</summary>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
     /// <exception cref="ArgumentException">The job has no input.</exception>
     /// <exception cref="VortexUnsupportedException">
     /// The clustering key is composite and one of its columns holds nulls in an input: its run holds
-    /// no such tuple, so no permuted read keeps every row (12 §4.6).
+    /// no such tuple, so no permuted read keeps every row.
     /// </exception>
     /// <exception cref="InvalidOperationException">The outputs do not hold the inputs' rows.</exception>
     public static async ValueTask<CompactionResult> RunAsync(
@@ -146,7 +122,6 @@ public static class DatasetCompactor
             commit.Outcomes.Count == 1 ? commit.Outcomes[0] : OperationOutcome.Applied);
     }
 
-    /// <summary>The two things a merge needs of the dataset before it reads a byte.</summary>
     private static void Check(ClusteringKey? key, CompactionJob job)
     {
         if (key is null)
@@ -158,10 +133,8 @@ public static class DatasetCompactor
                 "(13 §4.1). Compact it tiered, which concatenates.");
         }
 
-        // ONE COLUMN'S NULL KEYS ARE READ, last, where the merge's encoding puts them
-        // (KeyOrderedMerge.Field). A COMPOSITE KEY'S ARE NOT: its run holds no tuple with a null,
-        // whose encoded place is inside its leading column's group, so the read cannot deliver it
-        // there, and a merge that went on would drop the row.
+        // A single column's null keys are read, last, where the encoding puts them; a composite
+        // key's run holds no tuple with a null, so a merge that went on would drop those rows.
         if (!key.IsComposite)
         {
             return;
@@ -187,15 +160,10 @@ public static class DatasetCompactor
     }
 
     /// <summary>
-    /// §6.4's fragment compaction: each object's fragments bundled into one, index bytes only, and
-    /// swapped for it in one commit.
+    /// Fragment compaction: each object's fragments bundled into one, index bytes only, swapped for
+    /// it in one commit. The swap matches by content, so a fragment an indexer attached meanwhile
+    /// survives the rebase.
     /// </summary>
-    /// <remarks>
-    /// THE SWAP IS BY CONTENT, which is what makes it safe under a rebase (§8.2). An indexer that
-    /// attached a fragment meanwhile keeps it: only the fragments read here are dropped. A second
-    /// compaction of the same fragments finds them gone and the same bundle there. A compaction of
-    /// the object's DATA meanwhile dropped every fragment with it, and the bundle is dropped too.
-    /// </remarks>
     private static async ValueTask<CompactionResult> BundleAsync(
         VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
     {
@@ -219,7 +187,7 @@ public static class DatasetCompactor
 
         CommitResult commit = await dataset.CommitAsync(operations, cancellationToken).ConfigureAwait(false);
 
-        // What became of the bundles, the one operation per object that writes something.
+        // The bundles are the one operation per object that writes something.
         OperationOutcome outcome = OperationOutcome.Applied;
         for (int i = 0; i < operations.Count; i++)
         {
@@ -244,7 +212,7 @@ public static class DatasetCompactor
             outcome);
     }
 
-    /// <summary>§5.3's concatenation: each input's rows, in its own order, one after another.</summary>
+    /// <summary>Each input's rows, in its own order, one after another.</summary>
     private static async ValueTask<long> ConcatenateAsync(
         VortexDataset dataset, CompactionJob job, ObjectStream outputs, CancellationToken cancellationToken)
     {
@@ -267,7 +235,7 @@ public static class DatasetCompactor
         return rows;
     }
 
-    /// <summary>§5.3's k-way merge, one run of rows at a time.</summary>
+    /// <summary>The k-way merge, one run of rows at a time.</summary>
     private static async ValueTask<long> MergeAsync(
         VortexDataset dataset,
         CompactionJob job,
@@ -275,9 +243,8 @@ public static class DatasetCompactor
         ObjectStream outputs,
         CancellationToken cancellationToken)
     {
-        // Offered by leaf key, which is the encoded minimum and then the uid — the order of an exact
-        // lower bound, so an input is opened only once it could hold the next row — and ranked by
-        // the job's own order, which is who takes a tie among inputs holding the same key.
+        // Offered by leaf key, an exact lower bound, so an input opens only once it could hold the
+        // next row; the job's own order breaks ties among inputs holding the same key.
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
         for (int i = 0; i < job.Inputs.Count; i++)
         {
@@ -305,7 +272,7 @@ public static class DatasetCompactor
                 if (outputs.WantsRoll && !outputs.HoldsKey(merge.FirstKey))
                 {
                     // Never split a key across two objects: two outputs sharing a boundary value
-                    // would have overlapping ranges, and §5.2 asks a level for disjoint ones.
+                    // would overlap, and a level wants key-disjoint objects.
                     await outputs.RollAsync(cancellationToken).ConfigureAwait(false);
                 }
 
@@ -319,7 +286,7 @@ public static class DatasetCompactor
         return rows;
     }
 
-    /// <summary>The objects a compaction writes, rolled at the destination level's size (§5.3).</summary>
+    /// <summary>The objects a compaction writes, rolled at the destination level's size.</summary>
     private sealed class ObjectStream
     {
         private readonly VortexDataset _dataset;
@@ -341,7 +308,6 @@ public static class DatasetCompactor
         /// <summary>The objects it has sealed.</summary>
         internal IReadOnlyList<WrittenObject> Written => _written;
 
-        /// <summary>Their bytes.</summary>
         internal long Bytes
         {
             get
@@ -360,13 +326,10 @@ public static class DatasetCompactor
         internal bool WantsRoll => _draft is not null && _draft.Sink.Position >= _target;
 
         /// <summary>Whether the last row written carries this key, which must not be split.</summary>
-        /// <param name="key">The next row's encoded key.</param>
-        /// <returns>Whether they are the same key.</returns>
         internal bool HoldsKey(ReadOnlySpan<byte> key) =>
             _lastKeyLength >= 0 && key.SequenceEqual(_lastKey.AsSpan(0, _lastKeyLength));
 
         /// <summary>Records the last key of a run, so the next roll does not split it.</summary>
-        /// <param name="key">The run's last encoded key.</param>
         internal void Note(ReadOnlySpan<byte> key)
         {
             if (_lastKey.Length < key.Length)
@@ -385,13 +348,10 @@ public static class DatasetCompactor
             _rows += batch.RowCount;
         }
 
-        /// <summary>Seals the current object when it has reached its size; for a concatenation.</summary>
-        /// <param name="cancellationToken">Cancels the put.</param>
         internal ValueTask RollIfFullAsync(CancellationToken cancellationToken) =>
             WantsRoll ? RollAsync(cancellationToken) : ValueTask.CompletedTask;
 
         /// <summary>Seals the object being written and starts the next one.</summary>
-        /// <param name="cancellationToken">Cancels the put.</param>
         internal async ValueTask RollAsync(CancellationToken cancellationToken)
         {
             if (_draft is not { } draft)
@@ -418,7 +378,6 @@ public static class DatasetCompactor
         }
 
         /// <summary>Seals whatever is left.</summary>
-        /// <param name="cancellationToken">Cancels the put.</param>
         internal ValueTask FinishAsync(CancellationToken cancellationToken) => RollAsync(cancellationToken);
 
         /// <summary>Drops the object being written: a failed compaction leaves no commit behind.</summary>

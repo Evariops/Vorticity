@@ -1,8 +1,3 @@
-// The encoded rows: one contiguous byte buffer, plus where each row starts and how long it is.
-//
-// Rows are NOT self-delimiting - a row key carries no terminator and no length prefix, because
-// either would have to sort somewhere and would perturb the very order the format exists to
-// preserve. `Sizes` is therefore not a convenience, it is part of the representation.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -12,20 +7,14 @@ namespace Vorticity.RowEncoding;
 
 /// <summary>
 /// Row keys produced by <see cref="RowEncoder"/>: byte strings whose <c>memcmp</c> order is the
-/// tuple order of the columns they were built from.
+/// tuple order of the columns they were built from. A key carries neither terminator nor length
+/// prefix, so <see cref="Sizes"/> is part of the representation and not a convenience.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <b>Not a durable format.</b> Upstream marks the row encoding experimental and reserves the
-/// right to change its byte layout between Vortex releases. These bytes are safe to compare
-/// within one process, or across a cluster running one version; they are NOT safe in a persisted
-/// index, a checkpoint, or anything else that outlives the library version that produced it. The
-/// version they follow is <see cref="RowEncoder.VortexVersion"/>.
-/// </para>
-/// <para>
-/// The three buffers come from <see cref="ArrayPool{T}"/>; <see cref="Dispose"/> returns them, and
-/// every span this type hands out is invalid afterwards.
-/// </para>
+/// Not a durable format: the byte layout may change between Vortex releases, so these bytes are
+/// comparable only among keys produced by one version and never in a persisted index. The three
+/// buffers come from <see cref="ArrayPool{T}"/>, and <see cref="Dispose"/> returns them and
+/// invalidates every span handed out.
 /// </remarks>
 public sealed class RowKeys : IEncodedKeys
 {
@@ -59,11 +48,7 @@ public sealed class RowKeys : IEncodedKeys
     /// <summary>How many bytes each row occupies.</summary>
     public ReadOnlySpan<int> Sizes => _sizes is null ? ThrowDisposedInts() : _sizes.AsSpan(0, _rowCount);
 
-    /// <summary>The key of row <paramref name="index"/>.</summary>
-    /// <param name="index">0-based row index, below <see cref="RowCount"/>.</param>
-    /// <returns>The row's bytes, borrowed from this instance.</returns>
-    /// <exception cref="ArgumentOutOfRangeException">The index is out of range.</exception>
-    /// <exception cref="ObjectDisposedException">This instance has been disposed.</exception>
+    /// <summary>The key of the 0-based row <paramref name="index"/>, borrowed from this instance.</summary>
     public ReadOnlySpan<byte> Row(int index)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(index);
@@ -75,21 +60,12 @@ public sealed class RowKeys : IEncodedKeys
     }
 
     /// <summary>Compares two rows the way a sort would: by their bytes.</summary>
-    /// <param name="left">0-based row index.</param>
-    /// <param name="right">0-based row index.</param>
-    /// <returns>Negative, zero or positive, as <see cref="ReadOnlySpan{T}"/> comparison gives it.</returns>
-    /// <exception cref="ArgumentOutOfRangeException">Either index is out of range.</exception>
-    /// <exception cref="ObjectDisposedException">This instance has been disposed.</exception>
     public int Compare(int left, int right) => Row(left).SequenceCompareTo(Row(right));
 
     /// <summary>
-    /// Sorts <paramref name="indices"/> so that the rows they name are in ascending key order -
-    /// which, by construction, is the tuple order the columns and their
-    /// <see cref="RowSortField"/>s describe.
+    /// Sorts <paramref name="indices"/> into ascending key order, which by construction is the
+    /// tuple order the columns and their <see cref="RowSortField"/>s describe.
     /// </summary>
-    /// <param name="indices">Row indices to reorder; each must be below <see cref="RowCount"/>.</param>
-    /// <exception cref="ArgumentOutOfRangeException">An index is out of range.</exception>
-    /// <exception cref="ObjectDisposedException">This instance has been disposed.</exception>
     public void SortIndices(Span<int> indices)
     {
         _ = Live();

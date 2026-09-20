@@ -1,15 +1,3 @@
-// The composite key of a locating index, and the seek key a cursor over it needs - docs/10-indexes.md
-// §6.5 and docs/12-index-reads.md §4.6.
-//
-// THE CORE WRITES WHAT IT IS HANDED. A composite index is keyed by the row encoding of the tuple, and
-// the core does not row-encode (docs/09-contracts.md §3); this package fills its `IKeyEncoder` slot,
-// and gives a reader the one-tuple encoding that produces the same bytes, which is all a byte-keyed
-// cursor needs to seek. The encoding of the leading columns alone is a byte prefix of the encoding of
-// the whole tuple, so a prefix query is a seek and a walk while the key starts with the prefix.
-//
-// THE FORMAT IS NAMED, because these bytes now outlive the process: the index records
-// `RowKeyEncoder.Format` and a cursor reports it, so a reader built on another release of the row
-// format can tell that its seek keys do not compare with the index's.
 using System;
 using System.Buffers.Binary;
 using System.Globalization;
@@ -22,14 +10,20 @@ using Vorticity.Types;
 
 namespace Vorticity.RowEncoding;
 
-/// <summary>The row encoding as the key encoder of a composite index.</summary>
+/// <summary>
+/// The row encoding as the key encoder of a composite index. The encoding of the leading columns
+/// alone is a byte prefix of the whole tuple's, so a prefix query is a seek and a walk. These bytes
+/// outlive the process, so <see cref="Format"/> names the layout they follow and lets a reader see
+/// that its seek keys do not compare with an index written under another one.
+/// </summary>
 public sealed class RowKeyEncoder : IKeyEncoder
 {
     private readonly RowSortField[] _fields;
 
-    /// <summary>An encoder for keys of <paramref name="fields"/>.Length columns, or of any width with one field.</summary>
-    /// <param name="fields">One sort field per key column, in key order; a single one applies to every column.</param>
-    /// <exception cref="ArgumentException">No field was given.</exception>
+    /// <summary>
+    /// An encoder taking one sort field per key column, in key order; a single field applies to
+    /// every column, so one encoder then serves keys of any width.
+    /// </summary>
     public RowKeyEncoder(params RowSortField[] fields)
     {
         ArgumentNullException.ThrowIfNull(fields);
@@ -57,7 +51,6 @@ public sealed class RowKeyEncoder : IKeyEncoder
     public ReadOnlySpan<RowSortField> Fields => _fields;
 
     /// <inheritdoc/>
-    /// <remarks>One sort field given at construction applies to every column, so one encoder serves keys of any width.</remarks>
     public IEncodedKeys Encode(CanonicalArena arena, ReadOnlySpan<int> columns)
     {
         if (_fields.Length != 1 || columns.Length == 1)
@@ -78,16 +71,11 @@ public static partial class RowEncoder
     /// The row encoding of one tuple: the seek key of a composite cursor, or its prefix when fewer
     /// values than key columns are given.
     /// </summary>
-    /// <param name="values">The leading key values, in key order; <see cref="FilterLiteral.Null"/> for a null.</param>
-    /// <param name="fields">One sort field per value.</param>
-    /// <returns>The key's bytes.</returns>
     /// <remarks>
-    /// The dtypes are inferred from the literals -- a signed value as <c>i64</c>, an unsigned one as
-    /// <c>u64</c>, a float as <c>f64</c>, bytes as <c>utf8</c>, all non-nullable -- and the bytes
-    /// depend on them: when a key column is of another width or nullable, use the overload that
-    /// takes the column dtypes.
+    /// The dtypes are inferred from the literals -- signed as <c>i64</c>, unsigned as <c>u64</c>, a
+    /// float as <c>f64</c>, bytes as <c>utf8</c>, all non-nullable -- and the bytes depend on them,
+    /// so a key column of another width or a nullable one needs the overload taking dtypes.
     /// </remarks>
-    /// <exception cref="ArgumentException">The counts differ, or a null is given without a nullable dtype.</exception>
     public static byte[] EncodeKey(ReadOnlySpan<FilterLiteral> values, ReadOnlySpan<RowSortField> fields)
     {
         DTypeArena types = new DTypeArena();
@@ -110,15 +98,10 @@ public static partial class RowEncoder
         return EncodeKey(values, dtypes, fields);
     }
 
-    /// <summary>The row encoding of one tuple, at the key columns' own dtypes.</summary>
-    /// <param name="values">The leading key values, in key order.</param>
-    /// <param name="dtypes">Each value's column dtype: its width and nullability shape the bytes.</param>
-    /// <param name="fields">One sort field per value.</param>
-    /// <returns>The key's bytes.</returns>
-    /// <exception cref="ArgumentException">
-    /// The counts differ, a value does not fit its dtype, or a null is given for a non-nullable dtype.
-    /// </exception>
-    /// <exception cref="VortexUnsupportedException">A dtype has no row encoding.</exception>
+    /// <summary>
+    /// The row encoding of one tuple at the key columns' own dtypes, whose width and nullability
+    /// shape the bytes.
+    /// </summary>
     public static byte[] EncodeKey(
         ReadOnlySpan<FilterLiteral> values, ReadOnlySpan<DType> dtypes, ReadOnlySpan<RowSortField> fields)
     {
@@ -147,7 +130,6 @@ public static partial class RowEncoder
         }
     }
 
-    /// <summary>A one-row column holding <paramref name="value"/> at <paramref name="dtype"/>.</summary>
     private static int OneValue(CanonicalArena arena, FilterLiteral value, DType dtype)
     {
         bool isNull = value.Kind == FilterLiteralKind.Null;

@@ -1,17 +1,3 @@
-// A page reference - docs/13-dataset.md §3: "(version, offset, length, XXH3-128): the commit object
-// that wrote the page, where it lies in it, and its content hash".
-//
-// WHY THE VERSION IS PART OF THE ADDRESS, and why that is the design's hinge. "A commit references
-// the pages it did not change where they already are, in older commit objects" (§3). So a reference
-// names the OBJECT that holds the page as well as the place inside it -- which means a commit that
-// changes O(depth) pages writes O(depth) pages and points at everything else, and there is no page
-// object, no pack, and nothing to garbage-collect but data objects and whole commits.
-//
-// WHY THE HASH IS IN THE REFERENCE RATHER THAN IN THE PAGE. Three things at once (§7): the reader
-// checks what it read against what sent it there, so a torn or misdirected page is caught at the
-// only moment it matters; a writer that recognises a page's content can reference the copy it
-// already knows instead of writing it again, which the prolly rule makes common after a rebase
-// (§4.3); and `verify` has something to compare offline.
 using System;
 using System.Buffers.Binary;
 using System.Globalization;
@@ -21,22 +7,12 @@ namespace Vorticity.Dataset;
 /// <summary>Where a page lies and what it must hash to.</summary>
 /// <param name="Version">The commit object that holds it; 0 is "no page".</param>
 /// <param name="Offset">
-/// Its offset from the start of that object's PAGES REGION, which is one past its header.
+/// Its offset from the start of that object's pages region, which is one past its header. Relative
+/// rather than absolute so that a page's bytes do not depend on where its object put it, which is
+/// what makes two identical trees written into two commit objects identical byte for byte.
 /// </param>
 /// <param name="Length">Its bytes.</param>
 /// <param name="Hash">XXH3-128 of its bytes.</param>
-/// <remarks>
-/// WHY THE OFFSET IS RELATIVE, decided at step 38 after the absolute form failed. An internal page
-/// holds its children's references, so an absolute offset would have to be known before the page's
-/// bytes exist — and the page's bytes decide the header's length, which decides where the pages
-/// region starts, which decides the absolute offsets. The circle is real and it is not the one the
-/// header's own references broke: those are patched at layout time, a page's are baked into content
-/// that is then hashed. Relative offsets cut it, and they buy something the absolute form could
-/// never have: a page's bytes no longer depend on where its object put it, so two identical trees
-/// written into two commit objects are identical byte for byte, which is what 13 §4.1 promises and
-/// what §14's oracle compares. The reader adds the region's start, which is the header's length and
-/// lies in the object's first sixteen bytes.
-/// </remarks>
 public readonly record struct PageReference(ulong Version, long Offset, int Length, UInt128 Hash)
 {
     /// <summary>The reference that names no page.</summary>
@@ -45,11 +21,9 @@ public readonly record struct PageReference(ulong Version, long Offset, int Leng
     /// <summary>Whether this names a page.</summary>
     public bool Exists => Version != 0 || Length != 0;
 
-    /// <summary>The bytes a reference takes when written: version, offset, length, hash.</summary>
     internal const int Bytes = 8 + 8 + 4 + 16;
 
-    /// <summary>Writes the reference, little-endian, into <paramref name="destination"/>.</summary>
-    /// <param name="destination">At least <see cref="Bytes"/> bytes.</param>
+    /// <summary>Writes the reference, little-endian, into a span of at least <see cref="Bytes"/> bytes.</summary>
     internal void Write(Span<byte> destination)
     {
         BinaryPrimitives.WriteUInt64LittleEndian(destination, Version);
@@ -60,9 +34,6 @@ public readonly record struct PageReference(ulong Version, long Offset, int Leng
     }
 
     /// <summary>Reads a reference written by <see cref="Write"/>.</summary>
-    /// <param name="source">At least <see cref="Bytes"/> bytes.</param>
-    /// <returns>The reference.</returns>
-    /// <exception cref="CommitFormatException">The bytes cannot be a reference.</exception>
     internal static PageReference Read(ReadOnlySpan<byte> source)
     {
         if (source.Length < Bytes)
@@ -83,8 +54,7 @@ public readonly record struct PageReference(ulong Version, long Offset, int Leng
         return new PageReference(BinaryPrimitives.ReadUInt64LittleEndian(source), offset, length, hash);
     }
 
-    /// <summary>The reference, as a person reads it.</summary>
-    /// <returns>Version, offset, length and the hash's first hex digits.</returns>
+    /// <summary>Version, offset, length and the hash, as a person reads them.</summary>
     public override string ToString() => Exists
         ? string.Create(CultureInfo.InvariantCulture, $"v{Version}@{Offset}+{Length} {Hash:x32}")
         : "(none)";

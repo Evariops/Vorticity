@@ -1,26 +1,3 @@
-// The dataset tree - docs/13-dataset.md §4: "one tree per level, each a copy-on-write search tree
-// over data objects, ordered by the clustering key".
-//
-// WHAT A COMMIT DOES, §4.3 in one sentence: "load the touched leaves, merge the changes, re-emit
-// the leaves, rebuild the internal nodes over the changed range up to the top". The boundary rule
-// decides where the re-emitted pages end, and §4.1's third bullet is what makes the result a
-// function of the key set rather than of the history: "after an edit, re-chunking continues past
-// the change until a new boundary coincides with an old one".
-//
-// HOW THAT COINCIDENCE IS DETECTED HERE, and it is simpler than it sounds: the rule's state resets
-// at every boundary, and every old page began at a boundary. So an old page whose keys no change
-// touches can be REUSED BY REFERENCE -- not read, not rewritten -- exactly when the emitter is
-// between pages. After a change, the emitter is mid-page and the following old pages are read and
-// re-chunked until a cut lands where a page began; from there, reuse resumes. That single
-// condition, `untouched && emitter.IsEmpty`, is the convergence rule.
-//
-// WHAT THIS COMMIT COSTS, honestly, and what it does not yet do. Pages are WRITTEN only where
-// something changed, at every level: an untouched page is a reference. Pages are READ, at the
-// levels above the leaves, in full -- the descriptors of a level live in the level above it, and
-// this implementation materialises them rather than descending to the changes alone. At a million
-// objects that is four internal pages a commit; the growth is measured in
-// `DatasetTreeTests.WhatACommitReads`, and the top-down descent that would make it O(depth) is a
-// step of its own, with that measurement to beat.
 using System;
 using System.Collections.Generic;
 using System.IO.Hashing;
@@ -36,16 +13,10 @@ namespace Vorticity.Dataset;
 public readonly record struct TreeChange(ReadOnlyMemory<byte> Key, ReadOnlyMemory<byte>? Value, long Rows)
 {
     /// <summary>Adds or replaces an entry.</summary>
-    /// <param name="key">Its key.</param>
-    /// <param name="value">Its value.</param>
-    /// <param name="rows">Its rows.</param>
-    /// <returns>The change.</returns>
     public static TreeChange Put(ReadOnlyMemory<byte> key, ReadOnlyMemory<byte> value, long rows) =>
         new TreeChange(key, value, rows);
 
     /// <summary>Removes an entry.</summary>
-    /// <param name="key">Its key.</param>
-    /// <returns>The change.</returns>
     public static TreeChange Remove(ReadOnlyMemory<byte> key) => new TreeChange(key, null, 0);
 
     /// <summary>Whether this change removes the key.</summary>
@@ -66,27 +37,16 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
     public bool IsEmpty => Depth == 0;
 
     /// <summary>
-    /// How many pages a walk reads ahead of the one it is on (<see cref="WalkAsync"/>): the round
-    /// trips a walk over siblings saves, against the pages an early stop may have read for nothing.
+    /// How many pages a walk reads ahead of the one it is on: the round trips a walk over siblings
+    /// saves, against the pages an early stop may have read for nothing.
     /// </summary>
     public const int PrefetchWindow = 8;
 
-    /// <summary>Builds a tree from every entry, in key order (§14's rebuild oracle).</summary>
-    /// <param name="entries">The entries, sorted by key and unique.</param>
-    /// <param name="rule">The boundary rule.</param>
-    /// <param name="sink">Where the pages go.</param>
-    /// <returns>The tree.</returns>
-    /// <exception cref="ArgumentException">The entries are not sorted, or hold a duplicate key.</exception>
+    /// <summary>Builds a tree from every entry, which must be sorted by key and unique.</summary>
     public static DatasetTree Build(IReadOnlyList<TreeEntry> entries, IBoundaryRule rule, IPageSink sink) =>
         Build(entries, rule, NoSummary.Instance, sink);
 
-    /// <summary>Builds a tree from every entry, in key order (§14's rebuild oracle).</summary>
-    /// <param name="entries">The entries, sorted by key and unique.</param>
-    /// <param name="rule">The boundary rule.</param>
-    /// <param name="fold">What a page's summary is, from what it holds (§4.2).</param>
-    /// <param name="sink">Where the pages go.</param>
-    /// <returns>The tree.</returns>
-    /// <exception cref="ArgumentException">The entries are not sorted, or hold a duplicate key.</exception>
+    /// <summary>Builds a tree from every entry, which must be sorted by key and unique.</summary>
     public static DatasetTree Build(
         IReadOnlyList<TreeEntry> entries, IBoundaryRule rule, ISummaryFold fold, IPageSink sink)
     {
@@ -118,14 +78,10 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
         return OverLevels(leaves.Emitted, rule, fold, sink, entries.Count, rows, depth: 1);
     }
 
-    /// <summary>Applies a sorted batch of changes, reusing every page it does not have to rewrite.</summary>
-    /// <param name="changes">The changes, sorted by key and unique.</param>
-    /// <param name="rule">The boundary rule, the same one the tree was built under.</param>
-    /// <param name="source">Where the old pages are read from.</param>
-    /// <param name="sink">Where the new pages go.</param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>The new tree.</returns>
-    /// <exception cref="ArgumentException">The changes are not sorted, or hold a duplicate key.</exception>
+    /// <summary>
+    /// Applies a batch of changes, sorted by key and unique, reusing every page it does not have to
+    /// rewrite. The rule must be the one the tree was built under.
+    /// </summary>
     public ValueTask<DatasetTree> CommitAsync(
         IReadOnlyList<TreeChange> changes,
         IBoundaryRule rule,
@@ -134,15 +90,10 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
         CancellationToken cancellationToken) =>
         CommitAsync(changes, rule, NoSummary.Instance, source, sink, cancellationToken);
 
-    /// <summary>Applies a sorted batch of changes, reusing every page it does not have to rewrite.</summary>
-    /// <param name="changes">The changes, sorted by key and unique.</param>
-    /// <param name="rule">The boundary rule, the same one the tree was built under.</param>
-    /// <param name="fold">What a page's summary is, from what it holds (§4.2).</param>
-    /// <param name="source">Where the old pages are read from.</param>
-    /// <param name="sink">Where the new pages go.</param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>The new tree.</returns>
-    /// <exception cref="ArgumentException">The changes are not sorted, or hold a duplicate key.</exception>
+    /// <summary>
+    /// Applies a batch of changes, sorted by key and unique, reusing every page it does not have to
+    /// rewrite. The rule must be the one the tree was built under.
+    /// </summary>
     public async ValueTask<DatasetTree> CommitAsync(
         IReadOnlyList<TreeChange> changes,
         IBoundaryRule rule,
@@ -184,11 +135,13 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
             return Build(fresh, rule, fold, sink);
         }
 
-        // THE LEVELS ABOVE THE LEAVES, read once: a level's pages are described by the entries of
-        // the level above, so this is what the walk needs to know which leaf pages exist at all.
+        // A level's pages are described by the entries of the level above, so this read is what
+        // tells the merge below which leaf pages exist at all.
         List<List<InternalEntry>> descriptors = await DescribeAsync(source, cancellationToken).ConfigureAwait(false);
 
-        // Level 0: the leaves. Untouched pages are reused without being read.
+        // Level 0: the leaves. An old page began at a boundary and the rule resets at every
+        // boundary, so an untouched page can be reused by reference exactly when the emitter sits
+        // between pages; that condition is what makes re-chunking converge back onto old cuts.
         PageEmitter emitter = new PageEmitter(rule.Fresh(), fold, sink, leaf: true);
         List<InternalEntry> pages = descriptors[0];
         long added = 0;
@@ -227,8 +180,8 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
             return Empty;
         }
 
-        // The levels above, rebuilt over the changed range: an old page whose children are exactly
-        // the same references is reused, which is what keeps a commit's writes near `depth`.
+        // An old page whose children are exactly the same references is reused, which is what keeps
+        // a commit's writes near `depth`.
         int depth = 1;
         for (int above = 1; above < descriptors.Count && level.Count > 1; above++)
         {
@@ -242,17 +195,12 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
             depth++;
         }
 
-        // The rows are summed by the emitters and carried by the reused descriptors, so the root's
-        // are the tree's. The entries are not summed anywhere, so the merge counted the difference:
-        // every change falls inside some page's range, and a page a change falls in is read.
+        // The entries are not summed anywhere, so the merge counted the difference: every change
+        // falls inside some page's range, and a page a change falls in is read.
         return new DatasetTree(level[0].Child, depth, Entries + added, level[0].Rows);
     }
 
-    /// <summary>Finds the entry with this key.</summary>
-    /// <param name="key">The key.</param>
-    /// <param name="source">Where the pages are read from.</param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>The entry, or null when the tree does not hold that key.</returns>
+    /// <summary>Finds the entry with this key, or null when the tree does not hold it.</summary>
     public async ValueTask<TreeEntry?> FindAsync(
         ReadOnlyMemory<byte> key, IPageSource source, CancellationToken cancellationToken)
     {
@@ -296,9 +244,6 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
     }
 
     /// <summary>Every entry, in key order.</summary>
-    /// <param name="source">Where the pages are read from.</param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>The entries.</returns>
     public async IAsyncEnumerable<TreeEntry> EnumerateAsync(
         IPageSource source,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
@@ -311,27 +256,11 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
     }
 
     /// <summary>
-    /// The entries a walk keeps: those whose rows meet <c>[from, to)</c>, and those whose ancestors
-    /// a predicate could not rule out.
+    /// The entries whose rows meet <c>[from, to)</c> and whose ancestors <paramref name="descend"/>
+    /// could not rule out, in key order, each with its first row in the dataset. Both skips are
+    /// decided from the parent's entry, before the child page is read, so a node ruled out costs no
+    /// read at all. A null <paramref name="descend"/> reads every subtree.
     /// </summary>
-    /// <param name="source">Where the pages are read from.</param>
-    /// <param name="from">The first row of the dataset to reach, in the tree's own order.</param>
-    /// <param name="to">One past the last; <see cref="long.MaxValue"/> for all of them.</param>
-    /// <param name="descend">
-    /// Whether a subtree is worth reading, from its node's summaries (§4.2); null to read all of
-    /// them. A node the predicate refutes costs no read at all, which is the whole point of the
-    /// summary: <em>"a predicate that the node's summaries refute skips the whole subtree"</em>.
-    /// </param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>The entries, in key order, each with its first row in the dataset.</returns>
-    /// <remarks>
-    /// TWO SKIPS, ONE WALK, because they are the same walk: a node is not descended into when its
-    /// rows fall outside the range or when its summaries refute the predicate, and both decisions
-    /// are made from the parent's entry, before the child page is read. The row skip is what §6.6
-    /// prices at O(log N) for <c>Rows(a, b)</c> -- "the insertion-order tree, nodes carrying row
-    /// sums" -- and with the first-row-position key of §4.1 this IS that tree, since key order and
-    /// insertion order are then the same order.
-    /// </remarks>
     public async IAsyncEnumerable<PositionedEntry> WalkAsync(
         IPageSource source,
         long from,
@@ -346,12 +275,9 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
             yield break;
         }
 
-        // THE NEXT PAGES ARE ALREADY IN FLIGHT (§6.6: "children prefetched in parallel"). The stack's
-        // top is the walk's future in order, so the pages it names are read a window ahead: a walk
-        // over siblings pays one dependent round trip per window rather than one per page. A
-        // bounded window rather than every child, because a walk that stops early -- `ORDER BY key
-        // LIMIT k` -- must not have read six hundred pages to deliver ten rows: it has read at most a
-        // window more than it used.
+        // The stack's top is the walk's future in order, so the pages it names are read a window
+        // ahead: one dependent round trip per window rather than one per page. The window is
+        // bounded so that a walk which stops early has read at most a window more than it used.
         List<(PageReference Reference, int Level, long Row, Task<ReadOnlyMemory<byte>>? Read)> stack = [(Root, Depth, 0, null)];
         try
         {
@@ -386,9 +312,9 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
                     continue;
                 }
 
-                // Pushed in reverse so that popping walks the children in key order, which means
-                // each child's first row is reached by SUBTRACTING from the page's end rather than
-                // adding from its start: the same arithmetic, and no array to hold the offsets in.
+                // Pushed in reverse so that popping walks the children in key order; each child's
+                // first row is then reached by subtracting from the page's end, which needs no
+                // array to hold the offsets in.
                 IReadOnlyList<InternalEntry> page = TreePage.ReadInternal(bytes);
                 long at = row;
                 for (int i = 0; i < page.Count; i++)
@@ -423,19 +349,11 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
     }
 
     /// <summary>
-    /// The tree's identity: a Merkle hash over the pages' CONTENT, with a child's content hash in
-    /// place of its reference.
+    /// The tree's identity: a Merkle hash over the pages' content, with a child's content hash in
+    /// place of its reference, or zero for an empty tree. A page reference carries placement as
+    /// well as content, so this is the only identity two identical trees laid out in two commit
+    /// objects share.
     /// </summary>
-    /// <param name="source">Where the pages are read from.</param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>The hash, or zero for an empty tree.</returns>
-    /// <remarks>
-    /// §4.1 promises "one root hash" for a key set, and §13.J makes "equality of two datasets: one
-    /// root hash" the prolly tree's advantage. A page reference carries PLACEMENT as well as
-    /// content (§3: version, offset, length, hash), so two identical trees laid out in two commit
-    /// objects differ in their bytes and their root reference. The identity that does not depend on
-    /// placement is this one, and it is what the oracles compare.
-    /// </remarks>
     public async ValueTask<UInt128> ContentHashAsync(IPageSource source, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -444,20 +362,14 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
 
     /// <summary>
     /// The same tree with every page <paramref name="move"/> selects written again into
-    /// <paramref name="sink"/>, and every page above one of them with it (§10's repack).
+    /// <paramref name="sink"/>, and every page above one of them with it, plus how many pages were
+    /// written.
     /// </summary>
-    /// <param name="move">Which pages to take out of where they lie.</param>
-    /// <param name="source">Where the pages are read from.</param>
-    /// <param name="sink">Where the moved pages are written.</param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>The tree, and how many pages were written.</returns>
     /// <remarks>
-    /// THE CONTENT DOES NOT CHANGE, ONLY THE PLACEMENT: a leaf is copied byte for byte, an internal
-    /// page is copied with its moved children's references, so the tree's content hash
-    /// (<see cref="ContentHashAsync"/>) is the same before and after. A moved page's parent must move
-    /// too, because the reference it holds names the old placement; that is the O(depth) above each
-    /// moved page. Every page is read to find the ones to move -- a reference says where a page lies
-    /// but not where its children do -- which is the offline cost §10 accepts for repack.
+    /// Only the placement changes, so <see cref="ContentHashAsync"/> is the same before and after.
+    /// A moved page's parent must move too, because the reference it holds names the old placement.
+    /// Every page is read to find the ones to move, since a reference says where a page lies but
+    /// not where its children do.
     /// </remarks>
     public async ValueTask<(DatasetTree Tree, int Moved)> RelocateAsync(
         Func<PageReference, bool> move, IPageSource source, IPageSink sink, CancellationToken cancellationToken)
@@ -534,15 +446,10 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
     }
 
     /// <summary>
-    /// The descriptors of every level's pages: index 0 is the leaves, index <c>Depth − 1</c> the root.
+    /// The descriptors of every level's pages: index 0 is the leaves, index <c>Depth − 1</c> the
+    /// root. Reads every internal page and no leaf. The root, having no level above it, gets a
+    /// descriptor of its own whose key range is never consulted.
     /// </summary>
-    /// <param name="source">Where the pages are read from.</param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <remarks>
-    /// A level's pages are described by the entries stored one level above, so this reads every
-    /// INTERNAL page and no leaf. The root has no level above it, so it gets a descriptor of its
-    /// own, whose key range is never consulted: a single page is always the last of its level.
-    /// </remarks>
     private async ValueTask<List<List<InternalEntry>>> DescribeAsync(
         IPageSource source, CancellationToken cancellationToken)
     {
@@ -565,17 +472,15 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
         return descriptors;
     }
 
-    /// <summary>Whether any change falls in the page's range.</summary>
-    /// <param name="changes">The batch.</param>
-    /// <param name="from">The first change not yet consumed.</param>
-    /// <param name="upper">The next page's first key, or empty when this is the last page.</param>
-    /// <param name="last">Whether this is the last page of its level.</param>
+    /// <summary>Whether any change from <c>from</c> on falls below <c>upper</c>, the next page's first key.</summary>
     private static bool Touches(
         IReadOnlyList<TreeChange> changes, int from, ReadOnlyMemory<byte> upper, bool last) =>
         from < changes.Count && (last || TreePage.Compare(changes[from].Key.Span, upper.Span) < 0);
 
-    /// <summary>Feeds one old page's entries and the changes that fall in its range to the emitter.</summary>
-    /// <returns>How many entries the page gained: inserts minus removals.</returns>
+    /// <summary>
+    /// Feeds one old page's entries and the changes in its range to the emitter, returning how many
+    /// entries the page gained: inserts minus removals.
+    /// </summary>
     private static long Merge(
         IReadOnlyList<TreeEntry> page,
         IReadOnlyList<TreeChange> changes,
@@ -648,12 +553,6 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
     /// Rewrites one level above the leaves: an old page whose children are exactly the same
     /// references is reused; everything else goes through the chunker.
     /// </summary>
-    /// <param name="oldPages">The descriptors of this level's old pages.</param>
-    /// <param name="oldChildren">The descriptors of the level below's old pages, in order.</param>
-    /// <param name="children">The level below's new descriptors, in order.</param>
-    /// <param name="rule">The boundary rule.</param>
-    /// <param name="fold">What a page's summary is.</param>
-    /// <param name="sink">Where the pages go.</param>
     private static List<InternalEntry> Rewrite(
         List<InternalEntry> oldPages,
         List<InternalEntry> oldChildren,
@@ -703,7 +602,7 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
         return emitter.Emitted;
     }
 
-    /// <summary>How many of the level below's old pages belong to old page <paramref name="index"/>.</summary>
+    /// <summary>How many of the level below's old pages belong to the old page at this index.</summary>
     private static int CountChildren(
         List<InternalEntry> oldChildren, int from, List<InternalEntry> oldPages, int index)
     {
@@ -756,13 +655,10 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
         return new DatasetTree(level[0].Child, depth, entries, rows);
     }
 
-    /// <summary>The child whose range holds the key, by the usual descent.</summary>
-    /// <remarks>
-    /// A walk and not a binary search, because the page it walks is short: the boundary rule never
-    /// let one past thirty-two entries anywhere in the dataset suite, a tree over a million objects
-    /// included. It also stops at the first entry above the key, so a descent that lands early
-    /// reads a handful.
-    /// </remarks>
+    /// <summary>
+    /// The child whose range holds the key. A linear walk and not a binary search, because the
+    /// boundary rule keeps an internal page to a few dozen entries.
+    /// </summary>
     private static int Descend(IReadOnlyList<InternalEntry> page, ReadOnlySpan<byte> key)
     {
         int child = -1;
@@ -801,7 +697,6 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
             _rule.Reset();
         }
 
-        /// <summary>The descriptors of the pages emitted so far, in order.</summary>
         internal List<InternalEntry> Emitted { get; } = [];
 
         /// <summary>Whether nothing is accumulated: the emitter sits on a boundary.</summary>
@@ -828,7 +723,6 @@ public sealed record DatasetTree(PageReference Root, int Depth, long Entries, lo
         }
 
         /// <summary>Emits an old page unchanged, by reference. Only legal on a boundary.</summary>
-        /// <param name="descriptor">The old page's descriptor, kept as it is.</param>
         internal void Reuse(InternalEntry descriptor)
         {
             if (!IsEmpty)

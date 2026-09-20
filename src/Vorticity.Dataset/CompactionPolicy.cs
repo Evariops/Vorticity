@@ -1,24 +1,3 @@
-// When to compact - docs/13-dataset.md §5.3: "Triggers: level 0 above 8 objects; a level above its
-// size; an entry above K fragments".
-//
-// THE PLANNER READS ENTRIES, NEVER ROWS, and that is the whole cost of asking. It walks the leaves
-// of every occupied level -- the objects, with their summaries -- so under §5.2's invariant it
-// reads at most `8 + F x L` of them. A lagging dataset costs more, which is the same
-// output-sensitive number §5.2 already states for a lookup; a planner that hid it would be lying
-// about the thing it exists to report.
-//
-// WHY THE OVERLAP IS COMPUTED AGAINST THE UNION and not per object. A leveled compaction takes the
-// objects of level `i + 1` that overlap the inputs of level `i`. Testing each source object
-// separately looks cheaper and is wrong: source objects [1,5] and [90,100] leave a hole, the
-// outputs span [1,100] because a merge writes one sorted sequence, and a level-(i+1) object at
-// [20,30] that was not taken as an input now overlaps an output. The invariant of §5.2 -- disjoint
-// ranges inside a level -- would be broken by a compaction whose job is to hold it.
-//
-// AND WHY A TIERED JOB IS A CONTIGUOUS RUN. Without a clustering key an object's leaf key is its
-// first row position (§4.1), so the dataset's row order IS the tree's order. A concatenation of
-// objects that are not adjacent in that order would move rows past objects it did not read -- the
-// scan would answer the same rows in a different sequence, and §14 compares sequences. So the
-// planner takes the longest run of source-level objects that nothing else sits between.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -29,15 +8,13 @@ using Vorticity.Scan;
 
 namespace Vorticity.Dataset;
 
-/// <summary>Decides what to compact (§5.3).</summary>
+/// <summary>Decides what to compact. The planner reads leaf entries only, never rows.</summary>
 public static class CompactionPolicy
 {
-    /// <summary>Plans the compaction that is due on a dataset's current version.</summary>
-    /// <param name="dataset">The dataset.</param>
-    /// <param name="options">The numbers of §5, or null for the specification's.</param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>The plan, whose job is null when nothing is over its bound.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="dataset"/> is null.</exception>
+    /// <summary>
+    /// Plans the compaction due on a dataset's current version; the plan's job is null when nothing
+    /// is over its bound. Null options take the defaults.
+    /// </summary>
     public static async ValueTask<CompactionPlan> PlanAsync(
         VortexDataset dataset,
         CompactionOptions? options = null,
@@ -78,7 +55,7 @@ public static class CompactionPolicy
             fragmented);
     }
 
-    /// <summary>The first trigger that fires, in §5.3's order.</summary>
+    /// <summary>The first trigger that fires, in order of priority.</summary>
     private static CompactionJob? Choose(
         VortexDataset dataset,
         List<List<CompactionInput>> levels,
@@ -92,16 +69,10 @@ public static class CompactionPolicy
             return Build(dataset, levels, 0, settings, style, CompactionTrigger.LevelZeroCeiling);
         }
 
-        // The lowest level over its size first: compacting it feeds the one above, and doing the
-        // top one first would only have to be redone.
-        //
-        // A LEVEL OF ONE OBJECT IS AS COMPACTED AS IT CAN BE, whatever its size says, and the guard
-        // is what makes a drain terminate. The object target saturates at `MaxObjectBytes`, so a
-        // level's capacity stops growing at the top; without this, a dataset past that point would
-        // move its last object up a new level on every call, for ever, and each move would look
-        // like progress.
-        //
-        // AND THE TOP LEVEL OF A CAPPED DATASET HAS NO SIZE: nothing is moved out of it (MaxLevels).
+        // The lowest level over its size first: compacting it feeds the one above. A level of one
+        // object is as compacted as it can be whatever its size says, and that guard is what makes
+        // a drain terminate once the object target has saturated. A capped dataset's top level has
+        // no size bound at all.
         for (int level = 1; level < levels.Count; level++)
         {
             if (!settings.IsTop(level) && objects[level] > 1 && bytes[level] > settings.CapacityBytes(level))
@@ -110,9 +81,8 @@ public static class CompactionPolicy
             }
         }
 
-        // THE THIRD TRIGGER, LAST: an object carrying more than K fragments (§6.4). It reads index
-        // bytes only and rewrites no row, so it waits for the two that move data -- which would
-        // drop the object's fragments with the object anyway.
+        // Fragments last: this rewrites no row, and a trigger that moves data would drop the
+        // object's fragments with the object anyway.
         List<CompactionInput> fragmented = [];
         foreach (List<CompactionInput> level in levels)
         {
@@ -131,7 +101,7 @@ public static class CompactionPolicy
                 fragmented[0].Level, fragmented[0].Level, style, CompactionTrigger.Fragments, fragmented, 0, 0);
     }
 
-    /// <summary>The job that empties <paramref name="from"/> into the level above it.</summary>
+    /// <summary>The job that empties a level into the one above it.</summary>
     private static CompactionJob? Build(
         VortexDataset dataset,
         List<List<CompactionInput>> levels,
@@ -152,8 +122,9 @@ public static class CompactionPolicy
         List<CompactionInput> inputs = [.. sources];
         if (style == CompactionStyle.Leveled && to < levels.Count)
         {
-            // §5.3's second half of a leveled compaction: the destination objects the outputs would
-            // otherwise overlap are read too, so that the level stays key-disjoint.
+            // The destination objects the outputs would overlap are read too, so that the level
+            // stays key-disjoint. The range is the union of the sources, not one source at a time:
+            // a merge writes one sorted sequence, so it spans the holes between them as well.
             ClusteringKey key = dataset.Key!;
             (FilterLiteral low, bool hasLow, FilterLiteral high, bool hasHigh) = Range(sources, key);
             foreach (CompactionInput candidate in levels[to])
@@ -169,7 +140,7 @@ public static class CompactionPolicy
             from, to, style, trigger, inputs, settings.TargetBytes(to), FirstRow(levels, inputs));
     }
 
-    /// <summary>Every object of the source level: a leveled compaction drains it (§5.2).</summary>
+    /// <summary>The objects a leveled compaction drains out of the source level.</summary>
     private static List<CompactionInput> Leveled(List<CompactionInput> source, int from)
     {
         // Level 0's objects overlap each other by construction, so all of them go in. A level above
@@ -192,7 +163,11 @@ public static class CompactionPolicy
         return [largest];
     }
 
-    /// <summary>The longest run of source-level objects nothing else sits between.</summary>
+    /// <summary>
+    /// The longest run of source-level objects nothing else sits between. A tiered job concatenates
+    /// its inputs, so taking objects that are not adjacent in the tree's order would move rows past
+    /// objects it did not read and change the sequence a scan answers.
+    /// </summary>
     private static List<CompactionInput> Contiguous(List<List<CompactionInput>> levels, int from)
     {
         List<CompactionInput> best = [];
@@ -239,7 +214,7 @@ public static class CompactionPolicy
         return row;
     }
 
-    /// <summary>Every level's objects, merged into the one order a scan reads them in (§5.2).</summary>
+    /// <summary>Every level's objects, merged into the one order a scan reads them in.</summary>
     private static IEnumerable<(int Level, CompactionInput Input)> InOrder(List<List<CompactionInput>> levels)
     {
         int[] at = new int[levels.Count];
@@ -280,7 +255,7 @@ public static class CompactionPolicy
             if (!input.Entry.Summaries.TryGet(path, out ColumnSummary column))
             {
                 // An object that says nothing about its key spans everything it might hold, so the
-                // union does too: an inexact bound is still a conservative bound (08 §1).
+                // union does too.
                 return (default, false, default, false);
             }
 
@@ -324,7 +299,7 @@ public static class CompactionPolicy
             return true;
         }
 
-        // Only a positive proof of disjointness excludes the object (08 §1): a missing bound proves
+        // Only a positive proof of disjointness excludes the object: a missing bound proves
         // nothing, so it overlaps.
         if (column.HasMin && KeyCursor.Compare(column.Min, high) > 0)
         {

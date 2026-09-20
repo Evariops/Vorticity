@@ -1,16 +1,13 @@
-// Per-row validity, resolved ONCE per column instead of per row.
-//
-// The reference does the same thing for the same reason (vortex-row/src/codec.rs,
-// `resolve_validity`): the all-valid case is the common one, and hoisting the decision out of the
-// loop is what lets the encoder's inner loop be a straight-line write rather than a walk through
-// four validity representations.
 using System;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 
 namespace Vorticity.RowEncoding;
 
-/// <summary>One column's validity, flattened to a span and a predicate.</summary>
+/// <summary>
+/// One column's validity, flattened once per column to a span and a predicate so the encoder's
+/// inner loop is a straight-line write rather than a walk through four representations.
+/// </summary>
 internal readonly ref struct RowValidity
 {
     private readonly ReadOnlySpan<byte> _bits;
@@ -31,17 +28,9 @@ internal readonly ref struct RowValidity
         Bitmap = 2,
     }
 
-    /// <summary>
-    /// <see langword="true"/> when no row is null, so the caller can take a loop with no per-row
-    /// branch at all.
-    /// </summary>
+    /// <summary>Lets the caller take a loop with no per-row branch at all.</summary>
     internal bool AllValid => _state == State.AllValid;
 
-    /// <summary>Resolves a node's validity.</summary>
-    /// <param name="arena">The arena the node belongs to.</param>
-    /// <param name="node">The node whose validity to read.</param>
-    /// <returns>The flattened validity.</returns>
-    /// <exception cref="VortexFormatException">A bitmap validity does not name a Bool node.</exception>
     internal static RowValidity Resolve(CanonicalArena arena, CanonicalNode node)
     {
         Validity validity = node.Validity;
@@ -61,10 +50,7 @@ internal readonly ref struct RowValidity
         }
     }
 
-    /// <summary>Whether row <paramref name="row"/> holds a value.</summary>
-    /// <param name="row">0-based row index.</param>
-    /// <returns><see langword="true"/> when the row is not null.</returns>
-    /// <exception cref="VortexFormatException">The bitmap is shorter than the column.</exception>
+    /// <summary>Whether the 0-based row <paramref name="row"/> holds a value.</summary>
     internal bool IsValid(int row)
     {
         switch (_state)

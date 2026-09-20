@@ -1,72 +1,47 @@
-// What a commit object's header holds - docs/13-dataset.md §3: "the version, its parent, the
-// schema, the clustering key, the write policy, the chunker parameters and the dataset's seed
-// (§4.1), the compaction and retention settings, and the level table: per level, its top page
-// inlined, and the pages below it too while the header stays under 256 KiB".
-//
-// PROTO3, LIKE THE INDEX OPTIONS OF 10 §4.1, and for the same two reasons: an unknown field is
-// skipped rather than fatal, so a later version of this library can add one without a format
-// break; and the repository already has a single-pass writer and a bounds-checked reader for it,
-// so this codec is field numbers and nothing else.
-//
-// EVERY PAGE REFERENCE IS A FIXED 36 BYTES, which is not an optimisation but what makes the layout
-// possible at all. The header sits at offset zero and names pages that lie AFTER it, so their
-// offsets are only known once the header's length is; and the header's length depends on what it
-// holds. A varint offset would make that circular. Fixed-width references break the circle: the
-// header is serialized once to learn its length, then again with the offsets rebased, and the
-// second serialization is the same length as the first by construction -- which the builder
-// asserts rather than assumes.
 using System;
 using System.Collections.Generic;
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Dataset;
 
-/// <summary>The chunker's boundary parameters (§4.1).</summary>
-/// <param name="MinBytes">The smallest chunk the boundary rule may cut.</param>
-/// <param name="TargetBytes">The size it aims for.</param>
-/// <param name="MaxBytes">The size at which it cuts whatever the rule says.</param>
+/// <summary>
+/// The chunker's boundary parameters: the smallest chunk it may cut, the size it aims for, and the
+/// size at which it cuts whatever the boundary rule says.
+/// </summary>
 public readonly record struct ChunkerSettings(int MinBytes, int TargetBytes, int MaxBytes);
 
-/// <summary>The compaction settings (§5).</summary>
-/// <param name="Levels">How many levels the dataset keeps.</param>
-/// <param name="LevelTargetBytes">Level 1's target object size; each level multiplies it.</param>
-/// <param name="Fanout">How many objects of a level make one of the level above.</param>
+/// <summary>
+/// The compaction settings. <c>LevelTargetBytes</c> is level 1's target object size, which each
+/// level above multiplies.
+/// </summary>
 public readonly record struct CompactionSettings(int Levels, long LevelTargetBytes, int Fanout);
 
-/// <summary>The retention settings (§10).</summary>
-/// <param name="Versions">How many versions to keep beyond the current one.</param>
-/// <param name="Seconds">How long to keep a superseded version, in seconds.</param>
+/// <summary>
+/// The retention settings: how many versions to keep beyond the current one, and for how long, in
+/// seconds.
+/// </summary>
 public readonly record struct RetentionSettings(int Versions, long Seconds);
 
-/// <summary>A page carried inside the header rather than referenced.</summary>
-/// <param name="Reference">Where the page also lies, and what it hashes to.</param>
-/// <param name="Bytes">Its content.</param>
+/// <summary>A page carried inside the header as well as at the offset its reference names.</summary>
 public readonly record struct InlinedPage(PageReference Reference, ReadOnlyMemory<byte> Bytes);
 
-/// <summary>One level of the dataset tree, as the header records it.</summary>
-/// <param name="Level">Its number; 0 is the newest and smallest (§5).</param>
-/// <param name="Entries">The leaves it holds.</param>
-/// <param name="Top">Its top page.</param>
-/// <param name="Inlined">
-/// Pages carried in the header, top first: §3's "its top page inlined, and the pages below it too
-/// while the header stays under 256 KiB".
-/// </param>
+/// <summary>
+/// One level of the dataset tree, as the header records it; level 0 is the newest and smallest.
+/// <c>Inlined</c> holds the pages carried in the header, top first.
+/// </summary>
 public sealed record CommitLevel(int Level, long Entries, PageReference Top, IReadOnlyList<InlinedPage> Inlined)
 {
     /// <summary>A level with no inlined page.</summary>
-    /// <param name="level">Its number.</param>
-    /// <param name="entries">The leaves it holds.</param>
-    /// <param name="top">Its top page.</param>
     public CommitLevel(int level, long entries, PageReference top)
         : this(level, entries, top, [])
     {
     }
 
-    /// <summary>The tree's levels under <see cref="Top"/>; 1 when the top is a leaf page.</summary>
-    /// <remarks>
-    /// Recorded rather than derived: a reader that walks the tree needs it before it has read a
-    /// page, and a page does not say how far it is from the leaves.
-    /// </remarks>
+    /// <summary>
+    /// The tree's levels under <see cref="Top"/>; 1 when the top is a leaf page. Recorded rather
+    /// than derived: a page does not say how far it is from the leaves, and a reader needs the
+    /// depth before it has read one.
+    /// </summary>
     public int Depth { get; init; }
 
     /// <summary>The rows of every object under it.</summary>
@@ -76,13 +51,13 @@ public sealed record CommitLevel(int Level, long Entries, PageReference Top, IRe
 /// <summary>A commit object's header.</summary>
 public sealed record CommitHeader
 {
-    /// <summary>This commit's version, which is also its key's inverse (§3).</summary>
+    /// <summary>This commit's version, which is also the inverse of its key.</summary>
     public required ulong Version { get; init; }
 
     /// <summary>The version this one was built on; 0 for the first.</summary>
     public ulong Parent { get; init; }
 
-    /// <summary>The dataset's chunking seed (§4.1), fixed at creation.</summary>
+    /// <summary>The dataset's chunking seed, fixed at creation.</summary>
     public ulong Seed { get; init; }
 
     /// <summary>The schema, as the core serializes a dtype. Opaque here.</summary>
@@ -94,13 +69,10 @@ public sealed record CommitHeader
     /// <summary>The write policy the dataset applies to new objects. Opaque here.</summary>
     public ReadOnlyMemory<byte> WritePolicy { get; init; }
 
-    /// <summary>The chunker's parameters.</summary>
     public ChunkerSettings Chunker { get; init; }
 
-    /// <summary>The compaction settings.</summary>
     public CompactionSettings Compaction { get; init; }
 
-    /// <summary>The retention settings.</summary>
     public RetentionSettings Retention { get; init; }
 
     /// <summary>When the commit was written, in milliseconds since the Unix epoch.</summary>
@@ -109,7 +81,6 @@ public sealed record CommitHeader
     /// <summary>The levels, lowest first.</summary>
     public IReadOnlyList<CommitLevel> Levels { get; init; } = [];
 
-    /// <summary>The field numbers, so that the writer and the reader cannot drift.</summary>
     internal static class Field
     {
         internal const int Version = 1;
@@ -141,13 +112,10 @@ public sealed record CommitHeader
         internal const int Bytes = 2;
     }
 
-    /// <summary>Writes the header.</summary>
-    /// <param name="writer">The destination.</param>
-    /// <remarks>
-    /// Every offset it carries is relative to its object's pages region, exactly as the offsets
-    /// inside a page are (see <see cref="PageReference"/>), so nothing here depends on where the
-    /// header ends and the header can be written once.
-    /// </remarks>
+    /// <summary>
+    /// Writes the header. Every offset it carries is relative to its object's pages region, so
+    /// nothing here depends on where the header ends and it can be written in one pass.
+    /// </summary>
     internal void Write(ref ProtoWriter writer)
     {
         writer.WriteUInt64(Field.Version, Version);
@@ -276,10 +244,6 @@ public sealed record CommitHeader
         }
     }
 
-    /// <summary>Reads a header written by <see cref="Write"/>.</summary>
-    /// <param name="bytes">The header's bytes.</param>
-    /// <returns>The header.</returns>
-    /// <exception cref="CommitFormatException">The bytes are not a header.</exception>
     internal static CommitHeader Read(ReadOnlySpan<byte> bytes)
     {
         ulong version = 0;
@@ -335,7 +299,8 @@ public sealed record CommitHeader
                         levels.Add(ReadLevel(reader.ReadLengthDelimited()));
                         break;
                     default:
-                        // 10 §4.1's rule: a field this version does not know is skipped, not fatal.
+                        // A field this version does not know is skipped, not fatal, so a later one
+                        // can add fields without breaking the format.
                         reader.SkipField(wire);
                         break;
                 }

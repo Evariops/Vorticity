@@ -1,24 +1,3 @@
-// Verify - docs/13-dataset.md §10: "hashes every object against the leaf entries, walks the page
-// hashes, checks every fragment segment; offline; the only reader of the content hash. Between two
-// versions it is incremental, by the diff of their trees (§13.J), whatever their lineage."
-//
-// EVERY PAGE FROM THE STORE, NONE FROM THE HEADER. A reader takes the pages a header inlines, which
-// the header's own checksum covers, and never reads their stored copies: a stored root torn under
-// its inlined twin is invisible to every reader, and would surface only the day a later commit
-// stopped inlining it. Verify reads the stored copy of every page it checks, and checks the inlined
-// copies against their references besides.
-//
-// THE DIFF IS BY REFERENCE, HEIGHT BY HEIGHT. A reference names its content, so a page two versions
-// share is one subtree checked once, by the verify of the older one. Walking both trees from their
-// roots, one height at a time, the pages of the newer version that the older one does not hold at
-// that height are the ones read and checked, and only their children go on to the next height; the
-// older version's pages are read only where they differ too, and only to learn which leaf entries it
-// already vouched for. That is O(changed pages), whatever the lineage: two versions a rebase or a
-// compaction separates share what they share and nothing is assumed about how they got there. An
-// entry both versions hold byte for byte is not verified again; its object is immutable (§3).
-//
-// A PROBLEM IS REPORTED, NEVER THROWN. The point of an offline check is the whole list: a torn page
-// stops the walk below it and nothing else, a missing object is one line among the others.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -30,7 +9,7 @@ using Vorticity.File;
 
 namespace Vorticity.Dataset;
 
-/// <summary>What to verify (§10).</summary>
+/// <summary>What to verify.</summary>
 public sealed record VerifyOptions
 {
     /// <summary>The version to verify, or null for the latest.</summary>
@@ -50,7 +29,7 @@ public sealed record VerifyOptions
 /// <param name="Objects">The data objects hashed and opened.</param>
 /// <param name="Fragments">The index fragments read and checked.</param>
 /// <param name="Commits">The commit objects read whole and checked against their own checksum.</param>
-/// <param name="Unhashed">Objects whose entry records no content hash: imported ones (§7).</param>
+/// <param name="Unhashed">Objects whose entry records no content hash, as imported ones do not.</param>
 /// <param name="Problems">Each thing that does not hold, named.</param>
 public sealed record DatasetVerification(
     ulong Version,
@@ -66,17 +45,20 @@ public sealed record DatasetVerification(
     public bool Holds => Problems.Count == 0;
 }
 
-/// <summary>Checks a version against everything its references and entries promise (§10).</summary>
+/// <summary>
+/// Checks a version against everything its references and entries promise, offline. Every page is
+/// read from its stored copy and never from the copy a header inlines, so that a torn stored page
+/// hiding under a sound inlined twin is found; each problem is reported rather than thrown, so one
+/// torn page stops only the walk below it.
+/// </summary>
 public static class DatasetVerifier
 {
     private const int HashChunk = 1 << 20;
 
-    /// <summary>Verifies one version, whole or against one already verified.</summary>
-    /// <param name="store">The dataset's store.</param>
-    /// <param name="options">Which version, and since which; null for the latest, whole.</param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>What held, and every problem named.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="store"/> is null.</exception>
+    /// <summary>
+    /// Verifies one version, whole or against one already verified: what the two share by reference
+    /// is not checked again.
+    /// </summary>
     /// <exception cref="ObjectNotFoundException">The store holds no dataset, or not that version.</exception>
     public static async ValueTask<DatasetVerification> VerifyAsync(
         IObjectStore store, VerifyOptions? options = null, CancellationToken cancellationToken = default)
@@ -121,7 +103,6 @@ public static class DatasetVerifier
             version, options.Since ?? 0, run.Pages, run.Objects, run.Fragments, run.Commits, run.Unhashed, run.Problems);
     }
 
-    /// <summary>One verify's state: the page source, what it has seen and what it found.</summary>
     private sealed class Verification(IObjectStore store, CancellationToken cancellationToken)
     {
         // No header is ever inlined into it: every page it hands back was read from the store.
@@ -145,7 +126,6 @@ public static class DatasetVerifier
 
         internal long Unhashed { get; private set; }
 
-        /// <summary>The pages a header carries, against the references they are carried under.</summary>
         internal void CheckInlined(CommitHeader header)
         {
             foreach (CommitLevel level in header.Levels)
@@ -161,8 +141,8 @@ public static class DatasetVerifier
         }
 
         /// <summary>
-        /// One level's tree against the same level of the older version, height by height: the pages
-        /// the target holds and the older does not are checked, and only theirs are walked further.
+        /// One level's tree against the same level of the older version, height by height: only the
+        /// pages the target holds and the older does not are checked and walked further.
         /// </summary>
         internal async ValueTask DiffAsync(DatasetTree target, DatasetTree since)
         {
@@ -205,7 +185,7 @@ public static class DatasetVerifier
                     }
 
                     // The older version was verified before: its pages are read only to learn which
-                    // entries it vouched for, and one that no longer reads vouches for nothing.
+                    // entries it vouched for, and one that fails to read vouches for nothing.
                     ReadOnlyMemory<byte> bytes;
                     try
                     {
@@ -224,7 +204,6 @@ public static class DatasetVerifier
             }
         }
 
-        /// <summary>A page's children, or its leaf entries, into the sets the walk keeps.</summary>
         private static void Expand(
             ReadOnlyMemory<byte> page, int height, HashSet<PageReference> children, List<ObjectEntry>? entries, HashSet<UInt128>? vouched)
         {
@@ -251,7 +230,6 @@ public static class DatasetVerifier
             }
         }
 
-        /// <summary>Reads a page of the target from the store; a page that does not hold is a problem.</summary>
         private async ValueTask<ReadOnlyMemory<byte>?> ReadAsync(PageReference reference, int height)
         {
             _commits.Add(reference.Version);
@@ -274,7 +252,6 @@ public static class DatasetVerifier
             }
         }
 
-        /// <summary>Every entry the walk reached that the older version did not already vouch for.</summary>
         internal async ValueTask CheckEntriesAsync()
         {
             foreach (ObjectEntry entry in _entries)
@@ -286,10 +263,6 @@ public static class DatasetVerifier
             }
         }
 
-        /// <summary>
-        /// One object against its entry: its length, its content hash, what it says it is, and every
-        /// index region it carries or its fragments carry.
-        /// </summary>
         private async ValueTask CheckObjectAsync(ObjectEntry entry)
         {
             Objects++;
@@ -334,7 +307,6 @@ public static class DatasetVerifier
             await CheckFileAsync(entry, fragments).ConfigureAwait(false);
         }
 
-        /// <summary>Opens the object with its fragments and checks what only an open can.</summary>
         private async ValueTask CheckFileAsync(ObjectEntry entry, List<ReadOnlyMemory<byte>> fragments)
         {
             VortexOpenOptions options = fragments.Count == 0
@@ -389,8 +361,8 @@ public static class DatasetVerifier
         }
 
         /// <summary>
-        /// Every commit object this verify read from, whole: its trailer, its table and its checksum,
-        /// which a reader checks only when its one open read happens to cover the whole object (§3).
+        /// Checks every commit object this verify read from whole, including the checksum a reader
+        /// only covers when its one open read happens to span the whole object.
         /// </summary>
         internal async ValueTask CheckCommitsAsync(ulong version)
         {
@@ -423,7 +395,6 @@ public static class DatasetVerifier
             }
         }
 
-        /// <summary>The XXH3-128 of a whole object, a mebibyte at a time.</summary>
         private async ValueTask<UInt128> HashAsync(string key, long length)
         {
             XxHash128 hash = new XxHash128();

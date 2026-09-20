@@ -1,18 +1,3 @@
-// The commit protocol - docs/13-dataset.md §8.1 and §8.2.
-//
-// THREE DEPENDENT REQUESTS, uncontended (§8.1): the `List` that finds the latest version, the read
-// of its header, the `PutIfAbsent` that creates the next one. The data objects were uploaded before
-// and in parallel; they cost the commit nothing. Nothing else is on the critical path, which is why
-// there is no lease, no lock and no external service: put-if-absent linearises commits by itself.
-//
-// AND ON A LOSS, A REBASE RATHER THAN A MERGE (§8.2). A writer that had produced a TREE would have
-// to merge two trees, which is either wrong -- whose page wins? -- or expensive. This writer kept
-// its INTENTIONS, so it re-reads the winner and re-applies them to the winner's tree. Each
-// intention knows what to do when the ground moved: the seven rows of §8.2's matrix are the
-// branches in `Apply`, and the rebase matrix test walks them.
-//
-// WHAT AN ITERATION COSTS: "the header of N+1, the touched leaves, the creation", `depth + 2`
-// dependent requests. The counting store measures it rather than this comment asserting it.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -23,11 +8,11 @@ namespace Vorticity.Dataset;
 /// <summary>What a commit needs to know beyond its operations.</summary>
 public sealed record CommitOptions
 {
-    /// <summary>The dataset's chunking seed (§4.1), fixed at creation and carried by every header.</summary>
+    /// <summary>The dataset's chunking seed, fixed at creation and carried by every header.</summary>
     public required ulong Seed { get; init; }
 
-    /// <summary>The header a first commit starts from: schema, clustering key, settings.</summary>
-    /// <remarks>Ignored once the dataset exists; the winner's header is then the one that carries on.</remarks>
+    /// <summary>The header a first commit starts from: schema, clustering key, settings. Ignored
+    /// once the dataset exists, the winner's header carrying on instead.</summary>
     public CommitHeader? Template { get; init; }
 
     /// <summary>How many times to rebase before giving up.</summary>
@@ -36,22 +21,20 @@ public sealed record CommitOptions
     /// <summary>The boundary rule, or null for the prolly rule at this dataset's seed.</summary>
     public IBoundaryRule? Rule { get; init; }
 
-    /// <summary>What a node's summary is, or null for the one the object entries carry (§4.2).</summary>
+    /// <summary>What a node's summary is, or null for the one the object entries carry.</summary>
     public ISummaryFold? Fold { get; init; }
 
     /// <summary>A rule in its starting state.</summary>
-    /// <returns>The rule.</returns>
     public IBoundaryRule NewRule() => Rule?.Fresh() ?? new ProllyBoundaryRule(Seed);
 
     /// <summary>The fold this commit folds its pages' summaries with.</summary>
-    /// <returns>The fold.</returns>
     public ISummaryFold NewFold() => Fold ?? ObjectSummaryFold.Instance;
 }
 
 /// <summary>What a commit did.</summary>
 /// <param name="Version">The version created.</param>
 /// <param name="Key">Its commit object's key.</param>
-/// <param name="Levels">The trees that version names, one per level (§5.2).</param>
+/// <param name="Levels">The trees that version names, one per level.</param>
 /// <param name="Outcomes">What each operation decided, in the caller's order.</param>
 /// <param name="Attempts">How many times the writer had to rebase, 1 when it won first time.</param>
 /// <param name="Pages">A source that can read the new version's pages, new and old.</param>
@@ -67,15 +50,14 @@ public sealed record CommitResult(
     public DatasetTree Tree => Levels[0];
 }
 
-/// <summary>Creates versions of a dataset, one conditional creation at a time.</summary>
+/// <summary>
+/// Creates versions of a dataset, one conditional creation at a time: put-if-absent linearises
+/// commits by itself, so there is no lease, no lock and no external service. A writer that loses
+/// re-reads the winner and re-applies its operations rather than merging two trees.
+/// </summary>
 public static class DatasetCommitter
 {
     /// <summary>Applies the operations to the dataset's latest version, rebasing until it wins.</summary>
-    /// <param name="store">The dataset's store.</param>
-    /// <param name="operations">What to do, in the caller's order.</param>
-    /// <param name="options">The seed and the rest.</param>
-    /// <param name="cancellationToken">Cancels the requests.</param>
-    /// <returns>What the commit did.</returns>
     /// <exception cref="ObjectStoreException">The writer lost <see cref="CommitOptions.MaxAttempts"/> times.</exception>
     public static async ValueTask<CommitResult> CommitAsync(
         IObjectStore store,
@@ -92,7 +74,7 @@ public static class DatasetCommitter
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            // 1. The latest version, in one request (§8.3).
+            // 1. The latest version, in one request.
             (ulong parent, CommitObject? commit) = await LatestAsync(store, cancellationToken).ConfigureAwait(false);
             CommitPageSource pages = new CommitPageSource(store);
             DatasetLevels levels = DatasetLevels.Empty;
@@ -105,9 +87,9 @@ public static class DatasetCommitter
                 levels = DatasetLevels.Of(commit.Header);
             }
 
-            // 2. The operations, re-applied to whatever is there now (§8.2), a batch per level. The
-            // commit object exists before they are applied, because an indexer's fragment is written
-            // into it and its entry names it there (§6.4); a lost attempt throws both away.
+            // 2. The operations, re-applied to whatever is there now, a batch per level. The commit
+            // object exists before they are applied, because an indexer's fragment is written into
+            // it and its entry names it there; a lost attempt throws both away.
             ulong version = parent + 1;
             CommitObjectBuilder builder = new CommitObjectBuilder(version);
             (Dictionary<int, List<TreeChange>> changes, List<OperationOutcome> outcomes, Relocation repack) =
@@ -155,7 +137,7 @@ public static class DatasetCommitter
                 Levels = LevelsOf(next, builder, pages),
             };
 
-            // 3. One conditional creation (§8.1).
+            // 3. One conditional creation.
             string key = CommitKey.For(version);
             byte[] bytes = builder.Build(header);
             if (await store.PutIfAbsentAsync(key, bytes, cancellationToken).ConfigureAwait(false)
@@ -171,10 +153,8 @@ public static class DatasetCommitter
             "answer to contention, not more attempts (docs/13-dataset.md §8.2).");
     }
 
-    /// <summary>The latest version and its commit object, in one listing and one read (§8.3).</summary>
-    /// <param name="store">The store.</param>
-    /// <param name="cancellationToken">Cancels the requests.</param>
-    /// <returns>The version and its commit, or (0, null) when the dataset has none.</returns>
+    /// <summary>The latest version and its commit object, in one listing and one read; (0, null)
+    /// when the dataset has none.</summary>
     public static async ValueTask<(ulong Version, CommitObject? Commit)> LatestAsync(
         IObjectStore store, CancellationToken cancellationToken)
     {
@@ -190,22 +170,10 @@ public static class DatasetCommitter
     }
 
     /// <summary>
-    /// The pages §3 asks a header to carry: "its top page inlined, and the pages below it too while
-    /// the header stays under 256 KiB".
+    /// The pages a header carries, top first, spending what is left of its inline room. Only pages
+    /// already in hand are inlined: reading one just to inline it would spend a request to save
+    /// bytes, and the rewrite already holds the levels above the leaves.
     /// </summary>
-    /// <param name="builder">The commit being built, which holds the pages it just wrote.</param>
-    /// <param name="pages">The source, which holds every page this commit read or was handed.</param>
-    /// <param name="tree">The new tree.</param>
-    /// <param name="budget">What is left of the header's inline room; spent by what this inlines.</param>
-    /// <returns>The pages to inline, top first.</returns>
-    /// <remarks>
-    /// ONLY THE PAGES ALREADY IN HAND — the ones this commit wrote, the ones its predecessor's
-    /// header carried, and the ones it read on the way. A commit that READ a page just to inline it
-    /// would trade the thing §8.1 counts, requests, for the thing it does not. What is in hand,
-    /// though, is most of what matters: the levels above the leaves are read by the rewrite itself,
-    /// so a header ends up carrying the top of the tree without one extra request, and the next
-    /// commit's descent finds it there.
-    /// </remarks>
     private static IReadOnlyList<InlinedPage> Inline(
         CommitObjectBuilder builder, CommitPageSource pages, DatasetTree tree, ref long budget)
     {
@@ -240,27 +208,19 @@ public static class DatasetCommitter
         return inlined;
     }
 
-    /// <summary>
-    /// What the inlined pages may take, under §3's "while the header stays under 256 KiB" with room
-    /// left for everything else the header carries.
-    /// </summary>
+    /// <summary>What the inlined pages may take, leaving room under the header's size cap for
+    /// everything else it carries.</summary>
     private const int InlineBudget = 192 << 10;
 
-    /// <summary>The tree a header names at level 0, where appends land.</summary>
-    /// <param name="header">The header.</param>
-    /// <returns>The tree, empty when the header names no level 0.</returns>
+    /// <summary>The tree a header names at level 0, where appends land; empty when it names
+    /// none.</summary>
     public static DatasetTree TreeOf(CommitHeader header) => DatasetLevels.Of(header)[0];
 
-    /// <summary>What a header records for each occupied level, with the pages it can inline.</summary>
-    /// <param name="levels">The version's trees.</param>
-    /// <param name="builder">The commit being built, which holds the pages it just wrote.</param>
-    /// <param name="pages">The source, which holds every page this commit read or was handed.</param>
-    /// <remarks>
-    /// ONE INLINE BUDGET, SHARED, and spent from the top down: level 0 is the one every lookup
-    /// descends and the one an append touches, so it gets the room first. A level whose top does
-    /// not fit is read in one request instead, which is §9.1's "0 up to ~650 objects, 1 up to
-    /// ~400 000" starting one step further along for that level alone.
-    /// </remarks>
+    /// <summary>
+    /// What a header records for each occupied level, with the pages it can inline. The levels share
+    /// one inline budget and spend it from level 0 up, since every lookup descends level 0; a level
+    /// whose top does not fit costs one request to read instead.
+    /// </summary>
     private static IReadOnlyList<CommitLevel> LevelsOf(
         DatasetLevels levels, CommitObjectBuilder builder, CommitPageSource pages)
     {
@@ -279,12 +239,7 @@ public static class DatasetCommitter
         return recorded;
     }
 
-    /// <summary>Re-applies the operations to the levels as they are now, by §8.2's rules.</summary>
-    /// <param name="levels">The trees of the version this attempt builds on.</param>
-    /// <param name="operations">What to do.</param>
-    /// <param name="pages">Where the trees' pages are read.</param>
-    /// <param name="builder">The attempt's commit object, which receives the fragments applied.</param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <summary>Re-applies the operations to the levels as they are now.</summary>
     private static async ValueTask<(Dictionary<int, List<TreeChange>> Changes, List<OperationOutcome> Outcomes, Relocation Repack)>
         ApplyAsync(
             DatasetLevels levels,
@@ -294,9 +249,9 @@ public static class DatasetCommitter
             CancellationToken cancellationToken)
     {
         Relocation repack = new Relocation();
-        // Sorted and unique by key WITHIN A LEVEL, which is what a batch has to be; an operation
+        // Sorted and unique by key within a level, which is what a batch has to be; an operation
         // that touches a key another already touched sees the pending value, so two fragments on
-        // one object both land. One batch per level, because one tree per level (§4.3).
+        // one object both land. One batch per level, because one tree per level.
         Dictionary<int, SortedDictionary<byte[], TreeChange>> changes = [];
         Dictionary<string, ObjectEntry?> pending = new Dictionary<string, ObjectEntry?>(StringComparer.Ordinal);
         List<OperationOutcome> outcomes = new List<OperationOutcome>(operations.Count);
@@ -310,7 +265,7 @@ public static class DatasetCommitter
                     ObjectEntry? current = await CurrentAsync(add.Level, add.Key).ConfigureAwait(false);
                     if (current is { } held && held.Uid == add.Entry.Uid)
                     {
-                        // The winner already added this very object: the same uid is the same bytes.
+                        // The same uid is the same bytes, so the winner already added this object.
                         outcomes.Add(OperationOutcome.AlreadyThere);
                         break;
                     }
@@ -325,21 +280,19 @@ public static class DatasetCommitter
                     ObjectEntry? current = await CurrentAsync(fragment.Level, fragment.Key).ConfigureAwait(false);
                     if (current is not { } entry || entry.Uid != fragment.Uid)
                     {
-                        // The object is gone, or it is not the object the fragment was built
-                        // against: the fragment is dropped and never written (§8.2, row 4).
+                        // The object is gone, or is not the one the fragment was built against.
                         outcomes.Add(OperationOutcome.Dropped);
                         break;
                     }
 
                     if (entry.Holds(fragment.Fragment.Span))
                     {
-                        // Another indexer got there first with the same fragment (§8.2, row 3): its
-                        // bytes are not written a second time.
+                        // Another indexer got there first with the same fragment; its bytes are not
+                        // written a second time.
                         outcomes.Add(OperationOutcome.AlreadyThere);
                         break;
                     }
 
-                    // Written into this commit object, and named where it lies (§6.4).
                     PageReference written = builder.AddFragment(fragment.Fragment.Span);
                     Put(fragment.Level, fragment.Key, entry.With(written));
                     outcomes.Add(OperationOutcome.Applied);
@@ -376,8 +329,7 @@ public static class DatasetCommitter
 
                     if (!complete)
                     {
-                        // An input is missing: another compaction took it, and this one's outputs
-                        // are garbage (§8.2, row 5).
+                        // Another compaction took an input, so this one's outputs are garbage.
                         outcomes.Add(OperationOutcome.Abandoned);
                         break;
                     }
@@ -399,7 +351,7 @@ public static class DatasetCommitter
                 case DatasetOperation.Repack move:
                 {
                     // The fragments move here, as leaf changes: an entry names its fragments, so a
-                    // moved fragment is a changed entry. The pages move after the batches (above).
+                    // moved fragment is a changed entry. The pages move after the batches.
                     repack.Versions.UnionWith(move.Versions);
                     repack.At.Add(outcomes.Count);
                     outcomes.Add(OperationOutcome.AlreadyThere);
@@ -488,7 +440,6 @@ public static class DatasetCommitter
             level.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + Convert.ToHexString(key.Span);
     }
 
-    /// <summary>What an attempt's repacks name, and what they moved (§10).</summary>
     private sealed class Relocation
     {
         internal HashSet<ulong> Versions { get; } = [];
@@ -498,7 +449,7 @@ public static class DatasetCommitter
         internal int Moved { get; set; }
     }
 
-    /// <summary>`memcmp` order over keys, which is the tree's (06).</summary>
+    /// <summary>The tree's own byte order over keys.</summary>
     private sealed class KeyOrder : IComparer<byte[]>
     {
         internal static KeyOrder Instance { get; } = new KeyOrder();

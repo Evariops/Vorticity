@@ -1,12 +1,3 @@
-// Per-row width classification, from the DTYPE ALONE.
-//
-// The classification deliberately ignores the RowSortField and the data: a fixed-width type
-// encodes to the same number of bytes whether the row is null or not (sentinel plus zero fill),
-// and `descending` only changes byte VALUES. That is what lets the size pass answer "how many
-// bytes does column c contribute to every row" with one walk of the schema instead of one walk
-// of the data.
-//
-// Transcribed from `row_width_for_dtype` in vortex-row/src/codec.rs at 0.86.1.
 using System;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
@@ -23,9 +14,7 @@ internal readonly struct RowWidth
     /// <summary>Per-row width depends on the data (Utf8/Binary, or a composite containing one).</summary>
     internal static RowWidth Variable => new(-1);
 
-    /// <summary>Every row encodes to exactly this many bytes.</summary>
-    /// <param name="width">The constant width, including sentinels.</param>
-    /// <returns>The classification.</returns>
+    /// <summary>Every row encodes to exactly this many bytes, sentinels included.</summary>
     internal static RowWidth Fixed(int width) => new(width);
 
     /// <summary>Whether every row has the same width.</summary>
@@ -35,7 +24,11 @@ internal readonly struct RowWidth
     internal int Width => _width;
 }
 
-/// <summary>Classifies dtypes, and rejects the ones the format defines no ordering for.</summary>
+/// <summary>
+/// Classifies dtypes, and rejects the ones the format defines no ordering for. The width follows
+/// from the dtype alone, never from the options or the data, so the size pass walks the schema
+/// once instead of the data.
+/// </summary>
 internal static class RowWidths
 {
     /// <summary>The 32 data bytes of one variable-length block.</summary>
@@ -50,15 +43,7 @@ internal static class RowWidths
     /// <summary>The encoded size of an empty variable-length value: the sentinel alone.</summary>
     internal const int VarEmptySize = 1;
 
-    /// <summary>
-    /// Classifies <paramref name="dtype"/>'s per-row encoded width.
-    /// </summary>
-    /// <param name="dtype">The column's dtype.</param>
-    /// <returns>A constant width, or <see cref="RowWidth.Variable"/>.</returns>
-    /// <exception cref="VortexUnsupportedException">
-    /// The dtype has no defined row ordering: <c>List</c>, <c>Map</c>, <c>Variant</c>,
-    /// <c>Union</c>, <c>Extension</c>, or a 256-bit <c>Decimal</c>.
-    /// </exception>
+    /// <summary>Classifies <paramref name="dtype"/>'s per-row encoded width.</summary>
     internal static RowWidth For(DType dtype)
     {
         switch (dtype.Kind)
@@ -96,8 +81,7 @@ internal static class RowWidths
                     return RowWidth.Variable;
                 }
 
-                // A FixedSizeList<FixedSizeList<...>> nests, and this product is the one place
-                // where a schema alone - no data at all - can overflow an int.
+                // Nesting makes this product the one place where a schema alone can overflow an int.
                 long total = 1 + ((long)element.Width * dtype.FixedSize);
                 if (total > int.MaxValue)
                 {
@@ -147,9 +131,8 @@ internal static class RowWidths
                 throw Unsupported("union", "Row encoding does not support unions.");
 
             case DTypeKind.Extension:
-                // Rejected rather than unwrapped: silently encoding the storage array would make
-                // our bytes disagree with Rust's the day upstream defines temporal ordering.
-                // Callers who need a temporal sort key normalize to the storage type themselves.
+                // Rejected rather than unwrapped: silently encoding the storage array would put
+                // these bytes at odds with the day the format defines a temporal ordering.
                 throw Unsupported(
                     dtype.ExtensionId,
                     "Row encoding does not support extension dtypes, so timestamps and dates " +
@@ -161,20 +144,16 @@ internal static class RowWidths
     }
 
     /// <summary>
-    /// The storage width a decimal's row key is written at, chosen from the DECLARED precision and
-    /// never from the chunk's physical values type.
+    /// The storage width a decimal's row key is written at, chosen from the declared precision and
+    /// never from the chunk's physical values type: chunks of one column can compress to different
+    /// physical widths, and keys taken from those would not compare across chunks.
     /// </summary>
-    /// <remarks>
-    /// One logical column's chunks can compress to different physical widths; keys taken from the
-    /// physical width would then not be memcmp-comparable across chunks of the same column.
-    /// </remarks>
-    /// <param name="precision">The decimal precision, 1..76.</param>
-    /// <returns>The key storage type.</returns>
     internal static DecimalStorageType KeyStorage(byte precision) => DecimalStorage.ForPrecision(precision);
 
-    /// <summary>The encoded size of a non-empty variable-length value, sentinel included.</summary>
-    /// <param name="length">The value's byte length, positive.</param>
-    /// <returns>Sentinel plus <c>ceil(length / 32)</c> whole blocks.</returns>
+    /// <summary>
+    /// The encoded size of a non-empty variable-length value: the sentinel plus
+    /// <c>ceil(length / 32)</c> whole blocks.
+    /// </summary>
     internal static int NonEmptyVarSize(int length)
     {
         int blocks = ((length - 1) / VarBlockData) + 1;

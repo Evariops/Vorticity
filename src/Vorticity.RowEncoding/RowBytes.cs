@@ -1,12 +1,3 @@
-// The variable-length body, and the one place SIMD earns its keep.
-//
-// docs/06-row-encoding.md §7 calls out three vectorizable operations. Two of them are not worth a
-// hand-written kernel in .NET - big-endian conversion is already a single BSWAP through
-// IBinaryInteger.WriteBigEndian, and a strided sentinel+value write is a scatter no vector width
-// helps with. The third one is here: the 32-byte block. Ascending is a plain 32-byte copy;
-// descending is a 32-byte copy XORed with 0xFF, which is exactly one Vector256 load, xor and store.
-//
-// Transcribed from `encode_non_empty_varlen_body` in vortex-row/src/codec.rs at 0.86.1.
 using System;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
@@ -18,22 +9,11 @@ namespace Vorticity.RowEncoding;
 internal static class RowBytes
 {
     /// <summary>
-    /// Writes the body of a non-empty variable-length value: whole 32-byte blocks, each followed
-    /// by a marker.
+    /// Writes a non-empty variable-length value as 32-byte blocks, each followed by a marker: the
+    /// continuation marker on every non-final block, the final block's data length in 1..32 on the
+    /// last, so that a prefix reaches a lower marker and sorts first. The value must be non-empty
+    /// and a length that is a multiple of 32 ends on a marker of 32 rather than an empty block.
     /// </summary>
-    /// <remarks>
-    /// The marker is what preserves prefix ordering. Every non-final block carries the
-    /// continuation marker (<c>0xFF</c> ascending, <c>0x00</c> descending); the final block
-    /// carries its real data length in 1..32, zero-padded (or <c>0xFF</c>-padded when descending)
-    /// to the full 32 bytes. A shorter value therefore reaches a marker below <c>0xFF</c> while a
-    /// longer one is still emitting continuations, so the prefix sorts first.
-    ///
-    /// A length that is an exact multiple of 32 takes the same path with one fewer continuation
-    /// block and a final marker of 32 - not an extra empty block, which would compare wrong.
-    /// </remarks>
-    /// <param name="value">The value's bytes; never empty.</param>
-    /// <param name="destination">Where to write, at least <c>NonEmptyVarSize(len) - 1</c> long.</param>
-    /// <param name="descending">Whether to invert the data bytes and the markers.</param>
     /// <returns>The number of bytes written.</returns>
     internal static int WriteVarBody(ReadOnlySpan<byte> value, Span<byte> destination, bool descending)
     {
@@ -76,9 +56,6 @@ internal static class RowBytes
     }
 
     /// <summary>Copies <paramref name="source"/>, complementing every byte when descending.</summary>
-    /// <param name="source">The bytes to copy.</param>
-    /// <param name="destination">Where to write them; same length as <paramref name="source"/>.</param>
-    /// <param name="descending">Whether to complement.</param>
     internal static void CopyMaybeInverted(
         ReadOnlySpan<byte> source, Span<byte> destination, bool descending)
     {
@@ -91,24 +68,17 @@ internal static class RowBytes
         Invert(source, destination);
     }
 
-    /// <summary>Writes <c>source XOR 0xFF</c> into <paramref name="destination"/>.</summary>
-    /// <param name="source">The bytes to complement.</param>
-    /// <param name="destination">Where to write them; same length as <paramref name="source"/>.</param>
-    /// <remarks>
-    /// SLICED RATHER THAN LOADED UNSAFELY, unlike the vector loops elsewhere in the repository, and
-    /// measured rather than assumed: encoding a batch with every field descending costs 45,789 us
-    /// against 45,725 ascending on one file and 6,463 against 6,275 on another, so the whole of the
-    /// inversion is inside the noise and the bounds checks inside it are a fraction of that. There
-    /// is nothing here for a raw load and store to take.
-    /// </remarks>
+    /// <summary>
+    /// Writes <c>source XOR 0xFF</c> into <paramref name="destination"/>, which must be as long as
+    /// the source. Sliced rather than loaded unsafely: the inversion is too cheap for the bounds
+    /// checks to show.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static void Invert(ReadOnlySpan<byte> source, Span<byte> destination)
     {
         int i = 0;
         if (Vector256.IsHardwareAccelerated)
         {
-            // The whole reason this file exists: the common block is exactly 32 bytes, which is
-            // one Vector256 operation and no loop at all.
             Vector256<byte> ones = Vector256<byte>.AllBitsSet;
             for (; i <= source.Length - Vector256<byte>.Count; i += Vector256<byte>.Count)
             {
@@ -133,11 +103,7 @@ internal static class RowBytes
         }
     }
 
-    /// <summary>Reads the 16-byte Arrow view of row <paramref name="row"/>.</summary>
-    /// <param name="views">The views buffer.</param>
-    /// <param name="row">0-based row index.</param>
-    /// <returns>The 16 bytes of the view.</returns>
-    /// <exception cref="VortexFormatException">The buffer is too short for the row.</exception>
+    /// <summary>Reads the 16-byte Arrow view of the 0-based row <paramref name="row"/>.</summary>
     internal static ReadOnlySpan<byte> View(ReadOnlySpan<byte> views, int row)
     {
         int start = row * 16;
@@ -151,9 +117,6 @@ internal static class RowBytes
     }
 
     /// <summary>The byte length recorded in a 16-byte view.</summary>
-    /// <param name="view">The 16 view bytes.</param>
-    /// <returns>The value's length.</returns>
-    /// <exception cref="VortexFormatException">The length does not fit an <see cref="int"/>.</exception>
     internal static int ViewLength(ReadOnlySpan<byte> view)
     {
         uint size = BinaryPrimitives.ReadUInt32LittleEndian(view);

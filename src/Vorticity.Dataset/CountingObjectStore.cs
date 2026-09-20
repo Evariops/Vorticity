@@ -1,19 +1,3 @@
-// The counter of docs/13-dataset.md §9.2, one level up from `Vorticity.IO.CountingSegmentSource`
-// (step 27): that one counts what a reader asks of ONE file, this one counts what a dataset asks of
-// a STORE.
-//
-// WHY A COUNT IS NOT ENOUGH, and why this also records a depth. §9.2's third invariant:
-// "the dependent requests are the critical path ... which no total of requests can prove, since
-// parallel requests hide in a total". Ten requests issued together cost one round trip; ten issued
-// one after another cost ten. A decorator can tell those apart without a clock, because the caller
-// tells it by construction: requests that OVERLAP are requests the caller did not have to wait for.
-//
-// SO THE DEPTH IS COUNTED LIKE THIS: an operation that starts while none is in flight begins a new
-// step; one that starts while another is in flight joins the current step. The depth is the number
-// of steps. It is a LOWER BOUND on the dependent depth -- a caller that issues two independent
-// requests one after the other is charged two steps, as it should be, since it paid for two -- and
-// it is exact for the way this library reads, which registers every segment of a split before
-// reading any of it (03 §3.5).
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -21,7 +5,8 @@ using System.Threading.Tasks;
 
 namespace Vorticity.Dataset;
 
-/// <summary>Wraps a store and records what passes through it (§9.2).</summary>
+/// <summary>Wraps a store and records what passes through it, including a lower bound on how many
+/// round trips the caller waited for one after another.</summary>
 public sealed class CountingObjectStore : IObjectStore
 {
     private readonly IObjectStore _inner;
@@ -34,10 +19,7 @@ public sealed class CountingObjectStore : IObjectStore
     private int _inFlight;
     private long _steps;
 
-    /// <summary>Wraps <paramref name="inner"/>.</summary>
-    /// <param name="inner">The store that does the work.</param>
-    /// <param name="ownsInner">Whether disposing this disposes <paramref name="inner"/>.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="inner"/> is null.</exception>
+    /// <summary>Wraps a store; <c>ownsInner</c> makes disposing this dispose it too.</summary>
     public CountingObjectStore(IObjectStore inner, bool ownsInner = false)
     {
         ArgumentNullException.ThrowIfNull(inner);
@@ -63,9 +45,7 @@ public sealed class CountingObjectStore : IObjectStore
         }
     }
 
-    /// <summary>How many of <paramref name="operation"/> were asked.</summary>
-    /// <param name="operation">The kind.</param>
-    /// <returns>The count.</returns>
+    /// <summary>How many operations of one kind were asked.</summary>
     public long CountOf(ObjectOperation operation)
     {
         lock (_gate)
@@ -110,10 +90,8 @@ public sealed class CountingObjectStore : IObjectStore
         }
     }
 
-    /// <summary>
-    /// The critical path: how many times an operation started with the store idle, which is how
-    /// many round trips the caller waited for one after another.
-    /// </summary>
+    /// <summary>How many times an operation started with the store idle, a lower bound on the
+    /// round trips waited for one after another.</summary>
     public long DependentSteps
     {
         get
@@ -125,8 +103,8 @@ public sealed class CountingObjectStore : IObjectStore
         }
     }
 
-    /// <summary>Forgets everything counted so far.</summary>
-    /// <remarks>Call it with nothing in flight; otherwise the step in progress is counted twice.</remarks>
+    /// <summary>Forgets everything counted so far. Call it with nothing in flight, or the step in
+    /// progress is counted twice.</summary>
     public void Reset()
     {
         lock (_gate)
@@ -182,8 +160,7 @@ public sealed class CountingObjectStore : IObjectStore
         Enter(ObjectOperation.PutIfAbsent);
         lock (_gate)
         {
-            // COUNTED BEFORE THE CALL, and counted even when the key turns out to be taken: the
-            // bytes crossed the seam either way, which is what a caller pays for on a network.
+            // Counted even when the key turns out to be taken: the bytes crossed the seam anyway.
             _bytesWritten += content.Length;
         }
 
@@ -236,8 +213,6 @@ public sealed class CountingObjectStore : IObjectStore
     /// <inheritdoc/>
     public ValueTask DisposeAsync() => _ownsInner ? _inner.DisposeAsync() : ValueTask.CompletedTask;
 
-    /// <summary>Counts the operation and, when the store was idle, the step it begins.</summary>
-    /// <param name="operation">The kind.</param>
     private void Enter(ObjectOperation operation)
     {
         lock (_gate)

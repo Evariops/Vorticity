@@ -1,16 +1,3 @@
-// A range on the clustering key, read off a filter - docs/13-dataset.md §6.6's fourth row: "rank and
-// count on the clustering key: the row counts of the objects wholly inside the range, the exact cover
-// in the two boundary objects per level".
-//
-// WHAT "WHOLLY INSIDE" RESTS ON is the entry's summary, and a summary bound is inexact in the one
-// direction that keeps this sound: a minimum at or below the true one, a maximum at or above it (a
-// truncated string's maximum is rounded up, step 19). So summary bounds inside the range put every
-// key inside it. Two more conditions, each a way the row count would lie: the key holds no null,
-// which no comparison selects; and the key's type has summary bounds that are bounds in the filter's
-// order -- not a float, whose zone minimum and maximum exclude NaN (08 §2).
-//
-// ONLY A CONJUNCTION OF COMPARISONS ON THE KEY. Anything else in the filter -- another column, an
-// OR, a NOT -- selects rows the summaries of the key cannot count, and the object is opened.
 using Vorticity.Expressions;
 using Vorticity.Keys;
 using Vorticity.Scan;
@@ -18,7 +5,12 @@ using Vorticity.Types;
 
 namespace Vorticity.Dataset;
 
-/// <summary>A range on the dataset's clustering key, and whether an object lies wholly inside it.</summary>
+/// <summary>
+/// A range on the dataset's clustering key, and whether an object lies wholly inside it. A summary
+/// bound is inexact outwards -- a minimum at or below the true one, a maximum at or above it -- so
+/// summary bounds inside the range put every key inside it, provided the key holds no null and its
+/// type has summary bounds that are bounds in the filter's order.
+/// </summary>
 internal sealed class KeyRange
 {
     private readonly string _path;
@@ -31,10 +23,10 @@ internal sealed class KeyRange
 
     private KeyRange(string path) => _path = path;
 
-    /// <summary>The range <paramref name="filter"/> states on the clustering key, or null when it states something else.</summary>
-    /// <param name="dataset">The dataset, whose clustering key the range is on.</param>
-    /// <param name="filter">The scan's filter; null is every row.</param>
-    /// <returns>The range, or null when the entries cannot count the filter.</returns>
+    /// <summary>
+    /// The range <paramref name="filter"/> states on the clustering key -- a null filter is every
+    /// row -- or null when the entries cannot count it.
+    /// </summary>
     internal static KeyRange? Of(VortexDataset dataset, VortexExpr? filter)
     {
         if (dataset.Key is not { IsComposite: false } key)
@@ -59,7 +51,6 @@ internal sealed class KeyRange
     }
 
     /// <summary>Whether every row of an object with these summaries lies inside the range.</summary>
-    /// <param name="summaries">The object's summaries, from its leaf entry.</param>
     internal bool Holds(ObjectSummaries summaries)
     {
         if (!_hasLow && !_hasHigh)
@@ -77,7 +68,6 @@ internal sealed class KeyRange
             && (!_hasHigh || Above(_high, column.Max, _highInclusive));
     }
 
-    /// <summary>Whether <paramref name="value"/> is above <paramref name="bound"/>, or at it when inclusive.</summary>
     private static bool Above(FilterLiteral value, FilterLiteral bound, bool inclusive)
     {
         if (value.Kind != bound.Kind || value.Kind == FilterLiteralKind.Null)
@@ -89,7 +79,10 @@ internal sealed class KeyRange
         return order > 0 || (inclusive && order == 0);
     }
 
-    /// <summary>Narrows the range by one conjunct; false when it is not a comparison on the key.</summary>
+    /// <summary>
+    /// Narrows the range by one conjunct; false for anything but a conjunction of comparisons on
+    /// the key, since the key's summaries cannot count what it selects.
+    /// </summary>
     private bool Take(VortexExpr conjunct)
     {
         switch (conjunct)

@@ -1,24 +1,14 @@
-// The levels of docs/13-dataset.md §5, as a version names them: one tree per level (§4.1), not one
-// tree.
-//
-// WHY LEVELS ARE PART OF THE READ BOUND AND NOT AN OPTIMISATION (§5.1): "without a merge policy,
-// the number of objects a lookup touches is the number of appends". §5.2 fixes that with an
-// invariant -- at most 8 objects in level 0, key-disjoint objects inside every level above -- so a
-// lookup by key touches at most 8 + L objects whatever the dataset holds. This type is the shape
-// that invariant is stated over, and `Lag` is the invariant itself, asked rather than assumed:
-// §5.1 requires that a violation be REPORTED with its count, never refused, because "a library
-// never stalls a writer" (§5.3).
-//
-// EMPTY LEVELS ARE KEPT IN PLACE, not compacted out of the list. A level's number is its meaning --
-// its target size, its place in the lookup bound, what a compaction of the level below writes into
-// -- so level 2 stays level 2 when level 1 is emptied by a compaction that consumed all of it.
-// The header writes only the occupied ones and the gaps come back as empty trees.
 using System;
 using System.Collections.Generic;
 
 namespace Vorticity.Dataset;
 
-/// <summary>The trees of one version of a dataset, one per level (§5.2).</summary>
+/// <summary>
+/// The trees of one version of a dataset, one per level. Levels hold the lookup bound: at most
+/// eight objects in level 0 and key-disjoint objects in every level above, so a lookup by key
+/// touches at most eight plus the level count. Empty levels keep their place, since a level's
+/// number is its meaning.
+/// </summary>
 public sealed class DatasetLevels
 {
     private static readonly DatasetLevels None = new DatasetLevels([]);
@@ -33,8 +23,6 @@ public sealed class DatasetLevels
     public int Count => _levels.Length;
 
     /// <summary>The tree of one level, empty for a level this version does not name.</summary>
-    /// <param name="level">The level number.</param>
-    /// <returns>Its tree.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="level"/> is negative.</exception>
     public DatasetTree this[int level]
     {
@@ -78,9 +66,7 @@ public sealed class DatasetLevels
     /// <summary>Whether every level is empty.</summary>
     public bool IsEmpty => Entries == 0;
 
-    /// <summary>The levels a header names (§4.3's "a sorted batch of changes per level").</summary>
-    /// <param name="header">The commit header.</param>
-    /// <returns>The trees.</returns>
+    /// <summary>The levels a header names.</summary>
     /// <exception cref="ArgumentNullException"><paramref name="header"/> is null.</exception>
     public static DatasetLevels Of(CommitHeader header)
     {
@@ -113,9 +99,6 @@ public sealed class DatasetLevels
     }
 
     /// <summary>These levels with one of them replaced.</summary>
-    /// <param name="level">The level number.</param>
-    /// <param name="tree">Its new tree.</param>
-    /// <returns>A new set of levels.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="level"/> is negative.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="tree"/> is null.</exception>
     public DatasetLevels With(int level, DatasetTree tree)
@@ -130,29 +113,20 @@ public sealed class DatasetLevels
     }
 
     /// <summary>
-    /// How far the version is from §5.2's invariant: the objects level 0 holds above the eight it
-    /// may hold, and nothing else yet.
+    /// How far the version is from the level-0 invariant: the objects level 0 holds above the
+    /// ceiling, zero when the invariant holds. A lag degrades the read bound; it is reported, never
+    /// refused, since compaction is the caller's background job and a library never stalls a writer.
     /// </summary>
-    /// <param name="ceiling">What level 0 may hold; 8 by §5.2.</param>
-    /// <returns>The lag, zero when the invariant holds.</returns>
-    /// <remarks>
-    /// REPORTED, NEVER REFUSED. §5.3: "a level-0 count above 8 degrades the read bound and is
-    /// reported, never refused", because compaction is the user's background job and "a library
-    /// never stalls a writer". A dataset that appends faster than it compacts is a dataset with a
-    /// worse read bound and a number that says by how much, which is a different thing from a
-    /// dataset that stops accepting writes.
-    /// </remarks>
     public long LagAtLevelZero(int ceiling = DefaultLevelZeroCeiling)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(ceiling);
         return Math.Max(this[0].Entries - ceiling, 0);
     }
 
-    /// <summary>What level 0 may hold before the read bound of §5.2 degrades.</summary>
+    /// <summary>What level 0 may hold before the read bound degrades.</summary>
     public const int DefaultLevelZeroCeiling = 8;
 
     /// <summary>The levels a header should carry, in order, skipping the empty ones.</summary>
-    /// <returns>Each occupied level and its tree.</returns>
     public IEnumerable<(int Level, DatasetTree Tree)> Occupied()
     {
         for (int level = 0; level < _levels.Length; level++)

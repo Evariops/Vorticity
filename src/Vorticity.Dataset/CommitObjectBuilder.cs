@@ -1,24 +1,3 @@
-// Assembles one commit object - docs/13-dataset.md §3 and §4.3: "those pages are laid out inside
-// the commit object with the header and the fragments ... One PutIfAbsent creates the commit".
-//
-// WHY THE HEADER IS SERIALIZED ONCE. A page's absolute offset is only known once the header's
-// length is, and the header holds the page's offset: that circle is not broken by a second pass
-// but avoided, because no offset in the header is absolute (step 38). Every reference is relative
-// to the body, so the header's bytes do not depend on its own length.
-//
-// WHAT A REFERENCE HANDED OUT HERE MEANS. `AddPage` and `AddFragment` return a reference whose
-// version is this commit's and whose offset is RELATIVE to the body, the region after the header;
-// the reader adds the body's start, which the header's length gives. A reference to another version
-// -- a page an older commit wrote and this one did not change -- names that version's body and
-// passes through untouched, which is what makes §4.3's "every page the commit did not change is
-// referenced where it already lies" one line of code rather than a bookkeeping problem.
-//
-// THE BODY IS LAID OUT IN THE ORDER THINGS ARE ADDED, so an offset is final the moment it is handed
-// out. It has to be: a fragment's reference goes into its object's leaf entry, and that entry into a
-// page this same commit writes AFTER the fragment -- and a reference already hashed into a page
-// cannot be moved. The first layout put every fragment after every page, with an offset taken at
-// the fragment's addition: right only while no page followed a fragment, which every real indexing
-// commit does (step 42b). An object built pages first, fragments after, is byte for byte the same.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -27,7 +6,13 @@ using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Dataset;
 
-/// <summary>Builds the bytes of one commit object.</summary>
+/// <summary>
+/// Builds the bytes of one commit object. Every reference it hands out is relative to the body,
+/// the region after the header, so the header's bytes do not depend on its own length and it is
+/// serialized once. The body is laid out in the order things are added, which makes an offset
+/// final as soon as it is returned — it has to be, since a reference may already be hashed into a
+/// page this same commit writes later.
+/// </summary>
 public sealed class CommitObjectBuilder : IPageSink
 {
     private readonly ulong _version;
@@ -37,16 +22,13 @@ public sealed class CommitObjectBuilder : IPageSink
     private readonly List<byte[]> _body = [];
     private long _bodyBytes;
 
-    /// <summary>Starts a commit object for <paramref name="version"/>.</summary>
-    /// <param name="version">The version this object commits; never 0.</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="version"/> is 0.</exception>
+    /// <summary>Starts a commit object for a version, which is never 0.</summary>
     public CommitObjectBuilder(ulong version)
     {
         ArgumentOutOfRangeException.ThrowIfZero(version);
         _version = version;
     }
 
-    /// <summary>The version being committed.</summary>
     public ulong Version => _version;
 
     /// <summary>The pages added so far.</summary>
@@ -55,9 +37,7 @@ public sealed class CommitObjectBuilder : IPageSink
     /// <summary>The fragments added so far.</summary>
     public int FragmentCount => _fragmentReferences.Count;
 
-    /// <summary>Adds a tree page and returns the reference that will name it.</summary>
-    /// <param name="page">Its bytes; copied.</param>
-    /// <returns>A reference with this commit's version and its final offset in the body.</returns>
+    /// <summary>Copies a tree page in and returns the reference that names it.</summary>
     public PageReference AddPage(ReadOnlySpan<byte> page)
     {
         byte[] held = page.ToArray();
@@ -67,20 +47,12 @@ public sealed class CommitObjectBuilder : IPageSink
         return reference;
     }
 
-    /// <inheritdoc/>
-    /// <remarks>The tree's seam onto this builder: a page it emits is a page of this commit.</remarks>
     PageReference IPageSink.WritePage(ReadOnlySpan<byte> page) => AddPage(page);
 
-    /// <summary>The bytes of a page this builder holds, for a caller that wants to inline it.</summary>
-    /// <param name="reference">The reference this builder handed out.</param>
-    /// <param name="page">Receives its bytes.</param>
-    /// <returns>Whether this builder wrote that page.</returns>
-    /// <remarks>
-    /// A walk and not a map, on measurement: a commit over a million objects does hold more than a
-    /// thousand pages, but it asks this question rarely, and the whole budget suite -- that commit
-    /// included -- takes under ten thousand steps here in total. A map would index a list nobody
-    /// reads often enough to pay for it.
-    /// </remarks>
+    /// <summary>
+    /// The bytes of a page this builder wrote, for a caller that wants to inline it. A linear walk
+    /// rather than a map: the question is asked rarely enough that indexing the list would not pay.
+    /// </summary>
     public bool TryGetPage(PageReference reference, out ReadOnlyMemory<byte> page)
     {
         for (int i = 0; i < _pageReferences.Count; i++)
@@ -96,13 +68,7 @@ public sealed class CommitObjectBuilder : IPageSink
         return false;
     }
 
-    /// <summary>Adds an index fragment (§6.4) and returns the reference that will name it.</summary>
-    /// <param name="fragment">Its bytes; copied.</param>
-    /// <returns>A reference with this commit's version and its final offset in the body.</returns>
-    /// <remarks>
-    /// Final when returned, whatever is added after it: the leaf entry that names the fragment goes
-    /// into a page this commit writes later, and that page hashes the reference as it is now.
-    /// </remarks>
+    /// <summary>Copies an index fragment in and returns the reference that names it.</summary>
     public PageReference AddFragment(ReadOnlySpan<byte> fragment)
     {
         PageReference reference = Append(fragment.ToArray());
@@ -119,15 +85,11 @@ public sealed class CommitObjectBuilder : IPageSink
         return reference;
     }
 
-    /// <summary>Lays the object out.</summary>
-    /// <param name="header">
-    /// The header, holding references this builder handed out and references into older commits.
-    /// </param>
-    /// <returns>The object's bytes, ready for one <see cref="IObjectStore.PutIfAbsentAsync"/>.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="header"/> is null.</exception>
-    /// <exception cref="CommitFormatException">
-    /// The header names a version other than this builder's, or the object would be past 2 GiB.
-    /// </exception>
+    /// <summary>
+    /// Lays the object out, ready for one <see cref="IObjectStore.PutIfAbsentAsync"/>. The header
+    /// may hold references this builder handed out and references into older commits, but it must
+    /// name this builder's version.
+    /// </summary>
     public byte[] Build(CommitHeader header)
     {
         ArgumentNullException.ThrowIfNull(header);
@@ -162,7 +124,6 @@ public sealed class CommitObjectBuilder : IPageSink
 
         table.CopyTo(destination[at..]);
 
-        // §7: "a commit object carries an XXH3-64 over its header and its table".
         XxHash3 checksum = new XxHash3();
         checksum.Append(headerBytes);
         checksum.Append(table);
@@ -189,8 +150,7 @@ public sealed class CommitObjectBuilder : IPageSink
         }
     }
 
-    /// <summary>The table of §3: what this object holds, pages then fragments.</summary>
-    /// <remarks>Offsets are relative to the body, as every offset of this format is.</remarks>
+    /// <summary>What this object holds, pages then fragments, at offsets relative to the body.</summary>
     private byte[] BuildTable()
     {
         ProtoWriter writer = new ProtoWriter();
@@ -222,23 +182,18 @@ public sealed class CommitObjectBuilder : IPageSink
     }
 }
 
-/// <summary>The commit object's table: what it holds, for `verify` and for repack (§10).</summary>
+/// <summary>The commit object's table: what it holds, for verification and for repack.</summary>
 public sealed record CommitTable(IReadOnlyList<PageReference> Pages, IReadOnlyList<PageReference> Fragments)
 {
     /// <summary>An empty table.</summary>
     public static CommitTable Empty { get; } = new CommitTable([], []);
 
-    /// <summary>The field numbers, so that the writer and the reader cannot drift.</summary>
     internal static class Field
     {
         internal const int Page = 1;
         internal const int Fragment = 2;
     }
 
-    /// <summary>Reads a table.</summary>
-    /// <param name="bytes">Its bytes.</param>
-    /// <returns>The table.</returns>
-    /// <exception cref="CommitFormatException">The bytes are not a table.</exception>
     internal static CommitTable Read(ReadOnlySpan<byte> bytes)
     {
         List<PageReference> pages = [];

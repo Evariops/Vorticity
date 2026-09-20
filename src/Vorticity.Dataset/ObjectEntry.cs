@@ -1,39 +1,25 @@
-// What a leaf entry says about one data object - docs/13-dataset.md §4.2, the parts the protocol of
-// §8 needs to reason about.
-//
-// WHAT IT CARRIES AND WHY. §4.2 lists the key range, the object's key, size and row count, its
-// identity, its bounded summaries and its index descriptor. The tree itself needs none of them
-// (13 §4.1: the boundary rule looks at the KEY alone), and the commit protocol needs four: which
-// object the entry is, whether it is still the same object, how many rows it has, and which
-// fragments have been attached to it. The SUMMARIES are here for a different reader: the scan, which
-// must decide whether to open this object at all, and the parent node, which folds them into the
-// union that lets it skip the whole subtree.
-//
-// CANONICAL, like a page and for the same reason: a leaf entry is inside a content-addressed page,
-// so two encodings of one entry would be two trees. Varints, in order, no optional fields.
 using System;
 using System.Collections.Generic;
 using System.Text;
 
 namespace Vorticity.Dataset;
 
-/// <summary>One data object, as its leaf entry describes it.</summary>
+/// <summary>
+/// One data object, as its leaf entry describes it. Its encoding is canonical, since an entry lies
+/// inside a content-addressed page and two encodings of one entry would be two trees.
+/// </summary>
 /// <param name="Key">Its object key in the store, e.g. <c>data/&lt;uid&gt;.vortex</c>.</param>
 /// <param name="Uid">
-/// The identity its postscript carries (§7): a version of the bytes, not of the file. An append
-/// mints a new one, which is how a stale fragment is refused before any length is compared.
+/// The identity its postscript carries: a version of the bytes, not of the file. An append mints a
+/// new one, which is how a stale fragment is refused before any length is compared.
 /// </param>
 /// <param name="Rows">Its rows.</param>
 /// <param name="Bytes">Its bytes in the store.</param>
-/// <param name="Hash">The XXH3-128 its writer computed while writing (§7).</param>
-/// <param name="Fragments">
-/// The index fragments attached to it (§6.4), in the order they were attached; at most K after
-/// fragment compaction.
-/// </param>
+/// <param name="Hash">The XXH3-128 its writer computed while writing.</param>
+/// <param name="Fragments">The index fragments attached to it, in the order they were attached.</param>
 /// <param name="Summaries">
-/// Its bounded summaries (§4.2): per summarised column, <c>min</c>, <c>max</c> and
-/// <c>null_count</c>, over the first 32 columns by default, so that the entry has a bounded size
-/// whatever the schema.
+/// Its bounded summaries: per summarised column, <c>min</c>, <c>max</c> and <c>null_count</c>, over
+/// a bounded number of columns so that the entry has a bounded size whatever the schema.
 /// </param>
 public sealed record ObjectEntry(
     string Key,
@@ -44,13 +30,7 @@ public sealed record ObjectEntry(
     IReadOnlyList<PageReference> Fragments,
     ObjectSummaries Summaries)
 {
-    /// <summary>An entry with no fragment yet.</summary>
-    /// <param name="key">The object's key.</param>
-    /// <param name="uid">Its identity.</param>
-    /// <param name="rows">Its rows.</param>
-    /// <param name="bytes">Its bytes.</param>
-    /// <param name="hash">Its content hash.</param>
-    /// <param name="summaries">Its bounded summaries, or null for none.</param>
+    /// <summary>An entry with no fragment yet; null summaries means none.</summary>
     public ObjectEntry(
         string key, UInt128 uid, long rows, long bytes, UInt128 hash, ObjectSummaries? summaries = null)
         : this(key, uid, rows, bytes, hash, [], summaries ?? ObjectSummaries.Empty)
@@ -58,29 +38,17 @@ public sealed record ObjectEntry(
     }
 
     /// <summary>An entry with fragments and no summaries.</summary>
-    /// <param name="key">The object's key.</param>
-    /// <param name="uid">Its identity.</param>
-    /// <param name="rows">Its rows.</param>
-    /// <param name="bytes">Its bytes.</param>
-    /// <param name="hash">Its content hash.</param>
-    /// <param name="fragments">The fragments attached to it.</param>
     public ObjectEntry(
         string key, UInt128 uid, long rows, long bytes, UInt128 hash, IReadOnlyList<PageReference> fragments)
         : this(key, uid, rows, bytes, hash, fragments, ObjectSummaries.Empty)
     {
     }
 
-    /// <summary>Whether two entries describe the same object in the same state.</summary>
-    /// <param name="other">The other entry.</param>
-    /// <returns>Whether they are equal.</returns>
-    /// <remarks>
-    /// BY VALUE, WHICH A RECORD'S OWN EQUALITY WOULD NOT GIVE. <see cref="Fragments"/> is a list,
-    /// and the compiler's generated equality compares lists by REFERENCE: two entries holding the
-    /// same fragments in the same order, read out of two pages, would come back unequal. A record
-    /// that says it is a value and is not is a trap for anything that compares one — an oracle, a
-    /// rebase that wants to know whether an operation changed anything — so the comparison is
-    /// written out.
-    /// </remarks>
+    /// <summary>
+    /// Whether two entries describe the same object in the same state. Written out because the
+    /// generated equality would compare <see cref="Fragments"/> by reference, so two entries read
+    /// out of two pages with the same fragments would come back unequal.
+    /// </summary>
     public bool Equals(ObjectEntry? other)
     {
         if (ReferenceEquals(this, other))
@@ -131,20 +99,14 @@ public sealed record ObjectEntry(
     }
 
     /// <summary>The entry with <paramref name="fragment"/> attached.</summary>
-    /// <param name="fragment">The fragment's reference.</param>
-    /// <returns>The new entry.</returns>
     public ObjectEntry With(PageReference fragment) =>
         this with { Fragments = [.. Fragments, fragment] };
 
-    /// <summary>Whether a fragment of the same content as this reference's is attached.</summary>
-    /// <param name="fragment">A reference: its length and hash name the content, wherever it lies.</param>
-    /// <returns>Whether the entry holds such a fragment.</returns>
-    /// <remarks>
-    /// A FRAGMENT IS ITS CONTENT. The same index bytes written by two commits are one fragment
-    /// twice, which is why an entry never holds them twice (§8.2, row 3); and a drop means "the
-    /// fragment with these bytes", which a rebuild or a fragment compaction asks for without caring
-    /// which commit happened to write them.
-    /// </remarks>
+    /// <summary>
+    /// Whether a fragment of the same content as this reference's is attached. A fragment is its
+    /// content: the same index bytes written by two commits are one fragment, and an entry never
+    /// holds them twice.
+    /// </summary>
     public bool Holds(PageReference fragment)
     {
         foreach (PageReference held in Fragments)
@@ -159,8 +121,6 @@ public sealed record ObjectEntry(
     }
 
     /// <summary>The entry without the fragment of this reference's content.</summary>
-    /// <param name="fragment">A reference naming the content.</param>
-    /// <returns>The new entry.</returns>
     public ObjectEntry Without(PageReference fragment)
     {
         List<PageReference> kept = new List<PageReference>(Fragments.Count);
@@ -178,14 +138,10 @@ public sealed record ObjectEntry(
     private static bool SameContent(PageReference left, PageReference right) =>
         left.Length == right.Length && left.Hash == right.Hash;
 
-    /// <summary>Whether a fragment of exactly these bytes is already attached, wherever it lies.</summary>
-    /// <param name="fragment">The fragment's bytes.</param>
-    /// <returns>Whether the entry holds them.</returns>
-    /// <remarks>
-    /// By content, because a fragment not yet committed has no reference to compare: §8.2's third
-    /// row — "the second finds the fragment present in the winner's leaf, drops its own" — asks
-    /// whether the same index is there, not whether it was written by the same commit.
-    /// </remarks>
+    /// <summary>
+    /// Whether a fragment of exactly these bytes is already attached, wherever it lies. By content,
+    /// because an uncommitted fragment has no reference to compare.
+    /// </summary>
     public bool Holds(ReadOnlySpan<byte> fragment)
     {
         UInt128 hash = System.IO.Hashing.XxHash128.HashToUInt128(fragment);
@@ -201,7 +157,6 @@ public sealed record ObjectEntry(
     }
 
     /// <summary>The entry's canonical bytes, as a leaf page carries them.</summary>
-    /// <returns>The bytes.</returns>
     public byte[] ToBytes()
     {
         byte[] key = Encoding.UTF8.GetBytes(Key);
@@ -232,15 +187,12 @@ public sealed record ObjectEntry(
         return at.IsEmpty ? value : throw new CommitFormatException("An object entry was mis-sized.");
     }
 
-    /// <summary>The summaries an entry's bytes carry, without the rest of the entry being built.</summary>
-    /// <param name="value">The entry's bytes, as a leaf page holds them.</param>
-    /// <returns>Just the summaries' bytes, a slice of <paramref name="value"/>.</returns>
+    /// <summary>
+    /// The summaries an entry's bytes carry, as a slice of <paramref name="value"/>: the fields
+    /// before them are varints and fixed-width hashes, so reaching them is a skip rather than a
+    /// parse, and nothing is allocated.
+    /// </summary>
     /// <exception cref="CommitFormatException">The bytes are not an entry.</exception>
-    /// <remarks>
-    /// What <see cref="ISummaryFold.OfLeaf"/> needs and all it needs. The fields before the
-    /// summaries are varints and fixed-width hashes, so reaching them is a skip rather than a parse,
-    /// and no string, list or entry is allocated to get at them.
-    /// </remarks>
     public static ReadOnlyMemory<byte> SummaryOf(ReadOnlyMemory<byte> value)
     {
         ReadOnlySpan<byte> span = value.Span;
@@ -256,13 +208,11 @@ public sealed record ObjectEntry(
         return value.Slice(at - length, length);
     }
 
-    /// <summary>Moves past <paramref name="bytes"/> bytes, or says the entry is not one.</summary>
-    /// <remarks>
-    /// The count is a LONG because it comes from a varint in bytes this code did not write: a
-    /// fragment count near <c>2^32</c> times a reference's size overflows an int, and an overflow
-    /// that wraps to a small positive number is a skip that lands somewhere plausible. Widening is
-    /// cheaper than reasoning about which wrap is harmless.
-    /// </remarks>
+    /// <summary>
+    /// Moves past <paramref name="bytes"/> bytes, or says the entry is not one. The count is a long
+    /// because it comes from a varint this code did not write, and an int would wrap to a small
+    /// positive number that skips somewhere plausible.
+    /// </summary>
     private static void Skip(ReadOnlySpan<byte> value, ref int at, long bytes)
     {
         if (bytes < 0 || at + bytes > value.Length)
@@ -274,8 +224,6 @@ public sealed record ObjectEntry(
     }
 
     /// <summary>Reads an entry written by <see cref="ToBytes"/>.</summary>
-    /// <param name="value">The bytes.</param>
-    /// <returns>The entry.</returns>
     /// <exception cref="CommitFormatException">The bytes are not an entry.</exception>
     public static ObjectEntry FromBytes(ReadOnlySpan<byte> value)
     {

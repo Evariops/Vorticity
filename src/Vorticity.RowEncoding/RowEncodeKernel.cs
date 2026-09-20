@@ -1,17 +1,3 @@
-// Pass 2 of two: write the bytes.
-//
-// Every encoder writes row `i` at `offsets[i] + cursors[i]` and advances `cursors[i]` by exactly
-// the contribution RowSizeKernel computed for the same column. That invariant is what lets the
-// cursor array BE the output's `sizes` array once the last column is done, and what makes a
-// mismatch between the two passes show up as a corrupt row rather than as a silent overlap: the
-// caller's destination is sized from pass 1, so a column that writes more than it measured runs
-// off the end and throws.
-//
-// The encoders are column-at-a-time, not row-at-a-time: one pass per column over all rows. The
-// branch on validity and the branch on type are then hoisted out of the inner loop, which a
-// row-major encoder cannot do.
-//
-// Transcribed from `field_encode` and its `encode_*` helpers in vortex-row/src/codec.rs at 0.86.1.
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -24,18 +10,19 @@ using Vorticity.Types.Numerics;
 
 namespace Vorticity.RowEncoding;
 
-/// <summary>The write pass.</summary>
+/// <summary>
+/// The write pass. Every encoder writes row <c>i</c> at <c>offsets[i] + cursors[i]</c> and advances
+/// <c>cursors[i]</c> by exactly the contribution the sizing pass computed for the same column, so
+/// the cursors end as the output's sizes and a column that writes more than its size runs off
+/// the end rather than overlapping a neighbour. Encoding is column-at-a-time, which hoists the
+/// branches on validity and on type out of the inner loop.
+/// </summary>
 internal static class RowEncodeKernel
 {
-    /// <summary>Encodes one column into the per-row slots named by the offsets and cursors.</summary>
-    /// <param name="arena">The arena holding the column.</param>
-    /// <param name="nodeIndex">The column's canonical node index.</param>
-    /// <param name="field">The column's sort options, inherited unchanged by every child.</param>
-    /// <param name="offsets">Where each row starts in <paramref name="destination"/>.</param>
-    /// <param name="cursors">How far each row is already written; advanced by this call.</param>
-    /// <param name="destination">The output buffer.</param>
-    /// <exception cref="VortexUnsupportedException">The column's dtype has no defined ordering.</exception>
-    /// <exception cref="VortexFormatException">The column's data contradicts its dtype.</exception>
+    /// <summary>
+    /// Encodes one column into the per-row slots named by the offsets and cursors, advancing the
+    /// cursors. Every child inherits <paramref name="field"/> unchanged.
+    /// </summary>
     internal static void Encode(
         CanonicalArena arena,
         int nodeIndex,
@@ -85,8 +72,6 @@ internal static class RowEncodeKernel
                 throw RowThrow.UnsupportedCanonical(node);
         }
     }
-
-    // ------------------------------------------------------------------------------------ leaves
 
     /// <summary>The Null dtype: a sentinel and no body, because there is no value to order by.</summary>
     private static void EncodeNull(
@@ -180,13 +165,10 @@ internal static class RowEncodeKernel
 
     /// <summary>
     /// The one loop every fixed-width type goes through: sentinel, ordered value big-endian,
-    /// complemented when descending.
+    /// complemented when descending. A null zero-fills its value bytes even under
+    /// <c>descending</c>, since the fill is not a value and inverting it would make two nulls of
+    /// the same column differ.
     /// </summary>
-    /// <remarks>
-    /// A null writes its sentinel and ZERO-FILLS the value bytes - zero even under
-    /// <c>descending</c>, because the fill is not a value and inverting it would make two nulls
-    /// of the same column compare unequal to a null written by another implementation.
-    /// </remarks>
     private static void EncodeFixed<T, TOrder>(
         ReadOnlySpan<T> values, RowValidity validity, RowSortField field,
         ReadOnlySpan<int> offsets, Span<int> cursors, Span<byte> destination)
@@ -231,18 +213,11 @@ internal static class RowEncodeKernel
     }
 
     /// <summary>
-    /// Decimal: the signed-integer encoding of the unscaled value, at the width the DECLARED
-    /// precision implies.
+    /// Decimal: the signed-integer encoding of the unscaled value, at the width the declared
+    /// precision implies rather than this chunk's storage width, which can differ from chunk to
+    /// chunk of one column. A null slot's backing bytes are unspecified and may not fit the key
+    /// width, so the fit check applies to valid rows only.
     /// </summary>
-    /// <remarks>
-    /// The key width comes from the precision and never from this chunk's physical storage width,
-    /// because one logical column's chunks can compress to different physical widths and keys
-    /// taken from the physical width would then not be comparable across them.
-    ///
-    /// A null slot's backing bytes are unspecified and may not fit the key width at all, so the
-    /// fit check applies to valid rows only - checking it everywhere would reject files the
-    /// reference accepts.
-    /// </remarks>
     private static void EncodeDecimal(
         CanonicalArena arena, CanonicalNode node, RowSortField field,
         ReadOnlySpan<int> offsets, Span<int> cursors, Span<byte> destination)
@@ -284,8 +259,6 @@ internal static class RowEncodeKernel
 
                 slot[0] = RowSentinels.FixedNonNull;
 
-                // UInt128 implements WriteBigEndian explicitly, so the generic path above cannot
-                // reach it on a concrete UInt128; BinaryPrimitives is the same BSWAP pair.
                 BinaryPrimitives.WriteUInt128BigEndian(wide, ordered);
                 wide.Slice(16 - keyWidth, keyWidth).CopyTo(slot.Slice(1));
             }
@@ -325,8 +298,7 @@ internal static class RowEncodeKernel
             if (length == 0)
             {
                 // Three sentinels, not two: byte 0 alone must separate null from empty from
-                // non-empty, or a following column's bytes line up against another row's padding
-                // and the multi-column order breaks.
+                // non-empty, or a following column's bytes line up against another row's padding.
                 destination[pos] = emptyByte;
                 cursors[i] += RowWidths.VarEmptySize;
                 continue;
@@ -338,8 +310,6 @@ internal static class RowEncodeKernel
             cursors[i] += 1 + written;
         }
     }
-
-    // --------------------------------------------------------------------------------- composites
 
     private static void EncodeStruct(
         CanonicalArena arena, CanonicalNode node, RowSortField field,
@@ -365,10 +335,9 @@ internal static class RowEncodeKernel
             RowWidth width = RowWidths.For(childType);
             if (width.IsFixed)
             {
-                // Encode every row, then overwrite the null parents. Writing the child first and
-                // correcting after is not laziness: it keeps the cursor arithmetic in one place,
-                // and the correction is what CANONICALIZES the null body - two null parents must
-                // encode byte-equal no matter what their child arrays happen to hold underneath.
+                // Encode every row, then overwrite the null parents: the correction canonicalizes
+                // the null body, so two null parents encode byte-equal whatever their children
+                // hold, and the cursor arithmetic stays in one place.
                 Encode(arena, childIndex, field, offsets, cursors, destination);
                 byte childNull = RowSentinels.ChildCanonicalNull(childType, field);
                 for (int i = 0; i < rows; i++)
@@ -390,7 +359,7 @@ internal static class RowEncodeKernel
     }
 
     /// <summary>
-    /// A variable-width child of a null parent collapses to ONE byte, so its natural encoding is
+    /// A variable-width child of a null parent collapses to one byte, so its natural encoding is
     /// built in scratch and copied only for the rows that keep it.
     /// </summary>
     private static void EncodeVariableChild(
@@ -567,8 +536,6 @@ internal static class RowEncodeKernel
         }
     }
 
-    // ------------------------------------------------------------------------------------ helpers
-
     /// <summary>Exclusive prefix sum; returns the total.</summary>
     internal static int Prefix(ReadOnlySpan<int> sizes, Span<int> starts)
     {
@@ -589,15 +556,10 @@ internal static class RowEncodeKernel
     }
 
     /// <summary>
-    /// Writes one ordered value big-endian, complemented when descending.
+    /// Writes one ordered value big-endian, complemented when descending. TryWriteBigEndian rather
+    /// than WriteBigEndian: the latter is a default interface method the primitive types do not
+    /// override, so a constrained call to it boxes the receiver on every value.
     /// </summary>
-    /// <remarks>
-    /// TryWriteBigEndian rather than WriteBigEndian ON PURPOSE. The latter is a DEFAULT INTERFACE
-    /// METHOD that the primitive types do not override, so a constrained call to it has to box the
-    /// receiver to reach the interface's implementation - 24 bytes per value, on every row of
-    /// every fixed-width column. TryWriteBigEndian is abstract and implemented by each type, so
-    /// the same call devirtualizes and allocates nothing. The two spell the same bytes.
-    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void Write<T>(T ordered, bool descending, Span<byte> destination)
         where T : unmanaged, IBinaryInteger<T>

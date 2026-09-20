@@ -1,29 +1,13 @@
-// The key of a commit object - docs/13-dataset.md §3: "`<inverted version>` is 10²⁰ − 1 − version,
-// twenty digits: the newest commit sorts first, so one `List(prefix: "commit/", max: 1)` returns it
-// with no hint and no probe (§8.3). There is no mutable object anywhere in the layout."
-//
-// WHY INVERSION RATHER THAN A POINTER. Every other design needs a mutable object -- a `HEAD` file,
-// a table row, a rename -- and an object store has none: `PutIfAbsent` creates, nothing updates. So
-// the newest version is found by ORDER instead, and the order is the store's own: ordinal over
-// keys, which every store gives and §11 requires to be strongly consistent. Inverting the version
-// turns "the largest version" into "the first key", which one listing of one key answers.
-//
-// TWENTY DIGITS, ZERO-PADDED, because ordinal order over strings is digit order only when the
-// strings are the same length: "9" sorts after "10" and 09 does not. 10²⁰ − 1 is the largest value
-// twenty digits hold, and it is over `ulong.MaxValue`, so every version this library can count to
-// has an inverse that fits.
 using System;
 using System.Globalization;
 
 namespace Vorticity.Dataset;
 
-/// <summary>The keys of a dataset's two kinds of object (§3).</summary>
-/// <remarks>
-/// Public because keys cross the boundary in both directions: a store implementation is handed
-/// them by every call on <see cref="IObjectStore"/>, and <see cref="ObjectEntry.Key"/> hands one
-/// back to a caller. Recognising which of the two kinds a key names, without re-deriving the
-/// convention from the format document, is what this offers.
-/// </remarks>
+/// <summary>
+/// The keys of a dataset's two kinds of object. A commit's version is stored inverted and
+/// zero-padded to a fixed width, so that ordinal order over keys puts the newest commit first and
+/// one listing of one key finds it without a mutable pointer anywhere in the layout.
+/// </summary>
 public static class CommitKey
 {
     /// <summary>The prefix every commit object's key starts with.</summary>
@@ -38,16 +22,15 @@ public static class CommitKey
     /// <summary>The suffix every data object's key ends with.</summary>
     public const string DataSuffix = ".vortex";
 
-    /// <summary>Digits of the inverted version: 10²⁰ − 1 is the largest of them.</summary>
+    /// <summary>Digits of the inverted version, enough for every <see cref="ulong"/> version.</summary>
     public const int Digits = 20;
 
-    /// <summary>10²⁰ − 1, which no <see cref="ulong"/> version reaches.</summary>
     private static readonly UInt128 Ceiling = UInt128.Parse("99999999999999999999", CultureInfo.InvariantCulture);
 
-    /// <summary>The key of version <paramref name="version"/>.</summary>
-    /// <param name="version">The version; never 0, which is "no parent".</param>
-    /// <returns>The key, of the form <c>commit/&lt;inverted version&gt;.vxc</c>.</returns>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="version"/> is 0.</exception>
+    /// <summary>
+    /// The key of a version, of the form <c>commit/&lt;inverted version&gt;.vxc</c>. Version 0 is
+    /// reserved for "no parent" and has no key.
+    /// </summary>
     public static string For(ulong version)
     {
         ArgumentOutOfRangeException.ThrowIfZero(version);
@@ -57,10 +40,7 @@ public static class CommitKey
             $"{Prefix}{inverted.ToString("D20", CultureInfo.InvariantCulture)}{Suffix}");
     }
 
-    /// <summary>The version a commit object's key names.</summary>
-    /// <param name="key">The key.</param>
-    /// <param name="version">Receives the version.</param>
-    /// <returns>Whether the key is a commit object's.</returns>
+    /// <summary>The version a commit object's key names, and whether it is one at all.</summary>
     public static bool TryParse(string? key, out ulong version)
     {
         version = 0;
@@ -89,10 +69,10 @@ public static class CommitKey
         return true;
     }
 
-    /// <summary>The key of a data object.</summary>
-    /// <param name="uid">Its unique name, usually a <see cref="Guid"/>'s 32 hex digits.</param>
-    /// <returns>The key, of the form <c>data/&lt;uid&gt;.vortex</c>.</returns>
-    /// <exception cref="ArgumentException"><paramref name="uid"/> is empty or holds a slash.</exception>
+    /// <summary>
+    /// The key of a data object, of the form <c>data/&lt;uid&gt;.vortex</c>, where the uid is
+    /// usually a <see cref="Guid"/>'s 32 hex digits.
+    /// </summary>
     public static string ForData(string uid)
     {
         ArgumentException.ThrowIfNullOrEmpty(uid);

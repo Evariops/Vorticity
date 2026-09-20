@@ -1,11 +1,3 @@
-// Pass 1 of two: how many bytes does each row need.
-//
-// Sizes ACCUMULATE rather than being assigned, so several columns can be summed into one buffer.
-// Fixed-width columns never touch this file's data-dependent paths - the driver adds their
-// constant width once for the whole column - so what reaches here is Utf8/Binary and the
-// composites that contain them.
-//
-// Transcribed from `field_size` and its `add_size_*` helpers in vortex-row/src/codec.rs at 0.86.1.
 using System;
 using System.Buffers;
 using Vorticity.Arrays;
@@ -14,16 +6,16 @@ using Vorticity.Types.Numerics;
 
 namespace Vorticity.RowEncoding;
 
-/// <summary>The sizing pass.</summary>
+/// <summary>
+/// The sizing pass. Sizes accumulate rather than being assigned, so several columns sum into one
+/// buffer.
+/// </summary>
 internal static class RowSizeKernel
 {
-    /// <summary>Adds one column's per-row encoded size into <paramref name="sizes"/>.</summary>
-    /// <param name="arena">The arena holding the column.</param>
-    /// <param name="nodeIndex">The column's canonical node index.</param>
-    /// <param name="field">The column's sort options, inherited unchanged by every child.</param>
-    /// <param name="sizes">One accumulator per row; as long as the column.</param>
-    /// <exception cref="VortexUnsupportedException">The column's dtype has no defined ordering.</exception>
-    /// <exception cref="VortexFormatException">A row's encoded size exceeds <see cref="int.MaxValue"/>.</exception>
+    /// <summary>
+    /// Adds one column's per-row encoded size into <paramref name="sizes"/>, one accumulator per
+    /// row. Every child inherits <paramref name="field"/> unchanged.
+    /// </summary>
     internal static void Add(CanonicalArena arena, int nodeIndex, RowSortField field, Span<int> sizes)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
@@ -64,8 +56,8 @@ internal static class RowSizeKernel
                 return;
 
             default:
-                // ListView and Extension: rejected here as well as in RowWidths.For, because the
-                // canonical form is the last place a dtype and its physical shape can disagree.
+                // Rejected here as well as by width classification: the canonical form is the last
+                // place a dtype and its physical shape can disagree.
                 throw RowThrow.UnsupportedCanonical(node);
         }
     }
@@ -114,13 +106,13 @@ internal static class RowSizeKernel
             RowWidth width = RowWidths.For(childType);
             if (width.IsFixed)
             {
-                // A null parent row and a non-null one cost the same for a fixed child, so the
-                // parent's mask never enters the arithmetic.
+                // A fixed child costs the same under a null parent row as under a non-null one, so
+                // the parent's mask never enters the arithmetic.
                 AddConstant(sizes, width.Width);
                 continue;
             }
 
-            // A variable child under a null parent collapses to ONE byte, which is what makes two
+            // A variable child under a null parent collapses to one byte, which is what makes two
             // null parent rows byte-equal whatever their children hold.
             int[] rented = ArrayPool<int>.Shared.Rent(rows);
             try

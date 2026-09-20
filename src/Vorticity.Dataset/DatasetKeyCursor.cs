@@ -1,29 +1,3 @@
-// The ordered walk across a dataset's objects - docs/13-dataset.md §6.6: "a k-way merge of the
-// level-0 objects, through their runs, and of the levels", at a cost of "≤ 8 + L cursors, bounded".
-//
-// THE COUNT IS THE CLAIM, so `Cursors` reports it and a test reads it. An object's cursor is opened
-// only once it could hold the next key, which is what `KeyOrderedMerge` does for `InKeyOrder`: its
-// leaf key is its exact minimum (§4.1), so an unopened object whose minimum lies above every open
-// cursor's key cannot hold the next one. A SEEK goes further, level by level: inside a level above 0
-// the objects are key-disjoint (§5.2), so the one that can hold the sought key is the last whose
-// minimum is at or below it, and every object before it holds only smaller keys and is never opened
-// for this seek. Level 0's objects overlap and are all candidates, but each still opens only once it
-// could hold the next key. A seek therefore opens at most level 0's objects and one per level above
-// it; a walk from there opens the next object of a level only when the walk reaches it.
-//
-// A LINEAR SCAN, NOT A HEAP, and deliberately. Choosing the smallest of k keys costs k comparisons
-// here and log k with a heap, and k is bounded by a small constant; a heap would add the bookkeeping
-// of re-sifting a cursor that advanced, for a saving that starts to matter somewhere past thirty
-// cursors, which §5's invariant says never happens. The comparator is `KeyCursor.Compare`, the
-// library's own total order, so a merge cannot disagree with the runs it merges; the bounds are the
-// clustering key's encoding, which a cursor key is encoded into to be compared with them.
-//
-// AN OBJECT WITHOUT A KEY SOURCE IS A REFUSAL, not a skip. A dataset may hold a file it did not
-// write (§3's import) with no run on the clustering key and no sorted column to stand in; a walk
-// that quietly left its rows out would answer a question nobody asked. So opening it fails, names the
-// object, and says what would fix it -- when the walk reaches it, which is the only moment its rows
-// could have been left out -- and every other reader of the dataset is unaffected, because a scan
-// reads objects rather than keys.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -33,7 +7,11 @@ using Vorticity.Keys;
 
 namespace Vorticity.Dataset;
 
-/// <summary>A cursor over the keys of every object of one version, in key order.</summary>
+/// <summary>
+/// A cursor over the keys of every object of one version, in key order. An object's cursor opens
+/// only once it could hold the next key, which keeps the number of open cursors bounded. The merge
+/// picks the smallest key by a linear scan rather than a heap, since that count is a small constant.
+/// </summary>
 public sealed class DatasetKeyCursor : IAsyncDisposable
 {
     private readonly VortexDataset _dataset;
@@ -55,8 +33,8 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
     }
 
     /// <summary>
-    /// How many objects' cursors the walk has opened — §6.6's bounded number. A seek opens at most
-    /// level 0's objects and one per level above it; a walk opens the rest as it reaches them.
+    /// How many objects' cursors the walk has opened. A seek opens at most level 0's objects and one
+    /// per level above it; a walk opens the rest as it reaches them.
     /// </summary>
     public int Cursors { get; private set; }
 
@@ -79,10 +57,10 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
     /// <exception cref="InvalidOperationException">The cursor is not positioned.</exception>
     public ObjectEntry Object => _slots[Positioned()].Entry;
 
-    /// <summary>Prepares a walk over the objects of <paramref name="dataset"/>'s current version.</summary>
-    /// <param name="dataset">The dataset, which must declare a clustering key (§4.1).</param>
-    /// <param name="cancellationToken">Cancels the tree's reads.</param>
-    /// <returns>The cursor, unpositioned; seek it first. No object is opened yet.</returns>
+    /// <summary>
+    /// Prepares a walk over the objects of the dataset's current version. The cursor comes back
+    /// unpositioned, with no object opened; seek it first.
+    /// </summary>
     /// <exception cref="ArgumentNullException"><paramref name="dataset"/> is null.</exception>
     /// <exception cref="InvalidOperationException">The dataset declares no clustering key.</exception>
     public static async ValueTask<DatasetKeyCursor> OpenAsync(
@@ -107,7 +85,6 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
             slots.Add(new Slot(held.Entry, VortexDataset.OrderOf(held.TreeKey).ToArray()));
         }
 
-        // Each level by its objects' minima: the tree's own order on the clustering key.
         Slot[] all = [.. slots];
         foreach (List<int> level in levels)
         {
@@ -122,8 +99,6 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
     }
 
     /// <summary>Positions on the smallest key of the dataset.</summary>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>Whether any object holds an entry.</returns>
     public async ValueTask<bool> SeekFirstAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -138,15 +113,11 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
         return Choose();
     }
 
-    /// <summary>Positions relative to <paramref name="key"/>, as every object's cursor would.</summary>
-    /// <param name="key">The sought key, in the key's domain: the row encoding of the tuple for a composite key.</param>
-    /// <param name="op">Where to land.</param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>Whether an entry was found.</returns>
-    /// <remarks>
-    /// Forward operations only: this merge walks one way, so a backward seek would leave the
-    /// cursors pointing where the next <see cref="NextAsync"/> could not merge them.
-    /// </remarks>
+    /// <summary>
+    /// Positions relative to a key, given in the key's domain: the row encoding of the tuple for a
+    /// composite key. Forward operations only, since this merge walks one way and a backward seek
+    /// would leave the cursors where <see cref="NextAsync"/> could not merge them.
+    /// </summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="op"/> looks backwards.</exception>
     public async ValueTask<bool> SeekAsync(
         FilterLiteral key, SeekOp op = SeekOp.AtOrAfter, CancellationToken cancellationToken = default)
@@ -158,18 +129,17 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
                 nameof(op), op, "A merged cursor walks forward; seek to a lower bound and walk.");
         }
 
-        // EVERY CURSOR GOES TO THE LOWER BOUND, even for an exact seek, and the exactness is decided
-        // on the winner afterwards. Seeking each cursor `Exact` would invalidate the ones whose
-        // object does not hold the key, and the walk that follows would then be missing their rows
-        // for every key after this one -- a seek that quietly truncates the rest of the merge.
+        // Every cursor goes to the lower bound even for an exact seek, exactness being decided on
+        // the winner afterwards: seeking each one exactly would invalidate the cursors whose object
+        // does not hold the key, and truncate their rows out of the rest of the merge.
         _first = false;
         _target = key;
         _op = op == SeekOp.Exact ? SeekOp.AtOrAfter : op;
         byte[] sought = _key.IsComposite ? key.BytesValue.ToArray() : _key.Encode([key]);
         for (int level = 0; level < _levels.Length; level++)
         {
-            // Above level 0 the objects are disjoint: before the last one whose minimum is at or
-            // below the sought key, every object holds only smaller keys.
+            // Above level 0 the objects are disjoint, so everything before the last one whose
+            // minimum is at or below the sought key holds only smaller keys.
             int from = 0;
             if (level > 0)
             {
@@ -207,8 +177,6 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
     }
 
     /// <summary>Moves to the next entry in key order.</summary>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>Whether there is one.</returns>
     public async ValueTask<bool> NextAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -248,10 +216,8 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
         }
     }
 
-    /// <summary>
-    /// Opens and positions every pending object that could hold the next key: while one's minimum
-    /// is at or below the smallest key an open cursor holds, or no cursor holds one.
-    /// </summary>
+    /// <summary>Opens and positions every pending object whose minimum is at or below the smallest
+    /// key an open cursor holds, so none that could hold the next key stays closed.</summary>
     private async ValueTask ResolveAsync(CancellationToken cancellationToken)
     {
         while (true)
@@ -285,7 +251,7 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
         }
     }
 
-    /// <summary>The smallest key a live cursor holds, encoded as the bounds are; null when none is live.</summary>
+    /// <summary>The smallest key a live cursor holds, encoded as the bounds are.</summary>
     private byte[]? Smallest()
     {
         int smallest = -1;
@@ -307,7 +273,9 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
         return _key.IsComposite ? cursor.KeyBytes.ToArray() : _key.Encode([cursor.Key]);
     }
 
-    /// <summary>The object's cursor, opened on first use and kept for the life of the walk.</summary>
+    /// <summary>The object's cursor, opened on first use and kept for the life of the walk. An
+    /// object with no key source is refused rather than skipped, since skipping it would silently
+    /// leave its rows out of the walk.</summary>
     private async ValueTask<KeyCursor> CursorOfAsync(Slot slot, CancellationToken cancellationToken)
     {
         if (slot.Cursor is { } open)
@@ -327,11 +295,8 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
         return slot.Cursor;
     }
 
-    /// <summary>The live cursor holding the smallest key; ties go to the earlier object.</summary>
-    /// <remarks>
-    /// The tie-break is the tree's own order, so two objects holding the same key are walked in the
-    /// order the dataset holds them and a walk is a function of the version, not of a race.
-    /// </remarks>
+    /// <summary>The live cursor holding the smallest key; ties go to the earlier object, so that a
+    /// walk is a function of the version and not of a race.</summary>
     private bool Choose()
     {
         _current = -1;
@@ -362,22 +327,20 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
         return _current;
     }
 
-    /// <summary>One object of the walk: its entry, its bound, and its cursor once opened.</summary>
     private sealed class Slot(ObjectEntry entry, byte[] bound)
     {
         internal ObjectEntry Entry { get; } = entry;
 
-        /// <summary>Its leaf key's order: the encoded minimum of its clustering key (§4.1).</summary>
+        /// <summary>The encoded minimum of the object's clustering key.</summary>
         internal byte[] Bound { get; } = bound;
 
         internal ObjectLease? Lease { get; set; }
 
         internal KeyCursor? Cursor { get; set; }
 
-        /// <summary>Whether its cursor is positioned on an entry that has not gone out.</summary>
         internal bool Live { get; set; }
 
-        /// <summary>Whether it may hold a key of the current walk and is not positioned yet.</summary>
+        /// <summary>It may hold a key of the current walk and is not positioned yet.</summary>
         internal bool Pending { get; set; }
     }
 }

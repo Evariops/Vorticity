@@ -1,23 +1,3 @@
-// The cache of open data objects - docs/13-dataset.md §3: a data object is immutable, "a version of
-// the bytes, never of the file", so a handle on one can never go stale and re-opening it can only
-// cost what it cost the first time.
-//
-// WHAT IT ACTUALLY SAVES, and it is not bytes. Opening a Vortex file is a 64 KiB tail read and the
-// parse of a footer (02 §3): one dependent round trip and some CPU, per object, per scan. A dataset
-// scan that answers a hundred point queries over eight objects pays that eight hundred times
-// without a cache and eight times with one. §9.1 counts dependent round trips and nothing else,
-// which is the reason this exists and the reason it is keyed by object rather than by anything finer
-// -- by object and the index fragments it is opened with, since step 42b, because an object's bytes
-// never change and its fragments do.
-//
-// REFERENCE-COUNTED, NOT JUST LRU, because two scans may hold the same object at once and one of
-// them finishing must not close the file the other is reading. An object with no lease goes to the
-// idle list and is closed only when a later open pushes the cache over its capacity, oldest first.
-//
-// ONE OPEN AT A TIME, under the gate, and that is a deliberate simplification rather than an
-// oversight: it makes a double open impossible without a second map of in-flight opens, and a
-// dataset scan is sequential anyway. A reader that wants objects opened in parallel wants the
-// prefetch of §6.6 ("children prefetched in parallel"), which is a different thing and is not here.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -28,7 +8,12 @@ using Vorticity.File;
 
 namespace Vorticity.Dataset;
 
-/// <summary>Keeps a bounded number of the dataset's data objects open.</summary>
+/// <summary>
+/// Keeps a bounded number of the dataset's data objects open, saving the tail read and footer parse
+/// an open costs. Leases are reference-counted, since two scans may hold the same object and one of
+/// them finishing must not close the file the other is reading; opens are serialised under the
+/// gate, which makes a double open impossible without a map of in-flight opens.
+/// </summary>
 internal sealed class ObjectCache : IAsyncDisposable
 {
     private readonly IObjectStore _store;
@@ -56,11 +41,8 @@ internal sealed class ObjectCache : IAsyncDisposable
     /// <summary>
     /// Opens an object with the index fragments its entry names, or hands back the handle already
     /// open on that view of it.
+    /// The caller disposes the lease when it is done reading.
     /// </summary>
-    /// <param name="entry">The object's leaf entry: its key, and the fragments attached to it (§6.4).</param>
-    /// <param name="pages">Where the fragments are read: the commit objects that wrote them.</param>
-    /// <param name="cancellationToken">Cancels the reads and the open.</param>
-    /// <returns>A lease the caller disposes when it is done reading.</returns>
     internal async ValueTask<ObjectLease> RentAsync(
         ObjectEntry entry, CommitPageSource pages, CancellationToken cancellationToken)
     {
@@ -83,11 +65,9 @@ internal sealed class ObjectCache : IAsyncDisposable
             }
 
             Misses++;
-            // A compacted fragment is a bundle of containers (§6.4): each goes to the reader as the
-            // fragment it was. One whose bytes are not what its reference says is LEFT OUT, the rule
-            // of a region that fails its checksum (§7): an index claims nothing it cannot prove, and
-            // the object answers exactly without it. `verify` names it. A missing commit object is
-            // not that: the version is gone, and the read says so.
+            // A fragment whose bytes are not what its reference says is left out rather than fatal:
+            // an index claims nothing it cannot prove, and the object answers exactly without it. A
+            // missing commit object is not that -- the version is gone, and the read says so.
             List<ReadOnlyMemory<byte>> fragments = [];
             List<string> refused = [];
             foreach (PageReference reference in entry.Fragments)
@@ -134,8 +114,6 @@ internal sealed class ObjectCache : IAsyncDisposable
     }
 
     /// <summary>Gives a lease back; the object stays open until something else needs the room.</summary>
-    /// <param name="key">The object's key.</param>
-    /// <returns>When the release, and any eviction it allowed, is done.</returns>
     internal async ValueTask ReturnAsync(string key)
     {
         await _gate.WaitAsync().ConfigureAwait(false);
@@ -160,7 +138,6 @@ internal sealed class ObjectCache : IAsyncDisposable
         }
     }
 
-    /// <inheritdoc/>
     public async ValueTask DisposeAsync()
     {
         await _gate.WaitAsync().ConfigureAwait(false);
@@ -187,15 +164,11 @@ internal sealed class ObjectCache : IAsyncDisposable
         }
     }
 
-    /// <summary>What one open view of an object is kept under: the object, and the fragments it holds.</summary>
-    /// <param name="entry">The object's leaf entry.</param>
-    /// <returns>The object's key, followed by its fragments' hashes when it has any.</returns>
-    /// <remarks>
-    /// A DATA OBJECT IS IMMUTABLE, ITS FRAGMENTS ARE NOT (§6.4). An indexer attaches one in a later
-    /// commit, and a file reads its index directory once and keeps it; so a new set of fragments is a
-    /// new view of the same bytes — a second open, never a stale handle — and the view it replaces
-    /// ages out of the cache like any idle object.
-    /// </remarks>
+    /// <summary>
+    /// What one open view of an object is kept under: its key, followed by its fragments' hashes.
+    /// An object's bytes are immutable but its fragments are not, so a new set of fragments is a new
+    /// view of the same bytes -- a second open, never a stale handle.
+    /// </summary>
     private static string HandleOf(ObjectEntry entry)
     {
         if (entry.Fragments.Count == 0)
@@ -212,12 +185,11 @@ internal sealed class ObjectCache : IAsyncDisposable
         return handle.ToString();
     }
 
-    /// <summary>Closes idle objects, oldest first, until the cache is within its capacity.</summary>
-    /// <remarks>
-    /// A cache full of LEASED objects stays over capacity rather than closing a file someone is
-    /// reading: the capacity is a target, and the only thing that would make it a hard limit is
-    /// making a reader wait, which trades a bounded amount of memory for an unbounded latency.
-    /// </remarks>
+    /// <summary>
+    /// Closes idle objects, oldest first, until the cache is within its capacity. A cache full of
+    /// leased objects stays over capacity rather than close a file someone is reading: the capacity
+    /// is a target, and making it a hard limit would trade bounded memory for unbounded latency.
+    /// </summary>
     private async ValueTask EvictAsync()
     {
         while (_open.Count > _capacity && _idle.First is { } oldest)
@@ -268,7 +240,6 @@ internal sealed class ObjectLease(ObjectCache cache, string key, VortexFile file
     /// </summary>
     internal IReadOnlyList<string> FragmentRefusals { get; init; } = [];
 
-    /// <inheritdoc/>
     public ValueTask DisposeAsync()
     {
         if (_returned)
