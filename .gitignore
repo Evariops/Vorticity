@@ -15,7 +15,6 @@ project.fragment.lock.json
 *.nupkg
 *.snupkg
 packages/
-!packages/build/
 .nuget/
 
 # ---- Test and coverage output ----
@@ -32,7 +31,7 @@ coverage*.info
 # ---- BenchmarkDotNet ----
 BenchmarkDotNet.Artifacts/
 
-# ---- Native artifacts (vortex-ffi is loaded by the conformance and benchmark projects) ----
+# ---- Native artifacts (the benchmark project loads the vxbench cdylib built from tools/) ----
 *.dll
 *.so
 *.so.*
@@ -40,7 +39,6 @@ BenchmarkDotNet.Artifacts/
 *.pdb
 *.exp
 *.ilk
-!**/native/**/.gitkeep
 
 # ---- Rust conformance generator ----
 tools/conformance-gen/target/
@@ -73,7 +71,6 @@ leak-*
 # ---- IDE ----
 .vs/
 .vscode/
-!.vscode/extensions.json
 .idea/
 *.sln.iml
 *.DotSettings.user

@@ -12,8 +12,8 @@ rustc 1.98.1 (macOS aarch64). Two runnable artefacts back these notes:
 actually built. `src/main.rs` was the throwaway probe when these notes were written; it is now the
 generator's CLI.
 
-Source paths below are relative to
-`~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/`.
+Source paths below are relative to the crates.io checkout under the cargo registry,
+`$CARGO_HOME/registry/src/index.crates.io-<hash>/`.
 
 Where I could not find something, it says **NOT FOUND** and what I tried. Do not read past that
 into an assumption.
