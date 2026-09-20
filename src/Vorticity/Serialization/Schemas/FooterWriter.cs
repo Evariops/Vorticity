@@ -62,14 +62,12 @@ public static class FooterWriter
     // SegmentSpec's uint64 offset, which is what flatc-generated writers emit and what all 819
     // golden corpus files contain. Casting through a proxy of the same size whose alignment IS 8
     // buys exactly that padding; the element bytes are unchanged.
-#pragma warning disable CS0169, CS0649 // the proxy exists only for its alignment
     [StructLayout(LayoutKind.Sequential)]
     private readonly struct SegmentSpecBlock
     {
         private readonly ulong _low;
         private readonly ulong _high;
     }
-#pragma warning restore CS0169, CS0649
 
     private static int WriteSpecs(FlatBufferBuilder b, ReadOnlySpan<int> idOffsets)
     {

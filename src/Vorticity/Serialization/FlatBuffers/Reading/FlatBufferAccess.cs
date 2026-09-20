@@ -108,12 +108,15 @@ internal static class FlatBufferAccess
             Unsafe.SizeOf<AlignmentProbe<T>>() - Unsafe.SizeOf<T>();
     }
 
+    // Sequential and not auto: the packing of T has to survive into the probe, or the padding
+    // measured here is the natural alignment rather than the declared one. A Pack = 1 struct is
+    // exactly the case the callers have -- both FlatBuffers spec structs are Pack = 1 -- and an
+    // auto-laid-out probe reports 8 for them where the format requires 1.
+    [StructLayout(LayoutKind.Sequential)]
     private struct AlignmentProbe<T> where T : unmanaged
     {
-#pragma warning disable CS0649 // never assigned: the probe exists only for its size
         internal byte Pad;
         internal T Value;
-#pragma warning restore CS0649
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

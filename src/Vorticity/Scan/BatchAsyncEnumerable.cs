@@ -333,17 +333,11 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _pending = split;
         _currentLane = lane;
 
-        ValueTask read;
         try
         {
             // Phase 1: register. No I/O, no decoding, no allocation.
             Register(lane.Context, split);
             NoteRequests(lane.Context);
-
-            // Phase 2: exactly one coalesced read per batch.
-#pragma warning disable CA2012 // awaited by ReadAndCompleteAsync, on the next line, exactly once
-            read = _source.ReadManyAsync(lane.Context.Segments, _token);
-#pragma warning restore CA2012
         }
         catch
         {
@@ -351,11 +345,10 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             throw;
         }
 
-        return ReadAndCompleteAsync(read, lane);
+        return ReadAndCompleteAsync(lane);
     }
 
-    /// <summary>Awaits the batch's one read, then builds the batch from what it brought.</summary>
-    /// <param name="read">The read issued by <see cref="MoveNextAsync"/>, not yet awaited.</param>
+    /// <summary>Issues and awaits the batch's one read, then builds the batch from what it brought.</summary>
     /// <param name="lane">The lane the batch is being built in.</param>
     /// <returns><see langword="true"/> when a batch was produced.</returns>
     /// <remarks>
@@ -375,18 +368,20 @@ public sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// which is that every suspension and every resumption is visible as an <c>await</c>.
     /// </para>
     /// </remarks>
-    private async ValueTask<bool> ReadAndCompleteAsync(ValueTask read, Lane lane)
+    private async ValueTask<bool> ReadAndCompleteAsync(Lane lane)
     {
         try
         {
-            await read.ConfigureAwait(false);
+            // Phase 2: exactly one coalesced read per batch. Issued here rather than by the caller
+            // so that it is awaited where it is created: a ValueTask handed across a method
+            // boundary to be awaited later is one an exception path can drop unawaited.
+            await _source.ReadManyAsync(lane.Context.Segments, _token).ConfigureAwait(false);
         }
         catch
         {
-            // MoveNextAsync's catch covers a read that throws INLINE and CompleteBatch resets in
-            // its own; this is the third way a batch can fail -- a read whose ValueTask completes
-            // faulted, which is what every async ISegmentSource does -- and it must leave the lane
-            // in the same state as the other two. Without it the failed split's registrations stay
+            // Both ways a read can fail land here -- throwing inline, which a memory-mapped source
+            // does, and completing faulted, which every async one does -- and CompleteBatch resets
+            // in its own catch. Without this one the failed split's registrations stay
             // in the SegmentRequestSet (the source's AbandonPending releases the owners but leaves
             // the set registered and ready to retry, per ISegmentSource), so the NEXT batch
             // registers on top of them and issues one coalesced read covering a superset of the

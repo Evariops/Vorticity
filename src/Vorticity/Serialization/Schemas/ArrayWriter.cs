@@ -164,14 +164,12 @@ public static class ArrayWriter
 
     // Same alignment proxy trick as FooterWriter.SegmentSpecBlock: BufferSpec is Pack = 1, so
     // alignof is 1, but FlatBuffers aligns a Buffer vector to 4 - the width of its uint32 length.
-#pragma warning disable CS0169, CS0649 // the proxy exists only for its alignment
     [StructLayout(LayoutKind.Sequential)]
     private readonly struct BufferSpecBlock
     {
         private readonly uint _low;
         private readonly uint _high;
     }
-#pragma warning restore CS0169, CS0649
 }
 
 /// <summary>Builds the <c>Layout</c> table.</summary>
