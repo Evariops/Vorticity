@@ -351,13 +351,18 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     {
         try
         {
-            // Phase 2: exactly one coalesced read per batch. Issued here rather than by the caller
-            // so that it is awaited where it is created: a ValueTask handed across a method
-            // boundary to be awaited later is one an exception path can drop unawaited.
+            // Phase 2: exactly one coalesced read per batch, minus whatever the last batch of this
+            // lane already holds -- often all of it, because a segment spans every block of its
+            // chunk. Issued here rather than by the caller so that it is awaited where it is
+            // created: a ValueTask handed across a method boundary to be awaited later is one an
+            // exception path can drop unawaited.
+            lane.Kept.Prepare(lane.Context.Segments);
             await _source.ReadManyAsync(lane.Context.Segments, _token).ConfigureAwait(false);
+            lane.Kept.Adopt(lane.Context.Segments);
         }
         catch
         {
+            lane.Kept.Clear();
             // Both ways a read can fail land here -- throwing inline, which a memory-mapped source
             // does, and completing faulted, which every async one does -- and CompleteBatch resets
             // in its own catch. Without this one the failed split's registrations stay
@@ -763,12 +768,15 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             Register(context, rows);
             NoteRequests(context);
+            lane.Kept.Prepare(context.Segments);
             await _source.ReadManyAsync(context.Segments, _token).ConfigureAwait(false);
+            lane.Kept.Adopt(context.Segments);
             int root = ExecuteWithTake(context, rows, out bool proven);
             return ApplyFilter(context, root, proven);
         }
         catch
         {
+            lane.Kept.Clear();
             context.ResetBatch();
             throw;
         }
@@ -829,6 +837,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     {
         for (int i = 0; i < _lanes.Length; i++)
         {
+            // The kept segments first: they hold a reference of their own, and the context's
+            // disposal is what gives the batch's back.
+            _lanes[i].Kept.Clear();
             _lanes[i].Context.Dispose();
         }
     }
@@ -839,6 +850,12 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         internal Lane(ScanContext context) => Context = context;
 
         internal ScanContext Context { get; }
+
+        /// <summary>
+        /// The segments this lane's last batch read, kept for its next one. A field rather than a
+        /// property: it is a struct, and a property would hand out copies of it.
+        /// </summary>
+        internal KeptSegments Kept;
 
         internal RowRange Rows { get; set; }
 

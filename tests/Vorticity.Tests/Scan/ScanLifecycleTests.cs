@@ -155,9 +155,49 @@ public sealed class ScanLifecycleTests
 
         await enumerator.DisposeAsync();
 
-        Assert.True(source.OwnerCount >= 9);
+        // The count was 9 or more while every batch re-read its chunk's segments. A lane now keeps
+        // what its last batch read, so a scan of many blocks over few segments takes a handful of
+        // owners rather than one per block -- which is the point of this change and not something
+        // to pin. What the test is named for is the two lines below.
+        Assert.True(source.OwnerCount > 0, "the scan must have read something");
         Assert.Equal(0, source.LiveOwners);
         Assert.False(source.AnyOverReleased);
+    }
+
+    /// <summary>
+    /// A segment spans every block of its chunk, so a scan that asked for it once per batch asked
+    /// for the same bytes over and over: on a million-row file that was 124 rounds for 5 distinct
+    /// segments, and 184 725 367 bytes of a 1 523 369-byte file. A lane keeps what its last batch
+    /// read, so the count follows the segments rather than the blocks. The ratchet is the ratio:
+    /// a round per batch means the keeping stopped working.
+    /// </summary>
+    [Fact]
+    public async Task AScanAsksItsSourceOncePerSegmentRatherThanOncePerBatch()
+    {
+        Decoders.EnsureRegistered();
+        CountingSegmentSource source = new CountingSegmentSource(
+            MemoryMappedSegmentSource.Open(Corpus.Path(Multi)));
+        long batches = 0;
+        await using (VortexFile file = await VortexFile.OpenAsync(
+            source, new VortexOpenOptions(), CancellationToken.None))
+        {
+            await foreach (RecordBatch batch in file.Scan().WithMaxBatchRows(1000).ExecuteAsync())
+            {
+                using (batch)
+                {
+                    batches++;
+                }
+            }
+        }
+
+        Console.WriteLine(
+            $"SEGMENT REUSE: {batches} batches asked the source for {source.Requests} rounds and " +
+            $"{source.Bytes} bytes.");
+
+        Assert.True(batches >= 8, $"the fixture must deliver several batches; it delivered {batches}");
+        Assert.True(
+            source.Requests <= 4,
+            $"{batches} batches should not cost {source.Requests} rounds of reading");
     }
 
     [Fact]

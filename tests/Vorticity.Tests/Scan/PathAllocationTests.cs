@@ -203,10 +203,23 @@ public sealed class PathAllocationTests
         // grow either, 792 B before and after. ScalarStore did, 416 -> 424: its four int fields
         // exactly filled their slot and a fifth rounds the object up. Eight bytes per store,
         // against a class of silently wrong answers that no other test in the suite can catch.
-        ("open, first batch", File, 133_784, FirstBatch),
+        //
+        // +16 B on seven axes on 2026-09-20, and here is what the sixteen bytes buy. A lane now
+        // keeps the segments its last batch read, so the next batch of the same chunk reuses them
+        // instead of asking the source again. A segment spans every block of its chunk, so the
+        // scan was asking for the same bytes once per block: a million rows in 123 blocks asked for
+        // 247 specifications, of which five were distinct, and for 184 725 367 bytes of a
+        // 1 523 369-byte file. It now asks 3 times for 1 581 703 bytes. The same scan goes from
+        // 5,6 ms to 0,9 over a positional read and from 9,5 to 1,3 over bytes in memory; over a
+        // memory mapping it was already 0,9 and stays there, because a segment is a view. The peak
+        // does not move -- the source rented the whole segment for one batch anyway, and an entry
+        // the next batch does not ask for is released before it reads. The sixteen bytes are the
+        // rented array's first rent; four arrays and an object cost 448 before this was a struct
+        // over one pooled array. Seven axes moved because they sat at their ceiling to the byte.
+        ("open, first batch", File, 133_800, FirstBatch),
         ("full scan", File, 190_976, FullScan),
         ("projected scan, 1 of 5 columns", File, 134_144, ProjectedScan),
-        ("take 64 rows from 64 splits", File, 192_032, ScatteredTake),
+        ("take 64 rows from 64 splits", File, 192_048, ScatteredTake),
         ("selective filter, pruning on", File, 141_824, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
@@ -222,7 +235,7 @@ public sealed class PathAllocationTests
         // whose arenas were sized for a batch. R30 sized them for what they hold, and the gap is
         // now 6 496 B. What remains is the rest of that context plus the zone decode itself, and
         // no part of it grows with the number of zones.
-        ("selective filter, pruning off", File, 135_176, UnprunedFilter),
+        ("selective filter, pruning off", File, 135_192, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here
@@ -232,8 +245,8 @@ public sealed class PathAllocationTests
         // reference each on the enumerable, the enumerator and the lane's context, 32 B in all --
         // and this axis had none of the headroom the others carry. Loosened by exactly that, plus
         // the 32 B of headroom the neighbouring axes have.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_744, FullScan),
-        ("scan, vortex.pco", "encodings/pco", 29_184, FullScan),
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_760, FullScan),
+        ("scan, vortex.pco", "encodings/pco", 29_200, FullScan),
         // 27 648 -> 27 712 on 2026-09-19, and here is the argument. Decompressing a node's frames
         // used the one-shot `ZstandardDecoder.TryDecompress`, which builds and tears down a native
         // decompression context per call -- 977 of them on a million-row column. One decoder per
@@ -241,9 +254,9 @@ public sealed class PathAllocationTests
         // `zstd` axis from 7 476 to 6 844 us and `zstd_nullable` from 2 170 to 2 012 (bench/ab.sh,
         // 21 rounds, intervals [0,913; 0,937] and [0,921; 0,936]). Sixty-four bytes once, against
         // seven and a half per cent of both axes.
-        ("scan, vortex.zstd", "encodings/zstd", 27_744, FullScan),
+        ("scan, vortex.zstd", "encodings/zstd", 27_760, FullScan),
         ("scan, vortex.map", "encodings/map", 28_160, FullScan),
-        ("scan, vortex.variant", "encodings/variant", 27_656, FullScan),
+        ("scan, vortex.variant", "encodings/variant", 27_672, FullScan),
     ];
 
     [Fact]
