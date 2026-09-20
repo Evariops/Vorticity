@@ -174,6 +174,21 @@ public sealed class RandomAccessSegmentSource : ISegmentSource
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// THE RUNS ARE READ IN TURN, AND ISSUING THEM TOGETHER WAS MEASURED AND DROPPED. The shape is
+    /// the one <c>ObjectSegmentSource</c> uses, bounded by a depth, with a buffer projection per
+    /// read in flight. Against sixty-four positional reads of 128 kB the depth is worth two and a
+    /// half times -- 0,32 ms at one in flight against 0,13 at eight -- so the call-level physics
+    /// says yes. At the scan level it says nothing: a full scan of a wide file reads
+    /// 1 273, 1 284, 1 280 and 1 275 microseconds at depths of one, two, four and eight, and a
+    /// projection of four columns spread across that file reads 352, 352, 347 and 351.
+    /// <para>
+    /// The reason is in the run count. A wide file's columns are adjacent, so the coalescer hands
+    /// this method ONE run for fifty registered segments, and a depth has nothing to hold. What is
+    /// left unmeasured is a genuinely cold read: the pages here are resident, and there is no way
+    /// to evict them per file without being root.
+    /// </para>
+    /// </remarks>
     public async ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(requests);
