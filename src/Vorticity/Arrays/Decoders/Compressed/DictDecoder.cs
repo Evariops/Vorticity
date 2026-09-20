@@ -198,7 +198,14 @@ public sealed class DictDecoder : ArrayDecoder
         int codesIndex = selective
             ? context.DecodeChildSelected(in node, 0, codesType, length, wanted)
             : context.DecodeChild(in node, 0, codesType, length);
-        int valuesIndex = context.DecodeChild(in node, 1, dtype, valuesLength);
+
+        // Shared only on the selective path. The selection narrows the codes and never the values,
+        // so a take that visits a hundred batches of one chunk would decode this child a hundred
+        // times; on the whole-node path the reader above has already retained the node itself, and
+        // asking again here would retain the same bytes twice.
+        int valuesIndex = selective
+            ? context.DecodeChildShared(in node, 1, dtype, valuesLength)
+            : context.DecodeChild(in node, 1, dtype, valuesLength);
         int produced = selective ? wanted.Length : length;
 
         CanonicalNode codesNode = context.Canonical.GetNode(codesIndex);

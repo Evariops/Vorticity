@@ -603,6 +603,28 @@ public sealed class ScanContext : IDisposable
     /// <param name="layoutNodeIndex">The node's index in the layout tree.</param>
     internal static long LayoutKey(int layoutNodeIndex) => (1L << 32) | (uint)layoutNodeIndex;
 
+    /// <summary>
+    /// The retention key for one serialized array node inside a segment's blob, or
+    /// <see langword="null"/> when the pair cannot be named without collision.
+    /// </summary>
+    /// <remarks>
+    /// A third namespace, above the two below 2^33, for the children an <em>array</em> encoding
+    /// shares between batches rather than the ones a <em>layout</em> does. A dictionary stored as
+    /// one array node has no layout to hold its values child, so its key is the pair
+    /// <c>(segment, node)</c> -- the same pair <see cref="NodeCheckKey"/> names, and stable for the
+    /// same reason: the node arena holds one blob at a time, so a node's index is a function of
+    /// that blob's bytes.
+    /// </remarks>
+    /// <param name="segmentId">The segment whose blob was parsed.</param>
+    /// <param name="nodeIndex">The node's index in the node arena.</param>
+    internal static long? ChildKey(uint segmentId, int nodeIndex) =>
+        segmentId < (1u << 31) && nodeIndex >= 0
+            ? (1L << 62) | ((long)segmentId << 31) | (uint)nodeIndex
+            : null;
+
+    /// <summary>Whether a retained decode is already in flight, so another may not be opened.</summary>
+    internal bool IsRetaining => _redirect is not null;
+
     /// <summary>The retained decode for <paramref name="key"/>, if one is held.</summary>
     /// <param name="key">From <see cref="SegmentKey"/> or <see cref="LayoutKey"/>.</param>
     /// <param name="arena">The arena holding it. The caller may borrow from this until eviction.</param>

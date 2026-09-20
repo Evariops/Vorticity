@@ -25,46 +25,46 @@ and it is the one measured here.
 Ratio above 1.00x means this library took less wall time.
 machine: Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0
 runtime: .NET 11.0.0-rc.1.26425.128, reference: Vortex 0.86.1
-commit: 3f3d27f
-date: 2026-09-20 21:08 UTC
+commit: e776f7b
+date: 2026-09-20 21:45 UTC
 
 ## 1,000,000 rows, 3,060,049 bytes
 
 | scenario | what it does | ours, ms | Vortex Rust, ms | ratio | ours, peak | Rust, peak |
 |---|---|---|---|---|---|---|
-| `open` | open the file and read no rows | 50 (47-53) | 14 (14-19) | 0.29x | 47 MiB | 9 MiB |
-| `scan` | read every column of every row | 95 (88-96) | 25 (25-28) | 0.27x | 74 MiB | 20 MiB |
-| `project` | read one column of four | 77 (76-78) | 15 (14-17) | 0.19x | 54 MiB | 11 MiB |
-| `filter-narrow` | read the rows of a band holding about one in a hundred | 112 (110-114) | 18 (17-19) | 0.16x | 58 MiB | 15 MiB |
-| `filter-wide` | read the rows of a band holding about half | 117 (116-121) | 23 (21-27) | 0.20x | 74 MiB | 21 MiB |
-| `take` | take a thousand rows spread across the file | 170 (165-176) | 23 (21-24) | 0.13x | 56 MiB | 16 MiB |
-| `write` | read the file and encode it back out | 223 (220-230) | 209 (206-211) | 0.94x | 84 MiB | 50 MiB |
-| `append` | append a tenth of the rows to a copy of the file | 219 (211-220) | not asked | n/a | 85 MiB | not asked |
+| `open` | open the file and read no rows | 52 (49-54) | 13 (13-15) | 0.25x | 47 MiB | 9 MiB |
+| `scan` | read every column of every row | 91 (88-92) | 26 (25-30) | 0.28x | 73 MiB | 19 MiB |
+| `project` | read one column of four | 78 (78-91) | 16 (15-18) | 0.20x | 54 MiB | 11 MiB |
+| `filter-narrow` | read the rows of a band holding about one in a hundred | 114 (110-122) | 18 (16-22) | 0.16x | 58 MiB | 15 MiB |
+| `filter-wide` | read the rows of a band holding about half | 121 (113-121) | 23 (22-28) | 0.19x | 73 MiB | 21 MiB |
+| `take` | take a thousand rows spread across the file | 92 (89-102) | 24 (23-26) | 0.26x | 56 MiB | 16 MiB |
+| `write` | read the file and encode it back out | 226 (218-231) | 212 (210-213) | 0.93x | 84 MiB | 50 MiB |
+| `append` | append a tenth of the rows to a copy of the file | 222 (219-227) | not asked | n/a | 85 MiB | not asked |
 
 ## 10,000,000 rows, 30,536,900 bytes
 
 | scenario | what it does | ours, ms | Vortex Rust, ms | ratio | ours, peak | Rust, peak |
 |---|---|---|---|---|---|---|
-| `open` | open the file and read no rows | 53 (49-59) | 13 (13-15) | 0.25x | 47 MiB | 9 MiB |
-| `scan` | read every column of every row | 121 (119-132) | 110 (104-111) | 0.91x | 98 MiB | 36 MiB |
-| `project` | read one column of four | 80 (78-85) | 16 (16-19) | 0.20x | 55 MiB | 12 MiB |
-| `filter-narrow` | read the rows of a band holding about one in a hundred | 128 (123-130) | 19 (18-19) | 0.15x | 59 MiB | 19 MiB |
-| `filter-wide` | read the rows of a band holding about half | 148 (146-157) | 64 (63-67) | 0.43x | 87 MiB | 36 MiB |
-| `take` | take a thousand rows spread across the file | 724 (721-727) | 88 (86-90) | 0.12x | 85 MiB | 36 MiB |
-| `write` | read the file and encode it back out | 638 (570-650) | refused | n/a | 118 MiB | refused |
-| `append` | append a tenth of the rows to a copy of the file | 293 (289-298) | not asked | n/a | 91 MiB | not asked |
+| `open` | open the file and read no rows | 53 (47-67) | 15 (13-17) | 0.27x | 47 MiB | 9 MiB |
+| `scan` | read every column of every row | 120 (118-127) | 113 (112-119) | 0.94x | 98 MiB | 39 MiB |
+| `project` | read one column of four | 83 (80-91) | 18 (15-19) | 0.22x | 55 MiB | 12 MiB |
+| `filter-narrow` | read the rows of a band holding about one in a hundred | 116 (113-124) | 21 (20-24) | 0.18x | 59 MiB | 19 MiB |
+| `filter-wide` | read the rows of a band holding about half | 157 (148-161) | 67 (63-71) | 0.42x | 86 MiB | 36 MiB |
+| `take` | take a thousand rows spread across the file | 121 (113-126) | 87 (79-91) | 0.72x | 78 MiB | 40 MiB |
+| `write` | read the file and encode it back out | 616 (600-646) | refused | n/a | 118 MiB | refused |
+| `append` | append a tenth of the rows to a copy of the file | 304 (298-311) | not asked | n/a | 91 MiB | not asked |
 
 ## Reading it
 
 **Start with the floor.** The `open` row is a process that opens the file and reads
-no rows: 50 ms for us against 14 ms. That difference is a managed runtime
+no rows: 52 ms for us against 13 ms. That difference is a managed runtime
 starting, and it is the same whatever the file holds. Subtract it from every other row
 to see what the work cost — and remember that a long-running process pays it once,
 while this table pays it on every line.
 
-**Where we stand.** Of 13 compared scenarios, the closest is `write`
-at 1,000,000 rows (0.94x) and the furthest is `take` at 10,000,000 rows
-(0.12x). A ratio above 1.00x would mean we took less wall time.
+**Where we stand.** Of 13 compared scenarios, the closest is `scan`
+at 10,000,000 rows (0.94x) and the furthest is `filter-narrow` at 1,000,000 rows
+(0.16x). A ratio above 1.00x would mean we took less wall time.
 
 **Memory.** Our worst peak here is 98 MiB against 50 MiB. A managed heap and
 its runtime are most of that difference at these sizes.

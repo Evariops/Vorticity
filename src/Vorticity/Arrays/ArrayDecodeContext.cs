@@ -144,6 +144,64 @@ public sealed class ArrayDecodeContext
     }
 
     /// <summary>
+    /// Decodes child <paramref name="childIndex"/> of <paramref name="node"/> once for the scan
+    /// rather than once per batch, and hands the caller a window onto it.
+    /// </summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    /// <param name="childDType">The child's DType.</param>
+    /// <param name="childLength">The child's row count.</param>
+    /// <returns>The child's index in the batch's arena, holding every row.</returns>
+    /// <remarks>
+    /// <para>
+    /// For a child <b>every row of the parent shares</b>: a dictionary's values, where a batch that
+    /// wants one row still needs the entry that row points at, so the selection never narrows it and
+    /// each batch decodes the whole of it again. On a chunk larger than the batch that is the same
+    /// waste the flat reader's retention exists for -- but the reader does not reach here, because
+    /// it retains only for an encoding with no specialized selective decode, and a dictionary has
+    /// one for its codes.
+    /// </para>
+    /// <para>
+    /// Retained only inside a reader-opened scope, which is what says the node outlives the batch,
+    /// and never inside another retained decode, whose arena is already the one being filled.
+    /// Outside either, this is <see cref="DecodeChild"/> and nothing more. The window costs a
+    /// handful of records: a slice's buffers are views onto the retained arena, whose entry cannot
+    /// be evicted while the batch that touched it is alive.
+    /// </para>
+    /// <para>
+    /// Internal where <see cref="DecodeChild"/> is public, because what it promises is a property
+    /// of this scan's retention and not of the decoding contract: a decoder outside this assembly
+    /// would be given a lifetime rule to honour in exchange for a gain only some encodings can
+    /// take.
+    /// </para>
+    /// </remarks>
+    internal int DecodeChildShared(in ArrayNode node, int childIndex, DType childDType, int childLength)
+    {
+        ArrayNode child = node.GetChild(childIndex);
+        if (_scan.NodeCheckScope is not uint segment || _scan.IsRetaining ||
+            ScanContext.ChildKey(segment, child.Index) is not long key)
+        {
+            return DecodeNode(in child, childDType, childLength);
+        }
+
+        if (!_scan.TryGetRetained(key, out CanonicalArena held, out int retained))
+        {
+            held = _scan.BeginRetainedDecode();
+            retained = -1;
+            try
+            {
+                retained = DecodeNode(in child, childDType, childLength);
+            }
+            finally
+            {
+                _scan.EndRetainedDecode(key, retained);
+            }
+        }
+
+        return Layouts.CanonicalSlice.SliceAcross(held, Canonical, retained, 0, childLength);
+    }
+
+    /// <summary>
     /// Opens a scope in which one node's validation walk may be remembered across the batches that
     /// visit it.
     /// </summary>
