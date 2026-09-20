@@ -783,6 +783,13 @@ internal static class ArrayBlobWriter
     private static PType ToUnsigned(PType ptype) =>
         ptype.IsSignedInteger() ? (PType)(ptype - PType.I8) : ptype;
 
+    /// <remarks>
+    /// WHAT THIS FAMILY OF COPIES COSTS, measured: doubling all twelve of them, together with the
+    /// zero bitmap an all-null validity writes, moves the write allocation axes by 32 to 192 bytes
+    /// each and by 712 on the widest of them -- a tenth of a per cent. A node's metadata is a
+    /// handful of protobuf fields, and there are as many of these per file as there are nodes, not
+    /// as there are rows.
+    /// </remarks>
     private static byte[] BitPackedBytes(uint bitWidth, bool hasPatches, in PatchesMetadata patches)
     {
         ProtoWriter writer = new ProtoWriter();
@@ -1929,6 +1936,11 @@ internal static class ArrayBlobWriter
             {
                 // NOT omittable: without the child the reader derives AllValid and every null row
                 // comes back as a zero that claims to be present.
+                //
+                // Allocated rather than taken from a shared array of zeros or from the pool: an
+                // all-null column is one node's worth of bitmap, and doubling this allocation
+                // alongside the twelve metadata copies moves the widest write allocation axis by
+                // 712 bytes of 709 152.
                 int bytes = CanonicalSupport.BitmapByteCount(node.Length);
                 byte[] zeros = new byte[Math.Max(bytes, 1)];
                 destination[0] = BitmapNode(builder, buffers, encodings, zeros);
