@@ -1,6 +1,3 @@
-// Transcribed from spec/flatbuffers/dtype.fbs (`enum PType: uint8`) and spec/proto/dtype.proto
-// (`enum PType`). Both list U8, U16, U32, U64, I8, I16, I32, I64, F16, F32, F64 in that order,
-// so the unsigned family occupies 0..3, the signed family 4..7 and the floats 8..10.
 using System;
 using System.Runtime.CompilerServices;
 
@@ -8,7 +5,9 @@ namespace Vorticity.Types;
 
 /// <summary>
 /// Physical type of a <see cref="DTypeKind.Primitive"/> dtype. The numeric values are the wire
-/// tags shared by <c>dtype.fbs</c> and <c>dtype.proto</c>.
+/// tags shared by <c>dtype.fbs</c> and <c>dtype.proto</c>, and they group by family — unsigned
+/// 0..3, signed 4..7, floats 8..10 — which is what the range tests in
+/// <see cref="PTypeExtensions"/> rely on.
 /// </summary>
 public enum PType : byte
 {
@@ -65,8 +64,7 @@ public static class PTypeExtensions
     /// </summary>
     /// <exception cref="VortexFormatException">
     /// <paramref name="p"/> is not a defined tag. A <see cref="PType"/> reaching this method comes
-    /// from a file, so an undefined tag is malformed input rather than an argument error
-    /// (docs/03-architecture.md section 5).
+    /// from a file, so an undefined tag is malformed input rather than an argument error.
     /// </exception>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int ByteWidth(this PType p)

@@ -1,19 +1,17 @@
-// A FlatBuffers vector of tables or strings: [u32 count][uoffset elements...]. Vectors of scalars
-// and of inline structs do not come through here - they are reinterpreted in place by
-// FlatBufferTable.GetStructVector<T> (docs/02-format.md §3).
 using System;
 using System.Runtime.CompilerServices;
 
 namespace Vorticity.Serialization.FlatBuffers;
 
 /// <summary>
-/// A vector of tables or strings inside an untrusted FlatBuffer.
+/// A vector of tables or strings inside an untrusted FlatBuffer, laid out as
+/// <c>[u32 count][uoffset elements...]</c>. Vectors of scalars and of inline structs do not come
+/// through here - <c>FlatBufferTable.GetStructVector</c> reinterprets those in place.
 /// </summary>
 /// <remarks>
 /// The element count is validated against the real buffer length when the vector is resolved, so
 /// <see cref="Count"/> can never promise more elements than the buffer holds. Each element is a
-/// forward uoffset that is bounds-checked again when it is dereferenced
-/// (docs/03-architecture.md §6).
+/// forward uoffset that is bounds-checked again when it is dereferenced.
 /// </remarks>
 public readonly ref struct FlatBufferVector
 {
@@ -73,8 +71,7 @@ public readonly ref struct FlatBufferVector
     private int ElementPos(int index)
     {
         // Out of range is reported as a format error like every other out-of-range access in this
-        // reader: a hostile file must never be able to surface a different exception type
-        // (docs/09-contracts.md §4).
+        // reader: a hostile file must never be able to surface a different exception type.
         if ((uint)index >= (uint)_count)
         {
             ThrowIndex(index, _count);

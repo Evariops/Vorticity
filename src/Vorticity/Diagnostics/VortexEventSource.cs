@@ -1,16 +1,19 @@
-// The `Vorticity` EventSource - docs/09-contracts.md §5, and the counters docs/12-index-reads.md
-// §8.1 adds: whether an index earns its bytes, in production.
-//
-// ZERO-COST WITHOUT A LISTENER. Every hook is one `IsEnabled` test on a static; the counters exist
-// only once a listener has asked for them, and the running totals are plain `long`s added with
-// `Interlocked`. What `ScanMetrics` counts for one scan, this counts for the process.
 using System;
 using System.Diagnostics.Tracing;
 using System.Threading;
 
 namespace Vorticity.Diagnostics;
 
-/// <summary>The library's counters, published as <c>EventCounters</c> under the name <c>Vorticity</c>.</summary>
+/// <summary>
+/// The library's counters, published as <c>EventCounters</c> under the name <c>Vorticity</c>.
+/// They answer in production what <c>ScanMetrics</c> answers for a single scan — above all,
+/// whether an index earns the bytes it costs.
+/// </summary>
+/// <remarks>
+/// Nothing is paid until a listener attaches: every hook is one <c>IsEnabled</c> test on a
+/// static, the counters are created only once a listener has asked for them, and the running
+/// totals are plain <c>long</c>s added with <c>Interlocked</c>.
+/// </remarks>
 [EventSource(Name = "Vorticity")]
 internal sealed class VortexEventSource : EventSource
 {

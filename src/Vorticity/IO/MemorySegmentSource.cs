@@ -1,16 +1,3 @@
-// An ISegmentSource over bytes already in memory.
-//
-// The two built-in sources of docs/03-architecture.md §3.5 are both local-file: mmap and
-// RandomAccess. This is the third case that keeps turning up and that every caller was otherwise
-// writing for themselves -- a file already in a buffer, because it came off a network, out of a
-// cache, or out of a test fixture.
-//
-// It COPIES each segment rather than handing out a view of the array, and that is not laziness.
-// VortexBuffer's contract is that a buffer's real base address satisfies its declared alignment,
-// which is what makes a decoder's reinterpretation of it legal; a managed array offers no such
-// guarantee at an arbitrary offset. PinnedArraySegmentOwner copies into a block that does, so this
-// source loses zero-copy and keeps correctness, which is the right trade for a source whose bytes
-// were going to be copied into memory anyway.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,6 +8,14 @@ using Vorticity.Serialization.Schemas;
 namespace Vorticity.IO;
 
 /// <summary>Reads segments out of a byte buffer already in memory.</summary>
+/// <remarks>
+/// For a file that is already in a buffer, because it came off a network, out of a cache or out of
+/// a test fixture; the other two sources are both local-file. Each segment is copied rather than
+/// handed out as a view of the caller's array: a <see cref="VortexBuffer"/> promises that its real
+/// base address satisfies its declared alignment, which is what makes a decoder's reinterpretation
+/// of it legal, and a managed array gives no such guarantee at an arbitrary offset. The copy lands
+/// in a block that does — zero-copy given up for bytes that were going to be copied anyway.
+/// </remarks>
 public sealed class MemorySegmentSource : ISegmentSource
 {
     private readonly ReadOnlyMemory<byte> _bytes;

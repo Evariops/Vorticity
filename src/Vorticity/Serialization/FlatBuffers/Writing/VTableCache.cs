@@ -1,14 +1,3 @@
-// Vtable deduplication for the FlatBuffers builder.
-//
-// This is NOT an optimization that can be skipped. docs/01-scope.md §3 names vtable dedup as
-// mandatory: "without it, wide-schema metadata inflates and the 105% size target starts with a
-// self-inflicted handicap". A Vortex file with a 5 000-column struct emits one ArrayNode table per
-// column; without dedup that is 5 000 vtables of identical bytes.
-//
-// The reference FlatBuffers builders scan every previously written vtable linearly, which is
-// O(tables^2) and is exactly the case that hurts on a wide schema. This cache instead hashes the
-// candidate vtable's bytes and probes a bucket chain, so a match costs one hash plus one
-// SequenceEqual.
 using System;
 using System.IO.Hashing;
 using System.Runtime.CompilerServices;
@@ -17,9 +6,15 @@ namespace Vorticity.Serialization.FlatBuffers;
 
 /// <summary>
 /// Index of the vtables already written into a <see cref="FlatBufferBuilder"/>'s scratch buffer,
-/// keyed by their exact bytes.
+/// keyed by their exact bytes. Deduplicating them is mandatory rather than an optimization: a
+/// wide struct emits one table per column, and their vtables are byte-identical.
 /// </summary>
 /// <remarks>
+/// <para>
+/// A candidate is hashed and matched through a bucket chain rather than compared against every
+/// vtable written so far, so a match costs one hash plus one comparison. A linear scan would be
+/// quadratic in the number of tables, on exactly the wide schemas deduplication exists for.
+/// </para>
 /// <para>
 /// Vtables are addressed by their <em>back-offset</em> — the builder's <c>Offset</c> at the moment
 /// the vtable was finished — never by an absolute index, because the scratch array is reallocated
@@ -81,15 +76,10 @@ internal sealed class VTableCache
     /// slightly longer chain.
     /// </para>
     /// <para>
-    /// This was FNV-1a, kept on the grounds that it was deterministic where a randomized hash would
-    /// not be. That argument does not separate the two: XxHash3 at a fixed seed is exactly as
-    /// reproducible, run to run and machine to machine. What does separate them is speed, measured
-    /// on the real shape of the input rather than assumed. A vtable is <c>(slots + 2) * 2</c> bytes,
-    /// and the 31 969 the byte-exact write suite produces average 9,6 of them, 96,6 % at or below
-    /// sixteen, the longest 22. Over that distribution FNV-1a costs 2,91 ns a hash against 1,71
-    /// here. The gain is small in absolute terms — 93 µs against 55 for every vtable that suite
-    /// writes — and the reason to take it is that it leaves the writer one hash family instead of
-    /// two.
+    /// A fixed seed makes this exactly as reproducible, run to run and machine to machine, as any
+    /// non-randomized hash, and it is faster than a byte-at-a-time hash over the very short inputs
+    /// a vtable is — <c>(slots + 2) * 2</c> bytes, a couple of dozen at most. It also leaves the
+    /// writer one hash family instead of two.
     /// </para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -101,7 +91,7 @@ internal sealed class VTableCache
     /// preceded by at least the table it belongs to.
     /// </summary>
     /// <param name="buffer">The builder's scratch array.</param>
-    /// <param name="capacity">Its current length, used to turn a back-offset into an index.</param>
+    /// <param name="capacity">Its current length, which turns a back-offset into an index.</param>
     /// <param name="candidate">The freshly written vtable's bytes.</param>
     /// <param name="hash"><see cref="Hash"/> of <paramref name="candidate"/>.</param>
     internal int Find(byte[] buffer, int capacity, ReadOnlySpan<byte> candidate, uint hash)

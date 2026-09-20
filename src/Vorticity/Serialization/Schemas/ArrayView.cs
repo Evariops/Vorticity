@@ -1,18 +1,15 @@
-// Readers for `table Array`, `table ArrayNode` and `table ArrayStats` in spec/flatbuffers/array.fbs.
-//
-// The array blob's FlatBuffer is built with finish_minimal upstream, so there is NO 4-byte file
-// identifier at offset 4 (spec/REFERENCE.md, "The array blob, read off the writer"). Nothing here
-// looks for one.
-//
-// ArrayNode.children is the deepest file-supplied tree in the format and it is a DAG, not a tree:
-// forward-only uoffsets exclude cycles but two parents may legally share one child table. Depth
-// alone therefore cannot bound a walk of it, which is why Root demands a table budget.
 using System;
 using Vorticity.Serialization.FlatBuffers;
 
 namespace Vorticity.Serialization.Schemas;
 
 /// <summary>Reader for <c>table Array</c> in spec/flatbuffers/array.fbs.</summary>
+/// <remarks>
+/// The array blob's FlatBuffer is finished without a file identifier, so nothing here looks for
+/// one at offset 4. Its node tree is a directed acyclic graph rather than a tree — forward-only
+/// uoffsets exclude cycles, but two parents may legally share one child table — so depth alone
+/// cannot bound a walk of it and <see cref="Root"/> carries a table budget instead.
+/// </remarks>
 public readonly ref struct ArrayView
 {
     private readonly ReadOnlySpan<byte> _buffer;
@@ -26,8 +23,8 @@ public readonly ref struct ArrayView
 
     /// <summary>Parses <paramref name="buffer"/> as an <c>Array</c> root.</summary>
     /// <param name="buffer">
-    /// The array blob's FlatBuffer region — <c>[len-4-fb_length, len-4)</c> of the segment
-    /// (docs/02-format.md §5.1) — starting at its root uoffset.
+    /// The array blob's FlatBuffer region — <c>[len-4-fb_length, len-4)</c> of the segment —
+    /// starting at its root uoffset.
     /// </param>
     /// <param name="tableBudget">
     /// Remaining table allowance, seeded with <see cref="VortexLimits.MaxFlatBufferTables"/> and
@@ -62,7 +59,7 @@ public readonly ref struct ArrayView
     /// <remarks>
     /// <c>Buffer</c>'s natural alignment is 4, not 8 — its widest member is a <c>uint32</c> — so
     /// the elements are required to start on a 4-byte boundary inside the blob and nothing more.
-    /// Demanding 8 would reject 1543 of the 2236 array blobs in the golden corpus.
+    /// Demanding 8 would reject most of the array blobs a conforming writer produces.
     /// </remarks>
     /// <exception cref="VortexFormatException">
     /// The elements escape the buffer or are not 4-byte aligned inside it.
@@ -90,7 +87,7 @@ public readonly ref struct ArrayView
 /// <summary>Reader for <c>table ArrayNode</c> in spec/flatbuffers/array.fbs.</summary>
 /// <remarks>
 /// An <c>ArrayNode</c> carries neither its DType nor its length; both are supplied top-down by the
-/// parent (docs/02-format.md §5.2).
+/// parent.
 /// </remarks>
 public readonly ref struct ArrayNodeView
 {

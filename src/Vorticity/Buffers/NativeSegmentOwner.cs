@@ -1,6 +1,3 @@
-// The network-read origin of docs/03-architecture.md §3.1: aligned native memory that
-// RandomAccess / an HTTP source scatters into. NativeMemory.AlignedAlloc is the reason
-// netstandard2.1 was rejected outright (docs/03-architecture.md §1).
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
@@ -11,7 +8,9 @@ using System.Threading;
 namespace Vorticity.Buffers;
 
 /// <summary>
-/// A <see cref="SegmentOwner"/> over a block of aligned native memory.
+/// A <see cref="SegmentOwner"/> over a block of aligned native memory. This is the destination
+/// the I/O layer reads into: a random-access file read or a range response from a remote source
+/// scatters straight into the aligned block.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -83,7 +82,7 @@ public sealed class NativeSegmentOwner : SegmentOwner
     /// <returns>An owner with a reference count of 1.</returns>
     /// <exception cref="VortexFormatException">
     /// <paramref name="length"/> is negative, or <paramref name="alignment"/> is not a power of
-    /// two within the cap of docs/08-semantics.md §6.
+    /// two within the supported cap.
     /// </exception>
     /// <exception cref="OutOfMemoryException">The allocation failed.</exception>
     public static unsafe NativeSegmentOwner Allocate(int length, int alignment)
@@ -196,10 +195,9 @@ public sealed class NativeSegmentOwner : SegmentOwner
         int capacity,
         int length)
     {
-        // The pool always allocates at the 64-byte cap, whatever the caller asked for: see
-        // docs/03-architecture.md §3.5, "Coalescing versus alignment". A block that is 64-aligned
-        // satisfies every legal segment alignment, so buckets stay alignment-agnostic and blocks
-        // are genuinely interchangeable.
+        // The pool always allocates at the 64-byte cap, whatever the caller asked for: a block
+        // aligned to 64 satisfies every legal segment alignment, so buckets stay
+        // alignment-agnostic and blocks are genuinely interchangeable.
         void* pointer = AllocRaw(capacity, VortexLimits.MaxAlignment);
         return new NativeSegmentOwner(
             pointer,

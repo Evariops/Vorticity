@@ -1,6 +1,3 @@
-// The FlatBuffers `struct Buffer` of spec/flatbuffers/array.fbs plus the three small enums the
-// footer and array schemas declare. Named BufferSpec so it does not collide with
-// Vorticity.Buffers.VortexBuffer; docs/09-contracts.md §7 names it BufferSpec too.
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -9,16 +6,18 @@ namespace Vorticity.Serialization.Schemas;
 
 /// <summary>
 /// A FlatBuffers <c>struct</c> (8 bytes, inline) describing one data buffer inside an array blob.
+/// It is the <c>Buffer</c> struct of spec/flatbuffers/array.fbs, named <c>BufferSpec</c> here so it
+/// does not collide with <c>Vorticity.Buffers.VortexBuffer</c>.
 /// </summary>
 /// <remarks>
-/// spec/flatbuffers/array.fbs <c>Buffer</c>. Its natural alignment is 4, not 8: the widest member
-/// is a <c>uint32</c>. A reader that demanded 8-byte alignment would reject legal files — 1543 of
-/// the 2236 array blobs in the golden corpus place this vector at a 4-mod-8 offset.
+/// Its natural alignment is 4, not 8: the widest member is a <c>uint32</c>. A reader that demanded
+/// 8-byte alignment would reject legal files, because writers commonly place this vector at a
+/// 4-mod-8 offset.
 /// </remarks>
 [StructLayout(LayoutKind.Sequential, Pack = 1, Size = 8)]
 public readonly struct BufferSpec
 {
-    /// <summary>Byte 0..2. Padding bytes written immediately BEFORE this buffer.</summary>
+    /// <summary>Byte 0..2. Padding bytes written immediately before this buffer.</summary>
     public readonly ushort Padding;
 
     /// <summary>Byte 2..3. Alignment is <c>1 &lt;&lt; AlignmentExponent</c>. Untrusted.</summary>
@@ -51,10 +50,9 @@ public enum BufferCompression : byte
     None = 0,
 
     /// <summary>
-    /// The buffer is LZ4-compressed. DECLARED BY THE SCHEMA AND IMPLEMENTED BY NOTHING: no Vortex
+    /// The buffer is LZ4-compressed. Declared by the schema and implemented by nothing: no Vortex
     /// release writes this value or reads this field, and the format records neither the framing
-    /// nor a decompressed length, so a buffer carrying it is refused rather than decoded. See
-    /// docs/08-semantics.md §7.
+    /// nor a decompressed length, so a buffer carrying it is refused rather than decoded.
     /// </summary>
     LZ4 = 1,
 }
@@ -64,10 +62,9 @@ public enum BufferCompression : byte
 /// </summary>
 /// <remarks>
 /// A value outside this set is <em>not</em> rejected by the schema accessors. Compression is a
-/// registry component like any other: classifying an unknown scheme is the consumer's job, and
-/// failing at open time would contradict the "unknown component is not an open-time error" rule
-/// (Phase 1 contract §2.3). No v1 file uses this field — <c>compression_specs</c> is empty in all
-/// 819 golden corpus files.
+/// registry component like any other: classifying an unknown scheme is the consumer's job, and an
+/// unknown component must never be an open-time error. No known file uses this field —
+/// <c>compression_specs</c> is empty throughout the golden corpus.
 /// </remarks>
 public enum CompressionScheme : byte
 {
@@ -77,7 +74,7 @@ public enum CompressionScheme : byte
     /// <summary>LZ4.</summary>
     LZ4 = 1,
 
-    /// <summary>zlib / DEFLATE.</summary>
+    /// <summary>zlib / Deflate.</summary>
     ZLib = 2,
 
     /// <summary>Zstandard.</summary>
@@ -89,7 +86,7 @@ public enum CompressionScheme : byte
 /// </summary>
 /// <remarks>
 /// Like <see cref="CompressionScheme"/>, an out-of-domain value is returned as read rather than
-/// rejected: statistics are class II/III data (docs/08-semantics.md §5) and must never make a file
+/// rejected: statistics are advisory, and a value nobody understands must never make a file
 /// unreadable.
 /// </remarks>
 public enum StatPrecision : byte
@@ -102,7 +99,7 @@ public enum StatPrecision : byte
 }
 
 /// <summary>
-/// Load-time verification of the two inline struct layouts, required by docs/09-contracts.md §7.
+/// Load-time verification of the two inline struct layouts the zero-copy readers reinterpret.
 /// </summary>
 internal static class SchemaLayoutChecks
 {

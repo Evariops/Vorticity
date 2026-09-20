@@ -1,8 +1,3 @@
-// PHASE1-CONTRACTS.md §2.9 and §5.1. The doc's ReadManyAsync(ReadOnlySpan<SegmentSpec>,
-// Span<VortexBuffer>, ct) cannot be written by any implementer of the seam: an async method
-// cannot take a Span<T> parameter (CS4012). This caller-owned, poolable class replaces both spans
-// and, because it also holds the SegmentOwners, it is where "exactly one refcount per segment per
-// batch" (§2.2 rule 3) is actually enforced.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -15,19 +10,20 @@ namespace Vorticity.IO;
 /// <summary>
 /// A caller-owned, reusable set of segment reads. Register everything a split needs, then issue
 /// <b>one</b> <see cref="ISegmentSource.ReadManyAsync"/> — that single call is what makes
-/// coalescing possible (docs/03-architecture.md §3.5).
+/// coalescing possible. It carries both the requests and their results because an async method
+/// cannot take a <c>Span&lt;T&gt;</c> parameter, and, holding the owners, it is where the rule of
+/// exactly one reference per segment per batch is enforced.
 /// </summary>
 /// <remarks>
 /// <para>
 /// <b>Not thread-safe, by design.</b> A request set belongs to exactly one decode flow, the same
-/// way a <c>ScanContext</c> does (PHASE1-CONTRACTS.md §2.2 rule 6). Concurrent splits each get
-/// their own set. <see cref="ISegmentSource"/> implementations, by contrast, must be thread-safe.
+/// way a <c>ScanContext</c> does. Concurrent splits each get their own set.
+/// <see cref="ISegmentSource"/> implementations, by contrast, must be thread-safe.
 /// </para>
 /// <para>
 /// <b>Lifetime.</b> Every slot holds one reference to a <see cref="SegmentOwner"/> and
 /// <see cref="Release"/> gives back exactly one per slot. Buffers obtained from
-/// <see cref="GetBuffer"/> are invalid the moment <see cref="Release"/> runs
-/// (docs/07-dotnet-mapping.md §4).
+/// <see cref="GetBuffer"/> are invalid the moment <see cref="Release"/> runs.
 /// </para>
 /// </remarks>
 public sealed class SegmentRequestSet : IDisposable
@@ -89,7 +85,7 @@ public sealed class SegmentRequestSet : IDisposable
     /// </exception>
     /// <exception cref="InvalidOperationException">
     /// A <em>new</em> segment is registered after the set was populated. Its slot could never be
-    /// filled, so this is a caller bug (§1.4), not a file problem.
+    /// filled, so this is a caller bug, not a file problem.
     /// </exception>
     public int Add(in SegmentSpec spec)
     {
@@ -298,8 +294,8 @@ public sealed class SegmentRequestSet : IDisposable
     /// and leaves the registrations intact, so the read can be retried.
     /// </summary>
     /// <remarks>
-    /// This is the all-or-nothing rule of docs/03-architecture.md §3.5 in one call: a source wraps
-    /// its read in <c>try { … } catch { requests.AbandonPending(); throw; }</c>. It does nothing on
+    /// This is the all-or-nothing rule of a batch read in one call: a source wraps its read in
+    /// <c>try { … } catch { requests.AbandonPending(); throw; }</c>. It does nothing on
     /// an already-populated set, so a failure that arrives after <see cref="Complete"/> cannot
     /// destroy a good result.
     /// </remarks>
@@ -513,7 +509,7 @@ public sealed class SegmentRequestSet : IDisposable
     /// Segment offsets come straight from an untrusted footer. With a fixed mix, a file could
     /// declare tens of thousands of segments whose offsets all collide in the final masked hash,
     /// turning this linear open-addressed table quadratic — a legal file that makes the reader
-    /// hang, which is exactly the failure class docs/09-contracts.md §4.2 rules out. A seed the
+    /// hang, which is exactly the failure class the reader promises never to have. A seed the
     /// file cannot know makes such a collision set impossible to construct. It changes probe
     /// order only: slots are handed out by registration order, so every result stays
     /// deterministic.

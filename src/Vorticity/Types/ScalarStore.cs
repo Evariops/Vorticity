@@ -1,11 +1,3 @@
-// Same arena rationale as DTypeArena (docs/03-architecture.md section 3.2): a file's statistics
-// are thousands of small scalars, so a ScalarValue is a (store, index) handle over growable
-// arrays rather than an object per value.
-//
-// Unlike DTypeArena this store does NOT deduplicate. Dtypes repeat constantly across a wide
-// schema; scalar values do not, so a dedup table would cost a hash and a comparison per value and
-// collapse almost nothing. The consequence is that equality is always the structural walk, never
-// an index compare -- which the cross-store contract requires anyway.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -48,6 +40,14 @@ internal struct ScalarNode
 /// Arena backing <see cref="ScalarValue"/> handles.
 /// </summary>
 /// <remarks>
+/// <para>
+/// A file's statistics are thousands of small scalars, so a value is a (store, index) handle over
+/// growable arrays rather than an object per value. Unlike <see cref="DTypeArena"/> the store does
+/// not deduplicate: dtypes repeat constantly across a wide schema, scalar values do not, so a
+/// dedup table would cost a hash and a comparison per value and collapse almost nothing. Equality
+/// is therefore always the structural walk, never an index compare — which comparing values held
+/// by two different stores demands anyway.
+/// </para>
 /// <para>Not thread-safe for mutation; safe for concurrent reads once fully built.</para>
 /// <para>
 /// <see cref="ScalarValue.AsBytes"/> returns a span into store-owned memory. It is invalidated by
@@ -116,8 +116,8 @@ public sealed class ScalarStore
     /// <summary>
     /// The absent value: no wire case was present at all. It carries no store, so
     /// <c>store.Absent</c> equals <c>default(ScalarValue)</c> and equals another store's
-    /// <c>Absent</c>. Deliberately distinct from <see cref="Null"/> — docs/08-semantics.md
-    /// section 1: "a statistic with no value licenses nothing".
+    /// <c>Absent</c>. Deliberately distinct from <see cref="Null"/>: a statistic with no value
+    /// licenses nothing, where a null one asserts that the value is null.
     /// </summary>
     public ScalarValue Absent => default;
 
@@ -227,8 +227,8 @@ public sealed class ScalarStore
     }
 
     /// <summary>
-    /// A present union alternative. An outer-null union uses <see cref="Null"/> instead — see the
-    /// comment on <c>UnionValue</c> in spec/proto/scalar.proto.
+    /// A present union alternative. A union that is itself null uses <see cref="Null"/> instead, so
+    /// the two never collide.
     /// </summary>
     /// <exception cref="ArgumentException">The value belongs to a different store.</exception>
     /// <exception cref="VortexFormatException">The resulting nesting depth exceeds the cap.</exception>
@@ -287,16 +287,16 @@ public sealed class ScalarStore
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <see cref="VortexLimits.MaxDTypeDepth"/> bounds the recursion STACK and nothing else. A
+    /// <see cref="VortexLimits.MaxDTypeDepth"/> bounds the recursion stack and nothing else. A
     /// list stores its elements as node indices, so <c>List([v, v])</c> nested 64 deep is a
     /// 65-node DAG with 2^64 root-to-leaf paths, and this store does not deduplicate, so two
-    /// structurally identical roots built in the SAME store also take the full walk. The hash
+    /// structurally identical roots built in the same store also take the full walk. The hash
     /// early-out cannot help either: equal values hash equal by construction.
     /// </para>
     /// <para>
     /// The visit count is therefore bounded the same way <see cref="DTypeArena"/> bounds it: the
     /// walk runs allocation-free until it has visited <see cref="EqualityVisitBudget"/> node
-    /// pairs, then memoises the pairs it has PROVEN equal. A mismatch propagates straight out, so
+    /// pairs, then memoises the pairs it has proven equal. A mismatch propagates straight out, so
     /// unequal pairs are never revisited and are not memoised. There is no dedup table here, but
     /// "node <c>ai</c> in one store equals node <c>bi</c> in the other" is still a property of the
     /// pair alone, so the memo is sound. The <see cref="ScalarValueKind.Variant"/> branch compares
@@ -366,7 +366,7 @@ public sealed class ScalarStore
             case ScalarValueKind.F64:
                 // Bitwise, deliberately: this is value identity, not an IEEE comparison. NaN
                 // equals itself here and +0 does not equal -0. Filter evaluation follows IEEE 754
-                // instead (docs/08-semantics.md section 2) and must not reuse this.
+                // instead and must not reuse this.
                 return x.Bits == y.Bits;
 
             case ScalarValueKind.String:

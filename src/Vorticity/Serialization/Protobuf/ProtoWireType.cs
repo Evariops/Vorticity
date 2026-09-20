@@ -1,16 +1,15 @@
-// Hand-written proto3 runtime. docs/03-architecture.md §1 forbids a Protobuf dependency, so the
-// wire format is transcribed here from the encoding rules the vendored schemas rely on
-// (spec/proto/dtype.proto, spec/proto/scalar.proto are proto3; see docs/02-format.md §5.3).
 namespace Vorticity.Serialization.Protobuf;
 
 /// <summary>
-/// The three low bits of a Protobuf tag: how the following payload is framed.
+/// The three low bits of a Protobuf tag: how the following payload is framed. Part of a
+/// hand-written proto3 runtime: Vorticity takes no Protobuf dependency, so the wire format is
+/// transcribed from the encoding rules the vendored schemas rely on.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Values 3 and 4 are the deprecated <em>group</em> framing. proto3 never emits them, so
-/// Vorticity rejects them outright rather than implementing a second nesting mechanism
-/// (docs/02-format.md §5.3). They are named here only so a rejection can report what it saw.
+/// Vorticity rejects them outright rather than implementing a second nesting mechanism. They
+/// are named here only so a rejection can report what it saw.
 /// </para>
 /// <para>
 /// Values 6 and 7 have never been assigned and have no name: a tag carrying one is malformed.

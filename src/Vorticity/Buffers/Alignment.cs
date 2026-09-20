@@ -1,21 +1,19 @@
-// Rounding helpers shared by the writer's inter-segment padding (docs/03-architecture.md §3.8)
-// and by the reader's coalesced range arithmetic (docs/03-architecture.md §3.5, "Coalescing
-// versus alignment"). They are separated from VortexBuffer because both the writer, which has no
-// buffer yet, and the I/O layer, which works in file offsets, need them.
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
 namespace Vorticity.Buffers;
 
 /// <summary>
-/// Power-of-two rounding over 64-bit file positions and raw addresses.
+/// Power-of-two rounding over 64-bit file positions and raw addresses. It lives apart from
+/// <see cref="VortexBuffer"/> because both the writer, which pads between segments before any
+/// buffer exists, and the I/O layer, which works in file offsets, need the same arithmetic.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Every method validates <c>alignment</c> and rejects a value that is not a positive power of
 /// two. Positions are file offsets and are therefore required to be non-negative; a negative
 /// position can only come from arithmetic on a corrupt file, so it is rejected rather than
-/// rounded (docs/03-architecture.md §6: validate before use, never after).
+/// rounded — validation happens before the value is used, never after.
 /// </para>
 /// <para>
 /// <see cref="AlignUp(long, int)"/> never overflows: rounding a value within
@@ -75,8 +73,8 @@ public static class Alignment
 
     /// <summary>
     /// Rounds <paramref name="value"/> down to the previous multiple of
-    /// <paramref name="alignment"/>. This is the <c>start &amp; ~63L</c> of the coalescing rule in
-    /// docs/03-architecture.md §3.5.
+    /// <paramref name="alignment"/>. This is the <c>start &amp; ~63L</c> that turns a coalesced
+    /// read's start into the start of the 64-byte block serving it.
     /// </summary>
     /// <param name="value">A non-negative position.</param>
     /// <param name="alignment">A positive power of two.</param>

@@ -1,4 +1,3 @@
-// PHASE1-CONTRACTS.md §5.4 / docs/03-architecture.md §3.5, "Coalescing versus alignment".
 using System;
 
 namespace Vorticity.IO;

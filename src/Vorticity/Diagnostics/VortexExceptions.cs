@@ -1,4 +1,3 @@
-// Reimplemented from the Vortex specification (docs/03-architecture.md §5).
 using System;
 
 namespace Vorticity;
@@ -8,9 +7,9 @@ namespace Vorticity;
 /// class I semantic fields, or an exceeded resource cap (<see cref="VortexLimits"/>).
 /// </summary>
 /// <remarks>
-/// Part of the threat-model guarantee of docs/09-contracts.md §4: malformed input produces this
-/// exception or <see cref="VortexUnsupportedException"/>, never an out-of-bounds access,
-/// an unbounded allocation, or a hang.
+/// This is half of what the library promises about hostile input: a malformed file produces this
+/// exception or <see cref="VortexUnsupportedException"/>, never an out-of-bounds access, an
+/// unbounded allocation, or a hang.
 /// </remarks>
 public sealed class VortexFormatException : Exception
 {
@@ -25,9 +24,9 @@ public sealed class VortexFormatException : Exception
 /// this library does not implement.
 /// </summary>
 /// <remarks>
-/// The message <em>always</em> names both the component id and its kind: that pair is exactly the
-/// input the upstream troubleshooting procedure requires ("which edition, which minimum library
-/// version"). See docs/03-architecture.md §5 and docs/08-semantics.md §4.
+/// The message <em>always</em> names both the component id and its kind, because that pair is
+/// what someone needs to find which format edition introduced the component and which library
+/// version is required to read it.
 /// </remarks>
 public sealed class VortexUnsupportedException : Exception
 {

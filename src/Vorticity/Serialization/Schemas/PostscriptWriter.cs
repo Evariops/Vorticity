@@ -1,18 +1,15 @@
-// Writers for the postscript tables of spec/flatbuffers/footer.fbs.
-//
-// FlatBuffers is built back to front, so every sub-object - a string, a vector, a nested table -
-// must be finished BEFORE the table that references it is opened. Each method below therefore
-// creates its children first and only then calls StartTable.
-//
-// These are writers, not parsers: a bad argument here is a CALLER error and gets Argument*, per
-// the Phase 1 contract §1.4. File-supplied values never reach this code.
 using System;
 using Vorticity.Serialization.FlatBuffers;
 
 namespace Vorticity.Serialization.Schemas;
 
-/// <summary>Builds the <c>Postscript</c>, <c>PostscriptMetadata</c> and <c>PostscriptSegment</c> tables.</summary>
-/// <inheritdoc cref="ArrayWriter" path="/remarks"/>
+/// <summary>
+/// Builds the <c>Postscript</c>, <c>PostscriptMetadata</c> and <c>PostscriptSegment</c> tables.
+/// FlatBuffers is built back to front, so each method finishes its children — a string, a vector,
+/// a nested table — before opening the table that references them. These are writers, never
+/// parsers: no file-supplied value reaches this code, so a bad argument is a caller mistake and is
+/// reported as an argument exception.
+/// </summary>
 internal static class PostscriptWriter
 {
     /// <summary>Writes one <c>PostscriptSegment</c> table.</summary>
@@ -50,7 +47,7 @@ internal static class PostscriptWriter
     /// <param name="b">The builder. No table may be open.</param>
     /// <param name="keyUtf8">
     /// The key. Must be non-empty and at most <see cref="VortexLimits.MaxMetadataKeyLength"/>
-    /// UTF-8 bytes — spec/flatbuffers/footer.fbs states readers reject anything else.
+    /// UTF-8 bytes; readers reject anything else.
     /// </param>
     /// <param name="segmentOffset">Offset of the <c>PostscriptSegment</c> from <see cref="WriteSegment"/>.</param>
     /// <returns>The offset of the table written.</returns>

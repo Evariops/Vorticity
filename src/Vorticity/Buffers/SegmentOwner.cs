@@ -1,6 +1,3 @@
-// docs/03-architecture.md §3.1 and §3.5: "returned buffers are owned by the source until the
-// batch that requested them is disposed. A caching source therefore refcounts; the reader never
-// frees what it did not allocate." This is that refcount.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -10,6 +7,9 @@ namespace Vorticity.Buffers;
 
 /// <summary>
 /// Reference-counted owner of the memory behind one or more <see cref="VortexBuffer"/> views.
+/// Returned buffers stay owned by the source that produced them until the batch that asked for
+/// them is disposed: a caching source refcounts here, and the reader never frees what it did not
+/// allocate.
 /// </summary>
 /// <remarks>
 /// <para>

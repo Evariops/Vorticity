@@ -1,8 +1,3 @@
-// Reimplemented from the Vortex specification.
-// Enum values and the precision -> width mapping are transcribed from
-// vortex-array-0.86.1/src/dtype/decimal/types.rs (`DecimalType`,
-// `DecimalType::smallest_decimal_value_type`, `DecimalType::byte_width`) and from
-// spec/METADATA.md ("Enum `DecimalType`: I8=0, I16=1, I32=2, I64=3, I128=4, I256=5").
 using System.Runtime.CompilerServices;
 
 namespace Vorticity.Types.Numerics;
@@ -10,8 +5,8 @@ namespace Vorticity.Types.Numerics;
 /// <summary>
 /// The integer width Vortex uses to store a decimal of a given precision. This is the
 /// <c>values_type</c> field of <c>vortex.decimal</c>'s metadata
-/// (<c>message DecimalMetadata { DecimalType values_type = 1; }</c>, spec/METADATA.md), so the
-/// numeric values are wire values and must not be renumbered.
+/// (<c>message DecimalMetadata { DecimalType values_type = 1; }</c>), so the numeric values are
+/// wire values and must not be renumbered.
 /// </summary>
 public enum DecimalStorageType : byte
 {
@@ -40,12 +35,12 @@ public enum DecimalStorageType : byte
 /// </summary>
 public static class DecimalStorage
 {
-    /// <summary>Smallest legal decimal precision. docs/07-dotnet-mapping.md §2.</summary>
+    /// <summary>Smallest legal decimal precision: a precision of zero represents no digit.</summary>
     public const byte MinPrecision = 1;
 
     /// <summary>
-    /// Largest legal decimal precision: 76, not 38. spec/REFERENCE.md §1 correction 1 and
-    /// vortex-array-0.86.1/src/dtype/decimal/mod.rs (<c>MAX_PRECISION = &lt;i256&gt;::MAX_PRECISION</c>).
+    /// Largest legal decimal precision: 76, not 38. Precisions 39 to 76 select 256-bit storage,
+    /// so a reader that stops at 38 refuses legal files.
     /// </summary>
     public const byte MaxPrecision = 76;
 
@@ -60,7 +55,6 @@ public static class DecimalStorage
     /// <exception cref="VortexFormatException"><paramref name="precision"/> is outside 1..76.</exception>
     public static DecimalStorageType ForPrecision(byte precision)
     {
-        // vortex-array-0.86.1/src/dtype/decimal/types.rs::smallest_decimal_value_type
         if (precision - 1u > MaxPrecision - 1u)
         {
             ThrowPrecision(precision);
@@ -91,7 +85,6 @@ public static class DecimalStorage
 
     /// <summary>
     /// The width in bytes of one stored value: 1, 2, 4, 8, 16 or 32.
-    /// vortex-array-0.86.1/src/dtype/decimal/types.rs::byte_width.
     /// </summary>
     /// <param name="storage">The storage type.</param>
     /// <returns>The width in bytes.</returns>
@@ -137,7 +130,7 @@ public static class DecimalStorage
 
     /// <summary>
     /// Guards a value read from a file: true only for 0..5. A <c>values_type</c> outside that range
-    /// is a domain violation and must be rejected, not skipped (§1.7 of the Phase 1 contract).
+    /// is a domain violation and must be rejected rather than skipped.
     /// This overload sees an already-narrowed <see cref="byte"/>; use
     /// <see cref="IsDefinedWireValue"/> when the value still has its full protobuf width.
     /// </summary>

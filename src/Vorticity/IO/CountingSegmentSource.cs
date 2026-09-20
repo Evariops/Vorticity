@@ -1,11 +1,3 @@
-// A segment source that counts what goes through it - docs/13-dataset.md §9.2, docs/11 §6.4.
-//
-// THE READ PATH'S COST IS ITS ROUND TRIPS. On an object store a request is tens of milliseconds and a
-// byte is nearly free, so the budget of 13 §9 counts dependent requests first and bytes second.
-// This decorator counts both as the reader asks for them: one request per `ReadAsync`, per
-// `ReadRangeAsync`, and per `ReadManyAsync` -- a set of ranges fetched in one round, whatever
-// coalescing the source below applies -- and every range and byte asked for. It is what a test holds
-// a lookup to, and what a caller wraps a source in to see what a query costs.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,6 +9,14 @@ namespace Vorticity.IO;
 /// <summary>Counts the requests, ranges and bytes a reader asks of a source.</summary>
 /// <param name="inner">The source that serves them.</param>
 /// <param name="ownsInner">Whether disposing this source disposes <paramref name="inner"/>.</param>
+/// <remarks>
+/// A read path is priced by its round trips: on an object store a request costs tens of
+/// milliseconds and a byte is nearly free, so requests are the first thing to count and bytes the
+/// second. One request is counted per <c>ReadAsync</c>, per <c>ReadRangeAsync</c> and per
+/// <c>ReadManyAsync</c> — a set of ranges fetched in one round, whatever coalescing the source
+/// below applies — along with every range and byte asked for. Wrapping a source in this one is how
+/// a caller sees what a query costs.
+/// </remarks>
 public sealed class CountingSegmentSource(ISegmentSource inner, bool ownsInner = true) : ISegmentSource
 {
     private readonly ISegmentSource _inner = inner ?? throw new ArgumentNullException(nameof(inner));

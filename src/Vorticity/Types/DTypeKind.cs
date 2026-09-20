@@ -1,16 +1,10 @@
-// Union tags transcribed from spec/flatbuffers/dtype.fbs (`union Type`) and cross-checked against
-// spec/proto/dtype.proto (`message DType { oneof dtype_type { ... } }`). Both number the same 13
-// cases identically and the numbering is stable (docs/02-format.md section 4).
-//
-// FixedSizeList = 10 deliberately sits AFTER Extension = 9. The .fbs says so in a comment
-// ("This is after `Extension` for backwards compatibility.") and the .proto repeats it. It looks
-// like a transcription mistake and is not: renumbering would break every existing file.
 namespace Vorticity.Types;
 
 /// <summary>
-/// Discriminant of the Vortex dtype union. Values are the wire tags shared by
-/// <c>dtype.fbs</c> and <c>dtype.proto</c>; tag <c>0</c> is the FlatBuffers <c>NONE</c> and is
-/// never a valid dtype.
+/// Discriminant of the Vortex dtype union. The values are wire tags: the FlatBuffers and protobuf
+/// schemas number the same 13 cases identically and the numbering is stable, so renumbering any of
+/// them would break every existing file. Tag <c>0</c> is the FlatBuffers "no variant" marker and
+/// is never a valid dtype.
 /// </summary>
 public enum DTypeKind : byte
 {
@@ -42,8 +36,9 @@ public enum DTypeKind : byte
     Extension = 9,
 
     /// <summary>
-    /// Fixed-length list. Tag 10 rather than 9: it was added after <see cref="Extension"/> and
-    /// keeping the tag order preserves backward compatibility (spec/flatbuffers/dtype.fbs).
+    /// Fixed-length list. Tag 10 rather than 9, sitting after <see cref="Extension"/>: the gap
+    /// looks like a transcription mistake and is not, it is the order the tags were assigned in
+    /// and the only one existing files can be read with.
     /// </summary>
     FixedSizeList = 10,
 

@@ -1,18 +1,15 @@
-// Cold throw helpers for the Protobuf runtime.
-//
-// Two rules from the contract shape this file:
-//   * every malformed-input failure is a VortexFormatException and nothing else
-//     (docs/03-architecture.md §5, docs/09-contracts.md §4);
-//   * a throw never sits inline in a hot method, so the reader's fast paths stay inlineable.
-//
-// [DoesNotReturn] additionally lets the flow analysis in ProtoReader treat "we already
-// bounds-checked and failed" as terminal, so no post-throw statement is ever reached.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
 namespace Vorticity.Serialization.Protobuf;
 
+/// <summary>
+/// Cold throw helpers for the Protobuf runtime. Every failure on malformed input is a
+/// <see cref="VortexFormatException"/> and nothing else, and no throw sits inline in a hot method,
+/// so the reader's fast paths stay inlineable. <see cref="DoesNotReturnAttribute"/> also lets the
+/// caller's flow analysis treat a failed bounds check as terminal.
+/// </summary>
 internal static class ProtoThrow
 {
     [DoesNotReturn]
@@ -63,7 +60,7 @@ internal static class ProtoThrow
 
     /// <summary>
     /// Groups are wire types 3 and 4. proto3 never emits them, so a payload that contains one is
-    /// not a forward-compatible extension but a malformed message — docs/02-format.md §5.3.
+    /// not a forward-compatible extension but a malformed message.
     /// This is the "reject" half of the tolerate/reject distinction: an unknown <em>field
     /// number</em> is skipped, an unrepresentable <em>framing</em> is refused.
     /// </summary>

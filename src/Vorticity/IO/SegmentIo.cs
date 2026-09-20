@@ -1,5 +1,3 @@
-// docs/03-architecture.md §3.5 and PHASE1-CONTRACTS.md §5. Shared validation for the segment I/O
-// seam: every file-supplied SegmentSpec passes through here before a single byte is addressed.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -9,16 +7,16 @@ using Vorticity.Serialization.Schemas;
 namespace Vorticity.IO;
 
 /// <summary>
-/// Class I validation (docs/08-semantics.md §5) for the I/O layer: the checks memory safety
-/// depends on, applied unconditionally before any address is formed from file content.
+/// The validation the I/O layer's memory safety depends on: every file-supplied segment locator
+/// passes through here, unconditionally, before a single byte of it is addressed.
 /// </summary>
 internal static class SegmentIo
 {
     /// <summary>
     /// The longest segment this reader will materialize. A <see cref="VortexBuffer"/> is bounded
     /// by <see cref="int"/>, and a coalesced run adds up to <see cref="VortexLimits.MaxAlignment"/>
-    /// bytes of leading padding when its start is rounded down to 64 (PHASE1-CONTRACTS.md §5.4),
-    /// so the run length must still fit an <see cref="int"/> after that.
+    /// bytes of leading padding when its start is rounded down to 64, so the run length must still
+    /// fit an <see cref="int"/> after that.
     /// </summary>
     internal const int MaxSegmentLength = int.MaxValue - VortexLimits.MaxAlignment;
 
@@ -35,7 +33,8 @@ internal static class SegmentIo
     /// </exception>
     internal static void ValidateSpec(in SegmentSpec spec, out long offset, out int length)
     {
-        // Never cast an exponent without this - PHASE1-CONTRACTS.md §0a C4 forbids a local cap.
+        // Never cast an exponent without this: the cap lives in VortexLimits, and a local copy of
+        // it would be one more place to forget when it moves.
         VortexLimits.CheckAlignmentExponent(spec.AlignmentExponent);
 
         if (spec.Length > (uint)MaxSegmentLength)
@@ -79,7 +78,8 @@ internal static class SegmentIo
     /// <exception cref="ArgumentOutOfRangeException">The alignment is not usable.</exception>
     internal static void CheckAlignmentArgument(int alignment, string paramName)
     {
-        // A caller says this, not a file, so it is Argument* and not VortexFormatException (§1.4).
+        // A caller says this, not a file, so a bad value is an argument error rather than a
+        // malformed-file error.
         if (!Alignment.IsPowerOfTwo(alignment) || alignment > VortexLimits.MaxAlignment)
         {
             ThrowAlignmentArgument(alignment, paramName);

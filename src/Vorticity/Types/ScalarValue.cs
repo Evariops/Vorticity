@@ -1,8 +1,3 @@
-// A ScalarValue is 16 bytes: a store reference, a biased node index and the store generation the
-// index was issued under. The bias is what makes default(ScalarValue) mean Absent rather than
-// "node 0 of a null store", which matters because Absent has to be a first-class, storeless value
-// (docs/08-semantics.md section 1). The generation sits in padding the reference and the index
-// already forced, so carrying it is free.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -14,10 +9,17 @@ namespace Vorticity.Types;
 /// <see cref="DType"/> to get a <see cref="Scalar"/>.
 /// </summary>
 /// <remarks>
+/// <para>
+/// The handle is a store reference, a biased node index and the store generation the index was
+/// issued under. The bias is what makes <c>default</c> mean absence rather than node 0 of a null
+/// store, absence being a first-class, storeless value; the generation fits in padding the other
+/// two already force, so carrying it costs nothing.
+/// </para>
+/// <para>
 /// Equality is structural and works across stores. Floating-point values compare by raw bits, so
 /// a NaN equals a NaN with the same payload and <c>+0.0</c> does not equal <c>-0.0</c>: this is
-/// value identity, not the IEEE-754 comparison filter evaluation uses
-/// (docs/08-semantics.md section 2).
+/// value identity, not the IEEE-754 comparison that filter evaluation uses.
+/// </para>
 /// </remarks>
 public readonly struct ScalarValue : IEquatable<ScalarValue>
 {

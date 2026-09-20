@@ -1,13 +1,10 @@
-// Transcribed from spec/flatbuffers/dtype.fbs and spec/proto/dtype.proto: every parameterised
-// dtype carries a single `nullable: bool` field. Modelling it as a two-valued enum rather than a
-// bool keeps call sites self-describing (`Nullability.Nullable` vs a bare `true`) at zero cost:
-// the enum is a byte and converts to/from the wire bool with a cast.
 namespace Vorticity.Types;
 
 /// <summary>
 /// Whether a dtype admits nulls. The wire representation is the <c>nullable</c> boolean field of
 /// each dtype variant, so <see cref="NonNullable"/> is <c>false</c> and <see cref="Nullable"/> is
-/// <c>true</c>.
+/// <c>true</c>. A two-valued enum rather than a bool, which keeps call sites self-describing at
+/// no cost: it is a byte and converts to and from the wire boolean with a cast.
 /// </summary>
 public enum Nullability : byte
 {

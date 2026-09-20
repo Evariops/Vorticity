@@ -1,5 +1,3 @@
-// Resource caps: docs/08-semantics.md §6. Every cap is a constant declared once here rather than
-// invented per call site.
 using System;
 using System.Runtime.CompilerServices;
 
@@ -7,6 +5,8 @@ namespace Vorticity;
 
 /// <summary>
 /// Hard resource caps enforced by every parser. A violation is a <see cref="VortexFormatException"/>.
+/// Each cap is declared once here rather than invented at a call site, so no parser can enforce a
+/// different bound than its neighbour.
 /// </summary>
 public static class VortexLimits
 {
@@ -89,10 +89,10 @@ public static class VortexLimits
     /// <param name="max">The cap for this kind of tree; one of the constants above.</param>
     /// <param name="what">What is being nested, for the message.</param>
     /// <remarks>
-    /// INTERNAL, unlike <see cref="CheckAlignmentExponent"/>. The alignment check is named in
-    /// <c>SegmentSpec</c>'s own documentation as the thing an implementer of a segment source
-    /// calls, so it is part of what this library offers. This one is called only while parsing or
-    /// decoding, on trees a caller does not build.
+    /// This stays internal, unlike <see cref="CheckAlignmentExponent"/>: the alignment check is
+    /// named in <c>SegmentSpec</c>'s own documentation as something an implementer of a segment
+    /// source calls, whereas this one runs only while parsing or decoding, on trees a caller never
+    /// builds.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static void CheckDepth(int depth, int max, string what)

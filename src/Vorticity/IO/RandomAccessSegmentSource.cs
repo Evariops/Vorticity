@@ -1,7 +1,3 @@
-// docs/03-architecture.md §3.5: "RandomAccessSegmentSource - RandomAccess.ReadAsync with vectored
-// reads into aligned native buffers." See the class remarks for why one 64-aligned buffer per
-// coalesced run beats a scatter list here: it delivers the same zero-copy segments with fewer
-// allocations, and the alignment proof of PHASE1-CONTRACTS.md §5.4 is exactly what makes it work.
 using System;
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
@@ -24,7 +20,7 @@ namespace Vorticity.IO;
 /// <para>
 /// <b>How a coalesced run is delivered.</b> One 64-byte-aligned native buffer is allocated per
 /// run, the run is read into it with a single positional read, and every segment in the run is
-/// published as a <em>view</em> into that buffer — no per-segment copy. The doc's alternative, a
+/// published as a <em>view</em> into that buffer — no per-segment copy. The alternative, a
 /// vectored read scattering into one buffer per segment plus throwaways for the gaps, transfers
 /// the same bytes off the disk and would additionally need a <see cref="Memory{T}"/> (and so a
 /// <see cref="System.Buffers.MemoryManager{T}"/>) per scatter entry. The run buffer is the cheaper
@@ -33,8 +29,7 @@ namespace Vorticity.IO;
 /// <para>
 /// <b>Why the run buffer is safe to slice.</b> Its base is 64-aligned and its start is the run's
 /// start rounded down to 64, so a segment at file offset <c>o</c> lands at buffer offset
-/// <c>o - start</c>, which keeps every factor of two up to 64 that <c>o</c> had —
-/// PHASE1-CONTRACTS.md §5.4.
+/// <c>o - start</c>, which keeps every factor of two up to 64 that <c>o</c> had.
 /// </para>
 /// <para>
 /// <b>Thread safety.</b> Positional reads carry their own offsets and share no file position, so
@@ -84,12 +79,12 @@ public sealed class RandomAccessSegmentSource : ISegmentSource
 
     /// <summary>Diagnostics: blocks too large for the pool, allocated and freed per read.</summary>
     /// <remarks>
-    /// PERF-AUDIT-v2.md W-10. Two ceilings disagree by a factor of two --
+    /// Two ceilings disagree by a factor of two —
     /// <see cref="SegmentReadOptions.DefaultMaxCoalescedReadBytes"/> lets a run reach 16 MiB while
     /// <see cref="SegmentReadOptions.DefaultMaxPooledBytes"/> and
-    /// <see cref="AlignedBufferPool.Shared"/> both stop at 8 -- so a run in that band is a fresh
-    /// native allocation and a free on every read. This counts how often that actually happens,
-    /// which is the thing the point could not be decided without.
+    /// <see cref="AlignedBufferPool.Shared"/> both stop at 8 — so a run in that band is a fresh
+    /// native allocation and a free on every read. This counts how often that happens, which is
+    /// what deciding whether the gap is worth closing needs.
     /// </remarks>
     internal int UnpooledBlockCount => Volatile.Read(ref _unpooledBlocks);
 
@@ -101,8 +96,8 @@ public sealed class RandomAccessSegmentSource : ISegmentSource
     {
         ArgumentNullException.ThrowIfNull(path);
 
-        // System.IO.File spelled out: `Vorticity.File` (PHASE1-CONTRACTS.md §7) shadows a bare `File`
-        // for every file in this assembly, because namespace lookup beats a using directive.
+        // System.IO.File spelled out: this library has a `Vorticity.File` type of its own, and it
+        // shadows a bare `File` everywhere in the assembly because namespace lookup beats a using.
         SafeFileHandle handle = System.IO.File.OpenHandle(
             path,
             FileMode.Open,
@@ -175,18 +170,16 @@ public sealed class RandomAccessSegmentSource : ISegmentSource
 
     /// <inheritdoc/>
     /// <remarks>
-    /// THE RUNS ARE READ IN TURN, AND ISSUING THEM TOGETHER WAS MEASURED AND DROPPED. The shape is
-    /// the one <c>ObjectSegmentSource</c> uses, bounded by a depth, with a buffer projection per
-    /// read in flight. Against sixty-four positional reads of 128 kB the depth is worth two and a
-    /// half times -- 0,32 ms at one in flight against 0,13 at eight -- so the call-level physics
-    /// says yes. At the scan level it says nothing: a full scan of a wide file reads
-    /// 1 273, 1 284, 1 280 and 1 275 microseconds at depths of one, two, four and eight, and a
-    /// projection of four columns spread across that file reads 352, 352, 347 and 351.
     /// <para>
-    /// The reason is in the run count. A wide file's columns are adjacent, so the coalescer hands
-    /// this method ONE run for fifty registered segments, and a depth has nothing to hold. What is
-    /// left unmeasured is a genuinely cold read: the pages here are resident, and there is no way
-    /// to evict them per file without being root.
+    /// The runs are read one after another, rather than several in flight behind a bounded depth
+    /// as <c>ObjectSegmentSource</c> does. A depth pays when a call issues dozens of small
+    /// positional reads, and it buys nothing at the scale a scan works at, because a wide file's
+    /// columns are adjacent: the coalescer hands this method one run for a whole split of
+    /// registered segments, and a depth has nothing to hold.
+    /// </para>
+    /// <para>
+    /// The case that reasoning does not cover is a genuinely cold file, whose pages cannot be
+    /// evicted per file without privileges.
     /// </para>
     /// </remarks>
     public async ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
@@ -381,8 +374,8 @@ public sealed class RandomAccessSegmentSource : ISegmentSource
     /// <see cref="SegmentReadOptions.CoalesceGapBytes"/> apart would pin a run buffer for every
     /// gap it bridged and end up holding the whole file to deliver a few hundred bytes. Below
     /// half-useful the segments are copied into their own pooled buffers instead and the run
-    /// buffer goes straight back — the same outcome as the vectored scatter that
-    /// docs/03-architecture.md §3.5 describes, reached with one memcpy instead of a scatter list.
+    /// buffer goes straight back — the same outcome a vectored scatter would give, reached with
+    /// one memcpy instead of a scatter list.
     /// </remarks>
     private static bool ShouldSlice(in CoalescedRun run, SegmentSpec[] sorted)
     {

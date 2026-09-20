@@ -1,5 +1,3 @@
-// Writers for `table Array`, `table ArrayNode` and `table ArrayStats` in spec/flatbuffers/array.fbs,
-// and for `table Layout` in spec/flatbuffers/layout.fbs.
 using System;
 using System.Runtime.InteropServices;
 using Vorticity.Serialization.FlatBuffers;
@@ -178,7 +176,6 @@ internal static class ArrayWriter
 }
 
 /// <summary>Builds the <c>Layout</c> table.</summary>
-/// <inheritdoc cref="ArrayWriter" path="/remarks"/>
 internal static class LayoutWriter
 {
     /// <summary>Writes one <c>Layout</c> table.</summary>

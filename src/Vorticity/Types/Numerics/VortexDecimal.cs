@@ -1,9 +1,3 @@
-// Reimplemented from the Vortex specification (docs/07-dotnet-mapping.md §2).
-// A Vortex decimal is an unscaled integer plus the DType's (precision, scale); the value is
-// unscaled * 10^-scale. Precision runs to 76 and scale is bounded only by i8 on the negative side
-// (vortex-array-0.86.1/src/dtype/decimal/mod.rs: MAX_PRECISION = 76, MAX_SCALE = 76, and
-// scale <= precision is enforced only when scale > 0), so System.Decimal cannot be the carrier -
-// it would be silently lossy over a legal range of the format.
 using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -11,8 +5,10 @@ using System.Runtime.CompilerServices;
 namespace Vorticity.Types.Numerics;
 
 /// <summary>
-/// One decimal value: the unscaled integer plus the DType's precision and scale. Never lossy;
-/// conversion to <see cref="decimal"/> is explicit and fallible.
+/// One decimal value: the unscaled integer plus the DType's precision and scale. Precision runs to
+/// 76 and the scale spans a whole <see cref="sbyte"/>, a range <see cref="decimal"/> cannot carry
+/// without silent loss, so this type is never lossy and conversion to <see cref="decimal"/> is
+/// explicit and fallible.
 /// </summary>
 /// <remarks>
 /// The value is <c>Unscaled * 10^-Scale</c>. A negative scale is legal and means trailing zeros:
@@ -93,7 +89,6 @@ public readonly struct VortexDecimal : IEquatable<VortexDecimal>, IComparable<Vo
     /// <returns>The converted value.</returns>
     /// <exception cref="OverflowException">
     /// The value is outside <see cref="decimal"/>'s range, or the scale is outside -28..28.
-    /// docs/07-dotnet-mapping.md §1.
     /// </exception>
     public decimal ToDecimal()
     {
@@ -118,8 +113,7 @@ public readonly struct VortexDecimal : IEquatable<VortexDecimal>, IComparable<Vo
         value = 0m;
 
         // decimal's scale is 0..28. A negative Vortex scale is applied by multiplying, so it is
-        // bounded by the same 28 in the other direction. Checked before the magnitude, as the
-        // Phase 1 contract §3 requires.
+        // bounded by the same 28 in the other direction.
         if (_scale > 28 || _scale < -28)
         {
             return false;
@@ -193,7 +187,7 @@ public readonly struct VortexDecimal : IEquatable<VortexDecimal>, IComparable<Vo
         if (scale <= 0)
         {
             // Zero with a negative scale renders "0", not padded zeros: it is the one case where
-            // "append -scale zeros" is wrong (Phase 1 contract §3 ToString table).
+            // "append -scale zeros" is wrong.
             int zeros = isZero ? 0 : -scale;
             int total = (negative ? 1 : 0) + digitCount + zeros;
             if (destination.Length < total)

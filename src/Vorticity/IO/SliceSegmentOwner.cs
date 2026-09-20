@@ -1,5 +1,3 @@
-// docs/03-architecture.md §3.5, ownership bullet: "returned buffers are owned by the source until
-// the batch that requested them is disposed. A caching source therefore refcounts."
 using System;
 using Vorticity.Buffers;
 
@@ -33,6 +31,5 @@ internal sealed class SliceSegmentOwner : SegmentOwner
         Buffer = slice;
     }
 
-    /// <inheritdoc/>
     protected override void FreeCore() => _parent.Release();
 }

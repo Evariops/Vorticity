@@ -1,6 +1,3 @@
-// RandomAccess.ReadAsync needs a Memory<byte>, and a Memory<byte> can only come from an array, a
-// string, or a MemoryManager<T>. The destination here is aligned native memory
-// (docs/03-architecture.md §3.1), so a manager is the only bridge that does not introduce a copy.
 using System;
 using System.Buffers;
 
@@ -10,6 +7,11 @@ namespace Vorticity.IO;
 /// A <see cref="MemoryManager{T}"/> projecting a block of native memory as <see cref="Memory{T}"/>.
 /// </summary>
 /// <remarks>
+/// <para>
+/// A positional read wants a <see cref="Memory{T}"/>, and one can only come from an array, a
+/// string or a <see cref="MemoryManager{T}"/>; the destination here is aligned native memory, so
+/// this is the only bridge to it that adds no copy.
+/// </para>
 /// <para>
 /// One instance is created per <c>ReadManyAsync</c> call and re-pointed at each coalesced run in
 /// turn (<see cref="Reset"/>). That is safe because runs are read one at a time and each read is
@@ -35,10 +37,8 @@ internal sealed unsafe class NativeMemoryManager : MemoryManager<byte>
         _length = length;
     }
 
-    /// <inheritdoc/>
     public override Span<byte> GetSpan() => new Span<byte>(_pointer, _length);
 
-    /// <inheritdoc/>
     public override MemoryHandle Pin(int elementIndex = 0)
     {
         if ((uint)elementIndex > (uint)_length)
@@ -50,7 +50,6 @@ internal sealed unsafe class NativeMemoryManager : MemoryManager<byte>
         return new MemoryHandle(_pointer + elementIndex);
     }
 
-    /// <inheritdoc/>
     public override void Unpin()
     {
     }
@@ -65,6 +64,5 @@ internal sealed unsafe class NativeMemoryManager : MemoryManager<byte>
         _length = 0;
     }
 
-    /// <inheritdoc/>
     protected override void Dispose(bool disposing) => Clear();
 }

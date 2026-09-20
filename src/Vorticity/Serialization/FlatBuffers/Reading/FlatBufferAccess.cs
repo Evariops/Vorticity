@@ -1,14 +1,3 @@
-// Hand-written FlatBuffers primitive reads. Zero dependency is a founding constraint
-// (docs/03-architecture.md §1), and FlatBuffers reading is pure offset arithmetic, so the whole
-// runtime is this file plus two accessors.
-//
-// Parser-safety rule (docs/03-architecture.md §6): "Every offset/length read from the file is
-// validated against the real size BEFORE any access." Every method here therefore checks the
-// requested range against the span it was handed and throws VortexFormatException rather than
-// letting the CLR raise IndexOutOfRangeException or returning a wrong value.
-//
-// Little-endianness is guaranteed by the module initializer in VortexRuntimeChecks, so the reads
-// below are direct unaligned loads with no byte swapping (docs/09-contracts.md §7).
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -16,13 +5,16 @@ using System.Runtime.InteropServices;
 namespace Vorticity.Serialization.FlatBuffers;
 
 /// <summary>
-/// Bounds-checked little-endian primitive reads over a FlatBuffer.
+/// Bounds-checked little-endian primitive reads over a FlatBuffer. Reading a FlatBuffer is pure
+/// offset arithmetic, so it is hand-written here rather than taken as a dependency.
 /// </summary>
 /// <remarks>
-/// Every method throws <see cref="VortexFormatException"/> rather than returning a wrong value
-/// when the read escapes the span. The bounds test is written as
+/// Every offset and length read from a file is validated against the real size before any access,
+/// so every method throws <see cref="VortexFormatException"/> rather than returning a wrong value
+/// or letting the runtime raise an indexing error. The bounds test is written as
 /// <c>pos &lt; 0 || pos &gt; length - width</c> and never as <c>pos + width &gt; length</c>:
-/// the latter wraps for a hostile <c>pos</c> close to <see cref="int.MaxValue"/>.
+/// the latter wraps for a hostile <c>pos</c> close to <see cref="int.MaxValue"/>. A little-endian
+/// host is asserted once at startup, so the loads are direct and unaligned with no byte swapping.
 /// </remarks>
 internal static class FlatBufferAccess
 {
@@ -97,7 +89,7 @@ internal static class FlatBufferAccess
     /// <c>sizeof(struct { byte; T; }) - sizeof(T)</c> is exactly <c>alignof(T)</c>: the padded
     /// struct is <c>alignof(T) + sizeof(T)</c> whichever order the runtime chooses for the two
     /// fields, because <c>sizeof(T)</c> is always a whole multiple of <c>alignof(T)</c>.
-    /// <c>Unsafe.SizeOf</c> keeps this AOT- and trim-safe (docs/03-architecture.md §1: no reflection).
+    /// <c>Unsafe.SizeOf</c> keeps this AOT- and trim-safe, where reflection would not be.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static int AlignmentOf<T>() where T : unmanaged => AlignmentCache<T>.Value;
@@ -108,9 +100,9 @@ internal static class FlatBufferAccess
             Unsafe.SizeOf<AlignmentProbe<T>>() - Unsafe.SizeOf<T>();
     }
 
-    // Sequential and not auto: the packing of T has to survive into the probe, or the padding
-    // measured here is the natural alignment rather than the declared one. A Pack = 1 struct is
-    // exactly the case the callers have -- both FlatBuffers spec structs are Pack = 1 -- and an
+    // Sequential and not auto: the packing of T has to survive into the probe, or the padding it
+    // exposes is the natural alignment rather than the declared one. A Pack = 1 struct is exactly
+    // the case the callers have -- the inline structs of the format are Pack = 1 -- and an
     // auto-laid-out probe reports 8 for them where the format requires 1.
     [StructLayout(LayoutKind.Sequential)]
     private struct AlignmentProbe<T> where T : unmanaged

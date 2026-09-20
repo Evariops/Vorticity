@@ -1,4 +1,3 @@
-// Shared, branch-light wire arithmetic for the hand-written proto3 runtime.
 using System.Numerics;
 using System.Runtime.CompilerServices;
 
@@ -30,7 +29,7 @@ internal static class ProtoWire
 
     /// <summary>
     /// ZigZag-encodes a signed 64-bit value so small magnitudes stay short on the wire
-    /// (<c>sint64</c>; <c>vortex.scalar.ScalarValue.int64_value</c> uses it — spec/proto/scalar.proto).
+    /// (<c>sint64</c>; the scalar schema's <c>ScalarValue.int64_value</c> field is encoded this way).
     /// </summary>
     /// <remarks>
     /// <c>unchecked</c> is load-bearing: <c>long.MinValue &lt;&lt; 1</c> overflows to 0, which is

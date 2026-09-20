@@ -1,4 +1,3 @@
-// proto3 writer. Single-pass, pooled, no intermediate object model.
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -19,8 +18,8 @@ namespace Vorticity.Serialization.Protobuf;
 /// and exist for fields with <em>explicit</em> presence — <c>optional</c> fields, and every field
 /// inside a <c>oneof</c>, where "absent" and "present and zero" are different states. Both
 /// behaviours occur in the vendored schemas, so both are part of the contract:
-/// <c>Extension.metadata</c> in spec/proto/dtype.proto is <c>optional bytes</c>, and every arm of
-/// <c>ScalarValue.kind</c> in spec/proto/scalar.proto is a <c>oneof</c> member.
+/// <c>Extension.metadata</c> is an <c>optional bytes</c> field, and every arm of
+/// <c>ScalarValue.kind</c> is a <c>oneof</c> member.
 /// </para>
 /// <para>
 /// <b>Ownership.</b> The backing array is rented from <see cref="ArrayPool{T}"/> and returned by
@@ -100,9 +99,9 @@ public struct ProtoWriter : IDisposable
 
     /// <summary>Writes a field tag: <c>(fieldNumber &lt;&lt; 3) | wireType</c>.</summary>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="fieldNumber"/> is outside 1..536870911, or <paramref name="wireType"/> is a
+    /// <paramref name="fieldNumber"/> is outside 1 to 2^29 - 1, or <paramref name="wireType"/> is a
     /// group (3, 4) or an undefined value. Group framing is refused on write for the same reason
-    /// the reader refuses it on read (docs/02-format.md §5.3).
+    /// the reader refuses it on read: proto3 never emits it.
     /// </exception>
     public void WriteTag(int fieldNumber, ProtoWireType wireType)
     {

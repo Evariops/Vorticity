@@ -1,9 +1,12 @@
-// Cold throw helpers. Hot paths return codes or use TryXxx; when a throw is unavoidable it goes
-// through a NoInlining helper so the JIT keeps the inlined caller small.
 using System.Runtime.CompilerServices;
 
 namespace Vorticity;
 
+/// <summary>
+/// Cold throw helpers. Hot paths return codes or use a <c>TryXxx</c> form; where a throw is
+/// unavoidable it goes through one of these non-inlined helpers, so the throwing code stays out
+/// of the caller and the caller stays small enough to inline.
+/// </summary>
 internal static class ThrowHelper
 {
     [MethodImpl(MethodImplOptions.NoInlining)]

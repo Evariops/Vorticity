@@ -1,4 +1,3 @@
-// proto3 reader. Allocation-free by construction: a ref struct over a caller-owned span.
 using System;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
@@ -14,9 +13,9 @@ namespace Vorticity.Serialization.Protobuf;
 /// <b>Unknown field numbers are skipped, never rejected.</b> A caller loops on
 /// <see cref="TryReadTag"/>, handles the field numbers it knows, and passes everything else to
 /// <see cref="SkipField"/>, which dispatches on the wire type alone. This is the read-forever
-/// promise of docs/02-format.md §5.3: upstream may add an <c>optional</c> field to a per-encoding
-/// metadata message without minting a new encoding id, and a reader that refused the unknown
-/// number would fail on a perfectly legal file.
+/// promise: a producer may add an <c>optional</c> field to a per-encoding metadata message without
+/// minting a new encoding id, and a reader that refused the unknown number would fail on a
+/// perfectly legal file.
 /// </para>
 /// <para>
 /// The complementary rule is just as load-bearing: what is <em>tolerated</em> is an unrecognized
@@ -25,8 +24,8 @@ namespace Vorticity.Serialization.Protobuf;
 /// rejection is a <see cref="VortexFormatException"/> and nothing else.
 /// </para>
 /// <para>
-/// Every read validates against the real remaining length <em>before</em> touching a byte
-/// (docs/03-architecture.md §6), so a hostile payload can never produce an out-of-range access.
+/// Every read validates against the real remaining length <em>before</em> touching a byte, so a
+/// hostile payload can never produce an out-of-range access.
 /// </para>
 /// </remarks>
 public ref struct ProtoReader
@@ -54,14 +53,14 @@ public ref struct ProtoReader
     /// <summary>Total length of the message body in bytes.</summary>
     public readonly int Length => _data.Length;
 
-    /// <summary>Bytes not yet consumed.</summary>
+    /// <summary>Bytes still unread.</summary>
     public readonly int Remaining => _data.Length - _position;
 
     /// <summary>Reads the next varint, or reports that the buffer is exhausted.</summary>
     /// <param name="value">The varint read; zero when the buffer is exhausted.</param>
     /// <returns><see langword="false"/> at the end of the buffer.</returns>
     /// <remarks>
-    /// For PACKED repeated fields, whose elements carry no tags: the reader is handed the field's
+    /// For packed repeated fields, whose elements carry no tags: the reader is handed the field's
     /// length-delimited body and drains it. <see cref="TryReadTag"/> cannot serve, because inside a
     /// packed blob the bytes are values rather than tags and would decode as field numbers.
     /// </remarks>
@@ -80,7 +79,7 @@ public ref struct ProtoReader
     /// <summary>
     /// Reads the next field tag.
     /// </summary>
-    /// <param name="fieldNumber">The field number, 1..536870911. Zero when the method returns false.</param>
+    /// <param name="fieldNumber">The field number, at least 1 and below 2^29. Zero when the method returns false.</param>
     /// <param name="wireType">How the field's payload is framed.</param>
     /// <returns>False at the end of the message body; true when a tag was read.</returns>
     /// <exception cref="VortexFormatException">
@@ -254,7 +253,7 @@ public ref struct ProtoReader
 
     /// <summary>
     /// Reads a ZigZag-encoded <c>sint64</c> — the encoding of
-    /// <c>vortex.scalar.ScalarValue.int64_value</c> (spec/proto/scalar.proto).
+    /// <c>vortex.scalar.ScalarValue.int64_value</c>.
     /// </summary>
     /// <exception cref="VortexFormatException">The varint is malformed.</exception>
     public long ReadSInt64() => ProtoWire.ZigZagDecode64(ReadVarint());
@@ -309,7 +308,7 @@ public ref struct ProtoReader
     /// <remarks>
     /// The bounds test is done in 64-bit arithmetic so <c>position + length</c> cannot wrap:
     /// a file that declares a length near <see cref="int.MaxValue"/> at a high position is the
-    /// exact input that defeats a 32-bit check (docs/03-architecture.md §6).
+    /// exact input that defeats a 32-bit check.
     /// </remarks>
     public ReadOnlySpan<byte> ReadLengthDelimited()
     {
@@ -340,8 +339,9 @@ public ref struct ProtoReader
     public ProtoReader ReadMessage() => new ProtoReader(ReadLengthDelimited());
 
     /// <summary>
-    /// Consumes the payload of the field whose tag was just read, without interpreting it.
-    /// This is the unknown-field path of docs/02-format.md §5.3.
+    /// Consumes the payload of the field whose tag was just read, without interpreting it. This is
+    /// the unknown-field path: a field number the caller does not know is skipped from its wire
+    /// type alone.
     /// </summary>
     /// <param name="wireType">The wire type returned by <see cref="TryReadTag"/>.</param>
     /// <exception cref="VortexFormatException">

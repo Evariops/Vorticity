@@ -1,8 +1,3 @@
-// docs/03-architecture.md §3.5. "Object storage is deliberately not in the core: an HTTP source
-// would break zero-dependency and belongs to the layer above. That makes ISegmentSource a seam an
-// external implementer must be able to satisfy without asking us questions, so its contract is
-// specified, not implied." The four bullets of that section are the four paragraphs below, and
-// they are requirements on every implementation, not on ours alone.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,9 +11,15 @@ namespace Vorticity.IO;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Thread safety.</b> Implementations MUST be thread-safe (docs/09-contracts.md §1): concurrent
-/// splits read through one source. A <see cref="SegmentRequestSet"/>, by contrast, belongs to one
-/// flow and is never shared.
+/// Object storage stays outside the core — it would need an HTTP client, and the core takes no
+/// dependencies — so this is the seam an outside implementer fills. Everything below is a
+/// requirement on every implementation, stated rather than implied, because such an implementer
+/// has no one to ask.
+/// </para>
+/// <para>
+/// <b>Thread safety.</b> Implementations must be thread-safe: concurrent splits read through one
+/// source. A <see cref="SegmentRequestSet"/>, by contrast, belongs to one flow and is never
+/// shared.
 /// </para>
 /// <para>
 /// <b>Partial failure.</b> <see cref="ReadManyAsync"/> is all-or-nothing. If any range fails,

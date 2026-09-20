@@ -1,26 +1,3 @@
-// Hand-written FlatBuffers builder. Zero dependency is a founding constraint
-// (docs/03-architecture.md §1), so the writer half of the runtime is this file plus VTableCache.
-//
-// FlatBuffers is built BACK TO FRONT. Every object is emitted before the object that references
-// it, positions are counted from the END of the scratch array, and the root uoffset is the last
-// thing written. docs/01-scope.md §3 names back-to-front construction, alignment and vtable
-// deduplication as "the hidden half of Phase 0" precisely because each is easy to half-implement.
-//
-// Wire shapes, transcribed from spec/flatbuffers/*.fbs and docs/02-format.md §2, §3:
-//   buffer := [u32 root uoffset] ... objects ...
-//   table  := [i32 soffset to vtable][inline field data]
-//   vtable := [u16 vtable_size][u16 table_size][u16 slot per field id]
-//   vector := [u32 count][elements]
-//   string := [u32 length][utf8 bytes][NUL]        the NUL is NOT counted by the length prefix
-//
-// Two coordinate systems meet here and confusing them is the classic builder bug:
-//   * a BACK-OFFSET is `capacity - space`, i.e. the number of bytes written so far. It is what
-//     every public method returns and accepts, and it survives reallocation of the scratch array.
-//   * an ABSOLUTE INDEX is a position in the scratch array, `capacity - backOffset`. It is never
-//     handed out, because growing the buffer moves it.
-// A uoffset stored at back-offset `p` (counted after the 4 bytes of the uoffset itself) and
-// referring to back-offset `t` holds `p - t`; that is exactly `targetAbsolute - fieldAbsolute`
-// once the buffer is flipped, so it is a forward reference as the reader requires.
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -33,7 +10,9 @@ using System.Text;
 namespace Vorticity.Serialization.FlatBuffers;
 
 /// <summary>
-/// Builds a FlatBuffer back to front into a pooled scratch array, deduplicating vtables.
+/// Builds a FlatBuffer back to front into a pooled scratch array, deduplicating vtables. Writing a
+/// FlatBuffer is pure offset arithmetic, so it is hand-written here rather than taken as a
+/// dependency.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -44,18 +23,38 @@ namespace Vorticity.Serialization.FlatBuffers;
 /// encode it, and silently accepting it produces a buffer no reader can follow.
 /// </para>
 /// <para>
-/// <b>Vtable deduplication is mandatory, not an optimization</b> (docs/01-scope.md §3). Every
-/// finished table's vtable is compared byte for byte against every vtable already written, and an
-/// identical one is reused. Two tables with the same field ids but different value <em>widths</em>
-/// are not identical: a vtable encodes <c>table_size</c> and per-field byte offsets, not just
-/// which fields are present.
+/// <b>Back to front.</b> Every object is emitted before the object that references it, positions
+/// are counted from the end of the scratch array, and the root uoffset is written last. Two
+/// coordinate systems therefore meet here, and confusing them is the classic builder bug. A
+/// back-offset is <c>capacity - space</c>, the number of bytes written so far: it is what every
+/// public method returns and accepts, and it survives a reallocation of the scratch array. An
+/// absolute index is a position in that array, <c>capacity - backOffset</c>, and is never handed
+/// out, because growing the buffer moves it. A uoffset stored at back-offset <c>p</c> — counted
+/// after its own four bytes — and referring to back-offset <c>t</c> holds <c>p - t</c>, which is
+/// <c>targetAbsolute - fieldAbsolute</c> once the buffer is flipped, so it is the forward reference
+/// the reader requires.
+/// </para>
+/// <para>
+/// The wire shapes: a buffer is <c>[u32 root uoffset]</c> followed by its objects; a table is
+/// <c>[i32 soffset to vtable][inline field data]</c>; a vtable is
+/// <c>[u16 vtable_size][u16 table_size][u16 slot per field id]</c>; a vector is
+/// <c>[u32 count][elements]</c>; a string is <c>[u32 length][utf8 bytes][NUL]</c>, whose trailing
+/// NUL is not counted by the length prefix.
+/// </para>
+/// <para>
+/// <b>Vtable deduplication is mandatory, not an optimization</b>: a wide schema emits one table per
+/// column and their vtables are identical, so skipping it inflates the metadata of exactly the
+/// files that can least afford it. Every finished table's vtable is compared byte for byte against
+/// every vtable already written, and an identical one is reused. Two tables with the same field ids
+/// but different value <em>widths</em> are not identical: a vtable encodes <c>table_size</c> and
+/// per-field byte offsets, not just which fields are present.
 /// </para>
 /// <para>
 /// <b>Defaults.</b> A scalar equal to its schema default is omitted, so the reader returns the
 /// default from the absent slot. Set <see cref="ForceDefaults"/> to emit it anyway. Fields
-/// declared <c>= null</c> in a schema — <c>ArrayStats.is_sorted</c>, <c>null_count</c>,
-/// <c>nan_count</c> in spec/flatbuffers/array.fbs — must distinguish "absent" from "present and
-/// zero", so they are written with the <c>…Always</c> variants.
+/// declared <c>= null</c> in a schema — <c>ArrayStats.is_sorted</c>, <c>null_count</c> and
+/// <c>nan_count</c> among them — must distinguish "absent" from "present and zero", so they are
+/// written with the <c>…Always</c> variants.
 /// </para>
 /// <para>
 /// <b>Ownership.</b> The scratch array is rented from <see cref="ArrayPool{T}"/> and returned by
@@ -83,7 +82,7 @@ public sealed class FlatBufferBuilder : IDisposable
     /// <summary>
     /// The finished buffer is padded so its length is a multiple of 8. Placed at an 8-byte aligned
     /// address it then puts every object on its own natural boundary, which is what lets the
-    /// reader reinterpret struct vectors in place (docs/03-architecture.md §3.5).
+    /// reader reinterpret struct vectors in place.
     /// </summary>
     private const int RootAlignment = 8;
 
@@ -101,7 +100,7 @@ public sealed class FlatBufferBuilder : IDisposable
     /// <summary>Highest used field id plus one, or <c>-1</c> when no table is open.</summary>
     private int _vtableSize;
 
-    /// <summary><c>Offset</c> at <see cref="StartTable"/>, used to compute <c>table_size</c>.</summary>
+    /// <summary><c>Offset</c> at <see cref="StartTable"/>; <c>table_size</c> is the distance from it.</summary>
     private int _objectStart;
 
     private readonly VTableCache _vtables;
@@ -128,7 +127,7 @@ public sealed class FlatBufferBuilder : IDisposable
     }
 
     /// <summary>
-    /// Bytes written so far, measured from the head of the back-to-front buffer. Every offset this
+    /// Bytes written so far, counted from the head of the back-to-front buffer. Every offset this
     /// builder returns is a value of this counter, so it is also the identity of the object most
     /// recently written.
     /// </summary>
@@ -252,9 +251,9 @@ public sealed class FlatBufferBuilder : IDisposable
     /// Writes a vector of inline FlatBuffers structs, aligned to <c>alignof(T)</c>.
     /// </summary>
     /// <remarks>
-    /// The alignment is <c>alignof(T)</c> and never <c>sizeof(T)</c>: <c>struct Buffer</c> in
-    /// spec/flatbuffers/array.fbs is 8 bytes but only 4-byte aligned, and over-aligning it would
-    /// produce a file that disagrees with every other writer. This is the same rule
+    /// The alignment is <c>alignof(T)</c> and never <c>sizeof(T)</c>: the format's <c>Buffer</c>
+    /// struct is 8 bytes but only 4-byte aligned, and over-aligning it would produce a file that
+    /// disagrees with every other writer. This is the same rule
     /// <see cref="FlatBufferTable.GetStructVector{T}"/> checks on read, so anything written here
     /// reinterprets in place there.
     /// </remarks>
@@ -457,7 +456,7 @@ public sealed class FlatBufferBuilder : IDisposable
     /// </summary>
     /// <remarks>
     /// For FlatBuffers <c>= null</c> fields: <c>ArrayStats.null_count</c>,
-    /// <c>uncompressed_size_in_bytes</c> and <c>nan_count</c> in spec/flatbuffers/array.fbs. A
+    /// <c>uncompressed_size_in_bytes</c> and <c>nan_count</c> among them. A
     /// null_count of 0 means "no nulls"; an absent null_count means "unknown", and the reader's
     /// <see cref="FlatBufferTable.TryGetUInt64"/> is what tells them apart.
     /// </remarks>
@@ -472,9 +471,9 @@ public sealed class FlatBufferBuilder : IDisposable
     /// distinguishable from absent.
     /// </summary>
     /// <remarks>
-    /// For FlatBuffers <c>= null</c> fields: <c>ArrayStats.is_sorted</c>, <c>is_strict_sorted</c>
-    /// and <c>is_constant</c> in spec/flatbuffers/array.fbs, where "not sorted" and "nobody
-    /// computed it" are different claims (docs/08-semantics.md §5, class II).
+    /// For FlatBuffers <c>= null</c> fields such as <c>ArrayStats.is_sorted</c>,
+    /// <c>is_strict_sorted</c> and <c>is_constant</c>, where "not sorted" and "nobody computed it"
+    /// are different claims.
     /// </remarks>
     public void AddBoolAlways(int fieldId, bool value)
     {
@@ -487,9 +486,9 @@ public sealed class FlatBufferBuilder : IDisposable
     /// <see cref="FlatBufferTable.TryGetUInt8"/>.
     /// </summary>
     /// <remarks>
-    /// Not required by any <c>= null</c> field in the vendored schemas today, but
-    /// <c>ArrayStats.min_precision</c> is a <c>uint8</c> enum whose zero value (<c>Inexact</c>) a
-    /// producer may need to assert rather than imply.
+    /// For a <c>uint8</c> enum whose zero value carries meaning — <c>ArrayStats.min_precision</c>
+    /// and its <c>Inexact</c>, for instance — which a producer may need to assert rather than
+    /// imply.
     /// </remarks>
     public void AddUInt8Always(int fieldId, byte value)
     {
@@ -525,7 +524,7 @@ public sealed class FlatBufferBuilder : IDisposable
     /// <remarks>
     /// <typeparamref name="T"/>'s .NET sequential layout is written verbatim, which is the same
     /// assumption <see cref="FlatBufferTable.TryGetStruct{T}"/> makes when reading it back. That
-    /// holds for the schemas in spec/flatbuffers — <c>SegmentSpec</c> (16 B, 8-aligned) and
+    /// holds for the format's own structs — <c>SegmentSpec</c> (16 B, 8-aligned) and
     /// <c>Buffer</c> (8 B, 4-aligned) both have no interior padding a FlatBuffers struct would
     /// not also have — and a type that needs different packing must say so with
     /// <see cref="StructLayoutAttribute"/>.
@@ -569,11 +568,9 @@ public sealed class FlatBufferBuilder : IDisposable
         }
 
         // Trailing absent fields are not encoded at all: the reader treats a field id past the end
-        // of the vtable exactly like a zero slot (docs/03-architecture.md §6), so a sparse wide
-        // table costs slots only up to its last present field. Slot() already stops _vtableSize at
-        // the highest id actually written, so this loop normally exits at once; it enforces the
-        // invariant rather than assuming it, and it is what a StartTable(fieldCount) overload
-        // would need.
+        // of the vtable exactly like a zero slot, so a sparse wide table costs slots only up to its
+        // last present field. Slot() already stops _vtableSize at the highest id actually written,
+        // so this loop normally exits at once; it enforces the invariant rather than assuming it.
         int last = _vtableSize - 1;
         while (last >= 0 && _vtable[last] == 0)
         {
@@ -752,7 +749,7 @@ public sealed class FlatBufferBuilder : IDisposable
 
         byte[] grown = ArrayPool<byte>.Shared.Rent((int)next);
 
-        // Positions are measured from the END, so the written region is copied to the end of the
+        // Positions are counted from the end, so the written region is copied to the end of the
         // new array and every offset this builder has already handed out stays valid.
         Array.Copy(_buffer, _space, grown, grown.Length - written, written);
         byte[] old = _buffer;

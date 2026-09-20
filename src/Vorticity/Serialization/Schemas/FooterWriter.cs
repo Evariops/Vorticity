@@ -1,4 +1,3 @@
-// Writer for `table Footer` and `table FileStatistics` in spec/flatbuffers/footer.fbs.
 using System;
 using System.Buffers;
 using System.Runtime.InteropServices;
@@ -7,7 +6,6 @@ using Vorticity.Serialization.FlatBuffers;
 namespace Vorticity.Serialization.Schemas;
 
 /// <summary>Builds the <c>Footer</c> table and its four spec dictionaries.</summary>
-/// <inheritdoc cref="ArrayWriter" path="/remarks"/>
 internal static class FooterWriter
 {
     /// <summary>Writes the <c>Footer</c> table.</summary>
@@ -60,9 +58,9 @@ internal static class FooterWriter
     // SegmentSpec is declared Pack = 1 so a reader can reinterpret it wherever it lands, which
     // also makes its natural alignment 1 - and FlatBufferBuilder aligns a struct vector to
     // alignof(T). FlatBuffers requires the alignment of the struct's widest member instead, 8 for
-    // SegmentSpec's uint64 offset, which is what flatc-generated writers emit and what all 819
-    // golden corpus files contain. Casting through a proxy of the same size whose alignment IS 8
-    // buys exactly that padding; the element bytes are unchanged.
+    // SegmentSpec's uint64 offset, which is what conforming writers emit and what readers expect.
+    // Casting through a proxy of the same size whose alignment is 8 buys exactly that padding; the
+    // element bytes are unchanged.
     [StructLayout(LayoutKind.Sequential)]
     private readonly struct SegmentSpecBlock
     {
@@ -150,7 +148,6 @@ internal static class FooterWriter
 }
 
 /// <summary>Builds the <c>FileStatistics</c> table.</summary>
-/// <inheritdoc cref="ArrayWriter" path="/remarks"/>
 internal static class FileStatisticsWriter
 {
     /// <summary>Writes the <c>FileStatistics</c> table.</summary>

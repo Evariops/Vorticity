@@ -1,39 +1,3 @@
-// FlatBuffers codec for the Vortex dtype union. Every tag and every field id below is transcribed
-// from spec/flatbuffers/dtype.fbs -- never from memory. The vendored schema is:
-//
-//   union Type { Null = 1, Bool = 2, Primitive = 3, Decimal = 4, Utf8 = 5, Binary = 6,
-//                Struct_ = 7, List = 8, Extension = 9, FixedSizeList = 10,   // after Extension, on purpose
-//                Variant = 11, Union = 12, Map = 13 }
-//   table DType { type: Type; }
-//   root_type DType;
-//
-// THE TRAP THIS FILE EXISTS TO GET RIGHT. `table DType` declares a single field, but a FlatBuffers
-// union occupies TWO vtable slots: the `ubyte` discriminant is field id 0 and the value's uoffset
-// is field id 1. Reading the tag from slot 1, or the value from slot 0, produces a parser that
-// silently decodes the wrong table -- and a round trip through our own writer would not notice,
-// because the writer would make the same mistake symmetrically. DTypeFlatBuffersTests therefore
-// asserts the exact bytes of one hand-checked buffer, and DTypeEquivalenceTests cross-checks every
-// tag against the independent Protobuf codec (docs/02-format.md section 4 asks for exactly that).
-//
-// Other traps, none of which a self-round-trip catches either:
-//
-//   * `Struct_.names` and `Struct_.dtypes` are PARALLEL vectors; the .fbs comment on Union says
-//     "length must equal dtypes.len()" and the same rule holds for Struct_. A mismatch is
-//     reachable from a file, so it is VortexFormatException, not an argument error.
-//   * `Union.type_ids` is declared `[byte]` -- signed -- but the .fbs comment says "interpreted as
-//     unsigned", so a type id of 255 must survive as 255 and not as -1.
-//   * `Extension` has no `nullable` field: an extension's nullability is exactly its storage
-//     dtype's. `Null` has no fields at all.
-//   * `Extension.metadata` is `[ubyte]` and may be absent; the model cannot distinguish absent
-//     from present-but-empty, so this codec collapses the two -- see the remarks on Write.
-//   * FlatBuffers is built back to front, so every child (string, vector, nested DType table) must
-//     be written BEFORE the table that references it, and no object may be created while a table
-//     is open.
-//   * The decoded object graph is a DAG, not a tree. Forward-only uoffsets make cycles impossible,
-//     but two slots may legally resolve to the SAME child table, so a reader that recurses once
-//     per edge costs 2^depth on a buffer of a few hundred bytes -- a hang, not a wrong answer.
-//     The walk below therefore memoises decoded table positions once it has visited more tables
-//     than a tree of this buffer's size could possibly contain; see DTypeWalk.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -48,10 +12,15 @@ namespace Vorticity.Types.Serialization;
 /// </summary>
 /// <remarks>
 /// <para>
+/// Every tag and field id here is transcribed from the vendored schema rather than recalled,
+/// because a union occupies two vtable slots — the <c>ubyte</c> discriminant at field id 0, the
+/// value's uoffset at field id 1 — and swapping them yields a codec that decodes the wrong table
+/// while still round-tripping against itself.
+/// </para>
+/// <para>
 /// Reading is validate-at-access: every offset comes back through <see cref="FlatBufferTable"/>,
-/// which bounds-checks it against the real buffer before dereferencing it
-/// (docs/03-architecture.md section 6). Nothing malformed escapes as anything but
-/// <see cref="VortexFormatException"/>.
+/// which bounds-checks it against the real buffer before dereferencing it. Nothing malformed
+/// escapes as anything but <see cref="VortexFormatException"/>.
 /// </para>
 /// <para>
 /// Neither direction allocates beyond the arena's own growth and pooled scratch for the parallel
@@ -78,11 +47,11 @@ public static class DTypeFlatBuffers
 
     /// <summary>
     /// <c>table DType { type: Type; }</c> — the union's <c>ubyte</c> discriminant. A FlatBuffers
-    /// union occupies two slots and the tag is the FIRST of them.
+    /// union occupies two slots and the tag is the first of them.
     /// </summary>
     private const int DTypeTypeTag = 0;
 
-    /// <summary>The uoffset to the union's value table: the SECOND of the union's two slots.</summary>
+    /// <summary>The uoffset to the union's value table: the second of the union's two slots.</summary>
     private const int DTypeTypeValue = 1;
 
     // ---- field ids inside each case table, in .fbs declaration order ----
@@ -131,7 +100,7 @@ public static class DTypeFlatBuffers
     /// <remarks>
     /// <para>
     /// The decoded graph is a DAG: forward-only uoffsets exclude cycles, but two slots may resolve
-    /// to the same child table, and walking a DAG as a tree costs one visit per PATH — 2^depth for
+    /// to the same child table, and walking a DAG as a tree costs one visit per path — 2^depth for
     /// a Map whose key and value are the same table. Memoising every position would fix that and
     /// allocate a dictionary on every read, including the overwhelming majority of reads that need
     /// none, so the memo is switched on only once sharing is proven.
@@ -171,7 +140,7 @@ public static class DTypeFlatBuffers
     /// <returns>A handle into <paramref name="arena"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="arena"/> is null.</exception>
     /// <exception cref="VortexFormatException">
-    /// The buffer is truncated, an offset escapes it, the union tag is <c>NONE</c> or undefined,
+    /// The buffer is truncated, an offset escapes it, the union tag is absent or undefined,
     /// a required child is absent, a <see cref="PType"/> is undefined, two parallel vectors differ
     /// in length, or nesting exceeds <see cref="VortexLimits.MaxDTypeDepth"/>.
     /// </exception>
@@ -197,8 +166,7 @@ public static class DTypeFlatBuffers
     /// <param name="depth">
     /// Zero-based dtype nesting depth, checked against <see cref="VortexLimits.MaxDTypeDepth"/> on
     /// entry. The recursion runs before the arena sees anything, so the arena's own
-    /// construction-time cap arrives too late to stop a 10 000-deep schema from blowing the stack
-    /// (docs/03-architecture.md section 6).
+    /// construction-time cap arrives too late to stop a 10 000-deep schema from blowing the stack.
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="arena"/> is null.</exception>
     /// <exception cref="VortexFormatException">See <see cref="Read"/>.</exception>
@@ -257,8 +225,8 @@ public static class DTypeFlatBuffers
     private static DType ReadUnionValue(
         in FlatBufferTable dtypeTable, DTypeArena arena, int depth, ref DTypeWalk walk)
     {
-        // Field 0 is the ubyte discriminant. An absent slot reads as 0, which is the union's NONE
-        // constant and is malformed for a table the schema requires to carry a type.
+        // Field 0 is the ubyte discriminant. An absent slot reads as 0, the union's no-case
+        // constant, which is malformed for a table the schema requires to carry a type.
         byte tag = dtypeTable.GetUInt8(DTypeTypeTag);
         if (tag is < TagNull or > TagMap)
         {
@@ -511,10 +479,9 @@ public static class DTypeFlatBuffers
     /// <exception cref="ArgumentNullException"><paramref name="builder"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="dtype"/> is <c>default(DType)</c>.</exception>
     /// <remarks>
-    /// Two encodings are deliberately lossy, in both cases because the model cannot represent the
-    /// difference: an empty <c>Extension.metadata</c> is written as absent rather than as a
-    /// present-but-empty <c>[ubyte]</c>, and a <see cref="DTypeKind.Null"/> dtype's nullability is
-    /// not written at all — <c>table Null {}</c> has no field for it.
+    /// A <see cref="DTypeKind.Null"/> dtype's nullability is not written at all — <c>table Null
+    /// {}</c> has no field for it. <c>Extension.metadata</c> is always written, even when empty,
+    /// because an absent vector is a parse failure for other readers.
     /// </remarks>
     public static int Write(FlatBufferBuilder builder, DType dtype)
     {
@@ -755,15 +722,10 @@ public static class DTypeFlatBuffers
         int id = builder.CreateStringUtf8(dtype.ExtensionIdUtf8);
         int storage = WriteCore(builder, dtype.StorageType, depth + 1);
 
-        // PRESENT-BUT-EMPTY, NOT ABSENT, and this is not a matter of taste. The reference REQUIRES
-        // the field: vortex-array-0.86.1/src/dtype/serde/flatbuffers.rs does
-        //
-        //     fb_ext.metadata().ok_or_else(|| vortex_err!("failed to parse extension metadata ..."))
-        //
-        // so an extension whose metadata is empty -- `vortex.uuid`, whose metadata is 0 or 1 byte --
-        // is unreadable by Vortex Rust if the vector is omitted. Our own reader collapses absent and
-        // empty, which is why writing the shorter encoding looked free and why the round-trip test
-        // could never see it: the Rust cross-check found it on 16 files, all of them uuid.
+        // The vector is written present but empty, never omitted: the reference implementation
+        // treats an absent `metadata` as a parse failure, so an extension whose metadata is empty
+        // would be unreadable elsewhere. A round trip through this codec alone cannot show the
+        // difference, because the reader collapses absent with present-but-empty.
         ReadOnlySpan<byte> metadata = dtype.ExtensionMetadata;
         int metadataVector = builder.CreateByteVector(metadata);
 

@@ -1,6 +1,3 @@
-// docs/03-architecture.md §3.1: one non-owning view unifying three origins — memory-mapped pages
-// (zero-copy local case), aligned native memory (network reads), and pinned managed arrays
-// (tests). The lifetime belongs to the SegmentOwner that produced it, never to this struct.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -9,24 +6,26 @@ using System.Runtime.InteropServices;
 namespace Vorticity.Buffers;
 
 /// <summary>
-/// A non-owning, aligned view over a contiguous run of bytes.
+/// A non-owning, aligned view over a contiguous run of bytes. It is the single shape the reader
+/// works in, whatever the bytes came from: memory-mapped pages, aligned native memory, or a
+/// pinned managed array.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Exactly one pointer plus two 32-bit fields — 16 bytes on a 64-bit host. It deliberately holds
 /// a raw pointer rather than a <see cref="ReadOnlySpan{T}"/>: the reader stores buffers in arrays
-/// and in the batch arena (docs/03-architecture.md §3.3), which a <c>ref struct</c> forbids.
+/// and in the batch arena, which a <c>ref struct</c> forbids.
 /// </para>
 /// <para>
 /// <b>Lifetime.</b> The bytes are owned by a <see cref="SegmentOwner"/>. A
 /// <see cref="VortexBuffer"/> obtained from one is valid only until that owner's last
-/// <see cref="SegmentOwner.Release"/> — the zero-copy contract stated in
-/// docs/03-architecture.md §3.4 ("spans are valid until <c>Dispose</c>").
+/// <see cref="SegmentOwner.Release"/>: the zero-copy contract is that spans stay valid until the
+/// batch that handed them out is disposed, and not one instruction longer.
 /// </para>
 /// <para>
 /// <b>Alignment.</b> <see cref="AlignmentExponent"/> is the <em>declared</em> alignment of the
 /// segment as the file states it (<c>alignment = 1 &lt;&lt; alignment_exponent</c>, capped at
-/// <see cref="VortexLimits.MaxAlignmentExponent"/> per docs/08-semantics.md §6).
+/// <see cref="VortexLimits.MaxAlignmentExponent"/>).
 /// <see cref="IsAligned"/> reports whether the base address actually satisfies it, which
 /// <see cref="Slice(int)"/> can legitimately break.
 /// </para>
@@ -192,7 +191,7 @@ public readonly unsafe struct VortexBuffer
     /// <summary>
     /// Reinterprets the bytes as a span of <typeparamref name="T"/> with no copy. This is the
     /// primitive the footer parser uses on <c>SegmentSpec</c> (16 bytes) and <c>Buffer</c>
-    /// (8 bytes) — docs/02-format.md §3.
+    /// (8 bytes).
     /// </summary>
     /// <typeparam name="T">An unmanaged element type.</typeparam>
     /// <exception cref="VortexFormatException">
@@ -247,8 +246,8 @@ public readonly unsafe struct VortexBuffer
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void CheckExponent(int alignmentExponent)
     {
-        // docs/08-semantics.md §6: alignment_exponent is a u8 on the wire, so an unchecked file
-        // can demand 2^255. The cap is 6 (64 bytes).
+        // alignment_exponent is a u8 on the wire, so an unchecked file can demand 2^255; the cap
+        // is 6, that is 64 bytes.
         if ((uint)alignmentExponent > (uint)VortexLimits.MaxAlignmentExponent)
         {
             ThrowExponent(alignmentExponent);

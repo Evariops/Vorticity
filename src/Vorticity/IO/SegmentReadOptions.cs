@@ -1,5 +1,3 @@
-// docs/03-architecture.md §3.5: the coalescing knobs. "Tunable threshold, ~1 MiB" is the default
-// gap; the other two exist because both bound an allocation whose size comes from file content.
 using System;
 using Vorticity.Buffers;
 
@@ -7,11 +5,12 @@ namespace Vorticity.IO;
 
 /// <summary>
 /// Tuning for a segment source that performs real I/O. Immutable once constructed; a single
-/// instance is safely shared by every concurrent read.
+/// instance is safely shared by every concurrent read. Beyond the coalescing gap, the size
+/// thresholds are there to bound allocations whose size would otherwise come from file content.
 /// </summary>
 public sealed class SegmentReadOptions
 {
-    /// <summary>1 MiB — docs/03-architecture.md §3.5, "tunable threshold, ~1 MiB".</summary>
+    /// <summary>1 MiB.</summary>
     public const int DefaultCoalesceGapBytes = 1 << 20;
 
     /// <summary>16 MiB. The ceiling on a single coalesced read, and therefore on one allocation.</summary>

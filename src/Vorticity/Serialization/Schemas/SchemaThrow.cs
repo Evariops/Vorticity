@@ -1,11 +1,14 @@
-// Every throw in this component goes through a NoInlining helper so the accessors stay inlineable
-// (Phase 1 contract §1.4). Malformed input is always VortexFormatException and never anything else.
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace Vorticity.Serialization.Schemas;
 
+/// <summary>
+/// Throw helpers for the schema readers. Each one is kept out of line so the accessors that call
+/// it stay inlineable, and malformed input always surfaces as a
+/// <see cref="VortexFormatException"/>, never as another exception type.
+/// </summary>
 internal static class SchemaThrow
 {
     [MethodImpl(MethodImplOptions.NoInlining)]

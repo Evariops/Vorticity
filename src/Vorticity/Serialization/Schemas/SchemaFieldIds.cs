@@ -1,17 +1,12 @@
-// FlatBuffers field ids for every table in spec/flatbuffers/footer.fbs, array.fbs and layout.fbs.
-//
-// A FlatBuffers field id is its 0-based DECLARATION ORDER in the .fbs, not a written tag, so an
-// off-by-one here is completely silent: the vtable slot for the neighbouring field is read instead
-// and a value of a compatible width comes back looking plausible. Every constant below was
-// transcribed from the .fbs and then re-derived from real bytes by parsing all 819 golden corpus
-// files (postscript -> footer -> layout -> array blob) and checking each field against
-// corpus/manifest.json (declared_array_ids, declared_layout_ids, layout_ids, row_count,
-// array_node_shapes, metadata_segments).
-//
-// Constants, not an enum: they are indices into a vtable, mixed freely with ints.
 namespace Vorticity.Serialization.Schemas;
 
-/// <summary>Field ids, 0-based declaration order, for the Vortex FlatBuffers schemas.</summary>
+/// <summary>
+/// Field ids for the Vortex FlatBuffers schemas. A field id is the 0-based declaration order of
+/// the field in its table, not a tag written in the file, so an off-by-one is silent: the vtable
+/// slot of the neighbouring field is read instead and a value of a compatible width comes back
+/// looking plausible. Plain constants rather than an enum, because they are vtable indices mixed
+/// freely with ints.
+/// </summary>
 internal static class SchemaFieldIds
 {
     // table Postscript { dtype; layout; statistics; footer; metadata; }   footer.fbs
@@ -26,7 +21,7 @@ internal static class SchemaFieldIds
     internal const int PostscriptMetadataSegment = 1;
 
     // table PostscriptSegment { offset; length; alignment_exponent; _compression; _encryption; }
-    // A TABLE, unlike the 16-byte SegmentSpec STRUCT that carries the same five field names.
+    // A table, unlike the 16-byte SegmentSpec struct that carries the same five field names.
     internal const int PostscriptSegmentOffset = 0;
     internal const int PostscriptSegmentLength = 1;
     internal const int PostscriptSegmentAlignmentExponent = 2;

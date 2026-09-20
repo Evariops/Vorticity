@@ -1,21 +1,3 @@
-// FlatBuffers table accessor. Validation happens AT ACCESS: there is no separate verifier pass,
-// every uoffset/soffset/vtable read is bounds-checked at the moment it is dereferenced, so a
-// malformed buffer can never produce an out-of-range read (docs/03-architecture.md §6).
-//
-// The three rules that are easy to get wrong in both directions, restated from
-// docs/03-architecture.md §6:
-//   * uoffsets (table/vector/string references) are UNSIGNED and point forward: require
-//     `uoffset > 0` and the target in bounds. Progression is monotonic, so cycles are impossible
-//     by construction - there is deliberately no cycle detection and no visited set here.
-//     Cycles only, though: forward-only offsets do NOT exclude SHARING. Two slots at different
-//     positions may legally resolve to the same target, so the object graph is a DAG, not a tree,
-//     and a consumer that walks it as a tree costs 2^depth. Depth alone therefore cannot bound the
-//     traversal: the optional caller-owned table budget below bounds the TOTAL number of tables
-//     visited, the way the reference verifiers' max_tables does.
-//   * soffsets (a table's vtable reference) are SIGNED: the vtable may precede *or* follow its
-//     table, so the computed position is bounded in both directions.
-//   * Vtable sharing between tables is legal and routine (every real builder does it). Nothing
-//     here rejects a revisited position.
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -36,6 +18,19 @@ namespace Vorticity.Serialization.FlatBuffers;
 /// Every accessor throws <see cref="VortexFormatException"/> - and only that - on malformed input.
 /// A <c>fieldId</c> that is negative or beyond the vtable is treated as absent, exactly
 /// like a zero slot: field ids come from our own transcribed schemas, never from the file.
+/// </para>
+/// <para>
+/// There is no separate verification pass: every uoffset, soffset and vtable read is bounds-checked
+/// at the moment it is dereferenced, so a malformed buffer cannot produce an out-of-range read.
+/// Uoffsets point forward and are unsigned, so progression is monotonic and cycles are impossible
+/// by construction - there is deliberately no cycle detection and no visited set here. Forward-only
+/// offsets do not exclude sharing, however: two slots at different positions may legally resolve to
+/// the same target, so the object graph is a directed acyclic graph rather than a tree, and a
+/// consumer that walks it as a tree pays exponentially in its depth. Depth alone therefore cannot
+/// bound a traversal, which is why the optional caller-owned budget bounds the total number of
+/// tables visited instead. A table's vtable reference is signed, the vtable may sit on either side
+/// of its table, and vtable sharing between tables is legal and routine, so a revisited position is
+/// never rejected.
 /// </para>
 /// </remarks>
 public readonly ref struct FlatBufferTable
@@ -255,7 +250,6 @@ public readonly ref struct FlatBufferTable
     /// (<c>ArrayStats.is_sorted</c>, <c>is_strict_sorted</c>, <c>is_constant</c>).
     /// </summary>
     /// <returns><see langword="false"/> when the field is absent, which means "unknown", not "false".</returns>
-    // spec/flatbuffers/array.fbs
     public bool TryGetBool(int fieldId, out bool value)
     {
         if (TryGetFieldPos(fieldId, sizeof(byte), out int pos))
@@ -272,7 +266,6 @@ public readonly ref struct FlatBufferTable
     /// Tri-state read of a FlatBuffers <c>uint64 = null</c> field
     /// (<c>ArrayStats.null_count</c>, <c>uncompressed_size_in_bytes</c>, <c>nan_count</c>).
     /// </summary>
-    // spec/flatbuffers/array.fbs
     public bool TryGetUInt64(int fieldId, out ulong value)
     {
         if (TryGetFieldPos(fieldId, sizeof(ulong), out int pos))
@@ -353,7 +346,7 @@ public readonly ref struct FlatBufferTable
     /// <remarks>
     /// <para>
     /// <c>Footer.segment_specs</c> (<c>SegmentSpec</c>, 16 B) and <c>Array.buffers</c>
-    /// (<c>Buffer</c>, 8 B) are read this way - see docs/02-format.md §3. The element count times
+    /// (<c>Buffer</c>, 8 B) are read this way. The element count times
     /// <c>sizeof(T)</c> is computed in 64 bits so a hostile <c>uint32</c> count cannot overflow
     /// into a range that looks valid.
     /// </para>
@@ -361,8 +354,8 @@ public readonly ref struct FlatBufferTable
     /// The alignment tested is that of the element <em>address</em>, and the requirement is
     /// <c>alignof(T)</c>, never <c>sizeof(T)</c>: <c>Buffer</c> is 8 bytes but only 4-byte aligned,
     /// so demanding 8 would reject legal files. The test is meaningful because the buffers this
-    /// reader is handed are pinned or native and 64-byte aligned (docs/03-architecture.md §3.5); an
-    /// unpinned managed array can in principle be moved by the GC after the check.
+    /// reader is handed are pinned or native and 64-byte aligned; an unpinned managed array can in
+    /// principle be moved by the garbage collector after the check.
     /// </para>
     /// </remarks>
     /// <exception cref="VortexFormatException">
@@ -457,7 +450,7 @@ public readonly ref struct FlatBufferTable
         }
 
         // The first 4 bytes of a table are its vtable soffset, and the value must fit inside the
-        // table body: a slot past table_size is malformed (docs/03-architecture.md §6).
+        // table body: a slot past table_size is malformed.
         if (slot < 4 || slot > _tableSize - width)
         {
             ThrowSlot(fieldId, slot, width, _tableSize);

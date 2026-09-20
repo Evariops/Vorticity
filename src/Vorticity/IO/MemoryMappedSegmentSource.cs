@@ -1,6 +1,3 @@
-// docs/03-architecture.md §3.5: "MemoryMappedSegmentSource - zero-copy, alignment guaranteed by
-// the writer's padding." Performance invariant 2: a segment view is handed out directly, with no
-// copy. Deliberately NOT MemoryMappedViewAccessor.Read*, which copies.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
@@ -22,7 +19,8 @@ namespace Vorticity.IO;
 /// <para>
 /// The whole file is mapped once at construction and every segment is a pointer into it. There is
 /// no I/O on the read path at all, so <see cref="ReadManyAsync"/> does no coalescing: a run is
-/// only ever a way to turn several small reads into one, and there are no reads.
+/// only ever a way to turn several small reads into one, and there are no reads. A view is handed
+/// out directly; the accessor's own read methods, which copy, are deliberately unused.
 /// </para>
 /// <para>
 /// <b>Alignment.</b> A mapping base is page-aligned, so a segment at file offset <c>o</c> sits at
@@ -57,8 +55,8 @@ public sealed class MemoryMappedSegmentSource : ISegmentSource
     {
         ArgumentNullException.ThrowIfNull(path);
 
-        // System.IO.File spelled out: `Vorticity.File` (PHASE1-CONTRACTS.md §7) shadows a bare `File`
-        // for every file in this assembly, because namespace lookup beats a using directive.
+        // System.IO.File spelled out: this library has a `Vorticity.File` type of its own, and it
+        // shadows a bare `File` everywhere in the assembly because namespace lookup beats a using.
         SafeFileHandle handle = System.IO.File.OpenHandle(
             path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.None);
 
@@ -378,7 +376,7 @@ public sealed class MemoryMappedSegmentSource : ISegmentSource
         internal VortexBuffer View(long offset, int length, int alignmentExponent)
         {
             // Re-checked here even though every caller validated: this is the one method that
-            // turns a file-supplied number into an address, so it carries the class I check.
+            // turns a file-supplied number into an address, so it carries the memory-safety check.
             if ((ulong)offset > (ulong)_length || (ulong)length > (ulong)(_length - offset))
             {
                 ThrowWindow(offset, length, _length);
@@ -401,7 +399,6 @@ public sealed class MemoryMappedSegmentSource : ISegmentSource
             new ReadOnlySpan<byte>(_base + offset, destination.Length).CopyTo(destination);
         }
 
-        /// <inheritdoc/>
         protected override void FreeCore()
         {
             _view.SafeMemoryMappedViewHandle.ReleasePointer();

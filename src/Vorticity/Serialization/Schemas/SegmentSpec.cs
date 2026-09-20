@@ -1,11 +1,3 @@
-// The FlatBuffers `struct SegmentSpec` of spec/flatbuffers/footer.fbs. A FlatBuffers struct has no
-// vtable and no indirection: 16 bytes inline, so `Footer.segment_specs` is read by reinterpreting
-// the vector's element bytes with MemoryMarshal.Cast and never traversed (docs/02-format.md §3).
-//
-// The field order and widths below are the wire layout and may not be reordered. `Pack = 1` plus
-// `Size = 16` pins it: natural packing already produces offsets 0/8/12/13/14 with no interior
-// padding, and the explicit size is what the module initializer in SchemaLayoutChecks asserts
-// (docs/09-contracts.md §7).
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -16,8 +8,10 @@ namespace Vorticity.Serialization.Schemas;
 /// A FlatBuffers <c>struct</c> (16 bytes, inline, no vtable) locating one segment in the file.
 /// </summary>
 /// <remarks>
-/// spec/flatbuffers/footer.fbs. Read as a reinterpreted <see cref="ReadOnlySpan{T}"/> of
-/// <see cref="SegmentSpec"/> over <see cref="FooterView.SegmentSpecs"/>.
+/// <see cref="FooterView.SegmentSpecs"/> is read by reinterpreting the vector's element bytes as a
+/// <see cref="ReadOnlySpan{T}"/> of <see cref="SegmentSpec"/>, never traversed field by field, so
+/// the declaration order and widths below are the wire layout and may not be reordered. The
+/// explicit packing and size pin that layout and are asserted when the assembly loads.
 /// </remarks>
 [StructLayout(LayoutKind.Sequential, Pack = 1, Size = 16)]
 public readonly struct SegmentSpec

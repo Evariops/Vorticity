@@ -1,13 +1,13 @@
-// Reader for `table Footer` and `table FileStatistics` in spec/flatbuffers/footer.fbs.
-//
-// The footer is a dictionary, not a tree: five flat vectors. Only segment_specs is reinterpreted
-// in place; the others are walked one element at a time and never allocate.
 using System;
 using Vorticity.Serialization.FlatBuffers;
 
 namespace Vorticity.Serialization.Schemas;
 
 /// <summary>Reader for <c>table Footer</c> in spec/flatbuffers/footer.fbs.</summary>
+/// <remarks>
+/// The footer is a dictionary, not a tree: five flat vectors. Only <c>segment_specs</c> is
+/// reinterpreted in place; the others are walked one element at a time and never allocate.
+/// </remarks>
 public readonly ref struct FooterView
 {
     private readonly ReadOnlySpan<byte> _buffer;
@@ -35,8 +35,7 @@ public readonly ref struct FooterView
     /// <remarks>
     /// Absent means empty. The vector is deliberately <em>not</em> checked for uniqueness, count or
     /// registration here: the writer pre-populates it with every id the enabled editions permit for
-    /// byte determinism, so it names ids no array in the file uses (40 declared against 36
-    /// serialized across the golden corpus).
+    /// byte determinism, so it routinely names ids no array in the file uses.
     /// </remarks>
     public int ArraySpecCount => _table.GetVector(SchemaFieldIds.FooterArraySpecs).Count;
 
@@ -67,10 +66,9 @@ public readonly ref struct FooterView
     /// </summary>
     /// <remarks>
     /// Unlike every other vector in the footer, an absent <c>segment_specs</c> is an error rather
-    /// than an empty vector — upstream: "FileLayout missing segment specs"
-    /// (vortex-file-0.86.1/src/footer/mod.rs). The elements must also begin on an 8-byte boundary
-    /// <em>inside the footer buffer</em>, which is what FlatBuffers guarantees for a struct whose
-    /// widest member is a <c>uint64</c>; all 819 golden corpus files satisfy it exactly.
+    /// than an empty vector: a file layout with no segment map cannot be read at all. The elements
+    /// must also begin on an 8-byte boundary <em>inside the footer buffer</em>, which is what
+    /// FlatBuffers guarantees for a struct whose widest member is a <c>uint64</c>.
     /// </remarks>
     /// <exception cref="VortexFormatException">
     /// The field is absent, the elements escape the buffer, or they are not 8-byte aligned.

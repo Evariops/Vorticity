@@ -1,16 +1,15 @@
-// Readers for the three postscript tables of spec/flatbuffers/footer.fbs.
-//
-// The postscript is the first thing a reader parses and the only structure whose size the format
-// bounds (<= 65527 bytes, docs/02-format.md §1), so everything here is bounded by construction.
-// The one place that walks a file-supplied vector - the user metadata list - is validated eagerly
-// in Root, exactly as vortex-file-0.86.1/src/footer/postscript.rs does in ReadFlatBuffer: at most
-// 16 entries, every key present, non-empty, <= 64 UTF-8 bytes, and no two keys equal.
 using System;
 using Vorticity.Serialization.FlatBuffers;
 
 namespace Vorticity.Serialization.Schemas;
 
 /// <summary>Reader for <c>table Postscript</c> in spec/flatbuffers/footer.fbs.</summary>
+/// <remarks>
+/// The postscript is the first thing a reader parses, and the format caps its size, so everything
+/// here is bounded by construction. Its one file-supplied vector, the user metadata list, is
+/// validated eagerly in <see cref="Root"/>: the count is capped, and reading every key there also
+/// enforces that each one is present, non-empty, short enough and distinct from the others.
+/// </remarks>
 public readonly ref struct PostscriptView
 {
     private readonly FlatBufferTable _table;
@@ -121,8 +120,7 @@ public readonly ref struct PostscriptMetadataView
     /// <summary>The entry's key, as UTF-8 bytes.</summary>
     /// <exception cref="VortexFormatException">
     /// The key is absent, empty, or longer than <see cref="VortexLimits.MaxMetadataKeyLength"/>
-    /// bytes — all three are rejected by upstream's reader
-    /// (vortex-file-0.86.1/src/footer/postscript.rs, <c>validate_metadata_key</c>).
+    /// bytes. All three make the file malformed rather than the entry skippable.
     /// </exception>
     public ReadOnlySpan<byte> KeyUtf8
     {
@@ -171,7 +169,7 @@ public readonly ref struct PostscriptMetadataView
 /// <remarks>
 /// A <em>table</em>, not the 16-byte <see cref="SegmentSpec"/> <em>struct</em>, even though the two
 /// carry the same five field names. The postscript spells compression and encryption out inline so
-/// a reader can decrypt without first fetching the footer (docs/02-format.md §2).
+/// a reader can decrypt without first fetching the footer.
 /// </remarks>
 public readonly ref struct PostscriptSegmentView
 {
@@ -189,8 +187,9 @@ public readonly ref struct PostscriptSegmentView
     public uint Length => _table.GetUInt32(SchemaFieldIds.PostscriptSegmentLength);
 
     /// <summary>
-    /// Base-2 exponent of the segment's alignment, straight from the file and not yet checked
-    /// against <see cref="VortexLimits.MaxAlignmentExponent"/>.
+    /// Base-2 exponent of the segment's alignment, straight from the file and unchecked;
+    /// <see cref="ToSegmentSpec"/> is where it meets
+    /// <see cref="VortexLimits.MaxAlignmentExponent"/>.
     /// </summary>
     public byte AlignmentExponent => _table.GetUInt8(SchemaFieldIds.PostscriptSegmentAlignmentExponent);
 

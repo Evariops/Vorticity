@@ -1,12 +1,3 @@
-// Reimplemented from the Vortex specification. net11.0 has Int128 but no 256-bit integer, and
-// Vortex decimal precision runs to 76 backed by i256 (spec/REFERENCE.md §1 correction 1;
-// vortex-array-0.86.1/src/dtype/decimal/mod.rs), so a legal decimal(40,10) column - which the
-// golden corpus contains as types/decimal40_10_* - cannot be read without this type.
-//
-// Deliberately NOT a general arithmetic type: no add/sub/mul/shift/bitwise, no INumber<T>, no
-// Parse, no BigInteger (Phase 1 contract §2.1; zero dependencies is docs/03-architecture.md §1).
-// The only arithmetic here is the unsigned division by 10^19 that exact decimal rendering needs,
-// and it is private.
 using System;
 using System.Buffers.Binary;
 using System.Diagnostics;
@@ -16,16 +7,16 @@ namespace Vorticity.Types.Numerics;
 
 /// <summary>
 /// A 256-bit signed two's-complement integer, exactly as wide as Vortex's i256 decimal storage.
-/// docs/07-dotnet-mapping.md §2. This type carries, compares and renders such a value; it is not a
-/// general arithmetic type.
+/// Decimal precision runs beyond what <see cref="Int128"/> holds, so a column such as
+/// decimal(40,10) cannot be read without this type. It carries, compares and renders such a value
+/// and is deliberately not a general arithmetic type: the only arithmetic here is the private
+/// unsigned division by a power of ten that exact rendering needs.
 /// </summary>
 /// <remarks>
-/// The wire representation is little-endian two's complement:
-/// <c>DecimalValue::I256(v) =&gt; v.to_le_bytes()</c> in
-/// vortex-array-0.86.1/src/scalar/proto.rs, and <c>vortex.decimal</c>'s value buffer is a dense
-/// array of those 32-byte values. The big-endian accessors exist for callers that need the opposite
-/// order (<c>vortex.uuid</c>-style storage, the Phase 3b row encoder) and are never used to read an
-/// i256 out of a file.
+/// The wire representation is little-endian two's complement, and <c>vortex.decimal</c>'s value
+/// buffer is a dense array of those 32-byte values. The big-endian accessors exist for callers that
+/// need the opposite order, such as <c>vortex.uuid</c>-style storage and the row encoder; reading
+/// an i256 out of a file never goes through them.
 /// </remarks>
 public readonly struct Int256 : IEquatable<Int256>, IComparable<Int256>
 {
@@ -122,8 +113,8 @@ public readonly struct Int256 : IEquatable<Int256>, IComparable<Int256>
         new Int256(lo0, lo1, lo2, hi);
 
     /// <summary>
-    /// Reads exactly 32 bytes of little-endian two's complement. This is the wire order:
-    /// vortex-array-0.86.1/src/scalar/proto.rs writes <c>DecimalValue::I256(v).to_le_bytes()</c>.
+    /// Reads exactly 32 bytes of little-endian two's complement, which is the order an i256 takes
+    /// on the wire.
     /// </summary>
     /// <param name="bytes">Exactly 32 bytes.</param>
     /// <returns>The decoded value.</returns>
@@ -153,8 +144,8 @@ public readonly struct Int256 : IEquatable<Int256>, IComparable<Int256>
             ThrowByteCount(bytes.Length);
         }
 
-        // Written out rather than delegating to the little-endian reader over a reversed span:
-        // the two orders are independent implementations on purpose (Phase 1 contract §3 traps).
+        // Written out rather than delegating to the little-endian reader over a reversed span: the
+        // two orders stay independent implementations, so a mistake in one cannot hide in the other.
         return new Int256(
             BinaryPrimitives.ReadUInt64BigEndian(bytes.Slice(24)),
             BinaryPrimitives.ReadUInt64BigEndian(bytes.Slice(16)),
@@ -473,8 +464,8 @@ public readonly struct Int256 : IEquatable<Int256>, IComparable<Int256>
     {
         // Defensive: the loop below writes backwards from the end and is bounded only by the fact
         // that a magnitude is at most 2^255. A short span would index out of range, and an
-        // IndexOutOfRangeException is not one of the two exceptions this library is allowed to
-        // raise (docs/03-architecture.md §5).
+        // IndexOutOfRangeException is not one of the exception types this library contracts to
+        // raise.
         if (digits.Length < MaxDigitCount)
         {
             ThrowDigitBufferTooSmall(digits.Length);

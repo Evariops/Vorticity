@@ -1,26 +1,16 @@
-// Transcribed from spec/proto/scalar.proto: `message ScalarValue { oneof kind { ... } }`. The
-// numbering here is the proto field number of each case, so a codec can map tag to kind with a
-// cast instead of a switch:
-//
-//   1 null_value (google.protobuf.NullValue)   7 string_value (UTF-8)
-//   2 bool_value                               8 bytes_value
-//   3 int64_value  (sint64, zigzag)            9 list_value  (ListValue)
-//   4 uint64_value (plain varint)             10 f16_value   (uint64 varint of the binary16 bits)
-//   5 f32_value    (fixed32)                  11 variant_value (a nested Scalar)
-//   6 f64_value    (fixed64)                  12 union_value (UnionValue)
-//
-// Absent = 0 is ours, not the wire's: proto3 cannot distinguish "no case set" from a default, and
-// docs/08-semantics.md section 1 makes the distinction load-bearing -- "a statistic with no value
-// licenses nothing", so a missing statistic must never be readable as a null one.
-//
-// There is no decimal case among the twelve, and none is needed. A Decimal scalar arrives as
-// bytes_value carrying the unscaled value in little-endian two's complement, and its LENGTH
-// selects the storage width: 1, 2, 4, 8, 16 or 32 bytes for i8 through i256, so a precision past
-// 18 costs nothing special. Reading that requires the dtype, which a ScalarValue does not carry,
-// so it happens in TypedScalar and nowhere else.
 namespace Vorticity.Types;
 
-/// <summary>Discriminant of a <see cref="ScalarValue"/>.</summary>
+/// <summary>
+/// Discriminant of a <see cref="ScalarValue"/>. Each numbered case is the wire field number of the
+/// matching message case, so a codec maps a tag to a kind with a cast instead of a switch;
+/// <see cref="Absent"/> is this model's own, since the wire spells absence by setting no case at
+/// all.
+/// </summary>
+/// <remarks>
+/// There is no decimal case: a decimal scalar arrives as <see cref="Bytes"/> carrying the unscaled
+/// value in little-endian two's complement, its length selecting the storage width from 1 to 32
+/// bytes. Interpreting it needs the dtype, which a value does not carry.
+/// </remarks>
 public enum ScalarValueKind : byte
 {
     /// <summary>
@@ -58,11 +48,11 @@ public enum ScalarValueKind : byte
 
     /// <summary>
     /// An IEEE-754 binary16. Encoded as a <c>uint64</c> varint carrying the raw 16 bits, not as a
-    /// float — see spec/proto/scalar.proto.
+    /// float.
     /// </summary>
     F16 = 10,
 
-    /// <summary>A nested typed <see cref="Scalar"/> (RFC 0015 variant scalars).</summary>
+    /// <summary>A nested typed <see cref="Scalar"/>: a value carrying its own dtype.</summary>
     Variant = 11,
 
     /// <summary>A present union alternative: a type id plus a value.</summary>

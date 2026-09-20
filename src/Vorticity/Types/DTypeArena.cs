@@ -1,24 +1,3 @@
-// docs/03-architecture.md section 3.2: "DType as a readonly struct with a tag and a payload
-// (children in a shared array) rather than a class hierarchy: a wide schema must not produce
-// thousands of objects. Structural equality and hashing, allocation-free."
-//
-// So a DType is a (arena, index) handle and this class owns every array behind it:
-//
-//   _nodes        one DTypeNode per dtype node
-//   _children     child node indices, contiguous per node
-//   _fieldNames   Struct/Union field-name handles, contiguous per node, parallel to _children
-//   _typeIds      Union type ids, contiguous per node, parallel to _children
-//   _meta         Extension metadata bytes
-//   _nameBytes    interned UTF-8 name bytes, addressed by _nameEntries
-//
-// Two hash tables make the arena canonical rather than merely compact:
-//   * _nameBuckets interns names, so equal UTF-8 bytes always yield the same handle and a
-//     field-name comparison is an int comparison;
-//   * _nodeBuckets deduplicates whole nodes, so within one arena "structurally equal" and
-//     "same index" coincide. That turns same-arena equality into an int compare and keeps a
-//     1000-column schema of i32 at two nodes rather than 1001.
-//
-// Neither table allocates per lookup: both are open-addressed int arrays with linear probing.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -94,10 +73,20 @@ internal struct DTypeNameEntry
 }
 
 /// <summary>
-/// Arena of DType nodes. A <see cref="DType"/> is a (arena, index) handle: a wide schema produces
-/// no objects beyond this arena's own growable arrays (docs/03-architecture.md section 3.2).
+/// Arena of DType nodes. A <see cref="DType"/> is a (arena, index) handle, so a wide schema
+/// produces no objects beyond this arena's own growable arrays: the nodes themselves, and beside
+/// them the child indices, the struct and union field-name handles, the union type ids, the
+/// extension metadata bytes and the interned name bytes, each run contiguous per node.
 /// </summary>
 /// <remarks>
+/// <para>
+/// Two hash tables make the arena canonical rather than merely compact. One interns names, so
+/// equal UTF-8 bytes always yield the same handle and a field-name comparison is an int
+/// comparison; the other deduplicates whole nodes, so within one arena "structurally equal" and
+/// "same index" coincide, which turns same-arena equality into an int compare and keeps a
+/// 1000-column schema of i32 at two nodes rather than 1001. Neither allocates per lookup: both are
+/// open-addressed int arrays with linear probing.
+/// </para>
 /// <para>Not thread-safe for mutation; safe for concurrent reads once fully built.</para>
 /// <para>
 /// Spans handed out by <see cref="GetName"/>, <see cref="DType.GetFieldNameUtf8"/> and
@@ -109,10 +98,8 @@ internal struct DTypeNameEntry
 public sealed class DTypeArena
 {
     /// <summary>
-    /// Maximum decimal precision the format admits. Transcribed from
-    /// <c>vortex-array/src/dtype/decimal/mod.rs</c>, where <c>MAX_PRECISION</c> is
-    /// <c>i256</c>'s: precision 39-76 selects <c>i256</c> storage (spec/METADATA.md). Rejecting
-    /// anything above 38 would refuse legal files.
+    /// Maximum decimal precision the format admits. Precision 39 to 76 selects 256-bit storage,
+    /// so rejecting anything above 38 would refuse legal files.
     /// </summary>
     public const int MaxDecimalPrecision = 76;
 
@@ -120,9 +107,8 @@ public sealed class DTypeArena
     public const int MinDecimalPrecision = 1;
 
     /// <summary>
-    /// Maximum decimal scale, <c>MAX_SCALE</c> in <c>vortex-array/src/dtype/decimal/mod.rs</c>.
-    /// There is no lower bound beyond <see cref="sbyte"/>: a negative scale means digits before
-    /// the point and upstream does not constrain it.
+    /// Maximum decimal scale. There is no lower bound beyond <see cref="sbyte"/>: a negative scale
+    /// means digits before the point, and the format does not constrain it.
     /// </summary>
     public const int MaxDecimalScale = 76;
 
@@ -332,10 +318,10 @@ public sealed class DTypeArena
     // ---------------------------------------------------------------- leaf factories
 
     /// <summary>
-    /// The all-null dtype. <c>table Null {}</c> in spec/flatbuffers/dtype.fbs carries no
-    /// <c>nullable</c> field, so nullability is not part of a Null dtype's identity: the argument
-    /// is accepted for call-site symmetry and the node is always nullable. Storing it instead
-    /// would make a FlatBuffers round trip lossy and break the codec equivalence property.
+    /// The all-null dtype. A Null dtype carries no <c>nullable</c> field on the wire, so
+    /// nullability is not part of its identity: the argument is accepted for call-site symmetry
+    /// and the node is always nullable. Storing it instead would make a round trip through the
+    /// file format lossy.
     /// </summary>
     public DType Null(Nullability nullability)
     {
@@ -366,15 +352,15 @@ public sealed class DTypeArena
     /// </summary>
     /// <param name="precision">
     /// Total number of significant digits, 1..<see cref="MaxDecimalPrecision"/> (76). The storage
-    /// width follows it — p1-2 to i8, 3-4 to i16, 5-9 to i32, 10-18 to i64, 19-38 to i128,
-    /// 39-76 to i256 (docs/07-dotnet-mapping.md section 2) — so an out-of-range precision would
-    /// select a nonexistent storage width. Rejecting anything above 38 would refuse legal files.
+    /// width follows it — 1-2 to i8, 3-4 to i16, 5-9 to i32, 10-18 to i64, 19-38 to i128,
+    /// 39-76 to i256 — so an out-of-range precision would select a storage width that does not
+    /// exist. Rejecting anything above 38 would refuse legal files.
     /// </param>
     /// <param name="scale">
     /// Digits after the point. Bounded above by <see cref="MaxDecimalScale"/>, and by
-    /// <paramref name="precision"/> only when positive: upstream's <c>DecimalDType::try_new</c>
-    /// applies the <c>scale &lt;= precision</c> check under <c>if scale &gt; 0</c>, so a negative
-    /// scale (digits before the point) is legal down to <see cref="sbyte.MinValue"/>.
+    /// <paramref name="precision"/> only when positive: the <c>scale &lt;= precision</c> check
+    /// applies only to a positive scale, so a negative scale (digits before the point) is legal
+    /// down to <see cref="sbyte.MinValue"/>.
     /// </param>
     /// <param name="nullability">Whether the dtype admits nulls.</param>
     /// <exception cref="VortexFormatException">Precision or scale is out of range.</exception>
@@ -417,8 +403,9 @@ public sealed class DTypeArena
     /// </summary>
     /// <exception cref="VortexFormatException">
     /// <paramref name="nameHandles"/> and <paramref name="fields"/> differ in length, or the
-    /// resulting depth exceeds <see cref="VortexLimits.MaxDTypeDepth"/>. Both are reachable from a
-    /// file (spec/flatbuffers/dtype.fbs requires <c>names.len() == dtypes.len()</c>).
+    /// resulting depth exceeds <see cref="VortexLimits.MaxDTypeDepth"/>. The format requires the
+    /// two lengths to match but nothing enforces it in the bytes, so both are reachable from a
+    /// file.
     /// </exception>
     /// <exception cref="ArgumentException">A field belongs to a different arena, or is default.</exception>
     public DType Struct(ReadOnlySpan<int> nameHandles, ReadOnlySpan<DType> fields, Nullability nullability)
@@ -501,9 +488,9 @@ public sealed class DTypeArena
     }
 
     /// <summary>
-    /// An extension dtype. <c>table Extension</c> in spec/flatbuffers/dtype.fbs has no
-    /// <c>nullable</c> field: an extension's nullability is exactly its storage dtype's, which is
-    /// why this factory takes no <see cref="Nullability"/>.
+    /// An extension dtype. An extension carries no <c>nullable</c> field on the wire: its
+    /// nullability is exactly its storage dtype's, which is why this factory takes no
+    /// <see cref="Nullability"/>.
     /// </summary>
     /// <exception cref="ArgumentException"><paramref name="storageType"/> belongs to another arena.</exception>
     /// <exception cref="VortexFormatException">The resulting depth exceeds the cap.</exception>
@@ -555,8 +542,9 @@ public sealed class DTypeArena
     /// </summary>
     /// <exception cref="VortexFormatException">
     /// <paramref name="nameHandles"/>, <paramref name="fields"/> and <paramref name="typeIds"/> do
-    /// not all have the same length, or the resulting depth exceeds the cap. The .fbs comment
-    /// "length must equal dtypes.len()" makes the mismatch reachable from a file.
+    /// not all have the same length, or the resulting depth exceeds the cap. The format requires
+    /// the three lengths to match but nothing enforces it in the bytes, so a file can carry the
+    /// mismatch.
     /// </exception>
     /// <exception cref="ArgumentException">A field belongs to a different arena, or is default.</exception>
     public DType Union(
@@ -711,7 +699,7 @@ public sealed class DTypeArena
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <see cref="VortexLimits.MaxDTypeDepth"/> bounds the recursion STACK and nothing else. It
+    /// <see cref="VortexLimits.MaxDTypeDepth"/> bounds the recursion stack and nothing else. It
     /// does not bound the number of visits: children are node indices and the arena deduplicates
     /// whole nodes, so <c>Struct(["a","b"], [d, d])</c> stores the same child index twice and a
     /// dtype nested that way 64 deep is a 65-node DAG with 2^64 root-to-leaf paths. Walking it per
@@ -720,7 +708,7 @@ public sealed class DTypeArena
     /// </para>
     /// <para>
     /// So the visit count is bounded instead: the walk runs allocation-free until it has visited
-    /// <see cref="EqualityVisitBudget"/> node pairs, then memoises the pairs it has PROVEN equal
+    /// <see cref="EqualityVisitBudget"/> node pairs, then memoises the pairs it has proven equal
     /// and returns early on a revisit. A mismatch propagates straight out through every frame, so
     /// unequal pairs are never revisited and are not memoised. The dedup table makes a node index
     /// canonical within its arena, so a pair proven equal is equal in every context it is reached
@@ -745,11 +733,9 @@ public sealed class DTypeArena
         long pair = ((long)ai << 32) | (uint)bi;
         if (memo is not null)
         {
-            // Asked and added separately, and left that way: the add is on the far side of the
-            // recursion, where only a pair PROVEN equal is remembered. Folding the two into one
-            // `Add` would have to remember the pair before proving it. Measured before being left
-            // alone -- the whole test suite takes under ten thousand steps through here, memo and
-            // scalar store together, because the budget above keeps this off for any real schema.
+            // Asked and added separately: the add is on the far side of the recursion, where only
+            // a pair proven equal is remembered. Folding the two into one `Add` would have to
+            // remember the pair before proving it.
             if (memo.Contains(pair))
             {
                 return true;

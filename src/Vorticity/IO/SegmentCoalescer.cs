@@ -1,5 +1,3 @@
-// docs/03-architecture.md §3.5: "the reader registers every segment of a split before reading,
-// which allows coalescing nearby ranges. This makes or breaks performance on object storage."
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -12,9 +10,16 @@ namespace Vorticity.IO;
 /// gap and size budgets in <see cref="SegmentReadOptions"/>.
 /// </summary>
 /// <remarks>
+/// <para>
+/// A reader registers every segment of a split before reading any of it, and this is what that
+/// buys: nearby ranges become one read. On object storage it decides the performance of the whole
+/// read path.
+/// </para>
+/// <para>
 /// Public because it is the piece an external <see cref="ISegmentSource"/> implementer most wants
-/// to reuse, and because the alignment rule it enforces (PHASE1-CONTRACTS.md §5.4) has to be
-/// testable on its own rather than only through a file.
+/// to reuse, and because the alignment rule it enforces has to be testable on its own rather than
+/// only through a file.
+/// </para>
 /// </remarks>
 public static class SegmentCoalescer
 {
@@ -67,8 +72,8 @@ public static class SegmentCoalescer
         {
             SegmentIo.ValidateSpec(in specs[i], out long firstOffset, out int firstLength);
 
-            // The rule, and the only place it is written: round the run's start DOWN to 64 so a
-            // 64-aligned buffer base keeps every segment's own alignment. PHASE1-CONTRACTS.md §5.4.
+            // The rule, and the only place it is written: round the run's start down to 64, so a
+            // 64-aligned buffer base keeps every segment's own alignment.
             long start = firstOffset & ~((long)VortexLimits.MaxAlignment - 1);
             long end = firstOffset + firstLength;
             long prevOffset = firstOffset;

@@ -1,21 +1,3 @@
-// The Parquet Variant binary encoding, to the subset this library can test.
-//
-// A variant value is TWO byte strings: `metadata`, which is a version byte and a string dictionary,
-// and `value`, which is a tagged encoding of one JSON-like value. Apache's
-// `VariantEncoding.md` is the spec; `parquet-variant` in arrow-rs is 5 567 lines of it, and almost
-// all of that is objects, arrays, shredding and the builder API.
-//
-// WHAT IS HERE AND WHY THAT MUCH. `vortex.variant` and `vortex.parquet.variant` are the last two
-// encodings of the conformance corpus this library could not read, and both of them need the binary
-// form: the parquet one stores it directly, and the other one has to PRODUCE it, because a
-// `vortex.variant` over a constant carrier holds a typed scalar and the canonical form this library
-// gives both of them is the same `Struct{metadata, value}`. So the primitives are implemented in
-// both directions and everything else is REFUSED BY NAME -- an object, an array, a decimal, a uuid
-// each produce a `VortexUnsupportedException` naming what was found, rather than a wrong value or a
-// silent null. That is the same line `vortex.fsst`'s two-buffer form is on: the corpus does not
-// exercise it, so implementing it untested would be guessing with a straight face.
-//
-// LITTLE-ENDIAN THROUGHOUT, like the rest of the format.
 using System;
 using System.Buffers.Binary;
 
@@ -27,7 +9,7 @@ namespace Vorticity.Types.Variant;
 /// <summary>What a decoded variant value turned out to be.</summary>
 internal enum VariantKind : byte
 {
-    /// <summary>The variant `null`, which is a VALUE, not an absent row.</summary>
+    /// <summary>The variant `null`, which is a value in its own right, not an absent row.</summary>
     Null = 0,
 
     /// <summary>A boolean.</summary>
@@ -87,7 +69,16 @@ internal readonly ref struct VariantValue
     internal ReadOnlySpan<byte> Bytes => _bytes;
 }
 
-/// <summary>Reads and writes the Parquet Variant binary encoding.</summary>
+/// <summary>
+/// Reads and writes the Parquet Variant binary encoding, where a value is two little-endian byte
+/// strings: metadata, a version byte and a string dictionary, and value, a tagged encoding of one
+/// JSON-like value.
+/// </summary>
+/// <remarks>
+/// Only the primitives and strings are encoded and decoded, in both directions; an object, an
+/// array, a decimal or a uuid raises <see cref="VortexUnsupportedException"/> naming what was
+/// found, rather than yielding a wrong value or a silent null.
+/// </remarks>
 internal static class ParquetVariant
 {
     /// <summary>The only metadata version this encoding has ever had.</summary>
@@ -109,10 +100,9 @@ internal static class ParquetVariant
     /// The metadata of a variant whose value names no dictionary string: version 1, no entries.
     /// </summary>
     /// <remarks>
-    /// Three bytes, and the shape is worth spelling out because it is the shape the corpus carries:
-    /// header <c>0x01</c> is version 1 with <c>offset_size</c> 1 and the strings unsorted, then a
-    /// one-byte <c>dictionary_size</c> of 0, then the one offset a zero-entry dictionary still
-    /// needs.
+    /// Three bytes: header <c>0x01</c> is version 1 with <c>offset_size</c> 1 and the strings
+    /// unsorted, then a one-byte <c>dictionary_size</c> of 0, then the one offset a zero-entry
+    /// dictionary still needs.
     /// </remarks>
     internal static ReadOnlySpan<byte> EmptyMetadata => [0x01, 0x00, 0x00];
 

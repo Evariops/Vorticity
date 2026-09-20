@@ -1,8 +1,3 @@
-// The textual form of a DType. It is what vxdump prints and what a failing assertion shows, so
-// two properties matter beyond correctness: it must be culture-invariant (no ToString() that
-// consults CurrentCulture) and it must stay bounded. A dtype may legally nest 64 deep with a
-// struct at every level, so a naive recursive renderer is exponential in output size on a file
-// that is otherwise perfectly valid. Both guards are documented on the constants below.
 using System;
 using System.Buffers;
 using System.Globalization;
@@ -10,7 +5,13 @@ using System.Text.Unicode;
 
 namespace Vorticity.Types;
 
-/// <summary>Renders a <see cref="DType"/> as text. Culture-invariant and bounded.</summary>
+/// <summary>
+/// Renders a <see cref="DType"/> as text. This is what a dump tool prints and what a failing
+/// assertion shows, so two properties matter beyond correctness: the rendering never consults the
+/// current culture, and it stays bounded. A dtype may legally nest 64 deep with a struct at every
+/// level, which a plain recursive renderer would turn into an output exponential in size for a
+/// file that is otherwise perfectly valid; the two constants below are the bounds that prevent it.
+/// </summary>
 public static class DTypeFormatter
 {
     /// <summary>
@@ -252,8 +253,7 @@ internal ref struct ValueStringWriter
     /// an extension id or a string scalar — so the work and the buffer are both sized by the
     /// budget, never by the input. Decoding the whole span first and clamping afterwards would
     /// rent (and decode) megabytes to produce at most <see cref="DTypeFormatter.MaxRenderedLength"/>
-    /// characters, which is the pattern docs/03-architecture.md section 6 forbids: "no allocation
-    /// sized directly by a file-supplied value without a cap".
+    /// characters: no allocation here may be sized directly by a file-supplied value without a cap.
     /// </remarks>
     internal void AppendUtf8(scoped ReadOnlySpan<byte> utf8)
     {

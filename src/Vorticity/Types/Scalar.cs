@@ -1,11 +1,12 @@
-// spec/proto/scalar.proto: `message Scalar { vortex.dtype.DType dtype = 1; ScalarValue value = 2; }`
-// Both halves are handles into their own arena, so a Scalar is 32 bytes and copies freely.
 using System;
 using System.Diagnostics.CodeAnalysis;
 
 namespace Vorticity.Types;
 
-/// <summary>A typed scalar: a <see cref="Types.DType"/> paired with a <see cref="ScalarValue"/>.</summary>
+/// <summary>
+/// A typed scalar: a <see cref="Types.DType"/> paired with a <see cref="ScalarValue"/>. Both halves
+/// are handles into their own arena, so the pair is small and copies freely.
+/// </summary>
 public readonly struct Scalar : IEquatable<Scalar>
 {
     /// <summary>Pairs a dtype with a value. Neither is validated against the other.</summary>
@@ -28,8 +29,7 @@ public readonly struct Scalar : IEquatable<Scalar>
 
     /// <summary>
     /// True when the value is the null value. False when it is merely
-    /// <see cref="ScalarValueKind.Absent"/>: absence is not nullity
-    /// (docs/08-semantics.md section 1).
+    /// <see cref="ScalarValueKind.Absent"/>: absence is not nullity.
     /// </summary>
     public bool IsNull => Value.IsNull;
 

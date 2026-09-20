@@ -1,5 +1,3 @@
-// The third origin of docs/03-architecture.md §3.1: a pinned managed array, for tests and small
-// in-memory cases where a native allocation is not worth its bookkeeping.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -9,7 +7,8 @@ using System.Threading;
 namespace Vorticity.Buffers;
 
 /// <summary>
-/// A <see cref="SegmentOwner"/> over a <see cref="GC.AllocateArray{T}(int, bool)"/> pinned array.
+/// A <see cref="SegmentOwner"/> over a <see cref="GC.AllocateArray{T}(int, bool)"/> pinned array,
+/// for tests and small in-memory cases where a native allocation is not worth its bookkeeping.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -58,8 +57,8 @@ public sealed class PinnedArraySegmentOwner : SegmentOwner
     {
         int exponent = NativeSegmentOwner.CheckLengthAndAlignment(length, alignment);
 
-        // length + alignment - 1 cannot overflow: length <= int.MaxValue is not guaranteed to
-        // leave room, so the sum is formed in long and checked.
+        // The padded size is formed in long because length + alignment - 1 can exceed
+        // int.MaxValue, and a wrapped size would be allocated instead of refused.
         long padded = (long)length + alignment - 1;
         if (padded > int.MaxValue)
         {

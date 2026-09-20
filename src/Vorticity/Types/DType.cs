@@ -1,9 +1,3 @@
-// A DType is 16 bytes: an arena reference, a node index and the arena generation the index was
-// issued under (docs/03-architecture.md section 3.2). The generation sits in padding the reference
-// and the index already forced, so carrying it is free.
-// Every accessor is a lookup into the arena's arrays; nothing here allocates except the two
-// members whose contract says they do (GetFieldName, ExtensionId, ToString), which exist for
-// diagnostics.
 using System;
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
@@ -14,12 +8,20 @@ using Vorticity.Arrays.Decoders.Canonical;
 namespace Vorticity.Types;
 
 /// <summary>
-/// A Vortex logical type. This is a handle — an arena plus a node index — not an object: building
-/// a 1000-column schema allocates the arena's arrays and nothing else.
+/// A Vortex logical type. This is a 16-byte handle — an arena, a node index and the arena
+/// generation the index was issued under — not an object: building a 1000-column schema allocates
+/// the arena's arrays and nothing else.
 /// </summary>
 /// <remarks>
+/// <para>
+/// The generation fits in padding that the arena reference and the index already forced, so
+/// carrying it costs nothing. Every accessor is a lookup into the arena's arrays and allocates
+/// nothing, apart from the few members documented as allocating, which exist for diagnostics.
+/// </para>
+/// <para>
 /// Equality and hashing are structural and cross-arena: two arenas that independently built the
 /// same nested struct compare equal and hash equal, with no allocation on either path.
+/// </para>
 /// </remarks>
 public readonly struct DType : IEquatable<DType>
 {
@@ -51,8 +53,8 @@ public readonly struct DType : IEquatable<DType>
 
     /// <summary>
     /// Whether this dtype admits nulls. <see cref="DTypeKind.Extension"/> has no nullability of its
-    /// own and reports its storage dtype's; <see cref="DTypeKind.Null"/> is always nullable. Both
-    /// follow spec/flatbuffers/dtype.fbs, where neither table declares a <c>nullable</c> field.
+    /// own and reports its storage dtype's; <see cref="DTypeKind.Null"/> is always nullable.
+    /// Neither declares a <c>nullable</c> field on the wire.
     /// </summary>
     /// <exception cref="InvalidOperationException">The handle is default.</exception>
     public Nullability Nullability => NodeRef().Nullability;
@@ -75,9 +77,8 @@ public readonly struct DType : IEquatable<DType>
 
     /// <summary>
     /// Precision of a <see cref="DTypeKind.Decimal"/> dtype: 1..<see cref="DTypeArena.MaxDecimalPrecision"/>
-    /// (76), not 1..38. Upstream's <c>MAX_PRECISION</c> is <c>i256</c>'s, and 39-76 selects
-    /// <c>i256</c> storage (spec/METADATA.md, docs/07-dotnet-mapping.md section 2); a reader that
-    /// rejects precision above 38 refuses legal files.
+    /// (76), not 1..38. Precision 39 to 76 selects 256-bit storage, so a reader that rejects
+    /// anything above 38 refuses legal files.
     /// </summary>
     /// <exception cref="InvalidOperationException">The kind is not Decimal.</exception>
     public byte Precision
@@ -93,9 +94,9 @@ public readonly struct DType : IEquatable<DType>
     /// <summary>
     /// Scale of a <see cref="DTypeKind.Decimal"/> dtype: at most
     /// <see cref="DTypeArena.MaxDecimalScale"/> (76), and at most <see cref="Precision"/> only when
-    /// positive. There is NO lower bound beyond <see cref="sbyte"/> — upstream applies the
-    /// <c>scale &lt;= precision</c> check under <c>if scale &gt; 0</c>, so a negative scale (digits
-    /// before the point) is legal down to -128 (spec/METADATA.md). A reader that requires
+    /// positive. There is no lower bound beyond <see cref="sbyte"/>: the
+    /// <c>scale &lt;= precision</c> check applies only to a positive scale, so a negative scale
+    /// (digits before the point) is legal down to -128, and a reader that requires
     /// <c>scale &gt;= -precision</c> refuses legal files.
     /// </summary>
     /// <exception cref="InvalidOperationException">The kind is not Decimal.</exception>
@@ -213,8 +214,8 @@ public readonly struct DType : IEquatable<DType>
     }
 
     /// <summary>
-    /// The wire type id of union alternative <paramref name="index"/>. The .fbs declares
-    /// <c>type_ids: [byte]</c> with the comment "interpreted as unsigned", hence <see cref="byte"/>.
+    /// The wire type id of union alternative <paramref name="index"/>. The wire field is a signed
+    /// byte that the format interprets as unsigned, hence <see cref="byte"/> here.
     /// </summary>
     /// <exception cref="InvalidOperationException">The kind is not Union.</exception>
     /// <exception cref="ArgumentOutOfRangeException">The index is outside <c>[0, FieldCount)</c>.</exception>

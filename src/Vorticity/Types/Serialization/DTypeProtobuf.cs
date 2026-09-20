@@ -1,28 +1,3 @@
-// Protobuf codec for the Vortex dtype union. Every field number, wire type and name below is
-// transcribed from spec/proto/dtype.proto -- never from memory. The vendored schema is:
-//
-//   message DType { oneof dtype_type {
-//     Null null = 1;  Bool bool = 2;  Primitive primitive = 3;  Decimal decimal = 4;
-//     Utf8 utf8 = 5;  Binary binary = 6;  Struct struct = 7;    List list = 8;
-//     Extension extension = 9;  FixedSizeList fixed_size_list = 10;   // after Extension, on purpose
-//     Variant variant = 11;     Union union = 12;                Map map = 13; } }
-//
-// Traps this file exists to get right, none of which a round trip against our own writer would
-// catch on its own:
-//
-//   * `Decimal.precision` is `uint32` and `Decimal.scale` is `int32` on the wire, but `uint8` /
-//     `int8` in the model (spec/flatbuffers/dtype.fbs). Narrowing has to be range-checked, or a
-//     precision of 300 silently becomes 44.
-//   * `Union.type_ids` is `repeated int32` whose values "must fit in uint8" (the schema comment).
-//     proto3 packs repeated scalars by default, so BOTH the packed (length-delimited) and the
-//     unpacked (one varint field per element) framings are legal and both must be accepted.
-//   * `repeated string names` / `repeated DType dtypes` may be interleaved and split across
-//     non-adjacent tags. Pairing is by ordinal within each field, not by adjacency.
-//   * A proto3 `oneof` is last-wins when a case repeats on the wire. Zero cases present is
-//     malformed for a required root (docs/03-architecture.md section 5).
-//   * `Extension.metadata` is `optional bytes`: absent and present-but-empty are different on the
-//     wire. `DType.ExtensionMetadata` cannot represent the difference, so this codec collapses
-//     them -- see the remarks on Write.
 using System;
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
@@ -37,13 +12,20 @@ namespace Vorticity.Types.Serialization;
 /// <remarks>
 /// <para>
 /// Both directions are allocation-free apart from the arena's own growth and the pooled scratch
-/// used to gather a struct's or a union's repeated fields, whose length is not known in advance.
+/// that gathers a struct's or a union's repeated fields, whose length is not known in advance.
+/// </para>
+/// <para>
+/// Every field number, wire type and name here is transcribed from the vendored schema rather than
+/// recalled, and the reader accepts what the encoding allows rather than what a writer happens to
+/// emit: a repeated scalar field arrives packed or unpacked, a repeated <c>names</c> and
+/// <c>dtypes</c> pair may be interleaved and split across non-adjacent tags and so pairs by ordinal
+/// within each field rather than by adjacency, and a repeated oneof case is last-wins.
 /// </para>
 /// <para>
 /// Everything malformed throws <see cref="VortexFormatException"/> and nothing else: an
-/// unrecognized <em>field number</em> is skipped (docs/02-format.md section 5.3), while a value
-/// outside the schema's domain -- an undefined <see cref="PType"/>, a precision that does not fit
-/// in a byte, a nested dtype that is required and absent -- is rejected.
+/// unrecognized <em>field number</em> is skipped, while a value outside the schema's domain -- an
+/// undefined <see cref="PType"/>, a precision that does not fit in a byte, a nested dtype that is
+/// required and absent -- is rejected.
 /// </para>
 /// </remarks>
 public static class DTypeProtobuf
@@ -119,8 +101,7 @@ public static class DTypeProtobuf
     /// <param name="depth">
     /// Zero-based nesting depth. Checked against <see cref="VortexLimits.MaxDTypeDepth"/> on entry:
     /// the recursion happens before the arena sees anything, so the arena's own construction-time
-    /// cap arrives too late to stop a 10 000-deep message from blowing the stack
-    /// (docs/03-architecture.md section 6).
+    /// cap arrives too late to stop a 10 000-deep message from blowing the stack.
     /// </param>
     internal static DType Read(ref ProtoReader reader, DTypeArena arena, int depth)
     {
@@ -143,7 +124,8 @@ public static class DTypeProtobuf
                 continue;
             }
 
-            // Unknown field number: skipped, never rejected (docs/02-format.md section 5.3).
+            // Unknown field number: skipped, never rejected, so a newer writer's fields do not
+            // make a file unreadable.
             reader.SkipField(wire);
         }
 

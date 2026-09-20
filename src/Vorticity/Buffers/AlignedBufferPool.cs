@@ -1,7 +1,3 @@
-// docs/03-architecture.md §3.5, "Coalescing versus alignment": a coalesced read is served from a
-// 64-byte aligned block whose start is the coalesced start rounded down to 64. Every block this
-// pool hands out is therefore allocated at the 64-byte cap, which also makes blocks
-// interchangeable between callers that asked for different segment alignments.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
@@ -29,6 +25,11 @@ namespace Vorticity.Buffers;
 /// Rented memory is <b>not</b> zeroed. Callers fill a block before reading it, exactly as with
 /// <c>ArrayPool&lt;byte&gt;</c>.
 /// </para>
+/// <para>
+/// A coalesced read is served from a block whose start is the coalesced start rounded down to
+/// 64, so every block is allocated at that 64-byte cap; blocks are therefore interchangeable
+/// between callers that asked for different segment alignments.
+/// </para>
 /// </remarks>
 public sealed class AlignedBufferPool
 {
@@ -41,10 +42,10 @@ public sealed class AlignedBufferPool
     /// Bytes a single size class may retain before <see cref="RetainedFor"/> stops widening it.
     /// </summary>
     /// <remarks>
-    /// RETENTION IS BOUNDED IN BYTES, NOT IN BLOCKS, because bytes are what it costs. A flat count
-    /// across classes spanning 4 kB to 8 MB means the same number buys 256 kB at the bottom and
-    /// 512 MB at the top, so any count large enough to help the small classes is reckless in the
-    /// large ones. This budget buys depth exactly where blocks are cheap.
+    /// Retention is bounded in bytes rather than in blocks, because bytes are what it costs. A
+    /// flat count across classes spanning 4 kB to 8 MB means the same number buys 256 kB at the
+    /// bottom and 512 MB at the top, so any count large enough to help the small classes is
+    /// reckless in the large ones. This budget buys depth exactly where blocks are cheap.
     /// </remarks>
     private const int RetentionBudget = 256 * 1024;
 
@@ -57,17 +58,12 @@ public sealed class AlignedBufferPool
     /// <param name="floor">The pool's base count, never reduced.</param>
     /// <param name="blockSize">The class's block size in bytes.</param>
     /// <remarks>
-    /// MEASURED, not guessed, and the measurement is the reason this function exists at all. A
-    /// scattered take over 64 splits allocated 136 fresh <c>NativeSegmentOwner</c>s per operation
-    /// while its PEAK CONCURRENT DEMAND in the 4 kB class was 12 blocks against the 8 retained. Short
-    /// by four, fresh a hundred and thirty-six times: past the retained set every return is dropped
-    /// and the next rent has to allocate, so the cost is not the shortfall but the churn across it.
-    /// A full scan peaks at 6 in the same class and allocates none, which is the whole asymmetry
-    /// behind "a take of 64 rows allocates more than reading all 65 536".
-    ///
-    /// Depth only helps where demand is bursty and blocks are small, and that is what the budget
-    /// expresses: 64 blocks at 4 kB, halving each class up, and never below <paramref name="floor"/>
-    /// — so every class from 32 kB up retains exactly what it did before this change.
+    /// Past the retained set every return is dropped and the next rent has to allocate, so the
+    /// cost of being a few blocks short is not the shortfall but the churn across it: a scattered
+    /// read whose peak concurrent demand in the small classes exceeds the retained count allocates
+    /// on nearly every segment, while a full scan that stays under it allocates nothing. Depth
+    /// only helps where demand is bursty and blocks are small, which is what the budget expresses:
+    /// deepest at 4 kB, halving each class up, and never below <paramref name="floor"/>.
     /// </remarks>
     private static int RetainedFor(int floor, int blockSize)
         => Math.Max(floor, Math.Min(64, RetentionBudget / blockSize));
@@ -86,10 +82,10 @@ public sealed class AlignedBufferPool
 
     /// <param name="graded">
     /// When set, the small classes retain more than <paramref name="maxPerBucket"/> under
-    /// <see cref="RetentionBudget"/>. PRIVATE ON PURPOSE: the public constructor's count means
-    /// exactly what it says, and two tests assert it — a pool asked for 0 must retain nothing, and
-    /// one asked for 2 must not quietly be handed 64. Grading is a policy for <see cref="Shared"/>,
-    /// not a reinterpretation of a caller's number.
+    /// <see cref="RetentionBudget"/>. It stays private because the public constructor's count
+    /// means exactly what it says: a pool asked for zero retains nothing, and one asked for two is
+    /// never quietly handed more. Grading is a policy for <see cref="Shared"/>, not a
+    /// reinterpretation of a caller's number.
     /// </param>
     /// <param name="maxPooledLength">Requests above this length bypass the pool.</param>
     /// <param name="maxPerBucket">Blocks retained per size class, before grading.</param>
@@ -225,11 +221,10 @@ public sealed class AlignedBufferPool
     /// <summary>Number of blocks currently retained in the bucket serving <paramref name="length"/>.</summary>
     /// <param name="length">A length whose size class is being inspected.</param>
     /// <remarks>
-    /// TEST-FACING, and the only reason the count is reachable at all: nothing in the library asks
-    /// a bucket how full it is. A pool that is being used answers this from under the caller's
-    /// feet, so the number is a fact about an instant that has passed before it is returned --
-    /// which is what a test asserting on a quiesced pool wants and what nothing else should build
-    /// on.
+    /// Nothing in the library asks a bucket how full it is; the count exists for tests. A pool
+    /// that is being used answers from under the caller's feet, so the number describes an instant
+    /// that has already passed — what a test on a quiesced pool wants, and what nothing else
+    /// should build on.
     /// </remarks>
     internal int ParkedCount(int length)
     {
@@ -270,11 +265,10 @@ public sealed class AlignedBufferPool
         /// How many blocks the bucket holds, read without taking the gate.
         /// </summary>
         /// <remarks>
-        /// The lock this used to take bought nothing that a volatile read does not. An <c>int</c>
-        /// is read atomically whether or not a lock is held, so the gate could never have made the
-        /// value less stale than the instant it was read -- a pusher or a popper may run between
-        /// the read and the caller looking at it either way. What the gate did do is serialise a
-        /// diagnostic against the pool's real traffic.
+        /// Taking the gate would buy nothing a volatile read does not: an <c>int</c> is read
+        /// atomically either way, and a pusher or a popper may still run between the read and the
+        /// caller looking at the value. It would only serialise a diagnostic against the pool's
+        /// real traffic.
         /// </remarks>
         internal int Count => Volatile.Read(ref _count);
 

@@ -1,33 +1,3 @@
-// Protobuf codec for vortex.scalar.Scalar and vortex.scalar.ScalarValue, transcribed field by
-// field from spec/proto/scalar.proto:
-//
-//   message Scalar      { vortex.dtype.DType dtype = 1; ScalarValue value = 2; }
-//   message ScalarValue { oneof kind {
-//       google.protobuf.NullValue null_value = 1;   bool   bool_value  = 2;
-//       sint64 int64_value  = 3;                    uint64 uint64_value = 4;
-//       float  f32_value    = 5;                    double f64_value    = 6;
-//       string string_value = 7;                    bytes  bytes_value  = 8;
-//       ListValue list_value = 9;                   uint64 f16_value    = 10;
-//       Scalar variant_value = 11;                  UnionValue union_value = 12; } }
-//   message ListValue   { repeated ScalarValue values = 1; }
-//   message UnionValue  { uint32 type_id = 1; ScalarValue value = 2; }
-//
-// The wire types are not the ones a careless transcription would pick, and getting any of them
-// wrong produces a file that round-trips against itself and against nothing else:
-//
-//   * int64_value is SINT64 -- zigzag. uint64_value is a plain varint.
-//   * f32_value is fixed32 and f64_value is fixed64, but f16_value is a uint64 VARINT carrying the
-//     raw binary16 bits. It is not a float on the wire at all.
-//   * null_value is a google.protobuf.NullValue enum, i.e. a varint. Present means the scalar is
-//     null; absent -- no case set at all -- means Absent, which is a different thing
-//     (docs/08-semantics.md section 1: "a statistic with no value licenses nothing").
-//   * Every arm is a oneof member, so every one has explicit presence: the writers here are the
-//     `...Always` variants throughout, or `false`, `0`, `""` and `-0.0` would silently vanish and
-//     read back as Absent. docs/04-conformance.md section 4.3 lists -0.0 as a required case.
-//
-// No decimal case among the twelve, and none is needed: a Decimal scalar is a bytes_value whose
-// length selects the storage width, up to 32 bytes for i256. This reader stays untyped and hands
-// the bytes on unread; TypedScalar is where they are interpreted against a dtype.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -40,9 +10,22 @@ namespace Vorticity.Types.Serialization;
 /// messages (spec/proto/scalar.proto).
 /// </summary>
 /// <remarks>
+/// <para>
 /// A bare <c>ScalarValue</c> body also stands alone: it is the array metadata of
-/// <c>vortex.constant</c> (spec/METADATA.md), which is why <see cref="ReadValue"/> exists
-/// separately from <see cref="ReadScalar"/> rather than only as its nested half.
+/// <c>vortex.constant</c>, which is why <see cref="ReadValue"/> exists separately from
+/// <see cref="ReadScalar"/> rather than only as its nested half.
+/// </para>
+/// <para>
+/// Every wire type here is transcribed from the schema rather than guessed, because the obvious
+/// guess is often wrong and yields a file that round-trips against itself and against nothing
+/// else: the signed integer case is zigzag, and the half-precision case is a varint carrying the
+/// raw binary16 bits rather than a float.
+/// </para>
+/// <para>
+/// There is no decimal case: a decimal scalar travels as a bytes value whose length selects the
+/// storage width, up to 32 bytes. This codec stays untyped and hands those bytes on unread;
+/// they are interpreted against a dtype one layer up.
+/// </para>
 /// </remarks>
 public static class ScalarProtobuf
 {
@@ -117,7 +100,7 @@ public static class ScalarProtobuf
         int depth)
     {
         // The recursion runs before the store's own construction-time cap can see anything, so the
-        // reader has to hold the line itself (docs/03-architecture.md section 6).
+        // reader has to hold the line itself.
         VortexLimits.CheckDepth(depth + 1, VortexLimits.MaxDTypeDepth, "Scalar");
 
         ProtoReader reader = new ProtoReader(message);
@@ -214,7 +197,8 @@ public static class ScalarProtobuf
                     break;
 
                 default:
-                    // Unknown field number: skipped, never rejected (docs/02-format.md section 5.3).
+                    // Unknown field number: skipped, never rejected, so a newer writer's fields
+                    // do not make a file unreadable.
                     reader.SkipField(wire);
                     break;
             }
@@ -229,7 +213,7 @@ public static class ScalarProtobuf
             case CaseUInt64: return store.UInt64(bits);
 
             // Bit-preserving on purpose: a NaN payload and a negative zero are values here, not
-            // noise (docs/08-semantics.md section 2 keeps IEEE comparison out of value identity).
+            // noise. Value identity is the bit pattern, not IEEE comparison.
             case CaseF32: return store.F32(BitConverter.UInt32BitsToSingle((uint)bits));
             case CaseF64: return store.F64(BitConverter.UInt64BitsToDouble(bits));
             case CaseString: return store.String(body);
@@ -320,8 +304,7 @@ public static class ScalarProtobuf
         }
 
         // An absent `value` is a present union alternative carrying nothing, which the model spells
-        // Absent. An outer-null union uses null_value instead (the comment on UnionValue in
-        // spec/proto/scalar.proto), so the two never collide.
+        // Absent. A union that is itself null uses null_value instead, so the two never collide.
         ScalarValue value = hasValue
             ? ReadValueBody(valueBody, store, dtypes, depth + 1)
             : store.Absent;
@@ -421,7 +404,7 @@ public static class ScalarProtobuf
 
             case ScalarValueKind.F32:
                 // ...Always, or -0.0 is dropped by the proto3 `value != 0` test and reads back
-                // as Absent. docs/04-conformance.md section 4.3 requires -0.0 to survive.
+                // as Absent; a negative zero has to survive the round trip.
                 writer.WriteFloatAlways(CaseF32, value.AsF32);
                 break;
 
