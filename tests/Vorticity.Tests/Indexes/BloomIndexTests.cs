@@ -309,9 +309,49 @@ public sealed class BloomIndexTests
         IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
         Assert.Empty(directory.Entries);
 
-        // What was written before the verdict is dead weight, and the file still reads.
         int present = Key(40_000);
         Assert.Equal(Oracle($"key = {present}"), await written.File.Scan().Where(Parse($"key = {present}")).CountAsync());
+    }
+
+    /// <summary>
+    /// A refused index costs the file nothing but the footer that records there is none.
+    /// </summary>
+    /// <remarks>
+    /// The verdict used to be reached after the payloads had been written, and abandoning dropped
+    /// the directory entry rather than the bytes: a file of 1,582,812 bytes carried 1,048,797 more
+    /// for indexes nothing could use, two thirds of itself. The budget is asked before a byte goes
+    /// out now, on the write path and on the indexer's alike, which is what this measures -- a
+    /// count of entries would have passed throughout.
+    /// </remarks>
+    [Fact]
+    public async Task AnIndexTheBudgetRefusedLeavesNoBytesBehind()
+    {
+        Decoders.EnsureRegistered();
+        await using Written none = await Written.CreateAsync(WritePolicy.None);
+        await using Written refused = await Written.CreateAsync(Policy(), budgetPerMille: 1);
+
+        IndexWriteReport key = Assert.IsType<IndexWriteReport>(
+            refused.Report.Index("key", IndexKinds.BloomSbbf));
+        Assert.Equal(IndexOutcome.Abandoned, key.Outcome);
+
+        // The footer names one fewer segment and says the directory is empty; nothing else may
+        // differ. The bound is the footer's own order of magnitude, not a measured slack.
+        Assert.InRange(refused.Length - none.Length, 0, 1_024);
+
+        // The same question of the indexer, which walks a written file and appends to it.
+        string appended = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"vorticity-bloom-{Guid.NewGuid():N}.vortex");
+        System.IO.File.Copy(none.Path, appended);
+        try
+        {
+            await VortexFileIndexer.AppendIndexesAsync(
+                appended, Policy(), new VortexWriteOptions { IndexBudgetPerMille = 1 });
+            Assert.InRange(new System.IO.FileInfo(appended).Length - none.Length, 0, 4_096);
+        }
+        finally
+        {
+            System.IO.File.Delete(appended);
+        }
     }
 
     [Fact]

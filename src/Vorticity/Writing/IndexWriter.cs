@@ -889,7 +889,7 @@ internal sealed class IndexWriter : IDisposable
     /// </remarks>
     internal void SettleBudget(long dataBytes)
     {
-        if (dataBytes >= BudgetFloor && LivingBytes > 0 && OverBudget(dataBytes))
+        if (LivingBytes > 0 && OverBudget(dataBytes))
         {
             AbandonForBudget(dataBytes);
         }

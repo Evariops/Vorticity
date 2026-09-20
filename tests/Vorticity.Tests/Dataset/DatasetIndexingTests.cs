@@ -42,7 +42,12 @@ public sealed class DatasetIndexingTests
         .For("tag", IndexPolicy.Bloom(falsePositivePpm: 100))
         .For("id", IndexPolicy.SortedRuns.AsRequired());
 
-    private static readonly VortexWriteOptions Build = new VortexWriteOptions { IndexBudgetPerMille = 1_000 };
+    // A budget that cannot refuse anything here, because none of these tests is about the budget:
+    // the objects are a few kilobytes and their filters outweigh them, so at 1000 per mille the
+    // verdict would fall on the indexes these tests need built. It used not to, and only because
+    // the verdict was reached after the payloads had been written -- an object that flushed nothing
+    // was never judged. Now that the verdict comes first, the fixture has to say what it means.
+    private static readonly VortexWriteOptions Build = new VortexWriteOptions { IndexBudgetPerMille = 100_000 };
 
     private static long Id(long row) => (row * 7_919L) % 100_003;
 
