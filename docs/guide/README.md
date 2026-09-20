@@ -61,4 +61,4 @@ and never repeats it.
 | page | what you get |
 |---|---|
 | [how-it-works.md](how-it-works.md) | the shape of the library in two pages, and where to read further |
-| `benchmarks.md` | what this costs against the Rust implementation, on published scenarios |
+| [benchmarks.md](benchmarks.md) | what this costs against the Rust implementation, on published scenarios |

@@ -497,6 +497,27 @@ internal static class Report
         StringBuilder text = new StringBuilder();
         text.AppendLine("# Benchmarks");
         text.AppendLine();
+        text.AppendLine("What this library costs against the Rust implementation, on scenarios a caller");
+        text.AppendLine("would recognise. **This page is generated. Do not edit it** — every figure comes from");
+        text.AppendLine("`dotnet run -c Release --project bench/Vorticity.Benchmarks -- --report --markdown`,");
+        text.AppendLine("and a hand-written number here would be a number nothing re-measures.");
+        text.AppendLine();
+        text.AppendLine("## What is measured");
+        text.AppendLine();
+        text.AppendLine("Eight scenarios, at a million rows and at ten million, on a table of four columns: a");
+        text.AppendLine("monotone `i64`, an `f64`, a short `utf8` and a nullable `bool`. **Each side runs in its");
+        text.AppendLine("own process**, once per run, and the run is timed from outside — so what you see is");
+        text.AppendLine("what a command costs, including starting a runtime, opening the file and exiting.");
+        text.AppendLine();
+        text.AppendLine("Peak resident memory and processor time are each side's own `getrusage`, and the wall");
+        text.AppendLine("clock is the parent's. Both sides render the same rows, and the harness fails rather");
+        text.AppendLine("than print a ratio between two different answers.");
+        text.AppendLine();
+        text.AppendLine("The reference does the **same work**, which took care: its scan has one entry point");
+        text.AppendLine("that counts rows off an encoded array's metadata and one that materialises every");
+        text.AppendLine("column. Only the second is comparable to a reader that has no other representation,");
+        text.AppendLine("and it is the one measured here.");
+        text.AppendLine();
         text.AppendLine(Header(runs));
         text.AppendLine();
         foreach (int rows in Sizes)
@@ -525,8 +546,92 @@ internal static class Report
             text.AppendLine();
         }
 
+        text.Append(Reading(table));
         return text.ToString();
     }
+
+    /// <summary>
+    /// The reading, computed from the rows rather than written: which way each scenario went, what
+    /// the startup floor is, and what the table does not say.
+    /// </summary>
+    private static string Reading(List<Row> table)
+    {
+        List<Row> compared = [.. table.Where(r => r.Ours is not null && r.Theirs is not null)];
+        StringBuilder text = new StringBuilder();
+        text.AppendLine("## Reading it");
+        text.AppendLine();
+
+        Row? floor = table.FirstOrDefault(
+            r => r.Scenario.Name == "open" && r.Ours is not null && r.Theirs is not null);
+        if (floor is { Ours: { } ourFloor, Theirs: { } theirFloor })
+        {
+            text.AppendLine("**Start with the floor.** The `open` row is a process that opens the file and reads");
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                $"no rows: {ourFloor.WallMs.Median:F0} ms for us against {theirFloor.WallMs.Median:F0} ms. That difference is a managed runtime"));
+            text.AppendLine("starting, and it is the same whatever the file holds. Subtract it from every other row");
+            text.AppendLine("to see what the work cost — and remember that a long-running process pays it once,");
+            text.AppendLine("while this table pays it on every line.");
+            text.AppendLine();
+        }
+
+        if (compared.Count > 0)
+        {
+            Row best = compared.MaxBy(RatioOf)!;
+            Row worst = compared.MinBy(RatioOf)!;
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                $"**Where we stand.** Of {compared.Count} compared scenarios, the closest is `{best.Scenario.Name}`"));
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                $"at {best.Rows:N0} rows ({Ratio(best)}) and the furthest is `{worst.Scenario.Name}` at {worst.Rows:N0} rows"));
+            text.AppendLine("(" + Ratio(worst) + "). A ratio above 1.00x would mean we took less wall time.");
+            text.AppendLine();
+
+            double ourPeak = compared.Max(r => r.Ours!.RssBytes.Median) / (1024 * 1024);
+            double theirPeak = compared.Max(r => r.Theirs!.RssBytes.Median) / (1024 * 1024);
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                $"**Memory.** Our worst peak here is {ourPeak:F0} MiB against {theirPeak:F0} MiB. A managed heap and"));
+            text.AppendLine("its runtime are most of that difference at these sizes.");
+            text.AppendLine();
+        }
+
+        List<Row> refused = [.. table.Where(r => r.Scenario.Reference is not null && r.Theirs is null)];
+        if (refused.Count > 0)
+        {
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                $"**Where the reference refused.** No figure for it on " +
+                $"{string.Join(", ", refused.Select(r => $"`{r.Scenario.Name}` at {r.Rows:N0} rows"))}."));
+            text.AppendLine("The harness records the refusal rather than dropping the row: a table that shows only");
+            text.AppendLine("what worked is not a comparison.");
+            text.AppendLine();
+        }
+
+        List<string> alone = [.. table.Where(r => r.Scenario.Reference is null)
+            .Select(r => $"`{r.Scenario.Name}`").Distinct()];
+        if (alone.Count > 0)
+        {
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                $"**Where there is nothing to compare against.** {string.Join(", ", alone)}: the reference shim"));
+            text.AppendLine("exposes no such entry point, so the figure is ours alone and is not a ratio.");
+            text.AppendLine();
+        }
+
+        text.AppendLine("## What this does not measure");
+        text.AppendLine();
+        text.AppendLine("* **Steady state.** Every row includes a cold start: the runtime, the first tier of the");
+        text.AppendLine("  just-in-time compiler, and a page cache warmed only by the discarded run before it. The");
+        text.AppendLine("  per-encoding ratios in `bench/README.md` measure the other thing — the same code after");
+        text.AppendLine("  warm-up, in one process — and they read very differently. Both are true.");
+        text.AppendLine("* **Threading.** Both sides are single-threaded here, which is what makes a ratio a ratio.");
+        text.AppendLine("* **Your data.** One table of four columns, written by us, is not every file. A column the");
+        text.AppendLine("  compressor likes less, or a filter a zone map cannot prune, moves these numbers more");
+        text.AppendLine("  than any implementation detail does.");
+        text.AppendLine("* **Your machine.** These figures belong to the one named above.");
+        return text.ToString();
+    }
+
+    private static double RatioOf(Row row) =>
+        row.Theirs is null || row.Ours is null || row.Ours.WallMs.Median <= 0
+            ? 0
+            : row.Theirs.WallMs.Median / row.Ours.WallMs.Median;
 
     private static string Ratio(Row row) =>
         row.Theirs is null || row.Ours is null || row.Ours.WallMs.Median <= 0
@@ -546,11 +651,69 @@ internal static class Report
             $"{runs} runs of each scenario, each in its own process, the median reported with the " +
             $"lowest and highest beside it; one discarded run before them.\n" +
             $"Ratio above 1.00x means this library took less wall time.\n" +
-            $"machine: {RuntimeInformation.OSDescription} {RuntimeInformation.OSArchitecture}, " +
-            $"{Environment.ProcessorCount} processors\n" +
+            $"machine: {Processor()} ({RuntimeInformation.OSArchitecture}), " +
+            $"{Environment.ProcessorCount} processors, {RuntimeInformation.OSDescription}\n" +
             $"runtime: {RuntimeInformation.FrameworkDescription}, reference: Vortex 0.86.1\n" +
             $"commit: {Commit()}\n" +
             $"date: {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC");
+
+    /// <summary>
+    /// The processor, by name. A ratio between two implementations is a property of the machine as
+    /// much as of the code, and "Arm64" does not say which one.
+    /// </summary>
+    private static string Processor()
+    {
+        try
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                return Ask("sysctl", ["-n", "machdep.cpu.brand_string"]);
+            }
+
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux) && System.IO.File.Exists("/proc/cpuinfo"))
+            {
+                foreach (string line in System.IO.File.ReadLines("/proc/cpuinfo"))
+                {
+                    if (line.StartsWith("model name", StringComparison.Ordinal))
+                    {
+                        return line[(line.IndexOf(':', StringComparison.Ordinal) + 1)..].Trim();
+                    }
+                }
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return RuntimeInformation.OSArchitecture.ToString();
+        }
+
+        return RuntimeInformation.OSArchitecture.ToString();
+    }
+
+    private static string Ask(string exe, string[] arguments)
+    {
+        ProcessStartInfo start = new ProcessStartInfo(exe) { RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (string argument in arguments)
+        {
+            start.ArgumentList.Add(argument);
+        }
+
+        try
+        {
+            using Process? child = Process.Start(start);
+            if (child is null)
+            {
+                return "unknown";
+            }
+
+            string answer = child.StandardOutput.ReadToEnd().Trim();
+            child.WaitForExit();
+            return child.ExitCode == 0 && answer.Length > 0 ? answer : "unknown";
+        }
+        catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            return "unknown";
+        }
+    }
 
     /// <summary>The commit the figures belong to, so a table outliving its run says what it measured.</summary>
     private static string Commit()
