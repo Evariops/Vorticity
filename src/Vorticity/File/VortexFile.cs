@@ -33,6 +33,19 @@ namespace Vorticity.File;
 /// the dtype segment out of that decision, which is what makes it a saving. User metadata segments
 /// never enter it, because metadata values are read lazily.
 /// </para>
+/// <para>
+/// <b>After disposal</b>, a member throws <see cref="ObjectDisposedException"/> when, and only
+/// when, it reads the retained tail, whose buffer has gone back to the pool:
+/// <see cref="Identity"/>, <see cref="SegmentSpecs"/>, <see cref="Indexes"/>,
+/// <see cref="GetArrayEncodingId"/>, <see cref="GetLayoutEncodingId"/>,
+/// <see cref="ReadMetadataAsync"/> and <see cref="ReadIndexDirectoryAsync"/>. The others answer
+/// from state captured at the open -- <see cref="Schema"/>, <see cref="RowCount"/>,
+/// <see cref="FileLength"/>, <see cref="Statistics"/>, the metadata keys and specs -- and go on
+/// answering, because the answer is still true and a guard on them would be a branch on a member
+/// a scan reads. A scan built from a disposed file fails at its first read instead: its source is
+/// gone. Treat a disposed file as gone regardless; the distinction is what protects memory, not a
+/// licence to keep using one.
+/// </para>
 /// </remarks>
 public sealed partial class VortexFile : IAsyncDisposable
 {

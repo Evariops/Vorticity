@@ -105,13 +105,16 @@ internal static class Errors
             Console.WriteLine($"  truncated: {result.Truncated}, {result.OriginalLength} -> {result.Length}");
         });
 
-        // A disposed file does not refuse every question, so do not ask it any.
+        // A disposed file refuses the questions whose answer would read a released buffer, and
+        // answers the ones the open already settled. Ask it none of them either way.
         VortexFile disposed = await VortexFile.OpenAsync(path);
         await disposed.DisposeAsync();
         Ask("RowCount", () => _ = disposed.RowCount);
         Ask("Schema", () => _ = disposed.Schema);
         Ask("Scan()", () => _ = disposed.Scan());
         Ask("Identity", () => _ = disposed.Identity);
+        Ask("SegmentSpecs", () => _ = disposed.SegmentSpecs.Length);
+        Ask("GetArrayEncodingId(0)", () => _ = disposed.GetArrayEncodingId(0));
     }
 
     private static async Task Show(string what, Func<Task> call)

@@ -94,9 +94,14 @@ to fall back on: it throws on open, and `ValidLengthAsync` throws too rather tha
 
 ## Watch out
 
-* **A disposed `VortexFile` does not refuse every question.** `RowCount`, `Schema`, `FileLength` and
-  `Scan()` still answer after `DisposeAsync`; only `Identity` throws `ObjectDisposedException`.
-  Treat a disposed file as gone regardless — a scan started from one will fail at its first read.
+* **A disposed `VortexFile` refuses exactly the questions it cannot answer safely.** A member throws
+  `ObjectDisposedException` when it reads the file's retained tail, whose buffer has gone back to
+  the pool — `Identity`, `SegmentSpecs`, `Indexes`, `GetArrayEncodingId`, `GetLayoutEncodingId`,
+  `ReadMetadataAsync`, `ReadIndexDirectoryAsync`. The rest answer from what the open captured —
+  `Schema`, `RowCount`, `FileLength`, `Statistics`, the metadata keys — and go on answering,
+  because the answer is still true and a check on them would be a branch on a member a scan reads.
+  Treat a disposed file as gone regardless: `Scan()` still builds, and the scan fails at its first
+  read because the source went with the file.
 * **A `RecordBatch` does refuse.** Reading it after `Dispose()` throws, which is what stops a span
   over recycled memory from being read.
 * **A row range past the end is clamped, not refused.** `Rows(new RowRange(0, rows + 10))` returns
