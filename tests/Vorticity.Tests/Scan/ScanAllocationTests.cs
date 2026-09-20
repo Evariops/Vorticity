@@ -37,11 +37,29 @@ public sealed class ScanAllocationTests
 {
     private const string Multi = "distributions/high_cardinality_i64_r8193";
 
-    /// <summary>
-    /// What a batch of a degree-2 scan may cost across every thread: 3 434 measured, three runs
-    /// apart, to the byte. Was 3 514 while the pump built a closure and a delegate for every split.
-    /// </summary>
-    private const long ParallelPerBatchCeiling = 3_500;
+    /// <summary>What a batch of a degree-2 scan may cost across every thread.</summary>
+    /// <remarks>
+    /// <para>
+    /// THE MARGIN IS THE MEASUREMENT, and it is wide because the quantity is. Inside the suite the
+    /// axis reads 3 466 to 3 479 with intrinsics over four runs and 3 459 to 3 696 without them
+    /// over four more -- a spread of 237 bytes on a path whose degree-1 control reads 1 632 in
+    /// every one of the eight. The swing is the pool's, not the scan's: lanes decode on threads the
+    /// caller never touches, and how many of those the runtime injects is not a property of this
+    /// code.
+    /// </para>
+    /// <para>
+    /// WHAT THAT COSTS THE AXIS, said plainly: at this width it catches a regression of a few
+    /// hundred bytes a batch and not the eighty a per-split closure cost, which is what it was
+    /// added to watch. The instruments for that size are the sequential axis above, which holds an
+    /// equality against one <see cref="RecordBatch"/>, and the read-path ceilings, which see a
+    /// per-scan delegate at eight bytes. This one is here for the order of magnitude.
+    /// </para>
+    /// <para>
+    /// Set at 3 900 rather than at the worst seen, because a ceiling ON the worst seen is the
+    /// coin flip this axis already turned the no-intrinsics suite red with, one run in ten.
+    /// </para>
+    /// </remarks>
+    private const long ParallelPerBatchCeiling = 3_900;
     private const string Struct = "containers/uncompressed_canonical";
 
     /// <summary>65536 rows in 64 zones of 1024.</summary>
@@ -160,13 +178,23 @@ public sealed class ScanAllocationTests
         ReleaseOnlyCeilings.Require();
         Decoders.EnsureRegistered();
 
-        long perBatch = await MeasureWholeScan(Multi, 500, degree: 2);
+        long sequential = await MeasureWholeScan(Multi, 500, degree: 1);
+        long parallel = await MeasureWholeScan(Multi, 500, degree: 2);
+        long extra = parallel - sequential;
 
-        Assert.True(
-            perBatch <= ParallelPerBatchCeiling,
+        // Reported whether or not it passes, as the other allocation axes report theirs: a ceiling
+        // nobody can read the distance to is a ceiling nobody can maintain.
+        Console.Out.Write(
             string.Create(
                 CultureInfo.InvariantCulture,
-                $"{perBatch} B per batch at degree 2 against a ceiling of {ParallelPerBatchCeiling}"));
+                $"PARALLEL SCAN: {parallel} B per batch at degree 2 against {sequential} at degree 1, " +
+                $"{extra} more, ceiling {ParallelPerBatchCeiling}\n"));
+
+        Assert.True(
+            parallel <= ParallelPerBatchCeiling,
+            string.Create(
+                CultureInfo.InvariantCulture,
+                $"{parallel} B per batch at degree 2 against a ceiling of {ParallelPerBatchCeiling}"));
     }
 
     /// <summary>
