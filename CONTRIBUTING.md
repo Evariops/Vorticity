@@ -1,5 +1,39 @@
 # Contributing
 
+## What a fresh clone can run, and what it cannot yet
+
+A clone with nothing else installed but the SDK `global.json` asks for builds, tests and publishes.
+The conformance corpus is committed — 856 files and their sidecars — so `dotnet test` runs the
+whole thing on a bare clone with no toolchain beyond .NET.
+
+```
+dotnet build Vorticity.slnx -c Release
+dotnet test Vorticity.slnx -c Release
+dotnet publish tools/vxdump -c Release -r <rid>      # Native AOT, ~5 MB, no trim warning
+```
+
+Two things are not in the repository, both deliberately, and each one refuses with the command
+that produces it rather than with a stack trace.
+
+**The Rust shim, for anything that compares against the reference.** `--ffi-check` and
+`--ratio-check` load a cdylib built from `tools/vxbench-rs`, which means **`bench/gate.sh` is red
+on a fresh clone** until you build it. So is `--throughput --check` in any of its forms.
+
+```
+cd tools/vxbench-rs && cargo build --release
+```
+
+`bench/crosscheck.sh` needs `cargo` too, and builds a different crate: it has the .NET side write
+the corpus out and has Vortex Rust read every file back.
+
+**The throughput inputs**, 468 MB for 57 encodings, generated rather than committed — a git history
+is not the place for half a gigabyte that a script reproduces.
+
+```
+bench/gen-throughput.sh                              # once; or point VORTICITY_THROUGHPUT_CORPUS
+                                                     # at a directory that already holds them
+```
+
 ## What to run before a change is done
 
 The chain runs when a change is finished, not at every commit. Between two, the suite is enough.
@@ -64,6 +98,13 @@ Three things follow.
   if it is still red, it is real.
 * **Raising one is a deliberate, dated, justified edit**, with the measurement written at the site
   and the reason a reader can check. `--recalibrate` refuses to loosen on its own, by design.
+
+One ceiling is not portable, and it is worth knowing before you go looking for a regression.
+`PathAllocationTests` measures a whole read path from a corpus file's absolute path, so the figure
+carries that path's string — two bytes per character. The ceilings were set where this repository
+lives, and a clone thirty characters deeper is red by a couple of hundred bytes on every axis at
+once, in lockstep. Several axes moving together by the same amount is the signature: compare the
+two clone paths before believing the code moved.
 
 The same applies to analyzer warnings. There is no `#pragma` in this repository and no rule turned
 off in `.editorconfig`: an analyzer worth silencing is usually right about the code.
