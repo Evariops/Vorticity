@@ -82,7 +82,7 @@ BenchmarkDotNet class that no longer exists, on 4096-row files, against the lazy
 carries both defects at once: a fixed cost larger than the signal, and a reference that did not
 decode what it was being compared on. The instrument now is **`--throughput`**: the same question on
 files of a million rows, against `execute::<Canonical>`, with a ceiling per encoding and a non-zero
-exit over it. Its fifty rows live in [bench/BASELINE.md](../../bench/BASELINE.md) under "The 1M axis";
+exit over it. Its fifty rows live in the `bench-BASELINE.md` journal under "The 1M axis";
 `bench/README.md` says how to run it. The correction is not cosmetic — published as `fsst`
 "1.74× rather than 10.6×" — and it is why nothing should be quoted from here.
 
@@ -254,7 +254,7 @@ works out to under a kilobyte here and is pinned exactly by `ScanAllocationTests
 benchmark total.
 
 Every figure in this section is restated with its machine, its commit and its reproduction command
-in [bench/BASELINE.md](../bench/BASELINE.md), which is the file that moves in the same commit as any
+in the `bench-BASELINE.md` journal, which is the file that moves in the same commit as any
 change that moves a number. This section explains what the numbers mean; that file records what they
 currently are.
 

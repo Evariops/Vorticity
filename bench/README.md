@@ -28,7 +28,7 @@ dotnet run -c Release PROJ -- <arguments>
 | a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 50 files, against Rust |
 | a lane, or the degree of parallelism | `-- LanesBench` (`--full` walks 1, 2, 4, 8) | 15 s | ours at n lanes against the reference's pool at n workers, threads pinned both sides |
 | the compressor's decision | `-- CompressorBench` | 12 s | `Choose` and one arm per candidate; `--full` adds the utf8 and f64 columns |
-| the writer, per encoding | `-- --throughput --write --check` | 9 min | each file read back out to a discarding sink, against Rust. **Gates since B14** — 56 references, recalibrated 2026-09-15 after W-31 and W-35 took the median from 1.96 to 1.17. Three are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`) : re-run before believing a red. Only `zstd_nullable` produces no ratio, and that is **the reference** refusing to write it. What is left above ×2 is [WRITE-AUDIT.md](../WRITE-AUDIT.md) §6 |
+| the writer, per encoding | `-- --throughput --write --check` | 9 min | each file read back out to a discarding sink, against Rust. **Gates since B14** — 56 references, recalibrated 2026-09-15 after W-31 and W-35 took the median from 1.96 to 1.17. Three are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`) : re-run before believing a red. Only `zstd_nullable` produces no ratio, and that is **the reference** refusing to write it. What is left above ×2 is `WRITE-AUDIT.md` §6 |
 | every file we write, read by Rust | `bench/crosscheck.sh` | 79 s | 819 files compared scalar by scalar; needs cargo. `gate.sh --crosscheck` folds it in |
 | **anything, before you push** | `bench/gate.sh` | 35 s | the eight ratchets, `--ffi-check`, `--ratio-check`; exit 1 if one is red. `--throughput` adds the full axis (92 s) |
 | a change too big for a ported arm | `bench/ab.sh <commit> [--after <commit>] <file> [scenario…]` | 7 s | two builds of the library in one process, interleaved, ratio per round |
@@ -37,7 +37,7 @@ dotnet run -c Release PROJ -- <arguments>
 | a ratchet | `dotnet test Vorticity.slnx -c Release` | ~1 min | the suite plus the eight allocation and count ratchets |
 
 **A fast-profile figure is a direction, not a number.** Anything under about 5 % on a kernel, and
-every figure that goes into [BASELINE.md](BASELINE.md), is confirmed with `--full` on the one class
+every figure that goes into `bench-BASELINE.md`, is confirmed with `--full` on the one class
 concerned. Why, and what the fast profile costs in fidelity: `BenchmarkConfig.cs`, and BENCH-AUDIT.md
 §4.2 for the measurements behind it.
 
@@ -151,7 +151,7 @@ Nine other classes were deleted rather than demoted: each measured something ano
 measures with a better estimator, and BENCH-AUDIT.md §3.1 names the replacement for every one. The
 last to go was `RewrittenComparison`, whose unique question — our own bytes, read by both readers —
 is now the four `rewritten` axes of `--ratio-check`. The numbers they produced are not lost: they are
-in [BASELINE.md](BASELINE.md) and in the commits.
+in `bench-BASELINE.md` and in the commits.
 
 ## The gates, and their ceilings
 
@@ -248,11 +248,14 @@ paragraph.
 
 ## Where the rest lives
 
+These are engineering journals: French, dated, and kept on the maintainer's machine rather than in
+the repository. They are named and not linked, because the name is the reference.
+
 | file | what it holds |
 |---|---|
-| [BASELINE.md](BASELINE.md) | the current number on every axis, its machine, its commit. A record, not a gate |
-| [PROFILE.md](PROFILE.md) | the CPU profiling session: what actually costs, as opposed to what should |
-| [ALLOCATIONS.md](ALLOCATIONS.md), [BRANCHING.md](BRANCHING.md), [STRUCTURE.md](STRUCTURE.md) | the three code audits |
-| [PERF-AUDIT.md](PERF-AUDIT.md) | v1, the archive: three passes, 41 steps, the negative results |
-| `../PERF-AUDIT-v2.md` | the open work list |
-| `../BENCH-AUDIT.md` | this instrument, audited: what every figure above comes from |
+| `bench-BASELINE.md` | the current number on every axis, its machine, its commit. A record, not a gate |
+| `bench-PROFILE.md` | the CPU profiling session: what actually costs, as opposed to what should |
+| `bench-ALLOCATIONS.md`, `bench-BRANCHING.md`, `bench-STRUCTURE.md` | the three code audits |
+| `bench-PERF-AUDIT.md` | v1, the archive: three passes, 41 steps, the negative results |
+| `PERF-AUDIT-v2.md` | the open work list |
+| `BENCH-AUDIT.md` | this instrument, audited: what every figure above comes from |

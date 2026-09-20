@@ -82,12 +82,17 @@ leak-*
 .DS_Store
 Thumbs.db
 
-# ---- Notes de travail locales ----
+# ---- Working notes, kept on the maintainer's machine ----
 TODO.md
-LOOP-PROMPT.md
-LOOP-PROMPT-AUDITS.md
+LOOP-PROMPT*.md
 todo2.md
 todo2.previous.md
+
+# The engineering journals: French, dated, raw. They are the project's memory and a hundred code
+# comments name them, so they are not deleted -- but a public repository's history is not the place
+# for them, so they live here and stay off the published tree. docs/history/README.md says what
+# each one is.
+docs/history/
 
 # ---- Recorded benchmark runs (bench/compare.sh --record) ----
 bench/.runs/
