@@ -10,7 +10,7 @@ site.
 |---|---|
 | `VortexFile` | **Thread-safe.** Concurrent scans on one open file are supported and expected; the footer and layout tree are immutable after open |
 | `ISegmentSource` | Implementations **must** be thread-safe; the built-in ones are |
-| `Scan` / scan builder | Not thread-safe; build on one thread, then enumerate |
+| `Scan` / scan builder | Not thread-safe; build on one thread, then enumerate. Its one static member, `ScanBuilder.DefaultDegreeOfParallelism` (§2), **is** thread-safe: reads and writes are volatile, and a builder racing a write gets one value or the other, never a torn one |
 | `IAsyncEnumerator<RecordBatch>` | Single consumer, as the language requires |
 | `RecordBatch` | **Affine to its consumer.** Not thread-safe, and disposal must happen on the consuming flow. Its spans die with it |
 | Decoders / kernels | Pure functions over borrowed memory; no shared mutable state |
@@ -28,6 +28,12 @@ interpretable at equal threading. The 1.0 model:
   consent; a server running 200 concurrent requests does not want each scan fanning out.
 * **Opt-in chunk parallelism**: `scan.WithDegreeOfParallelism(n)` decodes independent chunks
   concurrently. Splits are already the unit of independence in the format.
+* **Consent can be given once, for the process**: `ScanBuilder.DefaultDegreeOfParallelism` is the
+  degree every builder made after it starts from, for a host that decides its threading at start-up
+  rather than at each of a hundred call sites. It is **1** unless set, so a caller who touches
+  neither sees the sequential default; `WithDegreeOfParallelism` overrides it for one scan, and the
+  per-call value always wins. A builder reads it once, when constructed, so setting it disturbs no
+  builder already made and no enumeration already running.
 * I/O concurrency is separate and always on: `ReadManyAsync` issues overlapping reads regardless
   of decode parallelism, because latency hiding is the whole point on object storage.
 
