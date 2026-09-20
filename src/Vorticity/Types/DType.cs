@@ -1,4 +1,6 @@
-// A DType is 16 bytes: an arena reference plus a node index (docs/03-architecture.md section 3.2).
+// A DType is 16 bytes: an arena reference, a node index and the arena generation the index was
+// issued under (docs/03-architecture.md section 3.2). The generation sits in padding the reference
+// and the index already forced, so carrying it is free.
 // Every accessor is a lookup into the arena's arrays; nothing here allocates except the two
 // members whose contract says they do (GetFieldName, ExtensionId, ToString), which exist for
 // diagnostics.
@@ -23,11 +25,13 @@ public readonly struct DType : IEquatable<DType>
 {
     private readonly DTypeArena? _arena;
     private readonly int _index;
+    private readonly int _generation;
 
     internal DType(DTypeArena arena, int index)
     {
         _arena = arena;
         _index = index;
+        _generation = arena.Generation;
     }
 
     /// <summary>True for <c>default(DType)</c>, which belongs to no arena and has no kind.</summary>
@@ -374,6 +378,10 @@ public readonly struct DType : IEquatable<DType>
             return a is null && b is null;
         }
 
+        // Checked here too, not only in NodeRef: the walk below reads the node arrays directly, and
+        // an equality that quietly compared a dead handle would disagree with GetHashCode.
+        a.CheckGeneration(_generation);
+        b.CheckGeneration(other._generation);
         return DTypeArena.StructurallyEqual(a, _index, b, other._index);
     }
 
@@ -384,7 +392,7 @@ public readonly struct DType : IEquatable<DType>
     /// Structural hash matching <see cref="Equals(DType)"/> across arenas. The value is cached on
     /// the node at construction, so this is a single array read and allocates nothing.
     /// </summary>
-    public override int GetHashCode() => _arena is null ? 0 : _arena.NodeRef(_index).Hash;
+    public override int GetHashCode() => _arena is null ? 0 : _arena.NodeRef(_index, _generation).Hash;
 
     /// <summary>Structural equality. See <see cref="Equals(DType)"/>.</summary>
     public static bool operator ==(DType a, DType b) => a.Equals(b);
@@ -409,7 +417,7 @@ public readonly struct DType : IEquatable<DType>
             ThrowDefault();
         }
 
-        return ref arena.NodeRef(_index);
+        return ref arena.NodeRef(_index, _generation);
     }
 
     private static void Require(in DTypeNode n, DTypeKind expected)

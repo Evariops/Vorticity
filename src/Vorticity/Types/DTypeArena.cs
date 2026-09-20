@@ -158,6 +158,8 @@ public sealed class DTypeArena
     private int _nameCount;
     private int[] _nameBuckets;
 
+    private int _generation;
+
     /// <summary>Creates an empty arena.</summary>
     /// <param name="initialCapacity">Hint for the initial node capacity. Must not be negative.</param>
     public DTypeArena(int initialCapacity = 16)
@@ -182,11 +184,19 @@ public sealed class DTypeArena
     public int NameCount => _nameCount;
 
     /// <summary>
-    /// Drops every node and every interned name. All previously issued <see cref="DType"/> handles
-    /// become meaningless; the arena does not and cannot detect their reuse.
+    /// Counts how many times this arena has been cleared. Every <see cref="DType"/> carries the
+    /// value it was issued under, so a handle held across a <see cref="Clear"/> is recognised
+    /// instead of silently reading whatever node now occupies its index.
+    /// </summary>
+    internal int Generation => _generation;
+
+    /// <summary>
+    /// Drops every node and every interned name. Every previously issued <see cref="DType"/> handle
+    /// is dead: reading one throws <see cref="InvalidOperationException"/>.
     /// </summary>
     public void Clear()
     {
+        _generation++;
         _nodeCount = 0;
         _childCount = 0;
         _fieldNameCount = 0;
@@ -606,7 +616,31 @@ public sealed class DTypeArena
 
     // ---------------------------------------------------------------- node access
 
-    internal ref readonly DTypeNode NodeRef(int index) => ref _nodes[index];
+    internal ref readonly DTypeNode NodeRef(int index, int generation)
+    {
+        CheckGeneration(generation);
+        return ref _nodes[index];
+    }
+
+    /// <summary>
+    /// Refuses a handle issued before the last <see cref="Clear"/>. The index alone cannot tell:
+    /// after a clear the arena refills from zero, so a stale handle stays in bounds and names a
+    /// node of some unrelated dtype.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void CheckGeneration(int generation)
+    {
+        if (generation != _generation)
+        {
+            ThrowStale(generation, _generation);
+        }
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowStale(int held, int current) => throw new InvalidOperationException(
+        $"This DType was issued before the arena was cleared (handle generation {held}, arena " +
+        $"generation {current}); its node index no longer means anything.");
 
     internal ReadOnlySpan<byte> MetaSpan(in DTypeNode n) => _meta.AsSpan(n.MetaStart, n.MetaLength);
 

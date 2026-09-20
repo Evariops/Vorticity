@@ -51,6 +51,18 @@ public sealed class AllocationTests
         }
     }
 
+    /// <summary>
+    /// Both handles are a reference plus two ints, and both were already padded to two words by the
+    /// reference's alignment. Anything that pushes either past 16 bytes makes every schema array,
+    /// every statistics table and every copy of a handle cost half again as much.
+    /// </summary>
+    [Fact]
+    public void HandlesAreTwoWords()
+    {
+        Assert.Equal(16, Unsafe.SizeOf<DType>());
+        Assert.Equal(16, Unsafe.SizeOf<ScalarValue>());
+    }
+
     [Fact]
     public void CrossArenaEqualityAllocatesNothing()
     {

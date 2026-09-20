@@ -193,10 +193,20 @@ public sealed class PathAllocationTests
         // octets par scan contre quatre-vingts par split au degré 2 — 3 514 → 3 434 par lot, tous
         // threads confondus — donc l'échange se rembourse au deuxième split d'un scan parallèle et
         // coûte huit octets une fois à tous les autres.
-        ("open, first batch", File, 133_768, FirstBatch),
+        //
+        // +8 B per ScalarStore on 2026-09-20: +8 on the footer-only axis, which builds one store,
+        // +16 on the ten that build two, +24 on the pruned filter, which builds three. A DType and
+        // a ScalarValue now carry the generation of the arena or store that issued them, and
+        // reading a handle held across a Clear throws instead of answering about whatever node has
+        // since taken that index. Neither handle grew -- both are still 16 bytes, the generation
+        // sits in padding the reference and the index had already forced -- and DTypeArena did not
+        // grow either, 792 B before and after. ScalarStore did, 416 -> 424: its four int fields
+        // exactly filled their slot and a fifth rounds the object up. Eight bytes per store,
+        // against a class of silently wrong answers that no other test in the suite can catch.
+        ("open, first batch", File, 133_784, FirstBatch),
         ("full scan", File, 190_976, FullScan),
         ("projected scan, 1 of 5 columns", File, 134_144, ProjectedScan),
-        ("take 64 rows from 64 splits", File, 192_016, ScatteredTake),
+        ("take 64 rows from 64 splits", File, 192_032, ScatteredTake),
         ("selective filter, pruning on", File, 141_824, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
@@ -212,7 +222,7 @@ public sealed class PathAllocationTests
         // whose arenas were sized for a batch. R30 sized them for what they hold, and the gap is
         // now 6 496 B. What remains is the rest of that context plus the zone decode itself, and
         // no part of it grows with the number of zones.
-        ("selective filter, pruning off", File, 135_168, UnprunedFilter),
+        ("selective filter, pruning off", File, 135_176, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here
@@ -222,7 +232,7 @@ public sealed class PathAllocationTests
         // reference each on the enumerable, the enumerator and the lane's context, 32 B in all --
         // and this axis had none of the headroom the others carry. Loosened by exactly that, plus
         // the 32 B of headroom the neighbouring axes have.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_728, FullScan),
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_744, FullScan),
         ("scan, vortex.pco", "encodings/pco", 29_184, FullScan),
         // 27 648 -> 27 712 on 2026-09-19, and here is the argument. Decompressing a node's frames
         // used the one-shot `ZstandardDecoder.TryDecompress`, which builds and tears down a native
@@ -231,9 +241,9 @@ public sealed class PathAllocationTests
         // `zstd` axis from 7 476 to 6 844 us and `zstd_nullable` from 2 170 to 2 012 (bench/ab.sh,
         // 21 rounds, intervals [0,913; 0,937] and [0,921; 0,936]). Sixty-four bytes once, against
         // seven and a half per cent of both axes.
-        ("scan, vortex.zstd", "encodings/zstd", 27_728, FullScan),
+        ("scan, vortex.zstd", "encodings/zstd", 27_744, FullScan),
         ("scan, vortex.map", "encodings/map", 28_160, FullScan),
-        ("scan, vortex.variant", "encodings/variant", 27_648, FullScan),
+        ("scan, vortex.variant", "encodings/variant", 27_656, FullScan),
     ];
 
     [Fact]

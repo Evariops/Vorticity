@@ -1,6 +1,8 @@
-// A ScalarValue is 16 bytes: a store reference plus a biased node index. The bias is what makes
-// default(ScalarValue) mean Absent rather than "node 0 of a null store", which matters because
-// Absent has to be a first-class, storeless value (docs/08-semantics.md section 1).
+// A ScalarValue is 16 bytes: a store reference, a biased node index and the store generation the
+// index was issued under. The bias is what makes default(ScalarValue) mean Absent rather than
+// "node 0 of a null store", which matters because Absent has to be a first-class, storeless value
+// (docs/08-semantics.md section 1). The generation sits in padding the reference and the index
+// already forced, so carrying it is free.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -24,15 +26,18 @@ public readonly struct ScalarValue : IEquatable<ScalarValue>
     // Node index + 1, so that the all-zero default is Absent.
     private readonly int _indexPlusOne;
 
+    private readonly int _generation;
+
     internal ScalarValue(ScalarStore store, int nodeIndex)
     {
         _store = store;
         _indexPlusOne = nodeIndex + 1;
+        _generation = store.Generation;
     }
 
     /// <summary>The wire case this value carries, or <see cref="ScalarValueKind.Absent"/>.</summary>
     public ScalarValueKind Kind =>
-        _indexPlusOne == 0 ? ScalarValueKind.Absent : _store!.NodeRef(_indexPlusOne - 1).Kind;
+        _indexPlusOne == 0 ? ScalarValueKind.Absent : _store!.NodeRef(_indexPlusOne - 1, _generation).Kind;
 
     /// <summary>
     /// True when no value is present at all. Never true for a null value: an absent statistic
@@ -167,7 +172,11 @@ public readonly struct ScalarValue : IEquatable<ScalarValue>
             return a == 0 && b == 0;
         }
 
-        return ScalarStore.StructurallyEqual(_store!, a - 1, other._store!, b - 1);
+        // Checked here too, not only in NodeRef: the walk below reads the node arrays directly, and
+        // an equality that quietly compared a dead handle would disagree with GetHashCode.
+        _store!.CheckGeneration(_generation);
+        other._store!.CheckGeneration(other._generation);
+        return ScalarStore.StructurallyEqual(_store, a - 1, other._store, b - 1);
     }
 
     /// <inheritdoc/>
@@ -177,7 +186,8 @@ public readonly struct ScalarValue : IEquatable<ScalarValue>
     /// Structural hash matching <see cref="Equals(ScalarValue)"/> across stores. Cached on the
     /// node at construction, so this is a single array read and allocates nothing.
     /// </summary>
-    public override int GetHashCode() => _indexPlusOne == 0 ? 0 : _store!.NodeRef(_indexPlusOne - 1).Hash;
+    public override int GetHashCode() =>
+        _indexPlusOne == 0 ? 0 : _store!.NodeRef(_indexPlusOne - 1, _generation).Hash;
 
     /// <summary>
     /// Culture-invariant rendering: <c>absent</c>, <c>null</c>, <c>true</c>, <c>-3</c>,
@@ -213,7 +223,7 @@ public readonly struct ScalarValue : IEquatable<ScalarValue>
         }
 
         ScalarStore store = v._store!;
-        ref readonly ScalarNode n = ref store.NodeRef(v._indexPlusOne - 1);
+        ref readonly ScalarNode n = ref store.NodeRef(v._indexPlusOne - 1, v._generation);
         switch (n.Kind)
         {
             case ScalarValueKind.Null:
@@ -321,7 +331,7 @@ public readonly struct ScalarValue : IEquatable<ScalarValue>
             ThrowAbsent();
         }
 
-        return ref _store!.NodeRef(biased - 1);
+        return ref _store!.NodeRef(biased - 1, _generation);
     }
 
     private ref readonly ScalarNode Require(ScalarValueKind expected)

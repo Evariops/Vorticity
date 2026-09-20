@@ -434,6 +434,27 @@ public sealed class ScalarValueTests
     }
 
     [Fact]
+    public void AHandleHeldAcrossClearIsRefused()
+    {
+        ScalarStore store = new();
+        ScalarValue stale = store.Int64(7);
+
+        store.Clear();
+
+        // Refilled to the same slot with a different kind: without the generation the stale handle
+        // would read the string and AsInt64 would hand back its offset and length as an integer.
+        ScalarValue fresh = store.String("x"u8);
+
+        Assert.Throws<InvalidOperationException>(() => { _ = stale.Kind; });
+        Assert.Throws<InvalidOperationException>(() => { _ = stale.AsInt64; });
+        Assert.Throws<InvalidOperationException>(() => { _ = stale.GetHashCode(); });
+        Assert.Throws<InvalidOperationException>(() => { _ = stale.Equals(fresh); });
+        Assert.Throws<InvalidOperationException>(() => { _ = fresh.Equals(stale); });
+        Assert.Throws<InvalidOperationException>(() => stale.ToString());
+        Assert.Equal(ScalarValueKind.String, fresh.Kind);
+    }
+
+    [Fact]
     public void NegativeCapacityIsRejected() =>
         Assert.Throws<ArgumentOutOfRangeException>(() => { _ = new ScalarStore(-1); });
 

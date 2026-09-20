@@ -188,6 +188,27 @@ public sealed class DTypeArenaTests
     }
 
     [Fact]
+    public void AHandleHeldAcrossClearIsRefused()
+    {
+        DTypeArena arena = new();
+        DType stale = arena.Primitive(PType.I64, Nullability.NonNullable);
+
+        arena.Clear();
+
+        // Refilled to the same index with a different type: without the generation the stale handle
+        // would read Utf8 and answer every question about it without complaint.
+        DType fresh = arena.Utf8(Nullability.NonNullable);
+        Assert.Equal(stale.NodeIndex, fresh.NodeIndex);
+
+        Assert.Throws<InvalidOperationException>(() => { _ = stale.Kind; });
+        Assert.Throws<InvalidOperationException>(() => { _ = stale.PType; });
+        Assert.Throws<InvalidOperationException>(() => { _ = stale.GetHashCode(); });
+        Assert.Throws<InvalidOperationException>(() => { _ = stale == fresh; });
+        Assert.Throws<InvalidOperationException>(() => { _ = fresh == stale; });
+        Assert.Equal(DTypeKind.Utf8, fresh.Kind);
+    }
+
+    [Fact]
     public void NegativeCapacityIsRejected() =>
         Assert.Throws<ArgumentOutOfRangeException>(() => { _ = new DTypeArena(-1); });
 

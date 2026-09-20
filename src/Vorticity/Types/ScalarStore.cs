@@ -75,6 +75,8 @@ public sealed class ScalarStore
     private DType[] _variantTypes;
     private int _variantTypeCount;
 
+    private int _generation;
+
     /// <summary>Creates an empty store.</summary>
     /// <param name="initialCapacity">Hint for the initial node capacity. Must not be negative.</param>
     public ScalarStore(int initialCapacity = 16)
@@ -91,11 +93,19 @@ public sealed class ScalarStore
     public int NodeCount => _nodeCount;
 
     /// <summary>
-    /// Drops every value. All previously issued <see cref="ScalarValue"/> handles become
-    /// meaningless; the store does not and cannot detect their reuse.
+    /// Counts how many times this store has been cleared. Every <see cref="ScalarValue"/> carries
+    /// the value it was issued under, so a handle held across a <see cref="Clear"/> is recognised
+    /// instead of silently reading whatever value now occupies its slot.
+    /// </summary>
+    internal int Generation => _generation;
+
+    /// <summary>
+    /// Drops every value. Every previously issued <see cref="ScalarValue"/> handle is dead: reading
+    /// one throws <see cref="InvalidOperationException"/>.
     /// </summary>
     public void Clear()
     {
+        _generation++;
         _nodeCount = 0;
         _childCount = 0;
         _byteCount = 0;
@@ -237,7 +247,31 @@ public sealed class ScalarStore
 
     // ---------------------------------------------------------------- node access
 
-    internal ref readonly ScalarNode NodeRef(int index) => ref _nodes[index];
+    internal ref readonly ScalarNode NodeRef(int index, int generation)
+    {
+        CheckGeneration(generation);
+        return ref _nodes[index];
+    }
+
+    /// <summary>
+    /// Refuses a handle issued before the last <see cref="Clear"/>. The index alone cannot tell:
+    /// after a clear the store refills from zero, so a stale handle stays in bounds and names a
+    /// value of some unrelated kind.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void CheckGeneration(int generation)
+    {
+        if (generation != _generation)
+        {
+            ThrowStale(generation, _generation);
+        }
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowStale(int held, int current) => throw new InvalidOperationException(
+        $"This ScalarValue was issued before the store was cleared (handle generation {held}, " +
+        $"store generation {current}); its node index no longer means anything.");
 
     internal ReadOnlySpan<byte> BlobSpan(in ScalarNode n) => _bytes.AsSpan(n.Start, n.Length);
 
