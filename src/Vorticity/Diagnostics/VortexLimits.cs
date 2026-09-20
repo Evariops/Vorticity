@@ -84,8 +84,18 @@ public static class VortexLimits
             $"alignment_exponent {exponent} exceeds the cap of {MaxAlignmentExponent} " +
             $"({MaxAlignment} bytes).");
 
+    /// <summary>Refuses a nesting depth past <paramref name="max"/>.</summary>
+    /// <param name="depth">The depth about to be entered.</param>
+    /// <param name="max">The cap for this kind of tree; one of the constants above.</param>
+    /// <param name="what">What is being nested, for the message.</param>
+    /// <remarks>
+    /// INTERNAL, unlike <see cref="CheckAlignmentExponent"/>. The alignment check is named in
+    /// <c>SegmentSpec</c>'s own documentation as the thing an implementer of a segment source
+    /// calls, so it is part of what this library offers. This one is called only while parsing or
+    /// decoding, on trees a caller does not build.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void CheckDepth(int depth, int max, string what)
+    internal static void CheckDepth(int depth, int max, string what)
     {
         if ((uint)depth > (uint)max)
         {
