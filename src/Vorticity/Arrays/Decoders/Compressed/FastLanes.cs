@@ -78,6 +78,13 @@ internal static class FastLanes
     /// <param name="index">A logical index in <c>[0, 1024)</c>.</param>
     /// <returns>The transposed index.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is outside the block.</exception>
+    /// <remarks>
+    /// TEST-FACING. Nothing decodes through this: a kernel that needs the permutation walks
+    /// <see cref="UntransposeTable"/>, which is the same table without the two argument checks and
+    /// the bounds check this pays per element. What this is for is checking the table against the
+    /// formula the crate states, one index at a time, which is a thing a test does and a decoder
+    /// never does.
+    /// </remarks>
     public static int Transpose(int index)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(index);
@@ -92,6 +99,8 @@ internal static class FastLanes
     /// <param name="index">A transposed index in <c>[0, 1024)</c>.</param>
     /// <returns>The logical index it came from.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is outside the block.</exception>
+    /// <remarks>Test-facing, like <see cref="Transpose"/>; production reads
+    /// <see cref="UntransposeTable"/>.</remarks>
     public static int Untranspose(int index)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(index);
@@ -104,6 +113,12 @@ internal static class FastLanes
     /// <param name="input">Exactly 1024 elements.</param>
     /// <param name="output">Exactly 1024 elements.</param>
     /// <exception cref="ArgumentException">Either span is not exactly 1024 elements.</exception>
+    /// <remarks>
+    /// TEST-FACING, and the round trip is what it is for: transposing a block and untransposing it
+    /// must give the block back, which is the property the two tables have to hold jointly. No
+    /// decoder transposes a block on its own -- the permutation is applied while the values are
+    /// being unpacked, through <see cref="UntransposeTable"/>, so that the block is walked once.
+    /// </remarks>
     public static void TransposeBlock<T>(ReadOnlySpan<T> input, Span<T> output)
         where T : unmanaged
     {
@@ -127,6 +142,8 @@ internal static class FastLanes
     /// <param name="input">Exactly 1024 elements.</param>
     /// <param name="output">Exactly 1024 elements.</param>
     /// <exception cref="ArgumentException">Either span is not exactly 1024 elements.</exception>
+    /// <remarks>Test-facing, like <see cref="TransposeBlock{T}"/>; production reads
+    /// <see cref="UntransposeTable"/> while it unpacks.</remarks>
     public static void UntransposeBlock<T>(ReadOnlySpan<T> input, Span<T> output)
         where T : unmanaged
     {
