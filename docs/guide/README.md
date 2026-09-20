@@ -1,7 +1,7 @@
 # The guide
 
-Pages named by what you are trying to do. Each one is short, opens with a working example taken
-from a compiled program, and says what happens, what to watch out for, and what it costs.
+Pages named by what you are trying to do. Each one is short, opens with a working example, and says
+what happens, what to watch out for, and what it costs.
 
 The design documents are a different thing and live beside this directory: they say why the format
 and this implementation are shaped as they are. A page here points at one when you want the depth,
