@@ -1899,6 +1899,7 @@ Vorticity:     method ValueTask<FilterLiteral> MinAsync(string, CancellationToke
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
 Vorticity:     method ValueTask<bool> AnyAsync(CancellationToken = default)
 Vorticity:     method ValueTask<long> CountAsync(CancellationToken = default)
+Vorticity:     property int DefaultDegreeOfParallelism { get; set; }
 Vorticity: sealed class Vorticity.Scan.ScanMetrics
 Vorticity:     ctor ScanMetrics()
 Vorticity:     property long Batches { get; }

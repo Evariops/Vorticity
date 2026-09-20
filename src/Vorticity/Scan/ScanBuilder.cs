@@ -7,6 +7,7 @@
 // enumerator, which trims `read` down to `keep` after the filter has run.
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Columns;
@@ -26,6 +27,8 @@ namespace Vorticity.Scan;
 /// </remarks>
 public sealed class ScanBuilder
 {
+    private static int s_defaultDegree = 1;
+
     private readonly VortexFile _file;
     private FieldMaskBuilder? _fields;
     private VortexExpr? _filter;
@@ -36,7 +39,7 @@ public sealed class ScanBuilder
     private RowRange _rows;
     private bool _rowsSet;
     private int _maxBatchRows;
-    private int _degree = 1;
+    private int _degree = Volatile.Read(ref s_defaultDegree);
     private ScanMetrics? _metrics;
     private TerminalTiers _tiers = TerminalTiers.All;
     private string? _orderPath;
@@ -371,12 +374,47 @@ public sealed class ScanBuilder
         return this;
     }
 
+    /// <summary>
+    /// The degree every scan starts from when it does not ask for one. Defaults to <c>1</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A host that wants concurrency had otherwise to call
+    /// <see cref="WithDegreeOfParallelism"/> at every call site, and nothing obliged it to: one
+    /// forgotten site and that scan is sequential, one careless site and it is not. This is the
+    /// setting made once, in the place a host configures things — the server-side half of what an
+    /// engine spells <c>MAXDOP</c>, where the per-scan call is the query-side half and wins.
+    /// </para>
+    /// <para>
+    /// <b>It is a default and not a total.</b> Ten concurrent scans at a default of four may have
+    /// forty splits in flight between them; this bounds one scan, not the process. Bounding the
+    /// process would mean scans waiting on each other through a shared gate, which is a different
+    /// contract and is not offered here.
+    /// </para>
+    /// <para>
+    /// Read once, when a <see cref="ScanBuilder"/> is constructed, so changing it never disturbs a
+    /// builder already made or an enumeration already running. Setting it from one thread while
+    /// another builds a scan is safe and leaves that scan with either value.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
+    public static int DefaultDegreeOfParallelism
+    {
+        get => Volatile.Read(ref s_defaultDegree);
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            Volatile.Write(ref s_defaultDegree, value);
+        }
+    }
+
     /// <summary>Opts in to decoding independent splits concurrently.</summary>
     /// <param name="degree">How many splits may be in flight at once. Must be positive.</param>
     /// <returns>This builder.</returns>
     /// <remarks>
     /// <para>
-    /// Default <c>1</c>: a library must not appropriate the host's thread pool
+    /// Overrides <see cref="DefaultDegreeOfParallelism"/>, which is <c>1</c> unless the host has
+    /// set it: a library must not appropriate the host's thread pool
     /// (docs/09-contracts.md §2). Each concurrent split gets its <b>own</b>
     /// <see cref="Vorticity.Arrays.ScanContext"/> with its own arenas (contract §2.2); nothing is
     /// shared. Batches are still delivered in row order.
