@@ -62,8 +62,8 @@ internal static class Extremes
 
             default:
                 throw new NotSupportedException(
-                    $"A {node.Kind} column has no minimum or maximum in the 1.0 filter scope " +
-                    "(docs/01-scope.md F7).");
+                    $"A {node.Kind} column has no minimum or maximum a filter can take: only " +
+                    "booleans, primitives, utf8 and binary do, plus extensions over those.");
         }
     }
 

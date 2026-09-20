@@ -41,8 +41,7 @@ internal static class ListKernels
         if (node.Kind is not (CanonicalKind.ListView or CanonicalKind.FixedSizeList))
         {
             throw new NotSupportedException(
-                $"ListContains reads a list or a fixed-size list; this column is {node.Kind} " +
-                "(docs/10-indexes.md §5.1).");
+                $"ListContains reads a list or a fixed-size list; this column is {node.Kind}.");
         }
 
         ValidityMask mask = ValidityMask.From(arena, node.Validity);

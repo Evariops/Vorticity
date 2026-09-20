@@ -55,7 +55,7 @@ The messages name the thing they refused:
 The projection path 'nope' does not name a field of the file's schema. (Parameter 'paths')
 The file has 1000000 rows. (Parameter 'rows')  Actual value was -1.
 A scan selects rows by range or by index list, not both.
-This RecordBatch has been disposed; every span borrowed from it is invalid (docs/07-dotnet-mapping.md §4).
+This RecordBatch has been disposed; every span borrowed from it is invalid.
 ```
 
 ## A torn tail

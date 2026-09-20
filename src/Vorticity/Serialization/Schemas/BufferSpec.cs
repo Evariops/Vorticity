@@ -108,7 +108,7 @@ internal static class SchemaLayoutChecks
     // in this file depends on them, so they are asserted once before any caller can hand us bytes.
     [System.Diagnostics.CodeAnalysis.SuppressMessage(
         "Usage", "CA2255:The 'ModuleInitializer' attribute should not be used in libraries",
-        Justification = "Deliberate inline-struct size guard; see docs/09-contracts.md §7.")]
+        Justification = "The struct sizes are a wire contract and every zero-copy reinterpretation here depends on them.")]
     [ModuleInitializer]
     internal static void Initialize()
     {

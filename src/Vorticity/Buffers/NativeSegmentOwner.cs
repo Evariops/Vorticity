@@ -233,7 +233,7 @@ public sealed class NativeSegmentOwner : SegmentOwner
     private static void ThrowAlignment(int alignment) =>
         throw new VortexFormatException(
             $"Segment alignment {alignment} must be a power of two in [1, " +
-            $"{VortexLimits.MaxAlignment}] (docs/08-semantics.md §6).");
+            $"{VortexLimits.MaxAlignment}].");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     [DoesNotReturn]

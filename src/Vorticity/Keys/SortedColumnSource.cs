@@ -113,7 +113,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         DType column = schema.GetField(index);
         if (!TryKeyKind(column, out FilterLiteralKind kind))
         {
-            return (null, $"a {column.Kind} column has no key order a cursor can walk (docs/12-index-reads.md §4.4)");
+            return (null, $"a {column.Kind} column has no key order a cursor can walk");
         }
 
         // The nulls are the leading rows and are not entries, so the source has to know how many

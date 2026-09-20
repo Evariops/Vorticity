@@ -375,7 +375,8 @@ public sealed class WritePolicy
         if (policy.Kind != IndexPolicyKind.SortedRuns)
         {
             throw new ArgumentException(
-                "A composite key is a sorted-runs index (docs/10-indexes.md §6.5).", nameof(policy));
+                "A composite key is served by a sorted-runs index and by no other kind.",
+                nameof(policy));
         }
 
         List<CompositeKeyPolicy> keys = [.. _keys, new CompositeKeyPolicy([.. columnPaths], policy)];

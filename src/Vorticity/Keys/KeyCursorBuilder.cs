@@ -117,8 +117,7 @@ public sealed class KeyCursorBuilder
         if (_forced is KeySourceKind.Postings or KeySourceKind.Dictionary && !_distinct)
         {
             throw new InvalidOperationException(
-                $"{_forced} holds keys without rows and serves only a Distinct() cursor " +
-                "(docs/12-index-reads.md §3).");
+                $"{_forced} holds keys without rows and serves only a Distinct() cursor.");
         }
 
         Choice choice = await ChooseAsync(cancellationToken).ConfigureAwait(false);
@@ -141,7 +140,7 @@ public sealed class KeyCursorBuilder
                 (_composite is not null
                     ? "WritePolicy.ForKey over these columns and a VortexWriteOptions.KeyEncoder"
                     : _distinct ? "IndexPolicy.Postings for that column" : "IndexPolicy.SortedRuns for that column") +
-                ", or add the index after the fact (docs/10-indexes.md §8).");
+                ", or add the index after the fact with VortexFileIndexer.");
         }
 
         return new KeyCursor(choice.Source, _distinct);
@@ -233,7 +232,7 @@ public sealed class KeyCursorBuilder
             {
                 rejected.Add(new KeySourceRejection(
                     candidate,
-                    "a composite key is served only by the sorted runs of its row encoding (docs/12-index-reads.md §4.6)"));
+                    "a composite key is served only by the sorted runs of its row encoding"));
                 continue;
             }
 
@@ -241,7 +240,7 @@ public sealed class KeyCursorBuilder
             {
                 rejected.Add(new KeySourceRejection(
                     candidate,
-                    "it holds keys without rows, which only a Distinct() cursor takes (docs/12-index-reads.md §3)"));
+                    "it holds keys without rows, which only a Distinct() cursor takes"));
                 continue;
             }
 
@@ -259,7 +258,7 @@ public sealed class KeyCursorBuilder
             }
             else if (chosen is not null)
             {
-                rejected.Add(new KeySourceRejection(candidate, $"{kind} is cheaper and was taken first (docs/12-index-reads.md §3)"));
+                rejected.Add(new KeySourceRejection(candidate, $"{kind} is cheaper and was taken first"));
                 await opened.DisposeAsync().ConfigureAwait(false);
             }
             else

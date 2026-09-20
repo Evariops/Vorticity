@@ -513,8 +513,7 @@ public static class Expr
         {
             throw new ArgumentException(
                 $"{op} matches BYTES, so its pattern must be a bytes literal; this one is " +
-                $"{pattern.Kind}. A column of any other type has no byte pattern to match " +
-                "(docs/12-index-reads.md §7).",
+                $"{pattern.Kind}. A column of any other type has no byte pattern to match.",
                 nameof(pattern));
         }
 
@@ -549,8 +548,8 @@ public static class Expr
 
         throw new ArgumentException(
             left is FieldExpr && right is FieldExpr
-                ? "A filter comparison is between a field and a literal. Comparing two columns is " +
-                  "outside the 1.0 filter scope (docs/01-scope.md F7)."
+                ? "A filter comparison is between a field and a literal. It cannot compare " +
+                  "two columns to each other."
                 : "A filter comparison is between a field and a literal.",
             nameof(right));
     }

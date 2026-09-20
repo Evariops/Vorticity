@@ -724,7 +724,7 @@ public sealed partial class VortexFileWriter
             new VortexUnsupportedException(
                 "append",
                 "layout",
-                $"This file cannot be appended to: {why}. Rewrite it instead (docs/11-write-strategy.md §3.8).");
+                $"This file cannot be appended to: {why}. Rewrite it instead.");
     }
 
     /// <summary>What the old file says of one column.</summary>

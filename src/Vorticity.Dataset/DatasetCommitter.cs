@@ -150,7 +150,7 @@ public static class DatasetCommitter
 
         throw new ObjectStoreException(
             $"The commit lost {options.MaxAttempts} times; a coordinator that batches commits is the " +
-            "answer to contention, not more attempts (docs/13-dataset.md §8.2).");
+            "answer to contention, not more attempts.");
     }
 
     /// <summary>The latest version and its commit object, in one listing and one read; (0, null)

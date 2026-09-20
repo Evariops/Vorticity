@@ -82,9 +82,8 @@ internal static class ComparisonKernels
 
             default:
                 throw new NotSupportedException(
-                    $"A filter cannot compare a {node.Kind} column. The 1.0 filter evaluates " +
-                    "booleans, primitives, utf8 and binary, plus extensions over those " +
-                    "(docs/01-scope.md F7).");
+                    $"A filter cannot compare a {node.Kind} column. A filter evaluates " +
+                    "booleans, primitives, utf8 and binary, plus extensions over those.");
         }
     }
 
@@ -115,7 +114,7 @@ internal static class ComparisonKernels
         {
             throw new NotSupportedException(
                 $"{op} matches bytes, so it evaluates utf8 and binary columns and extensions over " +
-                $"those; this one is {node.Kind} (docs/12-index-reads.md §7).");
+                $"those; this one is {node.Kind}.");
         }
 
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
@@ -374,9 +373,8 @@ internal static class ComparisonKernels
 
             default:
                 throw new NotSupportedException(
-                    $"A filter cannot compare a constant {dtype.Kind} column. The 1.0 filter " +
-                    "evaluates booleans, primitives, utf8 and binary, plus extensions over those " +
-                    "(docs/01-scope.md F7).");
+                    $"A filter cannot compare a constant {dtype.Kind} column. A filter " +
+                    "evaluates booleans, primitives, utf8 and binary, plus extensions over those.");
         }
 
         if (mask.AllValid)

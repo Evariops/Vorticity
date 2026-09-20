@@ -512,8 +512,7 @@ public sealed class RecordBatch : IDisposable
     private void ThrowDisposed() =>
         throw new ObjectDisposedException(
             nameof(RecordBatch),
-            "This RecordBatch has been disposed; every span borrowed from it is invalid " +
-            "(docs/07-dotnet-mapping.md §4).");
+            "This RecordBatch has been disposed; every span borrowed from it is invalid.");
 
     private static CanonicalArena ArenaOf(ScanContext context)
     {

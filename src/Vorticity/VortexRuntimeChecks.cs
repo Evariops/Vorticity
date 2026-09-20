@@ -13,7 +13,7 @@ internal static class VortexRuntimeChecks
     // executed once.
     [System.Diagnostics.CodeAnalysis.SuppressMessage(
         "Usage", "CA2255:The 'ModuleInitializer' attribute should not be used in libraries",
-        Justification = "Deliberate endianness guard; see docs/09-contracts.md §7.")]
+        Justification = "The endianness guard must run before a caller can hand the library a buffer.")]
     [ModuleInitializer]
     internal static void Initialize()
     {

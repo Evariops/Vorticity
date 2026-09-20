@@ -272,7 +272,7 @@ public sealed class BloomTreeTests
             {
                 Assert.Equal(IndexOutcome.Abandoned, bloom.Outcome);
                 Assert.Contains("first generation", bloom.Reason, StringComparison.Ordinal);
-                Assert.Contains("13-dataset.md §6.5", bloom.Reason, StringComparison.Ordinal);
+                Assert.Contains("a sorted-runs index serves such a column", bloom.Reason, StringComparison.Ordinal);
             }
             else
             {

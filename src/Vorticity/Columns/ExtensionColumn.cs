@@ -213,8 +213,7 @@ public readonly ref struct ExtensionColumn
         {
             ColumnsThrow.NotConvertible(
                 "This timestamp column carries a timezone other than UTC, so a UTC DateTime would " +
-                "be a guess. Use ToDateTimeOffset(index, timeZone), which makes the zone explicit " +
-                "(docs/07-dotnet-mapping.md §3).");
+                "be a guess. Use ToDateTimeOffset(index, timeZone), which makes the zone explicit.");
         }
 
         return Instant(index, options.Unit);

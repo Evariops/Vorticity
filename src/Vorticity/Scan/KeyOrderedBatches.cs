@@ -249,7 +249,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                     IndexKinds.SortedRuns,
                     "index",
                     $"InKeyOrder(({string.Join(", ", composite)})) needs the composite key's sorted runs " +
-                    $"(WritePolicy.ForKey): {reason} (docs/12-index-reads.md §4.6, §6).");
+                    $"(WritePolicy.ForKey): {reason}.");
                 _slices = await ExactCover.RangeAsync(null, source, _owner._path, _token).ConfigureAwait(false);
             }
             else
@@ -262,7 +262,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                     "index",
                     $"InKeyOrder(\"{_owner._path}\") needs a key source: the column is neither stated sorted " +
                     "nor indexed with IndexPolicy.SortedRuns, and ordering an unindexed column would mean " +
-                    "holding it (docs/12-index-reads.md §3, §6).");
+                    "holding the whole column in memory.");
                 _slices = await ExactCover.RangeAsync(_owner._filter, source, _owner._path, _token).ConfigureAwait(false);
             }
             if (_owner._descending)

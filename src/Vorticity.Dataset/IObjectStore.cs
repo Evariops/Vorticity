@@ -108,8 +108,8 @@ public sealed class ObjectNotFoundException : Exception
     public static ObjectNotFoundException InVersion(string key, ulong version, Exception cause) =>
         new ObjectNotFoundException(
             $"Version {version} of the dataset names '{key}', which the store no longer holds. A reader that " +
-            "outlives the retention window loses its objects to vacuum (docs/13-dataset.md §10); refresh to " +
-            "read the latest version.",
+            "outlives the retention window loses its objects to vacuum; refresh to read the latest " +
+            "version.",
             cause)
         {
             Key = key,

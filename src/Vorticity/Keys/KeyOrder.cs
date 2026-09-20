@@ -69,8 +69,8 @@ internal static class KeyOrder
         {
             throw new ArgumentException(
                 $"A key of domain {left.Kind} cannot be ordered against one of domain " +
-                $"{right.Kind}: docs/12-index-reads.md §4.4 gives an order per dtype, not across " +
-                "them.",
+                $"{right.Kind}: keys are ordered within one dtype, and there is no order across " +
+                "two.",
                 nameof(right));
         }
     }

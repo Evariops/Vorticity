@@ -262,7 +262,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 {
                     throw new ArgumentException(
                         $"The object '{objectKey}' has a schema other than the dataset's; a dataset " +
-                        "holds objects of one schema (docs/13-dataset.md §15.4).",
+                        "holds objects of one schema.",
                         nameof(objectKey));
                 }
 

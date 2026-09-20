@@ -554,7 +554,7 @@ internal sealed class BloomBuilder : IndexBuilder
     private void GiveUp(long projected, long raw) =>
         Abandon(
             $"Auto gave it up: {projected} bytes of filters against {raw} raw bytes of column, " +
-            $"over its share of {AutoShare}‰ (docs/10-indexes.md §5.5)");
+            $"over its share of {AutoShare}‰. An explicit Bloom policy overrides the share");
 
     /// <summary>
     /// Seals the open block: sizes and fills its filter, folds its values into the coarser sets,
@@ -651,7 +651,7 @@ internal sealed class BloomBuilder : IndexBuilder
         Abandon(
             $"Auto gave it up: its first generation holds more than {TreeWriter.Capacity} distinct values, " +
             $"more than a filter of {_maxBlocks} blocks holds at {_policy.FalsePositivePpm} ppm, so a " +
-            "probe would read every block's filter; a sorted run serves such a column (docs/13-dataset.md §6.5)");
+            "probe would read every block's filter; a sorted-runs index serves such a column");
         return true;
     }
 
@@ -697,7 +697,7 @@ internal sealed class BloomBuilder : IndexBuilder
         Abandon(
             $"Auto gave it up: its first {RepeatBlocks} blocks hold the same {distinct} values, so its " +
             "block filters prune nothing and the pass that would fill their root costs more than a " +
-            "default write may spend; an explicit Bloom policy buys it (docs/10-indexes.md §5.5)");
+            "default write may spend; an explicit Bloom policy buys it");
         _block.Clear();
         return true;
     }
@@ -774,7 +774,7 @@ internal sealed class BloomBuilder : IndexBuilder
             // hashing the rest of the file would buy nothing.
             Abandon(
                 $"Auto gave it up: the first {count} blocks hold {union} distinct values, " +
-                $"under the floor of {_policy.MinDistinct} (docs/10-indexes.md §5.5)");
+                $"under the floor of {_policy.MinDistinct} the policy asks before a filter pays");
         }
 
         if (Abandoned is null)
@@ -815,7 +815,7 @@ internal sealed class BloomBuilder : IndexBuilder
     {
         if (AutoShare > 0 && Abandoned is null && sorted == true && !_trigrams)
         {
-            Abandon("Auto gave it up: the column is sorted, so its zone map already prunes an equality (docs/10-indexes.md §5.5)");
+            Abandon("Auto gave it up: the column is sorted, so its zone map already prunes an equality");
         }
     }
 

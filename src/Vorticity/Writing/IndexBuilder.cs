@@ -77,7 +77,7 @@ internal abstract class IndexBuilder : IDisposable
         {
             Abandon(
                 $"Auto gave it up: {Bytes} bytes against {facts.ColumnBytes} bytes of column, over " +
-                $"its share of {AutoShare}‰ (docs/10-indexes.md §5.5)");
+                $"its share of {AutoShare}‰. An explicit policy overrides the share");
         }
     }
 

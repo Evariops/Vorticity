@@ -309,9 +309,8 @@ public sealed class KeyCursor : IAsyncDisposable
         if (!_source.HasRows)
         {
             throw new InvalidOperationException(
-                $"{member} needs rows, and this cursor's source holds keys without rows " +
-                "(docs/12-index-reads.md §4.3). A cursor opened without Distinct() is always " +
-                "served with rows.");
+                $"{member} needs rows, and this cursor's source holds keys without rows. " +
+                "A cursor opened without Distinct() is always served with rows.");
         }
     }
 
@@ -320,7 +319,7 @@ public sealed class KeyCursor : IAsyncDisposable
         if (key.Kind == FilterLiteralKind.Null)
         {
             throw new ArgumentException(
-                "No entry has a null key: nulls are in no key source (docs/12-index-reads.md §3).",
+                "No entry has a null key: a null is in no key source.",
                 nameof(key));
         }
 
@@ -328,7 +327,7 @@ public sealed class KeyCursor : IAsyncDisposable
         {
             throw new ArgumentException(
                 $"This column's keys are {KeyKind}; a {key.Kind} key cannot be ordered against " +
-                "them (docs/12-index-reads.md §4.4).",
+                "them.",
                 nameof(key));
         }
     }

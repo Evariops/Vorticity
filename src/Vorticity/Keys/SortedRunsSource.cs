@@ -211,7 +211,7 @@ internal sealed partial class SortedRunsSource : KeySource
         if (!SortedColumnSource.TryKeyKind(dtype, out kind) || !KeyLayout.TryOf(dtype, out layout))
         {
             layout = default;
-            return $"a {dtype.Kind} column has no key order a cursor can walk (docs/12-index-reads.md §4.4)";
+            return $"a {dtype.Kind} column has no key order a cursor can walk";
         }
 
         while (storage.Kind == DTypeKind.Extension)
