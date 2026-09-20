@@ -77,6 +77,32 @@ public sealed class AlignedBufferPoolTests
     }
 
     [Fact]
+    public void A_recycled_block_still_carries_the_previous_tenants_bytes()
+    {
+        // The other side of "rented memory is not zeroed": here it is observable rather than
+        // merely unpromised. A caller that reads a block before filling it reads the last scan's
+        // segment, and no assertion anywhere may come to depend on finding a zero.
+        AlignedBufferPool pool = new AlignedBufferPool();
+        try
+        {
+            NativeSegmentOwner first = pool.Rent(64, 64);
+            first.WritableSpan.Fill(0xA7);
+            pool.Return(first);
+
+            NativeSegmentOwner second = pool.Rent(64, 64);
+            Assert.Same(first, second);
+            Assert.Equal(0xA7, second.Buffer.Span[0]);
+            Assert.Equal(0xA7, second.Buffer.Span[63]);
+
+            pool.Return(second);
+        }
+        finally
+        {
+            pool.Trim();
+        }
+    }
+
+    [Fact]
     public void Sizes_in_the_same_class_share_a_block()
     {
         AlignedBufferPool pool = new AlignedBufferPool();

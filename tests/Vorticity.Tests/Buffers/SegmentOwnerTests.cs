@@ -312,17 +312,19 @@ public sealed class SegmentOwnerTests
         Assert.Equal(101, owner.WritableSpan.Length);
     }
 
+    // The zero this used to assert is the allocator's, not the owner's: a pinned array arrives
+    // zeroed, a native block and a recycled pool block do not, and all three are interchangeable
+    // behind SegmentOwner. Asserting it here turned an accident into a contract that two of the
+    // three origins break.
     [Fact]
-    public void A_pinned_segment_starts_zeroed_and_round_trips_its_bytes()
+    public void A_pinned_segment_round_trips_the_bytes_written_through_it()
     {
         using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.Allocate(32, 64);
 
-        for (int i = 0; i < 32; i++)
-        {
-            Assert.Equal(0, owner.Buffer.Span[i]);
-        }
-
         owner.WritableSpan.Fill(0x5A);
+        owner.WritableSpan[0] = 0x3C;
+
+        Assert.Equal(0x3C, owner.Buffer.Span[0]);
         Assert.Equal(0x5A, owner.Buffer.Span[31]);
     }
 

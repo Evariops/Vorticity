@@ -39,8 +39,7 @@ public sealed class PinnedArraySegmentOwner : SegmentOwner
     }
 
     /// <summary>
-    /// Allocates <paramref name="length"/> zero-filled bytes aligned to
-    /// <paramref name="alignment"/>.
+    /// Allocates <paramref name="length"/> bytes aligned to <paramref name="alignment"/>.
     /// </summary>
     /// <param name="length">Length in bytes, non-negative.</param>
     /// <param name="alignment">A power of two in
@@ -49,6 +48,12 @@ public sealed class PinnedArraySegmentOwner : SegmentOwner
     /// <exception cref="VortexFormatException">
     /// <paramref name="length"/> is negative or <paramref name="alignment"/> is out of range.
     /// </exception>
+    /// <remarks>
+    /// The bytes arrive zeroed because <see cref="GC.AllocateArray{T}(int, bool)"/> zeroes what it
+    /// hands out. That is the allocator's behaviour and not this type's promise: the other two
+    /// origins of a <see cref="SegmentOwner"/> hand back whatever the memory last held, the three
+    /// are interchangeable to a caller, and reading before writing is a defect against all of them.
+    /// </remarks>
     public static unsafe PinnedArraySegmentOwner Allocate(int length, int alignment)
     {
         int exponent = NativeSegmentOwner.CheckLengthAndAlignment(length, alignment);

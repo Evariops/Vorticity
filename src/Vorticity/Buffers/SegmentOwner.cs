@@ -25,6 +25,12 @@ namespace Vorticity.Buffers;
 /// <see cref="Retain"/> on an already-freed owner throws instead of returning a dangling view.
 /// </para>
 /// <para>
+/// <b>The owned bytes carry no zero-fill guarantee.</b> The origins disagree about what is there
+/// before anyone writes: native memory and a recycled pool block hold whatever they last held, a
+/// pinned array happens to arrive zeroed. They are interchangeable behind this type, so no caller
+/// may read the difference — whatever produced an owner fills the bytes it means to be read.
+/// </para>
+/// <para>
 /// <b><see cref="Dispose"/> is idempotent</b> — it drops the creator's single initial reference
 /// the first time and does nothing on any later call, as <see cref="IDisposable"/> requires. It
 /// is <em>not</em> a synonym for an unguarded <see cref="Release"/>: use <see cref="Release"/>
