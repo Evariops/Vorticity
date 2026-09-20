@@ -235,6 +235,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     // SHARED, BECAUSE NOTHING WRITES TO IT: the sink takes `ReadOnlyMemory<byte>`. One array per
     // writer was 88 bytes on every file for 64 zeros, which is what pays for the report's fields.
     private static readonly byte[] Padding = new byte[VortexLimits.MaxAlignment];
+    // The same, for the same reason: the magic is four bytes nobody writes to, and the sink takes
+    // memory rather than a span. Twenty-eight bytes a file, which is what it is -- the point is
+    // that there is now one rule here and not two.
+    private static readonly byte[] Magic = VortexFileFormat.MagicBytes.ToArray();
     private readonly bool _fileStatistics;
 
     /// <summary>The identity the options pinned, or null for a fresh one (docs/13-dataset.md §7).</summary>
@@ -1322,8 +1326,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         }
 
         _started = true;
-        byte[] magic = VortexFileFormat.MagicBytes.ToArray();
-        await _sink.WriteAsync(magic, cancellationToken).ConfigureAwait(false);
+        await _sink.WriteAsync(Magic, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
