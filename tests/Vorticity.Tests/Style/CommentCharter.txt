@@ -1,0 +1,81 @@
+# usage: edit the patterns here, not in the test that reads them.
+#
+# One entry per line. Blank lines and lines opening with a hash are ignored. Every entry is a
+# regular expression, matched case-sensitively unless it says otherwise.
+#
+# Sections:
+#   acronyms  a capitalised run that is a name or an identifier rather than emphasis. Matched as a
+#             whole word, and subtracted from the finding-identifier pattern too, so that a type
+#             like I128 is not read as a finding called I-128.
+#   reference a pointer to something outside the file: a document, a section, an audit entry, a
+#             date, a commit.
+#   history   a trace of how the code got here, as opposed to what it does.
+
+[acronyms]
+ASCII
+AVX2
+BSWAP
+CRLF
+D7FF
+DRAM
+FFFD
+FSST
+GUID
+HTTP
+IANA
+IEEE
+JSON
+JSONL
+LEB128
+LIFO
+MAXDOP
+NEON
+PROTO3
+PROTOBUF
+SBBF
+SIGBUS
+SIMD
+SINT64
+SWAR
+TOST
+UTF8
+UUID
+VLDB
+VTXF
+VXCOMMIT
+VXCT
+VXFB
+VXIX
+XXH3
+XXH64
+ZSTD
+# Compiler and analyzer diagnostic identifiers.
+(CS|CA)[0-9]{4}
+IDE[0-9]{4}
+IL[0-9]{4}
+RS[0-9]{4}
+# Fixed-width types spelled in capitals.
+[IUF][0-9]{1,3}
+
+[reference]
+\.md\b
+§
+\bdocs/[0-9]
+\b(PERF|BENCH|WRITE|IMPL|AUDIT)-[A-Za-z]
+# A finding or plan identifier: one or two capitals, an optional dash, up to three digits.
+\b[A-Z]{1,2}-?[0-9]{1,3}[a-z]?\b
+# A date, to the month.
+\b20[0-9]{2}-[0-9]{2}
+# An abbreviated commit hash.
+\b[0-9a-f]{7,}\b
+
+[history]
+\bused to\b
+\bno longer\b
+\btoday\b
+\bfor now\b
+\bnot yet\b
+\bwas [0-9]
+\b[0-9][0-9 ]*(->|→)[0-9 ]*[0-9]\b
+\bmeasured\b
+\bon 20[0-9]{2}\b
