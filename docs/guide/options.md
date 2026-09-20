@@ -47,7 +47,7 @@ Decoding vortex.runend would materialize 3997696 bytes, above the 4096-byte deco
 ```
 
 It exists so that a hostile or corrupt file cannot make a reader allocate without bound. Lower it
-for untrusted input; raise it for a file with genuinely large blocks. `limits.md` is the
+for untrusted input; raise it for a file with genuinely large blocks. [limits.md](limits.md) is the
 rest of that subject.
 
 ## Writing
@@ -64,11 +64,11 @@ VortexWriteOptions options = new VortexWriteOptions
 | option | default | what it changes |
 |---|---|---|
 | `RowBlockSize` | 8 192 | rows per block: the unit of pruning, of a take, and of a batch |
-| `DataBlockTargetBytes` | 1 048 576 | how much data goes into one segment |
+| `DataBlockTargetBytes` | 1 048 576 | uncompressed bytes to gather before a chunk is sealed. Raising it merges chunks: 16 MiB gave one chunk instead of two on a 400 000-row file, 1.3 % smaller. Lowering it below the default changed nothing on the files measured here |
 | `Compress` | `true` | choose an encoding per column, or store the canonical form |
 | `Profile` | `Default` | `Fastest` spends less time choosing |
 | `FileStatistics` | `true` | write the per-column summaries the open reads back |
-| `TargetEdition` | `Core20260803` | the edition a reader must understand: see `editions.md` |
+| `TargetEdition` | `Core20260803` | the edition a reader must understand: see [editions.md](editions.md) |
 | `IndexBudgetPerMille` | 100 | what the automatic index policy may spend, in thousandths of the file |
 | `EncodingHints` | empty | steer a column by name: see [encoding-hints.md](encoding-hints.md) |
 | `Indexes` | `Auto` | the index policy: see [indexes.md](indexes.md) |
@@ -101,7 +101,7 @@ ScanBuilder.DefaultDegreeOfParallelism = 4;   // process-wide, default 1
 ```
 
 It is a static, it is read once when a builder is constructed, and a per-scan
-`WithDegreeOfParallelism` wins over it. `threads.md` says what to expect from it.
+`WithDegreeOfParallelism` wins over it. [threads.md](threads.md) says what to expect from it.
 
 ## Run it
 

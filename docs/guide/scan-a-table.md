@@ -88,7 +88,7 @@ decide.
 
 * The batches arrive in file order. There is no parallel enumeration to opt into here;
   `WithDegreeOfParallelism` parallelises the decoding under one enumerator, and
-  `threads.md` says what that changes.
+  [threads.md](threads.md) says what that changes.
 * Breaking out of the loop stops the scan. Any batch already yielded is still yours to dispose.
 * A scan does not see a write that happened after the file was opened. Open again for that.
 

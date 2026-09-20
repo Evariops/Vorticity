@@ -18,7 +18,7 @@ It also carries refusals that protect the reader from a hostile file:
 Decoding vortex.runend would materialize 3997696 bytes, above the 4096-byte decompression ceiling.
 ```
 
-`limits.md` lists those ceilings and how to move them.
+[limits.md](limits.md) lists those ceilings and how to move them.
 
 ## `VortexUnsupportedException`
 

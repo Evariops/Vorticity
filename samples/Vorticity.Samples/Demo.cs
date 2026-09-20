@@ -61,6 +61,14 @@ internal static class Demo
         }
 
         string path = Path("wide.vortex");
+        await WriteWideAsync(path, VortexWriteOptions.Default);
+        Wide = path;
+        return path;
+    }
+
+    /// <summary>Writes the six-column file with the options given, and says how many chunks it took.</summary>
+    internal static async Task<int> WriteWideAsync(string path, VortexWriteOptions options)
+    {
         DTypeArena types = new DTypeArena();
         string[] names = ["a", "b", "c", "d", "e", "f"];
         DType[] fields = new DType[names.Length];
@@ -70,30 +78,26 @@ internal static class Demo
         }
 
         DType schema = types.Struct(names, fields, Nullability.NonNullable);
-        await using (VortexFileWriter writer = VortexFileWriter.Create(path, schema))
+        await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, options);
+        CanonicalArena arena = new CanonicalArena();
+        int[] nodes = new int[names.Length];
+        for (int f = 0; f < names.Length; f++)
         {
-            CanonicalArena arena = new CanonicalArena();
-            int[] nodes = new int[names.Length];
-            for (int f = 0; f < names.Length; f++)
+            VortexBuffer buffer = arena.Allocate(WideRows * sizeof(double), 8, out Span<byte> bytes);
+            Span<double> values = MemoryMarshal.Cast<byte, double>(bytes);
+            for (int i = 0; i < WideRows; i++)
             {
-                VortexBuffer buffer = arena.Allocate(WideRows * sizeof(double), 8, out Span<byte> bytes);
-                Span<double> values = MemoryMarshal.Cast<byte, double>(bytes);
-                for (int i = 0; i < WideRows; i++)
-                {
-                    values[i] = (i * (7919L + f) % 100_003) / 7.0;
-                }
-
-                nodes[f] = arena.AddPrimitive(schema.GetField(f), WideRows, Validity.NonNullable, PType.F64, buffer);
+                values[i] = (i * (7919L + f) % 100_003) / 7.0;
             }
 
-            int root = arena.AddStruct(schema, WideRows, Validity.NonNullable, nodes);
-            using RecordBatch batch = new RecordBatch(arena, root, 0);
-            await writer.WriteAsync(batch);
-            await writer.CompleteAsync();
+            nodes[f] = arena.AddPrimitive(schema.GetField(f), WideRows, Validity.NonNullable, PType.F64, buffer);
         }
 
-        Wide = path;
-        return path;
+        int root = arena.AddStruct(schema, WideRows, Validity.NonNullable, nodes);
+        using RecordBatch batch = new RecordBatch(arena, root, 0);
+        await writer.WriteAsync(batch);
+        WriteReport report = await writer.CompleteAsync();
+        return report.ChunkRows.Count;
     }
 
     /// <summary>

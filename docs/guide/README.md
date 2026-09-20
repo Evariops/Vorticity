@@ -44,17 +44,17 @@ and never repeats it.
 | [indexes.md](indexes.md) | what `Auto` builds and what it costs, and when to ask for more by name |
 | [keys-in-order.md](keys-in-order.md) | walk a column in key order, seek, step, rank, and read distinct keys |
 | [statistics-and-pruning.md](statistics-and-pruning.md) | see which blocks were skipped and why, and what makes pruning work |
-| `editions.md` | target an edition so that older readers, and Vortex Rust, can read what you write |
+| [editions.md](editions.md) | target an edition so that older readers, and Vortex Rust, can read what you write |
 | [encoding-hints.md](encoding-hints.md) | steer the compressor per column, and measure whether it helped |
-| `append-and-repair.md` | add rows to a file you already wrote, and recover one whose tail was torn |
+| [append-and-repair.md](append-and-repair.md) | add rows to a file you already wrote, and recover one whose tail was torn |
 | `datasets.md` | create a versioned dataset over an object store, import, append, commit |
 | `dataset-maintenance.md` | compact, vacuum, verify, and what each costs in requests |
 | `object-store.md` | implement the store seam for the service you use; also how to open a single file out of one |
 | `row-keys.md` | encode a tuple into bytes whose `memcmp` order is tuple order |
 | `vxdump.md` | look inside a file: schema, layout tree, encodings, segments, statistics |
 | `native-aot.md` | publish an application that uses this library ahead of time |
-| `threads.md` | what is safe to share, what is not, and how to turn on parallel decoding |
-| `limits.md` | the caps that protect a reader from a hostile file, and how to change them |
+| [threads.md](threads.md) | what is safe to share, what is not, and how to turn on parallel decoding |
+| [limits.md](limits.md) | the caps that protect a reader from a hostile file, and how to change them |
 
 ## Reference
 

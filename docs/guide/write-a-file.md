@@ -132,7 +132,7 @@ over the same path makes it fail with `IOException`.
 * A `RecordBatch` must be disposed, and disposing it does not reset the arena.
 * The options that change the file are in [options.md](options.md): compression, block size, write
   profile, target edition, statistics, index budget.
-* For a file whose tail was torn by a crash mid-append, see `append-and-repair.md`.
+* For a file whose tail was torn by a crash mid-append, see [append-and-repair.md](append-and-repair.md).
 
 ## Run it
 

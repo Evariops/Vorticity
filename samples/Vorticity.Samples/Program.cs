@@ -27,6 +27,10 @@ internal static class Program
         ["keys-in-order"] = KeysInOrder.RunAsync,
         ["statistics-and-pruning"] = StatisticsAndPruning.RunAsync,
         ["encoding-hints"] = EncodingHints.RunAsync,
+        ["editions"] = Editions.RunAsync,
+        ["append-and-repair"] = AppendAndRepair.RunAsync,
+        ["threads"] = Threads.RunAsync,
+        ["limits"] = Limits.RunAsync,
     };
 
     private static async Task<int> Main(string[] args)

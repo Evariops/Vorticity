@@ -58,7 +58,7 @@ file is whatever had been flushed. Delete it, or `Abandon()` the writer before d
 is the explicit way to say the file is not wanted.
 
 A file whose tail was left half-written by a crash is a different case, and
-`append-and-repair.md` covers it.
+[append-and-repair.md](append-and-repair.md) covers it.
 
 ## Watch out
 
