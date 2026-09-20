@@ -24,7 +24,11 @@ using System.Collections.Generic;
 namespace Vorticity.Dataset;
 
 /// <summary>Several index containers carried as one fragment (§6.4).</summary>
-public static class FragmentBundle
+/// <remarks>
+/// Internal: a bundle is how the indexer packs containers into one fragment, and no public member
+/// hands one to a caller or takes one back.
+/// </remarks>
+internal static class FragmentBundle
 {
     /// <summary>The magic that opens and closes a bundle.</summary>
     private static ReadOnlySpan<byte> Magic => "VXFB"u8;

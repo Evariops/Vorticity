@@ -19,7 +19,8 @@ using System.Collections.Generic;
 namespace Vorticity.Dataset;
 
 /// <summary>What a page holds.</summary>
-public enum TreePageKind
+/// <remarks>Internal with <see cref="TreePage"/>, which is the only thing that answers it.</remarks>
+internal enum TreePageKind
 {
     /// <summary>Data objects.</summary>
     Leaf = 0,
@@ -29,7 +30,11 @@ public enum TreePageKind
 }
 
 /// <summary>Reads and writes the canonical bytes of a tree page.</summary>
-public static class TreePage
+/// <remarks>
+/// Internal: the seam is <see cref="IPageSource"/> and <see cref="IPageSink"/>, which carry a page
+/// as opaque bytes. What those bytes mean is this library's business, not the store's.
+/// </remarks>
+internal static class TreePage
 {
     /// <summary>The kind byte and the entry count's largest varint.</summary>
     internal const int HeaderBytes = 1 + 5;

@@ -18,6 +18,12 @@ using System.Globalization;
 namespace Vorticity.Dataset;
 
 /// <summary>The keys of a dataset's two kinds of object (§3).</summary>
+/// <remarks>
+/// Public because keys cross the boundary in both directions: a store implementation is handed
+/// them by every call on <see cref="IObjectStore"/>, and <see cref="ObjectEntry.Key"/> hands one
+/// back to a caller. Recognising which of the two kinds a key names, without re-deriving the
+/// convention from the format document, is what this offers.
+/// </remarks>
 public static class CommitKey
 {
     /// <summary>The prefix every commit object's key starts with.</summary>

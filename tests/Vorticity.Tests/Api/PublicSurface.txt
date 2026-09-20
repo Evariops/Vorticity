@@ -2666,16 +2666,6 @@ Vorticity.Dataset:     method VortexWriteOptions Applied(VortexWriteOptions)
 Vorticity.Dataset:     method byte[] Encode(ReadOnlySpan<FilterLiteral>)
 Vorticity.Dataset:     property IReadOnlyList<string> Paths { get; }
 Vorticity.Dataset:     property bool IsComposite { get; }
-Vorticity.Dataset: static class Vorticity.Dataset.CommitFormat
-Vorticity.Dataset:     const int MinimumBytes = 48
-Vorticity.Dataset:     const int OpenBytes = 262144
-Vorticity.Dataset:     const int PreambleBytes = 16
-Vorticity.Dataset:     const int TrailerBytes = 32
-Vorticity.Dataset:     const uint Version = 1
-Vorticity.Dataset:     method void WritePreamble(Span<byte>, int)
-Vorticity.Dataset:     method void WriteTrailer(Span<byte>, long, int, long, ulong)
-Vorticity.Dataset:     property ReadOnlySpan<byte> Magic { get; }
-Vorticity.Dataset:     property ReadOnlySpan<byte> TrailerMagic { get; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.CommitFormatException : Exception
 Vorticity.Dataset:     ctor CommitFormatException()
 Vorticity.Dataset:     ctor CommitFormatException(string)
@@ -3204,10 +3194,6 @@ Vorticity.Dataset:     method IBoundaryRule Fresh()
 Vorticity.Dataset:     method bool IsBoundary(ReadOnlySpan<byte>, int)
 Vorticity.Dataset:     method void Reset()
 Vorticity.Dataset:     property int FillBytes { get; }
-Vorticity.Dataset: static class Vorticity.Dataset.FragmentBundle
-Vorticity.Dataset:     method IReadOnlyList<ReadOnlyMemory<byte>> Unpack(ReadOnlyMemory<byte>)
-Vorticity.Dataset:     method bool IsBundle(ReadOnlySpan<byte>)
-Vorticity.Dataset:     method byte[] Pack(IReadOnlyList<ReadOnlyMemory<byte>>)
 Vorticity.Dataset: interface Vorticity.Dataset.IBoundaryRule
 Vorticity.Dataset:     method IBoundaryRule Fresh()
 Vorticity.Dataset:     method bool IsBoundary(ReadOnlySpan<byte>, int)
@@ -3498,17 +3484,6 @@ Vorticity.Dataset:     method void Deconstruct(out ReadOnlyMemory<byte>, out Rea
 Vorticity.Dataset:     property ReadOnlyMemory<byte> Key { get; init; }
 Vorticity.Dataset:     property ReadOnlyMemory<byte> Value { get; init; }
 Vorticity.Dataset:     property long Rows { get; init; }
-Vorticity.Dataset: static class Vorticity.Dataset.TreePage
-Vorticity.Dataset:     method IReadOnlyList<InternalEntry> ReadInternal(ReadOnlyMemory<byte>)
-Vorticity.Dataset:     method IReadOnlyList<TreeEntry> ReadLeaf(ReadOnlyMemory<byte>)
-Vorticity.Dataset:     method TreePageKind KindOf(ReadOnlySpan<byte>)
-Vorticity.Dataset:     method byte[] WriteInternal(IReadOnlyList<InternalEntry>)
-Vorticity.Dataset:     method byte[] WriteLeaf(IReadOnlyList<TreeEntry>)
-Vorticity.Dataset:     method int Compare(ReadOnlySpan<byte>, ReadOnlySpan<byte>)
-Vorticity.Dataset: enum Vorticity.Dataset.TreePageKind
-Vorticity.Dataset:     const TreePageKind Internal = 1
-Vorticity.Dataset:     const TreePageKind Leaf = 0
-Vorticity.Dataset:     field int value__
 Vorticity.Dataset: sealed class Vorticity.Dataset.VacuumOptions : IEquatable<VacuumOptions>
 Vorticity.Dataset:     ctor VacuumOptions()
 Vorticity.Dataset:     method VacuumOptions <Clone>$()

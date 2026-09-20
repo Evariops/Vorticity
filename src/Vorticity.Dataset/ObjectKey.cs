@@ -12,6 +12,11 @@ using System;
 namespace Vorticity.Dataset;
 
 /// <summary>The key rules every <see cref="IObjectStore"/> enforces.</summary>
+/// <remarks>
+/// Public because <see cref="IObjectStore"/> is a seam implemented outside this repository, and
+/// these are the rules such an implementation has to apply for a test that passes against the
+/// stores here to mean anything against it.
+/// </remarks>
 public static class ObjectKey
 {
     /// <summary>The longest key a store accepts, in UTF-16 units.</summary>

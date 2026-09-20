@@ -39,7 +39,13 @@ using System.Buffers.Binary;
 namespace Vorticity.Dataset;
 
 /// <summary>The constants of the commit object's byte layout.</summary>
-public static class CommitFormat
+/// <remarks>
+/// Internal, where <see cref="CommitKey"/> and <see cref="ObjectKey"/> are not: a key crosses the
+/// boundary in both directions — a store implementer is handed one and
+/// <see cref="ObjectEntry.Key"/> gives one back — while the bytes behind a commit object never do.
+/// <see cref="CommitObject"/> is what a caller reads them through.
+/// </remarks>
+internal static class CommitFormat
 {
     /// <summary>The first eight bytes of every commit object.</summary>
     public static ReadOnlySpan<byte> Magic => "VXCOMMIT"u8;
