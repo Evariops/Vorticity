@@ -51,8 +51,8 @@ and never repeats it.
 | `dataset-maintenance.md` | compact, vacuum, verify, and what each costs in requests |
 | `object-store.md` | implement the store seam for the service you use; also how to open a single file out of one |
 | `row-keys.md` | encode a tuple into bytes whose `memcmp` order is tuple order |
-| `vxdump.md` | look inside a file: schema, layout tree, encodings, segments, statistics |
-| `native-aot.md` | publish an application that uses this library ahead of time |
+| [vxdump.md](vxdump.md) | look inside a file: schema, layout tree, encodings, segments, statistics |
+| [native-aot.md](native-aot.md) | publish an application that uses this library ahead of time |
 | [threads.md](threads.md) | what is safe to share, what is not, and how to turn on parallel decoding |
 | [limits.md](limits.md) | the caps that protect a reader from a hostile file, and how to change them |
 
@@ -60,5 +60,5 @@ and never repeats it.
 
 | page | what you get |
 |---|---|
-| `how-it-works.md` | the shape of the library in two pages, and where to read further |
+| [how-it-works.md](how-it-works.md) | the shape of the library in two pages, and where to read further |
 | `benchmarks.md` | what this costs against the Rust implementation, on published scenarios |
