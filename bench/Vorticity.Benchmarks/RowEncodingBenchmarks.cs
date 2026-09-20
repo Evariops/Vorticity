@@ -37,6 +37,7 @@ public class RowEncodingBenchmarks
     private IAsyncEnumerator<RecordBatch>? _batches;
     private RecordBatch? _batch;
     private RowSortField[] _fields = [];
+    private RowSortField[] _descending = [];
     private int[] _order = [];
 
     /// <summary>
@@ -88,6 +89,8 @@ public class RowEncodingBenchmarks
         _batch = _batches.Current;
         _fields = new RowSortField[_batch.FieldCount];
         Array.Fill(_fields, RowSortField.Ascending);
+        _descending = new RowSortField[_batch.FieldCount];
+        Array.Fill(_descending, new RowSortField(descending: true, nullsFirst: true));
         _order = new int[_batch.RowCount];
     }
 
@@ -151,6 +154,19 @@ public class RowEncodingBenchmarks
     public int Encode()
     {
         using RowKeys keys = RowEncoder.Encode(_batch!, _fields);
+        return keys.TotalBytes;
+    }
+
+    /// <summary>The same batch with every field descending, which is the only path that inverts.</summary>
+    /// <remarks>
+    /// A descending variable-length value is copied XORed with 0xFF, and that XOR is the one
+    /// operation docs/06-row-encoding.md §7 says is worth a vector. Ascending copies instead, so
+    /// the arm above never reaches it and its distance from this one is what inverting costs.
+    /// </remarks>
+    [Benchmark(Description = "encode a batch to row keys, descending")]
+    public int EncodeDescending()
+    {
+        using RowKeys keys = RowEncoder.Encode(_batch!, _descending);
         return keys.TotalBytes;
     }
 
