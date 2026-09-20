@@ -55,8 +55,16 @@ internal static class FilterRows
         await Count("day in (1, 2, 3)", firstDays);
         await Count("not(day >= 900)", Expr.Not(recent));
 
-        // A literal of the wrong type does not throw: it simply matches nothing.
-        await Count("day > \"900\"", Expr.Gt(Expr.Field("day"), Expr.Literal(FilterLiteral.From("900"))));
+        // A literal the column cannot be compared against is refused here, before anything is
+        // read, rather than yielding the empty result that reads like an empty file.
+        try
+        {
+            file.Scan().Where(Expr.Gt(Expr.Field("day"), Expr.Literal(FilterLiteral.From("900"))));
+        }
+        catch (ArgumentException error)
+        {
+            Console.WriteLine($"day > \"900\": {error.Message}");
+        }
 
         async Task Explain(string what, VortexExpr predicate)
         {

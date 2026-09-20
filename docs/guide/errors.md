@@ -106,8 +106,8 @@ to fall back on: it throws on open, and `ValidLengthAsync` throws too rather tha
   over recycled memory from being read.
 * **A row range past the end is clamped, not refused.** `Rows(new RowRange(0, rows + 10))` returns
   every row and no exception; a *row index* past the end throws.
-* **A filter literal of the wrong type matches nothing** instead of throwing. See
-  [filter-rows.md](filter-rows.md).
+* **A filter literal of a kind its column cannot be compared against throws `ArgumentException`**
+  where the filter is given, before anything is read. See [filter-rows.md](filter-rows.md).
 
 ## Run it
 

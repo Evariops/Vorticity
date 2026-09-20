@@ -180,7 +180,8 @@ public sealed class ScanBuilder
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="filter"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// The filter references a field the file's schema does not have.
+    /// The filter references a field the file's schema does not have, or compares a column against
+    /// a constant of a kind no comparison relates to it.
     /// </exception>
     public ScanBuilder Where(VortexExpr filter)
     {
@@ -196,6 +197,10 @@ public sealed class ScanBuilder
         {
             Projection.IncludePath(_file.Schema, paths[i], probe, nameof(filter));
         }
+
+        // Same place, same reason, for the constants: a comparison the schema cannot make yields
+        // no row, and an empty result reads like an empty file.
+        FilterTypeCheck.Check(_file.Schema, filter, nameof(filter));
 
         _filter = filter;
         _filterPaths = paths;

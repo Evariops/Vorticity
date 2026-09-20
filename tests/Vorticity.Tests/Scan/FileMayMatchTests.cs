@@ -125,12 +125,47 @@ public sealed class FileMayMatchTests
                 continue;
             }
 
+            // The constant is drawn from the column's own kind: a comparison across kinds is
+            // refused before the statistics are consulted at all, which would say nothing about
+            // what a file without them answers.
+            if (!TryExceedingConstant(file.Schema.GetField(0), out FilterLiteral above))
+            {
+                continue;
+            }
+
             files++;
             FieldExpr field = Expr.Field(file.Schema.GetFieldName(0));
-            Assert.True(file.MayMatch(Expr.Gt(field, Expr.Literal(FilterLiteral.From(long.MaxValue)))));
+            Assert.True(file.MayMatch(Expr.Gt(field, Expr.Literal(above))));
         }
 
         Assert.True(files > 0, "the corpus should carry struct-root files without statistics");
+    }
+
+    /// <summary>A constant of <paramref name="dtype"/>'s kind that no value of it exceeds.</summary>
+    /// <returns><see langword="false"/> for a kind no comparison reads.</returns>
+    private static bool TryExceedingConstant(DType dtype, out FilterLiteral value)
+    {
+        while (dtype.Kind == DTypeKind.Extension)
+        {
+            dtype = dtype.StorageType;
+        }
+
+        switch (dtype.Kind)
+        {
+            case DTypeKind.Bool:
+                value = FilterLiteral.From(true);
+                return true;
+            case DTypeKind.Primitive:
+                value = FilterLiteral.From(long.MaxValue);
+                return true;
+            case DTypeKind.Utf8:
+            case DTypeKind.Binary:
+                value = FilterLiteral.From(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF });
+                return true;
+            default:
+                value = FilterLiteral.Null;
+                return false;
+        }
     }
 
     /// <summary>Rows an UNPRUNED scan returns under <paramref name="filter"/>: the truth.</summary>

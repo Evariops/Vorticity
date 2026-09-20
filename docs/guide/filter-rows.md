@@ -94,9 +94,10 @@ any row could match, which for `day >= 5000` on this file is `False`, with nothi
 
 ## Watch out
 
-* **A literal of the wrong type matches nothing, silently.** `day > "900"` against an `i32` column
-  returns 0 rows rather than throwing. Build literals from the column's own type.
-* A field that is not in the schema throws `ArgumentException` when the scan starts.
+* A field that is not in the schema throws `ArgumentException` when the scan starts, and so does a
+  literal of a kind the column cannot be compared against — `day > "900"` on an `i32` column names
+  both in the message. Integers and floats compare against each other, so `day > 900.0` is fine;
+  text and booleans do not compare against numbers.
 * **Nulls answer `unknown`, and only `true` returns a row.** A row whose `celsius` is null comes
   back neither for `celsius > 45` nor for its negation. `IsNull` and `IsNotNull` are the two that
   never answer unknown.

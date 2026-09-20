@@ -30,10 +30,15 @@ public static class VortexFilePruningExtensions
     /// superset test: a scan of a file this returns <see langword="true"/> for may still yield
     /// nothing.
     /// </remarks>
+    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// The filter compares a column against a constant of a kind no comparison relates to it.
+    /// </exception>
     public static bool MayMatch(this VortexFile file, VortexExpr filter)
     {
         ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(filter);
+        FilterTypeCheck.Check(file.Schema, filter, nameof(filter));
         return FileStatisticsPruner.MayMatch(file, filter);
     }
 
@@ -52,11 +57,16 @@ public static class VortexFilePruningExtensions
     /// and one segment per equality-tested column that has one; a file written without the
     /// file-level resolution answers exactly as <see cref="MayMatch"/> does.
     /// </remarks>
+    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// The filter compares a column against a constant of a kind no comparison relates to it.
+    /// </exception>
     public static async System.Threading.Tasks.ValueTask<bool> MayMatchAsync(
         this VortexFile file, VortexExpr filter, System.Threading.CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(filter);
+        FilterTypeCheck.Check(file.Schema, filter, nameof(filter));
         return FileStatisticsPruner.MayMatch(file, filter)
             && await Indexes.BloomPruner.FileMayMatchAsync(file, filter, cancellationToken).ConfigureAwait(false);
     }

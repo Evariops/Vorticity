@@ -925,14 +925,17 @@ internal sealed class ZonePruner : IBlockPruner
         {
             case ComparisonOp.Greater:
             case ComparisonOp.GreaterOrEqual:
-                // x > k is impossible when every value is <= max < k.
-                return !bounds.HasMax ||
-                       Satisfiable(op, Compare(bounds.Max, value), upper: true);
+                // x > k is impossible when every value is <= max < k. A bound that cannot be
+                // ordered against k settles nothing, and reading the 0 that says so as "equal"
+                // would rule the zone out -- every zone, for a constant of another kind, which is
+                // an empty answer where an error is owed.
+                return !bounds.HasMax || !TryCompare(bounds.Max, value, out int over) ||
+                       Satisfiable(op, over, upper: true);
 
             case ComparisonOp.Less:
             case ComparisonOp.LessOrEqual:
-                return !bounds.HasMin ||
-                       Satisfiable(op, Compare(bounds.Min, value), upper: false);
+                return !bounds.HasMin || !TryCompare(bounds.Min, value, out int under) ||
+                       Satisfiable(op, under, upper: false);
 
             case ComparisonOp.Equal:
                 // k has to sit inside [min, max]. Inexact bounds only widen that interval, so the
