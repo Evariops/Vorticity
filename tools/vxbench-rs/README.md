@@ -6,6 +6,28 @@ in one process**, on the same bytes, with the same clock and the same page-cache
 two binaries can differ by more than the thing being measured, which is how a 1.4× ratio becomes
 unreadable.
 
+## Two shapes, one body of code
+
+The crate builds a **cdylib** and a **binary**, from the same functions.
+
+The cdylib is what BenchmarkDotNet loads, for the per-axis ratios above. The binary is what the
+published report runs, because the figures it reports — wall time, peak resident memory, processor
+time — belong to a whole process and cannot be measured from inside a loop that shares one. Both
+call the same entry points, so the two ways of measuring Rust cannot drift apart.
+
+```
+cargo build --release
+target/release/vxbench scan <file.vortex>
+target/release/vxbench project <file.vortex> <field>
+target/release/vxbench filter <file.vortex> <i64 field> <lo> <width>
+target/release/vxbench take <file.vortex> <count> <stride>
+target/release/vxbench write <file.vortex>
+target/release/vxbench open <file.vortex>
+```
+
+Each prints `rows=<n>` and exits 0, or a reason on standard error and exits 1. `filter` wants an
+`i64` field: the predicate's literal is one, and an `i32` column is refused rather than coerced.
+
 ## Why this is not `vortex-ffi`
 
 §2 originally named `vortex-ffi` as the cdylib. Two reasons it is not used:
