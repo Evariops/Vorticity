@@ -143,6 +143,14 @@ internal sealed class ZstdPlan
             offset += value.Length;
         }
 
+        // THE ONE-SHOT BUILDS A NATIVE COMPRESSION CONTEXT PER CALL, and reusing one instead is an
+        // open question with its first gate already passed: a `ZstandardEncoder` held across calls
+        // and `Reset` between them produces byte-identical output to this, checked on a run of
+        // a hundred thousand equal bytes, fifty thousand pseudo-random ones and four thousand
+        // URLs. What is not yet known is what it buys. Doubling this compression costs 15,9 ms of
+        // a 54,7 ms write of a million `fsst` rows and 11,9 of 33,7 on `varbin` -- a third of the
+        // axis -- but that is the compression itself, which has to happen; only the context build
+        // would go, and how many of those there are per write has not been counted.
         if (!ZstandardEncoder.TryCompress(
                 stream.AsSpan(0, (int)streamBytes), destination, out int written) || written <= 0)
         {
