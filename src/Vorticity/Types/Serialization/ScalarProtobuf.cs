@@ -25,12 +25,9 @@
 //     `...Always` variants throughout, or `false`, `0`, `""` and `-0.0` would silently vanish and
 //     read back as Absent. docs/04-conformance.md section 4.3 lists -0.0 as a required case.
 //
-// TODO(decimal-scalar): spec/proto/scalar.proto has no 128-bit case, so a Decimal(p) scalar with
-// p > 18 cannot be carried by int64_value or uint64_value and must arrive through one of the
-// twelve cases above -- most plausibly bytes_value holding the unscaled i128/i256, but the
-// encoding (width, endianness, sign extension) is specified nowhere in the vendored spec. No
-// Decimal kind is invented here: the twelve wire cases are implemented faithfully and the
-// ambiguity is resolved against the reference implementation in Phase 1.
+// No decimal case among the twelve, and none is needed: a Decimal scalar is a bytes_value whose
+// length selects the storage width, up to 32 bytes for i256. This reader stays untyped and hands
+// the bytes on unread; TypedScalar is where they are interpreted against a dtype.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;

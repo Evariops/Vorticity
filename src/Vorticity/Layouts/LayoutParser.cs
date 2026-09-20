@@ -147,11 +147,13 @@ internal static class LayoutParser
             LayoutsThrow.Arity("vortex.chunked", "segment", segmentCount, 0);
         }
 
-        // UNTESTED: no fixture; diverges from vortex-layout-0.86.1, which rejects non-empty chunked
-        // metadata outright (its Metadata is EmptyMetadata). layout.fbs's own comment and
-        // spec/METADATA.md describe a first-byte flag meaning "child 0 is the statistics table for
-        // the other chunks"; we read it, exclude that child from the chunk list, and let the
-        // offsets check below catch a wrong guess.
+        // UNTESTED: no fixture, and the 0.86.1 corpus cannot hold one. vortex-layout-0.86.1
+        // rejects non-empty chunked metadata outright, its Metadata being EmptyMetadata, so what
+        // would reopen this is a corpus from an upstream that writes the flag at all, not a
+        // fixture skipped from this one. layout.fbs's own comment and spec/METADATA.md describe a
+        // first-byte flag meaning "child 0 is the statistics table for the other chunks"; we read
+        // it, exclude that child from the chunk list, and let the offsets check below catch a
+        // wrong guess.
         ChunkedLayoutMetadata chunked = ChunkedLayoutMetadata.Read(metadata);
 
         int firstChunk = chunked.HasStatsTable ? 1 : 0;

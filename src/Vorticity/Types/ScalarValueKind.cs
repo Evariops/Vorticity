@@ -13,12 +13,11 @@
 // docs/08-semantics.md section 1 makes the distinction load-bearing -- "a statistic with no value
 // licenses nothing", so a missing statistic must never be readable as a null one.
 //
-// TODO(decimal-scalar): scalar.proto has no 128-bit case, so a Decimal(p) scalar with p > 18
-// cannot be carried by int64_value or uint64_value and must arrive through one of the twelve
-// cases above -- most plausibly bytes_value holding the unscaled i128, but the encoding (width,
-// endianness, sign extension) is not specified anywhere in the vendored spec. No Decimal kind is
-// invented here; the twelve wire cases are implemented faithfully and the ambiguity is resolved
-// against the reference implementation in Phase 1.
+// There is no decimal case among the twelve, and none is needed. A Decimal scalar arrives as
+// bytes_value carrying the unscaled value in little-endian two's complement, and its LENGTH
+// selects the storage width: 1, 2, 4, 8, 16 or 32 bytes for i8 through i256, so a precision past
+// 18 costs nothing special. Reading that requires the dtype, which a ScalarValue does not carry,
+// so it happens in TypedScalar and nowhere else.
 namespace Vorticity.Types;
 
 /// <summary>Discriminant of a <see cref="ScalarValue"/>.</summary>

@@ -385,8 +385,9 @@ public sealed class AlpRdDecoder : ArrayDecoder
         DType valuesType = context.Types.Primitive(leftPType, Nullability.NonNullable);
         int valuesIndex = context.DecodeChild(in node, 3, valuesType, patchCount);
 
-        // `// TODO(0ax1): handle chunk offsets` - upstream passes None unconditionally, so a
-        // descriptor that declares them describes a shape no reader implements.
+        // Upstream leaves chunk offsets unhandled here and passes None unconditionally, marking
+        // the gap in its own source, so a descriptor that declares them describes a shape no
+        // reader implements.
         if (patchesMetadata.HasChunkOffsets)
         {
             CompressedThrow.Format(
