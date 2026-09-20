@@ -1,5 +1,3 @@
-// vortex-array-0.86.1/src/patches.rs — the shared patch descriptor, reused by fastlanes.bitpacked,
-// vortex.alp, vortex.alprd and vortex.sparse. spec/METADATA.md, "Shared".
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
@@ -7,7 +5,8 @@ using Vorticity.Types;
 namespace Vorticity.Arrays.Metadata;
 
 /// <summary>
-/// The patch descriptor shared by every encoding that carries exceptions out of line.
+/// The patch descriptor shared by every encoding that carries exceptions out of line: bit packing,
+/// the two floating-point encodings and the sparse encoding all embed this same message.
 /// </summary>
 /// <remarks>
 /// <code>
@@ -26,9 +25,8 @@ public readonly struct PatchesMetadata : IEquatable<PatchesMetadata>
     private const string MessageName = "PatchesMetadata";
 
     /// <summary>
-    /// <c>PATCH_CHUNK_SIZE</c>: one patch index offset is stored per chunk of this many rows,
-    /// which is what makes patch lookup constant time.
-    /// vortex-array-0.86.1/src/patches.rs.
+    /// One patch index offset is stored per chunk of this many rows, which is what makes patch
+    /// lookup constant time.
     /// </summary>
     public const int ChunkSize = 1024;
 
@@ -112,7 +110,7 @@ public readonly struct PatchesMetadata : IEquatable<PatchesMetadata>
 
     /// <summary>
     /// Physical type of the indices child (tag 3). Always one of U8, U16, U32, U64: patch indices
-    /// must be unsigned (<c>PatchesMetadata::indices_dtype</c>).
+    /// must be unsigned.
     /// </summary>
     public PType IndicesPType => _indicesPType;
 
@@ -120,14 +118,11 @@ public readonly struct PatchesMetadata : IEquatable<PatchesMetadata>
     /// True when the patches carry a chunk-offsets child.
     /// </summary>
     /// <remarks>
-    /// This is the presence of <b>tag 5</b>, <c>chunk_offsets_ptype</c>, because that is the exact
-    /// discriminator upstream uses to decide the child layout:
-    /// <c>Some(patches_meta) if patches_meta.chunk_offsets_dtype()?.is_some() =&gt; 3</c>
-    /// (vortex-fastlanes-0.86.1/src/bitpacking/vtable/mod.rs). Tag 4 is read independently and
-    /// defaults to zero when absent, which is prost's behaviour for
-    /// <c>p.chunk_offsets_len()</c>. Every writer emits the two together, so the two possible
-    /// readings agree on every real file; see <see cref="HasChunkOffsetsLength"/> when the
-    /// difference matters.
+    /// This is the presence of <b>tag 5</b>, <c>chunk_offsets_ptype</c>, because the number of
+    /// children a patched node carries is decided by that field and not by tag 4. Tag 4 is read
+    /// independently and defaults to zero when absent. Every writer emits the two together, so the
+    /// two possible readings agree on every real file; see <see cref="HasChunkOffsetsLength"/> when
+    /// the difference matters.
     /// </remarks>
     public bool HasChunkOffsets => _hasChunkOffsetsPType;
 
@@ -214,9 +209,8 @@ public readonly struct PatchesMetadata : IEquatable<PatchesMetadata>
             }
         }
 
-        // Class I (docs/08-semantics.md §5): the indices ptype decides how many bytes per patch
-        // index the decoder reads out of the child buffer. `PatchesMetadata::indices_dtype`
-        // enforces the same rule upstream.
+        // The indices ptype decides how many bytes per patch index the decoder reads out of the
+        // child buffer, so a signed type is rejected rather than reinterpreted.
         if (!indicesPType.IsUnsignedInteger())
         {
             MetadataProto.ThrowOutOfDomain(

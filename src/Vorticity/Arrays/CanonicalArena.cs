@@ -1,9 +1,3 @@
-// The canonical model of Phase 1 contract §8.4: the nine forms `Canonical` in
-// vortex-array-0.86.1/src/canonical.rs has, minus Map, Union and Variant, which are out of scope
-// and reach the caller as VortexUnsupportedException with kind "dtype".
-//
-// `vortex.list` and `vortex.varbin` have no canonical form of their own - their decoders produce
-// ListView and VarBinView, the same choice upstream makes.
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -13,7 +7,12 @@ using Vorticity.Types.Numerics;
 
 namespace Vorticity.Arrays;
 
-/// <summary>The nine canonical forms Phase 1 produces.</summary>
+/// <summary>The canonical forms a decode produces.</summary>
+/// <remarks>
+/// Map, union and variant dtypes have no form here: they are out of scope and reach the caller as
+/// an unsupported-component error of kind "dtype". List and varbin encodings have no form of their
+/// own either, because their decoders produce <c>ListView</c> and <c>VarBinView</c>.
+/// </remarks>
 public enum CanonicalKind : byte
 {
     /// <summary>All rows null; no buffers.</summary>
@@ -45,34 +44,29 @@ public enum CanonicalKind : byte
 
     /// <summary>One element and a row count: every row resolves to the same window.</summary>
     /// <remarks>
-    /// The alternative is to TILE -- write the element once and double it over the whole column --
-    /// so a million rows of eight bytes cost eight megabytes to say one number.
-    /// `ConstantFormBenchmarks` priced the two against each other: build **~3 900x** at eight bytes
-    /// and **~8 400x** at sixteen, a scattered take **60x**, and the consumer -- the side that could
-    /// have said no -- reads **6,5 % FASTER**, because one cache line is re-read where 512 KiB were
-    /// walked.
     /// <para>
-    /// THIS IS THE ONLY PATH: `ConstantCanonicalizer` emits it for every constant column, and there
-    /// is no longer an option that tiles instead. A DECODER AUTHOR THEREFORE MEETS THIS KIND ON THE
-    /// ORDINARY PATH, which is why this paragraph is here.
+    /// The alternative is to tile -- write the element once and repeat it over the whole column --
+    /// which charges a million rows of eight bytes eight megabytes to say one number. Keeping the
+    /// element is orders of magnitude cheaper to build, and the consumer reads faster too, because
+    /// one cache line is re-read where a whole column would have been walked.
     /// </para>
     /// <para>
-    /// WHERE IT ENDS, and it is only two places: <see cref="CanonicalNode.Values"/> and the
-    /// `RequireMaterialized` sibling behind <see cref="CanonicalNode.Views"/>. Both promise a
-    /// contiguous array, which one element and a count cannot be, so both expand into a twin
-    /// memoized on the record. Everything else keeps the form -- and the filter does better than
-    /// keep it: `ComparisonKernels` answers a whole constant column from ONE comparison, `Extremes`
-    /// from none. A decoder that wants a side table as a span uses
-    /// <see cref="Decoders.Canonical.CanonicalSupport.ExpandIfConstant"/>.
+    /// It is the only path: <c>ConstantCanonicalizer</c> emits it for every constant column and
+    /// nothing tiles instead, so a decoder author meets this kind on the ordinary path.
     /// </para>
     /// <para>
-    /// COVERED DTYPES: primitive, utf8 and binary. NOT decimal, and that asymmetry is a loose end
-    /// rather than a decision -- the measurement above is at its best on sixteen bytes, which is a
-    /// decimal. `ConstantCanonicalizer.BuildDecimal` has no arm, and wiring one needs
-    /// <see cref="CanonicalArena.AddConstant"/> to carry `Storage`, `Precision` and `Scale`: it does not
-    /// today, so `MaterializeConstant` would read them at their defaults and `RequireExactLength`
-    /// would refuse `rows * 16` bytes against `rows * 1` expected. Noisy, so not dangerous -- but it
-    /// waits exactly where someone would go next.
+    /// It ends in exactly two places: <see cref="CanonicalNode.Values"/> and the accessor behind
+    /// <see cref="CanonicalNode.Views"/>. Both promise a contiguous array, which one element and a
+    /// count cannot be, so both expand into a twin memoized on the record. Everything else keeps
+    /// the form, and the filter does better than keep it: a comparison answers a whole constant
+    /// column from one comparison and extremes from none. A decoder that wants a side table as a
+    /// span uses <see cref="Decoders.Canonical.CanonicalSupport.ExpandIfConstant"/>.
+    /// </para>
+    /// <para>
+    /// The covered dtypes are primitive, utf8 and binary, and not decimal:
+    /// <see cref="CanonicalArena.AddConstant"/> carries no storage, precision or scale, so
+    /// materializing a decimal constant would read them at their defaults and be refused for a
+    /// buffer of the wrong width. Wiring decimal in means widening that builder first.
     /// </para>
     /// </remarks>
     Constant = 9,
@@ -84,7 +78,7 @@ public enum CanonicalKind : byte
 /// <remarks>
 /// A <c>ref struct</c> for the same reason <see cref="ArrayNode"/> is: an index is meaningless once
 /// its arena is <see cref="CanonicalArena.Reset"/>, and every buffer it names belongs to the
-/// batch's segments (Phase 1 contract §2.2 rules 4 and 5).
+/// batch's segments rather than to the node.
 /// </remarks>
 public readonly ref struct CanonicalNode
 {
@@ -112,7 +106,7 @@ public readonly ref struct CanonicalNode
     /// <summary>Row count, also supplied top-down.</summary>
     public int Length => _arena.RecordRef(_index).Length;
 
-    /// <summary>Per-row validity (contract §2.6).</summary>
+    /// <summary>Per-row validity.</summary>
     public Validity Validity => _arena.RecordRef(_index).Validity;
 
     // ---------------------------------------------------------------------------------- Bool
@@ -122,9 +116,8 @@ public readonly ref struct CanonicalNode
     public VortexBuffer Bits => Require(CanonicalKind.Bool).BufferA;
 
     /// <summary>
-    /// The bit position of row 0 inside the first byte, 0..7 - <c>vortex.bool</c>'s
-    /// <c>BoolMetadata.offset</c>. Consumers must apply it; the bitmap is never shifted, because
-    /// that would be an allocation and a copy per batch (contract §2.6 rule 5).
+    /// The bit position of row 0 inside the first byte, 0..7. Consumers must apply it; the bitmap
+    /// is never shifted, because that would be an allocation and a copy per batch.
     /// </summary>
     /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Bool"/>.</exception>
     public int BitOffset => Require(CanonicalKind.Bool).BitOffset;
@@ -146,19 +139,17 @@ public readonly ref struct CanonicalNode
         {
             ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
 
-            // THE CONSTANT FORM MATERIALIZES HERE (PERF-AUDIT-v2.md Z1b-c2b2), and at the sibling
-            // boundary `RequireMaterialized` draws for a string column's views -- those two, and
-            // nowhere else. This property promises a CONTIGUOUS span of `Length` values, and one
-            // element plus a count cannot honour that without expanding. Doing it at a boundary
-            // rather than per consumer is what spares the
-            // 171 local guards §2.4bis counted: every consumer that reads values -- the columns, the
-            // comparison kernels, the literal reader, row encoding, the zone summariser -- goes
-            // through here and needs no case of its own.
+            // The constant form materializes here, and at the boundary `RequireMaterialized` draws
+            // for a string column's views -- those two, and nowhere else. This property promises a
+            // contiguous span of `Length` values, and one element plus a count cannot honour that
+            // without expanding. Doing it at a boundary rather than per consumer spares every
+            // reader of values -- the columns, the comparison kernels, the literal reader, row
+            // encoding, the zone summariser -- a guard of its own.
             //
             // The gain survives for everyone who never asks: a scan that filters, takes, prunes or
-            // writes back never materializes, and those are the paths the column was tiled for. The
-            // cost falls exactly on the caller who demands a contiguous span, which is what such a
-            // caller is asking for. And it is paid ONCE -- the twin is memoized on the record.
+            // writes back never materializes, and those are the paths the form was chosen for. The
+            // cost falls exactly on the caller who demands a contiguous span, and it is paid once,
+            // because the twin is memoized on the record.
             if (r.Kind == CanonicalKind.Constant)
             {
                 return _arena.RecordRef(_arena.MaterializeConstant(_index)).BufferA;
@@ -177,7 +168,7 @@ public readonly ref struct CanonicalNode
 
     /// <summary>The decimal storage width.</summary>
     /// <remarks>
-    /// ANSWERED BY A CONSTANT TOO, and without expanding it, unlike <see cref="Values"/>. A
+    /// Answered by a constant too, and without expanding it, unlike <see cref="Values"/>. A
     /// constant record has no storage field of its own -- one record shape serves every kind -- but
     /// it does not need one: its element was written at the width the column reports, and that
     /// width is what <c>FixedSize</c> holds. The precision and the scale come from the dtype, which
@@ -310,7 +301,6 @@ public readonly ref struct CanonicalNode
 
     // ----------------------------------------------------------------------------- Extension
 
-    /// <summary>The canonical storage child; the extension's validity is the storage's.</summary>
     /// <summary>The one element a <see cref="CanonicalKind.Constant"/> node repeats.</summary>
     /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Constant"/>.</exception>
     public ReadOnlySpan<byte> ConstantElement
@@ -322,6 +312,7 @@ public readonly ref struct CanonicalNode
         }
     }
 
+    /// <summary>The canonical storage child; the extension's validity is the storage's.</summary>
     /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Extension"/>.</exception>
     public int StorageIndex
     {
@@ -348,7 +339,7 @@ public readonly ref struct CanonicalNode
     /// into its materialized twin first.
     /// </summary>
     /// <remarks>
-    /// The same boundary <see cref="Values"/> draws, for the accessors that promise a CONTIGUOUS
+    /// The same boundary <see cref="Values"/> draws, for the accessors that promise a contiguous
     /// array of something else -- the views of a string column. One element and a count cannot
     /// honour that promise either, and a caller asking for views is asking for the expansion by
     /// asking for the views.
@@ -366,7 +357,7 @@ public readonly ref struct CanonicalNode
             return ref r;
         }
 
-        // Taken AFTER the expansion: committing the twin's record may have grown the backing
+        // Taken after the expansion: committing the twin's record may have grown the backing
         // array, and `r` would then point at a block nobody reads any more.
         ref readonly CanonicalRecord twin = ref _arena.RecordRef(_arena.MaterializeConstant(_index));
         if (twin.Kind != kind)
@@ -394,7 +385,7 @@ public sealed class CanonicalArena
     private int _dataBufferCount;
 
     // Blocks handed out by Allocate, returned to the pool on Reset. Never handed to a caller as an
-    // owner: contract §2.2 rule 3 says decoders never Retain or Release anything.
+    // owner, because a decoder neither retains nor releases anything.
     private NativeSegmentOwner[] _owned;
     private int _ownedCount;
 
@@ -432,18 +423,17 @@ public sealed class CanonicalArena
     /// <remarks>
     /// <para>
     /// Both <see cref="CopyFrom"/> and <see cref="ReferenceFrom"/> have to place a node's new
-    /// child indices CONTIGUOUSLY, and cannot know them until each child has been copied -- which
-    /// appends records, and children, of its own. They used to gather into
-    /// <c>new int[src.ChildCount]</c> and replay it afterwards: one managed allocation per node
-    /// with children, on a path a batch walks.
+    /// child indices contiguously, and cannot know them until each child has been copied -- which
+    /// appends records, and children, of its own. Gathering them into a temporary array first
+    /// would cost one managed allocation per node with children, on a path a batch walks.
     /// </para>
     /// <para>
-    /// The arena already owns a growable child array, and reserving in it needs no second
-    /// buffer: this node takes [start, start + count), and every deeper copy reserves ABOVE that,
-    /// so the block is contiguous by construction rather than by replay. Nothing is shared between
-    /// calls, between arenas or between threads -- which a thread-static scratch would have been,
-    /// and an <c>await</c> introduced anywhere in this recursion would then have made two logical
-    /// flows share one stack silently.
+    /// The arena already owns a growable child array, and reserving in it needs no second buffer:
+    /// this node takes [start, start + count), and every deeper copy reserves above that, so the
+    /// block is contiguous by construction rather than by replay. Nothing is shared between calls,
+    /// between arenas or between threads -- which a thread-static scratch would have been, so an
+    /// <c>await</c> introduced anywhere in this recursion would silently make two logical flows
+    /// share one buffer.
     /// </para>
     /// <para>
     /// The slots hold whatever they held; the caller fills every one of them before the node that
@@ -486,15 +476,13 @@ public sealed class CanonicalArena
     }
 
     /// <summary>
-    /// Clears counts and returns every block <see cref="Allocate(int, int)"/> handed out. Does NOT free the
-    /// backing arrays.
+    /// Clears the counts and returns every block <see cref="Allocate(int, int)"/> handed out,
+    /// leaving the backing arrays allocated.
     /// </summary>
     /// <remarks>
-    /// Holding the blocks across the reset instead of returning them, so the next batch does not
-    /// rent them back, would save nothing. A full scan of a million-row <c>fsst</c> column peaks at
-    /// two blocks held per batch, and doubling every return and rental this loop performs is worth
-    /// 0,993 on that file, 1,000 on <c>zstd</c> and 0,997 on <c>onpair</c> — the churn being removed
-    /// does not clear the noise, because there is almost none of it.
+    /// Holding the blocks across the reset, so that the next batch does not rent them back, would
+    /// save nothing: a batch holds a handful of blocks at a time, and the rentals this loop
+    /// performs do not rise above the noise of the scan around them.
     /// </remarks>
     public void Reset()
     {
@@ -532,7 +520,7 @@ public sealed class CanonicalArena
     /// <returns>The new node's index.</returns>
     /// <exception cref="VortexFormatException">
     /// <paramref name="bitOffset"/> is outside 0..7, or <paramref name="bits"/> is too short for
-    /// <paramref name="length"/> bits at that offset. Both are class I.
+    /// <paramref name="length"/> bits at that offset.
     /// </exception>
     public int AddBool(DType dtype, int length, Validity validity, VortexBuffer bits, int bitOffset)
     {
@@ -580,20 +568,20 @@ public sealed class CanonicalArena
     }
 
     /// <summary>Adds a constant node: one element, repeated <paramref name="length"/> times.</summary>
-    /// <param name="dtype">The dtype this node produces, which is the ELEMENT's dtype.</param>
+    /// <param name="dtype">The dtype this node produces, which is the element's own dtype.</param>
     /// <param name="length">Row count.</param>
     /// <param name="validity">Per-row validity, as for any other node.</param>
     /// <param name="element">The one value's bytes, in the canonical form its dtype implies.</param>
     /// <returns>The new node's index.</returns>
     /// <remarks>
     /// <para>
-    /// The element's WIDTH is kept in <c>FixedSize</c> rather than derived from the dtype, so that
-    /// one record shape serves a primitive (8 bytes), a decimal (16) and a string of any length
-    /// without this method having to know the table of widths. PERF-AUDIT-v2.md Z1b-c2a.
+    /// The element's width is kept in <c>FixedSize</c> rather than derived from the dtype, so that
+    /// one record shape serves a primitive, a decimal and a string of any length without this
+    /// method having to know the table of widths.
     /// </para>
     /// <para>
-    /// FOR A STRING OR A BLOB THE ELEMENT IS THE VALUE ITSELF, not a 16-byte view of it. A view
-    /// names a buffer and an offset, which is a fact about a LAYOUT this node does not have; the
+    /// For a string or a blob the element is the value itself, not a 16-byte view of it. A view
+    /// names a buffer and an offset, which is a fact about a layout this node does not have; the
     /// value is the fact that survives, and <c>MaterializeConstant</c> is where it becomes views
     /// again. The empty string is then a legitimate element, which is why the emptiness check below
     /// is asked of the dtype rather than of the span.
@@ -618,13 +606,13 @@ public sealed class CanonicalArena
         return Commit(ref r);
     }
 
-    /// <summary>Expands a constant node into a materialized twin, once. PERF-AUDIT-v2.md Z1b-c2b2.</summary>
+    /// <summary>Expands a constant node into a materialized twin, once.</summary>
     /// <param name="nodeIndex">A node of kind <see cref="CanonicalKind.Constant"/>.</param>
     /// <returns>The twin's index: a Primitive, Decimal or VarBinView node holding `Length` copies.</returns>
     /// <remarks>
     /// Memoized on the record, so a caller that walks a column row by row through
     /// <c>PrimitiveColumn.this[int]</c> pays the expansion once rather than per access. The twin is
-    /// a NEW node: records are referenced by index all over the arena, and rewriting this one in
+    /// a new node: records are referenced by index all over the arena, and rewriting this one in
     /// place would change what every holder of that index sees.
     /// </remarks>
     internal int MaterializeConstant(int nodeIndex)
@@ -657,7 +645,7 @@ public sealed class CanonicalArena
                 checked(rows * width), width, out Span<byte> writable);
             Decoders.Compressed.RowKernels.Tile(writable, element);
 
-            // THE STORAGE COMES FROM THE ELEMENT'S WIDTH, not from the record's own fields: a
+            // The storage comes from the element's width, not from the record's own fields: a
             // constant record has no storage of its own, and reading one would hand `AddDecimal` a
             // zeroed triple it refuses. The element was written at the width the column reports,
             // which is what `FixedSize` holds, so the width is the storage.
@@ -679,7 +667,7 @@ public sealed class CanonicalArena
     /// <see cref="MaterializeConstant"/>: <paramref name="rows"/> views over one copy of the value.
     /// </summary>
     /// <remarks>
-    /// ONE heap copy whatever the row count, because every row names the same bytes -- so the twin
+    /// One heap copy whatever the row count, because every row names the same bytes -- so the twin
     /// costs sixteen bytes a row plus the value, not the value a row. A value of twelve bytes or
     /// fewer rides inside its view and the heap buffer is not allocated at all, which is the common
     /// case for the short strings a column turns out to be constant on.
@@ -875,9 +863,9 @@ public sealed class CanonicalArena
     }
 
     /// <summary>
-    /// Adds a node of <paramref name="kind"/> with only the four common fields set. Contract §8.3
-    /// exposes this through <see cref="ArrayDecodeContext.NewCanonical"/>; prefer the typed
-    /// builders above, which validate their buffers.
+    /// Adds a node of <paramref name="kind"/> with only the four common fields set. Decoders reach
+    /// it through <see cref="ArrayDecodeContext.NewCanonical"/>; prefer the typed builders above,
+    /// which validate their buffers.
     /// </summary>
     /// <param name="kind">The canonical form.</param>
     /// <param name="dtype">The dtype this node produces.</param>
@@ -901,14 +889,14 @@ public sealed class CanonicalArena
     /// that must produce values rather than borrow them.
     /// </summary>
     /// <param name="byteLength">
-    /// Size in bytes. It must ALREADY have been validated against the decoded row count: this
+    /// Size in bytes. It must already have been validated against the decoded row count: this
     /// method has no way to tell a legitimate 8 MiB column from a file-supplied length that was
     /// never capped.
     /// </param>
     /// <param name="alignment">A power of two in <c>[1, VortexLimits.MaxAlignment]</c>.</param>
     /// <returns>A non-owning view over the block, valid until the next <see cref="Reset"/> call.</returns>
     /// <remarks>
-    /// The block is ZEROED. The pool hands back recycled native memory, and letting a decoder that
+    /// The block is zero-filled. The pool hands back recycled native memory, and letting a decoder that
     /// writes only part of a buffer - a bitmap's trailing bits, a short last FastLanes block -
     /// publish the rest would leak whatever the previous batch, or the previous process activity,
     /// left there.
@@ -919,31 +907,31 @@ public sealed class CanonicalArena
     public VortexBuffer Allocate(int byteLength, int alignment) => Allocate(byteLength, alignment, out _);
 
     /// <summary>
-    /// <see cref="Allocate(int, int, out Span{byte})"/> WITHOUT the zero-fill. The caller must write
+    /// <see cref="Allocate(int, int, out Span{byte})"/> without the zero-fill. The caller must write
     /// every byte of <paramref name="destination"/> before anything reads it.
     /// </summary>
     /// <param name="byteLength">Size in bytes, already validated against the row count.</param>
     /// <param name="alignment">A power of two in <c>[1, VortexLimits.MaxAlignment]</c>.</param>
-    /// <param name="destination">The writable block, holding WHATEVER WAS THERE BEFORE.</param>
+    /// <param name="destination">The writable block, holding whatever was in it before.</param>
     /// <returns>A non-owning view over the same bytes.</returns>
     /// <remarks>
     /// <para>
-    /// SEPARATE METHOD RATHER THAN A FLAG, because the failure mode is silent. The blocks come from
-    /// a pool that has held other files' bytes, so a buffer this hands out and the caller does not
-    /// completely fill exposes those bytes AS COLUMN VALUES. That is data disclosure, not a wrong
-    /// answer, and it passes every differential test whose oracle is another run of this reader over
-    /// the same file. A boolean argument would let a call site acquire the fast path by accident; a
-    /// distinct name cannot be typed by mistake.
+    /// A separate method rather than a flag, because the failure mode is silent. The blocks come
+    /// from a pool that has held other files' bytes, so a buffer this hands out and the caller does
+    /// not completely fill exposes those bytes as column values. That is data disclosure, not a
+    /// wrong answer, and it passes every differential test whose oracle is another run of this
+    /// reader over the same file. A boolean argument would let a call site acquire the fast path by
+    /// accident; a distinct name cannot be typed by mistake.
     /// </para>
     /// <para>
-    /// The oracle that CAN catch it is the Rust cross-check, which reads what this library wrote
-    /// with an implementation that did not produce the bytes.
+    /// The oracle that can catch it is the cross-check against the reference implementation, which
+    /// reads what this library wrote with code that did not produce the bytes.
     /// </para>
     /// <para>
-    /// <b>Eligibility is "provably writes every byte", not "probably".</b> A decoder whose zero-width
-    /// or zero-length branch falls through to the buffer's existing contents is NOT eligible, however
-    /// rare that branch is - <c>fastlanes.bitpacked</c> at bit width 0 qualifies only because it
-    /// clears the span itself rather than inheriting a cleared one.
+    /// <b>Eligibility is "provably writes every byte", not "probably".</b> A decoder whose
+    /// zero-width or zero-length branch falls through to the buffer's existing contents is not
+    /// eligible, however rare that branch is - a bit-packed decoder at bit width 0 qualifies only
+    /// because it clears the span itself rather than inheriting a cleared one.
     /// </para>
     /// </remarks>
     public VortexBuffer AllocateUninitialized(int byteLength, int alignment, out Span<byte> destination)
@@ -998,7 +986,7 @@ public sealed class CanonicalArena
         return ref _records[index];
     }
 
-    /// <summary>The same record, writable: only the constant memo uses it. Z1b-c2b2.</summary>
+    /// <summary>The same record, writable: only the constant memo uses it.</summary>
     /// <param name="index">The node's index.</param>
     /// <returns>A mutable reference into the record array.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1111,11 +1099,10 @@ public sealed class CanonicalArena
     /// <returns>The total, in bytes.</returns>
     /// <exception cref="VortexFormatException"><paramref name="nodeIndex"/> is out of range.</exception>
     /// <remarks>
-    /// The reference's <c>nbytes()</c>, and it exists for the same caller: the writer's
-    /// repartitioner decides when a block is large enough, and "large enough" is a size in
-    /// UNCOMPRESSED bytes because that is the only size available before the block is compressed.
-    /// A shared buffer is counted once per reference, as upstream's is -- the figure is a budget,
-    /// not an allocation report.
+    /// It exists for the writer's repartitioner, which decides when a block is large enough, and
+    /// "large enough" is a size in uncompressed bytes because that is the only size available
+    /// before the block is compressed. A shared buffer is counted once per reference: the figure is
+    /// a budget, not an allocation report.
     /// </remarks>
     internal long ByteSize(int nodeIndex)
     {
@@ -1156,19 +1143,18 @@ public sealed class CanonicalArena
     /// <exception cref="VortexFormatException"><paramref name="sourceIndex"/> is out of range.</exception>
     /// <remarks>
     /// <para>
-    /// THE RESULT BORROWS, SO THE CALLER OWES A LIFETIME ARGUMENT -- the same one every other
-    /// cross-arena slice already owes. <see cref="CopyFrom"/> materializes bytes because its three
+    /// The result borrows, so the caller owes a lifetime argument -- the same one every other
+    /// cross-arena slice already owes. <see cref="CopyFrom"/> materializes bytes because its
     /// callers keep the result past the arena it came from; this one exists for the caller that
     /// does not, and for which materializing is the whole cost.
     /// </para>
     /// <para>
-    /// WHY IT EXISTS AT ALL, WHEN A SLICE IS ALREADY A VIEW. Every canonical kind but one narrows
-    /// across arenas for free, because everything a narrowed record needs is a
-    /// <see cref="VortexBuffer"/> and a buffer is a window, not an owner. <c>ListView</c> is the
-    /// exception: its offsets are absolute into an elements CHILD named by an arena index, and an
-    /// index means nothing in another arena. The child therefore has to EXIST here -- but existing
-    /// is a record, not a copy of its bytes. Copying them made a batch of a large list chunk cost
-    /// the whole child, which is the scan quadratic again, restricted to one dtype.
+    /// A slice is already a view, so most kinds need nothing of the sort: everything a narrowed
+    /// record holds is a <see cref="VortexBuffer"/>, which is a window rather than an owner.
+    /// <c>ListView</c> is the exception, because its offsets are absolute into an elements child
+    /// named by an arena index, and an index means nothing in another arena. The child therefore
+    /// has to exist here -- but existing is a record, not a copy of its bytes, and copying the
+    /// bytes would charge every batch of a large list chunk for the whole child.
     /// </para>
     /// </remarks>
     internal int ReferenceFrom(CanonicalArena source, int sourceIndex)
@@ -1233,31 +1219,28 @@ public sealed class CanonicalArena
     /// <exception cref="VortexFormatException"><paramref name="sourceIndex"/> is out of range.</exception>
     /// <remarks>
     /// <para>
-    /// THE POINT IS THE BYTES, NOT THE RECORD. A <see cref="CanonicalRecord"/> is mostly indices and
-    /// <see cref="VortexBuffer"/> views, and a view is a window onto memory this arena's
+    /// The point is the bytes, not the record. A <see cref="CanonicalRecord"/> is mostly indices
+    /// and <see cref="VortexBuffer"/> views, and a view is a window onto memory this arena's
     /// <see cref="Reset"/> hands back to the pool. Copying the record alone would produce something
     /// that reads correctly until the next batch refills the storage underneath it and then reads
-    /// live, plausible, wrong data - which is not a hypothetical: it is what
-    /// <c>ArenaLifetimeTests</c> demonstrates, and it is what made the shared-dictionary layout come
-    /// back permuted twice with three unrelated causes eliminated in between.
+    /// live, plausible, wrong data, which <c>ArenaLifetimeTests</c> demonstrates.
     /// </para>
     /// <para>
-    /// THREE SEPARATE ITEMS WANT THIS ONE FUNCTION. A dictionary shared across chunks must keep its
-    /// entries past the batch that first saw them (§3a); <c>CanonicalConcat</c> cannot coalesce
-    /// chunks across arenas without it (§3c); and a chunk larger than a batch is decoded once per
-    /// batch because the decoded node cannot be kept (the scan quadratic, 79x-129x). None of them is
-    /// about dictionaries, concatenation or scanning: all three are about lifetime.
+    /// Several unrelated needs come down to this one function: a dictionary shared across chunks
+    /// must keep its entries past the batch that first saw them, a concatenation cannot coalesce
+    /// chunks across arenas without it, and a chunk larger than a batch would otherwise be decoded
+    /// once per batch because the decoded node cannot be kept. None of them is about dictionaries,
+    /// concatenation or scanning: all are about lifetime.
     /// </para>
     /// <para>
     /// Recursive, over the schema rather than over the rows - depth is the nesting of the dtype, so
     /// a struct of lists of structs recurses three times whatever its row count.
     /// </para>
     /// <para>
-    /// INTERNAL UNTIL A CONSUMER JUSTIFIES THE SHAPE. <see cref="CanonicalArena"/> is public and a
-    /// caller building batches could plausibly want this, but the three items that asked for it have
-    /// not landed yet, and each could want a different signature - a subtree, a row range, a
-    /// retained handle. Publishing before one of them exists is how an API becomes permanent by
-    /// accident; promoting later costs nothing and un-shipping costs everything.
+    /// Internal until a consumer justifies the shape. <see cref="CanonicalArena"/> is public and a
+    /// caller building batches could plausibly want this, but each of the needs above could want a
+    /// different signature - a subtree, a row range, a retained handle - and publishing before one
+    /// of them exists is how an interface becomes permanent by accident.
     /// </para>
     /// </remarks>
     internal int CopyFrom(CanonicalArena source, int sourceIndex)
@@ -1268,7 +1251,7 @@ public sealed class CanonicalArena
             ArraysThrow.CanonicalIndex(sourceIndex, source._recordCount);
         }
 
-        // Read by value up front. The recursive calls below append to THIS arena, which may resize
+        // Read by value up front. The recursive calls below append to this arena, which may resize
         // `_records`, and holding a `ref` into the array across that would be a use-after-move when
         // source and destination are the same arena.
         CanonicalRecord src = source._records[sourceIndex];
@@ -1280,13 +1263,12 @@ public sealed class CanonicalArena
             validity = Validity.Bitmap(CopyFrom(source, validity.CanonicalNodeIndex));
         }
 
-        // A VARBINVIEW IS COPIED COMPACT, and that is not an optimization but the difference between
-        // linear and quadratic. WRITE-AUDIT.md §3.3: a slice of a VarBinView keeps its data buffers
-        // WHOLE -- rightly, because a slice is a view and that is what makes the string encodings
-        // reach their scan ceiling (CanonicalSlice.cs:50-57). Copying such a slice buffer by buffer
-        // therefore materializes every byte of the array it was cut from, and the writer's carried
-        // remainder, re-copied once per block, dragged the whole heap of every block already
-        // emitted: `fsst` copied 384 255 MB to write 929 140 bytes at a million rows.
+        // A VarBinView is copied compact, and that is not an optimization but the difference
+        // between linear and quadratic. A slice of a VarBinView keeps its data buffers whole --
+        // rightly, because a slice is a view, and that is what lets the string encodings scan at
+        // full speed. Copying such a slice buffer by buffer would therefore materialize every byte
+        // of the array it was cut from, and the writer's carried remainder, re-copied once per
+        // block, would drag the whole heap of every block already emitted along with it.
         if (src.Kind == CanonicalKind.VarBinView)
         {
             return CompactVarBinView(source, in src, validity);
@@ -1333,26 +1315,23 @@ public sealed class CanonicalArena
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The result holds ONE data buffer, in row order, and every buffered view points at it. That
+    /// The result holds one data buffer, in row order, and every buffered view points at it. That
     /// is a gather -- one memcpy per non-inline row -- against a copy of whole buffers, so it is
     /// cheaper exactly when the node is a window and never more than a constant factor dearer when
-    /// it is not. Inline views (65 % of them on `chunked_varbinview`) carry their bytes inside the
-    /// view and cost nothing here.
+    /// it is not. An inline view carries its bytes inside the view and costs nothing here, which is
+    /// the common case for short strings.
     /// </para>
     /// <para>
-    /// What the gather costs, where it is paid: the writer's transit copy of a million rows. Doing
-    /// it a second time and throwing the result away adds 5,1 ms to `fsst`, 4,2 to `zstd` and 3,9
-    /// to `onpair`, on write axes of 55,7, 39,1 and 31,2 ms -- two thirds of what buffering rows
-    /// into blocks costs at all. Moving the same bytes as one memcpy out of a contiguous heap, with
-    /// four bytes of offset a row instead of sixteen of view, adds 1,3, 0,3 and 0,7 instead. The
-    /// cost is the per-row copy and not the bytes, and a column whose views are nearly all inline
-    /// has neither: `varbin` moves 0,3 ms.
+    /// The cost of the gather falls on the writer's transit copy of the rows, and it is the per-row
+    /// copy rather than the bytes: moving the same bytes as one memcpy out of a contiguous heap,
+    /// with four bytes of offset a row instead of sixteen of view, is a fraction of the price, and
+    /// a column whose views are nearly all inline pays neither.
     /// </para>
     /// <para>
-    /// THE BOUNDS ARE CHECKED ON EVERY BUFFERED VIEW, Class I, for
+    /// The bounds are checked on every buffered view, for
     /// <see cref="Decoders.Canonical.CanonicalConcat"/>'s reason: these views may have been rebased
-    /// by a concat since the decoder validated them, and a copy is not a place to start trusting
-    /// them.
+    /// by a concatenation since the decoder validated them, and a copy is not a place to start
+    /// trusting them.
     /// </para>
     /// </remarks>
     private int CompactVarBinView(CanonicalArena source, in CanonicalRecord src, Validity validity)
@@ -1460,8 +1439,8 @@ public sealed class CanonicalArena
             return VortexBuffer.Empty;
         }
 
-        // Uninitialized: the copy below writes every byte of it. See AllocateUninitialized for why
-        // that bar is where it is.
+        // Uninitialized because the copy below writes every byte of it, which is the only thing
+        // that makes skipping the zero-fill safe.
         System.Threading.Interlocked.Add(ref BytesMaterialized, source.Length);
         VortexBuffer copy = AllocateUninitialized(source.Length, 1, out Span<byte> destination);
         source.Span.CopyTo(destination);
@@ -1475,16 +1454,15 @@ public sealed class CanonicalArena
             Array.Resize(ref _records, Grow(_records.Length));
         }
 
-        // A RECORD ENTERS THIS ARENA WITHOUT A MEMO, whoever built it. `Materialized` names a node
-        // by INDEX, and an index means nothing outside the arena that issued it -- so a record
+        // A record enters this arena without a memo, whoever built it. `Materialized` names a node
+        // by index, and an index means nothing outside the arena that issued it -- so a record
         // arriving from `ReferenceFrom` or `CopyFrom`, which copy the struct wholesale and then fix
-        // up the other arena-local fields, carries a pointer into a numbering this arena does not
-        // share. That is not hypothetical: with the constant form on, a chunked struct's constant
-        // field came across with a stale twin, `MaterializeConstant` returned it from the memo, and
-        // a Primitive concat was handed the other arena's struct ROOT. Resetting here rather than at
-        // the two copy sites makes the invariant hold for a third one nobody has written yet; it
-        // costs one store, and no caller commits a record with a live memo anyway -- it is written
-        // through `RecordRefMutable` AFTER the commit that issued the index.
+        // up the other arena-local fields, would carry a pointer into a numbering this arena does
+        // not share: a stale twin returned from the memo hands a consumer a node from the other
+        // arena entirely. Resetting here rather than at the two copy sites makes the invariant hold
+        // for a third one nobody has written yet; it costs one store, and no caller commits a
+        // record with a live memo anyway, since the memo is written through `RecordRefMutable`
+        // after the commit that issued the index.
         record.Materialized = -1;
 
         int index = _recordCount;
@@ -1512,7 +1490,7 @@ internal struct CanonicalRecord
 
     /// <summary>
     /// For a <see cref="CanonicalKind.Constant"/> node: the materialized twin, once someone has
-    /// asked for a contiguous span. -1 until then. PERF-AUDIT-v2.md Z1b-c2b2.
+    /// asked for a contiguous span. -1 until then.
     /// </summary>
     internal int Materialized;
 

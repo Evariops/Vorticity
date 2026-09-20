@@ -1,5 +1,3 @@
-// vortex.datetimeparts — vortex-datetime-parts-0.86.1/src/array.rs. spec/METADATA.md.
-// Phase 2 consumer.
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;

@@ -1,4 +1,3 @@
-// vortex.sequence — vortex-sequence-0.86.1/src/array.rs. spec/METADATA.md.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -15,8 +14,8 @@ namespace Vorticity.Arrays.Metadata;
 /// </summary>
 /// <remarks>
 /// Both values stay <b>untyped</b>. A wire <c>ScalarValue</c> carries no type tag, so it can only
-/// be interpreted against the node's inherited DType, which this codec does not have
-/// (Phase 1 contract §0a C3, §8.5).
+/// be interpreted against the node's inherited dtype, which this codec does not have; giving the
+/// values a type is the caller's job.
 /// </remarks>
 public readonly struct SequenceMetadata : IEquatable<SequenceMetadata>
 {
@@ -54,9 +53,8 @@ public readonly struct SequenceMetadata : IEquatable<SequenceMetadata>
     /// <param name="dtypes">Arena for a dtype nested inside a <c>variant_value</c>.</param>
     /// <exception cref="ArgumentNullException"><paramref name="store"/> or <paramref name="dtypes"/> is null.</exception>
     /// <exception cref="VortexFormatException">
-    /// The payload is malformed, or either value is missing. Upstream's <c>deserialize</c> raises
-    /// "base required" / "multiplier required" for a missing field, and reaches a
-    /// <c>vortex_expect</c> for a present-but-empty one — both are rejected here.
+    /// The payload is malformed, or either value is missing, or either value is present but sets no
+    /// case at all; a field that is there but empty is rejected just like an absent one.
     /// </exception>
     public static SequenceMetadata Read(ReadOnlySpan<byte> metadata, ScalarStore store, DTypeArena dtypes)
     {

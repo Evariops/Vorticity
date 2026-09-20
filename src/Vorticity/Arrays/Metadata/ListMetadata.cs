@@ -1,4 +1,3 @@
-// vortex.list — vortex-array-0.86.1/src/arrays/list/vtable/mod.rs. spec/METADATA.md.
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
@@ -10,9 +9,8 @@ namespace Vorticity.Arrays.Metadata;
 /// <c>message ListMetadata { uint64 elements_len = 1; PType offset_ptype = 2; }</c>.
 /// </summary>
 /// <remarks>
-/// The offset type is <em>not</em> restricted to unsigned: Arrow-style list offsets are signed and
-/// the corpus carries <c>i32</c> (<c>encodings/list.vortex</c>, <c>10 06</c>) as well as
-/// <c>u16</c>. Only patch indices are required to be unsigned.
+/// The offset type is <em>not</em> restricted to unsigned: Arrow-style list offsets are signed, so
+/// both signed and unsigned offsets occur here. Only patch indices are required to be unsigned.
 /// </remarks>
 public readonly struct ListMetadata : IEquatable<ListMetadata>
 {
@@ -36,7 +34,7 @@ public readonly struct ListMetadata : IEquatable<ListMetadata>
     /// <summary>Length of the elements child (tag 1).</summary>
     public ulong ElementsLength { get; }
 
-    /// <summary>Physical type of the offsets child (tag 2). Class I: it is the offset stride.</summary>
+    /// <summary>Physical type of the offsets child (tag 2); it fixes the stride of the offsets buffer.</summary>
     public PType OffsetPType { get; }
 
     /// <summary>Reads a <c>vortex.list</c> metadata payload.</summary>

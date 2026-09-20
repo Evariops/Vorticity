@@ -1,14 +1,3 @@
-// docs/03-architecture.md §3.3: array nodes are structs in a pooled array, addressed by index, and
-// read through a `ref struct` view. Phase 1 contract §2.2 fixes the lifetime this file implements:
-// the arena allocates its backing arrays once, grows by doubling, and is Reset() per batch - never
-// freed. Reset() zeroes counts and does NOT clear the arrays, which is what makes "zero managed
-// allocation per batch" reachable.
-//
-// The arena NEVER owns segment memory. A resolved buffer is a VortexBuffer - 16 bytes, a raw
-// pointer, non-owning. The bytes belong to a SegmentOwner held by the batch's SegmentRequestSet
-// (contract §2.2 rule 2). The one exception is the arena's own COPY of the Array FlatBuffer: node
-// metadata and statistics point into that copy, so a node view never depends on the segment
-// outliving it, and the inlined `array_encoding_tree` variant needs no pinning games.
 using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -88,8 +77,8 @@ public readonly struct ArrayNodeRecord
 /// <remarks>
 /// A <c>ref struct</c> deliberately: a node index means nothing without the arena that issued it
 /// and nothing after that arena is <see cref="ArrayNodeArena.Reset"/>, so making the view
-/// unstorable turns contract §2.2 rule 4 into a compile error in most of the cases where someone
-/// would break it.
+/// unstorable turns "never outlive the arena" into a compile error in most of the cases where
+/// someone would break it.
 /// </remarks>
 public readonly ref struct ArrayNode
 {
@@ -185,11 +174,23 @@ public readonly ref struct ArrayNode
 
 /// <summary>
 /// A pooled arena of <see cref="ArrayNodeRecord"/>s plus the resolved buffer table for one array
-/// blob. Owned by a <see cref="ScanContext"/>; <see cref="Reset"/> per batch; never owns segment
-/// memory (Phase 1 contract §2.2).
+/// blob. Owned by a <see cref="ScanContext"/> and <see cref="Reset"/> per batch.
 /// </summary>
-/// <remarks>Single-threaded by construction: a <see cref="ScanContext"/> is affine to one decode
-/// flow (contract §2.2 rule 6).</remarks>
+/// <remarks>
+/// <para>
+/// The backing arrays are allocated once, grow by doubling and are never freed; a reset only
+/// zeroes the counts, which is what makes a batch cost no managed allocation.
+/// </para>
+/// <para>
+/// The arena never owns segment memory: a resolved buffer is a non-owning pointer into bytes the
+/// batch's segment request set keeps alive. The one exception is its own copy of the array
+/// FlatBuffer, into which node metadata and statistics point, so a node view never depends on the
+/// segment outliving it and an inlined encoding tree needs no pinning of the caller's span.
+/// </para>
+/// <para>
+/// Single-threaded by construction: a <see cref="ScanContext"/> is affine to one decode flow.
+/// </para>
+/// </remarks>
 public sealed class ArrayNodeArena
 {
     private ArrayNodeRecord[] _records;
@@ -264,8 +265,8 @@ public sealed class ArrayNodeArena
     }
 
     /// <summary>
-    /// Clears counts. Does NOT free the backing arrays and does NOT touch any
-    /// <see cref="SegmentOwner"/>: the arena has never owned segment memory.
+    /// Clears the counts, leaving the backing arrays allocated and every
+    /// <see cref="SegmentOwner"/> untouched: the arena has never owned segment memory.
     /// </summary>
     public void Reset()
     {
@@ -336,8 +337,8 @@ public sealed class ArrayNodeArena
 
     /// <summary>
     /// The FlatBuffer copy lives on the pinned object heap. Two reasons, both structural:
-    /// FlatBufferTable.GetStructVector reinterprets a struct vector in place and tests the
-    /// element ADDRESS, so the copy's base must really be 8-aligned; and a pinned array cannot be
+    /// FlatBufferTable.GetStructVector reinterprets a struct vector in place and tests the address
+    /// of its elements, so the copy's base must really be 8-aligned; and a pinned array cannot be
     /// moved out from under a span a node view is still holding.
     /// </summary>
     private static byte[] AllocateTree(int capacity) => GC.AllocateArray<byte>(capacity, pinned: true);

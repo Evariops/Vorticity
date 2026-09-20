@@ -1,7 +1,3 @@
-// Layout vortex.list — vortex-layout-0.86.1/src/layouts/list/mod.rs. spec/METADATA.md.
-// Phase 2 consumer: `vortex.list` is a member of no core edition as of core2026.08.3, so it
-// resolves to LayoutEncodingId.Unknown in Phase 1 (Phase 1 contract §2.8). The codec is
-// transcribed now because the file was open; nothing in Phase 1 calls it.
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
@@ -11,6 +7,8 @@ namespace Vorticity.Arrays.Metadata;
 /// <summary>
 /// <c>vortex.list</c> <b>layout</b> metadata:
 /// <c>message ListLayoutMetadata { PType offsets_ptype = 1; }</c>.
+/// No core edition declares this layout, so a reader that meets it resolves an unknown layout
+/// encoding; the codec exists so that such a file can still be described.
 /// </summary>
 public readonly struct ListLayoutMetadata : IEquatable<ListLayoutMetadata>
 {

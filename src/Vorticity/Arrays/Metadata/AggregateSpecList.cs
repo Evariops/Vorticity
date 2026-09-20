@@ -1,4 +1,3 @@
-// The durable, reusable form of a zone map's repeated AggregateSpecProto entries.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -93,7 +92,7 @@ public sealed class AggregateSpecList
     /// <summary>
     /// The resolved aggregate of entry <paramref name="index"/>. Resolved once, when the entry was
     /// added; <see cref="AggregateId.Unknown"/> disables that aggregate's pruning and is never an
-    /// error (docs/08-semantics.md §4).
+    /// error.
     /// </summary>
     /// <param name="index">Zero-based entry index.</param>
     /// <exception cref="ArgumentOutOfRangeException">The index is outside <c>[0, Count)</c>.</exception>
@@ -127,9 +126,9 @@ public sealed class AggregateSpecList
             return;
         }
 
-        // `size *= 2` on its own overflows to a negative int and then spins forever at 2^31. The
-        // count is bounded by the metadata length in practice, but a growth loop that can hang is
-        // exactly the trap docs/03-architecture.md §6 is about, so the ceiling is explicit.
+        // `size *= 2` on its own overflows to a negative int and then spins forever. The count is
+        // bounded by the metadata length in practice, but a growth loop a malformed file could hang
+        // is worth ruling out, so the ceiling is explicit.
         if (required > Array.MaxLength)
         {
             ThrowTooLarge(required);

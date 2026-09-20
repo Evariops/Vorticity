@@ -1,4 +1,3 @@
-// Layout vortex.flat — vortex-layout-0.86.1/src/layouts/flat/mod.rs. spec/METADATA.md.
 using System;
 using Vorticity.Serialization.Protobuf;
 
@@ -11,9 +10,8 @@ namespace Vorticity.Arrays.Metadata;
 /// <remarks>
 /// A <c>ref struct</c>: <see cref="ArrayEncodingTree"/> is a slice of the caller's metadata buffer,
 /// never a copy. When the field is present the Array FlatBuffer is inlined here and the segment
-/// holds buffers only — a different offset-reconstruction path, exercised by the corpus file
-/// <c>containers/flat_inline_array_node.vortex</c> and by nothing a default writer produces
-/// (docs/04-conformance.md §3).
+/// holds buffers only, which is a different offset-reconstruction path from the usual one — rare,
+/// since a default writer does not produce it, but legal and readable.
 /// </remarks>
 public readonly ref struct FlatLayoutMetadata
 {

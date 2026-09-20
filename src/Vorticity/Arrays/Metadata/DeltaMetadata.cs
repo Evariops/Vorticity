@@ -1,13 +1,13 @@
-// fastlanes.delta - vortex-fastlanes-0.86.1/src/delta/vtable/mod.rs.
-//
-// Two fields, and the second is the same 1024-element block offset bit-packing carries.
 using System;
 
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Arrays.Metadata;
 
-/// <summary>Metadata of a <c>fastlanes.delta</c> node.</summary>
+/// <summary>
+/// Metadata of a <c>fastlanes.delta</c> node: the length of the deltas child, and the first row's
+/// offset within the same 1024-element block that bit-packing works in.
+/// </summary>
 public readonly struct DeltaMetadata : IEquatable<DeltaMetadata>
 {
     private const string MessageName = "DeltaMetadata";
@@ -75,15 +75,9 @@ public readonly struct DeltaMetadata : IEquatable<DeltaMetadata>
     /// <inheritdoc/>
     public override int GetHashCode() => HashCode.Combine(DeltasLength, Offset);
 
-    /// <summary>Equality.</summary>
-    /// <param name="left">Left.</param>
-    /// <param name="right">Right.</param>
-    /// <returns>Whether they are equal.</returns>
+    /// <summary>Equality operator.</summary>
     public static bool operator ==(DeltaMetadata left, DeltaMetadata right) => left.Equals(right);
 
-    /// <summary>Inequality.</summary>
-    /// <param name="left">Left.</param>
-    /// <param name="right">Right.</param>
-    /// <returns>Whether they differ.</returns>
+    /// <summary>Inequality operator.</summary>
     public static bool operator !=(DeltaMetadata left, DeltaMetadata right) => !left.Equals(right);
 }

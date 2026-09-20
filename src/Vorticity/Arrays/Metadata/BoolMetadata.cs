@@ -1,4 +1,3 @@
-// vortex.bool — vortex-array-0.86.1/src/arrays/bool/vtable/mod.rs. spec/METADATA.md.
 using System;
 using Vorticity.Serialization.Protobuf;
 
@@ -9,8 +8,7 @@ namespace Vorticity.Arrays.Metadata;
 /// </summary>
 /// <remarks>
 /// The offset is a <b>bit</b> offset into buffer 0 and is the only thing that distinguishes two
-/// otherwise identical bool arrays; the corpus file <c>encodings/bool_bit_offset7</c> carries the
-/// bytes <c>08 07</c>.
+/// otherwise identical bool arrays.
 /// </remarks>
 public readonly struct BoolMetadata : IEquatable<BoolMetadata>
 {
@@ -34,9 +32,8 @@ public readonly struct BoolMetadata : IEquatable<BoolMetadata>
     /// <summary>Reads a <c>vortex.bool</c> metadata payload.</summary>
     /// <param name="metadata">The raw metadata bytes; empty means <c>offset = 0</c>.</param>
     /// <exception cref="VortexFormatException">
-    /// The payload is malformed, or the offset is 8 or more. The bound is class I: the offset is
-    /// added to a bit index before the bitmap is indexed
-    /// (<c>vortex_ensure!(offset &lt; 8)</c> in vortex-array-0.86.1/src/arrays/bool/array.rs).
+    /// The payload is malformed, or the offset is 8 or more. The bound is enforced rather than
+    /// advisory: the offset is added to a bit index before the bitmap is indexed.
     /// </exception>
     public static BoolMetadata Read(ReadOnlySpan<byte> metadata)
     {

@@ -1,16 +1,3 @@
-// Shared field-level decoding helpers for the per-encoding metadata messages of spec/METADATA.md.
-//
-// Two rules from the Phase 1 contract §1.7 are implemented here once, so that no individual codec
-// can get them wrong:
-//
-//   * an UNRECOGNIZED field number is skipped, dispatching on its wire type alone (read-forever,
-//     docs/02-format.md §5.3);
-//   * a RECOGNIZED field number carrying the wrong wire type, or a value outside the message's
-//     domain, is rejected with a VortexFormatException. `prost` rejects the first
-//     ("invalid wire type") and silently coerces the second — an unknown `enumeration` varint
-//     becomes the enum's zero value, so a corrupt `codes_ptype = 99` reads as `u8` upstream. We
-//     reject instead, because that field decides how wide a buffer the decoder reads
-//     (docs/08-semantics.md §5, class I).
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -20,9 +7,16 @@ using Vorticity.Types;
 namespace Vorticity.Arrays.Metadata;
 
 /// <summary>
-/// Field readers shared by every metadata codec in this namespace. Internal: the codecs are the
-/// public surface.
+/// Field readers shared by every metadata codec in this namespace, so that two decoding rules are
+/// written once rather than once per codec: a field number the message does not recognize is
+/// skipped on its wire type alone, and a recognized field number that carries the wrong wire type
+/// or a value outside its domain is rejected with a <see cref="VortexFormatException"/>.
 /// </summary>
+/// <remarks>
+/// Rejecting is deliberate: a reader that coerces an out-of-domain enumeration to the enum's zero
+/// value would turn a corrupt physical type into a plausible one, and these fields decide how wide
+/// a buffer the decoder goes on to read.
+/// </remarks>
 internal static class MetadataProto
 {
     /// <summary>

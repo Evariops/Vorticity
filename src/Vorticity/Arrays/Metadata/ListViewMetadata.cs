@@ -1,4 +1,3 @@
-// vortex.listview — vortex-array-0.86.1/src/arrays/listview/vtable/mod.rs. spec/METADATA.md.
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;

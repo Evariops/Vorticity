@@ -1,21 +1,10 @@
-// Phase 1 contract §2.3: ids are classified at OPEN time and failure happens at USE time. This
-// file is the classifier. It is a hand-written UTF-8 matcher - switch on length, then on one
-// discriminating byte, then SequenceEqual - and never a Dictionary<string, ...>: a dictionary keyed
-// by string would force an allocation and a hash of file-controlled bytes on every lookup.
-//
-// An id we do not implement resolves to Unknown, and THAT IS NOT AN ERROR here. The three places
-// that turn Unknown into a VortexUnsupportedException are named in contract §2.3:
-// ArrayDecoderTable.Get, LayoutReaderTable.Get and ExtensionDTypeRegistry.RequireSupported.
-//
-// Membership was cross-checked against spec/editions/core*.toml (the union of every frozen
-// edition) and against corpus/manifest.json's coverage.covered / coverage.unclaimed_observed.
 using System;
 using System.Runtime.CompilerServices;
 
 namespace Vorticity.Arrays;
 
 /// <summary>
-/// Every array encoding Phase 1 can decode, plus <see cref="Unknown"/>. The values are
+/// Every array encoding this build can decode, plus <see cref="Unknown"/>. The values are
 /// <em>ours</em>: they are not the file's <c>u16</c> spec index and must never be persisted,
 /// compared against a wire value, or assumed stable across files.
 /// </summary>
@@ -109,7 +98,6 @@ public enum ArrayEncodingId : ushort
     /// <summary><c>vortex.bytebool</c>.</summary>
     ByteBool,
 
-    // ---------------------------------------------------------------- Phase 2 (docs/90-registry.md)
 
     /// <summary><c>vortex.decimal_byte_parts</c>.</summary>
     DecimalByteParts,
@@ -140,7 +128,7 @@ public enum ArrayEncodingId : ushort
 }
 
 /// <summary>
-/// Every layout encoding Phase 1 can read, plus <see cref="Unknown"/>. Ours, not the file's.
+/// Every layout encoding this build can read, plus <see cref="Unknown"/>. Ours, not the file's.
 /// </summary>
 public enum LayoutEncodingId : ushort
 {
@@ -162,7 +150,7 @@ public enum LayoutEncodingId : ushort
     /// <summary><c>vortex.zoned</c>.</summary>
     Zoned,
 
-    /// <summary><c>vortex.stats</c>, the legacy ancestor of <c>vortex.zoned</c> (contract §2.7).</summary>
+    /// <summary><c>vortex.stats</c>, the legacy ancestor of <c>vortex.zoned</c>.</summary>
     Stats,
 
     /// <summary><c>vortex.list</c>, the experimental shredded list layout.</summary>
@@ -170,7 +158,9 @@ public enum LayoutEncodingId : ushort
 }
 
 /// <summary>
-/// Resolves wire component ids to the enums above. Allocation-free and side-effect-free.
+/// Resolves wire component ids to the enums above. Allocation-free and side-effect-free: the
+/// matchers switch on length, then on one discriminating byte, then compare the whole span, so a
+/// lookup never allocates or hashes file-controlled bytes the way a string-keyed dictionary would.
 /// </summary>
 public static class EncodingRegistry
 {
@@ -181,9 +171,10 @@ public static class EncodingRegistry
     internal const int MaxLayoutEncodingId = (int)LayoutEncodingId.List;
 
     /// <summary>
-    /// Resolves an array encoding id. An id this build does not decode - a future edition's, or
-    /// one Phase 1 deferred - returns <see cref="ArrayEncodingId.Unknown"/>, which is
-    /// <em>not</em> an error (contract §2.3).
+    /// Resolves an array encoding id. An id this build does not decode returns
+    /// <see cref="ArrayEncodingId.Unknown"/>, which is <em>not</em> an error here: ids are
+    /// classified when the file is opened, and only the decoder table that is later asked for one
+    /// turns <see cref="ArrayEncodingId.Unknown"/> into a failure.
     /// </summary>
     /// <param name="idUtf8">The id exactly as the footer's <c>array_specs</c> carries it.</param>
     public static ArrayEncodingId ResolveArray(ReadOnlySpan<byte> idUtf8)
@@ -316,7 +307,7 @@ public static class EncodingRegistry
 
     /// <summary>
     /// Resolves a layout encoding id. Unrecognized returns <see cref="LayoutEncodingId.Unknown"/>,
-    /// which is not an error until the layout is on the path to projected data (contract §2.3).
+    /// which is not an error until the layout is on the path to projected data.
     /// </summary>
     /// <param name="idUtf8">The id exactly as the footer's <c>layout_specs</c> carries it.</param>
     public static LayoutEncodingId ResolveLayout(ReadOnlySpan<byte> idUtf8)

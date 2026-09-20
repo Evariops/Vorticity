@@ -1,6 +1,3 @@
-// The zone-map aggregate ids of spec/editions/core2026.08.0.toml, resolved from UTF-8 without a
-// dictionary and without an allocation (Phase 1 contract §2.3 applies the same rule to encoding
-// ids: a Dictionary<string, _> would hash file-controlled bytes and allocate per lookup).
 using System;
 using System.Buffers.Binary;
 
@@ -10,9 +7,8 @@ namespace Vorticity.Arrays.Metadata;
 /// The six core-edition zone-map aggregates, plus <see cref="Unknown"/>.
 /// </summary>
 /// <remarks>
-/// An id outside this set disables that aggregate's pruning and is <b>never</b> an error
-/// (docs/08-semantics.md §4; upstream returns <c>Ok(None)</c> for it when the session allows
-/// unknown plugins, in vortex-layout-0.86.1/src/layouts/zoned/schema.rs).
+/// An id outside this set disables that aggregate's pruning and is <b>never</b> an error: an
+/// aggregate nobody understands simply contributes nothing, and the read still succeeds.
 /// </remarks>
 public enum AggregateId : byte
 {
@@ -99,11 +95,10 @@ public static class AggregateRegistry
     /// exactly eight bytes, or the value is zero or does not fit in a <see cref="uint"/>.
     /// </returns>
     /// <remarks>
-    /// The payload is <b>not</b> a Protobuf message: <c>BoundedMin::serialize</c> writes
-    /// <c>max_bytes.to_le_bytes()</c>, eight raw little-endian bytes, and its <c>deserialize</c>
-    /// requires exactly that length and a non-zero value
-    /// (vortex-array-0.86.1/src/aggregate_fn/fns/bounded_min/mod.rs). Returning false rather than
-    /// throwing is deliberate: an unusable bound disables pruning, and pruning is advisory.
+    /// The payload is <b>not</b> a Protobuf message: it is the bound length as eight raw
+    /// little-endian bytes, and only exactly that length with a non-zero value is accepted.
+    /// Returning false rather than throwing is deliberate: an unusable bound disables pruning,
+    /// and pruning is advisory.
     /// </remarks>
     public static bool TryGetBoundLength(
         AggregateId aggregate, ReadOnlySpan<byte> options, out uint boundLength)

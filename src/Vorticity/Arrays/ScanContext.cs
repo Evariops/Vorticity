@@ -1,9 +1,3 @@
-// Phase 1 contract §2.2 and §8.3: everything one decode flow owns, with one owner and one
-// lifetime. A ScanContext is AFFINE TO A SINGLE CONSUMER (docs/09-contracts.md §1) and is never
-// shared - WithDegreeOfParallelism gives each concurrent split its own, with its own arenas.
-//
-// ResetBatch() releases segments BEFORE resetting the arenas. The other order would let a decoder
-// that ran during the reset read freed memory.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
@@ -21,8 +15,9 @@ namespace Vorticity.Arrays;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Not thread-safe, deliberately. Concurrent scans over one open <see cref="VortexFile"/> are
-/// supported and expected, and each of them holds its own <see cref="ScanContext"/>.
+/// Not thread-safe, deliberately. A context is affine to a single consumer and is never shared:
+/// concurrent scans over one open <see cref="VortexFile"/> are supported and expected, and each
+/// concurrent split gets its own context, with its own arenas.
 /// </para>
 /// <para>
 /// Every index this context hands out - an <see cref="ArrayNodeArena"/> node index, a
@@ -41,17 +36,15 @@ public sealed class ScanContext : IDisposable
     private const int ScanCapacity = 64;
 
     /// <summary>
-    /// The arena capacity for a context that reads METADATA and nothing else.
+    /// The arena capacity for a context that reads metadata and nothing else.
     /// </summary>
     /// <remarks>
-    /// PERF-AUDIT-v2.md R30. `ZonePruningPlan` builds a context to read one zone map -- a struct of
-    /// a few aggregate columns, one row per zone -- and then throws it away. Sized for a batch, that
-    /// context allocated <b>18 192 bytes</b>, which the F-9 probe measured as <b>97,3 %</b> of
-    /// everything pruning costs over not pruning. Three of its seven parts carry 87,8 % of that and
-    /// all three take a capacity: <see cref="ArrayNodeArena"/> 7 368 o, <see cref="CanonicalArena"/>
-    /// 6 760, <see cref="DTypeArena"/> 1 840.
+    /// A zone map is a struct of a few aggregate columns with one row per zone, and the context
+    /// that reads it is thrown away straight afterwards. Sized for a batch instead, the three
+    /// arenas that take a capacity -- <see cref="ArrayNodeArena"/>, <see cref="CanonicalArena"/>
+    /// and <see cref="DTypeArena"/> -- dominate everything pruning costs over not pruning.
     ///
-    /// Eight rather than four, because the arenas DOUBLE when they fill and a zone map of a struct
+    /// Eight rather than four, because the arenas double when they fill and a zone map of a struct
     /// with three aggregates already needs five or six nodes: undersizing would trade one
     /// allocation for two. Nothing about correctness depends on the number -- an arena that fills
     /// grows -- so this is a starting point and not a bound.
@@ -78,32 +71,30 @@ public sealed class ScanContext : IDisposable
         int count = file.ArrayEncodingCount;
         _arrayEncodings = count == 0 ? [] : new ArrayEncodingId[count];
 
-        // Deliberately NOT materialized. VortexFile keeps only each id's UTF-8 location for the
-        // reason its GetArrayEncodingId documents: FlatBuffers strings may be shared, so a 300 KB
-        // footer can legally point 20 000 spec entries at one 40 KB id, and interning them all
-        // would allocate 1.6 GB from a file that costs a single read. Interning them HERE instead
-        // would simply move that cost onto the first scan - and multiply it by the degree of
-        // parallelism, because every lane builds its own context. The four-byte resolved ids below
-        // are bounded; the text is fetched from the file only by a throw site.
+        // Deliberately not materialized. VortexFile keeps only each id's location in the footer,
+        // because FlatBuffers strings may be shared: a footer may legally point a great many spec
+        // entries at one long id, so interning them all would allocate orders of magnitude more
+        // than reading the file costs. Interning them here instead would move that cost onto the
+        // first scan and multiply it by the degree of parallelism, because every lane builds its
+        // own context. The four-byte resolved ids below are bounded; the text is fetched from the
+        // file only by a throw site.
         _arrayEncodingIds = [];
         for (int i = 0; i < count; i++)
         {
             _arrayEncodings[i] = file.GetArrayEncoding(i);
         }
 
-        // `DTypeArena`'s own default is 16, not 64, so it is capped rather than widened: a full
-        // scan must keep exactly the capacity it had before this parameter existed.
+        // `DTypeArena`'s own default is narrower than a scan capacity, so the value is capped
+        // rather than widened: a full scan keeps the dtype capacity the arena chooses for itself.
         Types = new DTypeArena(Math.Min(capacity, 16));
         Scalars = new ScalarStore();
         Nodes = new ArrayNodeArena(capacity);
         _batchCanonical = new CanonicalArena(capacity);
 
-        // NOT SIZED FROM THE ARENA CAPACITY, and measured before being left alone. A batch
-        // registers one segment per leaf it reads, so the set's own default of sixteen is the
-        // question; giving it the arena's sixty-four instead costs 2 736 B on every read-path axis
-        // and saves nothing, because the delta is exactly the forty-eight slots added -- no growth
-        // was being avoided, the corpus never reaching sixteen. Sizing it from the projection's
-        // leaf count would, on a file wide enough to grow it, which no axis here is.
+        // Deliberately not sized from the arena capacity. A batch registers one segment per leaf it
+        // reads, which the set's own default already covers, so widening it to the arena capacity
+        // would cost the extra slots on every read and avoid no growth. Sizing it from the
+        // projection's leaf count would only pay off on a file wide enough to grow it.
         Segments = new SegmentRequestSet();
         Decode = new ArrayDecodeContext(this);
     }
@@ -113,8 +104,8 @@ public sealed class ScanContext : IDisposable
     /// </summary>
     /// <param name="arrayEncodingIds">
     /// The footer's <c>array_specs</c>, in order: entry <c>i</c> is what a node's
-    /// <c>encoding == i</c> names. Over-reporting is normal and never an error - the writer
-    /// pre-populates every id its edition permits (corpus manifest, last caveat).
+    /// <c>encoding == i</c> names. Over-reporting is normal and never an error: a writer may
+    /// pre-populate every id its edition permits, whether or not the file uses them.
     /// </param>
     /// <param name="options">Read-time policy; <see cref="VortexReadOptions.Default"/> when null.</param>
     /// <remarks>
@@ -193,8 +184,8 @@ public sealed class ScanContext : IDisposable
 
     /// <summary>One record per decoded node.</summary>
     /// <remarks>
-    /// USUALLY THE BATCH'S ARENA, AND BRIEFLY NOT. A chunk larger than a batch is decoded into the
-    /// arena that will RETAIN it, so no copy is needed to move it there --
+    /// Usually the batch's arena, and briefly not. A chunk larger than a batch is decoded into the
+    /// arena that will retain it, so no copy is needed to move it there --
     /// <see cref="BeginRetainedDecode"/> redirects this property for the duration of that one
     /// decode and <see cref="EndRetainedDecode"/> puts it back. The redirect is never observable
     /// from outside a single <c>LayoutReader.Execute</c> call, and every node the redirected decode
@@ -255,23 +246,15 @@ public sealed class ScanContext : IDisposable
         "<encoding spec " + specIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) + ">";
 
     /// <summary>
-    /// Releases every segment held for the previous batch and resets every arena.
-    /// </summary>
-    /// <remarks>
-    /// The order is fixed: release segments, then the node arena, then the canonical arena. A
-    /// canonical node holds non-owning views into segment memory, so resetting the arenas first
-    /// would leave a window in which a live view names released pages.
-    /// </remarks>
-    /// <summary>
     /// The rows wanted out of the batch, in the coordinate space of the <c>Execute</c> call that is
     /// running, or empty for "every row".
     /// </summary>
     /// <remarks>
-    /// CARRIED ON THE CONTEXT RATHER THAN PASSED AS A PARAMETER because `LayoutReader.Execute` is a
-    /// public extension point: threading a new argument through it would be a breaking change for
-    /// an out-of-tree reader, and every reader already receives the context.
+    /// Carried on the context rather than passed as a parameter, because `LayoutReader.Execute` is
+    /// a public extension point: threading a new argument through it would be a breaking change
+    /// for an out-of-tree reader, and every reader already receives the context.
     ///
-    /// THE COORDINATE SPACE IS THE INVARIANT. The selection lives in exactly the space its sibling
+    /// The coordinate space is the invariant. The selection lives in exactly the space its sibling
     /// `rows` argument lives in, so a reader that re-bases `rows` must re-base this too, and a
     /// reader that passes `rows` through unchanged passes this through by doing nothing. Only
     /// `vortex.chunked` re-partitions rows; struct, zoned and flat do not.
@@ -283,13 +266,13 @@ public sealed class ScanContext : IDisposable
     internal bool HasSelection => _selection is not null;
 
     /// <summary>
-    /// The scan's mask of live blocks (docs/11 §6.1), in the FILE's row coordinates, or
+    /// The scan's mask of live blocks, in the file's row coordinates, or
     /// <see langword="null"/> when every block is live.
     /// </summary>
     /// <remarks>
-    /// PER SCAN, NOT PER BATCH: set once by the enumerator and never touched by
+    /// Per scan, not per batch: set once by the enumerator and never touched by
     /// <see cref="ResetBatch"/>. Carried on the context for the same reason the selection is --
-    /// <c>LayoutReader.Execute</c> is a public extension point. Unlike the selection it is NOT
+    /// <c>LayoutReader.Execute</c> is a public extension point. Unlike the selection it is not
     /// re-based: a reader that re-partitions rows (<c>vortex.chunked</c>) clears it for its
     /// children and expresses what it means in the selection instead, so that a reader below it
     /// never reads file coordinates as its own. A reader that sees it set may take its
@@ -298,7 +281,7 @@ public sealed class ScanContext : IDisposable
     internal Compute.BlockMask? LiveBlocks { get; set; }
 
     /// <summary>
-    /// The scan's metrics sink (docs/11 §6.4), or <see langword="null"/> when nobody asked. Per
+    /// The scan's metrics sink, or <see langword="null"/> when nobody asked. Per
     /// scan like <see cref="LiveBlocks"/>: set once per lane, never by <see cref="ResetBatch"/>,
     /// and the readers add to it what they materialize.
     /// </summary>
@@ -360,7 +343,7 @@ public sealed class ScanContext : IDisposable
     /// <remarks>
     /// Set by the struct reader around the matching child and cleared again after it, so that the
     /// leaf below it knows the node it holds is the predicate's without re-deriving the path. A
-    /// reader that executes a child which is NOT part of the column's values -- a zone map, say --
+    /// reader that executes a child which is not part of the column's values -- a zone map, say --
     /// clears it for that child, or the leaf would answer the predicate over a table of statistics.
     /// </remarks>
     internal bool PredicateAtNode { get; set; }
@@ -380,11 +363,11 @@ public sealed class ScanContext : IDisposable
     /// narrowing afterwards.
     /// </summary>
     /// <remarks>
-    /// A struct LAYOUT reads only the fields a projection names. A struct stored as one array node
+    /// A struct layout reads only the fields a projection names. A struct stored as one array node
     /// has no layout to do that, so without this the whole of it is decoded and all but one column
-    /// thrown away -- measured at slightly dearer than not projecting at all on a fifty-column file.
-    /// It rides on the holder the pushed comparison already allocates, so a scan that projects
-    /// nothing pays nothing for it.
+    /// thrown away, which on a wide file costs slightly more than not projecting at all. It rides
+    /// on the holder the pushed comparison already allocates, so a scan that projects nothing pays
+    /// nothing for it.
     /// </remarks>
     internal Layouts.FieldMask PushedFields =>
         _pushed is null ? Layouts.FieldMask.All : _pushed.Fields;
@@ -445,26 +428,22 @@ public sealed class ScanContext : IDisposable
     /// <see cref="ResetBatch"/>; that is the whole point.
     /// </summary>
     /// <remarks>
-    /// LAZY, and the ratchets are why. A file whose chunk is its batch never retains anything, which
-    /// is every conformance fixture and everything this library writes at the default edition. Two
-    /// eagerly-constructed collections cost 88 bytes on every one of those scans -
-    /// <c>PathAllocationTests</c> turned red by 56 bytes over its tightest ceiling - so the common
-    /// path allocates nothing for a feature it does not use.
-    /// </remarks>
-    /// <remarks>
+    /// Allocated on first use. A file whose chunk is its batch never retains anything, which is the
+    /// common case, and the scan paths hold tight allocation ceilings: the common path must pay
+    /// nothing for a feature it does not use.
+    ///
     /// Keyed rather than listed, because the lookup is asked once per retained column and per
-    /// batch and a walk over the entries makes a wide read cost the square of its columns: a
-    /// thousand retained columns read in 10,4 ms as a list and 6,2 ms as a map. Keyed rather than
-    /// listed AND keyed, because a second field is eight bytes on every scan context and
-    /// `PathAllocationTests` counts them -- the eviction sweep removes while it enumerates, which
-    /// a dictionary has allowed since .NET Core 3.0 and which needs no second collection.
+    /// batch, and a walk over the entries would make a wide read cost the square of its columns.
+    /// Keyed and nothing beside it, because a second collection would cost another field on every
+    /// scan context: the eviction sweep removes entries while it enumerates them, which a
+    /// dictionary allows.
     /// </remarks>
     private Dictionary<long, RetainedChunk>? _retained;
 
     /// <summary>Arenas whose entry was evicted, kept to be refilled rather than reallocated.</summary>
     private Stack<CanonicalArena>? _spareArenas;
 
-    /// <summary>Counts batches, so an entry can say whether the CURRENT batch has used it.</summary>
+    /// <summary>Counts batches, so an entry can say whether the batch in flight has used it.</summary>
     private long _batchNumber;
 
     /// <summary>
@@ -480,32 +459,17 @@ public sealed class ScanContext : IDisposable
     private const int CheckedNodeSlots = 8;
 
     /// <summary>
-    /// Keys of the nodes whose O(n) validation has already passed, or null when none has.
+    /// Keys of the nodes whose O(n) validation has already passed: the open scope in slot 0 and the
+    /// passed checks in slots 1 and up, each stored as its value plus one so that 0 means empty.
+    /// Null until a scope is opened.
     /// </summary>
     /// <remarks>
-    /// LAZY, AND A RATCHET IS WHY - the same lesson the retained-chunk list learned two fields up.
-    /// Written first as an <c>[InlineArray]</c> struct field on the belief that a struct field
-    /// allocates nothing: it allocates nothing SEPARATELY, and it makes this object 64 bytes bigger
-    /// on every scan that constructs one. `PathAllocationTests` charged exactly that and turned red
-    /// by 64 bytes on `scan, fastlanes.delta`, an axis with EIGHT bytes of headroom. Allocated on
-    /// first use instead, a scan that never takes a row pays nothing at all.
-    /// </remarks>
-    /// <summary>
-    /// The open scope in slot 0 and the passed checks in slots 1.., each stored as its value PLUS
-    /// ONE so that 0 means empty. Null until a scope is opened.
-    /// </summary>
-    /// <remarks>
-    /// ONE FIELD, AND THREE MEASUREMENTS FORCED IT. This began as three -- an inline array of keys,
-    /// a count, and a nullable segment id -- which is 24 bytes on every <see cref="ScanContext"/>,
-    /// and `scan, fastlanes.delta` has SIXTEEN bytes of headroom over its ceiling. Moving one field
-    /// to <c>ArrayDecodeContext</c> changed nothing: that object is smaller, so the same field
-    /// crossed an alignment boundary there too. Two fields would land the axis at exactly zero
-    /// headroom, which is a ratchet the next unrelated change breaks.
-    ///
-    /// So the state is one reference, allocated only when a reader opens a scope -- which only a
-    /// take on a node bigger than its batch does. A full scan never allocates it and never pays a
-    /// byte, which is why `scan, fastlanes.delta` is unchanged while the take path pays 88 bytes of
-    /// its 128 (v2 R26).
+    /// One field, and allocated on first use, because the scan paths hold tight allocation
+    /// ceilings. An inline array of keys, a count and a nullable segment id would be three struct
+    /// fields on every <see cref="ScanContext"/> whether or not a scan ever opens a scope, and
+    /// moving one of them to <c>ArrayDecodeContext</c> only shifts the cost onto a smaller object.
+    /// As one reference, allocated only when a reader opens a scope -- which only a take on a node
+    /// bigger than its batch does -- a full scan pays nothing at all.
     /// </remarks>
     private long[]? _nodeChecks;
 
@@ -534,30 +498,28 @@ public sealed class ScanContext : IDisposable
     }
 
     /// <summary>
-    /// Whether a per-NODE validation walk has already been run and passed during this scan.
+    /// Whether a per-node validation walk has already been run and passed during this scan.
     /// </summary>
     /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
     /// <returns><see langword="true"/> when the walk may be skipped.</returns>
     /// <remarks>
     /// <para>
-    /// A VERDICT, NOT A RESULT, AND THAT IS THE WHOLE POINT. `vortex.runend` checks that its run
-    /// ends ascend and `Patches` checks that its indices do - O(side table) walks over bytes that
-    /// belong to the NODE, not to the batch. `FlatLayoutReader` serves a take one batch at a time,
-    /// so they ran once per batch: 93% of a selective run-end take was that one walk (v2 R26),
-    /// 1 086 µs against 72 with it short-circuited.
+    /// What is remembered is a verdict, not a result, and that is the whole point. `vortex.runend`
+    /// checks that its run ends ascend and `Patches` checks that its indices do -- O(side table)
+    /// walks over bytes that belong to the node, not to the batch. `FlatLayoutReader` serves a take
+    /// one batch at a time, so without this the same walk runs again for every batch and dominates
+    /// a selective take.
     /// </para>
     /// <para>
-    /// R25 TRIED TO CACHE THE DECODE AND COULD NOT AFFORD IT: an entry costs a retained
-    /// <see cref="CanonicalArena"/>, and `PathAllocationTests` leaves 216 bytes of headroom on the
-    /// take axis and EIGHT on `scan, fastlanes.delta`. A verdict is a long in an inline array -- a
-    /// struct field of this object, so the whole mechanism allocates nothing, on any path, ever.
-    /// That is why this one fits where that one did not.
+    /// Caching the decode instead would cost a retained <see cref="CanonicalArena"/> per entry,
+    /// which the scan paths' allocation ceilings do not leave room for. A verdict is a long in an
+    /// inline array, so the whole mechanism allocates nothing, on any path, ever.
     /// </para>
     /// <para>
-    /// NEVER CLEARED BY <see cref="ResetBatch"/>, and it must not be: the fact it records is about
+    /// Never cleared by <see cref="ResetBatch"/>, and it must not be: the fact it records is about
     /// the file's bytes, which do not change between batches. Overflow is not an error and not a
-    /// correctness problem - past <see cref="CheckedNodeSlots"/> entries a node is re-checked, which
-    /// is exactly today's behaviour.
+    /// correctness problem -- past <see cref="CheckedNodeSlots"/> entries a node is simply
+    /// re-checked.
     /// </para>
     /// </remarks>
     internal bool IsNodeChecked(long key)
@@ -588,8 +550,8 @@ public sealed class ScanContext : IDisposable
     /// <summary>Records that the walk named by <paramref name="key"/> ran and passed.</summary>
     /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
     /// <remarks>
-    /// Past <see cref="CheckedNodeSlots"/> entries a node is simply re-checked, which is exactly
-    /// today's behaviour: this may only ever save work, never skip a check that has not passed.
+    /// Past <see cref="CheckedNodeSlots"/> entries a node is simply re-checked: this may only ever
+    /// save work, never skip a check that has not passed.
     /// </remarks>
     internal void MarkNodeChecked(long key)
     {
@@ -613,8 +575,8 @@ public sealed class ScanContext : IDisposable
     /// pair cannot be named without collision.
     /// </summary>
     /// <remarks>
-    /// A NODE INDEX IS STABLE ACROSS BATCHES, which is what makes this a key rather than a guess:
-    /// <c>ArrayBlobReader.LoadCore</c> RESETS the node arena before every parse, so the arena holds
+    /// A node index is stable across batches, which is what makes this a key rather than a guess:
+    /// <c>ArrayBlobReader.LoadCore</c> resets the node arena before every parse, so the arena holds
     /// one blob at a time and a node's index is a deterministic function of that blob's bytes. Parse
     /// the same segment in any batch, next to any other column, and the same node lands at the same
     /// index. The null return is a proof rather than a hope: 31 bits each is far above any real
@@ -628,12 +590,12 @@ public sealed class ScanContext : IDisposable
             : null;
 
     /// <summary>
-    /// The retention key for a whole LAYOUT NODE, which its index identifies within the tree.
+    /// The retention key for a whole layout node, which its index identifies within the tree.
     /// </summary>
     /// <remarks>
     /// A second namespace above the segment ids rather than a second cache: the eviction rule is
     /// the load-bearing part of this mechanism and there should be exactly one of it. A dict
-    /// layout's values child and a list layout's elements child are re-requested WHOLE on every
+    /// layout's values child and a list layout's elements child are re-requested whole on every
     /// batch, so they need the same "decoded once, borrowed by many batches" treatment a chunk
     /// larger than a batch needs -- but they are named by a position in the layout tree, not by a
     /// segment.
@@ -664,35 +626,31 @@ public sealed class ScanContext : IDisposable
     }
 
     /// <summary>
-    /// Picks the arena a chunk will be RETAINED in and redirects <see cref="Canonical"/> at it, so
+    /// Picks the arena a chunk will be retained in and redirects <see cref="Canonical"/> at it, so
     /// the decode lands there instead of being copied there afterwards.
     /// </summary>
     /// <returns>The arena, which the caller must close with <see cref="EndRetainedDecode"/>.</returns>
     /// <remarks>
     /// <para>
-    /// THE COPY WAS THE SECOND FULL PASS OVER EVERY LARGE CHUNK. This method used to be
-    /// <c>Retain(segmentId, source, nodeIndex)</c>, which decoded into the batch's arena and then
-    /// deep-copied the result -- every buffer, every byte -- into an arena that outlives the batch.
-    /// It was 26% of a 1M-row `vortex.sequence` scan and a proportional share of every other
-    /// encoding on this path. Decoding into the destination removes it entirely; nothing else about
-    /// the lifetime argument changes, because the arena was always the retained one.
-    /// </para>
-    /// </remarks>
-    /// <remarks>
-    /// <para>
-    /// THE EVICTION RULE IS A PROOF, NOT A HEURISTIC, and the first version of this cache had no
-    /// such rule and was wrong for it. Callers BORROW a retained arena: a batch's records hold views
-    /// onto its memory rather than copies. So an entry may be freed only when no live batch can be
-    /// looking at it, and there is exactly one fact that establishes that - a batch is invalid once
-    /// the next <c>MoveNextAsync</c> begins, so an entry whose <see cref="RetainedChunk.LastTouched"/>
-    /// is below the current batch number is borrowed by nobody.
+    /// Decoding straight into the destination is what keeps a large chunk from being walked twice:
+    /// decoding into the batch's arena and then deep-copying every buffer into an arena that
+    /// outlives the batch is a second full pass over the whole chunk. Nothing about the lifetime
+    /// argument changes, because the arena was always the retained one.
     /// </para>
     /// <para>
-    /// THE FIRST VERSION HELD ONE ENTRY AND SHARED ONE ARENA, and both were wrong for the same
-    /// reason: <b>a batch reads several columns, so several flat nodes, each with its own segment</b>.
-    /// One entry meant column B evicted column A mid-batch; one arena meant evicting anything freed
-    /// everything, since <see cref="CanonicalArena.Reset"/> returns every block it owns. That cost 25
-    /// tests and is why each entry owns its arena.
+    /// The eviction rule is a proof, not a heuristic. Callers borrow a retained arena: a batch's
+    /// records hold views onto its memory rather than copies. So an entry may be freed only when no
+    /// live batch can be looking at it, and there is exactly one fact that establishes that -- a
+    /// batch is invalid once the next <c>MoveNextAsync</c> begins, so an entry whose
+    /// <see cref="RetainedChunk.LastTouched"/> is below the batch number in flight is borrowed by
+    /// nobody.
+    /// </para>
+    /// <para>
+    /// Each entry owns its own arena, and there is an entry per key rather than a single slot,
+    /// because <b>a batch reads several columns, so several flat nodes, each with its own
+    /// segment</b>. One slot would let one column evict another mid-batch; one shared arena would
+    /// make evicting anything free everything, since <see cref="CanonicalArena.Reset"/> returns
+    /// every block it owns.
     /// </para>
     /// <para>
     /// The working set is therefore one chunk per column, which the schema bounds. Evicted arenas are
@@ -769,6 +727,14 @@ public sealed class ScanContext : IDisposable
         };
     }
 
+    /// <summary>
+    /// Releases every segment held for the previous batch and resets every arena.
+    /// </summary>
+    /// <remarks>
+    /// The order is fixed: release segments, then the node arena, then the canonical arena. A
+    /// canonical node holds non-owning views into segment memory, so resetting the arenas first
+    /// would leave a window in which a live view names released pages.
+    /// </remarks>
     public void ResetBatch()
     {
         // Before anything else: the batch that was borrowing retained arenas is now dead, which is

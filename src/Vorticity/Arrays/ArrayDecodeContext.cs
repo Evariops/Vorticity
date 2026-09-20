@@ -1,12 +1,3 @@
-// Phase 1 contract §2.4 and §8.3. A CLASS, not a ref struct: it is held by the ScanContext across
-// the whole batch and handed to every decoder.
-//
-// Two invariants live here and nowhere else:
-//   * the array depth cap. Every decoder recurses through DecodeChild and never by calling
-//     ArrayDecoder.Decode on a child, because that path is the only one that charges the cap;
-//   * the validity rule of contract §2.6, whose body is the reference's `deserialize_validity`
-//     plus the required constant collapse. Every decoder that can carry validity calls
-//     DecodeValidity, and none of them re-implements it.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -20,6 +11,12 @@ namespace Vorticity.Arrays;
 /// The per-batch decode facade: arenas, options, the encoding tables, and the two shared rules
 /// (child recursion and validity) every decoder is required to route through.
 /// </summary>
+/// <remarks>
+/// A class rather than a ref struct, because the scan holds it across the whole batch and hands it
+/// to every decoder. Two invariants live here and nowhere else: the array depth cap, which is
+/// charged only on the child-recursion path, and the validity rule, which every decoder that can
+/// carry validity calls instead of re-implementing it.
+/// </remarks>
 public sealed class ArrayDecodeContext
 {
     private readonly ScanContext _scan;
@@ -135,7 +132,7 @@ public sealed class ArrayDecodeContext
     /// </summary>
     /// <param name="node">The parent node.</param>
     /// <param name="childIndex">0-based child position.</param>
-    /// <param name="childDType">The child's DType, derived by the parent per contract §2.5.</param>
+    /// <param name="childDType">The child's DType, which only the parent can derive.</param>
     /// <param name="childLength">The child's row count, also derived by the parent.</param>
     /// <returns>The child's canonical node index.</returns>
     /// <exception cref="VortexFormatException">The index is out of range or the child is malformed.</exception>
@@ -147,16 +144,16 @@ public sealed class ArrayDecodeContext
     }
 
     /// <summary>
-    /// Opens a scope in which a per-NODE validation walk may be remembered across the batches of
-    /// one node.
+    /// Opens a scope in which one node's validation walk may be remembered across the batches that
+    /// visit it.
     /// </summary>
     /// <param name="segmentId">The segment the blob being decoded came from.</param>
     /// <returns>What was in force, to be restored by <see cref="EndNodeCheckScope"/>.</returns>
     /// <remarks>
-    /// OPENED BY THE READER, NOT BY A DECODER, because only the reader knows the two facts that make
-    /// remembering sound: which SEGMENT the blob came from - a decoder sees nodes, not segments -
-    /// and whether this node is bigger than the batch, below which it is visited once and there is
-    /// nothing to remember. <c>FlatLayoutReader</c> owns both.
+    /// Opened by the reader and never by a decoder, because only the reader knows the two facts
+    /// that make remembering sound: which segment the blob came from - a decoder sees nodes, not
+    /// segments - and whether the node is bigger than the batch, below which it is visited once and
+    /// there is nothing to remember.
     /// </remarks>
     internal uint? BeginNodeCheckScope(uint segmentId) => _scan.BeginNodeCheckScope(segmentId);
 
@@ -172,15 +169,15 @@ public sealed class ArrayDecodeContext
     /// <returns><see langword="false"/> whenever there is any doubt, so the walk runs.</returns>
     /// <remarks>
     /// <para>
-    /// A CHECK THAT IS A PROPERTY OF THE NODE MAY BE ASKED ONCE. `vortex.runend`'s "the run ends
-    /// ascend" and `Patches`'s "the patch indices ascend" are facts about bytes that do not change
-    /// between batches, and both were re-established on every batch of a take: measured at 93% of a
-    /// selective run-end take, 1 086 µs against 72 with the walk short-circuited (v2 R26).
+    /// A check that is a property of the node may be asked once. That the run ends of a run-end
+    /// array ascend, or that patch indices ascend, are facts about bytes that do not change between
+    /// batches, and re-establishing them can dominate a selective take of a node that many batches
+    /// visit.
     /// </para>
     /// <para>
-    /// IT IS NOT A WAY TO SKIP VALIDATION. Outside a reader-opened scope this returns false, so a
-    /// full scan, a filter and every first visit walk exactly as before; only a node ALREADY walked
-    /// and passed in this same scan is spared, and only the second time onward. A malformed file
+    /// It is not a way to skip validation. Outside a reader-opened scope this returns false, so a
+    /// full scan, a filter and every first visit walk in full; only a node already walked and
+    /// passed in this same scan is spared, and only from the second visit onward. A malformed file
     /// still throws on its first batch, which is the batch that would have thrown anyway.
     /// </para>
     /// </remarks>
@@ -201,9 +198,8 @@ public sealed class ArrayDecodeContext
     }
 
     /// <summary>
-    /// The shared validity rule of contract §2.6, whose body is the reference's
-    /// <c>deserialize_validity</c> (vortex-array-0.86.1/src/validity.rs) plus the required
-    /// constant collapse.
+    /// The shared validity rule: resolve a node's optional validity child into a
+    /// <see cref="Validity"/>, collapsing a constant bitmap.
     /// </summary>
     /// <param name="node">The parent node.</param>
     /// <param name="firstValidityChildIndex">
@@ -221,9 +217,9 @@ public sealed class ArrayDecodeContext
     /// The validity array may itself be encoded - constant, dict, runend, bitpacked over bool - so
     /// this goes through the normal decode dispatch and never a bitmap fast path. The collapse is
     /// required, not an optimization: <c>AllInvalid</c> reaches the wire as a
-    /// <c>vortex.constant(false)</c> child (upstream's <c>validity_to_child</c> is the exact
-    /// inverse), and an all-null column must report <see cref="ValidityKind.AllInvalid"/> so a
-    /// caller can skip the per-row check docs/07-dotnet-mapping.md §1 promises.
+    /// <c>vortex.constant(false)</c> child, and an all-null column must report
+    /// <see cref="ValidityKind.AllInvalid"/> so that a caller can skip the per-row check instead of
+    /// asking every row.
     /// </remarks>
     /// <exception cref="VortexFormatException">
     /// The child count is neither <paramref name="firstValidityChildIndex"/> nor one more, or the
@@ -249,7 +245,7 @@ public sealed class ArrayDecodeContext
                 $"{firstValidityChildIndex + 1} children; this one has {childCount}.");
         }
 
-        // Validity::DTYPE is non-nullable Bool, always, and its length is always the parent's.
+        // A validity child is always a non-nullable Bool of exactly the parent's length.
         DType boolType = Types.Bool(Nullability.NonNullable);
         int decoded = DecodeChild(in node, firstValidityChildIndex, boolType, length);
 
@@ -341,7 +337,7 @@ public sealed class ArrayDecodeContext
     /// a <c>u64</c> row count is attacker-controlled and must never size an allocation unchecked.
     /// </summary>
     /// <param name="value">The wire value.</param>
-    /// <param name="what">What is being measured, for the message.</param>
+    /// <param name="what">What the value counts, for the message.</param>
     /// <returns>The narrowed length.</returns>
     /// <exception cref="VortexFormatException">The value does not fit an <see cref="int"/>.</exception>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -361,7 +357,7 @@ public sealed class ArrayDecodeContext
     /// </summary>
     /// <param name="a">First factor.</param>
     /// <param name="b">Second factor.</param>
-    /// <param name="what">What is being measured, for the message.</param>
+    /// <param name="what">What the product counts, for the message.</param>
     /// <returns>The product.</returns>
     /// <exception cref="VortexFormatException">Either factor is negative, or the product overflows.</exception>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -382,8 +378,8 @@ public sealed class ArrayDecodeContext
 
     private int DecodeNode(in ArrayNode node, DType dtype, int length)
     {
-        // Semantic array depth. The FlatBuffers table budget charged at load counts tables; these
-        // are separate budgets and only the budget stops a shared-children DAG (contract §1.5).
+        // Semantic array depth. The FlatBuffers table budget charged at load counts tables, which
+        // is a different quantity: only this one bounds how deep a decode recurses.
         VortexLimits.CheckDepth(++_depth, VortexLimits.MaxArrayDepth, "Array");
 
         if (length < 0)
@@ -396,9 +392,9 @@ public sealed class ArrayDecodeContext
             throw new ArgumentException("A node cannot be decoded without a DType.", nameof(dtype));
         }
 
-        // One bounds-checked array index plus one virtual call, per NODE (contract §2.4). Require,
-        // not Get: the id TEXT is read out of the file's footer on demand and allocates, so only
-        // the failing branch may ask for it.
+        // One bounds-checked array index plus one virtual call, per node. Require rather than Get:
+        // the id text is read out of the file's footer on demand and allocates, so only the
+        // failing branch may ask for it.
         ArrayDecoder decoder = ArrayDecoderTable.Require(
             _scan, node.Encoding, node.EncodingSpecIndex);
 
@@ -482,7 +478,7 @@ public sealed class ArrayDecodeContext
             $"{what} would need {(long)a * b} bytes ({a} x {b}), which does not fit a 32-bit length.");
 }
 
-/// <summary>The three shapes a validity bitmap can collapse to (contract §2.6 rule 3).</summary>
+/// <summary>The three shapes a validity bitmap can collapse to.</summary>
 internal enum ValidityBitmapShape : byte
 {
     /// <summary>Every bit in range is zero: the array is all null.</summary>

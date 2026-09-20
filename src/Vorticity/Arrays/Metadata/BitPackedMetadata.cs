@@ -1,4 +1,3 @@
-// fastlanes.bitpacked — vortex-fastlanes-0.86.1/src/bitpacking/vtable/mod.rs. spec/METADATA.md.
 using System;
 using Vorticity.Serialization.Protobuf;
 
@@ -26,7 +25,7 @@ public readonly struct BitPackedMetadata : IEquatable<BitPackedMetadata>
 
     /// <summary>
     /// Exclusive upper bound on <see cref="Offset"/>: the FastLanes block is 1024 elements, so an
-    /// offset into it is always below that (vortex-fastlanes-0.86.1/src/bitpacking/array/mod.rs).
+    /// offset into it is always below that.
     /// </summary>
     public const uint OffsetLimit = 1024;
 

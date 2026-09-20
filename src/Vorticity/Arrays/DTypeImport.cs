@@ -1,33 +1,3 @@
-// Copying a DType from one DTypeArena into another.
-//
-// WHY THIS EXISTS. `DTypeArena.Struct` rejects children from a foreign arena ("Child DTypes must
-// come from the same DTypeArena as their parent"), and several dtypes this library DERIVES are
-// built over a column dtype that lives somewhere else:
-//
-//   * the zoned/stats zones table, built at parse time over the file schema's nodes;
-//   * the projected struct a FieldMask produces at scan time, built in the ScanContext's own arena
-//     over field dtypes that came from the layout tree;
-//   * vortex.masked's non-nullable child dtype, flipped from the node's own dtype at decode time.
-//
-// Deriving into the file's arena instead would work but would MUTATE a DTypeArena that concurrent
-// scans are reading - `WithNullability` on a non-leaf node calls `DTypeArena.CloneWithNullability`,
-// which grows arrays and rehashes the dedup table with no synchronization. That is why ScanContext
-// keeps its own arena (contract §8.3) and why every derivation imports first and derives second.
-// Copying is cheap: the target arena deduplicates, so the second batch's import finds every node
-// already there and allocates nothing.
-//
-// WHY THE WALK IS MEMOISED. A DTypeArena deduplicates, so `Struct(["a","b"], [d, d])` stores one
-// child index twice and a dtype nested that way 64 deep is a 65-node DAG with 2^64 root-to-leaf
-// paths: the depth cap bounds the stack, not the work (docs/03-architecture.md §6). A flat visit
-// budget bounds that, but it also rejects perfectly ordinary breadth - a 5000-field struct of
-// identically-typed columns is FOUR distinct nodes in the source arena and 5001 visits - so the
-// budget is only the allocation-free fast path here. Cross it and the walk switches to a memo
-// keyed on the source node index, exactly as DTypeFlatBuffers.ReadTableCore does, and the work
-// becomes linear in the source's DISTINCT node count. Nothing is rejected: any dtype the source
-// arena could build, this can copy.
-//
-// This lives in Vorticity.Arrays rather than Vorticity.Layouts because both Layouts and the
-// canonical decoders need it, and Layouts already depends on Arrays.
 using System;
 using System.Collections.Generic;
 
@@ -36,6 +6,12 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays;
 
+/// <summary>
+/// Copies a dtype from one <see cref="DTypeArena"/> into another. An arena refuses children that
+/// belong to a foreign arena, and deriving into the source arena instead would mutate a structure
+/// concurrent scans are reading, so every derivation imports first and derives second; the target
+/// deduplicates, so importing the same dtype again allocates nothing.
+/// </summary>
 internal static class DTypeImport
 {
     /// <summary>How many dtype nodes one import may visit before it starts memoising.</summary>

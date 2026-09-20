@@ -1,6 +1,3 @@
-// vortex.decimal_byte_parts —
-// vortex-decimal-byte-parts-0.86.1/src/decimal_byte_parts/mod.rs. spec/METADATA.md.
-// Phase 2 consumer.
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
@@ -12,10 +9,9 @@ namespace Vorticity.Arrays.Metadata;
 /// <c>message DecimalBytesPartsMetadata { PType zeroth_child_ptype = 1; uint32 lower_part_count = 2; }</c>.
 /// </summary>
 /// <remarks>
-/// <c>lower_part_count</c> must be zero. spec/METADATA.md: "Readers must require
-/// <c>lower_part_count == 0</c>; wide decimals belong to a future <c>_v2</c> id". A non-zero value
-/// is a domain violation and is rejected here rather than carried forward as a wrong shape
-/// (Phase 1 contract §1.7).
+/// <c>lower_part_count</c> must be zero: wide decimals belong to a future encoding id, so a
+/// non-zero value is a domain violation and is rejected rather than carried forward as a shape
+/// this codec cannot honour.
 /// </remarks>
 public readonly struct DecimalBytePartsMetadata : IEquatable<DecimalBytePartsMetadata>
 {

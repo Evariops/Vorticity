@@ -1,17 +1,3 @@
-// The frozen core editions, as data.
-//
-// An edition is a frozen set of component ids with a read-forever guarantee: once published it
-// never changes again, so this table is a transcription rather than a cache. It is generated from
-// spec/editions/core*.toml, which is itself vendored from upstream's `xtask generate-editions`, and
-// spec/refresh.sh plus the spec-drift CI job is what keeps the two in step.
-//
-// STORED AS "WHICH EDITION INTRODUCED IT" rather than as seven membership sets, because that is
-// what the data actually is: editions within a family are CUMULATIVE, so a component belongs to
-// every edition from the one that added it onward, and membership is one integer comparison.
-//
-// The four kinds are separate namespaces upstream and must stay separate here: `vortex.chunked` and
-// `vortex.dict` are both an array id AND a layout id, introduced independently, and a single table
-// would silently answer the wrong question for them.
 using System;
 using System.Collections.Frozen;
 using System.Collections.Generic;
@@ -64,6 +50,22 @@ public enum ComponentKind
 }
 
 /// <summary>Membership of the frozen <c>core</c> editions.</summary>
+/// <remarks>
+/// <para>
+/// An edition is a frozen set of component ids with a read-forever guarantee: once published it
+/// never changes, so these tables are a transcription and not a cache.
+/// </para>
+/// <para>
+/// Each id is stored against the edition that introduced it rather than in one membership set per
+/// edition, because editions within a family are cumulative: a component belongs to every edition
+/// from the one that added it onward, so membership is a single integer comparison.
+/// </para>
+/// <para>
+/// The four kinds are separate namespaces and must stay separate. <c>vortex.chunked</c> and
+/// <c>vortex.dict</c> are each both an array id and a layout id, introduced independently, so a
+/// single table would silently answer the wrong question for them.
+/// </para>
+/// </remarks>
 public static class EditionRegistry
 {
     /// <summary>
@@ -73,7 +75,7 @@ public static class EditionRegistry
     public const VortexEdition Newest = VortexEdition.Core20260803;
 
     /// <summary>
-    /// The oldest edition carrying a read-forever guarantee, and the floor for our READ scope.
+    /// The oldest edition carrying a read-forever guarantee, and the floor for the read scope.
     /// </summary>
     public const VortexEdition ReadForeverFloor = VortexEdition.Core20250500;
 

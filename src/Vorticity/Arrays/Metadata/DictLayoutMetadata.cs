@@ -1,4 +1,3 @@
-// Layout vortex.dict — vortex-layout-0.86.1/src/layouts/dict/mod.rs. spec/METADATA.md.
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;

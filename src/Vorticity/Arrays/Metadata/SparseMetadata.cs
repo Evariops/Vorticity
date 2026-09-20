@@ -1,4 +1,3 @@
-// vortex.sparse — vortex-sparse-0.86.1/src/lib.rs. spec/METADATA.md.
 using System;
 using Vorticity.Serialization.Protobuf;
 

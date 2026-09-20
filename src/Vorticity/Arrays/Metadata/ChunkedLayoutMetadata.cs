@@ -1,15 +1,11 @@
-// Layout vortex.chunked — spec/flatbuffers/layout.fbs' own comment, which contradicts
-// spec/METADATA.md's "empty metadata" entry and wins (Phase 1 contract §6.4):
-//
-//   the `ChunkedLayout` uses the first byte of the `metadata` array as a boolean to indicate
-//   whether the first child Layout represents the statistics table for the other chunks
 using System;
 
 namespace Vorticity.Arrays.Metadata;
 
 /// <summary>
-/// <c>vortex.chunked</c> <b>layout</b> metadata: not a Protobuf message at all, but a single
-/// optional flag byte.
+/// <c>vortex.chunked</c> layout metadata: not a Protobuf message at all, but a single optional
+/// flag byte. The format's schema and its metadata catalogue disagree here — the catalogue calls
+/// chunked layout metadata empty — and this codec follows the schema, which documents the flag.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -18,18 +14,12 @@ namespace Vorticity.Arrays.Metadata;
 /// rejected, because the field has never carried anything else and a future writer may extend it.
 /// </para>
 /// <para>
-/// <b>Vortex 0.86.1 no longer implements the flag, and rejects a file that sets it.</b>
-/// <c>impl VTable for Chunked</c> declares <c>type Metadata = EmptyMetadata</c> and its
-/// <c>deserialize</c> names the parameter <c>_metadata</c>
-/// (vortex-layout-0.86.1/src/layouts/chunked/mod.rs), while
-/// <c>EmptyMetadata::deserialize</c> raises "EmptyMetadata should not have metadata bytes" for a
-/// non-empty payload (vortex-array-0.86.1/src/metadata.rs). The <c>layout.fbs</c> comment this
-/// codec follows therefore describes a reader that no longer exists, every corpus file reports
-/// <c>metadata_bytes = 0</c> for its chunked layouts, and no fixture can validate the
-/// <see cref="HasStatsTable"/> branch. Reading the flag keeps us able to open a pre-0.86 file
-/// upstream would now refuse; <b>acting</b> on it — skipping child 0 as a statistics table — is a
-/// path with no ground truth behind it, so a layout reader should treat a true result as a reason
-/// to be careful, not as a verified shape.
+/// Nothing validates the <see cref="HasStatsTable"/> branch: the reference implementation reads
+/// chunked layout metadata as empty and rejects a payload that sets the flag, and every corpus
+/// file reports zero metadata bytes for its chunked layouts. Reading the flag keeps such a file
+/// openable; acting on it — skipping child 0 as a statistics table — is a path with no ground
+/// truth behind it, so a layout reader should treat a true result as a reason to be careful
+/// rather than as a verified shape.
 /// </para>
 /// </remarks>
 public readonly struct ChunkedLayoutMetadata : IEquatable<ChunkedLayoutMetadata>

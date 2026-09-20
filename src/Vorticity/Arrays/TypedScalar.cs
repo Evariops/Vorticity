@@ -1,15 +1,3 @@
-// Phase 1 contract §0a C3 and §8.5: a protobuf ScalarValue cannot be interpreted without its
-// DType. spec/proto/scalar.proto has twelve untyped kinds and the reference narrows each one using
-// the DType it is decoded against (vortex-array-0.86.1/src/scalar/proto.rs,
-// `ScalarValue::from_proto`). Phase 0's ScalarProtobuf.ReadValue stays untyped; this is the typed
-// interpreter every consumer of a wire ScalarValue goes through: vortex.constant's buffer 0,
-// fastlanes.for's metadata, vortex.sparse's fill value, vortex.sequence's base and multiplier,
-// every ArrayStats min/max/sum and every zone-map cell.
-//
-// Two rules do the most damage when forgotten:
-//   * a Decimal scalar is bytes_value carrying the LITTLE-ENDIAN two's-complement unscaled value,
-//     whose LENGTH selects the storage width - there is no dedicated decimal kind;
-//   * an Extension dtype's scalar is interpreted against its STORAGE dtype, not the extension.
 using System;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
@@ -22,10 +10,19 @@ using Vorticity.Types.Serialization;
 namespace Vorticity.Arrays;
 
 /// <summary>
-/// A wire <c>ScalarValue</c> interpreted against a <see cref="DType"/>. No allocation beyond the
-/// <see cref="ScalarStore"/> nodes <see cref="TypedScalarReader.Read"/> appends.
+/// A wire <c>ScalarValue</c> interpreted against a <see cref="DType"/>. The wire kinds are untyped,
+/// so this is the one path every consumer of a wire scalar goes through -- a constant's value, a
+/// sparse fill value, a sequence's base and multiplier, an array's statistics, a zone-map cell. No
+/// allocation beyond the <see cref="ScalarStore"/> nodes <see cref="TypedScalarReader.Read"/>
+/// appends.
 /// </summary>
 /// <remarks>
+/// <para>
+/// Two rules do the most damage when forgotten: a Decimal scalar is a <c>bytes_value</c> holding
+/// the little-endian two's-complement unscaled value, whose length alone selects the storage width
+/// because there is no dedicated decimal kind; and an Extension dtype's scalar is interpreted
+/// against its storage dtype, not against the extension.
+/// </para>
 /// <para>
 /// The whole value is validated against the dtype at <see cref="TypedScalarReader.Read"/> time, so
 /// every accessor below is a checked read of an already-legal value and
@@ -61,7 +58,7 @@ public readonly ref struct TypedScalar
     public ScalarValueKind WireKind => _value.Kind;
 
     /// <summary>
-    /// The nested typed scalar of a variant value: RFC 0015's <c>(dtype, value)</c> pair.
+    /// The nested typed scalar of a variant value: its <c>(dtype, value)</c> pair.
     /// </summary>
     /// <exception cref="VortexFormatException">The value is not a variant.</exception>
     public Scalar AsVariantScalar
@@ -88,9 +85,9 @@ public readonly ref struct TypedScalar
     }
 
     /// <summary>
-    /// The signed integer payload. Both <c>int64_value</c> and <c>uint64_value</c> are accepted -
-    /// upstream takes either against an integer ptype for backward compatibility - and the value
-    /// was range-checked against the dtype's ptype at read time.
+    /// The signed integer payload. Both <c>int64_value</c> and <c>uint64_value</c> are accepted
+    /// against an integer ptype, for compatibility with older writers, and the value was
+    /// range-checked against the dtype's ptype at read time.
     /// </summary>
     /// <exception cref="VortexFormatException">The value is null or is not an integer.</exception>
     public long AsInt64
@@ -144,7 +141,7 @@ public readonly ref struct TypedScalar
 
     /// <summary>
     /// The binary16 payload. <c>f16_value</c> carries the raw bits as a varint, and a plain
-    /// <c>uint64_value</c> is accepted too because f16 used to be serialized that way.
+    /// <c>uint64_value</c> is accepted too, because older writers serialize f16 that way.
     /// </summary>
     /// <exception cref="VortexFormatException">The value is null or is not a binary16.</exception>
     public Half AsF16
@@ -213,8 +210,7 @@ public readonly ref struct TypedScalar
             ReadOnlySpan<byte> bytes = _value.AsBytes;
             RequireDecimalWidth(bytes.Length);
 
-            // Sign extend the stored width out to 32 bytes; the wire order is little-endian
-            // (vortex-array-0.86.1/src/scalar/proto.rs writes DecimalValue::I256(v).to_le_bytes()).
+            // Sign extend the stored width out to the full width; the wire order is little-endian.
             Span<byte> le = stackalloc byte[Int256.ByteCount];
             le.Fill((bytes[^1] & 0x80) != 0 ? (byte)0xFF : (byte)0x00);
             bytes.CopyTo(le);
@@ -223,12 +219,11 @@ public readonly ref struct TypedScalar
     }
 
     /// <summary>
-    /// The SERIALIZED width of a decimal scalar's <c>bytes_value</c>: 1, 2, 4, 8, 16 or 32 bytes.
+    /// The serialized width of a decimal scalar's <c>bytes_value</c>: 1, 2, 4, 8, 16 or 32 bytes.
     /// </summary>
     /// <remarks>
-    /// Upstream's <c>bytes_from_proto</c> (vortex-array-0.86.1/src/scalar/proto.rs) picks the
-    /// <c>DecimalValue</c> variant from exactly this length, so it - not the dtype's precision - is
-    /// what decides a canonicalized constant's <c>values_type</c>.
+    /// The decimal storage width comes from exactly this length, so it -- and not the dtype's
+    /// precision -- is what decides a canonicalized constant's <c>values_type</c>.
     /// </remarks>
     /// <exception cref="VortexFormatException">
     /// The value is null, is not a <c>bytes_value</c>, or is not one of the six widths.
@@ -355,9 +350,8 @@ public readonly ref struct TypedScalar
             one.Clear();
         }
 
-        // One element written, then doubled: log2(n) calls to `memmove` rather than n copies of
-        // one element. `vortex.constant` is nothing but this loop, and it read 11x the reference
-        // on the 1M-row axis while doing no work at all beyond filling a buffer.
+        // One element written, then doubled: log2(n) calls to `memmove` rather than n copies of one
+        // element. `vortex.constant` is nothing but this loop, so a per-element copy dominates it.
         RowKernels.Tile(destination, one);
     }
 
@@ -416,15 +410,14 @@ public static class TypedScalarReader
     /// <returns>The interpreted value.</returns>
     /// <remarks>
     /// An empty message body is <see cref="ScalarValueKind.Absent"/>, which for every call site
-    /// that reaches this method is malformed: the null case is an explicit <c>null_value</c>,
-    /// tag 1.
+    /// that reaches this method is malformed: the null case is an explicit <c>null_value</c>.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="store"/> or <paramref name="types"/> is null.</exception>
     /// <exception cref="VortexFormatException">
     /// The message is malformed, carries no kind, or carries a kind the dtype does not admit.
     /// </exception>
     /// <exception cref="VortexUnsupportedException">
-    /// The value is a union or variant scalar, which Phase 1 does not model.
+    /// The value is a union or variant scalar, which this build does not model.
     /// </exception>
     public static TypedScalar Read(
         ReadOnlySpan<byte> message,
@@ -500,9 +493,8 @@ public static class TypedScalarReader
     }
 
     /// <summary>
-    /// Replaces an Extension dtype with its storage dtype. One line upstream
-    /// (<c>let dtype = match dtype { DType::Extension(ext) =&gt; ext.storage_dtype(), _ =&gt; dtype };</c>);
-    /// looped here because a storage dtype may itself be an extension, and bounded by
+    /// Replaces an Extension dtype with its storage dtype. Looped rather than done once, because a
+    /// storage dtype may itself be an extension, and bounded by
     /// <see cref="VortexLimits.MaxDTypeDepth"/> so a pathological chain cannot spin.
     /// </summary>
     /// <param name="dtype">The declared dtype.</param>
@@ -530,7 +522,7 @@ public static class TypedScalarReader
 
             case ScalarValueKind.Null:
                 // Legal against any dtype: nullability is a property of the array, not of the
-                // scalar (upstream builds ScalarValue::Null for every dtype).
+                // scalar.
                 return;
 
             case ScalarValueKind.Bool:
@@ -549,7 +541,7 @@ public static class TypedScalarReader
 
             case ScalarValueKind.UInt64:
             {
-                // uint64_value also carries f16 bits, because f16 used to be serialized as a u64.
+                // uint64_value also carries f16 bits, because older writers serialize f16 as a u64.
                 PType unsignedTarget = RequirePrimitive(dtype, "uint64_value");
                 if (unsignedTarget is PType.F32 or PType.F64)
                 {
@@ -575,7 +567,7 @@ public static class TypedScalarReader
                 return;
 
             case ScalarValueKind.F16:
-                // Phase 0's reader already rejects an f16_value above 16 bits.
+                // The untyped reader already rejects an f16_value above 16 bits.
                 RequireExactPType(dtype, PType.F16, "f16_value");
                 return;
 
@@ -598,10 +590,10 @@ public static class TypedScalarReader
 
             case ScalarValueKind.Variant:
             {
-                // RFC 0015: a variant scalar is a nested (dtype, value) pair, and the dtype it
-                // pairs with on the outside is `variant`. Validating the nested half against its
-                // OWN dtype is what makes `variant(i32 = 1)` a checked value rather than an opaque
-                // blob -- and the nesting is charged against the depth budget like any other.
+                // A variant scalar is a nested (dtype, value) pair, and the dtype it pairs with on
+                // the outside is `variant`. Validating the nested half against its own dtype is
+                // what makes `variant(i32 = 1)` a checked value rather than an opaque blob -- and
+                // the nesting is charged against the depth budget like any other.
                 RequireDTypeKind(dtype, DTypeKind.Variant, "variant_value");
                 Scalar nested = value.AsVariant;
                 if (nested.DType.IsDefault)
@@ -655,8 +647,8 @@ public static class TypedScalarReader
             }
 
             case DTypeKind.Map:
-                // Contract §8.4 puts Map out of Phase 1 scope: there is no canonical form for it,
-                // so a map scalar has nowhere to go.
+                // Map is out of scope: there is no canonical form for it, so a map scalar has
+                // nowhere to go.
                 ThrowUnsupportedScalar("vortex.map");
                 return;
 

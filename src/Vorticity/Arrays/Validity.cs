@@ -1,7 +1,3 @@
-// docs/02-format.md §5.4 gives four validity states; Phase 1 contract §2.6 fixes the one
-// representation every decoder produces and every consumer reads. The bitmap case points at a
-// canonical Bool node in the SAME CanonicalArena, which is why this struct carries an index and
-// never a buffer: an arena index is 4 bytes and cannot outlive its arena (contract §2.2 rule 4).
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -10,7 +6,7 @@ using Vorticity.Types;
 namespace Vorticity.Arrays;
 
 /// <summary>
-/// The four validity states of docs/02-format.md §5.4. <c>true</c> means <em>valid</em>.
+/// The four validity states an array can be in. <c>true</c> means <em>valid</em>.
 /// </summary>
 public enum ValidityKind : byte
 {
@@ -29,11 +25,11 @@ public enum ValidityKind : byte
 
 /// <summary>
 /// One array's validity. 8 bytes; the <see cref="ValidityKind.Bitmap"/> case names a canonical
-/// Bool node in the same <see cref="CanonicalArena"/>.
+/// Bool node in the same <see cref="CanonicalArena"/> by index rather than holding a buffer,
+/// because an index is four bytes and cannot outlive the arena it points into.
 /// </summary>
 /// <remarks>
-/// A <see cref="Validity"/> carries no length of its own: the parent array's length is the length
-/// (Phase 1 contract §2.6 rule 6).
+/// A <see cref="Validity"/> carries no length of its own: the parent array's length is the length.
 /// </remarks>
 public readonly struct Validity : IEquatable<Validity>
 {
@@ -67,9 +63,7 @@ public readonly struct Validity : IEquatable<Validity>
 
     /// <summary>
     /// <see cref="Nullability.NonNullable"/> maps to <see cref="NonNullable"/> and
-    /// <see cref="Nullability.Nullable"/> to <see cref="AllValid"/>. Mirrors
-    /// <c>impl From&lt;Nullability&gt; for Validity</c> in
-    /// vortex-array-0.86.1/src/validity.rs.
+    /// <see cref="Nullability.Nullable"/> to <see cref="AllValid"/>.
     /// </summary>
     /// <param name="nullability">The inherited dtype's nullability.</param>
     /// <exception cref="VortexFormatException"><paramref name="nullability"/> is not 0 or 1.</exception>

@@ -1,9 +1,3 @@
-// Phase 1 contract §2.3 and §8.2. This is ONE of exactly three places in the library that may
-// throw VortexUnsupportedException, and the only one that may throw it with kind "array".
-//
-// Registration is AOT- and trim-safe and free of module-initializer ordering games: the static
-// constructor news up every decoder explicitly, by name, in one place. No reflection, no assembly
-// scanning, no [ModuleInitializer] in a decoder file.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -18,7 +12,10 @@ namespace Vorticity.Arrays;
 /// </summary>
 /// <remarks>
 /// Internal: the table answers a dispatch question the scan asks and a caller does not, and there
-/// is no registration on it, so nothing outside could add to what it maps.
+/// is no registration on it, so nothing outside could add to what it maps. The static constructor
+/// news up every decoder explicitly, by name, in one place: no reflection, no assembly scanning
+/// and no module initializer, which keeps the table whole under trimming and ahead-of-time
+/// compilation.
 /// </remarks>
 internal static class ArrayDecoderTable
 {
@@ -26,16 +23,15 @@ internal static class ArrayDecoderTable
 
     static ArrayDecoderTable()
     {
-        // Phase 1 contract §8.2, plus Phase 2 decoders as they land: every decoder this build owns,
-        // named explicitly, in one place, in encoding-id order. Nothing else in the library
-        // registers anything, and nothing outside it has to: a caller who opens a file and scans it
-        // in a process with no test harness gets a working decoder table.
+        // Every decoder this build owns, named explicitly, in encoding-id order. Nothing else in
+        // the library registers anything and nothing outside it has to, so a caller who opens a
+        // file and scans it in a bare process gets a working table.
         //
-        // Each decoder exposes a shared, stateless `Instance`; `Register` asserts that its
-        // `IdUtf8` resolves back to the slot its `EncodingId` names, so a transposition here is a
-        // type-init failure rather than a wrong-encoding decode.
+        // Each decoder exposes a shared, stateless instance; Register asserts that its IdUtf8
+        // resolves back to the slot its EncodingId names, so a transposition here is a type-init
+        // failure rather than a wrong-encoding decode.
         //
-        // The fourteen canonical decoders (Decoders/Canonical).
+        // The canonical decoders.
         Register(NullDecoder.Instance);
         Register(BoolDecoder.Instance);
         Register(PrimitiveDecoder.Instance);
@@ -51,7 +47,7 @@ internal static class ArrayDecoderTable
         Register(ConstantDecoder.Instance);
         Register(MaskedDecoder.Instance);
 
-        // The nine compressed decoders (Decoders/Compressed).
+        // The compressed decoders.
         Register(ForDecoder.Instance);
         Register(DeltaDecoder.Instance);
         Register(MapDecoder.Instance);
@@ -67,7 +63,6 @@ internal static class ArrayDecoderTable
         Register(SequenceDecoder.Instance);
         Register(ByteBoolDecoder.Instance);
 
-        // Phase 2, as each lands.
         Register(DecimalBytePartsDecoder.Instance);
         Register(DateTimePartsDecoder.Instance);
         Register(ZstdDecoder.Instance);
@@ -81,7 +76,7 @@ internal static class ArrayDecoderTable
 
     /// <summary>
     /// The decoder for <paramref name="id"/>. <b>The only place a
-    /// <see cref="VortexUnsupportedException"/> with kind <c>"array"</c> is thrown</b> (contract §2.3).
+    /// <see cref="VortexUnsupportedException"/> with kind <c>"array"</c> is thrown.</b>
     /// </summary>
     /// <param name="id">The resolved id; <see cref="ArrayEncodingId.Unknown"/> always throws.</param>
     /// <param name="idText">
@@ -107,9 +102,9 @@ internal static class ArrayDecoderTable
     /// <remarks>
     /// <see cref="ScanContext.GetArrayEncodingIdText"/> allocates a string - it reads the id out of
     /// the file's footer window on demand, precisely so that a footer full of shared spec ids does
-    /// not cost O(bytes squared) at open. The contract's <see cref="Get(ArrayEncodingId, string)"/>
-    /// takes the text by value, so calling it per node per batch would allocate on a decode path,
-    /// which §1.3 forbids. The failing case still goes through <c>Get</c>, so the throw site is
+    /// not cost O(bytes squared) at open. <see cref="Get(ArrayEncodingId, string)"/> takes the text
+    /// by value, so calling it per node per batch would allocate on a decode path, which must stay
+    /// allocation-free. The failing case still goes through <c>Get</c>, so the throw site is
     /// unchanged. The exact mirror of <c>LayoutReaderTable.Require</c>.
     /// </remarks>
     /// <param name="scan">The flow whose encoding dictionary names <paramref name="specIndex"/>.</param>

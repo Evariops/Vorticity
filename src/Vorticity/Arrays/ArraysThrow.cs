@@ -1,13 +1,14 @@
-// Every throw in this component goes through a NoInlining helper so the hot accessors stay
-// inlineable (Phase 1 contract §1.4). Malformed input is always VortexFormatException; a caller
-// mistake is always an Argument* exception; a component we do not implement is always
-// VortexUnsupportedException, and only from the three sites contract §2.3 names.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
 namespace Vorticity.Arrays;
 
+/// <summary>
+/// The throw sites of this component, each one non-inlineable so that the accessors calling them
+/// stay small enough to inline. Malformed input raises <see cref="VortexFormatException"/>; a
+/// caller mistake raises an argument exception instead.
+/// </summary>
 internal static class ArraysThrow
 {
     [MethodImpl(MethodImplOptions.NoInlining)]

@@ -1,4 +1,3 @@
-// vortex.runend — vortex-runend-0.86.1/src/array.rs. spec/METADATA.md.
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
@@ -30,7 +29,7 @@ public readonly struct RunEndMetadata : IEquatable<RunEndMetadata>
         Offset = offset;
     }
 
-    /// <summary>Physical type of the run-ends child (tag 1). Class I: it is the run-end stride.</summary>
+    /// <summary>Physical type of the run-ends child (tag 1); it fixes the stride of that buffer.</summary>
     public PType EndsPType { get; }
 
     /// <summary>Number of runs (tag 2).</summary>

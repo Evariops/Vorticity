@@ -1,6 +1,3 @@
-// vortex.alp — vortex-alp-0.86.1/src/alp/array.rs. spec/METADATA.md.
-// Phase 2 consumer: transcribed now because the reference was already open; no Phase 1 decoder
-// reads it.
 using System;
 using Vorticity.Serialization.Protobuf;
 

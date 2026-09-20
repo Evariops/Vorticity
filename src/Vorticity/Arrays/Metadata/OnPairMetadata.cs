@@ -1,4 +1,3 @@
-// vortex.onpair — vortex-onpair-0.86.1/src/array.rs. spec/METADATA.md. Phase 2 consumer.
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
@@ -21,7 +20,7 @@ namespace Vorticity.Arrays.Metadata;
 /// }
 /// </code>
 /// Tag 2 is skipped by the ordinary unknown-field path, which is exactly right: a future reuse of
-/// the number must not fail the read (docs/02-format.md §5.3).
+/// the number must not fail the read.
 /// </remarks>
 public readonly struct OnPairMetadata : IEquatable<OnPairMetadata>
 {

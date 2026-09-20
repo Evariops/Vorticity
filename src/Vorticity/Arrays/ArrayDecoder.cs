@@ -1,7 +1,3 @@
-// Phase 1 contract §2.4. An abstract CLASS, not an interface: the table holds ArrayDecoder[]
-// indexed by ArrayEncodingId, so dispatch is one bounds-checked array index plus one virtual call
-// PER ARRAY NODE - never per element (docs/03-architecture.md §4 invariant 3). Sealed overrides
-// let the JIT devirtualize inside a loop that decodes many nodes of the same encoding.
 using System;
 using Vorticity.Types;
 
@@ -11,6 +7,12 @@ namespace Vorticity.Arrays;
 /// One decoder per serialized array encoding id. Stateless and thread-safe: a single instance is
 /// shared by every scan, and all per-decode state lives in the context and the arenas.
 /// </summary>
+/// <remarks>
+/// A class rather than an interface because the dispatch table is an array indexed by encoding id:
+/// reaching a decoder is one bounds-checked index plus one virtual call per array node, never per
+/// element, and a sealed override devirtualizes inside a loop that decodes many nodes of the same
+/// encoding.
+/// </remarks>
 public abstract class ArrayDecoder
 {
     /// <summary>
@@ -29,15 +31,15 @@ public abstract class ArrayDecoder
     /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
     /// <param name="node">The serialized node, a view into <c>context.Nodes</c>.</param>
     /// <param name="dtype">
-    /// The DType this node must produce. The node does not carry it (docs/02-format.md §5.2); the
-    /// parent derives it per the table in contract §2.5.
+    /// The DType this node must produce. The serialized node does not carry one, so the parent
+    /// derives it and passes it down.
     /// </param>
     /// <param name="length">The row count this node must produce. Also supplied by the parent.</param>
     /// <returns>The canonical node's index in <c>context.Canonical</c>.</returns>
     /// <remarks>
-    /// Synchronous by design: by the time this runs every segment the batch needs is already
-    /// materialized (docs/03-architecture.md §3.6). There is no <c>CancellationToken</c> because
-    /// cancellation granularity is the batch. Recurse through
+    /// Synchronous by design: by the time this runs, every segment the batch needs is already
+    /// materialized. There is no <c>CancellationToken</c> because cancellation granularity is the
+    /// batch. Recurse through
     /// <see cref="ArrayDecodeContext.DecodeChild"/> and never by calling this method directly on a
     /// child, or the depth cap is skipped.
     /// </remarks>
@@ -51,22 +53,19 @@ public abstract class ArrayDecoder
     /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
     /// <param name="node">The serialized node.</param>
     /// <param name="dtype">The DType this node must produce.</param>
-    /// <param name="length">The row count the node WOULD produce, which bounds the indices.</param>
+    /// <param name="length">The row count the whole node would produce, which bounds the indices.</param>
     /// <param name="wanted">
     /// Row indices into this node, strictly ascending and all in <c>[0, length)</c>.
     /// </param>
     /// <returns>The canonical node's index in <c>context.Canonical</c>.</returns>
     /// <remarks>
-    /// THE DEFAULT IS THE FALLBACK, and it is what every encoding did before any of them were
-    /// specialized: decode the whole node, then gather. Correct for every encoding and wasteful for
-    /// most, which is exactly the trade [90-registry.md](../../docs/90-registry.md)'s `take` table
-    /// describes - it names the encodings worth specializing and documents the zone-decode fallback
-    /// everywhere else, rather than pretending the fallback does not exist.
+    /// The default is the fallback: decode the whole node, then gather. It is correct for every
+    /// encoding and wasteful for most, so an encoding that can reach single rows cheaply overrides
+    /// it.
     ///
-    /// An override must produce a node INDISTINGUISHABLE from the default's: same dtype, same
-    /// validity, same values in the same order. `TakeSpecializationTests` asserts that against the
-    /// default for every specialized encoding, which is the only way an optimization like this can
-    /// be trusted.
+    /// An override must produce a node indistinguishable from the default's: same dtype, same
+    /// validity, same values in the same order. <c>TakeSpecializationTests</c> asserts exactly that
+    /// against the default for every specialized encoding.
     /// </remarks>
     public virtual int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
@@ -79,18 +78,16 @@ public abstract class ArrayDecoder
 
     /// <summary>
     /// Whether <see cref="DecodeSelected"/> is overridden, i.e. whether this encoding can produce
-    /// the wanted rows WITHOUT materializing the whole node.
+    /// the wanted rows without materializing the whole node.
     /// </summary>
     /// <remarks>
-    /// THE CALLER OF THE FALLBACK NEEDS TO KNOW IT IS THE FALLBACK, and that is the whole reason
-    /// this exists. `FlatLayoutReader` serves a take one batch at a time, so an encoding that lands
-    /// on the default above decodes the SAME million-row node once per batch: 64 rows of
-    /// `vortex.zstd` cost 427 ms against 7 ms for a full scan of that node, which is 59 scans of
-    /// the file to deliver 64 rows (v2 R23). The cure is the retained-chunk cache the batch path
-    /// already uses - decode the node once, gather out of it - and the cure is a REGRESSION for the
-    /// ten encodings below, which reach one row without decoding a node at all: the `fsst` take
-    /// reads 0.21 against the reference and a forced full decode would cost it 26.5 ms instead of
-    /// 0.2. So the reader asks this before choosing, and only the fallback is rerouted.
+    /// The caller of the fallback needs to know that it is the fallback, and that is the whole
+    /// reason this exists. <c>FlatLayoutReader</c> serves a take one batch at a time, so an
+    /// encoding left on the default decodes the same node again for every batch of the take. The
+    /// cure is the retained-chunk cache the batch path already uses - decode the node once, gather
+    /// out of it - and that same cure is a loss for an encoding that can reach a single row without
+    /// decoding a node at all, because it forces the full decode it was avoiding. So the reader
+    /// asks this first and reroutes only the fallback.
     ///
     /// <c>TakeSpecializationTests</c> asserts this flag against the declared method table, so it
     /// cannot drift from the overrides it claims to describe.
@@ -106,7 +103,7 @@ public abstract class ArrayDecoder
     /// take. Answering a predicate from the encoding lets a scan decode only the rows that
     /// survived, which means walking a split twice; paying for that where no encoding can answer
     /// would cost every filtered scan something for nothing. It is asked once per column and per
-    /// predicate, never per row, and false leaves today's single pass exactly as it is.
+    /// predicate, never per row, and false leaves the single decoding pass exactly as it is.
     /// </remarks>
     public virtual bool EvaluatesWithoutFullDecode => false;
 

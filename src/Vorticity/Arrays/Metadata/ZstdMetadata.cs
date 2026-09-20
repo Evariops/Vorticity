@@ -1,4 +1,3 @@
-// vortex.zstd — vortex-zstd-0.86.1/src/lib.rs. spec/METADATA.md. Phase 2 consumer.
 using System;
 using Vorticity.Serialization.Protobuf;
 
@@ -22,9 +21,9 @@ public readonly struct ZstdFrameMetadata : IEquatable<ZstdFrameMetadata>
     }
 
     /// <summary>
-    /// Uncompressed byte size of this frame (tag 1). File-supplied: the decoder must check it
-    /// against the decompression cap <b>before</b> allocating
-    /// (<see cref="VortexLimits.DefaultMaxDecompressedSize"/>, docs/08-semantics.md §6).
+    /// Uncompressed byte size of this frame (tag 1). The value comes from the file, so the decoder
+    /// must check it against <see cref="VortexLimits.DefaultMaxDecompressedSize"/> <b>before</b>
+    /// allocating.
     /// </summary>
     public ulong UncompressedSize { get; }
 

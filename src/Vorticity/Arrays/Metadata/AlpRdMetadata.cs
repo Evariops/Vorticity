@@ -1,5 +1,3 @@
-// vortex.alprd — vortex-alp-0.86.1/src/alp_rd/array.rs. spec/METADATA.md.
-// Phase 2 consumer.
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
@@ -16,7 +14,7 @@ namespace Vorticity.Arrays.Metadata;
 ///   uint32 dict_len         = 2;
 ///   repeated uint32 dict    = 3;
 ///   PType left_parts_ptype  = 4;
-///   PatchesMetadata patches = 5;   // prost `message` without `optional`: still Option&lt;&gt; in Rust
+///   PatchesMetadata patches = 5;   // optional, though it carries no `optional` keyword
 /// }
 /// </code>
 /// The dictionary is written into a caller-supplied span rather than an array owned by this struct:
@@ -68,8 +66,8 @@ public readonly struct AlpRdMetadata : IEquatable<AlpRdMetadata>
     public uint RightBitWidth { get; }
 
     /// <summary>
-    /// Declared number of usable dictionary entries (tag 2). Upstream slices
-    /// <c>dict[0..dict_len]</c>, so this must not exceed <see cref="DictionaryEntryCount"/>.
+    /// Declared number of usable dictionary entries (tag 2). Only the first
+    /// <c>dict_len</c> entries are read, so this must not exceed <see cref="DictionaryEntryCount"/>.
     /// </summary>
     public uint DictionaryLength { get; }
 
@@ -116,8 +114,7 @@ public readonly struct AlpRdMetadata : IEquatable<AlpRdMetadata>
     /// <exception cref="VortexFormatException">
     /// The payload is malformed, the dictionary does not fit in <paramref name="dictionary"/>,
     /// <c>dict_len</c> exceeds the number of entries present, or an entry does not fit in a
-    /// <see cref="ushort"/> — upstream requires the last of these
-    /// ("left_parts_dictionary code {i} does not fit in u16").
+    /// <see cref="ushort"/>, which the dictionary's codes are required to do.
     /// </exception>
     public static AlpRdMetadata Read(ReadOnlySpan<byte> metadata, Span<uint> dictionary)
     {
@@ -198,7 +195,7 @@ public readonly struct AlpRdMetadata : IEquatable<AlpRdMetadata>
         writer.WriteUInt32(2, value.DictionaryLength);
         if (dictionary.Length != 0)
         {
-            // prost packs a repeated numeric field, and so does the reference writer.
+            // A repeated numeric field goes out packed, as one length-delimited run of varints.
             ProtoWriter.MessageScope scope = writer.BeginMessage(3);
             for (int i = 0; i < dictionary.Length; i++)
             {

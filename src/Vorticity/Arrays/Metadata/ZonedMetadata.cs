@@ -1,14 +1,3 @@
-// Layout vortex.zoned — vortex-layout-0.86.1/src/layouts/zoned/mod.rs. spec/METADATA.md.
-//
-// The metadata is NOT a bare message. It is [u8 version] ++ ZonedMetadataProto:
-//
-//   let Some((&version, proto_bytes)) = metadata.split_first() else {
-//       vortex_bail!("Zoned metadata missing protobuf version") };
-//   vortex_ensure!(version == ZONED_METADATA_PROTO_VERSION, "Unsupported zoned metadata version: {}", version);
-//   vortex_ensure!(!proto_bytes.is_empty(), "Zoned metadata missing protobuf");
-//
-// A missing version byte, a version other than 1, and an empty protobuf tail are three distinct
-// rejections upstream, and all three are rejected here.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -19,6 +8,8 @@ namespace Vorticity.Arrays.Metadata;
 /// <summary>
 /// <c>vortex.zoned</c> layout metadata: a version byte followed by
 /// <c>message ZonedMetadataProto { uint32 zone_len = 1; repeated AggregateSpecProto aggregate_specs = 2; }</c>.
+/// The payload is not a bare message, so a missing version byte, an unsupported version and an
+/// empty Protobuf tail are three distinct rejections.
 /// </summary>
 /// <remarks>
 /// The aggregate specs live in a caller-owned <see cref="AggregateSpecList"/> rather than in this
@@ -30,7 +21,7 @@ public readonly struct ZonedMetadata
 {
     private const string MessageName = "ZonedMetadataProto";
 
-    /// <summary>The only supported value of the leading version byte: <c>ZONED_METADATA_PROTO_VERSION</c>.</summary>
+    /// <summary>The only supported value of the leading version byte.</summary>
     public const byte SupportedVersion = 1;
 
     private readonly AggregateSpecList? _specs;
@@ -43,8 +34,8 @@ public readonly struct ZonedMetadata
     }
 
     /// <summary>
-    /// Number of rows per zone (tag 1). Upstream treats <c>0</c> as "no usable zone map" and reads
-    /// the data child directly rather than failing, so it is not rejected here either.
+    /// Number of rows per zone (tag 1). A value of <c>0</c> means there is no usable zone map: the
+    /// reader falls back to the data child rather than failing, so it is not rejected here.
     /// </summary>
     public uint ZoneLength { get; }
 

@@ -1,4 +1,3 @@
-// vortex.patched - vortex-array-0.86.1/src/arrays/patched/vtable/mod.rs.
 using System;
 
 using Vorticity.Serialization.Protobuf;
@@ -69,8 +68,8 @@ public readonly struct PatchedArrayMetadata : IEquatable<PatchedArrayMetadata>
             MetadataProto.ThrowOutOfDomain(MessageName, "offset", $"{offset} is not less than 1024.");
         }
 
-        // "Must be a power of two between 1 and 128" - checked rather than trusted, because
-        // `chunk * n_lanes + n_lanes` indexes the lane-offsets child and a wild value reads past it.
+        // The lane count is checked rather than trusted, because `chunk * n_lanes + n_lanes` indexes
+        // the lane-offsets child and a wild value reads past it.
         if (laneCount == 0 || laneCount > 128 || (laneCount & (laneCount - 1)) != 0)
         {
             MetadataProto.ThrowOutOfDomain(

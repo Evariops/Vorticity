@@ -1,4 +1,3 @@
-// vortex.decimal — vortex-array-0.86.1/src/arrays/decimal/vtable/mod.rs. spec/METADATA.md.
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types.Numerics;
@@ -9,10 +8,10 @@ namespace Vorticity.Arrays.Metadata;
 /// <c>vortex.decimal</c> metadata: <c>message DecimalMetadata { DecimalType values_type = 1; }</c>.
 /// </summary>
 /// <remarks>
-/// The storage width is class I — it is the stride of buffer 0. prost would coerce an unknown
-/// enumeration value to <c>DecimalType::I8 = 0</c> and read the buffer one byte at a time; this
-/// codec rejects it instead. An <em>absent</em> field is still a legal <c>I8</c>: the corpus file
-/// <c>types/decimal2_1_nullable_r1024</c> carries zero metadata bytes.
+/// The storage width is the stride of buffer 0, so it cannot be guessed: a decoder that coerced
+/// an unknown enumeration value to <c>I8 = 0</c> would read the buffer one byte at a time, and
+/// this codec rejects the value instead. An <em>absent</em> field is still a legal <c>I8</c>, and
+/// real files do carry zero metadata bytes for a decimal array.
 /// </remarks>
 public readonly struct DecimalMetadata : IEquatable<DecimalMetadata>
 {

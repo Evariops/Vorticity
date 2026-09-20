@@ -1,4 +1,3 @@
-// AggregateSpecProto — vortex-layout-0.86.1/src/layouts/zoned/schema.rs. spec/METADATA.md.
 using System;
 using Vorticity.Serialization.Protobuf;
 
@@ -65,11 +64,9 @@ public readonly ref struct AggregateSpec
             }
         }
 
-        // An absent or empty id is NOT rejected. prost's `string` has implicit presence, so the two
-        // are the same bytes, and upstream resolves an id it does not know to Ok(None) and disables
-        // that aggregate's pruning rather than failing the read
-        // (vortex-layout-0.86.1/src/layouts/zoned/schema.rs; docs/08-semantics.md §4 makes the rule
-        // mandatory for us). AggregateRegistry.Resolve maps it to AggregateId.Unknown.
+        // An absent id is not rejected: a string field with implicit presence puts absent and empty
+        // on the same bytes, and an id nobody recognizes only disables that aggregate's pruning.
+        // AggregateRegistry.Resolve maps it to AggregateId.Unknown.
         return new AggregateSpec(id, options);
     }
 

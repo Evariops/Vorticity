@@ -1,10 +1,3 @@
-// vortex.variant and vortex.parquet.variant — vortex-array-0.86.1/src/arrays/variant/vtable/mod.rs
-// and vortex-parquet-variant-0.86.1/src/vtable.rs. spec/METADATA.md.
-//
-// Both messages exist to say the same thing in two ways: WHICH CHILDREN ARE PRESENT. Neither
-// carries a length, a physical type or anything else the decoder could get wrong by arithmetic;
-// what it can get wrong is counting children, which is why both readers return presence rather
-// than a payload.
 using System;
 
 using Vorticity.Serialization.Protobuf;
@@ -12,7 +5,8 @@ using Vorticity.Serialization.Protobuf;
 namespace Vorticity.Arrays.Metadata;
 
 /// <summary>
-/// <c>vortex.variant</c> array metadata.
+/// <c>vortex.variant</c> array metadata. The message carries no length and no physical type: all it
+/// says is which children are present, which is why the reader returns presence and not a payload.
 /// </summary>
 /// <remarks>
 /// <code>
@@ -20,7 +14,7 @@ namespace Vorticity.Arrays.Metadata;
 ///   optional DType shredded_dtype = 1;
 /// }
 /// </code>
-/// The shredded dtype is the ONLY field, and its presence is what says whether there is a second
+/// The shredded dtype is the only field, and its presence is what says whether there is a second
 /// child. The dtype itself is not decoded here: this build refuses a shredded variant, so the
 /// bytes are counted and skipped rather than parsed into a type nothing will use.
 /// </remarks>
@@ -93,7 +87,8 @@ public readonly struct VariantMetadata : IEquatable<VariantMetadata>
 }
 
 /// <summary>
-/// <c>vortex.parquet.variant</c> array metadata.
+/// <c>vortex.parquet.variant</c> array metadata. Like <see cref="VariantMetadata"/>, it only states
+/// which children are present, so the reader returns presence and not a payload.
 /// </summary>
 /// <remarks>
 /// <code>
@@ -103,9 +98,9 @@ public readonly struct VariantMetadata : IEquatable<VariantMetadata>
 ///   bool value_nullable             = 3;
 /// }
 /// </code>
-/// The child count is <c>1 + has_value + (typed_value_dtype is present)</c>, and MAY be one more
+/// The child count is <c>1 + has_value + (typed_value_dtype is present)</c>, and may be one more
 /// than that: an explicit validity child comes first when the array is nullable and its validity is
-/// not the dtype's. That "or one more" is upstream's own rule, not a tolerance invented here.
+/// not the dtype's. That extra child is part of the format, not a tolerance invented here.
 /// </remarks>
 public readonly struct ParquetVariantMetadata : IEquatable<ParquetVariantMetadata>
 {

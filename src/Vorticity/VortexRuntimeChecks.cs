@@ -1,14 +1,16 @@
-// docs/09-contracts.md §7: the zero-copy design casts file buffers directly with MemoryMarshal.
-// That assumes a little-endian host. Fail loudly at load rather than return byte-swapped data.
 using System.Runtime.CompilerServices;
 
 namespace Vorticity;
 
+/// <summary>
+/// Refuses to load on a big-endian host. The zero-copy design casts file buffers directly, which
+/// assumes a little-endian host, so failing at load is better than returning byte-swapped data.
+/// </summary>
 internal static class VortexRuntimeChecks
 {
-    // CA2255 warns that ModuleInitializer is meant for applications. Here it is deliberate and
-    // documented (docs/09-contracts.md §7): the check must run before any caller can hand us a
-    // buffer, and it is a single branch executed once.
+    // CA2255 warns that ModuleInitializer is meant for applications; here it is deliberate. The
+    // check must run before any caller can hand the library a buffer, and it is a single branch
+    // executed once.
     [System.Diagnostics.CodeAnalysis.SuppressMessage(
         "Usage", "CA2255:The 'ModuleInitializer' attribute should not be used in libraries",
         Justification = "Deliberate endianness guard; see docs/09-contracts.md §7.")]

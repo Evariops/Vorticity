@@ -1,12 +1,3 @@
-// spec/flatbuffers/array.fbs `table ArrayStats`, flattened out of the FlatBuffer at load time.
-//
-// Statistics are class II/III (docs/08-semantics.md §5): read, surfaced, and never trusted for a
-// correctness decision unless VortexReadOptions.VerifyStatistics is on. The three scalar
-// statistics stay as RAW BYTES - decoding one costs a Protobuf parse and a DType, and almost no
-// scan reads one. The caller decodes on demand with TypedScalarReader.Read.
-//
-// Six of the eleven fields are FlatBuffers `= null` fields, where absent means UNKNOWN and not
-// false/0, which is why they are reachable only through TryGet.
 using System;
 using Vorticity.Serialization.Schemas;
 
@@ -17,7 +8,10 @@ namespace Vorticity.Arrays;
 /// </summary>
 /// <remarks>
 /// A view over one entry of an <see cref="ArrayNodeArena"/>'s stats list, so it is only meaningful
-/// until that arena is <see cref="ArrayNodeArena.Reset"/> (Phase 1 contract §2.2 rule 4).
+/// until that arena is <see cref="ArrayNodeArena.Reset"/>. Statistics are advisory: they are
+/// surfaced as the file wrote them and are never trusted for a correctness decision unless
+/// <c>VortexReadOptions.VerifyStatistics</c> is on. A statistic that the file omits is unknown, not
+/// false or zero, which is why those are reachable only through a <c>TryGet</c>.
 /// </remarks>
 public readonly ref struct ArrayStatsSet
 {

@@ -1,4 +1,3 @@
-// fastlanes.rle — vortex-fastlanes-0.86.1/src/rle/vtable/mod.rs. spec/METADATA.md.
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
@@ -19,21 +18,18 @@ namespace Vorticity.Arrays.Metadata;
 ///   uint64 offset                   = 6;   // default 0
 /// }
 /// </code>
-/// <c>offset</c> is declared with <c>default = "0"</c> in prost, so absent and present-zero are the
-/// same state — unlike the <c>optional bool</c>s elsewhere in this namespace, no tri-state is needed.
+/// <c>offset</c> has a declared default of zero, so absent and present-zero are the same state —
+/// unlike the <c>optional bool</c>s elsewhere in this namespace, no tri-state is needed.
 /// </remarks>
 public readonly struct RleMetadata : IEquatable<RleMetadata>
 {
     private const string MessageName = "RLEMetadata";
 
     /// <summary>
-    /// Exclusive upper bound on <see cref="Offset"/>: the FastLanes block is 1024 elements, so the
-    /// first visible row always lies inside the first chunk
-    /// (<c>vortex_ensure!(offset &lt; 1024)</c> in <c>RLEData::try_new</c>,
-    /// vortex-fastlanes-0.86.1/src/rle/array/mod.rs, reached from <c>deserialize</c>). It is not
-    /// decoration: <c>rle_decompress</c> walks chunks from index 0 and slices <c>offset..</c> out
-    /// of the result afterwards, so a larger offset names a chunk mapping the reference never
-    /// produces for any input it accepts.
+    /// Exclusive upper bound on <see cref="Offset"/>: a block holds 1024 elements, so the first
+    /// visible row always lies inside the first chunk. The bound is not decoration: decoding walks
+    /// chunks from the first one and slices the offset off the result afterwards, so a larger
+    /// offset names a chunk mapping no valid file can describe.
     /// </summary>
     public const ulong OffsetLimit = 1024;
 
@@ -140,8 +136,8 @@ public readonly struct RleMetadata : IEquatable<RleMetadata>
             }
         }
 
-        // Checked on the raw u64, before any narrowing: a 2^40 offset must report the domain error
-        // the reference reports, not a length error from further down the decoder.
+        // Checked on the raw u64, before any narrowing, so that a huge offset reports this domain
+        // error rather than a length error from further down the decoder.
         if (offset >= OffsetLimit)
         {
             MetadataProto.ThrowOutOfDomain(MessageName, "offset", $"{offset} is not less than 1024.");

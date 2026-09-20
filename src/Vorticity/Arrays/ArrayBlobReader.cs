@@ -1,15 +1,3 @@
-// docs/02-format.md §5.1 and spec/REFERENCE.md, "The array blob, read off the writer rather than
-// the prose"; the reference is vortex-array-0.86.1/src/serde.rs
-// (`TryFrom<ByteBuffer> for ArrayRef` and `from_flatbuffer_and_segment_with_overrides`).
-//
-// The four details the prose gets wrong, all handled below:
-//   * the writer emits a leading ZERO-LENGTH max-alignment buffer that contributes no bytes and no
-//     `Buffer` entry - do not look for it on read;
-//   * `padding` is computed by the writer from the blob's offset WITHIN THE FILE, but the padding
-//     it actually wrote is recorded per buffer, so the reader just accumulates from zero;
-//   * the padding before the FlatBuffer is recorded NOWHERE, which is why the FlatBuffer is located
-//     from the end and never by walking forward past the last data buffer;
-//   * the FlatBuffer is built with `finish_minimal`: there is NO file identifier to look for.
 using System;
 using System.Buffers.Binary;
 using Vorticity.Buffers;
@@ -20,6 +8,14 @@ namespace Vorticity.Arrays;
 /// <summary>
 /// Turns a segment into a populated <see cref="ArrayNodeArena"/>, zero-copy for the data buffers.
 /// </summary>
+/// <remarks>
+/// The blob is read backwards from its length trailer, because the padding that precedes the
+/// trailing FlatBuffer is recorded nowhere and cannot be walked over forwards; the FlatBuffer
+/// itself carries no file identifier to look for. Buffer padding accumulates from the start of the
+/// segment: writers derive it from the blob's offset within the file but record what they actually
+/// wrote, and the leading zero-length buffer they emit for maximum alignment contributes neither
+/// bytes nor an entry to find.
+/// </remarks>
 public static class ArrayBlobReader
 {
     /// <summary>
@@ -30,7 +26,7 @@ public static class ArrayBlobReader
     /// <param name="segment">The whole array-blob segment.</param>
     /// <param name="encodings">
     /// Maps the <c>u16</c> spec index to a resolved id, i.e. the file's <c>array_specs</c> mapped
-    /// through <see cref="EncodingRegistry.ResolveArray"/> at open (contract §2.3).
+    /// through <see cref="EncodingRegistry.ResolveArray"/> at open.
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="arena"/> is null.</exception>
     /// <exception cref="VortexFormatException">The blob is malformed in any way.</exception>
@@ -61,7 +57,7 @@ public static class ArrayBlobReader
                 $"{segment.Length - 4} bytes precede its length trailer.");
         }
 
-        // 3. Located from the END. The padding in front of it is recorded nowhere.
+        // 3. Located from the end: the padding in front of it is recorded nowhere.
         int regionLength = segment.Length - 4 - (int)fbLength;
         ReadOnlySpan<byte> flatBuffer = bytes.Slice(regionLength, (int)fbLength);
         LoadCore(arena, flatBuffer, segment.Slice(0, regionLength), encodings);
@@ -78,10 +74,9 @@ public static class ArrayBlobReader
     /// <param name="encodings">Spec index to resolved id, as for the other overload.</param>
     /// <remarks>
     /// The segment bytes are byte-identical to the normal case - the writer still appends the
-    /// FlatBuffer and the <c>u32</c> - so this is the same walk with a different FlatBuffer source
-    /// and not a second algorithm. Verified against
-    /// <c>corpus/containers/flat_inline_array_node.vortex</c>, whose five inlined trees are byte
-    /// equal to the tails of their own segments.
+    /// FlatBuffer and the <c>u32</c>, and an inlined tree is byte equal to the tail of its own
+    /// segment - so this is the same walk with a different FlatBuffer source, not a second
+    /// algorithm.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="arena"/> is null.</exception>
     /// <exception cref="VortexFormatException">The blob is malformed in any way.</exception>
@@ -112,25 +107,25 @@ public static class ArrayBlobReader
 
         // The arena keeps its own copy so that node metadata and statistics - which are (offset,
         // length) pairs into these bytes - never depend on the caller's span staying alive or
-        // staying put. It is one memcpy of at most a few hundred bytes (1184 is the largest in the
-        // golden corpus) and it is what makes the inlined variant safe without pinning.
+        // staying put. It is one memcpy of a tree that is at most a few hundred bytes, and it is
+        // what makes the inlined variant safe without pinning.
         Span<byte> tree = arena.BeginTree(flatBuffer.Length);
         flatBuffer.CopyTo(tree);
         ReadOnlySpan<byte> treeSpan = arena.TreeSpan;
 
-        // Forward-only uoffsets exclude cycles but NOT sharing: two parents may resolve to one
-        // child table, so the node graph is a DAG and depth alone cannot bound the walk
-        // (docs/03-architecture.md §6). This budget is what stops it.
+        // Forward-only uoffsets exclude cycles but not sharing: two parents may resolve to one
+        // child table, so the node graph is a directed acyclic graph and depth alone cannot bound
+        // the walk. This budget is what stops it.
         int tableBudget = VortexLimits.MaxFlatBufferTables;
         ArrayView view = ArrayView.Root(treeSpan, ref tableBudget);
 
         ResolveBuffers(arena, view, region);
 
-        // Two more budgets, on the work the ARENA is made to do. The FlatBuffers table budget
-        // bounds table VISITS at a million; a million 32-byte records plus their buffer index lists
-        // is tens of megabytes conjured out of a 1.5 KB file, so depth and table count together are
-        // not enough. Both numbers below are derived from the FlatBuffer's own byte accounting
-        // rather than invented, so neither can reject a well-formed file:
+        // Two more budgets, on the work the arena is made to do. The table budget bounds how many
+        // tables are visited, not how much they materialize: one shared child re-expanded under
+        // many parents turns a tiny file into megabytes of records and buffer index lists, so depth
+        // and table count together are not enough. Both bounds are derived from the FlatBuffer's
+        // own byte accounting rather than invented, so neither can reject a well-formed file:
         //
         //   * a node costs at least 8 bytes - four for its own soffset and four for the slot that
         //     points at it (its parent's children vector, or the Array table's `root`) - so a tree
@@ -138,9 +133,7 @@ public static class ArrayBlobReader
         //   * a buffer index costs 2 bytes in its node's `buffers` vector, so a tree cannot hold
         //     more than length/2 + 1 of them.
         //
-        // Measured over all 2236 array blobs in the golden corpus the worst case uses 13.6% of the
-        // node budget and 6.2% of the index budget. Exceeding either means the graph is a
-        // shared-child DAG being re-expanded, not a tree.
+        // Exceeding either means the graph is a shared-child one being re-expanded, not a tree.
         int nodeBudget = (flatBuffer.Length / 8) + 1;
         int indexBudget = (flatBuffer.Length / 2) + 1;
 
@@ -154,10 +147,10 @@ public static class ArrayBlobReader
         ReadOnlySpan<BufferSpec> specs = view.Buffers;
         ReadOnlySpan<byte> regionBytes = region.Span;
 
-        // `offset` starts at 0 relative to the SEGMENT, not at the segment's file offset. The
+        // `offset` starts at 0 relative to the segment, not at the segment's file offset. The
         // writer computed padding from the file offset but recorded what it actually wrote, so the
         // reader accumulates - reaching for the file offset here is off-by-padding on every
-        // multi-buffer array (spec/REFERENCE.md).
+        // multi-buffer array.
         long offset = 0;
         for (int i = 0; i < specs.Length; i++)
         {
@@ -168,7 +161,7 @@ public static class ArrayBlobReader
                 ThrowBufferCompression(i, spec.Compression);
             }
 
-            // Class I: an unchecked u8 exponent can demand 2^255 (docs/08-semantics.md §6).
+            // An unchecked u8 exponent would let a file demand an alignment of 2^255.
             int alignmentExponent = spec.AlignmentExponent;
             _ = VortexLimits.CheckAlignmentExponent(spec.AlignmentExponent);
 
@@ -181,8 +174,8 @@ public static class ArrayBlobReader
                     "buffer region.");
             }
 
-            // FromPinned rather than region.Slice: Slice keeps the SEGMENT's declared alignment
-            // exponent, and every consumer that reinterprets these bytes needs the BUFFER's.
+            // FromPinned rather than region.Slice: Slice keeps the segment's declared alignment
+            // exponent, and every consumer that reinterprets these bytes needs the buffer's own.
             // The bytes are owner-backed (mapped pages or an aligned native block), so they are
             // pinned in the sense FromPinned requires.
             arena.AddGlobalBuffer(
@@ -202,14 +195,14 @@ public static class ArrayBlobReader
         ref int nodeBudget,
         ref int indexBudget)
     {
-        // Semantic array depth, a separate budget from the FlatBuffers table count (contract §1.5).
+        // Semantic array depth, a budget distinct from the FlatBuffers table count.
         VortexLimits.CheckDepth(depth, VortexLimits.MaxArrayDepth, "Array");
 
         ushort specIndex = node.Encoding;
         if (specIndex >= encodings.Length)
         {
-            // Not an unknown component - a structurally inconsistent file. There is no id text to
-            // name, so lazy resolution has nothing to defer (contract §2.3).
+            // Not an unknown component but a structurally inconsistent file: there is no id text
+            // to name, so deferring the resolution would have nothing to resolve later.
             ArraysThrow.Format(
                 $"Array node names encoding spec {specIndex}; the footer declares " +
                 $"{encodings.Length}.");
@@ -234,8 +227,8 @@ public static class ArrayBlobReader
         {
             int global = bufferIndices[i];
 
-            // Class I. Validated at LOAD, not at use: a node with BufferCount == 0 legitimately has
-            // an absent vector, and an index past the global list must never reach GetBuffer.
+            // Validated at load rather than at use: a node with no buffers legitimately has an
+            // absent vector, and an index past the global list must never reach GetBuffer.
             if (global >= globalBuffers)
             {
                 ArraysThrow.Format(
@@ -310,7 +303,8 @@ public static class ArrayBlobReader
             record.SumLength = sum.Length;
         }
 
-        // Six `= null` fields: absent means UNKNOWN, so presence and value are separate bits.
+        // These fields are optional on the wire, where absent means unknown rather than false or
+        // zero, so presence and value are carried as separate bits.
         if (view.TryGetIsSorted(out bool isSorted))
         {
             record.Flags |= ArrayStatsRecord.FlagIsSorted;
@@ -388,16 +382,15 @@ public static class ArrayBlobReader
             "it is a shared-child DAG, not a tree.");
 
     /// <summary>
-    /// Refuses a compressed buffer. NOT a deferral, and not effort: buffer-level compression is
-    /// declared by the schema and implemented by nothing.
+    /// Refuses a compressed buffer. Not a deferral: buffer-level compression is declared by the
+    /// schema and implemented by nothing.
     /// </summary>
     /// <remarks>
-    /// Vortex 0.86.1 writes <c>Compression::None</c>, never reads this field at all, and depends on
-    /// no lz4 implementation; the schema names an algorithm without saying whether the bytes are a
-    /// raw LZ4 block or a frame, and records no decompressed length anywhere. A decoder could only
-    /// be written by inventing both, so we refuse instead - which is also the safer of the two
-    /// behaviours, since the reference would read these bytes AS DATA and return silent garbage.
-    /// See docs/08-semantics.md §7.
+    /// Writers emit "no compression" and no reader consults this field; the schema names an
+    /// algorithm without saying whether the bytes are a raw block or a frame, and records no
+    /// decompressed length anywhere, so a decoder could only be written by inventing both.
+    /// Refusing is also the safer of the two behaviours, since a reader that ignored the field
+    /// would take these bytes for data and return silent garbage.
     /// </remarks>
     [System.Runtime.CompilerServices.MethodImpl(
         System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]

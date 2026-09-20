@@ -1,20 +1,3 @@
-// The four core extension DTypes. They live here, with the array spine, rather than with the
-// vortex.ext decoder, because they are resolved from a DTYPE rather than from an array node and
-// because both canonical-decoders (contract §9.5) and columns (§12) need them.
-//
-// Their metadata is HAND-ROLLED, not Protobuf. Every layout below is transcribed from
-// vortex-array-0.86.1/src/extension/, and the byte-level details are contract §9.5:
-//   * vortex.date       1 byte, trailing ignored, storage Days->i32 / ms->i64, ns/us/s rejected;
-//   * vortex.time       1 byte, trailing ignored, storage s|ms->i32 / us|ns->i64, Days rejected;
-//   * vortex.timestamp  [unit][u16 LE tz_len][tz], min 3 bytes because the length prefix is ALWAYS
-//                       written, storage i64 for every unit, TimeUnit::Days accepted at the dtype
-//                       level and rejected only when a value is unpacked;
-//   * vortex.uuid       0 or 1 byte and Length > 1 IS rejected, storage
-//                       FixedSizeList(Primitive(U8, NonNullable), 16, any).
-//
-// Validation happens upstream at DType-parse time (`try_with_vtable` always calls
-// `validate_dtype`). Phase 1 defers it to first USE of the field (contract §2.3), so the
-// vortex.ext decoder and the column accessor each run it once.
 using System;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
@@ -26,7 +9,7 @@ namespace Vorticity.Arrays;
 
 /// <summary>
 /// Vortex's own <c>TimeUnit</c> discriminants, ordered finest to coarsest. They are
-/// <b>not</b> Arrow's. vortex-array-0.86.1/src/extension/datetime/unit.rs.
+/// <b>not</b> Arrow's.
 /// </summary>
 public enum VortexTimeUnit : byte
 {
@@ -83,7 +66,7 @@ public readonly ref struct TimestampOptions
 
     /// <summary>
     /// The timezone as raw UTF-8, pointing into the caller's metadata. Never resolved against a
-    /// zone database: docs/07-dotnet-mapping.md §3 is binding - the core resolves no timezone.
+    /// zone database; the core resolves no timezone.
     /// </summary>
     public ReadOnlySpan<byte> TimeZoneUtf8 { get; }
 }
@@ -103,12 +86,16 @@ public readonly struct UuidOptions
     /// <summary>
     /// The RFC 4122 version discriminant: 0..8 are Nil, Mac, Dce, Md5, Random, Sha1, SortMac,
     /// SortRand and Custom. Both <c>0x0F</c> and <c>0xFF</c> are normalized to
-    /// <see cref="ExtensionDTypeRegistry.UuidVersionMax"/>, because the <c>uuid</c> crate changed the value in 1.23.0.
+    /// <see cref="ExtensionDTypeRegistry.UuidVersionMax"/>, since writers spell <c>Max</c> either way.
     /// </summary>
     public byte Version { get; }
 }
 
-/// <summary>Resolves and parses the four core extension dtypes.</summary>
+/// <summary>
+/// Resolves and parses the four core extension dtypes. Their metadata is hand-rolled rather than
+/// Protobuf, and a dtype is validated the first time the field carrying it is read rather than when
+/// it is parsed, so the <c>vortex.ext</c> decoder and the column accessor each validate once.
+/// </summary>
 public static class ExtensionDTypeRegistry
 {
     /// <summary>The normalized discriminant for the <c>Max</c> UUID version.</summary>
@@ -117,8 +104,9 @@ public static class ExtensionDTypeRegistry
     private const byte UuidVersionMaxLegacy = 0x0F;
     private const byte MaxUuidNumberedVersion = 8;
 
-    // Interned literals: returning one allocates nothing. U+00B5 MICRO SIGN, NOT U+03BC GREEK
-    // SMALL LETTER MU - it reaches DType.ToString() and therefore every manifest-`dtype` compare.
+    // Interned literals: returning one allocates nothing. The microsecond name carries U+00B5, the
+    // micro sign, and not U+03BC, the Greek small letter mu; it reaches DType.ToString() and so
+    // every textual comparison of a dtype.
     private static readonly string[] UnitNames = ["ns", "µs", "ms", "s", "days"];
 
     /// <summary>
@@ -149,7 +137,7 @@ public static class ExtensionDTypeRegistry
 
     /// <summary>
     /// <b>The only place a <see cref="VortexUnsupportedException"/> with kind <c>"dtype"</c> is
-    /// thrown</b> (contract §2.3), and only when the field carrying the extension is actually read.
+    /// thrown</b>, and only when the field carrying the extension is actually read.
     /// </summary>
     /// <param name="idUtf8">The extension id as the dtype carries it.</param>
     /// <exception cref="VortexUnsupportedException">The id is not one of the four core dtypes.</exception>
@@ -262,9 +250,9 @@ public static class ExtensionDTypeRegistry
     /// <summary>
     /// Reads <c>vortex.uuid</c>'s metadata and validates it against the storage dtype.
     /// </summary>
-    /// <param name="metadata">0 or 1 byte. Unlike the other three, 2 or more IS rejected.</param>
+    /// <param name="metadata">0 or 1 byte. Unlike the other three, 2 or more is rejected.</param>
     /// <param name="storage">
-    /// Must be <c>FixedSizeList(Primitive(U8, NonNullable), 16, any)</c>: the ELEMENT must be
+    /// Must be <c>FixedSizeList(Primitive(U8, NonNullable), 16, any)</c>: the element must be
     /// non-nullable, the outer list's nullability is free. Bytes are RFC 4122 network order.
     /// </param>
     /// <returns>The parsed options.</returns>
@@ -290,7 +278,7 @@ public static class ExtensionDTypeRegistry
         byte raw = metadata[0];
         if (raw is UuidVersionMaxLegacy or UuidVersionMax)
         {
-            // The uuid crate moved Max from 0x0F to 0xFF in 1.23.0; both spellings mean Max.
+            // Both spellings of the Max version are in circulation; neither is an error.
             return new UuidOptions(true, UuidVersionMax);
         }
 
@@ -349,8 +337,8 @@ public static class ExtensionDTypeRegistry
 
     private static void RequirePrimitiveStorage(DType storage, PType required, string id, VortexTimeUnit unit)
     {
-        // Class I in the sense that matters here: upstream's `as_ptype` is a vortex_panic! on a
-        // non-Primitive storage, so the Kind check has to come first and produce a format error.
+        // The kind check has to come first: reading the ptype of a non-primitive dtype is not
+        // meaningful, so this is what turns a malformed storage dtype into a format error.
         if (storage.IsDefault || storage.Kind != DTypeKind.Primitive)
         {
             ArraysThrow.Format(

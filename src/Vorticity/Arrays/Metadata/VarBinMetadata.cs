@@ -1,4 +1,3 @@
-// vortex.varbin — vortex-array-0.86.1/src/arrays/varbin/vtable/mod.rs. spec/METADATA.md.
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
@@ -25,7 +24,7 @@ public readonly struct VarBinMetadata : IEquatable<VarBinMetadata>
         OffsetsPType = offsetsPType;
     }
 
-    /// <summary>Physical type of the offsets child (tag 1). Class I: it is the offset stride.</summary>
+    /// <summary>Physical type of the offsets child (tag 1). It fixes the width of one offset.</summary>
     public PType OffsetsPType { get; }
 
     /// <summary>Reads a <c>vortex.varbin</c> metadata payload.</summary>

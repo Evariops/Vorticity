@@ -1,5 +1,3 @@
-// The two shapes that are not messages: an empty metadata field, and fastlanes.for's bare
-// ScalarValue. spec/METADATA.md, "Empty metadata", plus Phase 1 contract §0a C1/C2.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -20,7 +18,7 @@ public static class EncodingMetadata
     /// <param name="metadata">
     /// The raw <c>ArrayNode.metadata</c> / <c>Layout.metadata</c> bytes. An <em>absent</em>
     /// FlatBuffers field arrives here as an empty span and is accepted: absent and zero-length
-    /// are the same thing for these encodings (spec/METADATA.md, "Empty metadata").
+    /// are the same thing for these encodings.
     /// </param>
     /// <param name="encodingId">The encoding id, used in the exception message.</param>
     /// <exception cref="VortexFormatException"><paramref name="metadata"/> is non-empty.</exception>
@@ -31,11 +29,10 @@ public static class EncodingMetadata
     /// <c>vortex.fixed_size_list</c>, <c>vortex.ext</c>, <c>vortex.bytebool</c> and
     /// <c>vortex.zigzag</c>.
     /// <para>
-    /// <b>Do not call this for <c>vortex.constant</c>.</b> Its metadata is empty in every file a
-    /// conformant writer produces, but upstream ignores the field entirely — <c>deserialize</c>
-    /// names the parameter <c>_metadata</c> and reads the scalar from buffer 0 instead
-    /// (vortex-array-0.86.1/src/arrays/constant/vtable/mod.rs; Phase 1 contract §0a C1). Rejecting
-    /// a stray byte there would reject a file upstream reads.
+    /// <c>vortex.constant</c> is deliberately not on that list. Its metadata is empty in every
+    /// file a conformant writer produces, but the reference implementation ignores the field
+    /// entirely and reads the scalar from buffer 0, so rejecting a stray byte here would reject a
+    /// file others read happily.
     /// </para>
     /// </remarks>
     public static void RequireEmpty(ReadOnlySpan<byte> metadata, string encodingId)
@@ -55,14 +52,13 @@ public static class EncodingMetadata
     /// <param name="arena">Arena for the dtype nested inside a <c>variant_value</c>, if any.</param>
     /// <returns>
     /// The untyped reference value. It is interpreted against the node's inherited DType later —
-    /// a wire <c>ScalarValue</c> carries no type tag of its own (Phase 1 contract §0a C3).
+    /// a wire <c>ScalarValue</c> carries no type tag of its own.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="store"/> or <paramref name="arena"/> is null.</exception>
     /// <exception cref="VortexFormatException">
-    /// The payload is malformed, or empty. Empty would decode to
-    /// <see cref="ScalarValueKind.Absent"/>, which upstream turns into a null reference and then
-    /// rejects ("Reference value cannot be null"), so it is rejected here instead of producing a
-    /// silently wrong column (vortex-fastlanes-0.86.1/src/for/vtable/mod.rs).
+    /// The payload is malformed, or empty. An empty payload decodes to
+    /// <see cref="ScalarValueKind.Absent"/>, which is no frame-of-reference value at all, so it is
+    /// rejected here instead of producing a silently wrong column.
     /// </exception>
     public static ScalarValue ReadReferenceScalar(
         ReadOnlySpan<byte> metadata, ScalarStore store, DTypeArena arena)

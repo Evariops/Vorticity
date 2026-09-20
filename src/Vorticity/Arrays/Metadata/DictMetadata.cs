@@ -1,4 +1,3 @@
-// vortex.dict — vortex-array-0.86.1/src/arrays/dict/array.rs. spec/METADATA.md.
 using System;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
@@ -13,16 +12,14 @@ namespace Vorticity.Arrays.Metadata;
 /// message DictMetadata {
 ///   uint32 values_len                   = 1;
 ///   PType  codes_ptype                  = 2;
-///   optional bool is_nullable_codes     = 3;   // added after stabilisation
-///   optional bool all_values_referenced = 4;   // absent/false = unknown (conservative)
+///   optional bool is_nullable_codes     = 3;
+///   optional bool all_values_referenced = 4;
 /// }
 /// </code>
 /// Both booleans are modelled as <see cref="bool"/>? because absent and present-and-false are
-/// different states. <c>is_nullable_codes</c> absent means "fall back to the parent dtype's
-/// nullability", which is a different child DType from <c>Nullable</c>
-/// (vortex-array-0.86.1/src/arrays/dict/vtable/mod.rs). The corpus contains both spellings:
-/// <c>encodings/dict.vortex</c> carries <c>08 05 10 02 18 00 20 00</c>, i.e. both optionals
-/// present and false.
+/// different states: an absent <c>is_nullable_codes</c> means "fall back to the parent dtype's
+/// nullability", which can yield a different child DType from an explicit <c>false</c>. Files
+/// carry both spellings, so neither may be normalised into the other on the read path.
 /// </remarks>
 public readonly struct DictMetadata : IEquatable<DictMetadata>
 {
@@ -48,13 +45,13 @@ public readonly struct DictMetadata : IEquatable<DictMetadata>
     }
 
     /// <summary>
-    /// Number of dictionary entries (tag 1). Class I: the decoder must validate every code against
-    /// <c>[0, ValuesLength)</c> and <c>ValuesLength</c> against the actual values child
-    /// (docs/08-semantics.md §5).
+    /// Number of dictionary entries (tag 1). It is a claim, not a guarantee: the decoder must
+    /// check every code against <c>[0, ValuesLength)</c> and <c>ValuesLength</c> against the
+    /// actual values child before indexing with either.
     /// </summary>
     public uint ValuesLength { get; }
 
-    /// <summary>Physical type of the codes child (tag 2). Class I: it is the code stride.</summary>
+    /// <summary>Physical type of the codes child (tag 2): the stride the codes are read at.</summary>
     public PType CodesPType { get; }
 
     /// <summary>
