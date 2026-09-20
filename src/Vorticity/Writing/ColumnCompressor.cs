@@ -593,27 +593,73 @@ internal static class ColumnCompressor
         }
 
         DType dtype = node.DType;
-        if (dtype.Kind != DTypeKind.Primitive || !dtype.PType.IsInteger())
+        int length = node.Length;
+        long expanded = ExpandedBytes(node, dtype);
+        if (expanded < 0)
         {
             return ColumnPlan.Canonical;
         }
 
         // The small-column guard, on the bytes the expansion would have produced.
-        int length = node.Length;
-        if (length < MinimumRows && ((long)length * dtype.PType.ByteWidth()) < MinimumBytes)
+        if (length < MinimumRows && expanded < MinimumBytes)
         {
             return ColumnPlan.Canonical;
         }
 
-        if (stats.IsPresent && stats.Rows == length && stats.DeltaKnown && stats.DeltaBroken)
+        bool measured = stats.IsPresent && stats.Rows == length;
+        if (dtype.Kind == DTypeKind.Primitive && dtype.PType.IsInteger()
+            && !(measured && stats.DeltaKnown && stats.DeltaBroken))
+        {
+            SequencePlan? sequence = SequencePlan.OfConstant(node);
+            if (sequence is not null)
+            {
+                return ColumnPlan.ForSequence(sequence) with { PredictedBytes = 0 };
+            }
+        }
+
+        // ONE RUN, THE SAME WAY THE EXPANDED PATH REACHES IT: the pass counted the runs, there is
+        // one of them, and inside the ratio run-end wins before anything else is priced. A run of
+        // one costs a flat 32 whatever the column holds, so there is no size to reproduce either --
+        // and the values child is the constant filtered down to a row, which is a constant.
+        if (!Allows(target, "vortex.runend") || cascade.RunsAreDead || length / RunEndRatio < 1
+            || !measured || !stats.HasRunBoundaries || stats.RunCount != 1)
         {
             return ColumnPlan.Canonical;
         }
 
-        SequencePlan? sequence = SequencePlan.OfConstant(node);
-        return sequence is null
-            ? ColumnPlan.Canonical
-            : ColumnPlan.ForSequence(sequence) with { PredictedBytes = 0 };
+        return ColumnPlan.Runs([0], [length]) with { PredictedBytes = 0 };
+    }
+
+    /// <summary>
+    /// What <see cref="DataBytes"/> would report once <paramref name="node"/> is expanded, or -1
+    /// for a constant whose expanded form this does not account for.
+    /// </summary>
+    /// <remarks>
+    /// A constant of a fixed-width kind expands to one value per row. One of strings expands to a
+    /// view per row over a single copy of the element, and a value short enough to sit inside its
+    /// view leaves no copy at all.
+    /// </remarks>
+    private static long ExpandedBytes(CanonicalNode node, DType dtype)
+    {
+        long rows = node.Length;
+        switch (dtype.Kind)
+        {
+            case DTypeKind.Primitive:
+                return rows * dtype.PType.ByteWidth();
+
+            case DTypeKind.Utf8:
+            case DTypeKind.Binary:
+            {
+                int element = node.ConstantElement.Length;
+                return (rows * Arrays.Decoders.Canonical.CanonicalSupport.ViewSize)
+                    + (element <= Arrays.Decoders.Canonical.CanonicalSupport.MaxInlineViewLength
+                        ? 0
+                        : element);
+            }
+
+            default:
+                return -1;
+        }
     }
 
     /// <summary>Picks a scheme for the canonical node at <paramref name="nodeIndex"/>.</summary>
