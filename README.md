@@ -9,6 +9,11 @@ file format (LF AI & Data, formerly SpiralDB).
 * Validated by **cross-testing** against the Rust reference implementation.
 * Benchmarked against the Rust reference implementation — the fastest Vortex implementation there is.
 
+**What parity means here.** Files written by this library are read by Vortex Rust, and every value
+in them reads back equal — that is the parity claimed and the cross-check is what proves it. It is
+not byte parity: the same data is encoded differently on the two sides by design, and a file from
+one is not expected to match the other byte for byte.
+
 ## Documentation
 
 | Document | Contents |
@@ -32,20 +37,34 @@ file format (LF AI & Data, formerly SpiralDB).
 
 **Reading is complete for the 1.0 scope; writing produces files the Rust reference reads back.**
 
+Nothing here has been published yet, so nothing carries a version number. The first release will be
+a `0.1.0` cut by CI.
+
+| assembly | what it is | state |
+|---|---|---|
+| `Vorticity` | the format: open, layout tree, decoders, scan, filter, indexes, writer | the 1.0 scope, complete for reading |
+| `Vorticity.Dataset` | a versioned dataset over an object store: commit objects, a prolly tree, the store seam an S3 library implements | experimental, and the format is this repository's own |
+| `Vorticity.RowEncoding` | the byte-sortable row encoding | experimental: upstream reserves the right to change the layout between releases |
+
+Measured on 2026-09-20; every command is one line and re-runs on a clone.
+
 | | |
 |---|---|
-| Conformance corpus | **851 of 851** files in scope, all read back value for value against the Rust sidecars |
-| Round trip | all 851 written by Vorticity and read back |
-| **Cross-check** | 849 of 850 **read by Vortex Rust**, 2.53 M rows compared scalar by scalar against its own file, and **no file disagrees** (`bench/crosscheck.sh`). The 850th is skipped rather than failed: `experimental_patched_array_editions_off` carries a `vortex.patched` that belongs to no edition, and the verifier pins two — so it is the REFERENCE's own bytes that cannot be read there, before ours are looked at. Our written copy of that file contains no `vortex.patched` at all |
-| Tests | 5294, on a corpus of 851 files |
-| Native AOT | `vxdump` publishes with no trim or AOT warnings and opens 850 of 851 corpus files |
+| Tests | **6 636** passing, 1 skipped, over the two test projects — `dotnet test -c Release` |
+| Conformance corpus | **856 of 856** in-scope files read back value for value against the Rust sidecars: 2 547 199 rows and 5 720 491 values and validity bits compared — the conformance project, in the same `dotnet test` |
+| **Cross-check** | **854** files written by Vorticity and **read by Vortex Rust**, 2 538 751 rows compared scalar by scalar against the reference's own file, and no file disagrees — `bench/crosscheck.sh`. Two corpus files are out, and both times it is the reference that cannot read: `types/no_dtype_segment` has no schema for the comparison example to open with, and `experimental_patched_array_editions_off` carries a `vortex.patched` belonging to no pinned edition |
+| Throughput | **47 of 57** scan axes faster than the Rust reference — `dotnet run -c Release --project bench/Vorticity.Benchmarks -- --throughput --check` |
+| Native AOT | `vxdump` publishes with no trim or AOT warnings and reads the corpus |
 
-Implemented: the file open path, the layout tree, all 30 array encodings of the 1.0 scope, typed
+Implemented: the file open path, the layout tree, every array encoding of the 1.0 scope, typed
 column access, scans with projection and row ranges, filter pushdown, zone-map pruning, random
-access by row index, and a canonical uncompressed writer.
-
-Not yet: the sampling compressor and statistics on write, and parser fuzzing. See
+access by row index, exact block statistics on write, the fused single-pass writer, skipping and
+locating indexes, and the key cursor. Parser fuzzing runs in CI on every pull request. See
 [docs/90-registry.md](docs/90-registry.md) for the component-by-component state.
 
-The SIMD kernels, the byte-sortable row encoding and the benchmark suite against Rust all landed;
-[bench/README.md](bench/README.md) is the one page on what to run and what it costs.
+## Performance
+
+[bench/README.md](bench/README.md) is the one page on what to run, what it costs and what each
+number means. Three commands cover most of it: `-- --throughput --check` for the scan against Rust,
+`-- --throughput --write --check` for the writer, and `bench/gate.sh` for everything that gates a
+commit.
