@@ -1,15 +1,3 @@
-// The candidates of one IN, hashed once and read by every batch of a scan.
-//
-// An OR of equalities walks the whole column once per candidate, so its cost is rows times
-// candidates. Membership against a set is one walk whatever the count -- but only if the set itself
-// is built once. Built per batch it merely moves the candidate count from the row loop to the
-// setup, and a scan of a million rows in eight-thousand-row batches runs that setup a hundred and
-// twenty times over.
-//
-// SIGNEDNESS IS PART OF THE SET, not a detail of how it is read. A candidate above i64::MaxValue
-// shares its bit pattern with a negative value, so a set built for an unsigned column would make a
-// signed column match a row it must not. Each set therefore knows which kind of column it was built
-// for and says so.
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -20,22 +8,25 @@ using Vorticity.Types;
 
 namespace Vorticity.Compute;
 
-/// <summary>The candidates of an <c>IN</c>, hashed once for the whole scan.</summary>
+/// <summary>
+/// The candidates of an <c>IN</c>, hashed once for the whole scan: built per batch, the set would
+/// merely move the candidate count from the row loop to the setup. Signedness belongs to the set,
+/// because a candidate above <see cref="long.MaxValue"/> shares its bit pattern with a negative
+/// value and a set built for an unsigned column would make a signed column match a row it must not.
+/// </summary>
 internal sealed class InSet
 {
     /// <summary>
     /// Fewer candidates than this and the equality kernel wins: a compare against a value already
     /// in a register beats a hash, a mask and a load, and the OR path pays it once per candidate.
-    /// Measured on a million rows, an extra candidate costs that path about 0,28 ms while a set
-    /// costs about 1,3 ms whatever the count, which puts the crossing just under four.
+    /// The set costs the same whatever the count, so the two paths cross here.
     /// </summary>
     private const int LeastCandidates = 4;
 
     /// <summary>
-    /// An eighth full, which is emptier than a hash table is usually built and is what separates a
-    /// line from a floor. Almost every row misses, and an unsuccessful linear probe costs
-    /// <c>(1 + 1/(1-a)^2)/2</c> slots: 2,5 at a half and 1,15 at an eighth. Measured on a million
-    /// rows against 512 candidates, a half reads 8,2 ms and an eighth 2,4.
+    /// An eighth full, which is emptier than a hash table is usually built. Almost every row misses,
+    /// and an unsuccessful linear probe costs <c>(1 + 1/(1-a)^2)/2</c> slots: 2,5 at a half against
+    /// 1,15 at an eighth, so the extra memory buys back most of the probe.
     /// </summary>
     private const int Emptiness = 8;
 

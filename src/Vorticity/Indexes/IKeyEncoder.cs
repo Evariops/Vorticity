@@ -1,17 +1,14 @@
-// The slot a composite key's encoder fills - docs/12-index-reads.md §13, first question, and
-// docs/10-indexes.md §6.5.
-//
-// THE CORE WRITES WHAT IT IS HANDED AND DEPENDS ON NOTHING. A composite locating index keys each row
-// by the row encoding of its tuple, and the row encoding is a separate 0.x package the core must not
-// reference (docs/09-contracts.md §3). So the core names the shape of an encoder and the package
-// provides one (`Vorticity.RowEncoding.RowKeyEncoder`); a writer asked for a composite key without
-// an encoder abandons that index and says why.
 using System;
 using Vorticity.Arrays;
 
 namespace Vorticity.Indexes;
 
-/// <summary>Turns the rows of several columns into byte strings whose <c>memcmp</c> order is the tuple order.</summary>
+/// <summary>
+/// Turns the rows of several columns into byte strings whose <c>memcmp</c> order is the tuple order.
+/// A composite locating index keys each row by the encoding of its tuple; the core only names this
+/// shape, so that it depends on no encoder, and a writer offered a composite key without one
+/// abandons that index and says why.
+/// </summary>
 public interface IKeyEncoder
 {
     /// <summary>

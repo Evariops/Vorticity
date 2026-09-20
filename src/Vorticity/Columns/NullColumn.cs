@@ -1,5 +1,3 @@
-// Phase 1 contract §12.2. `Null` is the all-null dtype: it carries a length and nothing else
-// (docs/07-dotnet-mapping.md §1, "VortexNullColumn (length only)").
 namespace Vorticity.Columns;
 
 /// <summary>A column of the <c>Null</c> dtype: every row is null and there are no buffers.</summary>

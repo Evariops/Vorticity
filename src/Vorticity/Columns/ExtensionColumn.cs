@@ -1,14 +1,3 @@
-// Phase 1 contract §12.2 and docs/07-dotnet-mapping.md §3: THE CORE RESOLVES NO TIMEZONE.
-//
-// vortex.timestamp carries a unit and an IANA timezone identifier in its extension metadata.
-// Resolving that identifier needs the OS timezone database through TimeZoneInfo, which makes the
-// result machine-dependent and interacts badly with InvariantGlobalization. So this column exposes
-// the raw storage value plus the parsed metadata, and every conversion is explicit:
-// ToUtcDateTime refuses a zoned column, and ToDateTimeOffset makes the caller supply the zone.
-//
-// ToGuid's endianness is the other trap. Vortex stores UUIDs in RFC 4122 network (big-endian)
-// order; System.Guid's binary constructor is little-endian for the first three fields. Getting it
-// wrong produces a plausible, wrong GUID on every row - hence `new Guid(bytes, bigEndian: true)`.
 using System;
 using Vorticity.Arrays;
 using Vorticity.Types;
@@ -19,9 +8,13 @@ namespace Vorticity.Columns;
 /// An extension column: one of the four core logical types wrapped around a storage column.
 /// </summary>
 /// <remarks>
+/// A timestamp's timezone identifier is never resolved here: resolving one needs the operating
+/// system's timezone database, which would make the result machine-dependent and break under
+/// invariant globalization. The column surfaces the raw storage value and the parsed metadata, and
+/// every conversion is explicit -- <see cref="ToUtcDateTime"/> refuses a zoned column and
+/// <see cref="ToDateTimeOffset"/> makes the caller supply the zone.
 /// <see cref="Storage"/> and the spans here borrow from the owning <see cref="RecordBatch"/> and
-/// its dtype arena, and are invalid once that batch is disposed
-/// (docs/07-dotnet-mapping.md §4).
+/// its dtype arena, and are invalid once that batch is disposed.
 /// </remarks>
 public readonly ref struct ExtensionColumn
 {
@@ -38,8 +31,8 @@ public readonly ref struct ExtensionColumn
     public int Length => _batch.Node(_node).Length;
 
     /// <summary>
-    /// Whether row <paramref name="index"/> is not null. An extension's validity <em>is</em> its
-    /// storage's (vortex-array-0.86.1's <c>ValidityVTableFromChild</c>).
+    /// Whether row <paramref name="index"/> is not null. An extension has no validity of its own;
+    /// it is exactly its storage column's.
     /// </summary>
     /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
@@ -105,8 +98,7 @@ public readonly ref struct ExtensionColumn
     /// <summary>
     /// The raw, <b>unresolved</b> timezone identifier of a <see cref="ExtensionKind.Timestamp"/>
     /// column - typically an IANA name such as <c>Europe/Paris</c>. Empty when there is none or the
-    /// extension is not a timestamp. The core never resolves it
-    /// (docs/07-dotnet-mapping.md §3).
+    /// extension is not a timestamp. It is handed over unresolved.
     /// </summary>
     /// <exception cref="VortexUnsupportedException">The extension id is not one we implement.</exception>
     /// <exception cref="VortexFormatException">The extension metadata is malformed.</exception>
@@ -196,7 +188,7 @@ public readonly ref struct ExtensionColumn
     /// Row <paramref name="index"/> of a <c>vortex.timestamp</c> column as a UTC
     /// <see cref="DateTime"/>. Valid only when the column is naive (no timezone) or UTC; a zoned
     /// column must go through <see cref="ToDateTimeOffset"/>, which makes the caller supply the
-    /// zone (docs/07-dotnet-mapping.md §3).
+    /// zone.
     /// </summary>
     /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
     /// <remarks>
@@ -234,8 +226,7 @@ public readonly ref struct ExtensionColumn
     /// </summary>
     /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
     /// <param name="timeZone">The zone to render in. The caller supplies it because resolving the
-    /// column's own identifier would make the result machine-dependent
-    /// (docs/07-dotnet-mapping.md §3).</param>
+    /// column's own identifier would make the result machine-dependent.</param>
     /// <exception cref="ArgumentNullException"><paramref name="timeZone"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
     /// <exception cref="InvalidOperationException">
@@ -257,9 +248,9 @@ public readonly ref struct ExtensionColumn
 
     /// <summary>
     /// Row <paramref name="index"/> of a <c>vortex.uuid</c> column as a <see cref="Guid"/>. The
-    /// storage bytes are RFC 4122 network order, so the conversion is
-    /// <c>new Guid(bytes, bigEndian: true)</c> - the explicit, documented endianness swap
-    /// (docs/07-dotnet-mapping.md §1).
+    /// storage bytes are RFC 4122 network order while <see cref="Guid"/>'s binary constructor reads
+    /// its first three fields little-endian, so the conversion asks for the big-endian reading.
+    /// Skipping the swap yields a plausible but wrong value on every row.
     /// </summary>
     /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
@@ -306,8 +297,8 @@ public readonly ref struct ExtensionColumn
         long raw = ReadStorageInteger(index);
         if (unit == VortexTimeUnit.Days)
         {
-            // Upstream lets `days` past DType validation and fails when a value is unpacked
-            // (vortex-array-0.86.1/src/extension/datetime/unit.rs); this is that failure.
+            // A `days` unit passes dtype validation but has no instant, so the failure can only
+            // surface here, when a value is unpacked.
             ColumnsThrow.Format("A vortex.timestamp with unit `days` has no instant representation.");
         }
 
@@ -337,8 +328,9 @@ public readonly ref struct ExtensionColumn
             ColumnsThrow.Format("An extension column's dtype is not an extension dtype.");
         }
 
-        // Contract §2.3: the ONLY place a VortexUnsupportedException with kind "dtype" is raised,
-        // and only when the field is actually read.
+        // The single place an unsupported extension dtype is rejected, and only once the field is
+        // actually read: a file may carry extensions this library does not implement in columns
+        // nobody touches.
         ExtensionDTypeRegistry.RequireSupported(dtype.ExtensionIdUtf8);
         return dtype;
     }
@@ -426,12 +418,10 @@ internal static class TemporalConvert
         switch (unit)
         {
             case VortexTimeUnit.Nanoseconds:
-                // FloorDiv, not `/`: this is the only lossy unit (the other three scale exactly),
-                // and `/` truncates toward ZERO, which for a pre-epoch instant rounds toward the
-                // future. The tick containing -150 ns starts at -200 ns, not -100 ns, and without
-                // the floor everything in (-100, 0) collapses onto the epoch itself - a 200 ns
-                // wide zero bucket, and a `vortex.time` value below zero that slips past
-                // ToTimeOnly's `ticks < 0` guard. FloorDiv(long.MinValue, 100) stays in range.
+                // FloorDiv, not `/`: this is the only lossy unit, and `/` truncates toward zero,
+                // which for a pre-epoch instant rounds toward the future. Without the floor the
+                // last sub-tick before the epoch collapses onto the epoch itself, widening the
+                // zero bucket and letting a negative time of day slip past a `ticks < 0` guard.
                 ticks = FloorDiv(value, 100);
                 return true;
             case VortexTimeUnit.Microseconds:

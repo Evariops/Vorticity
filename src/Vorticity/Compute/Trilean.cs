@@ -1,29 +1,18 @@
-// Three-valued logic, one byte per row - docs/08-semantics.md §3.
-//
-// A byte rather than two bitmaps, deliberately. The bitmap form is denser and is what a vectorized
-// evaluator will want, but it makes every kernel do its own bit addressing, and the one thing this
-// layer must not get wrong is which of {true, false, unknown} a row is in. One byte per row costs
-// 8 KiB for a default batch, is rented rather than allocated, and keeps every kernel a flat loop
-// over an index. The representation is internal precisely so it can become bitmaps later without a
-// public change.
-//
-// The values are chosen so that AND and OR are table lookups rather than branches, and so that the
-// final selection -- "a row is returned only when the filter evaluates to true" -- is `== True`.
-// PERF-AUDIT-v2.md F-4, and it needs saying because §11 parks a neighbouring idea. What was
-// measured 1.8x SLOWER there is vectorizing the COMPARISON: it reads eight-byte values and must
-// write one-byte states, so the lanes do not line up and the packing eats the gain -- "do not
-// vectorize a computation whose OUTPUT resists". The three kernels below read bytes and write
-// bytes, sixteen lanes in and sixteen out, with nothing to pack. The rule does not reach them, and
-// F-10 measured what leaving them scalar costs: an `Or` over 65 536 states was 28,7 us, MORE than
-// a full `<` comparison over 65 536 i64 values, which is what made `IN (8)` twenty times the price
-// of one compare.
 using System;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
 namespace Vorticity.Compute;
 
-/// <summary>The three states a predicate takes on one row.</summary>
+/// <summary>
+/// The three states a predicate takes on one row, one byte per row rather than two bitmaps: a byte
+/// spares every kernel its own bit addressing, which is the one thing this layer must not get
+/// wrong, and the representation is internal so a denser one can replace it without a public
+/// change. The values are chosen so that conjunction and disjunction are masks rather than
+/// branches, and so that selecting a row is a comparison against <see cref="True"/>. Vectorizing
+/// these kernels pays where vectorizing a comparison does not: they read bytes and write bytes, so
+/// the lanes line up and nothing has to be packed on the way out.
+/// </summary>
 internal static class Trilean
 {
     /// <summary>The predicate is false for this row.</summary>

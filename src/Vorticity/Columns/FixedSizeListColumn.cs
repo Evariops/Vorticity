@@ -1,5 +1,3 @@
-// Phase 1 contract §12.2. A constant stride over one flattened elements child; there are no
-// offsets. Size == 0 is legal and upstream special-cases it, so nothing here divides by it.
 using System;
 using Vorticity.Arrays;
 
@@ -7,8 +5,10 @@ namespace Vorticity.Columns;
 
 /// <summary>A fixed-length list column: every row holds exactly <see cref="Size"/> elements.</summary>
 /// <remarks>
+/// Rows are a constant stride over one flattened child; there is no offsets buffer. A size of zero
+/// is legal, so nothing here divides by it.
 /// <see cref="Elements"/> borrows from the owning <see cref="RecordBatch"/> and is invalid once
-/// that batch is disposed (docs/07-dotnet-mapping.md §4).
+/// that batch is disposed.
 /// </remarks>
 public readonly ref struct FixedSizeListColumn
 {

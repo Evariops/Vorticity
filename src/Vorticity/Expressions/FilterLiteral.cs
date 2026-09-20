@@ -1,14 +1,3 @@
-// A filter's constant operand.
-//
-// A tagged union rather than `object`, so building a filter boxes nothing and comparing against one
-// costs no type test per row. The tags are the COMPARISON domains, not the DType domains: every
-// signed integer width compares as i64, every unsigned as u64, every float as f64, and utf8 and
-// binary both as bytes. That collapse is what keeps the kernel matrix to one row per canonical kind
-// instead of one per physical type.
-//
-// Signed and unsigned are separate tags on purpose. Folding them into one would make `x > -1` on a
-// u64 column either always true or never true depending on which way the fold went, and the bug
-// would only appear above i64::MaxValue.
 using System;
 
 namespace Vorticity.Expressions;
@@ -16,7 +5,7 @@ namespace Vorticity.Expressions;
 /// <summary>What a <see cref="FilterLiteral"/> holds.</summary>
 public enum FilterLiteralKind : byte
 {
-    /// <summary>SQL <c>NULL</c>: every comparison against it is <c>unknown</c>.</summary>
+    /// <summary>SQL <c>null</c>: every comparison against it is <c>unknown</c>.</summary>
     Null = 0,
 
     /// <summary>A boolean.</summary>
@@ -35,7 +24,15 @@ public enum FilterLiteralKind : byte
     Bytes = 5,
 }
 
-/// <summary>A constant a filter compares a column against.</summary>
+/// <summary>
+/// A constant a filter compares a column against. It is a tagged union rather than an
+/// <see cref="object"/>, so building a filter boxes nothing and comparing against one costs no type
+/// test per row, and the tags are comparison domains rather than physical types: every signed width
+/// compares as a signed integer, every unsigned width as an unsigned integer, every float as a
+/// double, and text and binary alike as bytes. Signed and unsigned stay separate arms, because
+/// folding them together would settle <c>x &gt; -1</c> on an unsigned column by the direction of the
+/// fold rather than by the value.
+/// </summary>
 public readonly struct FilterLiteral : IEquatable<FilterLiteral>
 {
     private readonly ulong _bits;
@@ -130,10 +127,10 @@ public readonly struct FilterLiteral : IEquatable<FilterLiteral>
 
     /// <inheritdoc/>
     /// <remarks>
-    /// THE CONTENT, FOR A BYTE STRING, because equality reads the content and a hash that stops at
-    /// the length says every literal of the same width is the same one. A set of sixteen-byte
-    /// literals -- identifiers, which is what a key column holds -- then degenerates into one
-    /// bucket, and every insertion compares against everything already in it.
+    /// A byte string hashes its content, because equality reads the content: a hash that stopped at
+    /// the length would call every literal of the same width the same one, so a set of fixed-width
+    /// identifiers -- what a key column holds -- would collapse into a single bucket and compare
+    /// each insertion against everything already in it.
     /// </remarks>
     public override int GetHashCode()
     {

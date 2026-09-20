@@ -1,13 +1,9 @@
-// Open-time policy. Every field here exists to remove I/O: a supplied DType removes the dtype
-// segment from the second-read decision, a supplied FileLength removes the length probe, and a
-// raised InitialReadSize can only reduce round trips (PHASE1-CONTRACTS.md §7.1). `TornTail` is the
-// one that can add I/O, and only on a file that would otherwise not open.
 using System;
 using Vorticity.Types;
 
 namespace Vorticity.File;
 
-/// <summary>What an open does with a file whose tail does not parse (docs/13-dataset.md §12).</summary>
+/// <summary>What an open does with a file whose tail does not parse.</summary>
 public enum VortexTornTailPolicy
 {
     /// <summary>
@@ -21,7 +17,14 @@ public enum VortexTornTailPolicy
     Refuse = 1,
 }
 
-/// <summary>Options for <see cref="VortexFile.OpenAsync(string, VortexOpenOptions, System.Threading.CancellationToken)"/>.</summary>
+/// <summary>
+/// Options for <see cref="VortexFile.OpenAsync(string, VortexOpenOptions, System.Threading.CancellationToken)"/>.
+/// Every option here but <see cref="TornTail"/> exists to remove input/output: a supplied
+/// <see cref="DType"/> drops the dtype segment from the second-read decision, a supplied
+/// <see cref="FileLength"/> drops the length probe, and a raised <see cref="InitialReadSize"/> can
+/// only reduce round trips. <see cref="TornTail"/> is the one that can add reads, and only on a
+/// file that would otherwise not open at all.
+/// </summary>
 public sealed class VortexOpenOptions
 {
     private readonly long _fileLength = -1;
@@ -35,12 +38,11 @@ public sealed class VortexOpenOptions
     /// The file's DType, supplied out of band.
     /// </summary>
     /// <remarks>
-    /// <b>Required</b> for a file written with <c>exclude_dtype()</c> (corpus:
-    /// <c>types/no_dtype_segment</c>). When both this and an embedded dtype segment are present,
-    /// <b>this wins</b>: the segment is never read, never parsed, and is excluded from the
-    /// second-read decision. There is no consistency check and no warning — that is upstream's
-    /// behaviour and it is what makes supplying a DType an I/O optimization
-    /// (PHASE1-CONTRACTS.md §7.4). Leave it <c>default</c> to read the embedded one.
+    /// <b>Required</b> for a file written with its dtype segment excluded. When both this and an
+    /// embedded dtype segment are present, <b>this wins</b>: the segment is never read, never
+    /// parsed, and is excluded from the second-read decision. There is deliberately no consistency
+    /// check and no warning, since a check would cost the very read that supplying a DType exists
+    /// to avoid. Leave it <c>default</c> to read the embedded one.
     /// </remarks>
     public DType DType { get; init; }
 
@@ -98,8 +100,8 @@ public sealed class VortexOpenOptions
     /// default, or refuse.
     /// </summary>
     /// <remarks>
-    /// An in-place append is not atomic (docs/11-write-strategy.md §3.8): a tear leaves the old file
-    /// whole before the torn bytes. Reading that version is safe -- it is a file that was complete
+    /// An in-place append is not atomic: a tear leaves the old file whole before the torn bytes.
+    /// Reading that version is safe -- it is a file that was complete
     /// -- and <see cref="VortexFile.TornTail"/> says it happened. Finding it walks back from the end
     /// for an end-of-file record, so it costs reads in proportion to the torn bytes; a file that does
     /// not begin with the Vortex magic is refused without the walk.
@@ -108,7 +110,7 @@ public sealed class VortexOpenOptions
 
     /// <summary>
     /// Whether the open also reads the index directory -- its fragments included -- rather than the
-    /// first scan that needs it (docs/11-write-strategy.md §6.3). Default <see langword="false"/>.
+    /// first scan that needs it. Default <see langword="false"/>.
     /// </summary>
     /// <remarks>
     /// For an object store, where a lazy read is one more round trip in the middle of a query. The

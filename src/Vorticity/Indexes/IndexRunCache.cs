@@ -1,14 +1,3 @@
-// The decoded runs one open file keeps for its cursors - docs/12-index-reads.md §9, "the run cache".
-//
-// SHARED, THREAD-SAFE, DETACHED. A file serves concurrent scans and cursors (docs/09-contracts.md
-// §1), so a segment of keys decoded by one is there for the next; and what is kept owns its arrays,
-// because a scan arena resets at every batch boundary, exactly as `ZoneBounds` owns its bounds.
-//
-// BOUNDED, LEAST RECENTLY USED FIRST OUT. A run's keys can be a chunk's rows, so the cache has the
-// budget `VortexReadOptions.IndexCacheBytes` gives it. A load happens outside the lock: two readers
-// of a cold segment may both decode it, and the second insert finds the first and keeps it -- the
-// two are equal, so the race costs a decode and never an answer. An entry larger than the budget is
-// handed back and not kept.
 using System;
 using System.Collections.Generic;
 
@@ -16,7 +5,9 @@ namespace Vorticity.Indexes;
 
 /// <summary>
 /// A decoded segment of a run: its keys and, for a sorted run, the rows they came from. A postings
-/// run and a dictionary hold keys without rows.
+/// run and a dictionary hold keys without rows. A segment owns its arrays rather than pointing into
+/// a scan's arena, which is reset at every batch boundary, so that it can outlive the scan that
+/// decoded it.
 /// </summary>
 /// <param name="Keys">
 /// Fixed-width keys laid end to end; for byte keys, the bytes of every key laid end to end.
@@ -25,7 +16,7 @@ namespace Vorticity.Indexes;
 /// <param name="Rows">Each entry's row, relative to the run's first row; null for keys without rows.</param>
 /// <param name="Count">The entries.</param>
 /// <param name="WideRows">
-/// The same, for a run spanning 2³² rows or more, whose rows are 64-bit (13 §6.1); then
+/// The same, for a run spanning 2³² rows or more, whose rows are 64-bit; then
 /// <paramref name="Rows"/> is null.
 /// </param>
 internal sealed record RunSegment(byte[] Keys, int[]? Offsets, uint[]? Rows, int Count, ulong[]? WideRows = null)
@@ -46,11 +37,11 @@ internal sealed record RunSegment(byte[] Keys, int[]? Offsets, uint[]? Rows, int
 /// <summary>Where a decoded segment was read: its index origin, and the offset of its first payload there.</summary>
 /// <param name="Origin">
 /// The origin of the run it belongs to: 0 for the file's own directory, then one per attached
-/// fragment (docs/13-dataset.md §6.4).
+/// fragment.
 /// </param>
 /// <param name="Offset">The offset of the segment's first payload, within that origin.</param>
 /// <remarks>
-/// THE ORIGIN IS PART OF THE KEY because an offset is unique within one origin only: every fragment's
+/// The origin belongs in the key because an offset is unique within one origin only: every fragment's
 /// offsets count from its own magic, so the first segments of two fragments sit at the same offset,
 /// and a cache keyed by the offset alone would hand one run the other's keys.
 /// </remarks>

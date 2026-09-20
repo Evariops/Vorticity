@@ -1,41 +1,39 @@
-// The kind names of docs/10-indexes.md §5 and §6, spelled once.
-//
-// A KIND NAME IS WIRE FORMAT. It is written into the directory and read back by a reader that may
-// predate the kind, whose only correct answer to a name it does not know is to ignore the entry
-// (§4.1). So the names are versioned in themselves -- `.v1` -- and a change of layout, hash or
-// meaning is a new name rather than an edit to an old one. Rebuilding an index is cheap; migrating
-// one is not.
 using System;
 
 namespace Vorticity.Indexes;
 
-/// <summary>The index kinds this library writes and reads, as they appear in the directory.</summary>
+/// <summary>
+/// The index kinds this library writes and reads, as they appear in the directory. A kind name is
+/// wire format, read back by readers that may predate the kind, so each name carries its own
+/// version and a change of layout, hash or meaning takes a new name rather than editing an old one:
+/// rebuilding an index is cheap, migrating one is not.
+/// </summary>
 public static class IndexKinds
 {
-    /// <summary>A split-block Bloom filter per block or generation (docs/10-indexes.md §5.1).</summary>
+    /// <summary>A split-block Bloom filter per block or generation.</summary>
     public const string BloomSbbf = "vorticity.bloom.sbbf.v1";
 
-    /// <summary>A trigram Bloom for <c>LIKE</c> and <c>CONTAINS</c> (§5.2).</summary>
+    /// <summary>A trigram Bloom for <c>LIKE</c> and <c>CONTAINS</c>.</summary>
     public const string BloomNgram3 = "vorticity.bloom.ngram3.v1";
 
     /// <summary>
-    /// "The chunks of this column are dictionary-encoded; probe the values child" (§5.3). The one
-    /// kind with no payload at all.
+    /// "The chunks of this column are dictionary-encoded; probe the values child". The one kind
+    /// with no payload at all.
     /// </summary>
     public const string DictProbe = "vorticity.dict.probe.v1";
 
-    /// <summary>Value to blocks, a superset at block granularity (§6.1).</summary>
+    /// <summary>Value to blocks, a superset at block granularity.</summary>
     public const string PostingsBlocks = "vorticity.postings.blocks.v1";
 
-    /// <summary>Value to rows, exact, in log-structured runs (§6.2).</summary>
+    /// <summary>Value to rows, exact, in log-structured runs.</summary>
     public const string SortedRuns = "vorticity.sorted.runs.v1";
 
-    /// <summary>Trigram to blocks (§6.4).</summary>
+    /// <summary>Trigram to blocks.</summary>
     public const string PostingsNgram3 = "vorticity.postings.ngram3.v1";
 
     /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
-    /// is a hint (docs/08-semantics.md §5) and a reader that cannot use one is only slower.
+    /// is only a hint, so a reader that cannot use one is slower and never wrong.
     /// </summary>
     /// <param name="kind">The name read from a directory.</param>
     /// <returns>Whether a builder or a probe exists for it here.</returns>

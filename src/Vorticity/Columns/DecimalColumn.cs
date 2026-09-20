@@ -1,9 +1,3 @@
-// Phase 1 contract §12.2 and docs/07-dotnet-mapping.md §2.
-//
-// Decimal maps to VortexDecimal, NOT to System.Decimal. Vortex allows precision up to 76 backed by
-// i256; System.Decimal holds 28-29 significant digits, so the naive mapping would be silently lossy
-// over a legal range of the format - the exact failure mode this library must not have. The raw
-// storage span is exposed so a caller can do its own arithmetic without widening.
 using System;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
@@ -17,8 +11,11 @@ namespace Vorticity.Columns;
 /// file declares, plus the dtype's precision and scale.
 /// </summary>
 /// <remarks>
+/// Rows are read as <see cref="VortexDecimal"/> rather than <see cref="decimal"/>: the format allows
+/// a precision of up to 76 digits, well past what <see cref="decimal"/> holds, so that mapping would
+/// be silently lossy over a legal range of the format.
 /// Every span here is borrowed from the owning <see cref="RecordBatch"/> and is invalid once that
-/// batch is disposed (docs/07-dotnet-mapping.md §4).
+/// batch is disposed.
 /// </remarks>
 public readonly ref struct DecimalColumn
 {
@@ -42,7 +39,7 @@ public readonly ref struct DecimalColumn
     /// <summary>The dtype's precision, 1..76.</summary>
     public byte Precision => _batch.Node(_node).Precision;
 
-    /// <summary>The dtype's scale. Negative scales are legal (docs/07-dotnet-mapping.md §2).</summary>
+    /// <summary>The dtype's scale. Negative scales are legal.</summary>
     public sbyte Scale => _batch.Node(_node).Scale;
 
     /// <summary>
@@ -59,8 +56,7 @@ public readonly ref struct DecimalColumn
 
     /// <summary>
     /// The raw storage: <c>Length * DecimalStorage.ByteWidth(Storage)</c> bytes, little-endian
-    /// two's complement, zero-copy. Exposed so a caller can do its own arithmetic without widening
-    /// (docs/07-dotnet-mapping.md §2).
+    /// two's complement, zero-copy. Exposed so a caller can do its own arithmetic without widening.
     /// </summary>
     public ReadOnlySpan<byte> StorageBytes
     {
@@ -157,8 +153,8 @@ public readonly ref struct DecimalColumn
             ColumnsThrow.WrongKind($"a decimal stored as {actual}", $"storage {required}");
         }
 
-        // MemoryMarshal.Cast, not VortexBuffer.Cast: see PrimitiveColumn<T>.Values for why we do
-        // not demand sizeof(T) alignment of a file-supplied buffer.
+        // MemoryMarshal.Cast, not VortexBuffer.Cast: a file-supplied buffer carries no alignment
+        // guarantee, and demanding one would reject well-formed files.
         return MemoryMarshal.Cast<byte, T>(Bytes(node));
     }
 }

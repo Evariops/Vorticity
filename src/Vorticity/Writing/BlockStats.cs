@@ -1,20 +1,3 @@
-// What one block of one column is, in the only terms the writer needs - docs/11-write-strategy.md
-// §3.2, stage 1 of its §8.
-//
-// A BLOCK IS NOT A CHUNK, and that distinction is the whole point. A chunk is an emission unit whose
-// size the caller's batching and the byte target decide together; a block is `RowBlockSize` rows
-// counted from row 0 OF THE FILE, so it is the same range whatever the batching. The zone map wants
-// the second and was given the first, which is why five corpus files lose their zone map today: a
-// ragged chunking has no single zone length to declare (WRITE-ARCHITECTURE.md §3.7). Summarizing per
-// block removes the question.
-//
-// MERGEABLE, BECAUSE A BATCH STRADDLES BLOCKS. 8 131 rows handed over at a time never line up with
-// 8 192, so what the pass produces is a PARTIAL that the next batch continues: min, max and the
-// counts merge exactly, and `Merge` is the proof that nothing here needs the rows a second time.
-//
-// The bounds live in the domain the column is read in - signed, unsigned or float - rather than in a
-// FilterLiteral, so accumulating one value costs a compare and not a construction; the literal is
-// built once per block, when the zone map asks for it.
 using System;
 using Vorticity.Expressions;
 

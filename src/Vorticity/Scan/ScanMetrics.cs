@@ -1,16 +1,14 @@
-// What a scan DID - docs/11-write-strategy.md §6.4: "ScanMetrics reports the same after
-// execution" as `Explain` planned, so that whether a structure earns its bytes is a number and not
-// an impression. docs/12-index-reads.md §12.8 adds the EventSource counters on top.
-//
-// A SINK THE CALLER OWNS. The builder is handed one (`WithMetrics`) and every enumerator started
-// from it adds to it; a caller that runs the same scan twice sees the sum, and one that wants a
-// fresh count hands over a fresh object. The additions are interlocked because a scan with a
-// degree above one runs its lanes on the pool.
 using System.Threading;
 
 namespace Vorticity.Scan;
 
-/// <summary>Counters a scan adds to as it runs.</summary>
+/// <summary>
+/// Counters a scan adds to as it runs, reporting after execution what <c>Explain</c> planned, so
+/// that whether a structure earns its bytes is a number rather than an impression. The object is a
+/// sink the caller owns: every enumerator started from the builder it was handed to adds to the
+/// same instance, so running a scan twice sums, and a fresh count means a fresh object. The
+/// additions are interlocked because a scan above degree one runs its lanes on the thread pool.
+/// </summary>
 public sealed class ScanMetrics
 {
     private long _segmentRequests;
@@ -46,7 +44,7 @@ public sealed class ScanMetrics
     public long Rows => Interlocked.Read(ref _rows);
 
     /// <summary>
-    /// Windows a key-ordered scan walked (docs/12-index-reads.md §6); zero for a scan in file order.
+    /// Windows a key-ordered scan walked; zero for a scan in file order.
     /// </summary>
     public long Windows => Interlocked.Read(ref _windows);
 
@@ -70,7 +68,7 @@ public sealed class ScanMetrics
 
     /// <summary>
     /// Adds what a split just registered: the distinct segments and their bytes, counted at the
-    /// asking (docs/11 §6.4) -- a caching source may serve some without a read.
+    /// asking -- a caching source may serve some without a read.
     /// </summary>
     /// <param name="segments">The request set, after registration and before the read.</param>
     internal void AddRequests(IO.SegmentRequestSet segments)
@@ -86,7 +84,7 @@ public sealed class ScanMetrics
 
     /// <summary>
     /// Adds what a split registered to the scan's sink, when there is one, and to the process's
-    /// counters, when a listener is attached (docs/09 §5); nothing is walked when neither asks.
+    /// counters, when a listener is attached; nothing is walked when neither asks.
     /// </summary>
     /// <param name="metrics">The scan's sink, or null.</param>
     /// <param name="segments">The request set, after registration.</param>

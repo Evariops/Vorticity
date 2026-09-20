@@ -1,10 +1,9 @@
-// Where a seek lands - docs/12-index-reads.md §4.1.
 namespace Vorticity.Keys;
 
 /// <summary>How <see cref="KeyCursor.SeekAsync"/> positions itself relative to a key.</summary>
 /// <remarks>
 /// The five operators are defined on the source's total order over <c>(key, row)</c>, so
-/// <see cref="Exact"/> lands on a duplicated key's LOWEST row and <see cref="AtOrBefore"/> on its
+/// <see cref="Exact"/> lands on a duplicated key's lowest row and <see cref="AtOrBefore"/> on its
 /// highest. A range <c>[a, b)</c> is <see cref="AtOrAfter"/> on <c>a</c> and then <c>Next</c> while
 /// the key stays below <c>b</c>.
 /// </remarks>

@@ -1,11 +1,3 @@
-// Row-slicing a canonical node, which is what PHASE1-CONTRACTS.md §11.3 asks the flat layout to do
-// ("decode the whole array, then slice to `rows`") and what a chunked layout needs for the two
-// partial chunks at the ends of a range.
-//
-// Every case is ZERO-COPY: a slice re-points at the same segment bytes with a narrower window, so
-// slicing costs one arena record per node of the canonical tree and no memory traffic. That is the
-// whole reason the flat reader can decode a 8192-row chunk and hand back rows 1023..1025 without
-// copying anything.
 using System;
 using System.Diagnostics;
 
@@ -17,6 +9,12 @@ using Vorticity.Types.Numerics;
 
 namespace Vorticity.Layouts;
 
+/// <summary>
+/// Row-slices a canonical node: what a flat layout does to narrow a decoded array to the rows
+/// asked for, and what a chunked layout does to the two partial chunks at the ends of a range.
+/// Every case re-points at the same segment bytes through a narrower window, so a slice costs one
+/// arena record per node of the canonical tree and no memory traffic at all.
+/// </summary>
 internal static class CanonicalSlice
 {
     private const int StackBuffers = 8;

@@ -1,22 +1,3 @@
-// The two things a filtered scan does around its batches: prune before reading, skip after.
-//
-// A selective filter rejects whole splits, and handing the caller an `await foreach` that yields
-// empty batches would make every consumer write the same `if (batch.RowCount == 0) continue;`. This
-// wrapper writes it once.
-//
-// Both live here rather than in the enumerator because both are things ONLY a filtered scan does,
-// and docs/03-architecture.md §3.7 hand-writes that enumerator precisely to avoid a compiler state
-// machine: ScanAllocationTests pins its per-batch figure at exactly one RecordBatch. An unfiltered
-// scan therefore keeps the object graph it had, and only a filtered one pays the one extra
-// per-enumeration allocation this adds.
-//
-// The pruning pass is why this is lazy. Reading the zone maps is I/O, ExecuteAsync is synchronous,
-// and doing it on the first MoveNextAsync is what lets a scan that is built and never enumerated
-// cost nothing at all.
-//
-// The lifetime contract is unchanged and is why this forwards rather than buffers: the inner
-// enumerator disposes the previous batch on the next MoveNextAsync, so skipping an empty batch
-// disposes it exactly the way delivering it would have.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -30,7 +11,16 @@ using Vorticity.Keys;
 
 namespace Vorticity.Scan;
 
-/// <summary>A filtered scan: zone-pruned before reading, empty batches skipped after.</summary>
+/// <summary>
+/// A filtered scan: zone-pruned before reading, empty batches skipped after, so that no consumer has
+/// to write the row-count check itself. Both passes live in this wrapper rather than in the inner
+/// enumerator, which is hand-written to avoid a compiler state machine and its per-batch allocation;
+/// only a filtered scan pays the one extra per-enumeration allocation this adds. The pruning pass is
+/// deferred to the first <c>MoveNextAsync</c> because reading zone maps is I/O, which keeps a scan
+/// that is built and never enumerated free. Batches are forwarded rather than buffered: the inner
+/// enumerator disposes the previous batch on its next step, so skipping an empty one disposes it
+/// exactly as delivering it would have.
+/// </summary>
 internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
 {
     private readonly BatchAsyncEnumerable _inner;
@@ -50,7 +40,6 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         _rows = rows ?? new RowRange(0, inner.File.RowCount);
     }
 
-    /// <inheritdoc/>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         CancellationToken cancellationToken = default) =>
         new Enumerator(_inner, _filter, _prune, _indexes, _rows, cancellationToken);
@@ -79,7 +68,7 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
 
         /// <summary>
         /// The rows an exact source proves the filter selects, when there is one and they fit a
-        /// batch (docs/10-indexes.md §6.6): the scan then reads them and evaluates nothing.
+        /// batch: the scan then reads them and evaluates nothing.
         /// </summary>
         private async ValueTask<RowSelection?> ProvenAsync()
         {
@@ -122,8 +111,8 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
             if (_inner is null)
             {
                 // One read of every zone map the filter can use, before the first batch, and one
-                // mask of live blocks refined from it (docs/11 §6.1). Both are memory-resident for
-                // the rest of the scan; every split asks the mask, never the zone maps.
+                // mask of live blocks refined from it. Both stay in memory for the rest of the
+                // scan; every split asks the mask, never the zone maps.
                 BlockMask? live = _prune && _filter is not null
                     ? await ZonePruningPlan
                         .RefineAsync(_source.File, _source.Tree, _filter, _token, steps: null, _source.Metrics, _indexes)

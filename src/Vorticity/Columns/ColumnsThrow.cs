@@ -1,14 +1,3 @@
-// Every throw in this component goes through a NoInlining helper so the accessors stay inlineable
-// (Phase 1 contract §1.4). The line this file exists to keep straight:
-//
-//   * the FILE said something impossible                     -> VortexFormatException
-//   * the CALLER asked for a row/field that does not exist   -> ArgumentOutOfRangeException
-//   * the CALLER asked for the wrong .NET type               -> InvalidOperationException
-//   * the CALLER used a disposed batch                       -> ObjectDisposedException
-//
-// Phase 1 contract §12.3 fixes the middle two: "Bounds checks throw ArgumentOutOfRangeException,
-// not VortexFormatException - an index from the caller is a caller error", and
-// "AsPrimitive<int>() on a u32 column throws InvalidOperationException".
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -16,6 +5,13 @@ using Vorticity.Types;
 
 namespace Vorticity.Columns;
 
+/// <summary>
+/// The throw helpers of the column accessors. Each one is kept out of line so that the accessor
+/// calling it stays inlineable. They also fix which exception each kind of error gets: a file that
+/// says something impossible is a format error, while a row or field index that does not exist, a
+/// request for the wrong .NET type and a use of a disposed batch are all caller errors and get the
+/// matching argument, operation or disposal exception.
+/// </summary>
 internal static class ColumnsThrow
 {
     [MethodImpl(MethodImplOptions.NoInlining)]

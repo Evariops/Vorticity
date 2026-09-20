@@ -1,8 +1,3 @@
-// PHASE1-CONTRACTS.md §2.3 and §11.2. This is ONE of exactly three places in the library that may
-// throw VortexUnsupportedException, and the only one that may throw it with kind "layout".
-//
-// Registration is AOT- and trim-safe: the static constructor news up every reader explicitly, by
-// name, in one place. No reflection, no assembly scanning, no module initializer.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -11,8 +6,11 @@ using Vorticity.Arrays;
 
 namespace Vorticity.Layouts;
 
-/// <summary>Maps a resolved <see cref="LayoutEncodingId"/> to its reader.</summary>
-/// <inheritdoc cref="Vorticity.Arrays.ArrayDecoderTable" path="/remarks"/>
+/// <summary>
+/// Maps a resolved <see cref="LayoutEncodingId"/> to its reader. Registration stays trim-safe and
+/// ahead-of-time friendly because the static constructor names every reader explicitly: no
+/// reflection, no assembly scanning, no module initializer.
+/// </summary>
 internal static class LayoutReaderTable
 {
     private static readonly LayoutReader?[] Readers =
@@ -30,8 +28,8 @@ internal static class LayoutReaderTable
     }
 
     /// <summary>
-    /// The reader for <paramref name="id"/>. <b>The only place a
-    /// <see cref="VortexUnsupportedException"/> with kind <c>"layout"</c> is thrown</b> (contract §2.3).
+    /// The reader for <paramref name="id"/>. The only place in the library where a
+    /// <see cref="VortexUnsupportedException"/> with kind <c>"layout"</c> is thrown.
     /// </summary>
     /// <param name="id">The resolved id; <see cref="LayoutEncodingId.Unknown"/> always throws.</param>
     /// <param name="idText">The id exactly as the file spells it, for the exception message.</param>
@@ -52,10 +50,10 @@ internal static class LayoutReaderTable
     /// path.
     /// </summary>
     /// <remarks>
-    /// <see cref="LayoutNode.EncodingIdText"/> allocates a string, and the contract's
+    /// <see cref="LayoutNode.EncodingIdText"/> allocates a string, and
     /// <see cref="Get(LayoutEncodingId, string)"/> takes one by value — so calling it per node per
-    /// batch would allocate on a decode path, which §1.3 forbids. The failing case still goes
-    /// through <c>Get</c>, so the throw site is unchanged.
+    /// batch would allocate on a decode path, which must stay allocation-free. The failing case
+    /// still goes through <c>Get</c>, so the throw site is unchanged.
     /// </remarks>
     internal static LayoutReader Require(in LayoutNode node)
     {

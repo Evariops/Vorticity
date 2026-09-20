@@ -1,10 +1,3 @@
-// Every throw in this component goes through a NoInlining helper so MoveNextAsync and the split
-// walk stay inlineable (PHASE1-CONTRACTS.md §1.4).
-//
-// The line this file exists to keep straight: a FILE says it -> VortexFormatException; a CALLER
-// says it -> Argument*. The scan is the one component whose inputs are mostly the caller's - a
-// projection path, a row range, a batch cap, a degree of parallelism - so almost everything here
-// is an Argument* and that is correct, not a lapse.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
@@ -12,6 +5,13 @@ using System.Runtime.CompilerServices;
 
 namespace Vorticity.Scan;
 
+/// <summary>
+/// The throw sites of the scan, each one non-inlineable so that the batch loop and the split walk
+/// stay inlineable. What the file says is wrong raises <see cref="VortexFormatException"/>; what
+/// the caller says is wrong raises an argument exception. The scan's inputs are mostly the
+/// caller's — a projection path, a row range, a batch cap, a degree of parallelism — so nearly
+/// every helper here is an argument exception by design, not by oversight.
+/// </summary>
 internal static class ScanThrow
 {
     [MethodImpl(MethodImplOptions.NoInlining)]

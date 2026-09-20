@@ -1,12 +1,3 @@
-// Reading one row of a canonical column back out as a FilterLiteral.
-//
-// The pruner needs it, and only the pruner: a zone map's min/max columns hold ordinary values of
-// the column's own dtype, and turning them into the same tagged union a filter's constants use is
-// what lets ZonePruner compare a bound against a constant with the comparison kernels' own rules --
-// signedness and IEEE 754 included -- rather than a second, subtly different set.
-//
-// A null row reads as "no literal": a zone whose min is null recorded no minimum, which is not the
-// same as a minimum of zero and must not be allowed to prune anything.
 using System;
 using System.Buffers.Binary;
 using Vorticity.Arrays;
@@ -17,7 +8,13 @@ using Vorticity.Types;
 
 namespace Vorticity.Compute;
 
-/// <summary>Reads canonical values back as filter literals.</summary>
+/// <summary>
+/// Reads canonical values back as filter literals, which is what lets a zone map's bounds be
+/// compared against a filter's constants under the comparison kernels' own rules -- signedness and
+/// IEEE 754 included -- rather than a second, subtly different set. A null row reads as no literal:
+/// a zone whose minimum is null recorded no minimum, which is not a minimum of zero and must never
+/// prune anything.
+/// </summary>
 internal static class LiteralReader
 {
     private const int ViewSize = 16;
@@ -86,7 +83,7 @@ internal static class LiteralReader
 
     /// <summary>Reads one primitive value out of a values buffer, whatever node it came from.</summary>
     /// <remarks>
-    /// Takes the BYTES rather than a node so the constant form can hand it an element: a constant
+    /// Takes the bytes rather than a node so the constant form can hand it an element: a constant
     /// column's element is a one-row values buffer, and building a node to carry it would cost a
     /// record per call for nothing.
     /// </remarks>

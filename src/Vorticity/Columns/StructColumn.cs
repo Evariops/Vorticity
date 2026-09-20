@@ -1,9 +1,3 @@
-// Phase 1 contract §12.2. Field names come from the dtype, not from the decoded array - a struct
-// canonical node carries only its children.
-//
-// A field name may be EMPTY or contain a '.' (types/struct_field_names does both, deliberately), so
-// name lookup here is exact and never splits a path. Callers that must address such a field use
-// GetField(int).
 using System;
 using Vorticity.Arrays;
 using Vorticity.Types;
@@ -13,7 +7,9 @@ namespace Vorticity.Columns;
 /// <summary>A struct column: named fields, each its own column.</summary>
 /// <remarks>
 /// The field views borrow from the owning <see cref="RecordBatch"/> and are invalid once that batch
-/// is disposed (docs/07-dotnet-mapping.md §4).
+/// is disposed. Field names come from the dtype rather than from the decoded array, and a name may
+/// be empty or contain a '.', so lookup here is exact and never splits a path; a field that cannot
+/// be addressed by name is reached through <see cref="GetField(int)"/>.
 /// </remarks>
 public readonly ref struct StructColumn
 {
@@ -41,7 +37,7 @@ public readonly ref struct StructColumn
     /// <summary>Number of fields.</summary>
     public int FieldCount => _batch.Node(_node).FieldCount;
 
-    /// <summary>Field <paramref name="index"/>'s name. <b>ALLOCATES</b>; prefer
+    /// <summary>Field <paramref name="index"/>'s name. <b>Allocates a string</b>; prefer
     /// <see cref="GetFieldNameUtf8"/>.</summary>
     /// <param name="index">0-based field index, below <see cref="FieldCount"/>.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>

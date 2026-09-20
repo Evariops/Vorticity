@@ -1,15 +1,3 @@
-// XxHash3-64 with seed 0 for the short fixed widths a Bloom filter hashes once per value
-// (docs/11-write-strategy.md §4.1, "hashing, fixed width"), inlined at the width the column decides.
-//
-// THE SAME FUNCTION, NOT A LOOK-ALIKE: the filter must stay the reference's bit for bit (10 §5.1),
-// so these are XXH3's own short-input paths -- `len_1to3`, `len_4to8`, `len_9to16` of
-// xxhash.h / doc/xxhash_spec.md -- with the default secret and a zero seed folded in as constants.
-// `XxHash3Tests` holds each width to `System.IO.Hashing.XxHash3` on random inputs.
-//
-// WHY NOT LANES. The paths are a handful of 64-bit multiplies, and NEON has no 64-bit multiply;
-// the spec's own fallback for 64-bit lanes is a different mixer, which a Bloom filter cannot use.
-// What the library call costs is the call and its dispatch on the length, per value -- and that is
-// what resolving the width once removes.
 using System;
 using System.Buffers.Binary;
 using System.Numerics;
@@ -17,7 +5,13 @@ using System.Runtime.CompilerServices;
 
 namespace Vorticity.Indexes;
 
-/// <summary>XxHash3-64, seed 0, for inputs of a known short length.</summary>
+/// <summary>
+/// XxHash3-64, seed 0, for inputs of a known short length, inlined at the width a column decides.
+/// These are the algorithm's own short-input paths with the default secret and a zero seed folded in
+/// as constants, not a look-alike: a Bloom filter built on them has to stay bit for bit the one the
+/// reference builds. What they buy over the general library call is the per-value dispatch on the
+/// length; the paths themselves are a handful of 64-bit multiplies, which no lane width helps.
+/// </summary>
 internal static class XxHash3Fixed
 {
     // The default secret's words, little-endian (kSecret, bytes 0 to 55).

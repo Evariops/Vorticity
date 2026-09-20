@@ -1,19 +1,3 @@
-// The split-block Bloom filter of docs/10-indexes.md §5.1: blocks of 256 bits held as eight 32-bit
-// words, one block chosen per value by the high half of its hash, one bit set per word by the low
-// half.
-//
-// BIT-IDENTICAL TO THE REFERENCE'S `BloomPartial` (vortex-layout-0.86.1
-// layouts/zoned/aggregates/bloom_filter/partial/mod.rs), line for line: XxHash3-64 with seed 0 over
-// the value's bytes; block = ((h >> 32) * n) >> 32, Lemire's fast range; bit i of the block's word i
-// at ((uint)h * SALT[i]) >> 27, with Parquet's eight salts in Parquet's order. So a filter written
-// here is the filter the reference would write for the same values, for as long as upstream keeps
-// that layout -- and the day it freezes one, ours can become theirs by a change of id.
-//
-// THE HASHED BYTES are the reference's too (canonical/primitive.rs, canonical/varbin.rs,
-// partial/scalar.rs): an integer or a float as its little-endian bytes at the column's own width,
-// a string or a binary as its bytes, an extension as its storage, a null never. A float is hashed by
-// bit pattern, so -0.0 and +0.0 are two values here; the probe, which answers an IEEE equality, asks
-// for both (see `BloomProbe`).
 using System;
 using System.IO.Hashing;
 using System.Numerics;
@@ -22,7 +6,13 @@ using System.Runtime.InteropServices;
 
 namespace Vorticity.Indexes;
 
-/// <summary>Split-block Bloom filter primitives over a span of 32-bit words.</summary>
+/// <summary>
+/// Split-block Bloom filter primitives over a span of 32-bit words: one 256-bit block of eight words
+/// per value, chosen by the high half of the hash, one bit set per word from the low half, with
+/// Parquet's eight salts in Parquet's order. Layout, hash and block choice match the reference
+/// implementation exactly, so a filter written here is the one the reference would write for the
+/// same values, and a reader of either can trust the other's bits.
+/// </summary>
 internal static class SplitBlockBloom
 {
     /// <summary>Words per block.</summary>
@@ -37,7 +27,14 @@ internal static class SplitBlockBloom
     ];
 
     /// <summary>The hash a filter stores for <paramref name="value"/>.</summary>
-    /// <param name="value">The value's bytes, as §5.1's table spells them.</param>
+    /// <remarks>
+    /// A float is hashed by bit pattern, so negative and positive zero are two values here; a probe
+    /// answering an equality has to ask for both.
+    /// </remarks>
+    /// <param name="value">
+    /// The value's bytes: an integer or a float as its little-endian bytes at the column's own width,
+    /// a string or a binary as its bytes, an extension as its storage. A null is never hashed.
+    /// </param>
     /// <param name="hash">XxHash3-64 by default; xxHash64 for the Parquet-compatible variant.</param>
     /// <returns>The 64-bit hash.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -1,16 +1,17 @@
-// PHASE1-CONTRACTS.md §13.3. The immutable description of one batch, threaded through both phases
-// so that RegisterSegments and Execute cannot disagree about what they are doing: they are handed
-// the same struct, by value.
 using System;
 
 using Vorticity.Layouts;
 
 namespace Vorticity.Scan;
 
-/// <summary>Everything one batch needs, threaded through the two phases of the executor.</summary>
+/// <summary>
+/// The immutable description of one batch, threaded through both phases of the executor. Segment
+/// registration and execution are handed the same struct by value, so they cannot disagree about
+/// what the batch covers.
+/// </summary>
 /// <remarks>
-/// <see cref="Rows"/> is in the ROOT layout's coordinates, which for a Vortex file are the file's
-/// own row indices. Layout readers translate for their children (contract §11.2).
+/// <see cref="Rows"/> is in the root layout's coordinates, which for a Vortex file are the file's
+/// own row indices. Layout readers translate them for their children.
 /// </remarks>
 public readonly struct ScanRequest
 {

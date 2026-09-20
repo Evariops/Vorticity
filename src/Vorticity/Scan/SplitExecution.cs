@@ -1,14 +1,3 @@
-// One split, registered and executed - the two halves of a batch's read that every consumer of a
-// split shares: the batch enumerator's lanes, sequential and pipelined alike, and the terminals of
-// docs/12-index-reads.md §5, which decode a split to count it and never build a batch from it.
-//
-// THE TAKE IS PUSHED DOWN HERE, ONCE. A scan's row selection travels down the layout tree in the
-// same coordinate space as the row range beside it (docs/03-architecture.md §3.6), so a reader
-// that re-partitions rows re-partitions it too and one that does not passes it on by doing
-// nothing; at the flat leaf it reaches the array decoders, where an encoding that can honour it
-// does (`fastlanes.bitpacked` indexes positionally, `vortex.dict` takes on the codes) and every
-// other one decodes the node and gathers. Having it in one place is what makes a terminal unable
-// to count a row a scan would not return.
 using System;
 using System.Buffers;
 using Vorticity.Arrays;
@@ -17,7 +6,20 @@ using Vorticity.Layouts;
 
 namespace Vorticity.Scan;
 
-/// <summary>Registers and executes one split of a scan.</summary>
+/// <summary>
+/// Registers and executes one split of a scan — the two halves of a batch's read, shared by every
+/// consumer of a split: the batch enumerator's lanes, sequential and pipelined alike, and the
+/// terminals, which decode a split to count it and never build a batch from it.
+/// </summary>
+/// <remarks>
+/// The row selection is pushed down in this one place, which is what makes a terminal unable to
+/// count a row a scan would not return. It travels down the layout tree in the same coordinate
+/// space as the row range beside it, so a reader that re-partitions rows re-partitions the
+/// selection too, and one that does not passes it on by doing nothing. At the flat leaf it reaches
+/// the array decoders, where an encoding able to honour it does — <c>fastlanes.bitpacked</c>
+/// indexes positionally, <c>vortex.dict</c> takes on the codes — and every other one decodes the
+/// node and gathers.
+/// </remarks>
 internal static class SplitExecution
 {
     /// <summary>Phase 1: registers the split's segments. No I/O, no decoding, no allocation.</summary>
@@ -42,9 +44,10 @@ internal static class SplitExecution
     /// <param name="take">The scan's row selection, or null for every row.</param>
     /// <returns>The root of the decoded split in the context's canonical arena.</returns>
     /// <remarks>
-    /// The split itself was already chosen because it holds at least one wanted row -- that is
-    /// the I/O half of F5. The selection is in the SPLIT's coordinate space, and <c>Execute</c>
-    /// is called with the split as its row range, so the two agree at the root by construction.
+    /// The split was already chosen because it holds at least one wanted row, so the selection
+    /// never has to reject the whole split. It is in the split's coordinate space, and
+    /// <c>Execute</c> is called with the split as its row range, so the two agree at the root by
+    /// construction.
     /// </remarks>
     internal static int Execute(
         ScanContext context, LayoutTree tree, in FieldMask mask, RowRange split, RowSelection? take)
@@ -68,7 +71,7 @@ internal static class SplitExecution
                 return reader.Execute(in root, split, in mask, context);
             }
 
-            // LocalIndices produces SPLIT-relative rows; the root's row space is the file's, which
+            // LocalIndices produces split-relative rows; the root's row space is the file's, which
             // is what `split` is expressed in.
             for (int i = 0; i < count; i++)
             {

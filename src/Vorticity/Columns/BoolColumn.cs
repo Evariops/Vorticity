@@ -1,7 +1,3 @@
-// Phase 1 contract §12.2. The bitmap is LSB-first and starts at BitOffset, which is
-// vortex.bool's BoolMetadata.offset and is always below 8 (contract §2.6 rule 5). We deliberately
-// do NOT normalize by shifting the bitmap: that would be an allocation and a copy per batch, so
-// every consumer applies the offset instead.
 using System;
 using Vorticity.Arrays;
 
@@ -9,8 +5,10 @@ namespace Vorticity.Columns;
 
 /// <summary>A boolean column: a bit-packed, LSB-first bitmap plus a starting bit offset.</summary>
 /// <remarks>
+/// The bitmap is never shifted to put row 0 on a byte boundary, because that would cost an
+/// allocation and a copy per batch; consumers apply <see cref="BitOffset"/> instead.
 /// <see cref="Bits"/> is borrowed from the owning <see cref="RecordBatch"/> and is invalid once
-/// that batch is disposed (docs/07-dotnet-mapping.md §4).
+/// that batch is disposed.
 /// </remarks>
 public readonly ref struct BoolColumn
 {

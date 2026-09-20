@@ -1,10 +1,3 @@
-// What a scan WOULD do - docs/11-write-strategy.md §6.4, `ScanBuilder.Explain()`.
-//
-// "Returns the plan without executing it: splits in the file, blocks pruned by each structure,
-// rows selected by exact indexes, bytes to read against the file's size." Nothing here is a
-// measurement: it is the same planning the scan does before its first batch -- the layout tree,
-// the split plan, the mask of live blocks, the segments a live split registers -- stopped before
-// any data segment is read. What the scan then did is `ScanMetrics`, the same quantities counted.
 using System.Collections.Generic;
 
 namespace Vorticity.Scan;
@@ -13,13 +6,18 @@ namespace Vorticity.Scan;
 /// One pruning structure's contribution to a scan's mask of live blocks, and what consulting it
 /// cost -- the two numbers that say whether a structure earns its bytes.
 /// </summary>
-/// <param name="Structure">The structure, as the reader names it: <c>"zone map"</c> today.</param>
+/// <param name="Structure">The structure, as the reader names it, such as <c>"zone map"</c>.</param>
 /// <param name="BlocksPruned">Blocks it proved empty that were still live when it ran.</param>
 /// <param name="SegmentsRead">Segments read to consult it.</param>
 /// <param name="BytesRead">Their bytes.</param>
 public sealed record PruningStep(string Structure, int BlocksPruned, int SegmentsRead, long BytesRead);
 
-/// <summary>The plan of a scan, from its builder, without a data segment read.</summary>
+/// <summary>
+/// The plan of a scan, from its builder, without a data segment read: the layout tree, the split
+/// plan, the mask of live blocks and the segments a live split registers, worked out exactly as the
+/// scan would but stopped before the first batch. Nothing here is measured; <see cref="ScanMetrics"/>
+/// counts the same quantities once the scan has run.
+/// </summary>
 /// <param name="RowCount">Rows the scan covers, after <c>Rows</c> and <c>Take</c> narrowed it.</param>
 /// <param name="BlockRows">Rows per block -- the zone map's zone, the writer's row block.</param>
 /// <param name="Blocks">Blocks over the file's rows.</param>
@@ -28,9 +26,9 @@ public sealed record PruningStep(string Structure, int BlocksPruned, int Segment
 /// <param name="Splits">Splits the scan would visit, before any of them is skipped.</param>
 /// <param name="LiveSplits">Splits it would read: at least one wanted row, at least one live block.</param>
 /// <param name="RowsSelectedByIndex">
-/// Rows an exact index selected outright: the scan reads them as a take and evaluates nothing
-/// (docs/10-indexes.md §6.6); zero when no exact source covers the filter, or it covers more than a
-/// batch, or the scan is narrowed by <c>Rows</c> or <c>Take</c>.
+/// Rows an exact index selected outright: the scan reads them as a take and evaluates nothing.
+/// Zero when no exact source covers the filter, or it covers more than a batch, or the scan is
+/// narrowed by <c>Rows</c> or <c>Take</c>.
 /// </param>
 /// <param name="SegmentsToRead">Distinct segments the live splits register.</param>
 /// <param name="BytesToRead">Their bytes.</param>
@@ -55,12 +53,12 @@ public sealed record ScanPlan(
     bool FileMayMatch)
 {
     /// <summary>
-    /// How <c>CountAsync</c> would answer the scan (docs/12-index-reads.md §5.2); null without a
-    /// filter, where the count is arithmetic.
+    /// How <c>CountAsync</c> would answer the scan; null without a filter, where the count is
+    /// arithmetic.
     /// </summary>
     public CountPlan? Count { get; init; }
 
-    /// <summary>What drives the scan under <c>InKeyOrder</c> (§6); null for a scan in file order.</summary>
+    /// <summary>What drives the scan under <c>InKeyOrder</c>; null for a scan in file order.</summary>
     public OrderPlan? Order { get; init; }
 }
 

@@ -1,23 +1,3 @@
-// Filter expressions - docs/01-scope.md F7 and docs/08-semantics.md §3.
-//
-// An expression tree is built ONCE PER SCAN, never per batch, which is what lets it be an ordinary
-// immutable object graph instead of another arena. docs/03-architecture.md §4 invariant 1 bounds
-// managed allocation PER BATCH; the builder is already a per-scan allocation and this joins it.
-//
-// The scope is deliberately the one F7 names -- comparisons, AND/OR/NOT, IS NULL, IN -- and two
-// limits are enforced at CONSTRUCTION rather than discovered during a scan:
-//
-//   * a comparison is between a field and a literal. Comparing two columns needs a second dispatch
-//     dimension in every kernel, prunes nothing from a zone map, and is vanishingly rare in
-//     pushdown; refusing it here costs one exception at build time instead of a kernel matrix.
-//   * a literal's type is checked against the column only when the filter runs, because the schema
-//     is not in scope at construction.
-//
-// Two predicates were added since, each where an index needed a question to answer: the byte
-// patterns of docs/12-index-reads.md §7, and `ListContains`, which a Bloom filter over a list's
-// elements answers (docs/10-indexes.md §5.1, step 28b).
-//
-// Three-valued logic lives in the evaluator, not here: this file is only the shape.
 using System;
 using System.Collections.Generic;
 
@@ -41,7 +21,7 @@ public enum ExprKind : byte
     /// <summary><c>NOT</c>.</summary>
     Not = 4,
 
-    /// <summary><c>IS NULL</c> or <c>IS NOT NULL</c>.</summary>
+    /// <summary>Whether a column is null, or is not null.</summary>
     NullCheck = 5,
 
     /// <summary><c>IN</c> over a literal set.</summary>
@@ -54,12 +34,12 @@ public enum ExprKind : byte
     ListContains = 8,
 }
 
-/// <summary>The three byte-pattern predicates of docs/12-index-reads.md §7.</summary>
+/// <summary>The three byte-pattern predicates a filter can apply to a column.</summary>
 /// <remarks>
-/// BYTES, NOT TEXT, and the distinction is the whole contract: the comparison is bytewise, which for
-/// UTF-8 is code-point order, and <c>_</c> in a <see cref="Like"/> pattern matches one BYTE rather
-/// than one code point. Case folding needs a definition of "case" for UTF-8 that this iteration does
-/// not have (§13), so every operator here is case-sensitive.
+/// These match bytes, not text, and the distinction is the whole contract: the comparison is
+/// bytewise, which for UTF-8 is code-point order, and <c>_</c> in a <see cref="Like"/> pattern
+/// matches one byte rather than one code point. Case folding would need a definition of "case" for
+/// UTF-8 that the library does not carry, so every operator here is case-sensitive.
 /// </remarks>
 public enum StringMatchOp : byte
 {
@@ -69,11 +49,11 @@ public enum StringMatchOp : byte
     /// <summary>The pattern occurs somewhere in the value; an empty pattern always does.</summary>
     Contains = 1,
 
-    /// <summary>SQL <c>LIKE</c>: <c>%</c> any run, <c>_</c> any one byte, the escape quotes either.</summary>
+    /// <summary>The SQL wildcard match: <c>%</c> any run, <c>_</c> any one byte, the escape quotes either.</summary>
     Like = 2,
 }
 
-/// <summary>The comparison operators F7 admits.</summary>
+/// <summary>The comparison operators a filter admits.</summary>
 public enum ComparisonOp : byte
 {
     /// <summary><c>=</c>.</summary>
@@ -96,6 +76,13 @@ public enum ComparisonOp : byte
 }
 
 /// <summary>A node of a filter expression.</summary>
+/// <remarks>
+/// The tree is an ordinary immutable object graph rather than an arena, because it is built once per
+/// scan and never per batch, where nothing may allocate. Three-valued logic lives in the evaluator,
+/// not here: these types are only the shape. Two limits hold when a node is built rather than being
+/// discovered mid-scan: a comparison is between a field and a literal, and a literal's type is
+/// checked against the column only when the filter runs, since the schema is out of scope here.
+/// </remarks>
 public abstract class VortexExpr
 {
     private protected VortexExpr()
@@ -108,9 +95,8 @@ public abstract class VortexExpr
     /// <summary>Adds every field path this expression reads to <paramref name="paths"/>.</summary>
     /// <param name="paths">The set to add to.</param>
     /// <remarks>
-    /// The scan unions these into the projection before planning: a filter column must be READ even
-    /// when the caller did not project it, and discarded before the batch is produced
-    /// (docs/03-architecture.md §3.4).
+    /// The scan unions these into the projection before planning: a filter column must be read even
+    /// when the caller did not project it, then dropped again before the batch is handed out.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="paths"/> is null.</exception>
     public abstract void CollectFields(ICollection<string> paths);

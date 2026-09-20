@@ -1,15 +1,3 @@
-// The byte trigrams of docs/10-indexes.md §5.2 and §6.4: what the two text indexes insert, and what a
-// string predicate needs to find.
-//
-// A PREDICATE REQUIRES THE TRIGRAMS OF ITS LITERAL RUNS. `StartsWith(p)` and `Contains(p)` need every
-// trigram of `p`; `LIKE` needs every trigram of every stretch between its wildcards. A run shorter
-// than three bytes yields none, and a predicate that yields none claims nothing -- `LIKE '%a_b%'` is
-// answered by the scan alone.
-//
-// CASE FOLDING IS ASCII AND ON BOTH SIDES. A case-insensitive index inserts lower-cased trigrams; a
-// probe against one lower-cases what it looks for, which keeps the answer a superset for a
-// case-SENSITIVE predicate too: a value containing `Foo` contains `foo` once folded. Bytes above
-// 0x7F are left alone, since folding UTF-8 bytewise is not folding, and both sides agree on that.
 using System;
 using System.Collections.Generic;
 using Vorticity.Compute;
@@ -17,13 +5,22 @@ using Vorticity.Expressions;
 
 namespace Vorticity.Indexes;
 
-/// <summary>Byte trigrams, for the text indexes.</summary>
+/// <summary>
+/// Byte trigrams, for the text indexes: what a text index inserts, and what a string predicate
+/// requires of a value before the index may rule it out. A predicate needs every trigram of each of
+/// its literal runs, so a run shorter than three bytes yields none, and a predicate that yields none
+/// claims nothing and is left to the scan.
+/// </summary>
 internal static class Trigrams
 {
     /// <summary>Bytes in a trigram.</summary>
     internal const int Length = 3;
 
-    /// <summary>Copies a trigram, ASCII-lower-cased when asked.</summary>
+    /// <summary>
+    /// Copies a trigram, ASCII-lower-cased when asked. Both the index and the probe fold, which keeps
+    /// the answer a superset for a case-sensitive predicate as well; bytes outside ASCII are left
+    /// alone, since folding encoded text one byte at a time would not be folding.
+    /// </summary>
     /// <param name="trigram">Three bytes.</param>
     /// <param name="fold">Whether to lower-case.</param>
     /// <param name="destination">Three bytes.</param>

@@ -1,9 +1,3 @@
-// Phase 1 contract §12.2. Both vortex.list and vortex.listview decode to the same canonical
-// ListView (contract §8.4), which is offsets + sizes over one flattened elements child - the same
-// choice upstream makes (Canonical::List is a ListViewArray).
-//
-// Offsets and sizes are separate buffers with their own physical types, so a row is
-// Elements[offset .. offset + size) and rows need not be contiguous or ordered.
 using System;
 using Vorticity.Arrays;
 using Vorticity.Types;
@@ -12,8 +6,10 @@ namespace Vorticity.Columns;
 
 /// <summary>A variable-length list column.</summary>
 /// <remarks>
+/// A row is an offset and a size over one flattened child, each held in its own buffer with its own
+/// physical type, so rows need be neither contiguous nor ordered.
 /// <see cref="Elements"/> borrows from the owning <see cref="RecordBatch"/> and is invalid once
-/// that batch is disposed (docs/07-dotnet-mapping.md §4).
+/// that batch is disposed.
 /// </remarks>
 public readonly ref struct ListColumn
 {

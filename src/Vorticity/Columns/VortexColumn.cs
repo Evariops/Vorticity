@@ -1,11 +1,3 @@
-// Phase 1 contract §12.2. Every column view is a `readonly ref struct`: that is the enforcement
-// mechanism for the lifetime contract, because a ref struct cannot be stored in a field, boxed,
-// captured by a lambda, or carried across an `await`, so the compiler rejects most of the ways a
-// caller would outlive the batch (docs/07-dotnet-mapping.md §4).
-//
-// Nullability is orthogonal and never in the .NET type (docs/07-dotnet-mapping.md §1): a nullable
-// i32 column is a PrimitiveColumn<int>, not a PrimitiveColumn<int?>. Mapping to T? would allocate
-// and destroy the span contract, so nulls live entirely in ValidityKind / IsValid.
 using System;
 using System.Runtime.CompilerServices;
 using Vorticity.Arrays;
@@ -18,9 +10,14 @@ namespace Vorticity.Columns;
 /// the dtype.
 /// </summary>
 /// <remarks>
-/// Every span reachable from this view is borrowed from the owning
-/// <see cref="RecordBatch"/> and is invalid once that batch is disposed
-/// (docs/07-dotnet-mapping.md §4).
+/// Every span reachable from this view is borrowed from the owning <see cref="RecordBatch"/> and is
+/// invalid once that batch is disposed. Being a <c>readonly ref struct</c> is what enforces that: a
+/// ref struct cannot be stored in a field, boxed, captured by a lambda or carried across an
+/// <c>await</c>, so the compiler rejects most of the ways a caller could outlive the batch.
+/// Nullability stays out of the .NET type -- a nullable <c>i32</c> column is a
+/// <c>PrimitiveColumn&lt;int&gt;</c>, never a <c>PrimitiveColumn&lt;int?&gt;</c>, because mapping to
+/// <c>T?</c> would allocate and break the span contract; nulls live in
+/// <see cref="ValidityKind"/> and <see cref="IsValid"/> alone.
 /// </remarks>
 public readonly ref struct VortexColumn
 {
@@ -41,7 +38,7 @@ public readonly ref struct VortexColumn
 
     /// <summary>
     /// How this column represents nulls. Exposed so callers can skip per-row checks on the common
-    /// cases (docs/07-dotnet-mapping.md §1).
+    /// cases.
     /// </summary>
     public ValidityKind ValidityKind => _batch.Node(_node).Validity.Kind;
 
@@ -80,7 +77,7 @@ public readonly ref struct VortexColumn
     /// The primitive column view. <typeparamref name="T"/> must match the column's
     /// <see cref="PType"/> exactly: <c>u8</c> is <see cref="byte"/>, <c>i8</c> is
     /// <see cref="sbyte"/>, <c>f16</c> is <see cref="Half"/>, and so on. Reinterpreting one width
-    /// as another is the caller's job (Phase 1 contract §12.3).
+    /// as another is the caller's job.
     /// </summary>
     /// <typeparam name="T">The matching .NET element type.</typeparam>
     /// <exception cref="InvalidOperationException">
@@ -113,7 +110,7 @@ public readonly ref struct VortexColumn
 
     /// <summary>
     /// The variable-length list view. Both <c>vortex.list</c> and <c>vortex.listview</c> decode to
-    /// the same canonical ListView form (Phase 1 contract §8.4).
+    /// the same canonical ListView form.
     /// </summary>
     /// <exception cref="InvalidOperationException">The column is not a ListView column.</exception>
     public ListColumn AsList() => new ListColumn(_batch, Require(CanonicalKind.ListView));
@@ -131,8 +128,8 @@ public readonly ref struct VortexColumn
     /// <summary>The canonical form this column decoded to.</summary>
     /// <remarks>
     /// Never <see cref="CanonicalKind.Constant"/>. That kind is a physical shortcut inside the
-    /// arena -- one element and a row count instead of a million copies (PERF-AUDIT-v2.md Z1b) --
-    /// and NOT a canonical form a column can be in: a caller switching on this property is asking
+    /// arena -- one element and a row count instead of a million copies -- and not a canonical form
+    /// a column can be in: a caller switching on this property is asking
     /// what the column holds, not how the decoder chose to store it. So a constant column reports
     /// the form its dtype stands for, and <see cref="StandsFor"/> is the one place that mapping
     /// lives.
@@ -145,7 +142,7 @@ public readonly ref struct VortexColumn
     /// <remarks>
     /// It covers exactly what <c>CanonicalArena.MaterializeConstant</c> can build, because the two
     /// are one promise: this says a caller may ask for that form, and that one has to deliver it.
-    /// Extending the constant form to another dtype means extending BOTH, in the same change.
+    /// Extending the constant form to another dtype means extending both, in the same change.
     /// </remarks>
     private static CanonicalKind StandsFor(DType dtype) => dtype.Kind switch
     {
@@ -161,16 +158,16 @@ public readonly ref struct VortexColumn
 
     /// <summary>
     /// Resolves the node a typed accessor should read, materializing a constant when the caller
-    /// asks for the form it stands for. PERF-AUDIT-v2.md Z1b-c2b2.
+    /// asks for the form it stands for.
     /// </summary>
     /// <param name="kind">The kind the typed accessor needs.</param>
     /// <returns>The node index to hand the typed view -- the twin's, for a materialized constant.</returns>
     /// <remarks>
-    /// A typed view hands out a CONTIGUOUS span, which one element and a count cannot be. So the
-    /// constant form ends where a caller asks for one, and it ends ONCE: the twin is memoized on the
-    /// record. Every path that never asks -- filter, take, prune, write back -- keeps the form, and
-    /// those are the paths the column was tiled for. The filter in particular does better than keep
-    /// it: `ComparisonKernels` answers a whole constant column from one comparison.
+    /// A typed view hands out a contiguous span, which one element and a count cannot be. So the
+    /// constant form ends where a caller asks for one, and it ends only once: the twin is memoized
+    /// on the record. Every path that never asks -- filter, take, prune, write back -- keeps the
+    /// form, and those are the paths the column was tiled for. The filter in particular does better
+    /// than keep it: `ComparisonKernels` answers a whole constant column from one comparison.
     /// </remarks>
     private int Require(CanonicalKind kind)
     {
@@ -183,7 +180,7 @@ public readonly ref struct VortexColumn
         if (node.Kind != kind)
         {
             // A caller asking a Utf8 column for AsPrimitive<int>() is a caller error, not a
-            // malformed file (Phase 1 contract §1.4).
+            // malformed file.
             ColumnsThrow.WrongKind(Reported(node).ToString(), kind.ToString());
         }
 
@@ -199,7 +196,7 @@ internal static class ColumnCore
     /// <see cref="ValidityKind.AllValid"/> answer without touching memory,
     /// <see cref="ValidityKind.AllInvalid"/> likewise; only
     /// <see cref="ValidityKind.Bitmap"/> reads a bit, and it applies the canonical Bool node's bit
-    /// offset (Phase 1 contract §2.6 rule 5).
+    /// offset.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static bool IsValid(RecordBatch batch, int nodeIndex, int rowIndex)
@@ -249,7 +246,7 @@ internal static class ColumnCore
         int width = ptype.ByteWidth();
 
         // 64-bit arithmetic on purpose: `index * width` and `offset + width` both overflow an int
-        // for an index near int.MaxValue, and an overflowed sum compares BELOW the buffer length,
+        // for an index near int.MaxValue, and an overflowed sum compares below the buffer length,
         // which would turn the guard into a pass and the slice into an out-of-bounds read.
         long offset = (long)index * width;
         if (index < 0 || offset + width > buffer.Length)

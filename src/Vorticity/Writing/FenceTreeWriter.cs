@@ -1,16 +1,3 @@
-// The writer side of docs/13-dataset.md §6.3: a long run's segment table, cut into fence pages.
-//
-// A RUN OF FEW SEGMENTS STAYS AS IT WAS: its table in its options, its regions in the directory,
-// byte for byte what the files before this step hold. A run of more than `InlineFences` segments
-// has its table written as pages, level by level from the segments up. Each level is cut into
-// pages of at most `PageBytes`, each page written becomes one fence of the level above, and the
-// first level with at most `InlineFences` fences is the root, inlined in the run's options. A
-// parent names its children by region and checksum, so a level is cut only once the level below
-// is placed: the pages go out one at a time, after the index writer closes.
-//
-// EVERY LEVEL AT LEAST HALVES. A page takes a second fence whatever its size, so a key long enough
-// to fill a page alone deepens the tree and never stops it. With keys of ordinary size a page holds
-// hundreds of fences, and two levels under a root of 64 cover every run this format can hold.
 using System;
 using System.Collections.Generic;
 using Vorticity.Indexes;
@@ -22,7 +9,7 @@ namespace Vorticity.Writing;
 /// <param name="PageBytes">The most bytes a page takes, unless its first two fences pass it.</param>
 internal readonly record struct FenceShape(int InlineFences, int PageBytes)
 {
-    /// <summary>13 §6.3's: 64 fences inline, pages of 64 KiB.</summary>
+    /// <summary>The shape the format prescribes: 64 fences inline, pages of 64 KiB.</summary>
     internal static FenceShape Default => new FenceShape(64, 64 << 10);
 
     /// <summary>Whether a run of <paramref name="fences"/> fences is paged.</summary>
@@ -30,7 +17,11 @@ internal readonly record struct FenceShape(int InlineFences, int PageBytes)
     internal bool Pages(int fences) => fences > InlineFences;
 }
 
-/// <summary>Cuts one run's fences into pages, level by level, as the pages are placed.</summary>
+/// <summary>Cuts one run's fences into pages, level by level from the segments up, each page
+/// becoming a fence of the level above until a level fits inline and is the root. A parent names
+/// its children by region and checksum, so a level is cut only once the level below is placed, and
+/// a page always takes a second fence however large the first is, so every level at least halves
+/// and a key too long for a page deepens the tree instead of stalling it.</summary>
 internal sealed class FenceTreeWriter
 {
     private readonly FenceShape _shape;

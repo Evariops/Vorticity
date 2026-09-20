@@ -1,11 +1,8 @@
-// What a cursor is served by, and why the other sources were not chosen - docs/12-index-reads.md
-// §3 and §8.1. The cheapest source the file offers wins, and `Explain` says so without opening a
-// cursor, the way `ScanPlan` says what a scan would read without running it.
 using System.Collections.Generic;
 
 namespace Vorticity.Keys;
 
-/// <summary>The kinds of key source of docs/12-index-reads.md §3.</summary>
+/// <summary>The kinds of source a cursor over one column can be served by.</summary>
 public enum KeySourceKind : byte
 {
     /// <summary>No source: the column is neither sorted nor indexed.</summary>
@@ -17,7 +14,7 @@ public enum KeySourceKind : byte
     /// </summary>
     SortedColumn = 1,
 
-    /// <summary>A <c>vorticity.sorted.runs.v1</c> index (docs/10-indexes.md §6.2).</summary>
+    /// <summary>A <c>vorticity.sorted.runs.v1</c> index.</summary>
     SortedRuns = 2,
 
     /// <summary>A <c>vorticity.postings.blocks.v1</c> index: keys without rows.</summary>
@@ -28,6 +25,10 @@ public enum KeySourceKind : byte
 }
 
 /// <summary>What a cursor over one column would be served by.</summary>
+/// <remarks>
+/// The cheapest source the file offers wins; this is the answer to that choice, reported without
+/// opening a cursor, along with the reason every other candidate lost.
+/// </remarks>
 /// <param name="Path">The column.</param>
 /// <param name="Source">The source chosen, or <see cref="KeySourceKind.None"/> when there is none.</param>
 /// <param name="Runs">How many runs the source merges; 1 for a sorted column.</param>

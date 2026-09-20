@@ -1,21 +1,3 @@
-// The live blocks of one scan - docs/11-write-strategy.md §6.1, the read contract.
-//
-// ONE OPERATION FOR EVERY PRUNING STRUCTURE: refine this mask. The scan builds it once per query,
-// a bit per block of the file's row space (123 bits for a million rows, 15 KiB for a billion), and
-// runs the pruners over it cheapest first -- the zone map today, the Bloom generations, postings and
-// exact indexes of docs/10-indexes.md through the same `IBlockPruner.Refine` when they exist --
-// stopping as soon as nothing is live. Every split then asks one question of it, `AnyLive`, where
-// it used to ask every pruner in turn.
-//
-// A BLOCK IS THE ZONE MAP'S ZONE, and the writer's row block: `SplitPlan.NaturalBatchRows`, 8 192
-// rows by default. Blocks are aligned from row 0 of the file, whatever the chunks are, which is
-// what lets a chunk that is not zone-aligned (a foreign writer's) still be answered: a range that
-// straddles two blocks is live when either is, exactly what `ZonePruner.MayMatch(RowRange)` said
-// about the zones it overlapped.
-//
-// Only a positive proof kills a block (docs/08-semantics.md §1: "pruning may never eliminate a row
-// that full materialization would have returned"), and nothing here revives one: a pruner can only
-// clear bits, so the order the pruners run in changes the work and never the answer.
 using System;
 using System.Numerics;
 using Vorticity.File;
@@ -23,6 +5,15 @@ using Vorticity.File;
 namespace Vorticity.Compute;
 
 /// <summary>One bit per block of a file's rows: the blocks a scan still has to read.</summary>
+/// <remarks>
+/// The scan builds one mask per query and runs the pruners over it cheapest first, stopping as soon
+/// as nothing is live; each split then asks it a single question rather than asking every pruner in
+/// turn. A block is the zone map's zone and the writer's row block, aligned from row 0 of the file
+/// whatever the chunks are, which is what lets a chunk a foreign writer left unaligned still be
+/// answered: a range straddling two blocks is live when either is. Only a positive proof kills a
+/// block and nothing here revives one, so a pruner can only clear bits and the order they run in
+/// changes the work and never the answer.
+/// </remarks>
 internal sealed class BlockMask
 {
     private readonly ulong[] _bits;
@@ -99,10 +90,10 @@ internal sealed class BlockMask
     /// </summary>
     /// <param name="rows">The rows about to be decoded, in file coordinates.</param>
     /// <remarks>
-    /// NOT A PRUNER'S OPERATION -- a pruner only clears bits (docs/11 §6.1). This is a consumer's:
-    /// a terminal that decodes one split of a chunk hands the readers a mask that says so, and the
-    /// restricted decode of step 8b materializes that split rather than the chunk, which on a
-    /// single-chunk file is the difference between one block and the whole column.
+    /// This is not a pruner's operation -- a pruner only ever clears bits. It is a consumer's: a
+    /// terminal that decodes one split of a chunk hands the readers a mask saying so, and the
+    /// restricted decode materializes that split rather than the chunk, which on a single-chunk
+    /// file is the difference between one block and the whole column.
     /// </remarks>
     internal void KeepOnly(RowRange rows)
     {

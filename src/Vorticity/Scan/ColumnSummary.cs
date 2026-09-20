@@ -1,21 +1,3 @@
-// One column's bounds over a whole file, and the pruning a caller can do from bounds it has KEPT
-// rather than from a file it has opened - docs/11-write-strategy.md §6.3's "an engine over many
-// files calls it before opening a scan", and docs/13-dataset.md §4.2's "summaries, bounded: per
-// summarised column, min, max, null_count".
-//
-// WHY THIS IS A SEAM AND NOT A COPY. `VortexFile.MayMatch` answers "can this predicate select a row
-// here" from a file that is already open. A dataset's parent node holds the same three aggregates
-// for an object it has NOT opened, and for the union of a whole subtree, and has to answer from
-// those alone: not opening the object is the entire point of the summary. Two implementations of
-// "does this predicate survive these bounds" would be two chances to disagree, and
-// docs/08-semantics.md §1 -- only a positive proof prunes -- is what they would disagree about. So
-// there is one implementation, the zone pruner, and this is its door for a caller who holds bounds
-// instead of a file.
-//
-// AN UNION OF EXACT BOUNDS IS EXACT, which is why the precision travels with the bound: min(min A,
-// min B) is the true minimum of A ∪ B whenever both were true minima. It turns false the moment one
-// side is a `vortex.bounded_min`, and then the `min == max ⇒ constant` shortcut is off for the
-// union too. Carrying one flag is what keeps that from being re-derived, wrongly, by each caller.
 using System;
 using System.Collections.Generic;
 using Vorticity.Compute;
@@ -26,7 +8,11 @@ using Vorticity.Types;
 
 namespace Vorticity.Scan;
 
-/// <summary>What one column says about a whole file: a lower bound, an upper bound, and nulls.</summary>
+/// <summary>
+/// What one column says about a whole file: a lower bound, an upper bound, and nulls. A caller that
+/// keeps these can prune without opening the file again, which is what an engine over many files
+/// does before it opens a scan at all.
+/// </summary>
 /// <param name="Path">The column, as a filter names it.</param>
 /// <param name="Min">A lower bound on its values.</param>
 /// <param name="HasMin">Whether <paramref name="Min"/> was recorded.</param>
@@ -35,6 +21,9 @@ namespace Vorticity.Scan;
 /// <param name="IsExact">
 /// Whether the bounds are the true extremes rather than conservative ones. False for
 /// <c>vortex.bounded_min</c> / <c>vortex.bounded_max</c>, and false for any union that involved one.
+/// The flag travels with the bound because a union of true extremes is itself exact, while one
+/// inexact side makes the union inexact and takes the <c>min == max</c> constant shortcut off the
+/// table; carrying it keeps every caller from re-deriving that, wrongly.
 /// </param>
 /// <param name="NullCount">How many of the rows are null.</param>
 /// <param name="HasNullCount">Whether <paramref name="NullCount"/> was recorded.</param>
@@ -48,7 +37,7 @@ public readonly record struct ColumnSummary(
     long NullCount,
     bool HasNullCount)
 {
-    /// <summary>The default number of columns summarised, which docs/13-dataset.md §4.2 fixes.</summary>
+    /// <summary>The default number of columns summarised.</summary>
     public const int DefaultLimit = 32;
 
     /// <summary>Whether this summary licenses nothing, so that holding it would buy nothing.</summary>
@@ -61,15 +50,15 @@ public static class ColumnSummaries
     /// <summary>The summaries of a file's first <paramref name="limit"/> top-level columns.</summary>
     /// <param name="file">An open file; no data segment is read.</param>
     /// <param name="limit">
-    /// How many columns to summarise, so that the result has a bounded size whatever the schema
-    /// (docs/13-dataset.md §4.2). <see cref="ColumnSummary.DefaultLimit"/> by default.
+    /// How many columns to summarise, so that the result has a bounded size whatever the schema.
+    /// <see cref="ColumnSummary.DefaultLimit"/> by default.
     /// </param>
     /// <returns>The summaries, in the schema's field order; empty when the file records none.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="file"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="limit"/> is negative.</exception>
     /// <remarks>
-    /// THE STATISTICS ARE SHALLOW, one entry per top-level field (docs/02-format.md §3), so a nested
-    /// path has no bound to read and does not appear. A field whose bounds are of a kind no filter
+    /// The file's statistics are shallow, one entry per top-level field, so a nested path has no
+    /// bound to read and does not appear. A field whose bounds are of a kind no filter
     /// literal can hold, and one with no statistic at all, are left out for the same reason: an
     /// absent summary licenses nothing, and saying so with silence costs no bytes.
     /// </remarks>

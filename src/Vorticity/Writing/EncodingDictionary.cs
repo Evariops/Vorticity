@@ -1,18 +1,3 @@
-// The footer's array_specs / layout_specs dictionaries, built as the writer goes.
-//
-// A component id appears once in the file and every node refers to it by a u16 index
-// (docs/02-format.md §3). Interning them here is what makes a fifty-column file carry
-// "vortex.primitive" once rather than fifty times -- and the reason the reader's own encoding table
-// is an index lookup rather than a string compare.
-//
-// Insertion order IS the index order, and nothing re-sorts: a node's u16 is handed out the first
-// time its id is seen and stays valid for the rest of the write.
-//
-// It is also where THE TARGET EDITION IS ENFORCED, because it is the one place every array and
-// every layout id in the file passes through exactly once. docs/90-registry.md asks for a per-kind
-// allowlist that "fails the write when a serializer produces an ID outside it"; putting it here
-// rather than at each call site is what makes that an invariant instead of a habit - a new
-// serializer cannot forget to ask.
 using System;
 using System.Collections.Generic;
 using System.Text;

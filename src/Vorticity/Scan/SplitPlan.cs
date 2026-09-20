@@ -1,27 +1,3 @@
-// PHASE1-CONTRACTS.md §13.3 step 1: "ask the root LayoutReader for the splits covering the
-// requested RowRange, capped at MaxBatchRows. A split is the unit of independence."
-//
-// DEVIATION, REPORTED: LayoutReader (§11.2) ships RegisterSegments and Execute and nothing else -
-// there is no split API to ask. Rather than add a method to a directory this component does not
-// own, the walk lives here. It is a read-only traversal of the parsed LayoutTree and it transcribes
-// vortex-layout-0.86.1/src/layouts/*/reader.rs::register_splits one case at a time:
-//
-//   flat            push the range end                      (indivisible: one segment, one array)
-//   chunked         recurse into each touched chunk         (each chunk's walk pushes its own end)
-//   struct          recurse into validity + selected fields, then push the range end
-//   dict            recurse into the CODES child (child 1)  (the values child is not row-aligned)
-//   zoned / stats   recurse into the DATA child (child 0)
-//   anything else   push the range end
-//
-// An unknown layout id is deliberately treated as opaque rather than fatal: throwing here would
-// move the VortexUnsupportedException out of LayoutReaderTable.Get, the only place contract §2.3
-// permits it. RegisterSegments hits the same node moments later and throws with the right id and
-// kind.
-//
-// THE BOUNDARY LIST IS NOT THE SPLIT LIST. Sub-dividing a wide span down to MaxBatchRows is done
-// lazily by SplitCursor, because a caller may legally say WithMaxBatchRows(1) on a three-billion-row
-// file and materializing three billion boundaries is exactly the unbounded allocation §1.5 forbids.
-// The materialized array is bounded by the layout tree, which the parser already bounds.
 using System;
 
 using Vorticity.Arrays;
@@ -30,10 +6,29 @@ using Vorticity.Types;
 
 namespace Vorticity.Scan;
 
-/// <summary>The natural split boundaries of one scan, in root-layout row coordinates.</summary>
+/// <summary>
+/// The natural split boundaries of one scan, in root-layout row coordinates; a split is the unit
+/// of independence. The boundaries come from a read-only traversal of the parsed layout tree,
+/// which <see cref="LayoutReader"/> offers no method to ask for.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The boundary list is not the split list: sub-dividing a span wider than the cap is left to
+/// <see cref="SplitCursor"/>, which does it lazily. A caller may legitimately ask for one row per
+/// batch on a three-billion-row file, and materializing three billion boundaries would be an
+/// unbounded allocation. What is materialized is bounded by the layout tree, which the parser
+/// already bounds.
+/// </para>
+/// <para>
+/// An unknown layout id is treated as opaque rather than fatal. Throwing here would move the
+/// unsupported-encoding failure out of <c>LayoutReaderTable.Get</c>, which is the only place meant
+/// to raise it; segment registration reaches the same node moments later and throws with the right
+/// id and kind.
+/// </para>
+/// </remarks>
 internal sealed class SplitPlan
 {
-    /// <summary>The batch size a file with no zone map implies (docs/03-architecture.md §3.4).</summary>
+    /// <summary>The batch size a file with no zone map implies.</summary>
     internal const long DefaultBatchRows = 8192;
 
     private readonly long[] _boundaries;

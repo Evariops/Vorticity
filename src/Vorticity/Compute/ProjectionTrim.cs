@@ -1,22 +1,3 @@
-// Dropping the columns a filter needed and the caller did not ask for.
-//
-// docs/03-architecture.md §3.4 fixes the order: "Where then Project. The filter sees columns that
-// are not projected; they are read for filtering and discarded before the batch is produced."
-//
-// So a scan with a filter decodes the UNION of the projected and the filtered fields, and this is
-// the step that removes the difference. It is a pure restructuring: every kept column's node is
-// reused as it is, and only the struct nodes above them are rebuilt. No values are copied.
-//
-// The TARGET SCHEMA is computed once per scan (Projection.ProjectedSchema) and walked alongside the
-// decoded tree, rather than being rebuilt here level by level. That is what keeps this file free of
-// DType construction: the i-th kept field of a decoded struct is the i-th field of the target, by
-// construction, because both orders are the schema's.
-//
-// The two masks line up for the same reason: a FieldMaskBuilder keeps its fields sorted and the
-// struct layout reader emits selected fields in schema order, so decoded position p is the read
-// mask's p-th named field. That is the one correspondence this file assumes, and it is asserted
-// rather than trusted -- a mismatch is a planner bug, and it fails loudly instead of silently
-// returning the wrong column.
 using System;
 using System.Buffers;
 using Vorticity.Arrays;
@@ -25,7 +6,14 @@ using Vorticity.Types;
 
 namespace Vorticity.Compute;
 
-/// <summary>Restricts a decoded struct to the fields the caller actually projected.</summary>
+/// <summary>
+/// Restricts a decoded struct to the fields the caller actually projected: filtering reads columns
+/// the projection drops, so a scan with a filter decodes the union of both and this step removes
+/// the difference, reusing every kept node as it is and rebuilding only the structs above them.
+/// The target dtype is walked alongside the decoded tree rather than rebuilt, since both orders are
+/// the schema's; the correspondence is asserted rather than trusted, because a mismatch would
+/// otherwise return the wrong column in silence.
+/// </summary>
 internal static class ProjectionTrim
 {
     /// <summary>

@@ -1,9 +1,3 @@
-// A sorted column walked as one contiguous run (docs/12-index-reads.md §4.3, "as delivered").
-//
-// THE MERGE IS DEGENERATE HERE, and that is the whole reason this source comes first. The entries
-// are the column's non-null rows, contiguous and already in key order, so a step is an addition, a
-// rank is a subtraction, and a direction flip costs nothing: `Prev` after `Next` is `i - 1`. The
-// re-seek §4.2 charges for a flip is owed by the sorted runs, not by this source.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,6 +6,11 @@ using Vorticity.Expressions;
 namespace Vorticity.Keys;
 
 /// <summary>A position in a sorted column's entries.</summary>
+/// <remarks>
+/// The entries are the column's non-null rows, contiguous and already in key order, so there is no
+/// merge to do: a step is an addition, a rank is a subtraction, and reversing direction costs
+/// nothing. That is why this source is preferred over the sorted runs whenever it exists.
+/// </remarks>
 internal sealed class SortedColumnWalker : KeySource
 {
     private readonly SortedColumnSource _source;
@@ -59,8 +58,8 @@ internal sealed class SortedColumnWalker : KeySource
                     return false;
                 }
 
-                // `lower_bound` lands on the first entry NOT below the key, which is the key
-                // itself when it is present and its successor when it is not.
+                // `lower_bound` lands on the first entry that is not below the key, which is the
+                // key itself when it is present and its successor when it is not.
                 await _source.EnsureEntryAsync(at, cancellationToken).ConfigureAwait(false);
                 if (SortedColumnSource.Compare(_source.LoadedKey(at), key) != 0)
                 {

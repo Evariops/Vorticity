@@ -1,28 +1,14 @@
-// The `options` bytes of a `vorticity.bloom.sbbf.v1` or `vorticity.bloom.ngram3.v1` entry
-// (docs/10-indexes.md §5.1, as amended by docs/13-dataset.md §6.2 at step 24):
-//
-//   message BloomOptions {
-//     uint32 version = 1;              // 2: one filter tree per run
-//     uint32 fpp_ppm = 3;
-//     uint32 hash = 4;                 // 0 = XxHash3-64, 1 = xxHash64
-//     uint32 max_blocks = 5;           // a node's ceiling: a node that needs more has no filter
-//     uint32 fanout = 7;               // children per node: 16
-//     uint32 min_distinct = 8;         // below it, a block or a node has no filter
-//     bool   case_insensitive = 9;     // bloom.ngram3 only: trigrams ASCII-lower-cased on both sides
-//     uint32 root_max_blocks = 10;     // the root's ceiling: max_blocks, or the file-level one
-//   }
-//
-// ONE ENTRY PER COLUMN, AND NOTHING IN IT GROWS WITH THE FILE. Version 1 listed one entry per
-// resolution and, at block level, one filter size per block of the file: a directory that grew
-// with the data, and a probe that read every generation. Its entries are no longer read. An entry a
-// reader cannot use is ignored (10 §4.1), which costs a file written before step 24 its pruning and
-// never a row; fields 2 and 6 stay version 1's.
 using System;
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Indexes;
 
-/// <summary>The parsed options of one Bloom entry.</summary>
+/// <summary>
+/// The parsed options of one Bloom entry: one entry per column, describing a single filter tree,
+/// so that nothing in the directory grows with the data. Field numbers that earlier versions used
+/// differently are left unread rather than reinterpreted, since an entry a reader cannot use is
+/// ignored and costs a file its pruning, never a row.
+/// </summary>
 /// <param name="FalsePositivePpm">The rate the filters were sized for.</param>
 /// <param name="Hash">The hash they store.</param>
 /// <param name="MaxBlocks">A leaf's clamp and a node's ceiling.</param>
@@ -40,7 +26,7 @@ internal sealed record BloomIndexOptions(
     /// <summary>The version this library writes and reads: a filter tree per run.</summary>
     internal const uint Version = 2;
 
-    /// <summary>Children per node: 10 §4.3's generation of sixteen blocks, at every level.</summary>
+    /// <summary>Children per node: one generation of sixteen blocks, at every level.</summary>
     internal const int Fanout = 16;
 
     /// <summary>Serializes the options.</summary>
@@ -69,7 +55,7 @@ internal sealed record BloomIndexOptions(
     /// <summary>Parses the options, refusing what this reader cannot use.</summary>
     /// <param name="bytes">The entry's <c>options</c>.</param>
     /// <param name="options">The parsed options.</param>
-    /// <returns>Whether they are usable; an unusable entry is ignored, never an error (10 §4.1).</returns>
+    /// <returns>Whether they are usable; an unusable entry is ignored, never an error.</returns>
     internal static bool TryParse(ReadOnlySpan<byte> bytes, out BloomIndexOptions? options)
     {
         options = null;
@@ -143,6 +129,6 @@ internal sealed record BloomIndexOptions(
 /// <summary>The largest filter any node may declare, which bounds what a probe will read.</summary>
 internal static class BloomBuilderLimits
 {
-    /// <summary>1 MiB blocks: the file-level ceiling of 10 §5.4, the largest there is.</summary>
+    /// <summary>The file-level ceiling, the largest a filter may ever be.</summary>
     internal const uint MaxFilterBlocks = 1u << 20;
 }

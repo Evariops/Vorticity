@@ -1,16 +1,3 @@
-// Phase 1 contract §12.2 and docs/07-dotnet-mapping.md §4: spans first, `string` on request.
-//
-// The canonical form for both Utf8 and Binary is VarBinView - Arrow's 16-byte view:
-//
-//   [0..4]   u32 size
-//   size <= 12 : [4..4+size]  the value, inline
-//   size >  12 : [4..8] prefix, [8..12] u32 data buffer index, [12..16] u32 offset
-//
-// vortex-array-0.86.1/src/arrays/varbinview/mod.rs. The decoder validates every view a consumer may
-// dereference but deliberately does NOT validate a null row's view - a null slot's bytes are
-// garbage by construction, and upstream's VarBinViewArray::validate skips them too. So this reader
-// must consult validity BEFORE it reads a view, and it re-checks the bounds it depends on so that a
-// decoder bug cannot become an out-of-bounds read.
 using System;
 using System.Buffers.Binary;
 using System.Text;
@@ -22,6 +9,10 @@ namespace Vorticity.Columns;
 
 /// <summary>A variable-length byte column: <c>Utf8</c> or <c>Binary</c>.</summary>
 /// <remarks>
+/// Values are stored as 16-byte views: a size, then either the bytes inline when they fit in twelve
+/// bytes or a data buffer index and an offset into it. A null row's view holds arbitrary bytes, so
+/// every accessor tests validity before it dereferences a view and re-checks the view's bounds, so
+/// that a malformed file cannot become an out-of-bounds read.
 /// Spans returned here point into the owning <see cref="RecordBatch"/>'s buffers and are invalid
 /// once that batch is disposed. <see cref="GetString"/> is the one accessor that copies.
 /// </remarks>
@@ -122,8 +113,8 @@ public readonly ref struct BinaryColumn
 
     /// <summary>
     /// Row <paramref name="index"/> as a <see cref="string"/>, or <see langword="null"/> for a null
-    /// row. <b>ALLOCATES</b>; it is the one accessor here that does, and it exists so a caller can
-    /// keep a value past <see cref="RecordBatch.Dispose"/> (docs/07-dotnet-mapping.md §4).
+    /// row. This is the one accessor here that allocates, and it exists so a caller can keep a
+    /// value past <see cref="RecordBatch.Dispose"/>.
     /// </summary>
     /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
     /// <returns>The decoded string, or <see langword="null"/> when the row is null.</returns>

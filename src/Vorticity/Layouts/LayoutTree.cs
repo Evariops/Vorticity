@@ -1,10 +1,3 @@
-// PHASE1-CONTRACTS.md §11.1. The layout tree is parsed ONCE per file, at open, and is immutable
-// and thread-safe thereafter (docs/09-contracts.md §1). DTypes are pushed down at parse time
-// exactly as they are for arrays: a Layout node carries no dtype (spec/flatbuffers/layout.fbs).
-//
-// A reader is a LAYOUT TREE INTERPRETER, not a fixed-structure parser: the split into row groups
-// and columns is the writer's choice (docs/01-scope.md §1), so nothing here assumes struct-over-
-// chunked-over-flat or any other shape.
 using System;
 using System.Globalization;
 using System.Runtime.CompilerServices;
@@ -19,9 +12,14 @@ using Vorticity.Types;
 namespace Vorticity.Layouts;
 
 /// <summary>
-/// The whole layout tree of one file, flattened. Immutable after <see cref="Parse(VortexFile)"/>
-/// and safe for concurrent scans.
+/// The whole layout tree of one file, flattened and parsed a single time when the file is opened.
+/// Immutable after <see cref="Parse(VortexFile)"/> and safe for concurrent scans.
 /// </summary>
+/// <remarks>
+/// A layout node carries no dtype on the wire, so every node's dtype is derived top-down at parse
+/// time. How a file splits into row groups and columns is the writer's choice, so a reader
+/// interprets whatever tree it is given rather than expecting a fixed nesting of layouts.
+/// </remarks>
 public sealed class LayoutTree
 {
     private readonly VortexFile? _file;
@@ -61,9 +59,9 @@ public sealed class LayoutTree
     /// <returns>The parsed tree.</returns>
     /// <remarks>
     /// Charges <see cref="VortexLimits.MaxLayoutDepth"/> and a FlatBuffers table budget seeded with
-    /// <see cref="VortexLimits.MaxFlatBufferTables"/>, and never throws for an unknown layout id
-    /// (contract §2.3) — an unknown id becomes <see cref="LayoutEncodingId.Unknown"/> and is fatal
-    /// only when a projection puts it on the path to data.
+    /// <see cref="VortexLimits.MaxFlatBufferTables"/>, and never throws for an unknown layout id —
+    /// an unknown id becomes <see cref="LayoutEncodingId.Unknown"/> and is fatal only when a
+    /// projection puts it on the path to data.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="file"/> is null.</exception>
     /// <exception cref="VortexFormatException">The layout tree is malformed.</exception>
@@ -101,8 +99,8 @@ public sealed class LayoutTree
     /// <param name="segmentCount">How many entries the footer's <c>segment_specs</c> holds.</param>
     /// <returns>The parsed tree. Its <see cref="File"/> throws; no reader can execute against it.</returns>
     /// <remarks>
-    /// This mirrors <c>ScanContext</c>'s detached constructor (contract §8.3) and exists for the
-    /// same reason: the structural rules are worth testing without forging a whole container.
+    /// The structural rules are worth exercising without forging a whole container, which is why
+    /// <c>ScanContext</c> offers a detached constructor for the same reason.
     /// </remarks>
     /// <exception cref="ArgumentNullException">An entry of <paramref name="layoutEncodingIds"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="segmentCount"/> is negative.</exception>
@@ -223,8 +221,8 @@ public sealed class LayoutTree
         Builder builder = new Builder(file, detachedEncodingIds, segmentCount, retained);
 
         // The budget lives for the whole traversal: forward-only uoffsets exclude cycles but not
-        // SHARING, and a small buffer of shared children is a DAG with exponentially many paths
-        // (docs/03-architecture.md §6).
+        // sharing, and a small buffer whose children are shared between parents is an acyclic graph
+        // with exponentially many root-to-leaf paths.
         int tableBudget = VortexLimits.MaxFlatBufferTables;
         LayoutView root = LayoutView.Root(retained, ref tableBudget);
         LayoutParser.ParseNode(builder, in root, schema, depth: 1);
@@ -266,8 +264,8 @@ public sealed class LayoutTree
             // Every materialized node but the root is reached through a 4-byte uoffset in some
             // parent's `children` vector, and a distinct visit needs a distinct slot unless a
             // layout table is shared between parents. Bounding the node count by the buffer length
-            // therefore bounds the DAG blow-up the FlatBuffers table budget alone would let
-            // through - 1 000 000 materialized records from a 3 KB file - while still admitting
+            // therefore bounds the blow-up the FlatBuffers table budget alone would let
+            // through - a million materialized records from a three-kilobyte file - while admitting
             // every tree a real writer produces, which spends 40 bytes or more per node.
             MaxNodes = ((long)layoutBytes.Length / 4) + 1;
         }
@@ -288,8 +286,8 @@ public sealed class LayoutTree
         /// Bytes of file-supplied vectors this parse may still inspect.
         /// </summary>
         /// <remarks>
-        /// The node budget bounds how many nodes a shared-children DAG can materialize, but not how
-        /// much WORK each one does: a thousand tables may all point at one 500 KB metadata vector,
+        /// The node budget bounds how many nodes a shared-children graph can materialize, but not
+        /// how much work each one does: a thousand tables may all point at one 500 KB metadata vector,
         /// and parsing it a thousand times is quadratic in the buffer. Charging every metadata and
         /// segment vector against a budget derived from the buffer length keeps the whole parse
         /// linear in it. Four times the buffer is generous: an honest tree's vectors sum to less
@@ -345,9 +343,9 @@ public sealed class LayoutTree
 
         /// <summary>
         /// Resolves a wire <c>u16</c> to a layout encoding. An id this build does not know is
-        /// <see cref="LayoutEncodingId.Unknown"/> and is NOT an error (contract §2.3); an index
-        /// outside the footer's dictionary is a format error, because the file named a spec that
-        /// does not exist.
+        /// <see cref="LayoutEncodingId.Unknown"/> and is not an error; an index outside the
+        /// footer's dictionary is a format error, because the file named a spec that does not
+        /// exist.
         /// </summary>
         internal LayoutEncodingId ResolveEncoding(ushort specIndex)
         {
@@ -461,7 +459,7 @@ internal struct LayoutNodeRecord
     /// <summary>Narrowed from the wire <c>u64</c> at parse time.</summary>
     internal long RowCount;
 
-    /// <summary>BYTE offset of the metadata vector inside the retained layout buffer.</summary>
+    /// <summary>Byte offset of the metadata vector inside the retained layout buffer.</summary>
     internal int MetadataStart;
 
     internal int MetadataLength;
@@ -469,10 +467,10 @@ internal struct LayoutNodeRecord
     /// <summary>Index into the tree's child-index list.</summary>
     internal int ChildStart;
 
-    /// <summary>Children in the PARSED tree, which is 0 for an unknown layout.</summary>
+    /// <summary>Children in the parsed tree, which is 0 for an unknown layout.</summary>
     internal int ChildCount;
 
-    /// <summary>BYTE offset of the segment-id vector inside the retained layout buffer.</summary>
+    /// <summary>Byte offset of the segment-id vector inside the retained layout buffer.</summary>
     internal int SegmentStart;
 
     /// <summary>Segment ids, i.e. <c>uint</c> elements, not bytes.</summary>

@@ -1,27 +1,18 @@
-// Index fragments attached to a file - docs/13-dataset.md §6.4: a fragment is "one entry's runs over
-// one block range of one object, in the format of the in-file runs: array blobs, then a footer that
-// is the IndexEntry message of 10 §4.1 ... so a fragment decodes with no access to the data object's
-// footer". A reader takes the directory the file names and adds what each fragment brings, entry by
-// entry, into one directory the pruners and the key sources read as they read any other.
-//
-// ONE RULE DECIDES WHERE AN ENTRY GOES: its identity, which is its kind, its column, its block length
-// and its options byte for byte. The file's own entry of an identity covers the file, since a writer
-// covers what it writes, so a fragment's entry of the same identity adds nothing and is left out. The
-// same identity across fragments is one index over several block ranges, and its runs join when
-// their blocks are disjoint. An overlap is a second opinion on the same blocks: a pruner could use it,
-// a key source could not -- a walk would meet the keys twice -- so the later fragment's entry is left
-// out, and named. Two entries of one kind and column with other options stay two entries: the Bloom
-// pruner already reads a tree per run whatever entry it came from, and the key sources try each.
-//
-// NOTHING HERE FAILS THE OPEN. A fragment is a hint like every index (10 §6.6): one that is not the
-// file's, or an entry that does not fit, is left out with its reason, and the scan is the scan
-// without it.
 using System;
 using System.Collections.Generic;
 
 namespace Vorticity.Indexes;
 
-/// <summary>Adds index fragments to the directory a file names (docs/13-dataset.md §6.4).</summary>
+/// <summary>
+/// Adds index fragments to the directory a file names, so that pruners and key sources read one
+/// directory however it was assembled. Where an entry goes is decided by its identity -- its kind,
+/// its column, its block length and its options byte for byte. The file's own entry of an identity
+/// already covers everything the file holds, so a fragment repeating it adds nothing; the same
+/// identity across fragments is one index over several block ranges and its runs join when their
+/// blocks are disjoint; an overlap is left out, since a key walk over both would meet the same keys
+/// twice. Nothing here fails the open: a fragment or an entry that does not fit is left out with
+/// its reason, and the scan runs without it.
+/// </summary>
 internal static class IndexFragmentMerge
 {
     /// <summary>The directory the file names, with every fragment's entries added to it.</summary>

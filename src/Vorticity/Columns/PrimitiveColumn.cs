@@ -1,9 +1,3 @@
-// Phase 1 contract §12.2 and §12.3. `T` must match the column's PType EXACTLY: byte<->sbyte and
-// int<->uint are not interchangeable here, and f16 maps to Half - IEEE binary16 - with no lossy
-// widening (docs/07-dotnet-mapping.md §1).
-//
-// Nullability is NOT in the type. A nullable i32 column is a PrimitiveColumn<int> whose null rows
-// hold whatever the writer left in the buffer; the caller consults IsValid.
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -20,8 +14,13 @@ namespace Vorticity.Columns;
 /// <see cref="PType"/>.
 /// </typeparam>
 /// <remarks>
+/// The match must be exact: <see cref="byte"/> and <see cref="sbyte"/> are not interchangeable, nor
+/// are <see cref="int"/> and <see cref="uint"/>, and a half-precision column is read as
+/// <see cref="Half"/> rather than widened. Nullability is not carried by the type: a nullable
+/// column has the same element type, its null rows hold an unspecified value, and the caller tells
+/// them apart with <see cref="IsValid"/>.
 /// <see cref="Values"/> is borrowed from the owning <see cref="RecordBatch"/> and is invalid once
-/// that batch is disposed (docs/07-dotnet-mapping.md §4).
+/// that batch is disposed.
 /// </remarks>
 public readonly ref struct PrimitiveColumn<T>
     where T : unmanaged
@@ -60,11 +59,8 @@ public readonly ref struct PrimitiveColumn<T>
             CanonicalNode node = _batch.Node(_node);
 
             // MemoryMarshal.Cast rather than VortexBuffer.Cast<T>: the latter demands the base
-            // address be a multiple of sizeof(T), which is stricter than anything the format
-            // guarantees (CanonicalSupport.MaxRequiredAlignment is 16 and a writer may pick less),
-            // and refusing a legal file over an alignment we do not need would be wrong. Scalar
-            // span access does not require alignment; the compressed decoders already reinterpret
-            // this way for the same reason.
+            // address be a multiple of sizeof(T), which is stricter than the format guarantees, so
+            // it would refuse a legal file over an alignment scalar span access never needs.
             ReadOnlySpan<T> all = MemoryMarshal.Cast<byte, T>(node.Values.Span);
             if (all.Length < node.Length)
             {

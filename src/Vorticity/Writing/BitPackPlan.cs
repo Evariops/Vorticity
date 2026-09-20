@@ -1,30 +1,3 @@
-// Choosing a bit width when a handful of values refuse to fit - vortex-fastlanes-0.86.1's
-// `find_best_bit_width` / `best_bit_width` (src/bitpacking/compress.rs), and the transform that
-// has to be chosen with it.
-//
-// THE PROBLEM, stated by its own corpus file. `types/i64_nonnull_r8192` is 0, i64::MIN, i64::MAX
-// and then eight thousand values alternating either side of zero up to about 56 000. Frame of
-// reference takes the MINIMUM as its reference, so every ordinary value in that column becomes
-// roughly 2^63 and the span is the whole 64 bits: a scheme designed to shrink dense integers
-// declines to touch the densest column in the corpus, because three rows out of 8192 say so. We
-// wrote it canonically at 3.31x the reference's size.
-//
-// TWO THINGS FIX IT, and they are separate:
-//
-//   * PATCHES. Pack at the width the BULK needs and carry the rest as (index, value) pairs, which
-//     `fastlanes.bitpacked` has always been able to express and our decoder has always read. The
-//     width is then not a property of the data but a MINIMUM over a cost function - packed bytes
-//     plus what the exceptions cost - and that is what `best_bit_width` computes.
-//   * THE TRANSFORM. Patches alone do not save that file: with the reference pinned to i64::MIN,
-//     HALF the column is an exception, and no width is cheap. What the reference does there is
-//     `vortex.zigzag` instead - interleave the sign bit, so magnitude rather than position decides
-//     the width - and then bit-pack with two patches at 17 bits. Verified, not guessed: the
-//     corpus sidecar's array tree for that file reads zigzag(bitpacked) and its metadata decodes
-//     to bit_width 17, two patches.
-//
-// So both are priced and the cheaper wins. Frame still wins outright on the columns it was already
-// winning - a column of timestamps around 1.7e18 has a tiny span and an enormous magnitude - which
-// is precisely why neither transform can simply replace the other.
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -46,7 +19,14 @@ internal enum BitPackTransform : byte
     ZigZag = 1,
 }
 
-/// <summary>A bit-packing decision: the transform, the width, and the values that did not fit.</summary>
+/// <summary>
+/// A bit-packing decision: the transform, the width, and the values that did not fit. The width is
+/// not a property of the data but the minimum of a cost function — packed bytes plus what the
+/// exceptions cost as patches — and both transforms are priced under it so the cheaper wins:
+/// neither dominates, since a frame of reference is pinned to the column's minimum and a single
+/// outlying low value widens every other row, while zigzag lets magnitude rather than position
+/// decide and loses on columns with a huge offset but a narrow span.
+/// </summary>
 internal sealed class BitPackPlan
 {
     /// <summary>
@@ -101,13 +81,11 @@ internal sealed class BitPackPlan
     /// pack will find and write, counted here from the histogram so the pack can size them.
     /// </summary>
     /// <remarks>
-    /// THE PATCHES THEMSELVES ARE GATHERED INSIDE THE PACK (docs/11-write-strategy.md §3.5), which
-    /// encodes every row anyway and sees each exception as it goes: <c>v ≥ 2^b</c> on the value it
-    /// has just transformed. Until stage R5b this plan carried the patch arrays, produced by a walk
-    /// of its own over the column -- the same transform, applied a second time, to find the same
-    /// rows. The count is all the pack needs from the chooser, and the pack checks it: the
-    /// histogram and the encode read the same rows under the same transform, so they agree or one
-    /// of the two is wrong, and a mismatch is an exception rather than a short array.
+    /// Only the count crosses over: the patches themselves are gathered by the pack, which encodes
+    /// every row anyway and recognises each exception as it goes, so gathering them here would mean
+    /// applying the same transform a second time to reach the same rows. The pack checks the count
+    /// against what it finds, since the histogram and the encode read the same rows under the same
+    /// transform; a mismatch throws rather than writing a short patch array.
     /// </remarks>
     internal long Exceptions { get; }
 
@@ -121,15 +99,14 @@ internal sealed class BitPackPlan
     /// is not weighed and then discarded; it is never weighed, so the frame's own answer stands.
     /// </param>
     /// <param name="reference">
-    /// The column's minimum in raw bits, when the ingest pass has already found it
-    /// (docs/11-write-strategy.md §8 stage 2); <see langword="null"/> to measure it here.
-    /// <see cref="Minimum"/> is a whole pass over every row, run on every integer column of every
-    /// file to recompute a number the zone map's own pass produced.
+    /// The column's minimum in raw bits, when the ingest pass has already found it;
+    /// <see langword="null"/> to measure it here, which costs a whole pass over every row to
+    /// recompute a number the zone map's own pass already produced.
     /// </param>
     /// <param name="ingested">
     /// The chunk's pair of bit-width histograms from the ingest pass (<see cref="BitPackWidths"/>),
-    /// or empty. The zigzag half is always usable; the raw half IS the framed histogram exactly when
-    /// <paramref name="reference"/> is zero, and only then (docs/11-write-strategy.md §3.2.3).
+    /// or empty. The zigzag half is always usable; the raw half is the framed histogram exactly when
+    /// <paramref name="reference"/> is zero, and only then.
     /// </param>
     /// <returns>The plan, or <see langword="null"/> when packing does not pay.</returns>
     internal static BitPackPlan? TryBuild(
@@ -168,17 +145,13 @@ internal sealed class BitPackPlan
         zigzags.Clear();
         bool signed = ptype.IsSignedInteger();
 
-        // WHAT THE INGEST PASS CAN ANSWER AND WHAT IT CANNOT, and the difference is the minimum.
-        // docs/11-write-strategy.md §3.2 counts the RAW and ZIGZAG widths while the rows arrive,
-        // because neither depends on a quantity the chunk only has once it is whole. The FRAMED
-        // histogram does — it is the widths of `v - min` — so §3.2.3 gives frame of reference a
-        // bound and a conditional sweep instead, which is stage R5's work. Until then:
-        //
-        //   * zigzag is taken from the pass whenever the pass ran, always;
-        //   * raw IS the framed histogram when the reference is zero, which is every unsigned
-        //     column that starts at zero, every dictionary's codes, and every offsets column --
-        //     so those walk nothing at all;
-        //   * a non-zero reference still walks, and skips the zigzag half it no longer needs.
+        // What the ingest pass can answer and what it cannot, and the difference is the minimum: it
+        // counts the raw and zigzag widths as the rows arrive, because neither depends on a
+        // quantity the chunk only has once it is whole, while the framed histogram is the widths of
+        // `v - min` and so does. Hence: zigzag is taken from the pass whenever the pass ran; raw is
+        // the framed histogram when the reference is zero — every unsigned column starting at zero,
+        // every dictionary's codes, every offsets column — so those walk nothing; and a non-zero
+        // reference still walks, skipping the zigzag half it no longer needs.
         bool ingestedWidths = ingested.Length == BitPackWidths.Length;
         bool framedFromIngest = ingestedWidths && minimum == 0;
         if (ingestedWidths)
@@ -190,11 +163,8 @@ internal sealed class BitPackPlan
             }
         }
 
-        // WHAT THAT SWEEP IS STILL WORTH, measured so the next reader does not have to. Doubling it
-        // on a million-row six-column write costs 3,7 ms in one run and 1,1 in another, against an
-        // axis of about 92 -- between one and four per cent, under the bar that would justify the
-        // bound-and-conditional-sweep §3.2.3 describes. What used to be five passes a row is one
-        // conditional one, and the columns whose reference is zero walk nothing at all.
+        // The remaining sweep is a small enough share of a write to keep whole, rather than pricing
+        // frame of reference by a bound and sweeping only the contested blocks.
         if (!framedFromIngest)
         {
             Histogram(
@@ -244,7 +214,7 @@ internal sealed class BitPackPlan
     /// <c>value - reference</c>, wrapping and masked to the element width.
     /// </summary>
     /// <remarks>
-    /// The MASK is not cosmetic here, though it is invisible in the packed bytes: the packer
+    /// The mask is not cosmetic here, though it is invisible in the packed bytes: the packer
     /// truncates to the element width anyway, but the histogram does not, and an unmasked
     /// subtraction that wrapped would report 64 bits for a value that packs into three.
     /// </remarks>
@@ -273,25 +243,14 @@ internal sealed class BitPackPlan
     /// Both width histograms in one walk, with the physical type resolved before the walk starts.
     /// </summary>
     /// <remarks>
-    /// THE SHAPE OF W-9 AND W-33, APPLIED TO THE LAST WRITE-SIDE LOOP THAT STILL DISPATCHED PER ROW.
-    /// The walk called <c>CompressedValues.ReadUnsigned(values, raw, row)</c> on every row of every
-    /// integer column of every chunk: a switch on the physical type, per value, to reach a load the
-    /// type decides once. Measured by doubling this very loop and reading the axis, it was worth
-    /// 18 % to 44 % of the write on twelve encodings — 34 % of <c>fastlanes_bitpacked</c>, 44 % of
-    /// <c>fastlanes_for</c>, 38 % of <c>table_wide</c>.
+    /// The type is dispatched once here rather than per row: reading each value through a switch on
+    /// the physical type, to reach a load the type decides once, costs a large share of the write on
+    /// every integer column of every chunk.
     /// <para>
     /// Resolved into <see cref="Histogram{T}"/> the arithmetic is the element's own: subtracting the
-    /// reference in <c>T</c> WRAPS at the element width, which is exactly what the
-    /// 64-bit form's mask was doing by hand, and <c>LeadingZeroCount</c> counts inside that width,
-    /// so the bit length is the same number. The histograms are therefore identical to the ones this
-    /// replaces, and so is every plan and every byte.
-    /// </para>
-    /// <para>
-    /// Where it will go next: docs/11-write-strategy.md §3.2 puts <c>bits_raw</c> and
-    /// <c>bits_zigzag</c> in the ingest pass, so this walk disappears rather than merely becoming
-    /// cheap. That move also restructures the candidate set — frame of reference cannot be
-    /// histogrammed before the minimum is known, so §3.2.3 prices it by bound and sweeps only the
-    /// contested blocks — which is stage 3's work, and it can move bytes. Typing the walk cannot.
+    /// reference in <c>T</c> wraps at the element width, which is what the 64-bit form's mask does
+    /// by hand, and <c>LeadingZeroCount</c> counts inside that width, so the bit length is the same
+    /// number and the histograms are the same histograms.
     /// </para>
     /// </remarks>
     /// <param name="values">The column's value buffer.</param>
@@ -327,10 +286,10 @@ internal sealed class BitPackPlan
     /// The framed widths of an all-valid column, four rows per step into four histograms.
     /// </summary>
     /// <remarks>
-    /// THE COUNTERS ARE THE COST, NOT THE WIDTHS. Consecutive values of a column mostly share a
-    /// width, so one histogram turns the loop into a chain of increments of the same counter, each
-    /// waiting on the store before it; four histograms taken in turn break that chain four ways,
-    /// which is what R10 measured on the ingest pass's raw count. They are folded at the end.
+    /// The counters are the cost here, not the widths. Consecutive values of a column mostly share
+    /// a width, so a single histogram turns the loop into a chain of increments of the same counter,
+    /// each waiting on the store before it; four histograms taken in turn break that chain four
+    /// ways, and are folded at the end.
     /// </remarks>
     private static void FramedWidths<T>(ReadOnlySpan<T> values, T reference, int elementBits, Span<int> frames)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
@@ -364,9 +323,9 @@ internal sealed class BitPackPlan
 
     /// <summary>One element width's histograms.</summary>
     /// <remarks>
-    /// The all-valid case is a separate loop rather than a test inside one, because a validity test
-    /// per row is the other half of what W-33 measured: the branch is the same shape as the load it
-    /// guards, and hoisting it is what lets the tight loop stay tight.
+    /// The all-valid case is a separate loop rather than a test inside one: a validity test per row
+    /// is a branch the same shape as the load it guards, and hoisting it is what lets the tight
+    /// loop stay tight.
     /// </remarks>
     /// <typeparam name="T">The element read as an unsigned word.</typeparam>
     /// <param name="bytes">The column's value buffer.</param>
@@ -411,14 +370,12 @@ internal sealed class BitPackPlan
         {
             if (!mask.IsValid(row))
             {
-                // A null row is PACKED as zero, and that is a different statement from "its value
-                // is zero": under a frame of reference the raw zero would encode as `-reference`,
-                // 64 bits wide, and every null in the column would count as an exception. Writing
-                // it as a raw zero here and letting the transform run cost 37 kB on
-                // `containers/zoned_many_zones_nulls` before the histogram was read against what
-                // Pack actually writes.
+                // A null row is packed as zero, which is a different statement from "its value is
+                // zero": the histogram counts the width the pack will write, so running the
+                // transform over the raw value would encode it as `-reference` under a frame of
+                // reference, at the full element width, and make every null an exception.
                 //
-                // THE ZIGZAG SIDE IS GUARDED like the value path below it, because the caller may
+                // The zigzag side is guarded like the value path below it, because the caller may
                 // already hold that half from the ingest pass and be here only for the framed one;
                 // an unconditional increment would count every null twice.
                 frames[0]++;

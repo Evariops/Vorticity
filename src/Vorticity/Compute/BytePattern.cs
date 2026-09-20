@@ -1,24 +1,18 @@
-// The three byte-pattern predicates of docs/12-index-reads.md §7, as pure functions over bytes.
-//
-// BYTES, NOT TEXT, and every consequence of that is deliberate. The comparison is bytewise, which
-// for UTF-8 is code-point order; `_` in a LIKE pattern matches one BYTE, so it matches one third of
-// a three-byte code point and the documentation says so rather than pretending otherwise; and there
-// is no case folding, because folding needs a definition of "case" for UTF-8 that this iteration
-// does not have and that docs/10-indexes.md §5.2's lower-cased trigrams would need too.
-//
-// `StartsWith` AND `Contains` ARE THE BCL'S, on purpose: `MemoryExtensions.StartsWith` and
-// `IndexOf` over `ReadOnlySpan<byte>` are vectorised in dotnet/runtime (`SpanHelpers.Byte.cs`), and
-// a hand-written loop here would be slower and would have to be tested against them anyway.
-//
-// LIKE IS A BACKTRACKING MATCHER, greedy on `%`, and it is linear on every pattern without adjacent
-// wildcards. The quadratic case a backtracker has -- `%a%a%a%...` against a long value -- is bounded
-// by the pattern, which the caller wrote, not by the file.
 using System;
 using System.Collections.Generic;
 
 namespace Vorticity.Compute;
 
 /// <summary>Matching a value's bytes against a pattern.</summary>
+/// <remarks>
+/// These are predicates over bytes, not over text, and every consequence of that is deliberate:
+/// comparison is bytewise, which for UTF8 is code-point order; <c>_</c> matches one byte, so it can
+/// match a single third of a three-byte code point; and there is no case folding, which would need
+/// a definition of "case" this layer does not have. <c>StartsWith</c> and <c>Contains</c> delegate
+/// to the runtime's vectorised span search rather than to hand-written loops. The <c>like</c>
+/// matcher backtracks greedily on <c>%</c> and is linear on any pattern without adjacent wildcards;
+/// its quadratic case is bounded by the pattern the caller wrote, never by the file.
+/// </remarks>
 internal static class BytePattern
 {
     private const byte Any = (byte)'%';
@@ -36,7 +30,7 @@ internal static class BytePattern
     internal static bool Contains(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern) =>
         pattern.IsEmpty || value.IndexOf(pattern) >= 0;
 
-    /// <summary>Whether <paramref name="value"/> matches a SQL <c>LIKE</c> pattern.</summary>
+    /// <summary>Whether <paramref name="value"/> matches a SQL <c>like</c> pattern.</summary>
     /// <remarks>
     /// The greedy backtrack: walk both, remember where the last <c>%</c> was and how far the value
     /// had been consumed when it was taken, and on a mismatch resume one byte further along from
@@ -103,8 +97,8 @@ internal static class BytePattern
     /// <paramref name="prefix"/>, or an empty span when there is none.
     /// </summary>
     /// <remarks>
-    /// THIS IS WHAT TURNS `StartsWith` INTO A RANGE, and the range is what a zone map and a sorted
-    /// index can both prune with: <c>x ≥ p AND x &lt; succ(p)</c> selects exactly the values that
+    /// This is what turns `StartsWith` into a range, and the range is what a zone map and a sorted
+    /// index can both prune with: <c>x ≥ p and x &lt; succ(p)</c> selects exactly the values that
     /// begin with <c>p</c>, bytewise. Trailing <c>0xFF</c> bytes are dropped before the increment
     /// because <c>0xFF</c> has no successor; an empty prefix, or one that is all <c>0xFF</c>, has no
     /// upper bound at all and the caller keeps only the lower one.
@@ -131,8 +125,8 @@ internal static class BytePattern
     }
 
     /// <summary>
-    /// The literal runs of a <c>LIKE</c> pattern: the stretches between unescaped wildcards, each of
-    /// which a matching value must contain somewhere (docs/10-indexes.md §5.2).
+    /// The literal runs of a <c>like</c> pattern: the stretches between unescaped wildcards, each of
+    /// which a matching value must contain somewhere.
     /// </summary>
     /// <param name="pattern">The pattern.</param>
     /// <param name="escape">The byte that quotes a wildcard.</param>
@@ -176,7 +170,7 @@ internal static class BytePattern
     }
 
     /// <summary>
-    /// The literal bytes a <c>LIKE</c> pattern must begin with, when it does not begin with a
+    /// The literal bytes a <c>like</c> pattern must begin with, when it does not begin with a
     /// wildcard.
     /// </summary>
     /// <remarks>

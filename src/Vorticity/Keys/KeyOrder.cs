@@ -1,29 +1,21 @@
-// The key order of docs/12-index-reads.md §4.4, and the one a sorted column is actually in.
-//
-// TWO ORDERS, AND THEY ARE NOT THE SAME ONE. A cursor is an ordinal structure and needs a TOTAL
-// order; a filter is a predicate structure and follows IEEE 754, where NaN is unordered
-// (docs/08-semantics.md §2). The two coincide on every dtype but the floats, where they differ in
-// exactly two places: the total order puts NaN at the ends and separates `-0.0` from `+0.0`, and
-// IEEE orders neither.
-//
-// SO THE COMPARATOR BELONGS TO THE SOURCE, not to the cursor. `Total` is what §4.4 states and what
-// `KeyCursor.Compare` exposes, because a consumer merging two cursors needs one answer. `Ieee` is
-// what a `SortedColumn` source is sorted in, because `is_sorted` is computed with IEEE comparisons
-// (vortex-array-0.86.1 `aggregate_fn/fns/is_sorted`): a column whose statistics claim it is sorted
-// is non-decreasing in IEEE and may, across a `-0.0` / `+0.0` pair, descend in the total order. A
-// bisection in the wrong one of the two would miss a key, so each source names its own.
 using System;
 using Vorticity.Expressions;
 
 namespace Vorticity.Keys;
 
 /// <summary>Orders two keys.</summary>
+/// <remarks>
+/// Two orders live here because a cursor is an ordinal structure and needs a total order, while a
+/// float column is sorted under IEEE comparisons, which order neither NaN nor <c>-0.0</c> against
+/// <c>+0.0</c>. The two agree on every dtype but the floats. Each source names the one it is
+/// actually sorted in, since bisecting in the other would step past a key it was meant to find.
+/// </remarks>
 internal static class KeyOrder
 {
     /// <summary>
-    /// The total order of docs/12-index-reads.md §4.4: numeric for integers, bytewise for strings,
-    /// and for floats the order of docs/06-row-encoding.md §3 -- negative NaN, then the negatives
-    /// down to <c>-0.0</c>, then <c>+0.0</c> up through the positives, then positive NaN.
+    /// The total order a cursor exposes: numeric for integers, bytewise for strings, and for floats
+    /// negative NaN, then the negatives down to <c>-0.0</c>, then <c>+0.0</c> up through the
+    /// positives, then positive NaN.
     /// </summary>
     /// <param name="left">One key.</param>
     /// <param name="right">The other.</param>
@@ -45,15 +37,14 @@ internal static class KeyOrder
 
     /// <summary>
     /// The order a <c>SortedColumn</c> source is in: the total order everywhere but the floats,
-    /// which follow IEEE, so that <c>-0.0</c> and <c>+0.0</c> are ONE key.
+    /// which follow IEEE, so that <c>-0.0</c> and <c>+0.0</c> are a single key.
     /// </summary>
     /// <param name="left">One key.</param>
     /// <param name="right">The other.</param>
     /// <returns>The sign of <c>left - right</c>.</returns>
     /// <remarks>
-    /// A NaN cannot reach this: a float column holding one is not <c>is_sorted</c>, since the
-    /// reference computes that flag with the same IEEE comparisons, and every comparison against a
-    /// NaN is false.
+    /// A NaN cannot reach this: a float column holding one is never flagged sorted, because that
+    /// flag is computed with the same IEEE comparisons and every comparison against a NaN is false.
     /// </remarks>
     internal static int Ieee(FilterLiteral left, FilterLiteral right)
     {
@@ -85,8 +76,8 @@ internal static class KeyOrder
     }
 
     /// <summary>
-    /// IEEE doubles read as the total order of docs/06 §3, through the transform that file's
-    /// encoder uses: a non-negative gets its sign bit set, a negative gets every bit flipped.
+    /// IEEE doubles read as the total order, through the same transform the row encoder uses: a
+    /// non-negative gets its sign bit set, a negative gets every bit flipped.
     /// </summary>
     private static int TotalFloat(double left, double right)
     {

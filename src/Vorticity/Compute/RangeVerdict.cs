@@ -1,31 +1,14 @@
-// What the statistics decide about a predicate over a row range: how many rows it selects, how
-// many it refuses, how many it leaves unknown -- docs/12-index-reads.md §5.2, the full-block proof
-// of `CountAsync`.
-//
-// A ZONE MAP CANNOT SAY WHICH ROWS, ONLY HOW MANY. A comparison over a zone whose bounds all lie on
-// the right side of the constant is true on every non-null, non-NaN row and false on no row, and
-// the zone knows how many nulls and NaNs it has; those are counts, not sets. So the verdict carries
-// three counts, one per truth value, each with its own "decided" flag, and any two decide the
-// third. They are independent otherwise: `x >= v` on a zone whose bounds prove it has no false row
-// whatever else is known, and its trues are decided only once the nulls and the NaNs are.
-//
-// THE COMBINATIONS ARE TAUTOLOGIES OF THREE-VALUED LOGIC OVER COUNTS, and nothing more, because a
-// count of trues on the left and a count of trues on the right say nothing about how many rows are
-// true on both -- unless one side is true, false or unknown EVERYWHERE, or the two sides' unknown
-// rows are the same rows. That last case is the one that matters in practice: `x >= 10 AND x < 20`
-// on a nullable column is unknown on exactly the nulls on both sides, and a verdict remembers whose
-// nulls its unknowns are so that the conjunction can see it.
-//
-// The asymmetry of pruning (docs/08-semantics.md §1) is reversed here. `MayMatch` errs towards
-// "maybe"; this errs towards "undecided". A wrong proof is a wrong count, and the tests hold every
-// count a verdict decides against the decode.
 using System.Diagnostics;
 
 namespace Vorticity.Compute;
 
 /// <summary>
 /// How many rows of a range a predicate selects, refuses and leaves unknown, when the statistics
-/// decide it.
+/// decide it. Statistics say how many rows, never which, so the three counts are independent and
+/// each carries its own decided flag; combining two verdicts is three-valued logic over counts,
+/// which only closes when one side is uniform or the two sides are unknown on the very same rows,
+/// the case a verdict tracks by naming the column whose nulls its unknowns are. An undecided count
+/// is always safe here, whereas a wrong one would be a wrong answer.
 /// </summary>
 internal readonly struct RangeVerdict
 {

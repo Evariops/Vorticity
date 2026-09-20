@@ -1,11 +1,3 @@
-// Phase 1 contract §12.1 and docs/07-dotnet-mapping.md - the public face of the library.
-//
-// THE LIFETIME CONTRACT, restated at every entry point below because it is the sharp edge of the
-// whole design (docs/07-dotnet-mapping.md §4): every span borrowed from a batch is invalid after
-// that batch is disposed. The column views are `readonly ref struct`s so the compiler rejects most
-// of the ways a caller would outlive the batch; the remaining hole - reaching through a stale view
-// after Dispose - is closed here by a disposed flag every accessor checks, so the failure is an
-// ObjectDisposedException rather than a read of recycled pool memory.
 using System;
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
@@ -29,12 +21,15 @@ namespace Vorticity.Columns;
 /// string's UTF-8 bytes - points into memory the batch's scan owns. Disposing the batch releases
 /// that memory and every borrowed span becomes invalid. Callers who need a value to outlive the
 /// batch copy it explicitly (<see cref="BinaryColumn.GetString"/> is the one accessor that copies
-/// for you).
+/// for you). The column views are <c>readonly ref struct</c>s, so the compiler rejects most of the
+/// ways a view could outlive its batch; the one it cannot catch, reaching through a stale view
+/// after <see cref="Dispose"/>, is caught by a flag every accessor tests, so the failure is an
+/// <see cref="ObjectDisposedException"/> and not a read of recycled pool memory.
 /// </para>
 /// <para>
-/// <b>Affinity.</b> A batch is affine to a single consumer and is not thread-safe
-/// (docs/09-contracts.md §1). Disposing it resets the scan's arenas, so a batch cannot outlive its
-/// successor: a caller that wants two batches alive at once must copy.
+/// <b>Affinity.</b> A batch is affine to a single consumer and is not thread-safe. Disposing it
+/// resets the scan's arenas, so a batch cannot outlive its successor: a caller that wants two
+/// batches alive at once must copy.
 /// </para>
 /// </remarks>
 public sealed class RecordBatch : IDisposable
@@ -48,8 +43,8 @@ public sealed class RecordBatch : IDisposable
     private readonly int _fieldCount;
     private readonly bool _isTabular;
 
-    // Allocated on the first NullCount() of a Bitmap column and never before: a scan that does not
-    // ask for null counts stays allocation-free per batch (docs/03-architecture.md §4 invariant 1).
+    // Allocated on the first NullCount() of a bitmap column and never before, so a scan that does
+    // not ask for null counts stays allocation-free per batch.
     private int[]? _nullCounts;
     private bool _disposed;
 
@@ -105,8 +100,8 @@ public sealed class RecordBatch : IDisposable
         _rowCount = root.Length;
         _startRow = startRow;
 
-        // docs/07-dotnet-mapping.md §5: a non-struct root is exposed as itself, not faked into a
-        // one-column table with an invented name.
+        // A non-struct root is exposed as itself, not faked into a one-column table with an
+        // invented name.
         _isTabular = !_schema.IsDefault && _schema.Kind == DTypeKind.Struct;
         _fieldCount = _isTabular ? _schema.FieldCount : 1;
 
@@ -120,7 +115,7 @@ public sealed class RecordBatch : IDisposable
 
     /// <summary>
     /// The dtype of this batch's root. For a projected scan it is the projected schema, not the
-    /// file's. May be any dtype, including a non-struct one (docs/07-dotnet-mapping.md §5).
+    /// file's. May be any dtype, including a non-struct one.
     /// </summary>
     public DType Schema
     {
@@ -162,8 +157,7 @@ public sealed class RecordBatch : IDisposable
     }
 
     /// <summary>
-    /// Number of columns: the struct root's field count, or 1 for a non-struct root
-    /// (docs/07-dotnet-mapping.md §5).
+    /// Number of columns: the struct root's field count, or 1 for a non-struct root.
     /// </summary>
     public int FieldCount
     {
@@ -190,12 +184,12 @@ public sealed class RecordBatch : IDisposable
 
     /// <summary>
     /// The name of column <paramref name="index"/>, or <see langword="null"/> for a non-struct
-    /// root - we do not invent a synthetic name, because a round trip through our own writer would
-    /// then produce a different schema than the input (docs/07-dotnet-mapping.md §5).
+    /// root: a synthetic name is not invented, because a round trip through the writer would then
+    /// produce a different schema than the input.
     /// </summary>
     /// <param name="index">0-based column index, below <see cref="FieldCount"/>.</param>
     /// <returns>The field name, or <see langword="null"/> when the root is not a struct.</returns>
-    /// <remarks>ALLOCATES a string. <see cref="StructColumn.GetFieldNameUtf8"/> does not.</remarks>
+    /// <remarks>Allocates a string. <see cref="StructColumn.GetFieldNameUtf8"/> does not.</remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
     /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
     public string? GetFieldName(int index)
@@ -281,16 +275,14 @@ public sealed class RecordBatch : IDisposable
     /// <remarks>
     /// <para>
     /// <b>What it is for.</b> A consumer that merges several batches into one ordered stream — a
-    /// k-way merge across the objects of a dataset (docs/13-dataset.md §5.3), a top-k, a re-chunk —
-    /// emits <em>runs</em> of rows rather than whole batches, and has no way to say "these rows of
-    /// that batch" without one. Writing a second one outside this assembly to say it would be a
-    /// second implementation of the one below, which is the thing to avoid.
+    /// k-way merge across the objects of a dataset, a top-k, a re-chunk — emits <em>runs</em> of
+    /// rows rather than whole batches, and has no way to say "these rows of that batch" without
+    /// one. Writing a second one outside this assembly would be a second implementation of this.
     /// </para>
     /// <para>
     /// <b>What it costs: no row.</b> The window narrows each record's buffers into views onto this
     /// batch's storage — a primitive becomes a buffer slice, a bitmap a slice and a bit offset — so
-    /// the cost follows the nodes of the schema and not the rows, and no byte moves. Half a million
-    /// rows of one <c>i64</c> column window in tens of nanoseconds.
+    /// the cost follows the nodes of the schema and not the rows, and no byte moves.
     /// </para>
     /// <para>
     /// <b>Lifetime.</b> The window lives in <em>this</em> batch's arena: it is valid until this
@@ -308,10 +300,9 @@ public sealed class RecordBatch : IDisposable
         ArgumentOutOfRangeException.ThrowIfNegative(length);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(start + (long)length, _rowCount);
 
-        // A contiguous window is a slice and not a gather. Handing the row numbers start, start+1,
-        // ... to the filter says "these, in order" at the price of copying every value named, a
-        // millisecond for half a million i64; narrowing the buffers into views says the same thing
-        // and moves nothing.
+        // A contiguous window is a slice and not a gather. Handing the row numbers to the filter
+        // would say the same thing at the price of copying every value named; narrowing the
+        // buffers into views moves nothing.
         int root = CanonicalSlice.SliceAcross(_arena, _arena, _root, start, length);
         return new RecordBatch(_arena, root, _startRow + start);
     }
@@ -326,10 +317,9 @@ public sealed class RecordBatch : IDisposable
     /// <para>
     /// <b>What it is for.</b> A consumer that needs a column to do its own work and was not asked
     /// for it drops it before handing the batch on: a k-way merge across the objects of a dataset
-    /// compares rows by their key whatever the caller selected (docs/13-dataset.md §6.6). The scan
-    /// already does exactly this for the columns a filter needed (docs/03-architecture.md §3.4,
-    /// "Where then Project"), and this is that step reachable from outside the scan rather than a
-    /// second copy of it.
+    /// compares rows by their key whatever the caller selected. The scan already does exactly this
+    /// for the columns a filter needed, and this is that step reachable from outside the scan
+    /// rather than a second copy of it.
     /// </para>
     /// <para>
     /// <b>What it costs: no value.</b> Every kept column's node is reused as it is and only the
@@ -486,10 +476,8 @@ public sealed class RecordBatch : IDisposable
                 $"offset {bitOffset}.");
         }
 
-        // Counted eight bytes at a time, with the two partial ends masked once rather than tested
-        // per byte -- PERF-AUDIT §4.2 asks for every bit-at-a-time site to arrive at this one
-        // kernel, and this loop carried an `i == firstByte` and an `i == lastByte` compare through
-        // all 125 000 iterations of a million-row bitmap.
+        // Every bit-at-a-time count goes through the one kernel, which walks eight bytes at a time
+        // and masks the two partial ends once instead of testing for them on every byte.
         return length - Arrays.Decoders.Canonical.BitmapKernels.CountSet(bits, bitOffset, length);
     }
 

@@ -1,11 +1,3 @@
-// What a cursor walks - docs/12-index-reads.md §9's `IKeySource` and `MergeCursor`, folded into one
-// type per source.
-//
-// ONE WALKER PER SOURCE, BEHIND ONE SURFACE. The spec splits a source (bounds, locate, entry) from a
-// merge cursor over it; the two sources that deliver rows are too unlike for that split to pay: a
-// sorted column is one contiguous run where a step is an addition and a rank a subtraction, and
-// sorted runs are a heap of positions. So each source walks itself, and `KeyCursor` keeps the
-// argument checks and the lifetime, which are the same for both.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,6 +6,12 @@ using Vorticity.Expressions;
 namespace Vorticity.Keys;
 
 /// <summary>One column's entries in key order, and a position among them.</summary>
+/// <remarks>
+/// Each source both locates and walks itself, rather than a common merge cursor driving a narrower
+/// source surface: a sorted column is one contiguous run, where a step is an addition and a rank a
+/// subtraction, while sorted runs are a heap of positions, and the two have almost nothing to share.
+/// What they do share -- argument checking and lifetime -- lives in <see cref="KeyCursor"/>.
+/// </remarks>
 internal abstract class KeySource : IAsyncDisposable
 {
     /// <summary>The column's comparison domain, which every seek key is in.</summary>
@@ -25,7 +23,7 @@ internal abstract class KeySource : IAsyncDisposable
     /// <summary>The runs the source merges: 1 for a sorted column.</summary>
     internal abstract int Runs { get; }
 
-    /// <summary>Whether an entry can say which file row it came from (docs/12-index-reads.md §4.3).</summary>
+    /// <summary>Whether an entry can say which file row it came from.</summary>
     internal virtual bool HasRows => true;
 
     /// <summary>What a composite key's bytes follow; null for a single column.</summary>
@@ -84,6 +82,5 @@ internal abstract class KeySource : IAsyncDisposable
     /// <summary>Leaves no entry current.</summary>
     internal abstract void Invalidate();
 
-    /// <inheritdoc/>
     public abstract ValueTask DisposeAsync();
 }

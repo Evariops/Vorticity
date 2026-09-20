@@ -1,24 +1,16 @@
-// The row indices a `take` asks for - docs/01-scope.md F5.
-//
-// Sorted and deduplicated ONCE, when the scan is built, so that everything downstream is a binary
-// search rather than a membership test. A caller's order is not preserved and the documentation
-// says so: a scan produces batches in file order, and reordering rows to match an arbitrary index
-// list would mean buffering the whole result.
-//
-// What this buys is the half of F5 that dominates on object storage. The splits an index list never
-// touches are skipped before any segment is registered, so reading a thousand scattered rows out of
-// a billion reads the splits those rows live in and nothing else. What it does NOT yet buy is the
-// other half: within a touched split the whole split is decoded and the wanted rows gathered out of
-// it, rather than the decoders taking the index list into the encodings themselves. That per-encoding
-// specialization -- take on `dict` codes, a binary search in `runend`, positional access into
-// `fastlanes.bitpacked` -- is recorded in docs/90-registry.md as the work it is.
 using System;
 
 using Vorticity.File;
 
 namespace Vorticity.Scan;
 
-/// <summary>A sorted, deduplicated list of the rows a scan should return.</summary>
+/// <summary>
+/// The row indices a take asks for, sorted and deduplicated once when the scan is built so that
+/// everything downstream is a binary search rather than a membership test. The caller's order is
+/// not preserved: a scan yields batches in file order, and matching an arbitrary index list would
+/// mean buffering the whole result. Splits the list never touches are skipped before any segment is
+/// registered; a split it does touch is decoded whole and the wanted rows gathered out of it.
+/// </summary>
 internal sealed class RowSelection
 {
     private readonly long[] _rows;

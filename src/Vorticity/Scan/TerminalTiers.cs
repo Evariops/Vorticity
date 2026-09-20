@@ -1,13 +1,13 @@
-// The tiers a terminal is pushed through - docs/12-index-reads.md §5.2 and §5.3 - as switches,
-// because the property that makes a terminal testable is that a wrong proof is a wrong answer:
-// §11 runs every count and every extreme with each tier forced off in turn and asserts that the
-// numbers agree. Internal, and meant for the tests; a caller who wants a slower answer has
-// WithPruning(false).
 using System;
 
 namespace Vorticity.Scan;
 
-/// <summary>Which proofs a terminal may take before decoding.</summary>
+/// <summary>
+/// Which proofs a terminal may take before decoding. The tiers are switches because a wrong proof
+/// is a wrong answer: the tests run every count and every extreme with each tier forced off in
+/// turn and require the numbers to agree. A caller who merely wants the slower answer turns
+/// pruning off instead.
+/// </summary>
 [Flags]
 internal enum TerminalTiers
 {
@@ -30,15 +30,15 @@ internal enum TerminalTiers
     Decode = 4,
 
     /// <summary>
-    /// The file's own statistic answers a <c>Min</c> or <c>Max</c> over the whole file, when it
-    /// is <c>Exact</c> (§5.3, first resolution).
+    /// The file's own statistic answers a <c>Min</c> or <c>Max</c> over the whole file, when that
+    /// statistic is <c>Exact</c>.
     /// </summary>
     FileStatistic = 8,
 
     /// <summary>
     /// The zone map's bounds answer a <c>Min</c> or <c>Max</c> over a whole zone: an
     /// <c>Exact</c> bound is the answer, an <c>Inexact</c> one a candidate to decode only when it
-    /// could beat the best (§5.3, second resolution).
+    /// could beat the best found so far.
     /// </summary>
     ZoneBounds = 16,
 

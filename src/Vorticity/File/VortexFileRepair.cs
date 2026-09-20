@@ -1,16 +1,3 @@
-// The repair of a torn append - docs/11-write-strategy.md §3.8, docs/10-indexes.md §8.
-//
-// AN APPEND IS NOT ATOMIC, AND ITS TEAR IS ALWAYS AT THE END. Nothing an append writes precedes the
-// old end of file, so a file whose tail is invalid holds, somewhere before its end, the complete
-// file it was before: its postscript and its EOF marker are still there, untouched. The repair
-// walks back from the end for an EOF marker, opens the prefix that ends with it as a file, and
-// truncates to the first prefix that opens. The old directory's `previous_eof` is not needed to
-// find it -- the torn directory could not be read anyway -- and the walk also finds the file of an
-// append that tore after its postscript but before its last flush.
-//
-// THE SAME WALK OPENS A TORN FILE WITHOUT REPAIRING IT (13 §12, step 25): `VortexFile.OpenAsync`
-// falls back to the prefix it finds, reads it as the file, and records the tear in
-// `VortexFile.TornTail`. Nothing is written; the repair stays the caller's decision.
 using System;
 using System.Buffers.Binary;
 using System.IO;
@@ -34,7 +21,18 @@ public sealed record VortexRepairResult(long OriginalLength, long Length, bool T
 /// <param name="Reason">Why the tail did not open.</param>
 public sealed record VortexTornTail(long FileLength, long ValidLength, string Reason);
 
-/// <summary>Truncates a file whose tail a torn append left invalid.</summary>
+/// <summary>
+/// Truncates a file whose tail a torn append left invalid. An append is not atomic and writes
+/// nothing before the old end of file, so a file with an invalid tail still holds, somewhere
+/// before its end, the complete file it was before, marker included: walking back for the last
+/// end-of-file record and keeping the longest prefix that opens recovers it, without needing the
+/// torn directory that could not be read anyway.
+/// </summary>
+/// <remarks>
+/// The same walk backs <c>VortexFile.OpenAsync</c>, which reads the prefix it finds and records
+/// the tear in <see cref="VortexFile.TornTail"/> without writing anything; truncating stays the
+/// caller's decision.
+/// </remarks>
 public static class VortexFileRepair
 {
     private const int Window = 1 << 20;

@@ -1,14 +1,3 @@
-// `ListContains` over one decoded batch - the question docs/10-indexes.md §5.1 gives a Bloom filter
-// over a list's elements, with the three-valued rule `ListContainsExpr` states.
-//
-// THE ELEMENTS ARE COMPARED ONCE, OVER THE WINDOW THE BATCH'S ROWS NAME, and each row then looks
-// for a `true` in its own range. A batch is a slice of a chunk and shares the chunk's elements
-// whole (`CanonicalSlice`), so comparing the whole child would make every batch cost its chunk:
-// the defect `FlatLayoutDecodeCountTests` holds the scan to, here on the filter's side.
-//
-// The comparison is `ComparisonKernels.Compare`'s equality, so an element is equal exactly when
-// `element = literal` would select it: IEEE for floats, the column's own width for integers, bytes
-// for strings. A null element compares unknown there and is simply not a match here.
 using System;
 using System.Buffers;
 using System.Runtime.InteropServices;
@@ -20,7 +9,13 @@ using Vorticity.Types;
 
 namespace Vorticity.Compute;
 
-/// <summary>Per-row evaluation of a list predicate.</summary>
+/// <summary>
+/// Per-row evaluation of a list predicate. The elements are compared once, over the window the
+/// batch's rows name, and each row then looks for a match in its own range: a batch is a slice of a
+/// chunk and shares the chunk's elements whole, so comparing the whole child would make every batch
+/// cost its chunk. Equality is the comparison kernel's, so an element matches exactly when
+/// <c>element = literal</c> would select it, and a null element is not a match.
+/// </summary>
 internal static class ListKernels
 {
     /// <summary>Evaluates <c>list_contains(column, literal)</c> into <paramref name="destination"/>.</summary>
@@ -138,8 +133,8 @@ internal static class ListKernels
         where TOffset : unmanaged
         where TSize : unmanaged
     {
-        // EVERYTHING READ OFF THE NODE BEFORE THE SLICE BELOW APPENDS RECORDS: a node read across
-        // that is a use-after-move (`ChunkCompactor`). The spans are over buffers, which do not move.
+        // Everything is read off the node before the slice below appends records: a node read across
+        // that append is a use-after-move. The spans are over buffers, which do not move.
         int rows = destination.Length;
         int elements = node.ElementsIndex;
         int childRows = arena.GetNode(elements).Length;

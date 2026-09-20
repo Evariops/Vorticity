@@ -1,31 +1,3 @@
-// The container of an index kept outside its file - docs/13-dataset.md §6.4: a fragment is "one
-// entry's runs over one block range of one object, in the format of the in-file runs ... with its
-// own encoding table ... so a fragment decodes with no access to the data object's footer".
-//
-//   "VXIX"                        magic
-//   run payloads                  array blobs, aligned like a data file's segments
-//   directory                     the IndexDirectory message, version byte first, with the indexed
-//                                 file's length, identity, store token and XXH3-128, and the
-//                                 container's own encoding table
-//   u64 directory offset, u32 directory length, u32 version, "VXIX"      the trailer, 20 bytes
-//
-// IT WAS THE SIDECAR'S, and 13 §12 retired the word: "the sidecar is one fragment in one commit
-// object: it is not a separate thing any more". The `.idx` file beside a data file went with step
-// 42d; the container stayed, because a fragment is exactly it, and every offset in it counts from
-// its own first byte, so it is read from wherever it is kept -- a commit object's range, bytes in
-// memory -- by the same code.
-//
-// A FRAGMENT IS BOUND TO ONE VERSION OF ONE FILE (13 §7, step 26). A file rewritten under the same
-// key would make every run a lie about rows it no longer has, so a mismatch refuses the fragment
-// whole -- an index is a hint, and a stale one is none. The binding is what a reader can check
-// without reading the file: its length and its identity, which every write and every append mints
-// anew, from the tail the open already holds. A file without an identity -- written by another
-// writer -- is bound by the store's token instead, its length and modification time on a file
-// system, which is a heuristic and is said to be one. A container that names neither binds by
-// nothing a reader checks, and is refused.
-//
-// THE FILE'S HASH IS THE INDEXER'S, when it knows it: no reader computes it, and `vxdump --verify`
-// compares it offline.
 using System;
 using System.Buffers.Binary;
 using System.IO;
@@ -38,7 +10,13 @@ using Vorticity.IO;
 
 namespace Vorticity.Indexes;
 
-/// <summary>The container an index fragment is written in (docs/13-dataset.md §6.4).</summary>
+/// <summary>
+/// The container an index fragment is written in: run payloads, then the directory, then a trailer
+/// naming it. It carries its own encoding table and every offset in it counts from its own first
+/// byte, so the same code reads it wherever it is kept -- a range of a larger object, or bytes in
+/// memory. Its directory binds it to one version of one file, because a file rewritten under the
+/// same key would leave every run describing rows that are gone.
+/// </summary>
 internal static class IndexContainer
 {
     /// <summary>The magic at both ends.</summary>
