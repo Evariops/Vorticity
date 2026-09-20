@@ -859,10 +859,10 @@ internal static class ThroughputCheck
         new("dict_u64_codes", 0.84, 0.015),   // raised deliberately: three processes never measured under it
         new("dict_u8_codes", 1.00, 0.036),   // raised deliberately: three processes never measured under it
         new("ext", 0.068, 0.024),   // 3 passes, spread 0.063-0.068; was 0.070, -3.2%
-        new("fastlanes_bitpacked", 0.60, 0.038),   // axe entier, 3 passes, spread 0.59-0.60; was 0.73. 7i : la transformation à la charge ; 7k : les compteurs de largeurs alternés (0.55-0.57 en sous-ensemble, B8)
-        new("fastlanes_bitpacked_patched_no_chunk_offsets", 0.44, 0.040),   // raised deliberately: three processes never measured under it
+        new("fastlanes_bitpacked", 0.46, 0.009),   // 3 passes, spread 0.45-0.46; was 0.60, -23.6% : la compression d'un bloc passe par les vecteurs
+        new("fastlanes_bitpacked_patched_no_chunk_offsets", 0.32, 0.034),   // 3 passes, spread 0.31-0.32; was 0.44, -26.7% : idem
         new("fastlanes_delta", 0.18, 0.027),   // 3 passes, spread 0.17-0.18; was 0.19, -2.8%
-        new("fastlanes_for", 0.69, 0.103),   // raised deliberately: three processes never measured under it
+        new("fastlanes_for", 0.59, 0.015),   // 3 passes, spread 0.58-0.59; was 0.69, -14.4% : la même vectorisation, sous le cadre de référence
         new("fastlanes_rle", 0.28, 0.011),   // 3 passes, spread 0.26-0.28; was 0.88, -68.5% (PERF-GAPS W3.1 : la marche des frontieres de runs, typee et vectorisee)
         new("fixed_size_list", 0.065, 0.022),   // 3 passes, spread 0.064-0.065; was 0.12, -45.5% (28a, 2026-09-17 : les éléments résumés à l'ingestion, la marche des pas par registres)
         new("fsst", 0.26, 0.013),   // raised deliberately: three processes never measured under it
