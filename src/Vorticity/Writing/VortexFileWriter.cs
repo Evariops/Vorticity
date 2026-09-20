@@ -787,6 +787,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <summary>
     /// Emits whole multiples of <see cref="_rowBlock"/> rows and carries the remainder forward.
     /// </summary>
+    /// <remarks>
+    /// THE CONCATENATION IS THE SECOND COPY THE PENDING ROWS PAY, and what it would take to make it
+    /// a borrow is an append buffer per column, where every batch lays its bytes down in order --
+    /// with the rule below surviving it, that what is carried is cut from one batch and never from
+    /// the concatenation. Doubling both concatenations here prices that design: on a million-row
+    /// write it reads 1,084 then 1,075 on `chunked`, whose whole axis is 2,3 ms and whose interval
+    /// is as wide as the effect, 1,025 on `table_mixed`, whose axis is 91, and 1,006 on `fsst`.
+    /// Two and a half per cent where the time actually is.
+    /// </remarks>
     private async ValueTask EmitBlockAsync(CancellationToken cancellationToken)
     {
         ScanContext from = _transit![_current]!;
