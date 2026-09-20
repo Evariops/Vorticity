@@ -52,6 +52,13 @@ public sealed class CountingSegmentSource(ISegmentSource inner, bool ownsInner =
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// The walk over the slots here is the second one the set gets, and it is what a decorator
+    /// costs. What is counted is the reads the inner source is about to issue, which is the set's
+    /// unfilled slots; only the inner source walks them again to coalesce and read, and by then it
+    /// has filled them, so there is no moment at which one walk could answer both. Counting after
+    /// the call would count nothing, every slot being filled by then.
+    /// </remarks>
     public ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(requests);
