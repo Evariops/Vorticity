@@ -1,14 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- 0.x, like Vorticity.RowEncoding and for a related reason: docs/13-dataset.md describes a
-       format this repository is the first to write, and §15 still lists decisions left open. The
-       core stays 1.x and knows nothing of this package; this package references the core, and now
-       the row encoding too, which is the order a clustering key is kept in (§4.1). -->
+  <!-- Experimental, like Vorticity.RowEncoding and for a related reason: docs/13-dataset.md
+       describes a format this repository is the first to write, and §15 still lists decisions left
+       open. The core knows nothing of this package; this package references the core, and the row
+       encoding too, which is the order a clustering key is kept in (§4.1). -->
   <PropertyGroup>
     <RootNamespace>Vorticity.Dataset</RootNamespace>
     <AssemblyName>Vorticity.Dataset</AssemblyName>
-    <Version>0.1.0</Version>
-    <Description>A versioned dataset over an object store: immutable data and commit objects, a prolly tree of leaves, and the store seam an S3 library implements. Experimental format, versioned 0.x.</Description>
+    <PackageId>Vorticity.Dataset</PackageId>
+    <IsPackable>true</IsPackable>
+    <PackageTags>$(PackageTags);dataset;object-store;versioning</PackageTags>
+    <Description>A versioned dataset over an object store: immutable data and commit objects, a prolly tree of leaves, and the store seam an S3 library implements. The format is experimental and this repository is the first to write it.</Description>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 

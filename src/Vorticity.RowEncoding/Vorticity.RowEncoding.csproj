@@ -1,16 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- 0.x ON PURPOSE, and not a placeholder. docs/09-contracts.md §3: upstream marks the row
-       format experimental and reserves the right to change its byte layout between releases.
-       Binding it into the 1.x core would force a choice between breaking our own semver to
+  <!-- A package of its own, deliberately. docs/09-contracts.md §3: upstream marks the row format
+       experimental and reserves the right to change its byte layout between releases. Folding it
+       into the core would force a choice between breaking the core's own compatibility promise to
        follow upstream and diverging from Rust, which would cost the byte-exactness that is this
-       feature's entire point. The version that actually matters to a user is the pair
-       (package version, Vortex release transcribed) - see RowEncoding.VortexVersion. -->
+       feature's entire point. The release these keys transcribe is RowEncoder.VortexVersion. -->
   <PropertyGroup>
     <RootNamespace>Vorticity.RowEncoding</RootNamespace>
     <AssemblyName>Vorticity.RowEncoding</AssemblyName>
-    <Version>0.1.0</Version>
-    <Description>Byte-sortable row encoding for Vortex arrays: columns to row keys whose memcmp order is tuple order. Experimental format, versioned 0.x.</Description>
+    <PackageId>Vorticity.RowEncoding</PackageId>
+    <IsPackable>true</IsPackable>
+    <PackageTags>$(PackageTags);row-encoding;byte-sortable;key-encoding</PackageTags>
+    <Description>Byte-sortable row encoding for Vortex arrays: columns to row keys whose memcmp order is tuple order. Upstream marks the format experimental and may change its byte layout between releases.</Description>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 

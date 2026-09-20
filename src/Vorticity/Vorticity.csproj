@@ -3,6 +3,9 @@
   <PropertyGroup>
     <RootNamespace>Vorticity</RootNamespace>
     <AssemblyName>Vorticity</AssemblyName>
+    <PackageId>Vorticity</PackageId>
+    <IsPackable>true</IsPackable>
+    <PackageTags>$(PackageTags);simd;zero-copy;aot</PackageTags>
     <Description>Pure .NET implementation of the Vortex columnar file format, with no third-party dependency.</Description>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>

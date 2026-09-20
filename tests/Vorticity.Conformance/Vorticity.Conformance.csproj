@@ -3,7 +3,6 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <RootNamespace>Vorticity.Conformance</RootNamespace>
-    <IsPackable>false</IsPackable>
     <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
     <TestingPlatformCaptureOutput>false</TestingPlatformCaptureOutput>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>

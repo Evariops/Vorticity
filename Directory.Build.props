@@ -29,4 +29,34 @@
     <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
   </PropertyGroup>
 
+  <!-- Package metadata, shared by the three libraries. Nothing here sets a version: nothing has
+       been published, so nothing carries a number, and the job that publishes passes one. A local
+       `dotnet pack` therefore produces the SDK's default 1.0.0, which is a file name and not a
+       claim. Not packable by default either, so a project has to ask: the three libraries do, and
+       the benchmarks, the tools and the tests never will. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <Authors>Raphaël Ducom</Authors>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>vortex;columnar;file-format;analytics</PackageTags>
+    <RepositoryType>git</RepositoryType>
+    <!-- The repository has no remote, so there is no URL to write down. PublishRepositoryUrl reads
+         RepositoryUrl off the remote once there is one; PackageProjectUrl has no equivalent and is
+         left unset rather than pointed at a guess. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <!-- Both files sit at the root and belong in every package: the readme because NuGet renders it
+       on the package page, NOTICE because Apache-2.0 §4(d) requires it to travel with the work.
+       The Pack metadata is inert wherever IsPackable stays false. -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="/" Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)NOTICE" Pack="true" PackagePath="/" Visible="false" />
+  </ItemGroup>
+
 </Project>
