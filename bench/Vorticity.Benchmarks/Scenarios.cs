@@ -58,7 +58,8 @@ internal static class Scenarios
             "projected",
             "projected scan, 1 of 5 columns",
             ScanProjected,
-            p => RustReader.Require(RustReader.ScanProjected(p, Field), "projected scan")),
+            p => RustReader.Require(
+                RustReader.ScanProjectedCanonical(p, Field), "projected scan")),
         new Scenario(
             "take",
             "scattered take, 64 of 64 splits",

@@ -148,8 +148,9 @@ internal static class RatioCheck
     ///     projected scan          0.514   0.392
     ///     open to first batch     0.093   0.060
     ///
-    /// (The full-scan row is from before the axis was made like-for-like; it now reads 0.536,
-    /// because the reference side canonicalizes and the reader side got faster.)
+    /// (Both the full-scan and the projected row are from before those axes were made
+    /// like-for-like: the reference side now canonicalizes on each, and the reader side got
+    /// faster.)
     ///
     /// The two that agree are the long axis and the trivial one; the two that do not are short
     /// managed paths measured beside a native call an order of magnitude longer. Both estimators
@@ -157,14 +158,15 @@ internal static class RatioCheck
     /// one path with the caches to itself; this reports a path sharing a process with other work,
     /// which is the case a gate should defend. Neither figure should be quoted as the other.
     ///
-    /// THERE ARE TWO FULL-SCAN AXES, AND THEY MEASURE DIFFERENT QUESTIONS. Upstream's scan hands
-    /// back arrays in the file's own encodings and `len()` answers from their metadata, so nothing
-    /// is decompressed; the .NET reader has no lazy state, because `CanonicalArena` is the only
-    /// representation it has. "full scan" therefore drives the Rust side through
-    /// `execute::&lt;Canonical&gt;`, which is the comparison a decoder ratio has to be built on.
-    /// "full scan, upstream lazy" keeps the old call beside it, because "how long to get a stream
-    /// of arrays you may never fully read" is a real question about a real API -- it just is not
-    /// the same question, and quoting one as the other is what this pair exists to prevent.
+    /// THE SCAN AXES COME IN PAIRS, AND EACH PAIR MEASURES TWO DIFFERENT QUESTIONS. Upstream's scan
+    /// hands back arrays in the file's own encodings and `len()` answers from their metadata, so
+    /// nothing is decompressed; the .NET reader has no lazy state, because `CanonicalArena` is the
+    /// only representation it has. "full scan" and "projected scan, 1 of 5 columns" therefore drive
+    /// the Rust side through `execute::&lt;Canonical&gt;`, which is the comparison a decoder ratio
+    /// has to be built on. "full scan, upstream lazy" and "projected scan, upstream lazy" keep the
+    /// counting calls beside them, because "how long to get a stream of arrays you may never fully
+    /// read" is a real question about a real API -- it just is not the same question, and quoting
+    /// one as the other is what these pairs exist to prevent.
     /// </remarks>
     private static readonly Axis[] Axes =
     [
@@ -176,6 +178,10 @@ internal static class RatioCheck
             ScanAll,
             p => RustReader.Require(RustReader.ScanAll(p), "scan")),
         FromScenario("projected"),
+        new Axis(
+            "projected scan, upstream lazy",
+            Scenarios.ScanProjected,
+            p => RustReader.Require(RustReader.ScanProjected(p, Field), "projected scan")),
         new Axis(
             "open to first batch",
             FirstBatch,
@@ -255,7 +261,7 @@ internal static class RatioCheck
                 "projected scan, 1 of 50 columns",
                 p => Vorticity.Bench.Scenarios.ScenarioSet.ScanProjectedField(p, WideField),
                 p => RustReader.Require(
-                    RustReader.ScanProjected(p, WideField), "projected scan"),
+                    RustReader.ScanProjectedCanonical(p, WideField), "projected scan"),
                 wide),
         ];
     }
@@ -383,7 +389,8 @@ internal static class RatioCheck
     {
         ["full scan"] = new(0.335, 2, 0.004),
         ["full scan, upstream lazy"] = new(0.460, 2, 0.004),
-        ["projected scan, 1 of 5 columns"] = new(0.443, 9, 0.039),
+        ["projected scan, 1 of 5 columns"] = new(0.370, 9, 0.029),   // 3 passes, spread 0.360-0.370; was 0.443, -16.4%: the reference side now decodes the column it was asked for
+        ["projected scan, upstream lazy"] = new(0.409, 9, 0.007),   // first calibration, 3 passes, spread 0.406-0.409
         ["open to first batch"] = new(0.085, 10, 0.052),
         ["open, footer only"] = new(0.776, 26, 0.049),
         ["read and write back"] = new(0.322, 1, 0.028),
@@ -395,7 +402,7 @@ internal static class RatioCheck
         ["rewritten high card, reference's"] = new(0.878, 28, 0.024),
         ["rewritten high card, ours"] = new(0.915, 20, 0.005),
         ["full scan, 1M table"] = new(0.057, 1, 0.049),
-        ["projected scan, 1 of 50 columns"] = new(0.104, 10, 0.062),   // 3 passes, spread 0.098-0.104; was 0.119, -12.3%
+        ["projected scan, 1 of 50 columns"] = new(0.103, 10, 0.102),   // 3 passes, spread 0.092-0.103; was 0.104, -1.3%: the reference side now decodes, which costs it 6% on a file of fifty columns
         ["key order, sorted column, 1% band"] = new(0.683, 13, 0.040),
         ["key order, uncorrelated, 64 rows"] = new(1.148, 6, 0.160),
         ["count, exact cover, 1% band"] = new(0.633, 7, 0.047),

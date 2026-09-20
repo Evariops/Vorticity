@@ -162,12 +162,31 @@ internal static partial class RustReader
     [LibraryImport(Library, EntryPoint = "vxbench_scan_canonical_threads", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long ScanCanonicalThreads(string path, long threads);
 
-    /// <summary>Opens a file and scans one field of every batch.</summary>
+    /// <summary>Opens a file and scans one field of every batch, without decoding it.</summary>
     /// <param name="path">The file to scan, as a UTF-8 C string.</param>
     /// <param name="field">The root field to project.</param>
     /// <returns>The row count, or negative on failure.</returns>
+    /// <remarks>
+    /// The projected twin of <see cref="ScanAll"/>: the row count comes off the arrays' metadata
+    /// and the column stays in its file encoding. It answers "how long to get a stream of arrays
+    /// you may never fully read", which is a real question about a real API and not the question a
+    /// decoder ratio is built on -- that one is <see cref="ScanProjectedCanonical"/>.
+    /// </remarks>
     [LibraryImport(Library, EntryPoint = "vxbench_scan_projected", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long ScanProjected(string path, string field);
+
+    /// <summary>Opens a file, scans one field of every batch and canonicalizes it.</summary>
+    /// <param name="path">The file to scan, as a UTF-8 C string.</param>
+    /// <param name="field">The root field to project.</param>
+    /// <returns>The row count, or negative on failure.</returns>
+    /// <remarks>
+    /// The like-for-like projected scan, for the same reason <see cref="ScanCanonical"/> is the
+    /// like-for-like full scan: our reader materializes every column it delivers, so the reference
+    /// has to materialize the one it was asked for or the ratio measures decoding against not
+    /// decoding.
+    /// </remarks>
+    [LibraryImport(Library, EntryPoint = "vxbench_scan_projected_canonical", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial long ScanProjectedCanonical(string path, string field);
 
     /// <summary>Opens a file and reads one batch.</summary>
     /// <param name="path">The file to open, as a UTF-8 C string.</param>

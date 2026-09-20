@@ -169,9 +169,10 @@ and in the commits.
 
 ## The gates, and their ceilings
 
-* **`--ratio-check`** — twenty-four axes, ours against Rust, **interleaved against one clock** so
-  that drift is common to both arms. Nine on the dataset (full scan, full scan upstream-lazy,
-  projected, first batch, footer only, read-and-write-back, filtered 1 %, filtered half, scattered
+* **`--ratio-check`** — twenty-five axes, ours against Rust, **interleaved against one clock** so
+  that drift is common to both arms. Ten on the dataset (full scan, full scan upstream-lazy,
+  projected, projected upstream-lazy, first batch, footer only, read-and-write-back, filtered 1 %,
+  filtered half, scattered
   take); four `rewritten` ones that read a file **our writer produced** beside the reference's — the
   only place our own encoding choices are measured at all; two on key order and one on the exact
   count; six on predicates pushed into a string or a packed column (equality and prefix over `fsst`
@@ -179,7 +180,7 @@ and in the commits.
   has a ceiling in `RatioCheck.cs`; over it, non-zero exit. 56 s.
   A bare word narrows it to the axes whose name contains it — `-- --ratio-check write`, `--
   --ratio-check rewritten`, `-- --ratio-check string` — which is the difference between checking one
-  change and waiting for twenty-four axes.
+  change and waiting for twenty-five axes.
 
   **Do not pin tiered compilation for this gate.** `DOTNET_TieredCompilation=0` costs our side
   dynamic profile-guided optimization while the reference, being native, loses nothing: the same
