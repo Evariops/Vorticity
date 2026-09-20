@@ -93,32 +93,21 @@ internal static class ConstantCanonicalizer
             {
                 PType ptype = dtype.PType;
 
-                // PERF-AUDIT-v2.md Z1b, behind `VortexReadOptions.ConstantForm`. The element is
-                // written ONCE instead of `length` times: at a million rows of eight bytes that is
-                // eight bytes rather than eight megabytes. Measured on the 1M `constant` file, a
-                // full scan goes from 201 us to 144 -- a ratio of 0,716, so 28,4 % of that scan was
-                // tiling a value that never changes. R22 had predicted it: on that axis `Tile` is
-                // ENTIRELY bytes, +44,6 % when the work is doubled and nothing when only the calls
-                // are.
+                // The element is written ONCE instead of `length` times: at a million rows of eight
+                // bytes that is eight bytes rather than eight megabytes. A full scan of the 1M
+                // `constant` file goes from 201 us to 144 -- 28,4 % of it was tiling a value that
+                // never changes.
                 int bytes = ArrayDecodeContext.CheckedMultiply(
                     length, ptype.ByteWidth(), "constant values");
 
-                if (context.Options.ConstantForm)
-                {
-                    // The ceiling is charged against what the node stands for, not against the
-                    // eight bytes it stores: see `RequireStandsForWithinBudget`.
-                    CanonicalSupport.RequireStandsForWithinBudget(context, bytes);
+                // The ceiling is charged against what the node stands for, not against the
+                // eight bytes it stores: see `RequireStandsForWithinBudget`.
+                CanonicalSupport.RequireStandsForWithinBudget(context, bytes);
 
-                    int width = ptype.ByteWidth();
-                    Span<byte> element = stackalloc byte[width];
-                    scalar.WriteTo(element, ptype);
-                    return arena.AddConstant(dtype, length, validity, element);
-                }
-
-                VortexBuffer values = CanonicalSupport.AllocateUninitialized(
-                    context, bytes, Align, out Span<byte> writable);
-                scalar.WriteTo(writable, ptype);
-                return arena.AddPrimitive(dtype, length, validity, ptype, values);
+                int width = ptype.ByteWidth();
+                Span<byte> element = stackalloc byte[width];
+                scalar.WriteTo(element, ptype);
+                return arena.AddConstant(dtype, length, validity, element);
             }
 
             case DTypeKind.Decimal:
@@ -219,37 +208,8 @@ internal static class ConstantCanonicalizer
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             length, CanonicalSupport.ViewSize, "constant variant views");
 
-        if (context.Options.ConstantForm)
-        {
-            CanonicalSupport.RequireStandsForWithinBudget(context, viewBytes);
-            return arena.AddConstant(dtype, length, Validity.NonNullable, value);
-        }
-
-        VortexBuffer views = CanonicalSupport.AllocateUninitialized(
-            context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
-        if (length == 0)
-        {
-            return arena.AddVarBinView(dtype, 0, Validity.NonNullable, views, default);
-        }
-
-        Span<byte> first = writable[..CanonicalSupport.ViewSize];
-        if (value.Length <= CanonicalSupport.MaxInlineViewLength)
-        {
-            first.Clear();
-            CanonicalSupport.WriteInlineView(first, value);
-            RowKernels.Tile(writable, first);
-            return arena.AddVarBinView(dtype, length, Validity.NonNullable, views, default);
-        }
-
-        VortexBuffer data = CanonicalSupport.AllocateUninitialized(
-            context, value.Length, Align, out Span<byte> heap);
-        value.CopyTo(heap);
-        CanonicalSupport.WriteReferenceView(first, value.Length, value, bufferIndex: 0, offset: 0);
-        RowKernels.Tile(writable, first);
-
-        Span<VortexBuffer> single = stackalloc VortexBuffer[1];
-        single[0] = data;
-        return arena.AddVarBinView(dtype, length, Validity.NonNullable, views, single);
+        CanonicalSupport.RequireStandsForWithinBudget(context, viewBytes);
+        return arena.AddConstant(dtype, length, Validity.NonNullable, value);
     }
 
     private static int BuildDecimal(
@@ -316,50 +276,11 @@ internal static class ConstantCanonicalizer
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             length, CanonicalSupport.ViewSize, "constant views");
 
-        // PERF-AUDIT-v2.md Z1b, the string half. This is where the `variant` axis's 6.5x lives: a
-        // constant variant column is two constant BINARY columns, and tiling them is 2 x 1M views,
-        // 32 MB of buffer for two values that never change.
-        if (context.Options.ConstantForm)
-        {
-            CanonicalSupport.RequireStandsForWithinBudget(context, viewBytes);
-            return arena.AddConstant(dtype, length, validity, value);
-        }
-
-        VortexBuffer views = CanonicalSupport.AllocateUninitialized(
-            context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
-
-        if (value.Length <= CanonicalSupport.MaxInlineViewLength)
-        {
-            if (length > 0)
-            {
-                // WriteInlineView leaves the bytes past the value untouched, so the first view is
-                // cleared before it is written and then tiled -- the zero-fill of one 16-byte view
-                // rather than of the whole buffer.
-                Span<byte> first = writable[..CanonicalSupport.ViewSize];
-                first.Clear();
-                CanonicalSupport.WriteInlineView(first, value);
-                RowKernels.Tile(writable, first);
-            }
-
-            return arena.AddVarBinView(dtype, length, validity, views, default);
-        }
-
-        // The scalar's bytes live in the batch's ScalarStore, which is a managed array and may
-        // move; a VortexBuffer is a raw pointer, so the value is copied into arena memory once and
-        // every row references that.
-        VortexBuffer data = CanonicalSupport.AllocateUninitialized(
-            context, value.Length, Align, out Span<byte> heap);
-        value.CopyTo(heap);
-        if (length > 0)
-        {
-            Span<byte> first = writable[..CanonicalSupport.ViewSize];
-            CanonicalSupport.WriteReferenceView(first, value.Length, value, bufferIndex: 0, offset: 0);
-            RowKernels.Tile(writable, first);
-        }
-
-        Span<VortexBuffer> single = stackalloc VortexBuffer[1];
-        single[0] = data;
-        return arena.AddVarBinView(dtype, length, validity, views, single);
+        // The string half, and where the `variant` axis's 6.5x came from: a constant variant column
+        // is two constant BINARY columns, and tiling them was 2 x 1M views, 32 MB of buffer for two
+        // values that never change.
+        CanonicalSupport.RequireStandsForWithinBudget(context, viewBytes);
+        return arena.AddConstant(dtype, length, validity, value);
     }
 
     private static int BuildStruct(

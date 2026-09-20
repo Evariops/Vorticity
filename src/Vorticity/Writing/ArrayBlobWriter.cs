@@ -1475,11 +1475,11 @@ internal static class ArrayBlobWriter
     /// value is being byte-exact, and folding a size change into a memory refactor is how a
     /// regression hides behind an improvement.
     /// <para>
-    /// So the element is expanded back to the form the writer already emits, and the bytes are
-    /// identical by construction: with the switch off the canonicalizer tiles and the writer sees a
-    /// primitive; with it on the canonicalizer does not, and the writer tiles to the same buffer.
-    /// `ConstantFormTests.WritingBackIsByteIdenticalEitherWay` is what makes "by construction" a
-    /// measured fact rather than a claim.
+    /// So the element is expanded back to the form the writer already emits, and the file does not
+    /// depend on how the read stored the column: the canonicalizer keeps the element and the writer
+    /// tiles it to the buffer a primitive would have arrived in.
+    /// `ConstantFormTests.WritingBackIsDeterministic` is what makes that a measured fact rather
+    /// than a claim.
     /// </para>
     /// <para>
     /// THE EXPANSION ITSELF IS THE ARENA'S, not a second copy here. This used to tile the element

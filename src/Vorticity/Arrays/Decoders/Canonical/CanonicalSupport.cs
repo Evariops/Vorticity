@@ -187,8 +187,7 @@ internal static class CanonicalSupport
     /// <para>
     /// That asymmetry is the whole design of the constant form. It exists to save a CONSUMER from
     /// reading a million copies of one value; it was never meant to save a decoder from a side
-    /// table it has to walk. Recounted on 2026-09-18, this helper alone accounts for about 120 of
-    /// the 225 tests that turning <c>VortexReadOptions.ConstantForm</c> on used to break --
+    /// table it has to walk. This helper alone is why about 120 decoders need it --
     /// `vortex.onpair`'s and `vortex.fsst`'s `uncompressed_lengths`, `vortex.fsst`'s
     /// `codes_offsets`, `fastlanes.bitpacked`'s patch indices and `vortex.alp`'s `patch_values`.
     /// </para>

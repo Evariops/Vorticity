@@ -45,18 +45,16 @@ public enum CanonicalKind : byte
 
     /// <summary>One element and a row count: every row resolves to the same window.</summary>
     /// <remarks>
-    /// PERF-AUDIT-v2.md Z1b-c2a. The alternative is to TILE -- write the element once and double it
-    /// over the whole column -- so a million rows of eight bytes cost eight megabytes to say one
-    /// number. `ConstantFormBenchmarks` priced the three arms: build **~3 900x** at eight bytes and
-    /// **~8 400x** at sixteen, a scattered take **60x**, and the consumer -- the arm that could have
-    /// said no -- reads **6,5 % FASTER**, because one cache line is re-read where 512 KiB were
+    /// The alternative is to TILE -- write the element once and double it over the whole column --
+    /// so a million rows of eight bytes cost eight megabytes to say one number.
+    /// `ConstantFormBenchmarks` priced the two against each other: build **~3 900x** at eight bytes
+    /// and **~8 400x** at sixteen, a scattered take **60x**, and the consumer -- the side that could
+    /// have said no -- reads **6,5 % FASTER**, because one cache line is re-read where 512 KiB were
     /// walked.
     /// <para>
-    /// THIS IS THE DEFAULT PATH SINCE 2026-09-18. `ConstantCanonicalizer` emits it whenever
-    /// `VortexReadOptions.ConstantForm` is on, and it is on unless a caller turns it off (Z1b-c2c2,
-    /// closed). A DECODER AUTHOR THEREFORE MEETS THIS KIND ON THE ORDINARY PATH, which is the whole
-    /// reason this paragraph is here: the previous wording said the default still tiled, and a
-    /// decoder written against it would not have grown its arm.
+    /// THIS IS THE ONLY PATH: `ConstantCanonicalizer` emits it for every constant column, and there
+    /// is no longer an option that tiles instead. A DECODER AUTHOR THEREFORE MEETS THIS KIND ON THE
+    /// ORDINARY PATH, which is why this paragraph is here.
     /// </para>
     /// <para>
     /// WHERE IT ENDS, and it is only two places: <see cref="CanonicalNode.Values"/> and the
