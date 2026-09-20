@@ -2,7 +2,7 @@
 
 A Vorticity specification, written 2026-09-15 and revised the same day after a review of its
 first iteration (§10 lists what the review changed). It starts from the measurements in
-[WRITE-ARCHITECTURE.md](../WRITE-ARCHITECTURE.md) (§1, kept verbatim) and specifies the writer
+the `WRITE-ARCHITECTURE.md` journal (§1, kept verbatim) and specifies the writer
 that replaces today's trial encoder: one fused, typed pass per block of 8 192 rows that computes
 everything that must be exact and everything the chooser needs; verdicts by exact formula; one
 encoding pass into output written once; zones equal to blocks; index builders fed by the same
@@ -920,7 +920,7 @@ high-cardinality column without an index is probed on its first chunk only.
 
 ## 11. Sources
 
-Measurements and profiles: [WRITE-ARCHITECTURE.md](../WRITE-ARCHITECTURE.md) (2026-09-15).
+Measurements and profiles: the `WRITE-ARCHITECTURE.md` journal (2026-09-15).
 Read path: `src/Vorticity/Scan/{BatchAsyncEnumerable.cs,SplitPlan.cs,FilteredBatches.cs}`,
 `src/Vorticity/Compute/{ZonePruner.cs,FilterEvaluator.cs}`, `src/Vorticity/Expressions/`.
 Reference writer at 0.86.1: `vortex-file/src/strategy.rs`, `vortex-layout/src/layouts/{repartition.rs,
@@ -943,15 +943,18 @@ body above says otherwise, **this section is the one that is true**; the body is
 was argued, and several of its mechanisms were replaced on the way by something the measurements
 preferred. Code paths are under `src/Vorticity/`, test paths under `tests/Vorticity.Tests/`.
 
+Re-read against the code on **2026-09-20**, before publication. What moved since the audit carries
+that date where it is written down.
+
 | § | status | where |
 |---|---|---|
-| 2 The target | ✅ in substance; two rows ⤳ (below) | `Writing/VortexFileWriter.cs:561` (ingest before copy) |
+| 2 The target | ✅ in substance; two rows ⤳ (below) | `Writing/VortexFileWriter.cs:599` (ingest before copy) |
 | 3.0 `ColumnWriter` per leaf | ✅ | `Writing/ColumnWriter.cs:41`; `Writing/ChunkStats.cs` |
-| 3.1 Blocks, not batches | ✅ | `Writing/VortexFileWriter.cs:306` `PreferredBatchRows`, `:603` whole blocks |
+| 3.1 Blocks, not batches | ✅ | `Writing/VortexFileWriter.cs:321` `PreferredBatchRows`, `:603` whole blocks |
 | 3.2 The fused pass | ✅, field set amended | `Writing/BlockStats.cs:45`; `Writing/BlockStatsPass.cs` |
 | 3.2.1 Hashing | ✅ amended | `Writing/KeyHash.cs`; `Indexes/XxHash3Fixed.cs` |
 | 3.2.2 The distinct table | ✅ amended (R2, R5a-2, R5b-1, R6, R9) | `Writing/DistinctTable.cs:58`; `Writing/ColumnWriter.cs:608` |
-| 3.2.3 The second sweep | ⤳ superseded, same bytes | `Writing/BitPackPlan.cs:330` `FramedWidths` — an exact walk replaced the bound and its sweep (step 30) |
+| 3.2.3 The second sweep | ⤳ superseded, same bytes | `Writing/BitPackPlan.cs:335` `FramedWidths` — an exact walk replaced the bound and its sweep (step 30) |
 | 3.2.4 Nested columns | ✅ | `Writing/ColumnWriter.cs`; tests `Writing/ListElementStatisticsTests.cs` |
 | 3.3 Merging | ✅ | `Writing/ZoneMapWriter.cs`; `Writing/BlockStats.cs` `Merge`; `Writing/BloomTreeWriter.cs`; `Writing/KeyIndexBuilder.cs:132` |
 | 3.4.1–3.4.3 Choose | ✅ (order amended at step 30) | `Writing/ColumnCompressor.cs`; `Writing/ColumnWriter.cs` plan memory; tests `Writing/ChooserDifferentialTests.cs`, `Writing/PlanMemoryTests.cs` |
@@ -964,7 +967,7 @@ preferred. Code paths are under `src/Vorticity/`, test paths under `tests/Vortic
 | 4.3 Read side | ✅ merge-join; ❌ three by measurement (step 32) | `Indexes/KeyIndexPruner.cs` |
 | 5.1, 5.2 Guarantees, gates | ✅ | tests `Writing/WrittenSizeTests.cs`, `Indexes/ParquetBloomVectorTests.cs`; `bench/gate.sh` |
 | 5.3 Targets | ⬜ three of ten, owner the write axis (below) | — |
-| 6.1–6.4 Reading | ✅ | `Compute/ZonePruningPlan.cs:56`; `Compute/BlockMask.cs`; `Scan/ScanBuilder.cs:477` `ExplainAsync` |
+| 6.1–6.4 Reading | ✅ | `Compute/ZonePruningPlan.cs:56`; `Compute/BlockMask.cs`; `Scan/ScanBuilder.cs:515` `ExplainAsync` |
 | 7.1–7.3 Surface | ✅ | `Writing/VortexWriteOptions.cs:92`, `:116` `EncodingHints`, `:127` `IndexBudgetPerMille`; `Writing/VortexEncodingHint.cs` |
 | 8 Staging | ✅ | IMPL-PLAN.md §1, steps 1–8, 12, 17 |
 | 9 Not in the target | ⤳ | zero-decode rewrite: REMAINING-PLAN debt 7 |
@@ -1006,18 +1009,45 @@ choice:
 
 **Deferred, with the reason and the owner.**
 - §2, §3.5, "never from a concatenation": emission still concatenates the pending batches
-  (`Writing/VortexFileWriter.cs:763`, `:810`, `:986`). Removing it is the remedy of WRITE-AUDIT
-  **W-36** (the bytes depend on the batching), which moves the bytes of every file written from
-  batches not aligned to blocks: the write axis owns it, with the crosscheck.
+  (`Writing/VortexFileWriter.cs:763`, `:810`, `:986`), and **it will still do so at the first
+  publication** — decided 2026-09-20, with the limit written here rather than fixed first, because
+  removing it moves the bytes of every file written from batches not aligned to blocks and so has
+  to cross the corpus size ratchet and the Rust cross-check together.
+
+  **The limit, stated for a caller.** The determinism this writer promises is *the same batches
+  give the same bytes*, not *the same rows give the same bytes*. Feed the same rows in a different
+  batching and the file is valid, reads back value for value, and is a different size: rewriting
+  `types/binary_nonnull_r8193` at forced batch counts costs 65 980 bytes in the source's own 2
+  chunks, 92 212 in 3, 146 076 in 5 and 169 860 in 9 — roughly 26 kB per extra chunk, because each
+  chunk builds and writes its own dictionary of the same distinct values, where the reference
+  shares one values child across a column's chunks through the `vortex.dict` layout that this
+  writer does not emit. `Writing/BatchingSizeTests.cs` pins those four numbers, deliberately as a
+  ratchet on a number that is known to be bad: it asserts the cost does not grow unwatched, not
+  that it is acceptable. A caller who wants the smallest file feeds the largest batches it can.
 - §3.4.4: the ALP-integers and offsets rows have no cascade context. Each would move bytes; the
   write axis owns them, measured like every other scheme.
 - §3.7, §5.2, "dispatch goes to zero in `Writing/`": three calls remain, named in
   `Compute/PerRowDispatchTests.cs` against WRITE-AUDIT W-11 and W-13, which own them.
-- §5.3: the targets were projections "to be replaced by measurements". The write-only split was
-  never measured; by the round-trip proxy of `--throughput --write`, seven hold and three do not —
-  `variant` (3.48, held by `ConstantForm`, parked as Z1b), `onpair` (≈ 31.7 ms against 30) and
-  "none above ×2", which `variant` breaks. The write axis owns them; the references are BENCH-AUDIT
-  B28's, and raising the unreachable ones is the owner's decision.
+- §5.3: the targets were projections "to be replaced by measurements", and the table's "today"
+  column is the state of the day §5.3 was written. The write-only split is still not measured, but
+  by the round-trip proxy of `--throughput --write --check`, **all ten hold** (2026-09-20):
+
+  | file | target | ours | Rust |
+  |---|---|---|---|
+  | `fastlanes_bitpacked` | ≤ 5 ms | 2,17 | 4,73 |
+  | `alp_no_patches` | ≤ 12 | 8,15 | 15,78 |
+  | `masked_all_invalid` | ≤ 0,5 | 0,36 | 0,94 |
+  | `variant` | ≤ 1 | 0,159 | 1,79 |
+  | `dict_nullable_codes` | ≤ 15 | 14,13 | 15,05 |
+  | `zstd` / `onpair` | ≤ 40 / ≤ 30 | 32,67 / 25,82 | 41,68 / 27,12 |
+  | write axis median | < 0,6 | **0,290** | — |
+  | above ×2 | none | **none**: the slowest of the fifty-six axes is `parquet_variant` at 1,01 | — |
+
+  The three that did not hold at the audit were `variant`, at 3,48 and held there by the reader's
+  constant form being a switch; `onpair`; and "none above ×2", which `variant` broke. The switch is
+  gone and the form is on for every file, and the writer no longer re-tiles a constant through its
+  transit — the same fact on the write side, 0,39 against a 3,48 reference. The `Auto`-index row of
+  §5.3 is not in this proxy and is unchanged. The references are `ThroughputCheck`'s write table.
 
 **§10, each question.** The constant's wire form, run-end priced and competing, trials under
 `best`, `for_margin`, the 5 % plan tolerance, bounded string bounds off by default — all decided at

@@ -1226,7 +1226,7 @@ decided when. Code paths are under `src/Vorticity/`, test paths under `tests/Vor
   fence pages.
 - §5.1 (12b): "one entry per resolution … the packed `n_blocks` table" — since step 24, one entry per
   column holding a filter tree; options version 2.
-- §5.2, §6.4, §6.6: the "prerequisite" predicates exist (`Expressions/VortexExpr.cs:493-510`).
+- §5.2, §6.4, §6.6: the "prerequisite" predicates exist (`Expressions/VortexExpr.cs:499-516`).
 - §5.4: the file filter is the root of each run's tree, built from the exact set; the API is
   `MayMatchAsync`.
 - §5.5, §7.2, §7.3: `IndexBudgetBytes` is `IndexBudgetPerMille` = 100, a share of the data bytes

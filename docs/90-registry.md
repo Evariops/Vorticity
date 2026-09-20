@@ -6,7 +6,10 @@ default writer requires this set; the read-forever floor is `core2025.05.0` (Vor
 
 Phase column refers to [01-scope.md](01-scope.md) §3.
 
-## Array encodings (34)
+## Array encodings (37)
+
+Thirty-seven wire IDs have a decoder; `grep -rh "IdUtf8 => " src/Vorticity/Arrays/Decoders`
+lists them and is the count above. The tables below group them by the phase that brought them in.
 
 ### Canonical and structural — Phase 1
 
@@ -71,15 +74,19 @@ It is therefore refused by name, with a message that says which shape was found,
 implemented against no test. Revisit if a file in the read-forever range (Vortex 0.36.0 onward)
 turns out to use it; the corpus generator can produce one on demand.
 
-### Deferred to 1.1
+### Late arrivals — Phase 3
 
-| ID | Reason |
+These five were deferred to 1.1 when this document was first written, and all five were built
+inside 1.0 instead. Each is read and written, and each has a round-trip axis of its own in
+`--throughput` and `--throughput --write`.
+
+| ID | Note |
 |---|---|
-| `vortex.pco` | Pcodec: a full integer/float codec; pure algorithm, no BCL blocker, but a sizeable body of work. Writer opt-in upstream (`pco` feature) |
-| `vortex.zstd_buffers` | Draft `zstd2026.02.0` edition, no read-forever guarantee; trivial once `vortex.zstd` exists |
-| `vortex.map` | `core2026.08.2`, very recent |
-| `vortex.variant` | `core2026.08.3`, very recent |
-| `vortex.parquet.variant` | `core2026.08.3`, very recent |
+| `vortex.pco` | Pcodec, a full integer/float codec; writer opt-in upstream (`pco` feature) |
+| `vortex.zstd_buffers` | draft `zstd2026.02.0` edition, so no read-forever guarantee |
+| `vortex.map` | `core2026.08.2` |
+| `vortex.variant` | `core2026.08.3` |
+| `vortex.parquet.variant` | `core2026.08.3` |
 
 ### Outside every edition
 
@@ -91,16 +98,18 @@ Three distinct cases, and conflating them is a mistake the corpus catches:
   and is registered when `use_experimental_patches()` is set; `fastlanes.delta` likewise has a real
   ID. Neither belongs to any edition, so an edition-enforcing writer cannot emit them — but a
   writer with enforcement disabled can, and our conformance corpus contains such files (1 patched,
-  4 delta). Treat them as low priority, **not** as impossible.
+  4 delta). **Both are decoded**, which is why they are in the count above; what no edition
+  contains, this writer still does not emit.
 * **Experimental layouts.** The `vortex.list` layout is gated by `use_experimental_list_layout()`
   upstream and is documented there as expected to change; files using it may become unreadable by
-  future Vortex versions. Out of scope, and the corpus has one.
+  future Vortex versions. **It is read**, because the corpus has one and a file we cannot open is
+  not a file we can claim to support; it is the seventh layout of the table above.
 
 Note that a patched ALP or BitPacked array written *normally* is read as a `Patched` node wrapping
 a patch-free array, with the patches carried in the encoding's own metadata — that path needs no
 `vortex.patched` decoder.
 
-## Layouts (6) — Phase 1
+## Layouts (7) — Phase 1
 
 | ID | Role | Priority |
 |---|---|---|
@@ -110,6 +119,7 @@ a patch-free array, with the patches carried in the encoding's own metadata — 
 | `vortex.zoned` | zone map for pruning | required (the default writer always emits it) |
 | `vortex.stats` | legacy zone map | required for older files |
 | `vortex.dict` | dictionary shared across a child layout | required |
+| `vortex.list` | elements, offsets and a validity child | read only: experimental upstream, never emitted here (see below) |
 
 ## What an unknown id gets told
 
@@ -189,8 +199,8 @@ Both decoders' own headers say so in as many words ("`codes_offsets` bounds each
 they also say is that the reference does not *use* it that way, decompressing the whole stream in
 one pass and cutting the result with `uncompressed_lengths`. For a full scan that is the right
 choice. For a take it is not, and the two were classified from the reference's decode strategy
-rather than from what the format makes possible. They are a **defect to fix**, worth 830 µs of the
-1070 µs a scattered take costs — the largest single performance item left in the library.
+rather than from what the format makes possible. **That defect is fixed**: both have a
+`DecodeSelected`, and what it bought is two paragraphs below.
 
 The
 density threshold the bit-packed row prescribed ("decode per 1024-block once the hit density exceeds
@@ -209,10 +219,11 @@ rows one from each split:
 | the same, string column projected away | — | **242 µs (0.19×)** |
 
 The second row is the attribution, and it is why the first one looks unimpressive: the remaining
-830 µs is the `utf8` column. Over the four columns the specializations cover, a scattered take went
-from ~1.0× a full scan to 0.19× — and the fallback is now the whole of the residual rather than
-being hidden inside a number that averaged it with everything else, which is what made it worth
-looking at again.
+830 µs was the `utf8` column, whose FSST take was still the fallback when that pair was measured.
+Over the four columns the specializations covered then, a scattered take went from ~1.0× a full scan
+to 0.19× — and the fallback became the whole of the residual rather than being hidden inside a
+number that averaged it with everything else, which is what made it worth looking at again, and
+what the FSST and OnPair rows above then closed.
 
 **Both are specialized now.** With `vortex.onpair` decoding selectively too, that scattered take is
 **452 µs, 0.34× a full scan**, and the `strs` residual is 206 µs rather than 825 — 2.4× on the axis
@@ -327,16 +338,16 @@ merely self-consistent. The values child of run-end and dict is the original col
 representative rows, so a dictionary of strings shares the data buffers it came from and copies only
 16-byte views.
 
-**Where the size actually stands**, measured over the whole corpus against the ≤105% target of
-[05-benchmarks.md](05-benchmarks.md) §3:
+**Where the size actually stands.** `WrittenSizeTests` rewrites the whole corpus and prints the
+figure, so it is measured by the suite rather than remembered here: **856 files, 10 265 948 bytes
+against the reference's 15 984 453 — ratio 0.642×** (2026-09-20), against the ≤ 105 % target of
+[05-benchmarks.md](05-benchmarks.md) §3 and a 0.65 ratchet the same test fails on.
 
-| | ratio to the reference |
-|---|---|
-| Whole corpus | **0.822×** — smaller than the reference, against a ≤105% target. Was 0.862× before `vortex.zstd`, 1.95× before FSST, 1.54× before nested columns, 1.15× before the schemes were priced in bytes, 1.11× before ALP, 1.044× before patched bit-packing, 1.008× before the codes cascade, 0.988× before `vortex.sequence`, 0.894× before the offsets went through the compressor |
-| `distributions/high_cardinality_i64_r8193` (dense integers) | **0.97×** |
-| `distributions/short_runs_i32_r8193` | **0.87×** |
-| `types/i64_nonnull_r8192` | **0.99×** (was 3.31×) |
-| `containers/zoned_many_zones_nulls` (five columns, one of them high-cardinality text) | 1.16× (was 3.61×) |
+Per-file figures are not listed here, for the reason the test's own header gives: a ratio written
+down in a document is a ratio nothing reproduces. The test prints the twelve worst **by bytes lost**
+rather than by ratio — a 40× ratio on a 300-byte file is a rounding error — and today's head of that
+list is `containers/experimental_list_layout` (30 984 bytes, 3.12×), the two `encodings/table_wide`
+files (24 796 each, 1.93×) and `encodings/alprd` (5 744, 1.20×).
 
 Measured by `WrittenSizeTests` on every run rather than by hand, with the worst offenders ranked
 by BYTES LOST — a 40× ratio on a 300-byte file moves nothing.

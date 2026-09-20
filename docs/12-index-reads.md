@@ -1025,17 +1025,17 @@ the text above is kept as the record of what was decided when. Code paths are un
 | § | status | where |
 |---|---|---|
 | 1 Inventory | ✅ | every "after" row exists (below) |
-| 2 Two models | ✅ | `Scan/ScanBuilder.cs:274` `InKeyOrder`, `Keys/KeyCursorBuilder.cs:72` `Distinct` |
+| 2 Two models | ✅ | `Scan/ScanBuilder.cs:277` `InKeyOrder`, `Keys/KeyCursorBuilder.cs:72` `Distinct` |
 | 3 Sources of order | ✅ | `Keys/KeyPlan.cs:9`; `Keys/SortedColumnSource.cs`; `Keys/SortedRunsSource.cs:51`; `Keys/SortedRunsSource.Dictionary.cs:39`; refusal `Keys/KeyCursorBuilder.cs:149` |
 | 4, 4.1–4.5 The cursor | ✅ | `Keys/KeyCursor.cs:21`; `Keys/KeyOrder.cs:32`; tests `Keys/KeyCursorTests.cs`, `Keys/SortedRunsCursorTests.cs` |
 | 4.6 Composite keys | ✅ | `Vorticity.RowEncoding/RowKeyEncoder.cs:26`; `Writing/VortexWriteOptions.cs:138`; tests `Keys/CompositeKeyTests.cs` |
-| 5.1 `AnyAsync` | ✅ | `Scan/TerminalScan.cs:86` |
-| 5.2 `CountAsync` | ✅ | `Compute/ZonePruner.cs:84` `MustMatch`; `Scan/TerminalTiers.cs:12`; `Scan/TerminalScan.cs:103` exact cover |
-| 5.3 `MinAsync` / `MaxAsync` | ✅, one clause ⤳ | `Scan/TerminalScan.cs:314`, exact cover at `:328`; resolution 4's "`Explain` says so" is not delivered: `ScanPlan` plans a count and an order, not an extreme — deferred until a consumer asks |
+| 5.1 `AnyAsync` | ✅ | `Scan/TerminalScan.cs:90` |
+| 5.2 `CountAsync` | ✅ | `Compute/ZonePruner.cs:93` `MustMatch`; `Scan/TerminalTiers.cs:12`; `Scan/TerminalScan.cs:179` exact cover |
+| 5.3 `MinAsync` / `MaxAsync` | ✅, one clause ⤳ | `Scan/TerminalScan.cs:333`, exact cover at `:349`; resolution 4's "`Explain` says so" is not delivered: `ScanPlan` plans a count and an order, not an extreme — deferred until a consumer asks |
 | 5.4 `Distinct` | ✅ | `Keys/KeyCursorBuilder.cs:72`; `Keys/SortedRunsSource.Dictionary.cs:39` |
-| 6 Key-ordered delivery | ✅ | `Scan/ScanBuilder.cs:274`, `:308` (composite); `Scan/KeyOrderedBatches.cs:51` (the null tail) |
-| 7 Three predicates | ✅ | `Expressions/VortexExpr.cs:493-518`; `Compute/BytePattern.cs`; `ILIKE` ⤳ (§13) |
-| 8.1 Listing | ✅ | `File/VortexFile.Indexes.cs:164` `Indexes`; `File/VortexOpenOptions.cs:118` `PreloadIndexes`; `Scan/ScanBuilder.cs:368` `WithIndexes`, `:477` `ExplainAsync` |
+| 6 Key-ordered delivery | ✅ | `Scan/ScanBuilder.cs:277`, `:311` (composite); `Scan/KeyOrderedBatches.cs:64` (the null tail) |
+| 7 Three predicates | ✅ | `Expressions/VortexExpr.cs:499-516`; `Compute/BytePattern.cs`; `ILIKE` ⤳ (§13) |
+| 8.1 Listing | ✅ | `File/VortexFile.Indexes.cs:164` `Indexes`; `File/VortexOpenOptions.cs:118` `PreloadIndexes`; `Scan/ScanBuilder.cs:371` `WithIndexes`, `:515` `ExplainAsync` |
 | 8.2, 8.3 | ✅ | `docs/09-contracts.md` §1; `Indexes/LyingIndexTests.cs` |
 | 9 Inside the reader | ✅ (shape amended) | `Indexes/IndexRunCache.cs:60`; `Keys/ExactCover.cs:30` |
 | 10 Costs | ✅ as statements, two corrected below | — |
@@ -1058,7 +1058,7 @@ operators of `KeyCursorTests` run under both settings, so a truthful column is n
 - §5.2 (10b note): "the exact-cover tier waits for a source; `CountTiers`" — delivered at step 13;
   the switch is `TerminalTiers`, five flags.
 - §5.3 (10c note): "the third [resolution] excepted until an ordered source exists" — delivered
-  (`Scan/TerminalScan.cs:328`).
+  (`Scan/TerminalScan.cs:349`).
 - §5.4 and §10: "the postings keys of each run — a few hundred bytes per chunk" holds for
   `Postings`, not for `Dictionary`: a flat chunk is one segment, so reading its `values` child reads
   the chunk (538 604 B for `label`, IMPL-PLAN §1.37). The remedy moves bytes of every dictionary
@@ -1073,6 +1073,11 @@ operators of `KeyCursorTests` run under both settings, so a truthful column is n
   immaterial at r ≤ 4.
 - §3, §8.1: `Explain()` is `ExplainAsync()` on both builders; §8.1 lacks the composite
   `InKeyOrder(IReadOnlyList<string>, bool)` row.
+- §8.1 (2026-09-20): the `ScanBuilder` row reads "unchanged", and one member joined it —
+  `ScanBuilder.DefaultDegreeOfParallelism`, a static property that sets the degree every later
+  builder starts from, for a host that configures its process once instead of at every call site
+  (`Scan/ScanBuilder.cs:401`). `WithDegreeOfParallelism` still overrides it per scan, and the
+  default of that default is 1, so a caller who sets neither sees what it always saw.
 - §7: the n-gram Bloom's ASCII case-folding option is delivered (`Indexes/IndexPolicy.cs:176`);
   only the `ILIKE` predicate waits.
 
