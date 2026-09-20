@@ -1,7 +1,3 @@
-// vortex.primitive - vortex-array-0.86.1/src/arrays/primitive/vtable/mod.rs `deserialize`.
-// Phase 1 contract §9.1: one buffer (`values`), an optional validity child at index 0, empty
-// metadata. Both the exact byte length and the alignment are class I and are checked before the
-// buffer is ever reinterpreted.
 using System;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -9,7 +5,11 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
-/// <summary>Decodes <c>vortex.primitive</c>: fixed-width values, read zero-copy.</summary>
+/// <summary>
+/// Decodes <c>vortex.primitive</c>: one values buffer of fixed-width values, read zero-copy, with
+/// an optional validity child. Both the buffer's exact byte length and its alignment are checked
+/// before it is ever reinterpreted as the physical type.
+/// </summary>
 public sealed class PrimitiveDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>

@@ -1,23 +1,3 @@
-// fastlanes.delta - vortex-fastlanes-0.86.1/src/delta/{vtable/mod.rs,array/delta_decompress.rs}
-// and the kernel in fastlanes-0.7.2/src/delta.rs.
-//
-// DELTA IS A PREFIX SUM ALONG FASTLANES LANES, NOT ALONG ROWS. A 1024-element block is visited in
-// the same transposed order bit-packing uses, and each lane carries its own running total seeded
-// from a per-block base vector:
-//
-//     index(row, lane) = FL_ORDER[row / 8] * 16 + (row % 8) * 128 + lane
-//
-// with `row` over [0, T) and `lane` over [0, 1024 / T), T being the type's bit width. For u32 the
-// largest index that produces is 6*16 + 7*128 + 31 = 1023, which is the check that the formula and
-// the lane count agree.
-//
-// SIGNEDNESS IS NOT A CASE. Upstream reinterprets both children as the unsigned type of the same
-// width and adds with wrapping, because a wrapping add inverts the encoder's wrapping subtract
-// whatever the sign. This decoder works on raw bytes for the same reason.
-//
-// NOT IN ANY CORE EDITION, which is why the corpus reaches it only through the generator's forced
-// path. A default writer upstream cannot emit one; that is a statement about writers and has never
-// been a reason not to read.
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -31,7 +11,14 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>fastlanes.delta</c>: a per-lane prefix sum over 1024-element blocks.</summary>
+/// <summary>
+/// Decodes <c>fastlanes.delta</c>: a per-lane prefix sum over 1024-element blocks. The sum runs
+/// along FastLanes lanes rather than along rows, so a block is visited in the same transposed order
+/// bit-packing uses, with <c>index(row, lane) = order[row / 8] * 16 + (row % 8) * 128 + lane</c> and
+/// each lane seeded from a per-block base vector. Signedness is not a case: both children are read
+/// as the unsigned type of the same width, because a wrapping add inverts the encoder's wrapping
+/// subtract whatever the sign.
+/// </summary>
 public sealed class DeltaDecoder : ArrayDecoder
 {
     private const string Id = "fastlanes.delta";
@@ -70,9 +57,8 @@ public sealed class DeltaDecoder : ArrayDecoder
         int deltasLength = (int)metadata.DeltasLength;
         int offset = (int)metadata.Offset;
 
-        // `debug_assert!(remainder.is_empty(), "deltas must be padded to a multiple of 1024")`,
-        // promoted to a real check: a short final block would otherwise read a base vector that was
-        // never written and produce values rather than an error.
+        // Deltas are padded to a whole number of blocks: a short final block would read a base
+        // vector that was never written and produce values rather than an error.
         if (deltasLength % BlockSize != 0)
         {
             CompressedThrow.Format(
@@ -98,20 +84,12 @@ public sealed class DeltaDecoder : ArrayDecoder
         // Only the window is materialized, not the whole decoded run: a delta node of a million rows
         // asked for one batch has no reason to produce a million values.
         //
-        // THE ZERO FILL STAYS, and `AllocateUninitialized` here was TRIED AND MEASURED AWAY. It is
-        // provable -- `Undelta` walks the blocks `[offset / 1024, (offset + length - 1) / 1024]`
-        // and writes `output[p - offset]` for every `p` in `[max(offset, blockStart),
-        // min(offset + length, blockStart + 1024))`, whose union over that block span is exactly
-        // `[offset, offset + length)` -- and it is SLOWER: 1.035 and 1.042 against this line over
-        // two `bench/ab.sh` runs of `fastlanes_delta` fullscan (2026-09-18).
-        //
-        // The reason is the one `ZstdDecoder.BuildViews` already documents for its views: a
-        // 1M-row batch asks for 8 000 000 bytes, which is UNDER `AlignedBufferPool.MaxPooledLength`
-        // (8 388 608), so this block comes back from the pool with its pages already faulted. The
-        // memset is then not a page-fault pass but a sequential prefetch of a buffer the untranspose
-        // loop is about to rewrite, and dropping it trades that fill for a cold miss per row. The
-        // zstd heap makes the opposite call (31.84 MB, over the pool's bar, fresh pages every scan)
-        // and takes the uninitialized block -- the rule is the size, not the encoding.
+        // The zero fill stays even though the loop below writes every element of the window. A
+        // buffer of this size comes back from the pool with its pages already faulted, so the fill
+        // is not a page-fault pass but a sequential prefetch of memory the untranspose loop is about
+        // to rewrite, and skipping it trades that for a cold miss per row. Only allocations too
+        // large for the pool, which get fresh pages on every scan, are worth leaving uninitialized:
+        // the rule is the size, not the encoding.
         VortexBuffer output = CompressedValues.Allocate(
             context, length * width, width, Id, out Span<byte> destination);
 
@@ -176,20 +154,18 @@ public sealed class DeltaDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// The prefix sum, with the element type resolved once and the LANES walked together.
+    /// The prefix sum, with the element type resolved once and the lanes walked together.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE LANES ARE THE VECTOR, not the rows. `index(row, lane) = FL_ORDER[row / 8] * 16 +
-    /// (row % 8) * 128 + lane` is contiguous in LANE, so for one row the whole lane vector is one
-    /// contiguous run of the delta block -- and each lane's accumulator is independent of every
-    /// other, which is exactly the shape a prefix sum normally is not. There are 16 lanes for a
-    /// 64-bit element and 128 for an 8-bit one, so the per-row step is a handful of vector adds
-    /// where it used to be one scalar add per element through two physical-type switches.
+    /// The lanes are the vector, not the rows. The index formula is contiguous in lane, so one row's
+    /// whole lane vector is a contiguous run of the delta block, and each lane's accumulator is
+    /// independent of every other -- which is exactly the shape a prefix sum normally is not. The
+    /// per-row step is therefore a handful of vector adds rather than a scalar add per element.
     /// </para>
     /// <para>
-    /// The 1024-element block is rented rather than `new byte[BlockSize * width]` per decode, which
-    /// is PERF-AUDIT §3.2's heap allocation per delta node.
+    /// The 1024-element block is rented rather than allocated per decode, so a file full of delta
+    /// nodes does not put one array on the heap per node.
     /// </para>
     /// </remarks>
     private static void Undelta<T>(
@@ -228,21 +204,17 @@ public sealed class DeltaDecoder : ArrayDecoder
                     Accumulate(running, deltaBlock.Slice(at, lanes), block.Slice(at, lanes));
                 }
 
-                // UNTRANSPOSE ON THE WAY OUT. The prefix sum runs in FastLanes' transposed space -
-                // that is what the lane iteration means - so `block` is not in row order and
-                // upstream calls `Transpose::untranspose` before returning. Doing it per copied
-                // element instead of into a second 1024-element buffer keeps the window's cost
-                // proportional to the window: a batch that wants 8 rows of a block maps 8 indices,
-                // not 1024.
+                // Untranspose on the way out: the prefix sum runs in FastLanes' transposed space, so
+                // `block` is not in row order. Mapping each copied element, rather than
+                // untransposing the whole block into a second buffer, keeps the cost proportional
+                // to the window: a batch that wants eight rows of a block maps eight indices.
                 int blockStart = b * BlockSize;
                 int from = Math.Max(offset, blockStart);
                 int to = Math.Min(offset + length, blockStart + BlockSize);
 
-                // ADDRESSED BY REFERENCE, because this loop runs once per DECODED VALUE and the
-                // by-index form paid four checks for each: two `ArgumentOutOfRangeException` tests
-                // inside `FastLanes.Untranspose`, then the table's own bounds check, then two span
-                // indexers. `p - blockStart` is in [0, 1024) by the clamps above and the table has
-                // exactly 1024 entries, so the argument checks can only ever pass.
+                // Addressed by reference because this loop runs once per decoded value, and the
+                // bounds checks an indexed form would repeat cannot fail: `p - blockStart` is in
+                // [0, 1024) by the clamps above and the table has exactly 1024 entries.
                 ref int table = ref MemoryMarshal.GetReference(FastLanes.UntransposeTable);
                 ref T blockRef = ref MemoryMarshal.GetReference(block);
                 ref T outputRef = ref MemoryMarshal.GetReference(output);
@@ -266,9 +238,9 @@ public sealed class DeltaDecoder : ArrayDecoder
     private static void Accumulate<T>(Span<T> running, ReadOnlySpan<T> delta, Span<T> into)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
-        // `in running[i]` is a BOUNDS CHECK PER VECTOR ITERATION, on the innermost loop of the
-        // encoding. The three spans are the same length -- the caller slices all three to `lanes`
-        // -- so one set of hoisted references serves all of them.
+        // Indexing the spans would cost a bounds check per vector iteration, on the innermost loop
+        // of the encoding. The three spans are the same length -- the caller slices all three to
+        // `lanes` -- so one set of hoisted references serves all of them.
         int count = running.Length;
         ref T runningRef = ref MemoryMarshal.GetReference(running);
         ref T deltaRef = ref MemoryMarshal.GetReference(delta);

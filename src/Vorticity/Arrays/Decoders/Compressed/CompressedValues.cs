@@ -1,13 +1,3 @@
-// The value plumbing shared by the four compressed decoders that MOVE canonical rows around
-// rather than compute them: vortex.dict gathers, vortex.runend repeats, vortex.sparse scatters
-// over a fill, and fastlanes.rle gathers per chunk. Writing that four times would be four chances
-// to get the VarBinView buffer-index remap or the validity collapse subtly different.
-//
-// Four canonical kinds can be moved this way, which is exactly the set upstream's own run-end and
-// sparse canonicalizers handle: Primitive, Decimal, Bool and VarBinView
-// (vortex-runend-0.86.1/src/array.rs `run_end_canonicalize`,
-// vortex-sparse-0.86.1/src/canonical.rs). A Struct, ListView, FixedSizeList or Extension under one
-// of these encodings is rejected, as it is upstream.
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -22,7 +12,12 @@ using Vorticity.Types.Numerics;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>A read-only view of one canonical node's value container, row-addressable.</summary>
+/// <summary>
+/// A read-only view of one canonical node's value container, row-addressable. It is the reading
+/// half of the plumbing shared by the encodings that move canonical rows around rather than compute
+/// them, so the view buffer-index remap and the validity collapse are written once instead of once
+/// per decoder.
+/// </summary>
 internal readonly ref struct ValueReader
 {
     /// <summary>Bytes in one Arrow-style binary view.</summary>
@@ -143,8 +138,8 @@ internal readonly ref struct ValueReader
 
 /// <summary>
 /// Materializes one canonical node of the same kind as a <see cref="ValueReader"/>, row by row.
-/// Every byte comes from <see cref="CanonicalArena.Allocate(int, int)"/>, which is the only place
-/// a decoder may get writable memory (Phase 1 contract §8.4).
+/// Every byte comes from <see cref="CanonicalArena.Allocate(int, int)"/>, which is the only place a
+/// decoder may get writable memory.
 /// </summary>
 internal ref struct ValueWriter
 {
@@ -336,11 +331,11 @@ internal ref struct ValueWriter
         // copies of one element. `vortex.runend` is nothing but this loop.
         Span<byte> destination = _bytes.Slice(destinationRow * _width, count * _width);
 
-        // TILED STRAIGHT FROM THE SOURCE, because `Copy` first was a `SpanHelpers.Memmove` CALL
-        // PER RUN to move four bytes -- out of line, because the length is a variable -- and a
-        // run-end column is nothing but runs. `Tile` already takes its element from wherever the
-        // caller keeps it; only a view that needs its buffer index rebased has to be written into
-        // the destination first, and then the tiling repeats the rebased copy.
+        // Tiled straight from the source: copying the row into the destination first would add an
+        // out-of-line move of a few bytes per run, and a run-end column is nothing but runs. `Tile`
+        // takes its element from wherever the caller keeps it; only a view whose buffer index needs
+        // rebasing is written into the destination first, and the tiling then repeats that rebased
+        // copy.
         if (_kind == CanonicalKind.VarBinView && _bufferIndexShift != 0)
         {
             Copy(in source, sourceRow, destinationRow);
@@ -352,7 +347,7 @@ internal ref struct ValueWriter
     }
 
     /// <summary>
-    /// Expands every run in ONE call, with the ends' physical type and the value width resolved
+    /// Expands every run in one call, with the ends' physical type and the value width resolved
     /// once instead of once per run.
     /// </summary>
     /// <param name="source">The run values, one per run.</param>
@@ -369,14 +364,12 @@ internal ref struct ValueWriter
     /// must walk the runs itself.
     /// </returns>
     /// <remarks>
-    /// PERF-AUDIT-v2.md R29, and it is the per-call cost that pays rather than the filling. R22
-    /// measured the two apart on the 1M `runend` axis by doubling the calls alone: `Tile` costs
-    /// 32,8 % of that scan in FIXED cost against 27 % of actual filling -- 4,3 ns of prologue per
-    /// run against 3,5 ns of `Fill` for the 256 bytes a 64-row run of `i32` covers. The file's own
-    /// header states the rule this was the last kernel not to follow: "switch on the code's
-    /// physical type once, switch on the value width once, and call a loop generic in both".
+    /// What a run costs is dominated by entering a kernel, not by the filling itself: a run holds
+    /// few enough rows that the prologue of a per-run call outweighs the bytes it writes. So the
+    /// rule is to switch on the ends' physical type once, switch on the value width once, and call
+    /// a loop generic in both.
     ///
-    /// The caller's loop stays, and is what a shape without a typed kernel still runs: Bool, a
+    /// The caller's loop stays, and is what a shape without a typed kernel runs: Bool, a
     /// VarBinView that has to rebase its buffer index, and any width outside 1/2/4/8/16/32.
     /// </remarks>
     public readonly int RepeatRuns(
@@ -555,14 +548,14 @@ internal ref struct ValueWriter
     /// <param name="row">The destination row.</param>
     public readonly void ClearBit(int row) => _bytes[row >> 3] &= (byte)~(1 << (row & 7));
 
-    /// <summary>Sets or clears a whole RUN of Bool output rows.</summary>
+    /// <summary>Sets or clears a whole run of Bool output rows.</summary>
     /// <param name="row">First destination row.</param>
     /// <param name="count">How many rows.</param>
     /// <param name="value">The bit to write across them.</param>
     /// <remarks>
     /// The kernel writes the interior bytes whole and masks only the two ends, so a run costs a
     /// vectorized fill rather than <paramref name="count"/> read-modify-writes of the same byte.
-    /// PERF-AUDIT §4.2 asks for every bit-at-a-time site to arrive here.
+    /// Every site that would otherwise set bits one at a time goes through it.
     /// </remarks>
     public readonly void FillBits(int row, int count, bool value) =>
         BitmapKernels.FillRange(_bytes, row, count, value);
@@ -613,8 +606,8 @@ internal ref struct ValueWriter
     private static bool ReadBit(ReadOnlySpan<byte> bits, int bit) =>
         (bits[bit >> 3] & (1 << (bit & 7))) != 0;
 
-    // A views buffer must be 16-byte aligned (contract §8.4); everything else needs its own width,
-    // and the pool never hands back less than that.
+    // A views buffer must be 16-byte aligned; everything else needs its own width, and the pool
+    // never hands back less than that.
     private static int AlignmentFor(int width) => width switch
     {
         1 => 1,
@@ -627,8 +620,8 @@ internal ref struct ValueWriter
 }
 
 /// <summary>
-/// Builds an output validity bitmap and collapses it, so a decoder never has to repeat contract
-/// §2.6 rule 3 by hand.
+/// Builds an output validity bitmap and collapses it -- an all-valid bitmap becomes no bitmap at
+/// all, an all-null one becomes the all-invalid marker -- so no decoder does that by hand.
 /// </summary>
 internal ref struct ValidityWriter
 {
@@ -690,7 +683,9 @@ internal ref struct ValidityWriter
     /// <summary>The bitmap itself, for a kernel that writes it directly; empty when untracked.</summary>
     internal readonly Span<byte> Bits => _bits;
 
-    /// <summary>Collapses the bitmap per contract §2.6 rule 3 and publishes it if it survives.</summary>
+    /// <summary>
+    /// Collapses the bitmap to a uniform validity when it is one, and publishes it otherwise.
+    /// </summary>
     /// <param name="ctx">The decode context.</param>
     /// <param name="dtype">The dtype the parent node produces; its nullability answers the untracked case.</param>
     /// <param name="encodingId">The encoding asking, for the error message.</param>
@@ -870,12 +865,13 @@ internal static class CompressedValues
     /// <param name="byteLength">Size in bytes.</param>
     /// <param name="alignment">A power of two.</param>
     /// <param name="encodingId">The encoding, for the error message.</param>
-    /// <param name="destination">The writable block, NOT zeroed.</param>
+    /// <param name="destination">The writable block, not zeroed.</param>
     /// <returns>A non-owning view over the same bytes.</returns>
     /// <exception cref="VortexFormatException">The buffer would exceed the ceiling.</exception>
     /// <remarks>
-    /// Only for a decoder that provably writes every byte; see
-    /// <see cref="CanonicalArena.AllocateUninitialized"/> for why that bar is where it is.
+    /// Only for a decoder that provably writes every byte, null rows included; anything it leaves
+    /// alone keeps whatever the pool last held there, which two decodes of one file need not agree
+    /// on.
     /// </remarks>
     public static VortexBuffer AllocateUninitialized(
         ArrayDecodeContext ctx, int byteLength, int alignment, string encodingId,
@@ -906,19 +902,19 @@ internal static class CompressedValues
     /// <returns>A non-owning view over the block.</returns>
     /// <remarks>
     /// <para>
-    /// <b>This is the amplification guard, and every allocation in this component goes through
-    /// it.</b> Several compressed encodings produce output out of proportion to their input:
+    /// This is the amplification guard, and every allocation in this component goes through it.
+    /// Several compressed encodings produce output out of proportion to their input:
     /// <c>vortex.sequence</c> has no children and no buffers at all, <c>fastlanes.bitpacked</c> at
     /// bit width 0 has an empty packed buffer, and <c>vortex.sparse</c> needs only a fill scalar.
-    /// For each of them a few hundred bytes of file can declare 2^31 rows, so without a ceiling a
-    /// 1 KB file is a multi-gigabyte allocation - the "unbounded allocation" the threat model of
-    /// docs/09-contracts.md §4 rules out. The row count itself is validated much further out, at
-    /// the layout level, and nothing between there and here bounds the product.
+    /// For each of them a few hundred bytes of file can declare a row count near the limit of a
+    /// 32-bit length, so without a ceiling a tiny file is a multi-gigabyte allocation. The row
+    /// count itself is validated much further out, at the layout level, and nothing between there
+    /// and here bounds the product.
     /// </para>
     /// <para>
-    /// The ceiling is docs/08-semantics.md §6's <c>MaxDecompressedSize</c>, applied per decoded
-    /// node's output buffer - never a constant invented at the call site (contract §1.5). A caller
-    /// with a genuinely larger column raises <see cref="VortexReadOptions.MaxDecompressedSize"/>.
+    /// The ceiling is <see cref="VortexReadOptions.MaxDecompressedSize"/>, applied per decoded
+    /// node's output buffer, never a constant invented at the call site. A caller with a genuinely
+    /// larger column raises that option.
     /// </para>
     /// </remarks>
     /// <exception cref="VortexFormatException">The buffer would exceed the ceiling.</exception>
@@ -986,7 +982,9 @@ internal static class CompressedValues
     /// <param name="offset">First row of the window, within the child.</param>
     /// <param name="length">Rows in the window.</param>
     /// <param name="dtype">The dtype the window's node produces.</param>
-    /// <returns>The windowed validity, collapsed per contract §2.6 rule 3.</returns>
+    /// <returns>
+    /// The windowed validity, collapsed when the window is uniformly valid or uniformly null.
+    /// </returns>
     /// <remarks>
     /// The bitmap is re-based by moving the byte pointer and keeping the residual bit offset, so
     /// nothing is copied: shifting the bits would be an allocation and a copy per batch, and

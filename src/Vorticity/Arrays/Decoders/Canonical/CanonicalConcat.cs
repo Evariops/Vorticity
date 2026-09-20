@@ -1,11 +1,3 @@
-// Concatenation of canonical nodes. `vortex.chunked` is the only decoder that needs it
-// (vortex-array-0.86.1/src/arrays/chunked/vtable/mod.rs, then the encoding's `execute`, which
-// canonicalizes by concatenating), and the constant builder reuses it to tile a fixed-size-list
-// row.
-//
-// Every chunk shares the parent's dtype, so every chunk canonicalizes to the same CanonicalKind and
-// this file is a switch over the nine kinds rather than a general kernel. Buffers come from
-// CanonicalArena.Allocate, which is the only writable memory a decoder may have (contract §8.4).
 using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -17,9 +9,13 @@ using Vorticity.Types.Numerics;
 namespace Vorticity.Arrays.Decoders.Canonical;
 
 /// <summary>Concatenates canonical nodes that share a dtype into one canonical node.</summary>
+/// <remarks>
+/// Every chunk shares the parent's dtype, so every chunk canonicalizes to the same kind; that is
+/// why this is a switch over the canonical kinds rather than a general kernel. The buffers it
+/// writes come from the arena, which is the only writable memory a decoder may hold.
+/// </remarks>
 internal static class CanonicalConcat
 {
-    /// <summary>Chunk indices held on the stack before renting; Z1b-c2b.</summary>
     private const int StackChunks = 32;
 
     private const int StackSmall = 32;
@@ -117,11 +113,10 @@ internal static class CanonicalConcat
                 continue;
             }
 
-            // A CONSTANT CHUNK BESIDE A CHUNK THAT IS NOT ONE is not the malformed file this check
-            // is for. `distributions/repeated_prefix_utf8` is exactly it: the writer folded one
-            // chunk to `vortex.constant` and left the others alone, so with the constant form on
-            // the kinds disagree where the tiled form made them agree. Expanding the constants is
-            // what restores the agreement, and it restores it to what the tiled form produced.
+            // A constant chunk beside a chunk that is not one is not the malformed file this check
+            // is for: a writer may fold one chunk to `vortex.constant` and leave its neighbours
+            // alone, which makes the kinds disagree without the dtypes disagreeing. Expanding the
+            // constants restores the agreement.
             if (other == CanonicalKind.Constant || kind == CanonicalKind.Constant)
             {
                 mixedConstants = true;
@@ -152,11 +147,10 @@ internal static class CanonicalConcat
 
         Validity validity = ConcatValidity(context, dtype, length, chunks);
 
-        // EXHAUSTIVE BY CONSTRUCTION (PERF-AUDIT-v2.md §2.4bis, Z1b-c1): the `_` arm this had was a
-        // Struct arm in disguise, so a tenth kind would have been concatenated field by field over
-        // fields it does not have. Every kind is NAMED now -- Null and Extension included, at the
-        // throw the two early returns above make unreachable -- and IDE0072 (error, see
-        // .editorconfig) fails the build when a named kind is missing.
+        // Every kind is named, Null and Extension included, at a throw the two early returns above
+        // make unreachable. A catch-all arm would quietly concatenate a new kind as whatever the
+        // arm above it does; naming them all lets the exhaustiveness analyzer fail the build
+        // instead.
         return kind switch
         {
             CanonicalKind.Bool => ConcatBool(context, dtype, length, chunks, validity),
@@ -168,10 +162,9 @@ internal static class CanonicalConcat
             CanonicalKind.Struct => ConcatStruct(context, dtype, length, chunks, validity, depth),
             CanonicalKind.Null or CanonicalKind.Extension => throw new UnreachableException(
                 $"{kind} returns above, before ConcatValidity."),
-            // CONVERTIT (Z1b-c2b) : deux constantes EGALES restent une constante, deux
-            // differentes materialisent. C'est la seule regle du §2.4 qui ne se derive pas
-            // de la forme mais des donnees, et elle decide a la concat plutot qu'au decode
-            // parce que c'est la seule qui voit les chunks ensemble.
+            // Equal constants stay a constant, different ones materialize. This is the one choice
+            // that follows from the data rather than from the shape, so it is made here rather
+            // than at decode: concatenation is the only place that sees the chunks together.
             CanonicalKind.Constant =>
                 ConcatConstant(context, dtype, length, chunks, validity, depth),
             _ => throw new UnreachableException($"CanonicalKind {(byte)kind} is not defined."),
@@ -180,8 +173,8 @@ internal static class CanonicalConcat
 
 
     /// <summary>
-    /// Concatenates chunks of which SOME are constant: every constant is expanded, and the concat
-    /// the shared kind already has runs over the result.
+    /// Concatenates chunks of which only some are constant: every constant is expanded, and the
+    /// concat the shared kind already has runs over the result.
     /// </summary>
     /// <param name="context">The decode context owning the arena.</param>
     /// <param name="dtype">The chunked array's dtype.</param>
@@ -190,10 +183,10 @@ internal static class CanonicalConcat
     /// <param name="depth">Recursion depth.</param>
     /// <returns>The concatenated node's index.</returns>
     /// <remarks>
-    /// There is nothing to save here and the expansion is the honest answer: the column holds more
-    /// than one value, so it cannot stay a constant, and the chunk that was one has to become what
-    /// its neighbours already are. It re-enters <c>Concat</c> at the SAME depth, which terminates
-    /// because the list it re-enters with holds no constant.
+    /// There is nothing to save here: the column holds more than one value, so it cannot stay a
+    /// constant, and the chunk that was one has to become what its neighbours already are. It
+    /// re-enters <c>Concat</c> at the same depth, which terminates because the list it re-enters
+    /// with holds no constant.
     /// </remarks>
     private static int ConcatExpandingConstants(
         ArrayDecodeContext context, DType dtype, int length, ReadOnlySpan<int> chunks, int depth)
@@ -228,10 +221,9 @@ internal static class CanonicalConcat
     /// <param name="depth">Recursion depth, for the materializing path.</param>
     /// <returns>The concatenated node's index.</returns>
     /// <remarks>
-    /// PERF-AUDIT-v2.md §2.4's rule, and Z1b-c2b implements it. The comparison is over the ELEMENTS,
-    /// which are one value each, so deciding costs a memcmp per chunk rather than a pass over the
-    /// rows. When they differ there is nothing to be saved: the column really does hold more than
-    /// one value, and the materialized form is the honest one.
+    /// The comparison is over the constant elements, which are one value each, so deciding costs a
+    /// memcmp per chunk rather than a pass over the rows. When they differ there is nothing to be
+    /// saved: the column really does hold more than one value.
     /// </remarks>
     private static int ConcatConstant(
         ArrayDecodeContext context, DType dtype, int length, ReadOnlySpan<int> chunks,
@@ -250,14 +242,9 @@ internal static class CanonicalConcat
             return arena.AddConstant(dtype, length, validity, first);
         }
 
-        // DIFFERENT VALUES: the column really does hold more than one, so the materialized form is
-        // the honest one. Each chunk is expanded through the arena's memoized twin and handed to the
-        // concat the underlying kind already has.
-        //
-        // This path was deferred at Z1b-c2b on the grounds that no corpus file reaches it. That was
-        // WRONG, and the probe said so within a minute: `ChunkedConstantTests` builds exactly this,
-        // and the §1.6 rule -- do not write a path no measurement reaches -- only licenses skipping
-        // a path when you have LOOKED. Reading the corpus is not looking; running is.
+        // Different values: the column holds more than one, so it has to materialize. Each chunk
+        // is expanded through the arena's memoized twin and handed to the concat the underlying
+        // kind already has.
         Span<int> stack = stackalloc int[StackChunks];
         Scratch<int> scratch = new Scratch<int>(chunks.Length, stack);
         try
@@ -268,9 +255,9 @@ internal static class CanonicalConcat
                 expanded[i] = arena.MaterializeConstant(chunks[i]);
             }
 
-            // Three arms and not a switch over DTypeKind: the constant form covers the three dtypes
-            // `MaterializeConstant` can expand, and naming the twenty it cannot would say the
-            // opposite of the truth. The twin's KIND is what decides, and it is one of three.
+            // Three arms and not a switch over DTypeKind: the constant form covers only the three
+            // dtypes `MaterializeConstant` can expand, and naming the ones it cannot would say the
+            // opposite of the truth.
             if (dtype.Kind == DTypeKind.Decimal)
             {
                 return ConcatDecimal(context, dtype, length, expanded, validity);
@@ -304,7 +291,7 @@ internal static class CanonicalConcat
             if (chunk.Length == 0)
             {
                 // An empty chunk says nothing about the whole; contributing its state would turn a
-                // legal zero-row chunk (encodings/chunked_empty_chunks) into a spurious bitmap.
+                // legal zero-row chunk into a spurious bitmap.
                 continue;
             }
 
@@ -381,24 +368,23 @@ internal static class CanonicalConcat
         int width = ptype.ByteWidth();
         int totalBytes = ArrayDecodeContext.CheckedMultiply(length, width, "concatenated values");
 
-        // NOT COPIED AT ALL when the chunks already lie end to end, which is the common shape and
+        // Nothing is copied when the chunks already lie end to end, which is the common shape and
         // not a lucky one: chunk buffers come either from consecutive segments of the same mapped
-        // file or from consecutive bump allocations in the same arena. Concatenating them then
-        // means memcpying several megabytes onto a byte-identical image of themselves.
+        // file or from consecutive bump allocations in the same arena. Copying them would mean
+        // writing a byte-identical image of themselves.
         if (SameKind(arena, chunks, ptype) &&
             TryBorrowRun(arena, chunks, width, totalBytes, out VortexBuffer borrowed))
         {
             return arena.AddPrimitive(dtype, length, validity, ptype, borrowed);
         }
 
-        // UNINITIALIZED, because the chunks tile the output: each contributes its whole values
-        // buffer, and the widths agree, so the copies below cover every byte. Zero-filling first
-        // doubled the memory traffic of a concatenation that is already bandwidth-bound - 8 MB of
-        // memset in front of 8 MB of copy, on the one encoding whose entire cost is this loop.
+        // Uninitialized, because the chunks tile the output: each contributes its whole values
+        // buffer and the widths agree, so the copies below cover every byte. Zero-filling would
+        // double the memory traffic of a concatenation that is already bandwidth-bound.
         //
-        // "Cover every byte" is CHECKED rather than assumed: if the chunks come up short the tail
+        // "Cover every byte" is checked rather than assumed: if the chunks come up short the tail
         // is cleared below, so a disagreement between a chunk's declared length and its buffer
-        // cannot leak pool bytes into a column. See CanonicalArena.AllocateUninitialized.
+        // cannot leak pool bytes into a column.
         VortexBuffer values = CanonicalSupport.AllocateUninitialized(
             context, totalBytes, Align, out Span<byte> writable);
 
@@ -427,7 +413,7 @@ internal static class CanonicalConcat
 
     /// <summary>Whether every chunk holds <paramref name="ptype"/>, so the borrow may be tried.</summary>
     /// <remarks>
-    /// A mismatch is a format error, but it is NOT raised here: the copying path raises it with the
+    /// A mismatch is a format error, but it is not raised here: the copying path raises it with the
     /// chunk index in the message, and declining is what keeps this a fast-path test.
     /// </remarks>
     private static bool SameKind(CanonicalArena arena, ReadOnlySpan<int> chunks, PType ptype)
@@ -444,8 +430,8 @@ internal static class CanonicalConcat
     }
 
     /// <summary>
-    /// The chunks' values as ONE buffer, without copying, when they are already adjacent and in
-    /// order.
+    /// The chunks' values as a single buffer, without copying, when they are already adjacent and
+    /// in order.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -456,18 +442,15 @@ internal static class CanonicalConcat
     /// copy.
     /// </para>
     /// <para>
-    /// PERF-AUDIT-v2.md R8a. Taken by WIDTH rather than by <c>PType</c>, since a decimal run has a
-    /// storage width and no ptype and the walk never looked at anything else. The kind check each
-    /// caller needs -- same physical type, same decimal storage -- stays with the caller, which is
-    /// also where a disagreement is a FORMAT ERROR rather than a reason to decline.
+    /// It takes a width rather than a <c>PType</c>, because a decimal run has a storage width and
+    /// no ptype and the walk looks at nothing else. The kind check each caller needs -- same
+    /// physical type, same decimal storage -- stays with the caller, which is also where a
+    /// disagreement is a format error rather than a reason to decline.
     /// </para>
     /// <para>
-    /// IT FIRES MORE OFTEN THAN IT LOOKS, AND FAILS FOR ONE REASON. Counted over the fifty files of
-    /// a million: 1 672 borrows out of 2 093 attempts, and every one of the 421 failures is a
-    /// column whose chunks carry a validity bitmap -- the counts match exactly, on three different
-    /// corpora. Decoding such a chunk allocates its values AND its bits, so the next chunk's values
-    /// no longer start where the previous one ended. That is R8e, and it is why a nullable chunked
-    /// column never borrows.
+    /// A nullable chunked column never borrows: decoding such a chunk allocates its bits as well as
+    /// its values, so the next chunk's values do not start where the previous one ended. That is
+    /// the one reason the walk fails in practice.
     /// </para>
     /// <para>
     /// The borrowed bytes outlive the result for the same reason every other decoder's do: they
@@ -502,14 +485,14 @@ internal static class CanonicalConcat
             VortexBuffer buffer = chunk.Values;
             ReadOnlySpan<byte> span = buffer.Span;
 
-            // A zero-row chunk is legal (encodings/chunked_empty_chunks) and contributes nothing;
-            // its buffer may be the null-based empty one, which has no address to be adjacent to.
+            // A zero-row chunk is legal and contributes nothing; its buffer may be the null-based
+            // empty one, which has no address to be adjacent to.
             if (span.IsEmpty)
             {
                 continue;
             }
 
-            // The chunk must contribute EXACTLY its declared rows. A buffer longer than that would
+            // The chunk must contribute exactly its declared rows. A buffer longer than that would
             // still sum to `totalBytes` if a later one came up short, and the borrowed run would
             // then hold the wrong bytes at the right size.
             if (span.Length != chunk.Length * width)
@@ -567,15 +550,12 @@ internal static class CanonicalConcat
 
         int totalBytes = ArrayDecodeContext.CheckedMultiply(length, width, "concatenated decimals");
 
-        // PERF-AUDIT-v2.md R8a. THE WIDENING PATH BELOW NEVER RUNS on anything measured: across the
-        // 856-file corpus and the fifty files of a million, every chunk of every decimal column
-        // already carried the widest storage, so the loop was `CopyTo` and nothing else. Which
-        // makes this exactly `ConcatPrimitive`'s case and it gets the same two answers.
+        // Decimal chunks in practice all carry the widest storage, so the widening path below is
+        // the rare one and this is `ConcatPrimitive`'s case, with the same two answers.
         //
-        // FIRST, THE BORROW. Chunks decoded into one arena usually land end to end, and then the
-        // concatenation is a memcpy of several megabytes onto a byte-identical image of itself.
-        // Measured by short-circuiting the copy on `chunked_decimal` at a million rows: the loop is
-        // **75 % of that scan** (447 us against 110).
+        // First, the borrow: chunks decoded into one arena usually land end to end, and copying
+        // them would write a byte-identical image of themselves. The loop dominates the scan of a
+        // chunked decimal column, so declining to run it at all is the whole saving.
         if (NoWideningNeeded(arena, chunks, width) &&
             TryBorrowRun(arena, chunks, width, totalBytes, out VortexBuffer contiguous))
         {
@@ -583,10 +563,10 @@ internal static class CanonicalConcat
                 dtype, length, validity, storage, dtype.Precision, dtype.Scale, contiguous);
         }
 
-        // SECOND, NO ZERO-FILL. The chunks tile the output when no widening is needed, and when one
+        // Second, no zero-fill. The chunks tile the output when no widening is needed, and when one
         // is, the fill below writes the sign bytes of every row it touches. Either way the memset
-        // is paid for nothing -- and the tail is cleared if the chunks come up short, exactly as
-        // `ConcatPrimitive` does, so a length disagreement cannot leak pool bytes into a column.
+        // would be paid for nothing -- and the tail is cleared if the chunks come up short, exactly
+        // as `ConcatPrimitive` does, so a length disagreement cannot leak pool bytes into a column.
         VortexBuffer values = CanonicalSupport.AllocateUninitialized(
             context, totalBytes, Align, out Span<byte> writable);
 
@@ -628,8 +608,7 @@ internal static class CanonicalConcat
     /// <summary>Whether every chunk already stores at <paramref name="width"/> bytes a row.</summary>
     /// <remarks>
     /// The borrow needs the bytes to be usable as they lie; a narrower chunk has to be sign-extended
-    /// into place and cannot be. Across everything measured this is true of every decimal column
-    /// there is, which is why the widening loop below has never actually run.
+    /// into place and cannot be.
     /// </remarks>
     private static bool NoWideningNeeded(CanonicalArena arena, ReadOnlySpan<int> chunks, int width)
     {
@@ -662,10 +641,10 @@ internal static class CanonicalConcat
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             length, CanonicalSupport.ViewSize, "concatenated views");
 
-        // PERF-AUDIT-v2.md R8b. A NULL ROW IS THE ONLY REASON THIS BUFFER NEEDS ZEROING: it keeps
-        // `BinaryView::empty_view()` and nothing writes it. When every chunk is all-valid the views
-        // tile the output and the memset is 16 MB paid for nothing at a million rows -- the same
-        // argument `ConcatPrimitive` makes, and `TilesFully` checks it rather than assuming it.
+        // A null row is the only reason this buffer needs zeroing: it keeps the empty view and
+        // nothing writes it. When every chunk is all-valid the views tile the output and the
+        // memset is paid for nothing -- the same argument `ConcatPrimitive` makes, and `TilesFully`
+        // checks it rather than assuming it.
         bool tiled = TilesFully(arena, chunks, length);
         VortexBuffer views = tiled
             ? CanonicalSupport.AllocateUninitialized(
@@ -686,10 +665,9 @@ internal static class CanonicalConcat
                 CanonicalNode chunk = arena.GetNode(chunks[i]);
                 ReadOnlySpan<byte> source = chunk.Views.Span;
 
-                // THE ALL-VALID CHUNK IS THE SHAPE, not a lucky case: 112 chunks of 112 on
-                // `chunked_varbinview` at a million rows, and a chunked VarBinView written by the
-                // reference is all-valid whenever its column is. It moves its views in ONE copy and
-                // then walks them to rebase, instead of slicing twice and copying sixteen bytes a
+                // The all-valid chunk is the usual shape, not a lucky case: a chunked view column
+                // is all-valid whenever the column is. Such a chunk moves its views in one copy
+                // and then walks them to rebase, instead of slicing twice and copying one view a
                 // row through the validity mask.
                 if (chunk.Validity.IsAllValid)
                 {
@@ -760,8 +738,8 @@ internal static class CanonicalConcat
     /// <c>ViewKernels</c> makes of on-wire little-endian data.
     /// </para>
     /// <para>
-    /// THE BOUND IS CHECKED ON EVERY BUFFERED VIEW and the metadata never licenses skipping it
-    /// (Class I). The inline views -- 65 % of them on `chunked_varbinview` -- leave after one load.
+    /// The buffer index is bounds-checked on every buffered view; metadata never licenses skipping
+    /// it. An inline view leaves after one load, since it references no buffer at all.
     /// </para>
     /// </remarks>
     private static void Rebase(
@@ -806,9 +784,9 @@ internal static class CanonicalConcat
         {
             if (!mask.IsValid(j))
             {
-                // Null rows keep BinaryView::empty_view(); their stored view was never validated
-                // and must not be rebased. This is also the one thing that stops the caller from
-                // using `AllocateUninitialized`: the zeroes ARE the empty view.
+                // Null rows keep the empty view; their stored view was never validated and must
+                // not be rebased. This is also the one thing that stops the caller from using
+                // `AllocateUninitialized`: the zeroes are the empty view.
                 continue;
             }
 
@@ -850,11 +828,10 @@ internal static class CanonicalConcat
     {
         CanonicalArena arena = context.Canonical;
 
-        // THE ELEMENT DTYPE COMES FROM THE CHILD, NOT FROM THE PARENT, and the difference is a
-        // `vortex.map`: its canonical form is a ListView, but its DTYPE is Map, which has no
-        // `ElementType` -- `MapDecoder` derives `Struct{key, value}` and puts it on the elements
-        // child. Reading the parent worked for as long as nothing chunked or repartitioned a map
-        // column, which nothing did until the writer started choosing its own chunk boundaries.
+        // The element dtype comes from the child, not from the parent, and the difference is a
+        // map: its canonical form is a ListView, but its dtype is Map, which has no element type
+        // -- the map decoder derives `Struct{key, value}` and puts it on the elements child. Read
+        // from the parent, a chunked map column would lose its element dtype.
         DType elementType = chunks.Length == 0
             ? dtype.ElementType
             : arena.GetNode(arena.GetNode(chunks[0]).ElementsIndex).DType;
@@ -876,7 +853,7 @@ internal static class CanonicalConcat
                 (ulong)Math.Max(totalElements, 0), "concatenated list elements");
             int elementsIndex = Concat(context, elementType, elementCount, elements, depth + 1);
 
-            // Offsets are rebased onto the concatenated elements, so the source widths no longer
+            // Offsets are rebased onto the concatenated elements, so the source widths do not
             // matter; u64 is the only width guaranteed to hold every rebased offset.
             int offsetBytes = ArrayDecodeContext.CheckedMultiply(length, 8, "concatenated list offsets");
             VortexBuffer offsets = CanonicalSupport.Allocate(
@@ -962,20 +939,14 @@ internal static class CanonicalConcat
     {
         CanonicalArena arena = context.Canonical;
 
-        // A VARIANT DTYPE NAMES NO FIELDS, AND THIS METHOD USED TO ASK IT FOR THEM. A variant
-        // column's canonical form is `Struct{metadata, value}` (VariantDecoder) while its SCHEMA
-        // still says `variant`, whose own FieldCount is 0 -- so the loop below ran zero times, the
-        // per-chunk agreement check that lives INSIDE it never ran, and `AddStruct` published a
-        // struct with no children at all. Both children were dropped in silence, and the failure
-        // surfaced one frame later in the writer ("a variant column is a two-field struct; this one
-        // has 0 fields"): `variant` and `parquet_variant` could not be written back at all as soon
-        // as a file held more than one pending chunk (v2 W-22a).
+        // A variant dtype names no fields, so it cannot be asked for them: a variant column's
+        // canonical form is `Struct{metadata, value}` while its schema still says `variant`, whose
+        // own field count is zero. Taking the count from the dtype there would publish a struct
+        // with no children at all, in silence.
         //
-        // Every other walk over a canonical struct in this library -- CanonicalSlice, CanonicalFilter,
-        // MaskProjection, ProjectionTrim -- reads the count off the NODE. This one is the exception,
-        // and it is the exception because it also needs each field's dtype, which for a struct only
-        // the schema has. For a variant the children carry their own: `binary`, and a `binary` whose
-        // nullability the file's metadata decided.
+        // Every other walk over a canonical struct in this library reads the count off the node.
+        // This one is the exception because it also needs each field's dtype, which for a struct
+        // only the schema has; for a variant the children carry their own.
         bool variant = dtype.Kind == DTypeKind.Variant;
         int fieldCount = variant
             ? arena.GetNode(chunks[0]).FieldCount
@@ -990,11 +961,9 @@ internal static class CanonicalConcat
             Span<int> sources = perChunk.Span;
             Span<int> results = fields.Span;
 
-            // CHECKED BEFORE THE FIELD LOOP, NOT INSIDE IT. This is the same check as before and it
-            // used to live one level down, where a `fieldCount` of 0 meant it never ran at all --
-            // which is exactly how a variant's two children came to be dropped without a word. A
-            // guard that is skipped whenever the count is wrong in the one direction that matters
-            // is not a guard.
+            // Checked before the field loop, not inside it: inside, a field count of zero would
+            // skip the check entirely, which is the one direction in which the count being wrong
+            // does real damage.
             for (int i = 0; i < chunks.Length; i++)
             {
                 int actual = arena.GetNode(chunks[i]).FieldCount;

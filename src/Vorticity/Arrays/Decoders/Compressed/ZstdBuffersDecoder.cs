@@ -1,19 +1,3 @@
-// vortex.zstd_buffers - vortex-zstd-0.86.1/src/zstd_buffers.rs.
-//
-// NOT A VALUE CODEC. `vortex.zstd` compresses a column's values; this compresses the BUFFERS of
-// another array, one zstd frame each, and stores that array's encoding id and metadata so it can be
-// rebuilt afterwards. Decoding is therefore: decompress every buffer, then decode the INNER array
-// with those buffers substituted for its own.
-//
-// WHICH SOUNDED ARCHITECTURAL AND IS NOT, for one reason: `inner_metadata` is a `bytes` field inside
-// this node's metadata, so it is already a sub-span of the arena's FlatBuffer copy. A synthesised
-// node can point at it with an offset and a length exactly as a parsed node does - no new storage,
-// no arena extension, and the pinned tree makes the offset stable. The children are this node's
-// children unchanged; only the buffers are new.
-//
-// A DRAFT EDITION. `zstd2026.02.0` carries no read-forever guarantee, so a file using this is not
-// promised to stay readable by its own edition's rules. That is a reason to watch the encoding, not
-// a reason to refuse it.
 using System;
 using System.Collections.Generic;
 using System.IO.Compression;
@@ -26,7 +10,19 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.zstd_buffers</c>: an inner array whose buffers were zstd-compressed.</summary>
+/// <summary>
+/// Decodes <c>vortex.zstd_buffers</c>: an inner array whose buffers were zstd-compressed. This is
+/// not a value codec. It wraps another array, holding one frame per buffer of it along with that
+/// array's encoding id and metadata, so decoding means decompressing every buffer and then
+/// decoding the inner array with those buffers in place of its own.
+/// </summary>
+/// <remarks>
+/// The inner metadata is a length-delimited field inside this node's own metadata, hence already a
+/// sub-span of the arena's copy, so the synthesized node addresses it by offset and length exactly
+/// as a parsed node does: no new storage and no arena extension, and the children are this node's
+/// children unchanged. The encoding belongs to a draft edition, which carries no promise that such
+/// a file stays readable; that is a reason to watch it, not to refuse it.
+/// </remarks>
 public sealed class ZstdBuffersDecoder : ArrayDecoder
 {
     private const string Id = "vortex.zstd_buffers";
@@ -52,8 +48,7 @@ public sealed class ZstdBuffersDecoder : ArrayDecoder
         ReadOnlySpan<byte> innerMetadata = default;
 
         // Plain lists on a deliberately cold path: this runs once per node, and the counts are the
-        // buffer count of one array. A stackalloc here fought the ref-struct scoping rules for no
-        // measurable gain.
+        // buffer count of one array.
         List<long> sizes = [];
         List<int> alignments = [];
 
@@ -102,10 +97,10 @@ public sealed class ZstdBuffersDecoder : ArrayDecoder
         }
 
         // Decompressed into the canonical arena, which is the only writable memory a decoder may
-        // have (contract §8.4) and is released with the batch.
+        // have and is released with the batch.
         //
-        // One decoder for every buffer of the node, for the reason `ZstdDecoder` gives: the one-shot
-        // form builds and tears down a native decompression context per call.
+        // One decoder reused across every buffer of the node: the one-shot form builds and tears
+        // down a native decompression context per call.
         int firstBuffer = -1;
         using ZstandardDecoder reused = new ZstandardDecoder();
         for (int i = 0; i < buffers; i++)
@@ -169,10 +164,10 @@ public sealed class ZstdBuffersDecoder : ArrayDecoder
 
     /// <summary>Reads a <c>repeated</c> varint field, packed or not.</summary>
     /// <remarks>
-    /// PACKED IS THE DEFAULT IN PROTO3, so the common shape is one length-delimited blob of varints
-    /// rather than one tag per element. Treating it as a bare varint leaves the reader mid-blob and
-    /// the next tag reads as field 0 - which is exactly the error this produced before it was fixed,
-    /// and a good one to get, since field 0 is reserved and can only mean a misaligned reader.
+    /// Packing is the default in PROTO3, so the common shape is one length-delimited blob of
+    /// varints rather than one tag per element. Treating such a blob as a bare varint leaves the
+    /// reader mid-blob and the next tag reads as field 0, which is reserved and can only mean a
+    /// misaligned reader.
     /// </remarks>
     private static void ReadRepeated(ref ProtoReader reader, ProtoWireType wire, List<long> into)
     {

@@ -1,31 +1,3 @@
-// vortex.variant - vortex-array-0.86.1/src/arrays/variant/vtable/mod.rs, and
-// vortex.parquet.variant - vortex-parquet-variant-0.86.1/src/vtable.rs.
-//
-// THE LAST TWO ENCODINGS OF THE CORPUS, and they are one decoder because they are one shape. A
-// variant column is a self-describing value per row; upstream keeps two spellings of it -- a
-// logical `vortex.variant` over any Variant-typed storage, and an `arrow.parquet.variant`-
-// compatible pair of binary children -- and neither has a canonical form of its own: `execute`
-// returns the array unchanged for both.
-//
-// WHAT THIS BUILD DOES WITH THEM, and why it is not a new canonical kind. There is no
-// `CanonicalKind.Variant` and adding one would mean a new column type, a new arena builder, a new
-// writer path and a new public accessor for a shape `AsStruct()` already expresses. So a variant
-// node is a STRUCT of `{metadata, value}` WEARING THE VARIANT DTYPE -- exactly the trick
-// `vortex.map` uses to be a ListView wearing a Map dtype, and for the same reason:
-// `CanonicalArena.AddStruct` does not constrain the dtype's kind, so the representation is
-// available without a lie.
-//
-// The two fields are the Parquet Variant binary encoding, which is what
-// `vortex.parquet.variant` already stores and what `VariantDecoder` therefore has to PRODUCE for
-// the logical spelling: a `vortex.variant` over a `vortex.constant` carries a typed SCALAR, and
-// `ConstantCanonicalizer` encodes it (see `Types/Variant/ParquetVariant.cs`). Both paths end at the
-// same two binary columns, so the conformance comparer has one thing to decode and the writer has
-// one thing to serialize.
-//
-// SHREDDING IS REFUSED BY NAME. Both encodings can carry a second, typed child holding selected
-// paths pulled out of the variant, and merging it back is the bulk of what `parquet-variant` does.
-// No corpus file has one, so implementing it would be untested guessing; a file that has one gets a
-// `VortexUnsupportedException` saying which child it was.
 using System;
 
 using Vorticity.Arrays.Decoders.Canonical;
@@ -34,7 +6,13 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.variant</c>: a logical variant column over Variant-typed storage.</summary>
+/// <summary>
+/// Decodes <c>vortex.variant</c>: a logical variant column over Variant-typed storage. The storage
+/// child carries the whole of the work, so this decoder only checks the shape it produced. Both
+/// variant spellings can also carry a typed child holding paths shredded out of the variant;
+/// merging one back is not implemented and such a file is refused by name rather than read
+/// partially.
+/// </summary>
 public sealed class VariantDecoder : ArrayDecoder
 {
     private const string Id = "vortex.variant";
@@ -56,18 +34,14 @@ public sealed class VariantDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// The logical spelling is TRANSPARENT to a take: it hands back its one child's node with a
+    /// The logical spelling is transparent to a take: it hands back its one child's node with a
     /// shape check and nothing else, so the rows it is asked for are the rows the child is asked for.
     /// </summary>
     /// <remarks>
-    /// PERF-GAPS.md V1. Without this the take went through the default -- decode the whole node,
-    /// then gather -- which on the corpus's `variant` file expands a million rows of constant to
-    /// deliver sixty-four: the take cost as much as the scan (636 against 611 us against a Rust that
-    /// pushes the selection into the child, `variant/compute/take.rs:15-25`).
-    ///
-    /// The storage check runs against the SELECTED length, because that is the node's length on
-    /// this path; everything above it is the same code, which is why the two share `Core`.
-    /// `TakeSpecializationTests` holds this answer to the default's.
+    /// Without this the default route would decode the whole node and then gather, expanding every
+    /// row of the storage to deliver a handful. The shape check runs against the selected length,
+    /// because that is the node's length on this path; everything above it is the same code, which
+    /// is why both routes share one core.
     /// </remarks>
     public override int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
@@ -103,10 +77,9 @@ public sealed class VariantDecoder : ArrayDecoder
 
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 1, Id);
 
-        // The core storage wears the SAME dtype as the node -- upstream asserts it -- so the child
-        // decodes at the variant dtype and whatever encoding it uses has to produce the
-        // `Struct{metadata, value}` form. `vortex.constant` does; anything else that does not will
-        // say so below rather than be reinterpreted.
+        // The core storage wears the same dtype as the node, so the child decodes at the variant
+        // dtype and whatever encoding it uses has to produce the `Struct{metadata, value}` form.
+        // An encoding that does not is refused below rather than reinterpreted.
         int core = selective
             ? context.DecodeChildSelected(in node, 0, dtype, length, wanted)
             : context.DecodeChild(in node, 0, dtype, length);
@@ -116,7 +89,11 @@ public sealed class VariantDecoder : ArrayDecoder
     }
 }
 
-/// <summary>Decodes <c>vortex.parquet.variant</c>: the Arrow-compatible binary spelling.</summary>
+/// <summary>
+/// Decodes <c>vortex.parquet.variant</c>: the Arrow-compatible binary spelling, a pair of binary
+/// children holding each row's variant metadata and value. A file carrying shredded paths, or one
+/// whose rows are all shredded, is refused rather than read partially.
+/// </summary>
 public sealed class ParquetVariantDecoder : ArrayDecoder
 {
     private const string Id = "vortex.parquet.variant";
@@ -138,20 +115,18 @@ public sealed class ParquetVariantDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// The selection goes into the two binary children, which is where upstream puts it too
-    /// (<c>parquet-variant/src/kernel.rs:273-289</c>).
+    /// The selection goes into the two binary children, which is where the work is.
     /// </summary>
     /// <remarks>
-    /// PERF-GAPS.md V2. Nothing here is per-row: the node is a struct of two `vortex.varbin`
-    /// columns, so pushing `wanted` down is the whole of the work, and the saving is theirs --
-    /// two million sixteen-byte views not built to return sixty-four rows.
-    ///
-    /// THIS IS ONLY SAFE BECAUSE <see cref="VarBinDecoder"/> IS SPECIALIZED TOO. Declaring
-    /// <see cref="SelectsWithoutFullDecode"/> takes `FlatLayoutReader`'s pushed route, which has no
-    /// retained-chunk cache; an unspecialized child on that route decodes its whole node once per
-    /// batch, which is v2 R23's quadratic take. `TakeSpecializationTests` checks the flag against
-    /// the overrides of THIS decoder and cannot see that, so the pairing is stated here and the
-    /// `--throughput --take` axis is what holds it.
+    /// Nothing here is per-row: the node is a struct of two binary columns, so pushing the wanted
+    /// rows down is the whole of the work and the saving is the children's, which then build a view
+    /// per delivered row instead of one per row of the node.
+    /// <para>
+    /// This is only safe because the binary child decoder is specialized too. Declaring
+    /// <see cref="SelectsWithoutFullDecode"/> takes the pushed route, which has no retained-chunk
+    /// cache, so an unspecialized child on it would decode its whole node once per batch and make
+    /// the take quadratic. That pairing spans two decoders, so no unit test can see it.
+    /// </para>
     /// </remarks>
     public override int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
@@ -194,8 +169,8 @@ public sealed class ParquetVariantDecoder : ArrayDecoder
                 "reads the unshredded form only.");
         }
 
-        // "children.len() == expected || expected + 1": the extra one, when present, is an explicit
-        // validity child and it comes FIRST. Upstream's rule, transcribed.
+        // One child more than expected is allowed: the extra one is an explicit validity child,
+        // and it comes first.
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, 3, Id);
         int first = node.ChildCount == 3 ? 1 : 0;
 
@@ -228,8 +203,8 @@ public sealed class ParquetVariantDecoder : ArrayDecoder
         fields[0] = metadataChild;
         fields[1] = valueChild;
 
-        // A STRUCT WEARING THE VARIANT DTYPE. See the file header: the shape is
-        // `Struct{metadata, value}` and the schema still says variant.
+        // A struct wearing the variant dtype: the canonical shape is `Struct{metadata, value}`
+        // while the schema still says variant.
         return context.Canonical.AddStruct(dtype, produced, validity, fields);
     }
 
@@ -248,7 +223,12 @@ public sealed class ParquetVariantDecoder : ArrayDecoder
     }
 }
 
-/// <summary>The shape both variant spellings canonicalize to.</summary>
+/// <summary>
+/// The shape both variant spellings canonicalize to. There is no canonical variant kind: a variant
+/// node is a two-field struct of the Parquet Variant metadata and value bytes wearing the variant
+/// dtype, so both spellings end at the same two binary columns and the writer and the conformance
+/// comparer each have one form to handle.
+/// </summary>
 internal static class VariantStorage
 {
     /// <summary>The struct field holding each row's variant metadata bytes.</summary>

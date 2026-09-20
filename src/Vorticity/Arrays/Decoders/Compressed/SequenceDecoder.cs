@@ -1,14 +1,3 @@
-// vortex.sequence - vortex-sequence-0.86.1/src/array.rs, src/eval.rs and src/compress.rs.
-// A[i] = base + i * multiplier, with NO children and NO buffers: everything is in the metadata.
-//
-// Three things are easy to get wrong and all three are checked here:
-//   * a zero-length sequence is malformed ("SequenceArray length must be greater than zero"),
-//     which is why encodings/sequence_r0 is in the corpus manifest's `skipped` list;
-//   * the multiplier's ptype comes from the PROTO ONEOF TAG, not from the array's dtype:
-//     int64_value -> i64, uint64_value -> u64, anything else is an error
-//     (`multiplier_ptype_from_proto`). The serialized step preserves signedness, not width;
-//   * `base + (n - 1) * multiplier` must fit the output ptype, checked BEFORE a single value is
-//     generated (`ensure_last_expressible`, which has a dedicated upstream test).
 using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -18,7 +7,13 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.sequence</c> into a materialized primitive array.</summary>
+/// <summary>
+/// Decodes <c>vortex.sequence</c> into a materialized primitive array: row i is
+/// <c>base + i * multiplier</c>, with no children and no buffers, everything coming from the
+/// metadata. A zero-length sequence is malformed, the multiplier's physical type is the one the
+/// wire tag names rather than the array's, so the step keeps its signedness but not its width, and
+/// the last value must fit the output type, which is checked before a single value is generated.
+/// </summary>
 public sealed class SequenceDecoder : ArrayDecoder
 {
     private const string Id = "vortex.sequence";
@@ -47,9 +42,8 @@ public sealed class SequenceDecoder : ArrayDecoder
     /// indices and generates nothing else.
     /// </summary>
     /// <remarks>
-    /// The cheapest specialization there is, and the one with the largest ratio: generating 64 of
-    /// 65 536 rows instead of all of them. Not in the take table only because the table was written
-    /// before the writer could emit this encoding.
+    /// The cheapest specialization there is: a take generates one value per wanted row rather than
+    /// one per row of the node.
     /// </remarks>
     public override int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
@@ -75,7 +69,7 @@ public sealed class SequenceDecoder : ArrayDecoder
 
         SequenceMetadata metadata = SequenceMetadata.Read(node.Metadata, context.Scalars, context.Types);
 
-        // The base is validated against the OUTPUT ptype, so a base that does not narrow
+        // The base is validated against the output ptype, so a base that does not narrow
         // losslessly is rejected here rather than silently truncated.
         DType baseType = context.Types.Primitive(ptype, Nullability.NonNullable);
         TypedScalar baseScalar = TypedScalarReader.Interpret(metadata.Base, baseType);
@@ -120,7 +114,7 @@ public sealed class SequenceDecoder : ArrayDecoder
         int width = ptype.ByteWidth();
         int produced = selective ? wanted.Length : length;
         int total = ArrayDecodeContext.CheckedMultiply(produced, width, "Sequence values");
-        // UNINITIALIZED: every arm of the switch below generates all `produced` elements.
+        // Left uninitialized: every arm of the switch below generates all `produced` elements.
         VortexBuffer output = CompressedValues.AllocateUninitialized(
             context, total, width, Id, out Span<byte> destination);
 
@@ -156,7 +150,7 @@ public sealed class SequenceDecoder : ArrayDecoder
 
         if (selective)
         {
-            // MULTIPLY rather than accumulate: the wanted rows are scattered, so there is no run to
+            // Multiply rather than accumulate: the wanted rows are scattered, so there is no run to
             // accumulate along, and `base + i * step` wraps exactly as the running sum would.
             for (int i = 0; i < wanted.Length; i++)
             {
@@ -166,10 +160,10 @@ public sealed class SequenceDecoder : ArrayDecoder
             return;
         }
 
-        // THE ACCUMULATOR IS A LOOP-CARRIED DEPENDENCY, one add deep, so the serial loop runs at
-        // the latency of an add per value however wide the machine is. `base + i * step` is the
-        // same sequence with no dependency at all: seed one vector with the first `lanes` values
-        // and advance it by `lanes * step`, which wraps exactly as the running sum does because
+        // The accumulator is a loop-carried dependency one add deep, so the serial loop runs at the
+        // latency of an add per value however wide the machine is. `base + i * step` is the same
+        // sequence with no dependency at all: seed one vector with the first `lanes` values and
+        // advance it by `lanes * step`, which wraps exactly as the running sum does because
         // two's-complement addition is associative.
         int index = 0;
         T accumulator = start;
@@ -187,11 +181,11 @@ public sealed class SequenceDecoder : ArrayDecoder
             T laneStep = unchecked(value - start);
             Vector<T> bump = new Vector<T>(laneStep);
 
-            // FOUR ACCUMULATORS, NOT ONE, and no bounds check in the loop. One vector still leaves
-            // a loop-carried add between consecutive stores, so the loop runs at add LATENCY where
-            // the store units are the only thing that should bound it; four independent chains let
-            // the machine retire four stores in the time one dependency step takes. The base
-            // reference is taken once, so `StoreUnsafe` addresses the span without re-checking it
+            // Four accumulators rather than one, and no bounds check in the loop. A single vector
+            // still leaves a loop-carried add between consecutive stores, so the loop runs at the
+            // latency of that add where the store units should be the only bound; four independent
+            // chains let the machine retire four stores in the time one dependency step takes. The
+            // base reference is taken once, so the stores address the span without re-checking it
             // per iteration.
             ref T destinationRef = ref MemoryMarshal.GetReference(values);
             Vector<T> v0 = new Vector<T>(seed);
@@ -240,9 +234,9 @@ public sealed class SequenceDecoder : ArrayDecoder
             : baseScalar.AsUInt64;
     }
 
-    // `SequenceData::ensure_last_expressible`. Measured in the ptype's own signedness so a large
-    // u64 base stays exact, and expressed as `steps <= room / magnitude` so the product is never
-    // formed at all.
+    // Refuses a sequence whose last value would not fit the output type. The room is computed in
+    // the ptype's own signedness so a large unsigned base stays exact, and the test is expressed as
+    // `steps <= room / magnitude` so the product that would overflow is never formed.
     private static void EnsureLastExpressible(
         PType ptype, ulong baseBits, bool ascending, ulong magnitude, int length)
     {

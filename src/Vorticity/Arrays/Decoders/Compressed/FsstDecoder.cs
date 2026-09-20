@@ -1,29 +1,3 @@
-// vortex.fsst - vortex-fsst-0.86.1/src/array.rs `deserialize` and src/canonical.rs
-// `canonicalize_fsst`. The kernel itself is FsstSymbolTable.
-//
-// The layout is unusual in one respect that shapes the whole decode: the ROW BOUNDARIES ARE ON THE
-// DECODED SIDE, not the compressed one. `codes_offsets` splits the code stream per row, but the
-// decode does not use it for that -- it decompresses the entire stream in one pass and then cuts
-// the result with `uncompressed_lengths`. Two consequences worth stating, because both are
-// load-bearing:
-//
-//   * a row's decoded bytes are `lengths[i]`, and the lengths must account for the decoded heap
-//     EXACTLY (upstream asserts it in build_views). So the lengths are not a hint: they are the
-//     only thing that says where a value ends.
-//   * `codes_offsets` is used only to find the code stream's own extent, offsets[0]..offsets[len],
-//     which for an unsliced array is upstream's `codes.sliced_bytes()`.
-//
-// Shapes, from `deserialize`:
-//     3 buffers [symbols, symbol_lengths, codes] -> children [uncompressed_lengths, codes_offsets, validity?]
-//     2 buffers [symbols, symbol_lengths]        -> children [codes: vortex.varbin, uncompressed_lengths]
-//
-// Only the 3-buffer shape is implemented. The 2-buffer one is upstream's `deserialize_legacy`, and
-// it requires the codes child to still BE a vortex.varbin -- offsets plus a byte heap -- while this
-// library canonicalizes every child, and a canonical VarBinView inlines values of 12 bytes or fewer
-// into the views, where a contiguous code stream no longer exists. Reconstructing one would mean
-// reaching past the arena into another encoding's serialized form. No corpus file uses the shape
-// (all 55 are `vortex.fsst/c2/b3` or `/c3/b3`), so it is refused by name rather than implemented
-// untested -- recorded in docs/90-registry.md as the gap it is.
 using System;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
@@ -32,7 +6,14 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.fsst</c> into a canonical varbin view.</summary>
+/// <summary>
+/// Decodes <c>vortex.fsst</c> into a canonical varbin view. The row boundaries sit on the decoded
+/// side: <c>uncompressed_lengths</c> is the only thing that says where a value ends, and must
+/// account for the decoded heap exactly, while <c>codes_offsets</c> bounds the compressed stream
+/// and each row's slice of it. Only the three-buffer shape is read; the two-buffer one keeps its
+/// codes in a nested <c>vortex.varbin</c> child, and canonicalizing that child inlines its short
+/// values into the views, leaving no contiguous code stream to decode from.
+/// </summary>
 public sealed class FsstDecoder : ArrayDecoder
 {
     /// <summary>The wire id.</summary>
@@ -64,16 +45,17 @@ public sealed class FsstDecoder : ArrayDecoder
     /// <remarks>
     /// <para>
     /// Equal values compress to equal codes, and equal codes decompress to equal values, so code
-    /// equality IS value equality. The first half is the invariant
-    /// <c>FsstCompressInvariantTests</c> holds; the second is decompression being a function.
+    /// equality is value equality. The first half holds because compression takes the longest
+    /// symbol that matches at each position, whatever order the symbols are examined in; the second
+    /// is decompression being a function.
     /// </para>
     /// <para>
-    /// ONLY EQUALITY AND ITS NEGATION. An ordering on codes is not an ordering on the bytes they
+    /// Only equality and its negation. An ordering on codes is not an ordering on the bytes they
     /// stand for -- a symbol's code says nothing about where its bytes sort -- so anything else
-    /// declines and the scan decodes as it always has.
+    /// declines and the scan decodes the column instead.
     /// </para>
     /// <para>
-    /// MOST ROWS ARE REJECTED BY THEIR OFFSETS ALONE: a row whose code slice is not the needle's
+    /// Most rows are rejected by their offsets alone: a row whose code slice is not the needle's
     /// length cannot equal it, and that is two integer reads against touching its bytes. Only the
     /// rows of the right length are compared, which on a selective equality is few.
     /// </para>
@@ -136,9 +118,9 @@ public sealed class FsstDecoder : ArrayDecoder
                 ? Compute.Trilean.False
                 : Compute.Trilean.True;
 
-            // The physical type of the offsets is resolved ONCE, for the reason
-            // `TotalDecodedLength` gives: reading one offset a row through a switch on the type was
-            // 15 % of a scan, and a loop that reads two is no better.
+            // The physical type of the offsets is resolved once for the whole loop: reading each
+            // offset through a switch on the type would put that switch on every row, and this loop
+            // reads two offsets a row.
             switch (offsetsPType)
             {
                 case PType.U8: Match<byte>(raw, stream, wanted, in rows, length, match, miss, destination); break;
@@ -171,20 +153,17 @@ public sealed class FsstDecoder : ArrayDecoder
     /// Decodes only the wanted rows, by decompressing only their codes.
     /// </summary>
     /// <remarks>
-    /// THE REASON THIS IS POSSIBLE AT ALL is the child the reference does not decode with:
-    /// `codes_offsets[i]..[i+1]` bounds row i's codes exactly, so a row's compressed bytes are
-    /// addressable without walking the rows before it. The header above explains why the REFERENCE
-    /// does not work that way - it decompresses the whole stream in one pass and cuts the result
-    /// with `uncompressed_lengths`, which is the right choice for a full scan and the wrong one for
-    /// a take. docs/90's take table classified this encoding from that decode strategy rather than
-    /// from the format, and called it a variable-length encoding whose row n cannot be found
-    /// without rows 0..n-1. The argument is sound in general and does not apply here.
+    /// This is possible because <c>codes_offsets[i]..[i+1]</c> bounds row <c>i</c>'s codes exactly,
+    /// so a row's compressed bytes are addressable without walking the rows before it. Decoding the
+    /// stream in one pass and cutting the result with the uncompressed lengths is the right shape
+    /// for a full scan and the wrong one for a take; the general rule that a variable-length
+    /// encoding cannot reach a row without the rows before it does not hold for this one.
     ///
-    /// What is NOT pushed down is `codes_offsets` itself, deliberately: row i needs offsets i AND
-    /// i+1, so the wanted set for that child is not `wanted` but its union with `wanted + 1`.
-    /// Building that union costs more than it saves - the child is one integer decode of len+1
-    /// values, while the cost this method exists to avoid is the FSST kernel over the whole split,
-    /// the heap allocation that sizes with it, and a view built for every row in it.
+    /// What is not pushed down is <c>codes_offsets</c> itself, deliberately: row <c>i</c> needs
+    /// offsets <c>i</c> and <c>i + 1</c>, so the wanted set for that child is the selection unioned
+    /// with itself shifted by one, and building that union costs more than it saves. The child is
+    /// one integer decode, while what this method exists to avoid is the kernel over the whole
+    /// split, the heap allocation that sizes with it, and a view built for every row in it.
     /// </remarks>
     /// <inheritdoc/>
     public override int DecodeSelected(
@@ -212,20 +191,10 @@ public sealed class FsstDecoder : ArrayDecoder
 
         FsstMetadata metadata = FsstMetadata.Read(node.Metadata);
 
-        // The padded decode tables are built once PER CALL and handed to whichever path runs.
-        //
-        // THAT IS NOT ONCE PER TAKE, AND THE COMMENT HERE USED TO IMPLY IT WAS. PERF-AUDIT-v2.md
-        // R11, measured on `--throughput --take` at a million rows: 54 976 calls to `Prepare` for
-        // 54 976 wanted rows -- **one per row**. The 64 rows of a take are spread over the file, so
-        // each lands in its own split, and each split is one `DecodeSelected` call that rebuilds
-        // 2.3 KiB of tables to decode a single row. Doubling the build costs **at least 4,5 %** of
-        // that take.
-        //
-        // It is left as it is, and the number is why: the `fsst` take axis reads **0.23** -- four
-        // times the reference -- so 4,5 % of it buys nothing anyone is waiting for. The fix is not
-        // here either: it is one prepared table cached per node for the life of a scan, which is
-        // `ScanContext` scratch and therefore R14. On a full scan the count is what the audit
-        // expected -- 86 calls for 86 million rows.
+        // The padded decode tables are built once per call and handed to whichever path runs. That
+        // is not once per take: a take's rows are spread over the file, so each tends to land in
+        // its own split and pay its own build. Sharing one prepared table across the splits of a
+        // scan would have to live in the scan's own scratch rather than here.
         Span<byte> symbolScratch = stackalloc byte[FsstSymbolTable.SymbolScratchBytes];
         Span<byte> widthScratch = stackalloc byte[FsstSymbolTable.WidthScratchBytes];
         FsstDecodeTable table = FsstSymbolTable
@@ -234,7 +203,7 @@ public sealed class FsstDecoder : ArrayDecoder
 
         int produced = selective ? wanted.Length : length;
 
-        // The lengths ARE pushed down: one per wanted row is all the views need, and the child is
+        // The lengths are pushed down: one per wanted row is all the views need, and the child is
         // free to specialize its own take.
         PType lengthsPType = metadata.UncompressedLengthsPType;
         CanonicalSupport.RequireIntegerPType(lengthsPType, Id + " uncompressed_lengths");
@@ -285,25 +254,24 @@ public sealed class FsstDecoder : ArrayDecoder
             }
         }
 
-        // THE SWEEP IS SKIPPED ONLY WHEN THE HEAP IS PROVABLY ASCII, and the proof is two facts
-        // about where its bytes came from rather than a look at the bytes: every byte is either one
-        // of the first `width` bytes of some symbol -- all below 0x80, which `SymbolsAreAscii`
-        // establishes over two kilobytes of table -- or a byte the escape path wrote, all of which
-        // `escapeBits` has accumulated. ASCII is valid UTF-8, so there is nothing left to check.
-        // Anything else falls through to the full `Utf8.IsValid` exactly as before: the guarantee
-        // is the same one, bought at two kilobytes instead of fifty-two megabytes.
+        // The validity sweep is skipped only when the heap is provably ASCII, and the proof is two
+        // facts about where its bytes came from rather than a look at the bytes: every byte is
+        // either one of the first `width` bytes of some symbol, all below 0x80 whenever
+        // `SymbolsAreAscii` holds, or a byte the escape path wrote, all of which `escapeBits` has
+        // accumulated. ASCII is valid text, so there is nothing left to check. Anything else falls
+        // through to validating the whole heap, for the same guarantee at the price of reading it.
         bool heapIsAscii = table.SymbolsAreAscii && (escapeBits & 0x80) == 0;
         bool requireUtf8 = dtype.Kind == DTypeKind.Utf8 && !heapIsAscii;
 
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             produced, CanonicalSupport.ViewSize, Id + " views");
 
-        // Uninitialized: ViewKernels writes all sixteen bytes of every view, null rows included.
-        // A null row stores a zero length upstream, so it consumes nothing of the heap and gets an
-        // empty view -- which is now WRITTEN rather than inherited from the allocator.
+        // Uninitialized: the view kernel writes all sixteen bytes of every view, null rows included.
+        // A null row declares a zero length, so it consumes nothing of the heap and gets an empty
+        // view, which is written rather than inherited from the allocator.
         VortexBuffer views = CanonicalSupport.AllocateUninitialized(
             context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
-        // No `wanted` indirection: the lengths child was decoded SELECTIVELY, so it already holds
+        // No `wanted` indirection: the lengths child was decoded selectively, so it already holds
         // exactly the produced rows in selection order.
         ViewKernels.BuildFromLengths(
             uncompressedLengths.Values.Span, lengthsPType, default, destination, writable, produced,
@@ -323,7 +291,7 @@ public sealed class FsstDecoder : ArrayDecoder
     /// Decompresses one wanted row at a time, each from its own slice of the code stream.
     /// </summary>
     /// <remarks>
-    /// Each row is decoded into the REMAINING heap rather than into a slice of exactly its own
+    /// Each row is decoded into the remaining heap rather than into a slice of exactly its own
     /// length, and the difference is not cosmetic. The kernel's fast path is an 8-byte store per
     /// symbol that it may only take while 8 bytes of slack remain; handed a destination cut to the
     /// row's exact size, every symbol in every row would fall to the narrow tail path instead. The
@@ -449,10 +417,9 @@ public sealed class FsstDecoder : ArrayDecoder
     /// </remarks>
     private static int TotalDecodedLength(CanonicalNode lengths, PType ptype, int length)
     {
-        // Typed once rather than per row: this loop was 15% of a 1M-row fsst scan, going through
-        // `ReadInteger`'s switch on the physical type to add one number. The overflow cap moves to
-        // the end -- a sum of at most 2^31 values each below 2^63 cannot wrap a `long`, so the
-        // running total is exact until it is tested.
+        // Typed once rather than per row, so that adding one number does not go through a switch on
+        // the physical type. The overflow cap moves to the end -- a sum of at most 2^31 values each
+        // below 2^63 cannot wrap a `long`, so the running total is exact until it is tested.
         (long total, _, int negative) = ViewKernels.SumLengths(
             lengths.Values.Span, ptype, default, length);
 

@@ -1,17 +1,3 @@
-// vortex.patched - vortex-array-0.86.1/src/arrays/patched/vtable/mod.rs.
-//
-// An inner primitive array with sparse overrides, indexed PER 1024-VALUE CHUNK AND PER LANE. The
-// patches are stored CSR-style: `lane_offsets` has `n_chunks * n_lanes + 1` entries, and the patches
-// of chunk `c` are `lane_offsets[c * n_lanes] .. lane_offsets[c * n_lanes + n_lanes]`. Each patch's
-// index is an offset WITHIN its chunk, which is why it fits in a u16.
-//
-// A patch whose absolute index falls outside `[offset, offset + len)` is SKIPPED rather than being
-// an error: `offset` exists because slicing a patched array keeps the whole chunk's patch list, so
-// out-of-view patches are the normal state of a sliced array, not corruption.
-//
-// IN-MEMORY ONLY UPSTREAM, and contract §2.8 pinned that note as a reason to refuse the encoding.
-// It is a statement about writers - no conformant writer emits one - and reading one costs nothing.
-// The corpus has a single file, produced with VORTEX_EXPERIMENTAL_PATCHED_ARRAY=1.
 using System;
 using System.Buffers.Binary;
 
@@ -21,7 +7,16 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.patched</c>: an inner array with per-chunk sparse overrides.</summary>
+/// <summary>
+/// Decodes <c>vortex.patched</c>: an inner primitive array with sparse overrides indexed per
+/// chunk and per lane. The patches are stored the way a compressed sparse row is: `lane_offsets`
+/// holds one entry per chunk and lane plus a terminator, and each patch's index is an offset
+/// within its own chunk, which is why it fits in a <c>u16</c>.
+/// </summary>
+/// <remarks>
+/// No conformant writer emits this encoding, which the reference implementation only builds in
+/// memory; it is decoded anyway because doing so costs nothing.
+/// </remarks>
 public sealed class PatchedArrayDecoder : ArrayDecoder
 {
     private const string Id = "vortex.patched";

@@ -1,19 +1,3 @@
-// fastlanes.bitpacked - vortex-fastlanes-0.86.1/src/bitpacking/vtable/mod.rs (`deserialize`),
-// src/bitpacking/array/mod.rs (`validate`) and src/bitpacking/array/bitpack_decompress.rs.
-//
-// The child layout is decided by the METADATA, never by the child count (contract §10.2):
-//
-//     patches absent            -> validity child 0     shapes: [V?]
-//     patches, no chunk offsets -> validity child 2     shapes: [idx, val, V?]
-//     patches, chunk offsets    -> validity child 3     shapes: [idx, val, chunks, V?]
-//
-// Three children is ambiguous between "patches + validity" and "patches + chunk offsets, no
-// validity", and only `chunk_offsets_ptype`'s presence resolves it. The corpus exercises all five
-// counts: c0 x137, c1 x55, c2 x1, c3 x40, c4 x43.
-//
-// The packed-length check is what makes the unpack kernel safe: with
-// `packed.len() == ceil((len + offset) / 1024) * 128 * bit_width` every block the loop touches is
-// fully present, so the kernel needs no per-element bounds check.
 using System;
 using System.Buffers;
 using System.Numerics;
@@ -27,6 +11,16 @@ using Vorticity.Types;
 namespace Vorticity.Arrays.Decoders.Compressed;
 
 /// <summary>Decodes <c>fastlanes.bitpacked</c>, patches included, into a primitive array.</summary>
+/// <remarks>
+/// The metadata, never the child count, decides what the children are: without patches, only an
+/// optional validity child; with patches, the patch indices and patch values first, then the
+/// per-chunk offsets when the metadata declares them, then the optional validity child. Three
+/// children on their own are ambiguous between patches with validity and patches with chunk
+/// offsets, and only the declared chunk-offsets type tells the two apart.
+///
+/// The packed buffer must hold exactly one whole block for every block the rows span; that check is
+/// what lets the unpack kernel run without a per-element bounds check.
+/// </remarks>
 public sealed class BitPackedDecoder : ArrayDecoder
 {
     private const string Id = "fastlanes.bitpacked";
@@ -47,18 +41,15 @@ public sealed class BitPackedDecoder : ArrayDecoder
     /// Unpacks only the wanted rows, one at a time, without materializing a single block.
     /// </summary>
     /// <remarks>
-    /// The `fastlanes.bitpacked` row of the take table: "O(1) positional access via the inverse
-    /// transposition". The table also describes a density threshold - decode a whole 1024-block
-    /// once enough of it is wanted, per element below that - and it is deliberately NOT implemented
-    /// here, because the crossover is a measurement nobody has made. Per-element is strictly better
-    /// than today's behaviour at every density up to "all of it", and at "all of it" the scan does
-    /// not take this path at all: `ExecuteWithTake` skips the pushdown when every row of the split
-    /// is wanted.
+    /// The inverse transposition gives positional access to a packed row, so a wanted row is read
+    /// without unpacking the block around it. Switching to a whole-block unpack once enough of a
+    /// block is wanted would need a crossover density this code does not know; per element is never
+    /// the worse choice here, and when every row of a split is wanted the scan does not push the
+    /// take down at all.
     ///
-    /// PATCHES ARE STILL DECODED IN FULL. There are few of them by construction - a patch that
-    /// paid for itself is rare in the column - and they arrive as their own child arrays, so
-    /// selecting among them would mean pushing a second, differently-based selection into them.
-    /// The gain would be a fraction of a fraction.
+    /// Patches are still decoded in full. There are few of them by construction, and they arrive as
+    /// their own child arrays, so selecting among them would mean pushing a second, differently
+    /// based selection into those children, for a fraction of a fraction.
     /// </remarks>
     public override int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
@@ -111,7 +102,7 @@ public sealed class BitPackedDecoder : ArrayDecoder
 
         if (metadata.HasPatches)
         {
-            // Applied against the FULL row space and then narrowed, which is the cheap direction:
+            // Applied against the whole row space and then narrowed, which is the cheap direction:
             // a patch set is small, and the alternative is a search per wanted row.
             ApplySelectedPatches(context, in node, dtype, length, in metadata, width, wanted, destination);
         }
@@ -135,7 +126,7 @@ public sealed class BitPackedDecoder : ArrayDecoder
         PType ptype = CompressedValues.RequireIntegerPrimitive(dtype, Id);
         int elementBits = ptype.ByteWidth() * 8;
 
-        // Class I, all before the packed buffer is touched.
+        // The metadata is checked before the packed buffer is touched.
         if (metadata.BitWidth > (uint)elementBits)
         {
             CompressedThrow.Format(
@@ -169,14 +160,14 @@ public sealed class BitPackedDecoder : ArrayDecoder
         Span<byte> destination = default;
         if (total != 0)
         {
-            // UNINITIALIZED: Unpack writes all `total` bytes, including at bit width 0 where it
+            // Uninitialized: Unpack writes all `total` bytes, including at bit width 0 where it
             // clears the span itself rather than inheriting a cleared one. Patches only overwrite.
             output = CompressedValues.AllocateUninitialized(context, total, width, Id, out destination);
             Unpack(packed.Span, bitWidth, offset, length, width, destination);
         }
 
-        // Patches are decoded and applied BEFORE the validity child, only because the validity
-        // child sits after them; the order of the two operations is otherwise independent.
+        // Patches are decoded and applied before the validity child only because the validity child
+        // sits after them; the order of the two operations is otherwise independent.
         if (metadata.HasPatches)
         {
             ApplyPatches(context, in node, dtype, length, in metadata, width, destination);
@@ -283,11 +274,10 @@ public sealed class BitPackedDecoder : ArrayDecoder
         ReadOnlySpan<T> packed = MemoryMarshal.Cast<byte, T>(packedBytes);
         int elementsPerBlock = FastLanes.BlockByteLength(bitWidth) / Unsafe.SizeOf<T>();
 
-        // THE WINDOW DECIDES WHICH BLOCKS ARE TOUCHED, and there are at most three kinds: a
-        // partial first, a contiguous run of whole ones, and a partial last. Blocks before the
-        // window were being visited only to be `continue`d, and the whole run was being unpacked a
-        // block at a time -- which made `UnpackBlock` rebuild its per-row shape table once per
-        // block, for a bit width that is the same across every block of the node.
+        // The window decides which blocks are touched, and there are at most three kinds: a partial
+        // first, a contiguous run of whole ones, and a partial last. The whole run is handed to the
+        // kernel in one call so the per-row shape table, which depends only on the bit width and so
+        // is the same for every block of the node, is built once rather than once per block.
         int end = offset + length;
         int firstBlock = offset / FastLanes.BlockSize;
         int lastBlock = (end - 1) / FastLanes.BlockSize;
@@ -309,8 +299,8 @@ public sealed class BitPackedDecoder : ArrayDecoder
                     CopyPartial(packed, bitWidth, elementsPerBlock, firstBlock, offset, end, scratch, destination);
                 }
 
-                // A window that is partial at both ends of the SAME block was already copied
-                // whole by the head: its clamp is [offset, end), which is all of it.
+                // A window partial at both ends of one and the same block was already copied whole
+                // by the head: its clamp is [offset, end), which is all of it.
                 if (tailPartial && !(headPartial && lastBlock == firstBlock))
                 {
                     CopyPartial(packed, bitWidth, elementsPerBlock, lastBlock, offset, end, scratch, destination);
@@ -399,8 +389,7 @@ public sealed class BitPackedDecoder : ArrayDecoder
             context.MarkNodeChecked(in node);
         }
 
-        // A span is read below, so a constant child is expanded: see
-        // `CanonicalSupport.RequirePrimitiveChild`.
+        // A span is read below, so a constant child is expanded into one rather than refused.
         CanonicalNode values = context.Canonical.GetNode(
             CanonicalSupport.ExpandIfConstant(context, valuesIndex));
         if (values.Kind != CanonicalKind.Primitive)
@@ -443,8 +432,8 @@ public sealed class BitPackedDecoder : ArrayDecoder
 
         if (patchesMetadata.HasChunkOffsets)
         {
-            // Read, validated and then deliberately unused: Phase 1 never slices patches, so
-            // `offset_within_chunk` and the per-chunk index offsets have nothing to accelerate.
+            // Read, validated and then deliberately unused: nothing here slices a patch set, so the
+            // per-chunk index offsets have nothing to accelerate.
             int chunkOffsetsLength = ArrayDecodeContext.CheckedLength(
                 patchesMetadata.ChunkOffsetsLength, $"{Id} patch chunk_offsets_len");
             DType chunkOffsetsType = context.Types.Primitive(
@@ -463,8 +452,7 @@ public sealed class BitPackedDecoder : ArrayDecoder
             context.MarkNodeChecked(in node);
         }
 
-        // A span is read below, so a constant child is expanded: see
-        // `CanonicalSupport.RequirePrimitiveChild`.
+        // A span is read below, so a constant child is expanded into one rather than refused.
         CanonicalNode values = context.Canonical.GetNode(
             CanonicalSupport.ExpandIfConstant(context, valuesIndex));
         if (values.Kind != CanonicalKind.Primitive)
@@ -479,7 +467,6 @@ public sealed class BitPackedDecoder : ArrayDecoder
                 $"{dtype.PType.Name()} was required.");
         }
 
-        // `assert!(values.all_valid(ctx)?, "Patch values must be all valid")`.
         if (!values.Validity.IsAllValid)
         {
             CompressedThrow.Format($"{Id} patch values must not contain nulls.");

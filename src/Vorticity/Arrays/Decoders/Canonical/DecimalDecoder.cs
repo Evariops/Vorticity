@@ -1,12 +1,3 @@
-// vortex.decimal - vortex-array-0.86.1/src/arrays/decimal/vtable/mod.rs `deserialize`.
-// Phase 1 contract §9.1: one buffer (`values`), an optional validity child at index 0, and a
-// DecimalMetadata whose `values_type` is the buffer's stride.
-//
-// The stride is on the wire AND derivable from the dtype's precision, and the two must agree well
-// enough to be safe: prost would coerce an unknown enumeration to DecimalType::I8 = 0 and read the
-// buffer one byte at a time. DecimalMetadata.Read already rejects an out-of-domain tag; this
-// decoder additionally rejects a storage narrower than the precision needs, which would truncate
-// every value.
 using System;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -16,6 +7,11 @@ using Vorticity.Types.Numerics;
 namespace Vorticity.Arrays.Decoders.Canonical;
 
 /// <summary>Decodes <c>vortex.decimal</c>: little-endian two's-complement unscaled values.</summary>
+/// <remarks>
+/// The values buffer's stride is both stated in the node's metadata and derivable from the dtype's
+/// precision, and the two have to agree closely enough to be safe: a storage narrower than the
+/// precision needs would truncate every value, so it is refused here.
+/// </remarks>
 public sealed class DecimalDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>

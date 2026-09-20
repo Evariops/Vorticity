@@ -1,11 +1,3 @@
-// Re-publishes an already-decoded canonical node under a different dtype and validity, sharing
-// every buffer and child. `vortex.masked` needs it: its child is decoded at `P` with nullability
-// stripped and the mask is then applied on top (vortex-array-0.86.1/src/arrays/masked/vtable/mod.rs).
-// So does a filter reading a field through a nullable struct (`FilterEvaluator.MaskedBy`).
-//
-// Nothing is copied. The new record points at the same VortexBuffers, which belong to the batch's
-// segments or to the canonical arena's own rentals - either way to something whose lifetime is the
-// batch (Phase 1 contract §2.2 rule 2).
 using System;
 using System.Diagnostics;
 using Vorticity.Buffers;
@@ -14,6 +6,11 @@ using Vorticity.Types;
 namespace Vorticity.Arrays.Decoders.Canonical;
 
 /// <summary>Rebuilds a canonical node with a new dtype and validity, sharing its storage.</summary>
+/// <remarks>
+/// Nothing is copied: the new record points at the same buffers, which belong to the batch's
+/// segments or to the arena's own rentals, so their lifetime is the batch either way. A masked
+/// array needs this, its child being decoded with nullability stripped and the mask applied on top.
+/// </remarks>
 internal static class CanonicalRewrap
 {
     private const int StackChildren = 32;
@@ -30,10 +27,8 @@ internal static class CanonicalRewrap
     /// <returns>The new canonical node's index.</returns>
     /// <exception cref="VortexFormatException">The source's row count disagrees with the parent's.</exception>
     /// <remarks>
-    /// EXHAUSTIVE BY CONSTRUCTION (PERF-AUDIT-v2.md §2.4bis, Z1b-c1): every kind is NAMED, and the
-    /// <c>_</c> arm throws. It used to be <c>default: RewrapExtension</c>, so a tenth kind had its
-    /// mask pushed down to a storage child it does not have. IDE0072 -- error here, see
-    /// <c>.editorconfig</c> -- now fails the build when a named kind is missing.
+    /// Every kind is named and the <c>_</c> arm throws, so a kind added later fails the build
+    /// rather than falling into whichever arm happened to be the catch-all.
     /// </remarks>
     internal static int WithValidity(
         CanonicalArena arena, int sourceIndex, DType dtype, Validity validity, int length)
@@ -64,8 +59,7 @@ internal static class CanonicalRewrap
             // An extension's validity is the storage's, so the mask has to be pushed down one level
             // rather than applied to the wrapper.
             CanonicalKind.Extension => RewrapExtension(arena, in source, dtype, validity, length),
-            // EMPRUNTE (Z1b-c2b) : re-publier une constante sous un autre dtype et une autre
-            // validite ne touche pas la valeur.
+            // Re-publishing a constant under another dtype and validity leaves its value alone.
             CanonicalKind.Constant =>
                 arena.AddConstant(dtype, length, validity, source.ConstantElement),
             _ => throw new UnreachableException($"CanonicalKind {(byte)source.Kind} is not defined."),

@@ -1,26 +1,18 @@
-// pco's bit reader - pco-1.0.3/src/bit_reader.rs.
-//
-// FIRST PIECE OF THE PCO PORT that is testable on its own, which is why it comes before anything
-// that uses it. Bits are read LSB-FIRST within a little-endian window: the byte at the current
-// index is loaded as a `u64`, shifted right by the bit offset within that byte, and masked to the
-// requested width.
-//
-// TWO WORDS, NOT ONE, and the overlap is deliberate upstream. A single `u64` yields at most 57 bits
-// safely, because up to 7 of its bits may be consumed by the offset. Wider reads take a second word
-// starting SEVEN bytes on rather than eight - overlapping by a byte - which avoids a left shift by
-// 64 when the reader happens to be byte-aligned. `calc_max_bytes(64) = 9` selects that path for
-// every 64-bit latent, so it is the normal case and not a corner.
-//
-// BOUNDS INSTEAD OF PADDING. Upstream reads past the logical end and relies on the caller having
-// padded the buffer; the extra bits are masked away. This reads zeroes past the end instead, which
-// produces the same masked value without requiring the padding, and refuses a read that would need
-// bits the buffer does not have.
 using System;
 using System.Buffers.Binary;
 
 namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 
-/// <summary>Reads LSB-first bit fields out of a pco byte stream.</summary>
+/// <summary>
+/// Reads LSB-first bit fields out of a pco byte stream: the byte at the current index is loaded as
+/// a <c>u64</c>, shifted right by the bit offset within that byte, and masked to the width asked
+/// for.
+/// </summary>
+/// <remarks>
+/// Past the logical end this reads zeroes and refuses a read that would need bits the buffer does
+/// not hold, where the reference implementation reads past the end and relies on the caller having
+/// padded the buffer. The masked value is the same either way, and no padding is required.
+/// </remarks>
 internal ref struct PcoBitReader
 {
     private readonly ReadOnlySpan<byte> _source;
@@ -59,8 +51,8 @@ internal ref struct PcoBitReader
     /// pco's offsets are addressed rather than streamed: the symbol pass records each value's width
     /// and a running sum, and the offset pass reads value <c>i</c> at <c>base + csum[i]</c>. That is
     /// a random access into the same buffer, not a second cursor -- so this reads from an explicit
-    /// position rather than saving, moving and restoring one. The save/restore version needed a
-    /// try/finally, which kept it out of line on the hottest loop in the decoder.
+    /// position rather than saving, moving and restoring one. Saving and restoring would need a
+    /// try/finally, which keeps the method out of line on the decoder's hottest loop.
     /// </remarks>
     internal readonly ulong ReadAt(long bitPosition, int width) => ReadCore(bitPosition, width);
 
@@ -94,8 +86,9 @@ internal ref struct PcoBitReader
         }
         else
         {
-            // Seven bytes on, not eight: the deliberate one-byte overlap that keeps the shift below
-            // 64 when `bitsPastByte` is zero.
+            // One word yields at most 57 bits safely, since the offset may consume up to seven of
+            // them. A wider read takes a second word seven bytes on rather than eight: the
+            // one-byte overlap is what keeps the shift below 64 when `bitsPastByte` is zero.
             int processed = 56 - bitsPastByte;
             value = first | (WordAt(byteIndex + 7) << processed);
         }
@@ -163,13 +156,14 @@ internal ref struct PcoBitReader
         return _source.Slice(byteIndex, count);
     }
 
-    /// <summary>Eight bytes little-endian at <paramref name="byteIndex"/>, zero past the end.</summary>
-    /// <summary>Eight bytes at <paramref name="byteIndex"/>, zero-filled past the end.</summary>
+    /// <summary>
+    /// Eight bytes little-endian at <paramref name="byteIndex"/>, zero-filled past the end.
+    /// </summary>
     /// <remarks>
-    /// ONE LOAD WHEN THE BYTES ARE THERE. This assembled the word a byte at a time -- eight loads,
-    /// eight shifts and eight ORs for every bit read, and `ReadPreDelta` makes two per VALUE. The
-    /// byte loop survives only for the last seven bytes of the buffer, where a wide load would run
-    /// past the end.
+    /// One load when the bytes are there: assembling the word a byte at a time costs eight loads,
+    /// eight shifts and eight bitwise ors on every bit read, and a single value can need more than
+    /// one read. The byte loop survives only for the last seven bytes of the buffer, where a wide
+    /// load would run past the end.
     /// </remarks>
     private readonly ulong WordAt(int byteIndex)
     {

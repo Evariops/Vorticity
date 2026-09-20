@@ -1,33 +1,3 @@
-// The per-element switch, hoisted out of the loop once for the whole family that shares it.
-//
-// WHAT THIS REPLACES, AND WHY IT IS ONE FILE. Five encodings move canonical rows around rather than
-// compute them -- `vortex.dict` gathers, `vortex.runend` repeats, `vortex.sparse` scatters,
-// `fastlanes.rle` gathers per chunk, `vortex.constant` tiles -- and each of them wrote its inner
-// loop as: read a code through `switch (ptype)`, bounds-check it, then `Slice(row * width, width)
-// .CopyTo(...)`, which is a second switch inside `memmove`'s size dispatch. The 1M-row axis reads
-// that family at 9.5x to 20.8x the reference while the encodings that COMPUTE values pointwise --
-// `alp`, `for`, `zigzag`, `bitpacked` -- sit between 1.7x and 3x. The difference is not the
-// arithmetic; it is that in a gather the dispatch IS the loop body. Rust's `take` kernel
-// monomorphizes on both types and emits a load and a store.
-//
-// bench/BRANCHING.md measured the same switch at +0.9% inside `OnPairDecoder.Concatenate` and
-// concluded it was refuted. That conclusion holds for that loop and nowhere else: Concatenate's
-// body is a 16-byte store, two table reads and three bounds checks, so 1.2 ns of switch hides
-// behind 2.4 ns of other work. Here the body is one move.
-//
-// THE SHAPE. `switch` on the code's physical type once, `switch` on the value width once, and call
-// a loop generic in both. The JIT specializes a generic over an unmanaged struct into its own
-// code, so `dst[i] = src[idx]` becomes a load and a store of exactly that width with no dispatch.
-// Value widths are 1/2/4/8 (primitives and decimals), 16 (a VarBinView view, and i128) and 32
-// (i256); `Vector128<byte>` is used for 16 rather than a hand-rolled struct because it is a real
-// 16-byte unmanaged type whose assignment the JIT already compiles to one pair of instructions,
-// and it stays correct with `DOTNET_EnableHWIntrinsic=0` (it is a type, not an intrinsic call).
-//
-// BOUNDS. Every code is checked against the value count before it indexes anything - class I,
-// unchanged, and `vortex.dict`'s header says why: `all_values_referenced` is a hint and must never
-// let a check be skipped. What changes is that the check is a compare against a local rather than
-// a `switch` returning a widened `long`, and that the indexing itself keeps the JIT's own bounds
-// check, which on a span whose length is a loop-invariant local costs a compare it can hoist.
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -40,8 +10,20 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 
 /// <summary>
 /// Typed row movement: gather, tile and masked gather, with the physical-type dispatch done once
-/// per call instead of once per row.
+/// per call instead of once per row. Several encodings move canonical rows around rather than
+/// compute them, and in such a loop the dispatch is the body, so each kernel switches on the code
+/// type once and on the value width once, then calls a loop generic in both that the runtime
+/// specializes into a plain load and store.
 /// </summary>
+/// <remarks>
+/// Value widths are 1, 2, 4 and 8 for primitives and decimals, 16 for a view or a 128-bit decimal,
+/// and 32 for a 256-bit one. <c>Vector128&lt;byte&gt;</c> stands in for the 16-byte unit because it
+/// is a real unmanaged type whose assignment already compiles to one pair of instructions, and,
+/// being a type rather than an intrinsic call, it stays correct when hardware intrinsics are
+/// disabled. Every code is range-checked against the value count before it indexes anything: a
+/// dictionary's claim that all its values are referenced is a hint, and must never let that check
+/// be skipped.
+/// </remarks>
 internal static class RowKernels
 {
     /// <summary>Value widths this file has a typed kernel for.</summary>
@@ -56,9 +38,7 @@ internal static class RowKernels
     /// <remarks>
     /// The widths that fit a primitive go through <c>Span&lt;T&gt;.Fill</c>, which is the vectorized
     /// memset. The rest double: write one element, then copy what is written over what is not, so
-    /// n bytes cost log2(n / width) calls to the same `memmove` intrinsic rather than n / width
-    /// copies of one element. That is what `vortex.constant` was paying -- a million 8-byte
-    /// `CopyTo` calls for one scalar -- and it is 11x the reference on the 1M axis.
+    /// filling costs a logarithmic number of block copies rather than one copy per element.
     /// </remarks>
     internal static void Tile(Span<byte> destination, ReadOnlySpan<byte> element)
     {
@@ -128,7 +108,7 @@ internal static class RowKernels
     /// <param name="destination">Exactly <paramref name="count"/> rows of room.</param>
     /// <param name="count">Rows to gather.</param>
     /// <returns>
-    /// The row of the first out-of-range code, or -1 when every code was in range. The CALLER
+    /// The row of the first out-of-range code, or -1 when every code was in range. The caller
     /// raises, because only it knows the encoding's name and the code's value.
     /// </returns>
     internal static int Gather(
@@ -260,18 +240,12 @@ internal static class RowKernels
         ref TValue targetRef = ref MemoryMarshal.GetReference(target);
         ref byte flagRef = ref MemoryMarshal.GetReference(flags);
 
-        // THE LOOP STAYS FUSED, and the split was TRIED AND MEASURED AWAY. PERF-GAPS.md E6 reads
-        // upstream's two separate walks -- `validity.take` then `take_views`
-        // (`varbinview/compute/take.rs:49`, `:57`) -- against this one body and guesses that two
-        // tight passes beat it. They do not: a pure gather pass followed by a mask-only pass over
-        // the same codes measured **1.082** against this form on `dict_nullable_values_nonnull_codes`
-        // fullscan, interval [1.045; 1.151], entirely on the wrong side of 1 (bench/ab.sh,
-        // 2026-09-18). The second walk of a megabyte of codes costs more than the contention it
-        // removes, and the fused body has no dependency between the view store and the mask
-        // arithmetic for a split to break anyway.
+        // The gather and the mask stay in one body rather than becoming two passes: a second walk
+        // over the codes costs more than the register pressure it relieves, and there is no
+        // dependency between the value store and the mask arithmetic for a split to break.
         //
-        // THE FULL BLOCK IS ITS OWN LOOP, with a CONSTANT eight iterations, for the reason the
-        // bitmap form documents: a variable trip count costs the unroll, and with it the constant
+        // The full block is its own loop with a constant eight iterations, for the reason the
+        // bitmap form below gives: a variable trip count costs the unroll, and with it the constant
         // shift amounts and the eight independent gathers in flight at once.
         int whole = target.Length & ~7;
         for (int block = 0; block < whole; block += 8)
@@ -329,13 +303,13 @@ internal static class RowKernels
         bool codesAllValid = codeBits.IsEmpty;
         bool tracked = !outputBits.IsEmpty;
 
-        // EVERY CODE VALID, EVERY VALUE MAYBE NOT: a dictionary whose VALUES are nullable, which is
-        // its own corpus shape and reads 3.2x the reference. There is no code mask to test, and the
-        // output validity is a bit per row written in order -- so it is accumulated a BYTE at a
-        // time and stored once, instead of eight read-modify-writes of the same byte.
+        // Every code valid, the values possibly not: a dictionary whose values are nullable. There
+        // is no code mask to test, and the output validity is a bit per row written in order, so it
+        // is accumulated a byte at a time and stored once instead of eight read-modify-writes of
+        // the same byte.
         if (codesAllValid && tracked && !valuesAllValid)
         {
-            // FOUR BOUNDS CHECKS PER ROW BECOME ONE FOR THE WHOLE LOOP. Every access inside the
+            // Four bounds checks per row become one for the whole loop. Every access inside the
             // block below is provable from a fact established before it, so the checks are not
             // removed on trust - they are removed because they are redundant:
             //
@@ -346,27 +320,26 @@ internal static class RowKernels
             //                         checks the bitmap covers exactly that many bits.
             //
             // The guard failing is not an error: it falls through to the general loop, which
-            // checks everything per row and reports a malformed file the way it always did. That
-            // matters, because the bitmap's extent comes from the FILE and this is a reader that
-            // hostile input is aimed at - the checks go away when they are provably redundant, not
-            // when they are merely unlikely to fire.
+            // checks everything per row and reports a malformed file. That matters, because the
+            // bitmap's extent comes from the file and this is a reader hostile input is aimed at:
+            // the checks go away when they are provably redundant, not when they are merely
+            // unlikely to fire.
             if (codes.Length >= target.Length
                 && !valueBits.IsEmpty
                 && (long)valueBits.Length * 8 >= (long)valueBitOffset + valuesLength)
             {
                 ReadOnlySpan<TCode> rowCodes = codes[..target.Length];
 
-                // ONE BYTE PER DICTIONARY ENTRY, EXPANDED ONCE. The row body gathers TWICE from
-                // the dictionary -- the value, and the value's validity BIT -- and the second
-                // gather was seven operations to extract one bit: an add for the bit index, a
-                // shift to find its byte, a load, a shift and a mask to select it, then the shift
-                // and the or that place it in the output byte. Against a table of bytes the whole
-                // thing is a load, a shift and an or.
+                // One byte per dictionary entry, expanded once. The row body gathers twice from the
+                // dictionary, the value and the value's validity bit, and extracting that bit from
+                // a bitmap takes several operations where a table of bytes takes a load, a shift
+                // and an or.
                 //
-                // The expansion is O(dictionary) against O(rows), and it is taken only when the
-                // dictionary is the smaller of the two -- which is what dictionary encoding MEANS.
-                // A dictionary wider than the column it encodes keeps the bitmap form below, where
-                // the table would cost more cache than the bit arithmetic it saves.
+                // The expansion costs one pass over the dictionary against one per row, so it is
+                // taken only when the dictionary is the smaller of the two, which is the case
+                // dictionary encoding is for. A dictionary larger than the column it encodes keeps
+                // the bitmap form below, where the table would cost more cache than the bit
+                // arithmetic it saves.
                 if (valuesLength <= target.Length)
                 {
                     Scratch<byte> flagScratch = new Scratch<byte>(valuesLength, default);
@@ -392,9 +365,9 @@ internal static class RowKernels
                 ref TValue targetRef = ref MemoryMarshal.GetReference(target);
                 ref byte bitsRef = ref MemoryMarshal.GetReference(valueBits);
 
-                // THE FULL BLOCK IS ITS OWN LOOP, with a CONSTANT eight iterations. Sharing one
-                // loop with the tail made the trip count a variable, which costs the unroll - and
-                // with it the constant shift amounts, and the chance for eight independent gathers
+                // The full block is its own loop with a constant eight iterations. Sharing one loop
+                // with the tail would make the trip count a variable, which costs the unroll, and
+                // with it the constant shift amounts and the chance for eight independent gathers
                 // to be in flight at once. Only the last block of a column is ever short.
                 int whole = target.Length & ~7;
                 for (int block = 0; block < whole; block += 8)
@@ -628,11 +601,10 @@ internal static class RowKernels
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A NEGATIVE CODE MUST SATURATE UP, not down. The loop this replaces read the code as a
-    /// <c>long</c> and compared <c>(ulong)code &gt;= (ulong)(uint)valuesLength</c>, so -1 became
-    /// 2^64-1 and was refused. Truncating instead would be a silent correctness change: -2^32 as
-    /// an <c>i64</c> truncates to 0 and would gather row 0 from a file that declares a negative
-    /// code. So does <see cref="uint"/>'s own <c>CreateSaturating</c>, which clamps negatives to 0.
+    /// A negative code must saturate up, not down, so that the caller's range check refuses it.
+    /// Truncating would be a silent correctness change: a large negative code truncates to 0 and
+    /// would gather row 0 from a file that declares nonsense. <see cref="uint"/>'s own
+    /// <c>CreateSaturating</c> is no good here either, since it clamps negatives to 0.
     /// </para>
     /// <para>
     /// <c>Unsafe.As</c> rather than a cast through <c>object</c>: the typeof comparisons are

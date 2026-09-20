@@ -1,6 +1,3 @@
-// vortex.null - vortex-array-0.86.1/src/arrays/null/mod.rs `deserialize`.
-// Phase 1 contract §9.1: no children, no buffers, metadata must be empty, and `P` must be
-// DType::Null.
 using System;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;

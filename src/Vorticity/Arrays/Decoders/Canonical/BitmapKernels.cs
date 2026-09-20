@@ -1,15 +1,3 @@
-// Bitmap runs, by the word instead of by the bit.
-//
-// Every encoding that expands rows writes validity in RUNS: `vortex.runend` marks a whole run
-// valid, `vortex.sparse` fills then patches, `vortex.constant` sets every bit or none. The
-// bit-at-a-time loops those started as are O(bits) with a load, an or and a store each; a run is
-// two edge bytes and a `Fill` in between, which is the memset intrinsic. On a million rows that is
-// the difference between a million read-modify-writes and 125 KB of vector stores.
-//
-// LSB-first throughout, which is what Arrow and `vortex.bool` both use: bit i of a bitmap lives in
-// byte i >> 3 at position i & 7. CanonicalSupport.BitAt/SetBit are the single-bit spelling of the
-// same layout and stay where they are - a loop that genuinely touches scattered bits should keep
-// using them.
 using System;
 using System.Buffers.Binary;
 using System.Numerics;
@@ -19,8 +7,17 @@ using System.Runtime.Intrinsics;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
-/// <summary>Whole-run bitmap writes, for the decoders that produce runs rather than bits.</summary>
+/// <summary>
+/// Whole-run bitmap writes, for the decoders that produce runs rather than bits. Bitmaps are
+/// least-significant-bit first, as Arrow and <c>vortex.bool</c> both are: bit i lives in byte
+/// <c>i &gt;&gt; 3</c> at position <c>i &amp; 7</c>.
+/// </summary>
 /// <remarks>
+/// <para>
+/// A loop that genuinely touches scattered bits belongs on <c>CanonicalSupport.BitAt</c> and
+/// <c>CanonicalSupport.SetBit</c>, which are the single-bit spelling of the same layout; these
+/// kernels are for whole runs, where a run reduces to two edge bytes and a fill between them.
+/// </para>
 /// <para>
 /// The choice between the two vector widths is written here because this class holds one of each.
 /// <see cref="Classify"/> folds bytes into an <c>or</c> and an <c>and</c> accumulator: every lane
@@ -56,17 +53,13 @@ internal static class BitmapKernels
     /// <remarks>
     /// <para>
     /// The two answers together say whether a validity bitmap is all-valid, all-invalid or mixed,
-    /// which decides whether the bitmap is kept at all. It was a byte-at-a-time loop that
-    /// recomputed an edge mask for EVERY byte -- two comparisons against a mask that is 0xFF for
-    /// all but the first and last -- and on an all-invalid million-row column it was 36% of the
-    /// scan.
+    /// which decides whether the bitmap is kept at all.
     /// </para>
     /// <para>
-    /// The edges are masked once each and the interior is whole bytes, so it reduces to "is this
-    /// run all zero" and "is this run all ones": an OR accumulator and an AND accumulator over
-    /// vectors. THE EARLY EXIT IS KEPT, because it is what made the old loop tolerable on a MIXED
-    /// bitmap - the answer is usually settled in the first byte or two - and it now settles in the
-    /// first vector instead.
+    /// The edges are masked once each and the interior is whole bytes, so the question reduces to
+    /// "is this run all zero" and "is this run all ones": an or accumulator and an and accumulator
+    /// over vectors. The early exit earns its place on a mixed bitmap, where the answer usually
+    /// settles in the first vector.
     /// </para>
     /// </remarks>
     internal static void Classify(
@@ -110,15 +103,13 @@ internal static class BitmapKernels
             Vector<byte> ors = Vector<byte>.Zero;
             Vector<byte> ands = Vector<byte>.AllBitsSet;
 
-            // FOUR VECTORS PER EXIT TEST. Accumulating is two instructions; asking whether the
-            // answer is settled is two vector compares and a branch, and on a uniform bitmap -- the
-            // case that reaches this loop at all -- it is never settled, so every one of those was
-            // spent to learn nothing. Removing the test outright reads 4,126 us against 3,737 on a
-            // million-bit classify, so it was nine per cent of the kernel.
-            //
-            // A mixed bitmap now leaves up to three vectors later than it did. It costs that
-            // bitmap almost nothing, because a mix the edges can see never enters this loop: the
-            // head and tail are compared above, and the loop is reached only when both ends agree.
+            // Four vectors per exit test. Accumulating is two instructions, while asking whether
+            // the answer is settled costs two vector compares and a branch, and a uniform bitmap
+            // -- the case that reaches this loop at all -- never settles, so a test per vector
+            // would be spent to learn nothing. A mixed bitmap leaves up to three vectors later
+            // than a per-vector test would let it, which costs it almost nothing: a mix the edges
+            // can see never enters this loop, since the head and tail are compared above and the
+            // loop is reached only when both ends agree.
             int block = width * 4;
             for (; i <= count - block; i += block)
             {
@@ -162,18 +153,15 @@ internal static class BitmapKernels
     }
 
     /// <summary>
-    /// Counts the SET bits of <paramref name="count"/> bits from <paramref name="start"/>.
+    /// Counts the set bits of <paramref name="count"/> bits from <paramref name="start"/>.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Eight bytes at a time, with the two partial ends masked ONCE instead of tested per byte.
-    /// The loops this replaces did one of two things per bit or per byte: a
-    /// <c>mask.IsValid(row)</c> call over every row of the array, or a byte-wise popcount carrying
-    /// an <c>i == firstByte</c> and an <c>i == lastByte</c> compare into all 125 000 iterations of
-    /// a million-row bitmap. Both ends are known before the loop starts.
+    /// Eight bytes at a time, with the two partial ends masked once before the loop rather than
+    /// tested on every byte: both ends are known before the loop starts.
     /// </para>
     /// <para>
-    /// The single-byte case is separate because a range inside one byte has BOTH masks on the same
+    /// The single-byte case is separate because a range inside one byte has both masks on the same
     /// byte, and the two-sided form would count it twice.
     /// </para>
     /// </remarks>
@@ -225,11 +213,11 @@ internal static class BitmapKernels
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE DESTINATION IS WRITTEN A BYTE AT A TIME, not a bit. Once the destination is byte
+    /// The destination is written a byte at a time, not a bit. Once the destination is byte
     /// aligned -- which costs at most seven bits of head -- each output byte is eight source bits
     /// read as one unaligned pair and shifted into place, whatever the source's own alignment.
-    /// Eight times fewer read-modify-writes, and the destination byte is written rather than
-    /// OR-ed, so the caller no longer has to hand over a cleared buffer.
+    /// The destination byte is assigned rather than or-ed into, so the caller need not hand over a
+    /// cleared buffer.
     /// </para>
     /// <para>
     /// The second source byte of a pair is read only when the shift needs it, and when it does,
@@ -371,16 +359,16 @@ internal static class BitmapKernels
     /// Packs one byte per boolean into one bit per boolean: bit i is set iff
     /// <c>source[i] != 0</c>.
     /// </summary>
-    /// <param name="source">One byte per value; ANY non-zero byte is true, as upstream has it.</param>
+    /// <param name="source">One byte per value; any non-zero byte counts as true.</param>
     /// <param name="destination">
     /// <c>(source.Length + 7) / 8</c> bytes; every one of them is written, including the partial
     /// last byte, whose bits past the value count are cleared.
     /// </param>
     /// <remarks>
-    /// <c>vortex.bytebool</c> is this loop and nothing else, and it was a read-modify-write of the
-    /// destination byte per VALUE. Sixteen bytes compare to zero in one instruction and their
-    /// sixteen sign bits extract to a <see cref="ushort"/> in one more, so the vector path writes
-    /// two output bytes per iteration and touches each of them once.
+    /// <c>vortex.bytebool</c> is this loop and nothing else, so it is worth the vector path:
+    /// sixteen bytes compare to zero in one instruction and their sixteen sign bits extract to a
+    /// <see cref="ushort"/> in one more, which writes two output bytes per iteration and touches
+    /// each of them once instead of read-modify-writing a destination byte per value.
     /// </remarks>
     internal static void PackBytes(ReadOnlySpan<byte> source, Span<byte> destination)
     {
@@ -394,7 +382,7 @@ internal static class BitmapKernels
             {
                 Vector128<byte> values = Vector128.LoadUnsafe(ref input, (uint)i);
 
-                // Equals gives 0xFF where the byte IS zero, so the mask of its sign bits is the
+                // Equals gives 0xFF where the byte is zero, so the mask of its sign bits is the
                 // complement of what the bitmap wants.
                 uint zeros = Vector128.Equals(values, Vector128<byte>.Zero)
                     .ExtractMostSignificantBits();
@@ -403,7 +391,7 @@ internal static class BitmapKernels
             }
         }
 
-        // Whole bytes of the tail, still written once each rather than bit by bit.
+        // Whole bytes of the tail, written once each rather than bit by bit.
         for (; i + 8 <= length; i += 8)
         {
             byte packed = 0;

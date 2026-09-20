@@ -1,19 +1,3 @@
-// fastlanes.rle - vortex-fastlanes-0.86.1/src/rle/vtable/mod.rs (`validate_parts`) and
-// src/rle/array/rle_decompress.rs, over fastlanes-0.7.2/src/rle.rs.
-//
-// Despite the crate it comes from, the RLE gather is NOT transposed: `RLE::decode_unchecked` is a
-// straight `output[i] = rle_vals[rle_idxs[i]]`. What the FastLanes block size buys is the chunking:
-// the indices are padded to a multiple of 1024 and one absolute value-index offset is stored per
-// 1024-element chunk, so a chunk's dictionary is `values[offsets[c] - offsets[0] ..]`.
-//
-// Exactly three children, no buffers. The nullability lives on the INDICES child, not on the node,
-// and the indices child is `indices_len` long while the array is `len` long starting at `offset` -
-// so the decoded validity has to be windowed, not used as is.
-//
-// Upstream tolerates a garbage index at a null position (it can be anything after the indices are
-// further compressed) and fills such a row with the chunk's first value; it also fills a
-// single-value chunk without looking at the indices at all. Both behaviours are reproduced here,
-// because a file the reference reads must not fail for us.
 using System;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -21,7 +5,15 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>fastlanes.rle</c> by gathering each chunk's values through its indices.</summary>
+/// <summary>
+/// Decodes <c>fastlanes.rle</c> by gathering each chunk's values through its indices. The gather
+/// itself is not transposed; what the FastLanes block size buys is the chunking, the indices being
+/// padded to whole blocks with one absolute value-index offset stored per chunk, so a chunk's
+/// values start at that offset taken relative to the first. Nullability lives on the indices child,
+/// which covers the whole encoded run while the array is a window of it, so that validity has to be
+/// windowed rather than used as is; an index at a null position may hold anything and its row takes
+/// the chunk's first value, as does every row of a chunk that has only one value.
+/// </summary>
 public sealed class FastLanesRleDecoder : ArrayDecoder
 {
     private const string Id = "fastlanes.rle";
@@ -46,8 +38,8 @@ public sealed class FastLanesRleDecoder : ArrayDecoder
         RleMetadata metadata = RleMetadata.Read(node.Metadata);
         PType ptype = RequirePrimitive(dtype);
 
-        // "RLE indices must be u8 or u16" - the whole domain, because the kernel's index type is
-        // u16 and a u8 index only appears after the indices are themselves downcast.
+        // Those two widths are the whole domain: the index type of the encoding is u16, and a u8
+        // index only appears once the indices have themselves been downcast.
         if (metadata.IndicesPType is not (PType.U8 or PType.U16))
         {
             CompressedThrow.Format(
@@ -149,11 +141,11 @@ public sealed class FastLanesRleDecoder : ArrayDecoder
 
         ulong firstOffset = CompressedValues.ReadUnsigned(offsets, metadata.ValuesIdxOffsetsPType, 0);
 
-        // BY CHUNK, NOT BY ROW. The chunk boundary is fixed by the FastLanes block size, so which
-        // chunk a row belongs to is a property of the loop, not a question to ask per row: the
-        // division, the offsets lookup through `switch (ptype)` and the compare against the
-        // previous chunk were all paid a million times to answer it 977 times. Inside a chunk the
-        // gather is `RowKernels`', with both physical types resolved before it starts.
+        // By chunk, not by row. The chunk boundary is fixed by the FastLanes block size, so which
+        // chunk a row belongs to is a property of the loop rather than a question to ask per row:
+        // the division, the offsets lookup and the compare against the previous chunk would
+        // otherwise be paid once per row to answer it once per chunk. Inside a chunk the gather is
+        // a kernel with both physical types resolved before it starts.
         int row = 0;
         while (row < length)
         {
@@ -177,8 +169,8 @@ public sealed class FastLanesRleDecoder : ArrayDecoder
 
             if (chunkValueCount == 1)
             {
-                // "fills a single-value chunk without looking at the indices at all" -- upstream's
-                // behaviour, and now one tiled write instead of `chunkRows` copies.
+                // A chunk with a single value is filled without reading its indices at all, in one
+                // tiled write rather than a copy per row.
                 RowKernels.TileRow(width, values, chunkBase, destination, row, chunkRows);
             }
             else
@@ -200,10 +192,10 @@ public sealed class FastLanesRleDecoder : ArrayDecoder
                         chunkValueCount);
                 }
 
-                // A null index selects nothing, and upstream fills such a row with the chunk's
-                // FIRST value rather than leaving it undefined. The masked gather zeroes it, so
-                // the zeroed rows are re-filled here; scanning the mask a second time costs a word
-                // per 64 rows, where testing validity inside the gather costs a branch per row.
+                // A null index selects nothing, and such a row takes the chunk's first value rather
+                // than being left undefined. The masked gather zeroes it, so the zeroed rows are
+                // re-filled here; scanning the mask a second time costs a word per sixty-four rows,
+                // where testing validity inside the gather would cost a branch per row.
                 if (!indicesValidity.IsAllValid)
                 {
                     FillNulls(
@@ -251,9 +243,8 @@ public sealed class FastLanesRleDecoder : ArrayDecoder
         return dtype.PType;
     }
 
-    // "RLE values_idx_offsets must be non-decreasing" and
-    // "RLE values_idx_offsets span N values but only M are present": both are checked upstream in
-    // rle_decompress before any gather, and both keep the per-chunk slicing inside `values`.
+    // The offsets must be non-decreasing and must not span more values than are present. Both are
+    // checked before any gather, since together they keep the per-chunk slicing inside `values`.
     private static void ValidateOffsets(
         ReadOnlySpan<byte> offsets, PType ptype, int offsetsLength, int valuesLength)
     {

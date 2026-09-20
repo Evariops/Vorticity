@@ -1,10 +1,3 @@
-// Shared, allocation-free primitives every canonical decoder needs: the bounds and shape checks
-// that are class I (docs/08-semantics.md §5), the bit plumbing `vortex.bool`'s bit offset forces on
-// everything downstream, and the 16-byte Arrow view layout that `vortex.varbin` and
-// `vortex.varbinview` both produce.
-//
-// vortex-array-0.86.1/src/arrays/varbinview/view.rs fixes the view layout; the rest is transcribed
-// from the per-encoding `deserialize` bodies cited in each decoder.
 using System;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
@@ -17,7 +10,9 @@ using Vorticity.Types;
 namespace Vorticity.Arrays.Decoders.Canonical;
 
 /// <summary>
-/// Validation and bit/byte plumbing shared by the fourteen canonical decoders. Internal by
+/// Validation and bit/byte plumbing shared by the canonical decoders: the bounds and shape checks
+/// a file-supplied node needs, the bit addressing a sub-byte bitmap offset forces on everything
+/// downstream, and the sixteen-byte view layout the variable-width encodings produce. Internal by
 /// design: nothing outside this directory should need it, and everything in it throws
 /// <see cref="VortexFormatException"/> and nothing else.
 /// </summary>
@@ -26,14 +21,13 @@ internal static class CanonicalSupport
     /// <summary>Bytes in one Arrow <c>BinaryView</c>.</summary>
     internal const int ViewSize = 16;
 
-    /// <summary>Longest value a view can carry inline. <c>BinaryView::MAX_INLINED_SIZE</c>.</summary>
+    /// <summary>Longest value a view can carry inside itself, instead of in a data buffer.</summary>
     internal const int MaxInlineViewLength = 12;
 
     /// <summary>
-    /// The strictest alignment we ever demand of a file-supplied buffer. Upstream asks for
-    /// <c>align_of</c> of the element type, which never exceeds 16 even for <c>i256</c>; demanding
-    /// the full 32 bytes there would reject files whose segment alignment exponent is 4, which is
-    /// the largest any observed writer emits (Phase 1 contract §0a C4).
+    /// The strictest alignment ever demanded of a file-supplied buffer. No element type needs more
+    /// than this, and demanding more would reject files from writers that align their segments to
+    /// sixteen bytes.
     /// </summary>
     internal const int MaxRequiredAlignment = 16;
 
@@ -41,7 +35,7 @@ internal static class CanonicalSupport
     /// <param name="context">The decode context, for the size ceiling.</param>
     /// <param name="byteLength">Size in bytes.</param>
     /// <param name="alignment">A power of two.</param>
-    /// <param name="destination">The writable block, NOT zeroed.</param>
+    /// <param name="destination">The writable block, left as the pool found it.</param>
     /// <returns>A non-owning view over the same bytes.</returns>
     /// <remarks>
     /// Only for a decoder that provably writes every byte; see
@@ -59,12 +53,11 @@ internal static class CanonicalSupport
     /// <see cref="Vorticity.File.VortexReadOptions.MaxDecompressedSize"/>.
     /// </summary>
     /// <remarks>
-    /// Phase 1 contract §1.5: "no allocation sized directly by a file-supplied value without a cap
-    /// first". Several of these sizes are products of a file-supplied row count and a
-    /// schema-supplied width - a <c>vortex.constant</c> under
-    /// <c>fixed_size_list(i32)[100000]</c> asks for 3 GB from a 40-byte node - and
+    /// No allocation may be sized directly by a file-supplied value without a cap first. Several of
+    /// these sizes are products of a file-supplied row count and a schema-supplied width, so a tiny
+    /// node can ask for gigabytes, and
     /// <see cref="ArrayDecodeContext.CheckedMultiply"/> only stops the ones that overflow
-    /// <see cref="int"/>. The ceiling is the caller's, not a new constant of ours.
+    /// <see cref="int"/>. The ceiling is the caller's, not a constant of this library's.
     /// </remarks>
     internal static VortexBuffer Allocate(
         ArrayDecodeContext context, int byteLength, int alignment, out Span<byte> destination)
@@ -81,20 +74,19 @@ internal static class CanonicalSupport
     }
 
     /// <summary>
-    /// Charges <paramref name="byteLength"/> against the read's decompression ceiling WITHOUT
+    /// Charges <paramref name="byteLength"/> against the read's decompression ceiling without
     /// allocating it, for a node that stands for more bytes than it stores.
     /// </summary>
     /// <param name="context">The decode context carrying the ceiling.</param>
     /// <param name="byteLength">The size the node stands for.</param>
     /// <remarks>
-    /// The constant form (PERF-AUDIT-v2.md Z1b) keeps one element and a row count, so nothing is
-    /// allocated at decode and the guard the two <c>Allocate</c> overloads apply never fires. The
-    /// guard still has to fire: the row count is file-supplied, <c>MaterializeConstant</c> will
-    /// expand it in full the moment a caller asks for a span, and the arena deliberately does not
-    /// check -- its contract says the size arrives already validated. So the ceiling is charged
-    /// here, where the row count is first seen, which also keeps the two forms indistinguishable to
-    /// a caller. That is the premise of the option, and a file refused in one form and accepted in
-    /// the other would break it.
+    /// The constant form keeps one element and a row count, so nothing is allocated at decode and
+    /// the guard the two <c>Allocate</c> overloads apply never fires. It still has to fire: the row
+    /// count is file-supplied, <c>MaterializeConstant</c> expands it in full the moment a caller
+    /// asks for a span, and the arena does not check, its contract being that the size arrives
+    /// already validated. Charging the ceiling here, where the row count is first seen, also keeps
+    /// the constant and the materialized forms indistinguishable to a caller: a file refused in one
+    /// and accepted in the other would make the choice between them observable.
     /// </remarks>
     /// <exception cref="VortexFormatException">It exceeds the ceiling.</exception>
     internal static void RequireStandsForWithinBudget(ArrayDecodeContext context, int byteLength) =>
@@ -127,10 +119,9 @@ internal static class CanonicalSupport
     }
 
     /// <summary>
-    /// Requires <paramref name="buffer"/> to start on a multiple of <paramref name="alignment"/>.
-    /// Class I for every reinterpreting read: the caller relies on the decode being zero-copy
-    /// (docs/03-architecture.md §4 invariant 2), so a misaligned buffer is rejected rather than
-    /// silently copied.
+    /// Requires <paramref name="buffer"/> to start on a multiple of <paramref name="alignment"/>,
+    /// which every reinterpreting read needs. Callers rely on the decode staying zero-copy, so a
+    /// misaligned buffer is rejected rather than silently copied.
     /// </summary>
     internal static unsafe void RequireAligned(VortexBuffer buffer, int alignment, string what)
     {
@@ -175,21 +166,18 @@ internal static class CanonicalSupport
     /// <summary>
     /// Requires the canonical node at <paramref name="index"/> to be a Primitive of
     /// <paramref name="ptype"/> and <paramref name="length"/> rows. A child's own encoding never
-    /// gets to decide what it means (Phase 1 contract §2.5).
+    /// gets to decide what it means.
     /// </summary>
     /// <remarks>
-    /// A CONSTANT CHILD IS EXPANDED HERE, AND THIS IS THE ONE PLACE THAT DOES IT. Every caller of
-    /// this helper is about to read a CONTIGUOUS SPAN of <paramref name="length"/> values -- offsets
-    /// to walk, lengths to sum, patch indices to binary-search -- and
-    /// <see cref="CanonicalKind.Constant"/> has an element, not a span. Expanding it restores
-    /// exactly the bytes the tiling form would have produced, at exactly the cost it would have
-    /// paid, so nothing is lost by it.
+    /// A constant child is expanded here, and this is the one place that does it: every caller is
+    /// about to read a contiguous span of <paramref name="length"/> values -- offsets to walk,
+    /// lengths to sum, patch indices to binary-search -- and a constant node has an element, not a
+    /// span. Expanding restores exactly the bytes a dense child would have carried, at the cost a
+    /// dense child would have had, so nothing is given up by it.
     /// <para>
-    /// That asymmetry is the whole design of the constant form. It exists to save a CONSUMER from
-    /// reading a million copies of one value; it was never meant to save a decoder from a side
-    /// table it has to walk. This helper alone is why about 120 decoders need it --
-    /// `vortex.onpair`'s and `vortex.fsst`'s `uncompressed_lengths`, `vortex.fsst`'s
-    /// `codes_offsets`, `fastlanes.bitpacked`'s patch indices and `vortex.alp`'s `patch_values`.
+    /// The constant form is there to save a consumer from reading many copies of one value, not to
+    /// save a decoder from a side table it has to walk; that is why the expansion belongs on the
+    /// decoder's side of the boundary.
     /// </para>
     /// </remarks>
     internal static CanonicalNode RequirePrimitiveChild(
@@ -214,9 +202,8 @@ internal static class CanonicalSupport
     /// </returns>
     /// <remarks>
     /// See <see cref="RequirePrimitiveChild"/> for why expanding here gives nothing up. This is the
-    /// form for the sites that check the child's shape THEMSELVES rather than through that helper --
-    /// `vortex.alp`'s and `fastlanes.bitpacked`'s `patch_values` -- because their messages name the
-    /// patch count rather than the array's row count.
+    /// form for the sites that check the child's shape themselves rather than through that helper,
+    /// because their messages name a patch count rather than the array's row count.
     /// </remarks>
     internal static int ExpandIfConstant(ArrayDecodeContext context, int index)
     {
@@ -303,11 +290,6 @@ internal static class CanonicalSupport
     /// <paramref name="sourceBit"/> to <paramref name="destination"/> at bit
     /// <paramref name="destinationBit"/>.
     /// </summary>
-    /// <remarks>
-    /// Both of these were bit-at-a-time loops, the two PERF-AUDIT §4.2 names under
-    /// <c>CanonicalSupport</c>. They now forward to <see cref="BitmapKernels"/>, which §4.2 asks to
-    /// become the single entry point for bitmap work.
-    /// </remarks>
     internal static void CopyBits(
         ReadOnlySpan<byte> source, int sourceBit, Span<byte> destination, int destinationBit, int count) =>
         BitmapKernels.CopyRange(source, sourceBit, destination, destinationBit, count);
@@ -321,8 +303,7 @@ internal static class CanonicalSupport
 
     /// <summary>
     /// Writes an Arrow view for a value that is stored out of line.
-    /// <c>{u32 size, [4]u8 prefix, u32 buffer_index, u32 offset}</c>, little-endian throughout
-    /// (vortex-array-0.86.1/src/arrays/varbinview/view.rs <c>Ref</c>).
+    /// <c>{u32 size, [4]u8 prefix, u32 buffer_index, u32 offset}</c>, little-endian throughout.
     /// </summary>
     internal static void WriteReferenceView(
         Span<byte> view, int size, ReadOnlySpan<byte> value, int bufferIndex, int offset)
@@ -354,11 +335,10 @@ internal static class CanonicalSupport
     /// <returns><see langword="true"/> when the view references a data buffer.</returns>
     /// <remarks>
     /// <para>
-    /// THE SLOW PART OF BUILDING VIEWS WAS THE CALL, NOT THE COPY. The inline case was
-    /// <c>view.Clear()</c> followed by <c>value.CopyTo(view[4..])</c>: a memset and a
-    /// <c>SpanHelpers.Memmove</c> PER ROW, both out-of-line because the length is a variable, to
-    /// move at most twelve bytes. On a 1M-row <c>vortex.parquet.variant</c> scan - two varbin
-    /// columns and nothing else - <c>Memmove</c> was <b>78% of the whole scan</b>.
+    /// The expensive part of building views is the call, not the copy: writing an inline view with
+    /// a clear followed by a span copy costs two out-of-line calls per row, because the length is a
+    /// variable, to move at most twelve bytes. On a scan of nothing but variable-width columns that
+    /// dominates everything else.
     /// </para>
     /// <para>
     /// A view is 16 bytes and every field of it is known here, so it is composed in two
@@ -368,8 +348,8 @@ internal static class CanonicalSupport
     /// read, from a span that is exactly that long.
     /// </para>
     /// <para>
-    /// Little-endian is a module-initializer invariant (docs/09-contracts.md §7), so the words are
-    /// composed by shifting rather than by <see cref="BinaryPrimitives"/>.
+    /// A little-endian host is checked once at start-up, so the words are composed by shifting
+    /// rather than through <see cref="BinaryPrimitives"/>.
     /// </para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -423,8 +403,8 @@ internal static class CanonicalSupport
     /// </summary>
     /// <remarks>
     /// Overlapping reads rather than a loop: the 4..8 and 8..12 cases read one word at the value's
-    /// START and one ending at its END, which together cover every byte exactly and read none
-    /// beyond it. Only the 1..3 case is byte-wise, where a word read would overrun.
+    /// start and one ending at its last byte, which together cover every byte and read none beyond
+    /// it. Only the 1..3 case is byte-wise, where a word read would overrun.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void Gather(ref byte source, int size, out ulong first, out uint rest)

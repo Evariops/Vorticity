@@ -1,16 +1,3 @@
-// vortex.pco - vortex-pco-0.86.1/src/array.rs, wrapping pco-1.0.3.
-//
-// THE WRAPPER IS TRIVIAL AND THE PAYLOAD IS NOT, which is the whole shape of this encoding. The
-// Vortex node carries protobuf metadata naming pco's file header and, per chunk, how many values
-// each of its pages holds; the buffers are the per-chunk metadata blocks followed by the page
-// bodies; and there are zero or one validity children. Everything hard is inside those buffers, in
-// pco's own format: mode, delta encoding, a bin table and an ANS entropy coder per latent variable.
-//
-// SO THIS CLASS STOPS WHERE THE FORMAT BEGINS. It parses the wrapper, checks the buffer arithmetic
-// the wrapper promises, and then refuses - it does not decode. The refusal is deliberate and is not
-// a placeholder that might quietly start returning numbers: a partly-built entropy coder produces
-// PLAUSIBLE values, which is the failure this repository has paid for four times over.
-// bench/PLAN.md tracks the remaining pieces.
 using System;
 using System.Collections.Generic;
 
@@ -20,7 +7,11 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 
-/// <summary>The <c>vortex.pco</c> node's own metadata: pco's header, and its chunks' page sizes.</summary>
+/// <summary>
+/// The <c>vortex.pco</c> node's own metadata: pco's header, and its chunks' page sizes. This is
+/// only the wrapper the node declares; the compressed values themselves live in the buffers, in
+/// pco's own format, which nothing here parses.
+/// </summary>
 internal readonly struct PcoWrapperMetadata
 {
     private const string MessageName = "PcoMetadata";

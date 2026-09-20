@@ -1,12 +1,14 @@
-// Every throw in this component goes through a NoInlining helper (Phase 1 contract §1.4) so the
-// decode loops stay inlineable. Malformed input is ALWAYS VortexFormatException; an Argument*
-// exception here would mean a bug in this library, never a bad file.
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
+/// <summary>
+/// Throw sites for the compressed decoders, kept out of line so the decode loops stay inlineable.
+/// Malformed input always raises <see cref="VortexFormatException"/>; an argument exception raised
+/// here would mean a bug in this library rather than a bad file.
+/// </summary>
 internal static class CompressedThrow
 {
     [MethodImpl(MethodImplOptions.NoInlining)]

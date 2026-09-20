@@ -1,8 +1,3 @@
-// vortex.pco - vortex-pco-0.86.1/src/array.rs, wrapping pco-1.0.3.
-//
-// The wrapper is thin: protobuf metadata naming pco's file header and, per chunk, its pages' value
-// counts; buffers holding the per-chunk pco metadata followed by the page bodies; zero or one
-// validity child. Everything else is pco's own format, in the sibling files here.
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -15,7 +10,12 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 
-/// <summary>Decodes <c>vortex.pco</c>.</summary>
+/// <summary>
+/// Decodes <c>vortex.pco</c>, a thin wrapper around pco's own format: metadata naming pco's file
+/// header and, per chunk, its pages' value counts; buffers holding the per-chunk pco metadata
+/// followed by the page bodies; zero or one validity child. Everything below that belongs to pco
+/// and lives in the sibling types here.
+/// </summary>
 public sealed class PcoDecoder : ArrayDecoder
 {
     private const string Id = "vortex.pco";
@@ -67,9 +67,9 @@ public sealed class PcoDecoder : ArrayDecoder
         VortexBuffer output = CompressedValues.Allocate(
             context, length * width, width, Id, out Span<byte> destination);
 
-        // The two page buffers, rented ONCE for the whole node rather than allocated per page: a
-        // million-row column is a thousand pages, and contract §1.3 does not allow a thousand
-        // allocations on a decode path.
+        // The two page buffers, rented once for the whole node rather than allocated per page: a
+        // large column runs to many hundreds of pages, and a decode path must not allocate once
+        // per page.
         int widestPage = 0;
         foreach (int[] pages in wrapper.Chunks)
         {
@@ -84,16 +84,16 @@ public sealed class PcoDecoder : ArrayDecoder
         Scratch<ulong> secondaryScratch = new Scratch<ulong>(widestPage, default);
 
         // A batch's three working buffers, rented here for the same reason the two page buffers
-        // are: they are fixed at 256 values and a thousand pages must not allocate them a thousand
-        // times. They belong to this decode and to nothing wider -- see PcoBatchScratch for why
-        // the thread-static they briefly were is not an option.
+        // are: they are fixed at one batch of values and every page must not allocate its own.
+        // They belong to this decode and to nothing wider; PcoBatchScratch says why sharing them
+        // beyond it is not an option.
         Scratch<ulong> batchValues = new Scratch<ulong>(PcoPageDecoder.BatchSize, default);
         Scratch<int> batchOffsetBits = new Scratch<int>(PcoPageDecoder.BatchSize, default);
         Scratch<long> batchOffsetCumulative = new Scratch<long>(PcoPageDecoder.BatchSize, default);
         try
         {
-            // Three latent states for the whole node, reset by each page rather than rebuilt:
-            // PERF-AUDIT-v2.md R13, same reason as the buffers above.
+            // The latent states are built once for the whole node and reset by each page rather
+            // than rebuilt, for the same reason as the buffers above.
             PcoLatentState[] states = new PcoLatentState[PcoPageDecoder.MaxLatentVars];
             for (int i = 0; i < states.Length; i++)
             {
@@ -117,8 +117,8 @@ public sealed class PcoDecoder : ArrayDecoder
                     pageBuffer++;
 
                     // The ordered latent form: shifted so the type's minimum is zero. For an
-                    // unsigned type it is the value itself, which is why the shift is by MID
-                    // rather than by a sign test -- and the shift is pointwise, so it is one
+                    // unsigned type it is the value itself, so the shift is a single addition of
+                    // the midpoint rather than a sign test -- and it is pointwise, so it costs one
                     // vector add per lane group rather than a bounds-checked eight-byte write per
                     // value.
                     Span<ulong> target = MemoryMarshal.Cast<byte, ulong>(

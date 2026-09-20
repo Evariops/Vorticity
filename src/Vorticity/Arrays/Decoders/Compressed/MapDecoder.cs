@@ -1,20 +1,3 @@
-// vortex.map - vortex-array-0.86.1/src/arrays/map/vtable/mod.rs.
-//
-// A MAP IS A LISTVIEW OF STRUCTS WEARING A DIFFERENT DTYPE, and that is the whole encoding: empty
-// metadata, no buffers, one child, and upstream's `execute` returns the array unchanged because a
-// map array is already canonical. The child must be a `vortex.listview` of
-// `Struct{key, value}` - upstream checks the encoding explicitly rather than accepting any list.
-//
-// WHAT THIS BUILD DOES WITH IT. There is no `CanonicalKind.Map`, and adding one would mean a new
-// column type for a shape `AsList().AsStruct()` already expresses. The node is therefore a
-// `ListView` carrying the MAP dtype: the data reads as list-of-entries, and the schema still says
-// map. `CanonicalArena.AddListView` does not constrain the dtype's kind, which is what makes that
-// representable rather than a lie.
-//
-// The entries dtype is rebuilt here rather than taken from the child, because the child is
-// FILE-SUPPLIED and the expected shape is SCHEMA-supplied: `List(Struct{key, value}, nullability)`
-// with the struct non-nullable, exactly `MapDType::entries_dtype`. Handing the child its expected
-// dtype is how a mismatch becomes an error instead of a reinterpretation.
 using System;
 
 using Vorticity.Arrays.Decoders.Canonical;
@@ -22,7 +5,12 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.map</c>: a list of <c>{key, value}</c> entries per row.</summary>
+/// <summary>
+/// Decodes <c>vortex.map</c>: a list of <c>{key, value}</c> entries per row. The encoding is empty
+/// metadata, no buffers and one child, which must be a list view of a non-nullable
+/// <c>Struct{key, value}</c>; there is no canonical map node, so the result is a list view that
+/// keeps the map dtype, which reads as a list of entries while the schema still says map.
+/// </summary>
 public sealed class MapDecoder : ArrayDecoder
 {
     private const string Id = "vortex.map";
@@ -54,20 +42,17 @@ public sealed class MapDecoder : ArrayDecoder
             CompressedThrow.Format($"{Id} requires a map dtype; the node declares {dtype.Kind}.");
         }
 
-        // IMPORTED INTO THE CONTEXT'S ARENA, then derived there - the order DTypeImport's header
-        // states as the rule, and the reason it exists.
-        //
-        // THIS USED TO DERIVE INTO `dtype.Arena`, WHICH IS THE FILE'S. A DType is an index into an
-        // arena and children must share their parent's, so composing the file's key and value types
-        // straight into `context.Types` is refused - correctly - and deriving into the file's arena
-        // instead looked like the way round it. It is not: `DTypeArena.Struct` grows arrays and
-        // rehashes the dedup table with no synchronization at all, and docs/09-contracts.md §1
-        // permits CONCURRENT SCANS over one open file. Two scans reaching a Map column at the same
-        // moment are two unsynchronized writers on one table. That is why ScanContext owns an arena
-        // (contract §8.3) and why `MaskedDecoder` and `ZoneMapSchema` already import first.
-        //
+        // The key and value types are imported into the context's arena first, then composed
+        // there. A DType is an index into an arena and children must share their parent's, so the
+        // file's types cannot be composed into the context's arena directly; composing into the
+        // file's arena instead is not the way round it, because growing an arena rehashes its
+        // dedup table with no synchronization while scans over one open file may run concurrently.
         // Importing costs nothing after the first batch: the target arena deduplicates, so every
         // later import finds the nodes already there.
+        //
+        // The entries dtype is rebuilt from the schema rather than taken from the child: handing
+        // the child the shape it is expected to have is what turns a mismatch into an error rather
+        // than a reinterpretation.
         DTypeArena types = context.Types;
         DType key = DTypeImport.Into(types, dtype.KeyType);
         DType value = DTypeImport.Into(types, dtype.ValueType);
@@ -106,7 +91,7 @@ public sealed class MapDecoder : ArrayDecoder
             CompressedThrow.ChildLength(Id, "entries", list.Length, length);
         }
 
-        // Re-wrapped rather than returned as-is, so the node keeps the MAP dtype. Returning the
+        // Re-wrapped rather than returned as-is, so the node keeps the map dtype. Returning the
         // child would report the column as a list of structs and silently drop both the map-ness and
         // the keys-sorted flag the schema carries.
         return context.Canonical.AddListView(

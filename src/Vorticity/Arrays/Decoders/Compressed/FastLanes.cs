@@ -1,31 +1,3 @@
-// The two FastLanes permutations, which are NOT the same one - spec/REFERENCE.md §"FastLanes: the
-// two index functions, which are not the same", derived from fastlanes-0.7.2/src/bitpacking.rs,
-// src/macros.rs and src/transpose.rs.
-//
-//   1. the BIT-PACKING index, used by fastlanes.bitpacked:
-//          index(row, lane) = FL_ORDER[row / 8] * 16 + (row % 8) * 128 + lane
-//      with `lane` running over T::LANES = 1024 / T::T lanes;
-//   2. the ELEMENT TRANSPOSITION, used by the transposed encodings, where `lane` is `% 16`
-//      whatever the element width:
-//          transpose(i) = (i % 16) * 64 + FL_ORDER[(i / 16) % 8] * 8 + i / 128
-//
-// Only FL_ORDER is its own inverse. `transpose` is not: transpose(1) == 64 but transpose(64) == 8,
-// so Untranspose is the inverse MAPPING (output[transpose(i)] = input[i]) and never a second
-// Transpose. That bug survives a round trip written the same wrong way in both directions, which
-// is why the tests assert the crate's known-value table literally.
-//
-// THE UNPACK KERNEL IS VECTORIZED, and the reason it can be is the whole point of the FastLanes
-// layout rather than an accident. `lane` is the SIMD lane: for a fixed `row`, the packed words the
-// kernel reads are `packed[lanes * word + lane]` for consecutive lane, and the positions it writes
-// are `index(row, lane) = FL_ORDER[row/8] * 16 + (row % 8) * 128 + lane` - also consecutive, and
-// aligned to `lanes`, at every one of the four element widths. So both ends are plain contiguous
-// loads and stores; there is no gather anywhere in it. The scalar loop iterates lane-major and
-// carries a word across rows, so the vector form interchanges the loops and recomputes that word
-// from `row` instead. The index function is a permutation, so every output element is still
-// written exactly once whichever order the loops run in.
-//
-// docs/03-architecture.md §4 invariant 4: the scalar path stays, and CI runs the whole suite with
-// DOTNET_EnableHWIntrinsic=0 so it is exercised rather than merely present.
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -35,23 +7,41 @@ using System.Runtime.Intrinsics;
 namespace Vorticity.Arrays.Decoders.Compressed;
 
 /// <summary>
-/// The FastLanes 1024-element block permutations and the scalar bit-unpacking kernel.
+/// The FastLanes 1024-element block permutations and the bit-packing kernels. Two different
+/// permutations live here: the bit-packing index
+/// <c>index(row, lane) = order[row / 8] * 16 + (row % 8) * 128 + lane</c>, over
+/// <c>1024 / elementBits</c> lanes, and the element transposition
+/// <c>transpose(i) = (i % 16) * 64 + order[(i / 16) % 8] * 8 + i / 128</c>, whose lane is
+/// <c>i % 16</c> whatever the element width. Only the eight-entry order table is its own inverse;
+/// the transposition is not, so untransposing is a separate mapping and never a second
+/// transposition, a confusion that round-trips perfectly while producing a file no other
+/// implementation can read.
 /// </summary>
+/// <remarks>
+/// That <c>lane</c> is the vector lane is the point of the layout rather than an accident: for a
+/// fixed row the packed words a kernel reads are consecutive in lane, and the positions it writes
+/// are consecutive and aligned to the lane count at each of the four element widths, so both ends
+/// are plain contiguous loads and stores with no gather anywhere. The index function is a
+/// permutation, so every element is still touched exactly once whichever order the loops run in,
+/// which is what lets the vector form interchange them. The scalar path stays reachable and the
+/// suite runs once with hardware intrinsics disabled, so it is exercised rather than merely
+/// present.
+/// </remarks>
 internal static class FastLanes
 {
-    /// <summary>Elements in one FastLanes block. <c>FL_CHUNK_SIZE</c> upstream.</summary>
+    /// <summary>Elements in one FastLanes block.</summary>
     public const int BlockSize = 1024;
 
     /// <summary>Bytes one 1024-element block occupies at one bit of width: <c>128 * bit_width</c>.</summary>
     public const int BytesPerBlockPerBit = 128;
 
-    // fastlanes-0.7.2/src/lib.rs. Its own inverse: FL_ORDER[FL_ORDER[i]] == i.
+    // Its own inverse: order[order[i]] == i.
     private static ReadOnlySpan<byte> OrderBytes => [0, 4, 2, 6, 1, 5, 3, 7];
 
     private static readonly int[] TransposeForward = BuildTranspose();
     private static readonly int[] TransposeInverse = BuildTransposeInverse(TransposeForward);
 
-    // One 1024-entry table per element width, exactly as the crate precomputes them.
+    // One 1024-entry table per element width.
     private static readonly int[] PackedIndex8 = BuildPackedIndex(8);
     private static readonly int[] PackedIndex16 = BuildPackedIndex(16);
     private static readonly int[] PackedIndex32 = BuildPackedIndex(32);
@@ -71,19 +61,18 @@ internal static class FastLanes
     public static ReadOnlySpan<byte> Order => OrderBytes;
 
     /// <summary>
-    /// The element transposition of fastlanes-0.7.2/src/transpose.rs:
-    /// <c>lane * 64 + FL_ORDER[order] * 8 + row</c> with <c>lane = idx % 16</c>,
-    /// <c>order = (idx / 16) % 8</c> and <c>row = idx / 128</c>.
+    /// The element transposition:
+    /// <c>lane * 64 + order[o] * 8 + row</c> with <c>lane = idx % 16</c>,
+    /// <c>o = (idx / 16) % 8</c> and <c>row = idx / 128</c>.
     /// </summary>
     /// <param name="index">A logical index in <c>[0, 1024)</c>.</param>
     /// <returns>The transposed index.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is outside the block.</exception>
     /// <remarks>
-    /// TEST-FACING. Nothing decodes through this: a kernel that needs the permutation walks
+    /// Test-facing. Nothing decodes through this: a kernel that needs the permutation walks
     /// <see cref="UntransposeTable"/>, which is the same table without the two argument checks and
     /// the bounds check this pays per element. What this is for is checking the table against the
-    /// formula the crate states, one index at a time, which is a thing a test does and a decoder
-    /// never does.
+    /// formula, one index at a time, which is a thing a test does and a decoder never does.
     /// </remarks>
     public static int Transpose(int index)
     {
@@ -114,7 +103,7 @@ internal static class FastLanes
     /// <param name="output">Exactly 1024 elements.</param>
     /// <exception cref="ArgumentException">Either span is not exactly 1024 elements.</exception>
     /// <remarks>
-    /// TEST-FACING, and the round trip is what it is for: transposing a block and untransposing it
+    /// Test-facing, and the round trip is what it is for: transposing a block and untransposing it
     /// must give the block back, which is the property the two tables have to hold jointly. No
     /// decoder transposes a block on its own -- the permutation is applied while the values are
     /// being unpacked, through <see cref="UntransposeTable"/>, so that the block is walked once.
@@ -133,7 +122,7 @@ internal static class FastLanes
     /// <summary>
     /// The inverse permutation as a span, for a kernel that walks it and has already established
     /// its indices. <c>Untranspose(i) == UntransposeTable[i]</c>, without the two argument checks
-    /// and the bounds check that the by-index accessor pays PER ELEMENT.
+    /// and the bounds check that the by-index accessor pays per element.
     /// </summary>
     internal static ReadOnlySpan<int> UntransposeTable => TransposeInverse;
 
@@ -196,8 +185,7 @@ internal static class FastLanes
 
     /// <summary>
     /// Bytes one 1024-element block of <paramref name="bitWidth"/>-bit values occupies.
-    /// <c>128 * bit_width</c>, independent of the element width
-    /// (vortex-fastlanes-0.86.1/src/bitpacking/array/mod.rs <c>validate</c>).
+    /// <c>128 * bit_width</c>, independent of the element width.
     /// </summary>
     /// <param name="bitWidth">0..64.</param>
     public static int BlockByteLength(int bitWidth) => BytesPerBlockPerBit * bitWidth;
@@ -212,9 +200,9 @@ internal static class FastLanes
     /// <param name="packed">Exactly <c>lanes * bitWidth</c> words; overwritten.</param>
     /// <remarks>
     /// Written as the literal inverse of the unpack loop rather than from the paper, one statement
-    /// at a time, because the two index functions are easy to conflate and a pack/unpack pair
+    /// at a time, because the two index functions are easy to conflate and a pack and unpack pair
     /// written the same wrong way round-trips perfectly while producing a file no other
-    /// implementation can read. The tests assert the crate's known-value table, not a round trip.
+    /// implementation can read. The tests assert known values, not a round trip.
     /// </remarks>
     /// <exception cref="ArgumentException">A span is the wrong length.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="bitWidth"/> is out of range.</exception>
@@ -250,28 +238,17 @@ internal static class FastLanes
         packed.Clear();
         ReadOnlySpan<int> index = PackedIndexTable(elementBits);
 
-        // PERF-AUDIT-v2.md W-14. THE LOOPS ARE NESTED ROW-OUTER, AND THAT IS THE WHOLE CHANGE.
-        // Everything the body computes from `row` -- the two word indices, the shift, the spill
-        // width -- does not depend on `lane` at all, and the mask does not depend on either; nested
-        // lane-outer, all five were recomputed for every one of the 1 024 elements of a block,
-        // including two integer divisions and two modulos. Hoisted, the inner loop is a table read,
-        // an AND, a shift and an OR.
+        // The loops are nested row-outer. Everything the body computes from `row` -- the two word
+        // indices, the shift, the spill width -- does not depend on `lane`, and the mask depends on
+        // neither; nested lane-outer, all of them would be recomputed for every element of a block,
+        // two integer divisions and two modulos among them. Hoisted, the inner loop is a table
+        // read, an and, a shift and an or.
         //
-        // REORDERING IS EXACT, not an approximation: each (lane, row) pair ORs into
+        // The reordering is exact, not an approximation: each (lane, row) pair ors into
         // `packed[lanes * word + lane]`, the writes for one row are disjoint across lanes, and `|=`
-        // over rows is commutative -- so the same bits land in the same words in any order. The
-        // access pattern gets better as a side effect: consecutive lanes are consecutive words,
-        // where lane-outer strode by `lanes` on both the read and the write.
-        //
-        // Measured by doubling the call on `--throughput --write` at a million rows: `PackBlock` is
-        // **at least 6,8 %** of a `fastlanes_bitpacked` write (18 118 us against 19 350 doubled),
-        // 1,5 % of `fastlanes_for` and nothing measurable on `primitive`. "At least" because a
-        // doubling measures a floor -- §1.6, and W-7b is where that was learned.
-        //
-        // AND THE FLOOR WAS A FLOOR: vectorizing this took that write from 2 497 to 2 155 us and
-        // 2 533 to 2 186, thirteen and fourteen per cent, twice. The loop below is what runs
-        // without the intrinsics, and the suite runs under DOTNET_EnableHWIntrinsic=0 so it is
-        // exercised rather than merely present.
+        // over rows is commutative, so the same bits land in the same words in any order. The
+        // access pattern improves as a side effect: consecutive lanes are consecutive words, where
+        // lane-outer strode by `lanes` on both the read and the write.
         if (bitWidth == elementBits)
         {
             for (int row = 0; row < elementBits; row++)
@@ -287,10 +264,10 @@ internal static class FastLanes
             return;
         }
 
-        // THE VECTOR FORM IS THE UNPACK'S, RUN BACKWARDS, and it rests on the same contiguity proof
-        // this file opens with: for a fixed row the values it reads are `index(row, lane)` for
-        // consecutive lane -- contiguous and aligned to `lanes` -- and the words it writes are
-        // `packed[lanes * word + lane]`, also consecutive. So both ends are plain loads and stores.
+        // The vector form is the unpack's, run backwards, and it rests on the same contiguity: for
+        // a fixed row the values it reads are `index(row, lane)` for consecutive lane -- contiguous
+        // and aligned to `lanes` -- and the words it writes are `packed[lanes * word + lane]`, also
+        // consecutive. So both ends are plain loads and stores.
         // Where the unpack stores, this ORs, because two rows can reach the same word: a row's
         // spill lands in the word the next row starts in. The buffer was cleared above, the rows
         // run in order, and `|=` is commutative, so the same bits land in the same words.
@@ -331,9 +308,8 @@ internal static class FastLanes
     }
 
     /// <summary>
-    /// Unpacks one 1024-element FastLanes block. Transcribed from the
-    /// <c>unpack!</c> macro of fastlanes-0.7.2/src/macros.rs, whose iteration order is the wire
-    /// contract - the crate warns it is deliberately not the FastLanes paper's order.
+    /// Unpacks one 1024-element FastLanes block. The iteration order is the wire contract, and is
+    /// deliberately not the order the FastLanes paper describes.
     /// </summary>
     /// <typeparam name="T">The unsigned element type: byte, ushort, uint or ulong.</typeparam>
     /// <param name="packed">Exactly <c>1024 * bitWidth / (8 * sizeof(T))</c> elements.</param>
@@ -364,7 +340,7 @@ internal static class FastLanes
                 nameof(packed));
         }
 
-        // W == 0 packs nothing at all: every value is zero (macros.rs, "Special case for W=0").
+        // A zero bit width packs nothing at all: every value is zero.
         if (bitWidth == 0)
         {
             output.Clear();
@@ -373,12 +349,11 @@ internal static class FastLanes
 
         ReadOnlySpan<int> index = PackedIndexTable(elementBits);
 
-        // W == T copies straight through: packed[LANES * row + lane] is the value. AND IT IS A
-        // BLOCK COPY, not a gather -- `BuildPackedIndex` writes
-        // `table[row * lanes + lane] = Order[row / 8] * 16 + (row % 8) * 128 + lane`, so for a
-        // fixed row the destination runs contiguously in `lane`, exactly as the source does. The
-        // by-element form was 1024 bounds-checked loads through an index table to move what is
-        // `elementBits` memcpys of 128 bytes. (PERF-AUDIT, §"FastLanes.UnpackBlock:280".)
+        // A bit width equal to the element width copies straight through: `packed[lanes * row +
+        // lane]` is the value. It is a block copy rather than a gather, because for a fixed row the
+        // destination `order[row / 8] * 16 + (row % 8) * 128 + lane` runs contiguously in `lane`,
+        // exactly as the source does, so one copy per row moves what an index table would move one
+        // bounds-checked element at a time.
         if (bitWidth == elementBits)
         {
             ReadOnlySpan<byte> order = OrderBytes;
@@ -403,53 +378,35 @@ internal static class FastLanes
     }
 
     /// <summary>
-    /// Unpacks a RUN of consecutive blocks into consecutive output, with the per-row shape
-    /// computed ONCE for the whole run.
+    /// Unpacks a run of consecutive blocks into consecutive output, with the per-row shape computed
+    /// once for the whole run.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Every block of a node shares one bit width, so all <c>elementBits</c> row shapes are the
-    /// same for all of them -- and the per-block form rebuilt every one of them per block: four
-    /// multiply-shift pairs and two mask constructions per row, 32 rows for a u32, against an
-    /// inner loop of eight vector iterations per row. It was a quarter of the kernel spent
-    /// recomputing a table that never changed.
+    /// Every block of a node shares one bit width, so the row shapes are the same for all of them.
+    /// Building them per block would spend a sizeable share of the kernel recomputing a table that
+    /// never changes, several multiply-shift pairs and two mask constructions per row against an
+    /// inner loop of a few vector iterations.
     /// </para>
     /// <para>
-    /// The block stays the OUTER loop even though hoisting the rows outside it would also hoist
-    /// the two <c>Vector128.Create</c> broadcasts. A row writes only <c>lanes</c> contiguous
-    /// elements per block, so row-outer would sweep the whole output once per row -- 32 passes
-    /// over a megabyte column instead of one. The broadcasts are a register move; the sweep is
-    /// memory bandwidth.
+    /// The block stays the outer loop even though hoisting the rows outside it would also hoist the
+    /// two mask broadcasts. A row writes only <c>lanes</c> contiguous elements per block, so
+    /// row-outer would sweep the whole output once per row instead of once in total. The broadcasts
+    /// are a register move; the sweep is memory bandwidth.
     /// </para>
     /// <para>
-    /// THREE SHAPES WERE MEASURED AGAINST THIS ONE on 2026-09-18 (PERF-GAPS.md E1), on 64 blocks at
-    /// widths 5, 10, 17 and 25 for u32 and 17, 33 and 52 for u64, interleaved in one process. All
-    /// three are recorded here so the next reader does not pay for them again.
+    /// Two other shapes are slower, for reasons that will not change. Carrying the packed word in a
+    /// register across rows, with lane groups outside, costs a data-dependent branch per row and
+    /// re-reads the shape table per lane group, to save loads that all hit the first-level cache.
+    /// Precomputing the mask vectors into an array and indexing them by row replaces a broadcast
+    /// from a register, which is one instruction, with a vector load.
     /// </para>
     /// <para>
-    /// <b>Lane groups outside, rows inside, the packed word carried in a register</b> -- upstream's
-    /// shape, and what "le mot reste en registre" asks for: <b>1.67x to 1.94x SLOWER</b>. Holding
-    /// the word costs a data-dependent branch per row (`is this still the word I have?`), re-reads
-    /// the shape table once per lane group instead of once per block, and moves the two mask
-    /// broadcasts inside the row loop. The loads it saves are all L1 hits -- the packed side of a
-    /// block is 1.3 kB -- so it trades free loads for real branches.
-    /// </para>
-    /// <para>
-    /// <b>The mask vectors precomputed once per run into an array</b>, indexed by row instead of
-    /// broadcast per row per block: <b>1.11x to 1.15x SLOWER</b>. `Vector128.Create(scalar)` is one
-    /// `dup` from a register; a 16-byte load from a table is worse. The broadcasts were already
-    /// free.
-    /// </para>
-    /// <para>
-    /// <b>The same loop with the shift and the masks as LITERALS</b> -- output deliberately wrong,
-    /// run only to price the mechanism -- reads <b>0.80x to 0.93x</b>. That is the whole ceiling of
-    /// a generator monomorphised by bit width, the C# answer to upstream's `seq_t!`: ten to twenty
-    /// per cent of the kernel, and only of the kernel. Reaching it means emitting code per (width,
-    /// row) pair -- shifts depend on the row, not on the width alone -- which is 64 widths x 4
-    /// element types x the rows of each, thousands of lines of generated source. NOT WRITTEN: the
-    /// axes where this library still loses to upstream are counted in milliseconds (`fsst` 7.2 ms,
-    /// `zstd` 7.1 ms) and this one in tens of microseconds. The measurement is the argument; if the
-    /// balance changes, the ceiling above is what to expect.
+    /// Hard-coding the shift and the masks as literals is faster still, and that is the ceiling a
+    /// generator monomorphised by bit width could reach. It would mean emitting code for every
+    /// (width, row) pair, since the shift depends on the row and not on the width alone -- four
+    /// element types times sixty-four widths times their rows, thousands of generated lines -- for
+    /// a fraction of one kernel.
     /// </para>
     /// </remarks>
     /// <typeparam name="T">The unsigned element type.</typeparam>
@@ -465,9 +422,8 @@ internal static class FastLanes
         int lanes = BlockSize / elementBits;
         int wordsPerBlock = lanes * bitWidth;
 
-        // A zero bit width packs nothing at all: the whole run is zeros, and it is ONE clear
-        // rather than `blocks` of them. The per-block form was calling into `memset` once per
-        // 1024 elements for a buffer that is contiguous.
+        // A zero bit width packs nothing at all: the whole run is zeros, and the output is
+        // contiguous, so it is one clear rather than one per block.
         if (bitWidth == 0)
         {
             output[..(blocks * BlockSize)].Clear();
@@ -506,7 +462,7 @@ internal static class FastLanes
 
     /// <summary>
     /// The scalar unpack loop, reachable on its own: it is the fallback the vector paths need, and
-    /// what they are measured and differentially tested against.
+    /// what they are compared against value for value.
     /// </summary>
     /// <typeparam name="T">The unsigned element type.</typeparam>
     /// <param name="packed">The packed words.</param>
@@ -536,7 +492,7 @@ internal static class FastLanes
                     int currentBits = bitWidth - remainingBits;
                     value = (src >> shift) & Mask<T>(currentBits);
 
-                    // The guard is on the WORD index, not the row: the last row of a lane can
+                    // The guard is on the word index, not the row: the last row of a lane can
                     // spill exactly onto the boundary, in which case remainingBits is 0 and there
                     // is no next word to read.
                     if (nextWord < bitWidth)
@@ -556,7 +512,7 @@ internal static class FastLanes
     }
 
     /// <summary>
-    /// Unpacks ONE value out of a 1024-element block, without touching the other 1023.
+    /// Unpacks one value out of a 1024-element block, without touching the other 1023.
     /// </summary>
     /// <typeparam name="T">The unsigned element type.</typeparam>
     /// <param name="packed">Exactly <c>lanes * bitWidth</c> words: one block.</param>
@@ -565,13 +521,14 @@ internal static class FastLanes
     /// <returns>The value at that index.</returns>
     /// <remarks>
     /// This is what makes `fastlanes.bitpacked` worth specializing for a take, and it is a property
-    /// of the layout rather than a trick: the bit-packing index is INVERTIBLE in closed form, so a
-    /// logical index maps straight to the (row, lane) pair holding it - `PackedRowTable` and
-    /// `PackedLaneTable` are that inverse, precomputed - and from there the same shift and mask the
-    /// bulk kernel uses extracts the one value. No block is unpacked and nothing is allocated.
+    /// of the layout rather than a trick: the bit-packing index is invertible in closed form, so a
+    /// logical index maps straight to the (row, lane) pair holding it -- `PackedRowTable` and
+    /// `PackedLaneTable` are that inverse, precomputed -- and from there the same shift and mask
+    /// the bulk kernel uses extracts the one value. No block is unpacked and nothing is allocated.
     ///
-    /// The two degenerate widths are the caller's to handle: W == 0 means every value is zero and
-    /// W == T means the packed word IS the value, and neither reaches the arithmetic below.
+    /// The two degenerate widths are the caller's to handle: a zero bit width means every value is
+    /// zero, and a bit width equal to the element width means the packed word is the value.
+    /// Neither reaches the arithmetic below.
     /// </remarks>
     public static T UnpackOne<T>(ReadOnlySpan<T> packed, int bitWidth, int index)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
@@ -594,7 +551,7 @@ internal static class FastLanes
         int currentBits = bitWidth - remainingBits;
         T value = (packed[(lanes * currentWord) + lane] >> shift) & Mask<T>(currentBits);
 
-        // The guard is on the WORD index, not the row: the last row of a lane can spill exactly
+        // The guard is on the word index, not the row: the last row of a lane can spill exactly
         // onto the boundary, leaving no next word to read.
         if (nextWord < bitWidth)
         {
@@ -609,7 +566,7 @@ internal static class FastLanes
     /// </summary>
     /// <remarks>
     /// Hoisting it out is most of the win even before the vectors: the scalar loop recomputes four
-    /// divisions and two masks per VALUE, and every one of them is constant across the 16 to 128
+    /// divisions and two masks per value, and every one of them is constant across the 16 to 128
     /// lanes of a row.
     /// </remarks>
     private readonly struct Row<T>
@@ -630,7 +587,7 @@ internal static class FastLanes
                 LowMask = Mask<T>(bitWidth - remainingBits);
                 CurrentBits = bitWidth - remainingBits;
 
-                // The guard is on the WORD index, not the row: the last row of a lane can spill
+                // The guard is on the word index, not the row: the last row of a lane can spill
                 // exactly onto the boundary, leaving no next word to read.
                 Spills = nextWord < bitWidth;
                 HighMask = Mask<T>(remainingBits);
@@ -885,7 +842,8 @@ internal static class FastLanes
                 nuint into = blockDestination + (nuint)shape.Destination;
                 int shift = shape.Shift;
                 int currentBits = shape.CurrentBits;
-                // See `Unpack128`: the spill test is per ROW, so it is hoisted out of the lanes.
+                // Whether a row straddles two packed words is the same for all its lanes, so the
+                // test is hoisted out of the lane loop.
                 if (shape.Spills)
                 {
                     for (int lane = 0; lane < lanes; lane += step)
@@ -936,7 +894,8 @@ internal static class FastLanes
                 nuint into = blockDestination + (nuint)shape.Destination;
                 int shift = shape.Shift;
                 int currentBits = shape.CurrentBits;
-                // See `Unpack128`: the spill test is per ROW, so it is hoisted out of the lanes.
+                // Whether a row straddles two packed words is the same for all its lanes, so the
+                // test is hoisted out of the lane loop.
                 if (shape.Spills)
                 {
                     for (int lane = 0; lane < lanes; lane += step)
@@ -987,9 +946,9 @@ internal static class FastLanes
                 nuint into = blockDestination + (nuint)shape.Destination;
                 int shift = shape.Shift;
                 int currentBits = shape.CurrentBits;
-                // THE SPILL TEST IS A PROPERTY OF THE ROW, SO IT IS NOT IN THE LANE LOOP. Whether
-                // this row straddles two packed words is decided by `Row<T>`'s constructor and is
-                // the same for all 16 to 128 lanes; testing it inside meant one branch per vector
+                // The spill test is a property of the row, so it is not in the lane loop. Whether
+                // this row straddles two packed words is decided when the shape is built and is the
+                // same for all 16 to 128 lanes; testing it inside would be one branch per vector
                 // iteration of the innermost loop of the encoding. Two loops, one test.
                 if (shape.Spills)
                 {
@@ -1200,8 +1159,8 @@ internal static class FastLanes
         return table;
     }
 
-    // spec/REFERENCE.md's inverse derivation, kept as its own computation rather than as a scan of
-    // the forward table so the two can be cross-checked against each other in the tests.
+    // The inverse of the packing order, derived on its own rather than read off the forward table,
+    // so the tests can check one against the other.
     private static int[] BuildPackedRows(int elementBits)
     {
         int lanes = BlockSize / elementBits;

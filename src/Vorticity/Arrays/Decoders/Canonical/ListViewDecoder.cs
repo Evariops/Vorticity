@@ -1,16 +1,3 @@
-// vortex.listview - vortex-array-0.86.1/src/arrays/listview/vtable/mod.rs `deserialize` and
-// `ListViewData::validate` / `validate_offsets_and_sizes` in .../listview/array.rs.
-//
-// The whole difference from `vortex.list` is that these offsets are NOT ordered, so nothing can be
-// inferred from monotonicity: EVERY row is checked for `offset >= 0`, `size >= 0` and
-// `offset + size <= elements_len`. Upstream checks all rows including the null ones and so does
-// this.
-//
-// THE ADD MUST NOT BE A SIGNED ADD. Both operands are already i64 by the time they are read, so
-// `offset + size` is an unchecked long add that WRAPS NEGATIVE for two individually legal values
-// near 2^62 - and a wrapped sum compares below `elements_len`, turning the guard into a pass.
-// Upstream widens to u64 and uses `checked_add` (`validate_offsets_and_sizes`); after the two sign
-// checks both operands are in [0, long.MaxValue], so a ulong add is exact and is the same test.
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -19,7 +6,11 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
-/// <summary>Decodes <c>vortex.listview</c>: unordered (offset, size) pairs over an elements child.</summary>
+/// <summary>
+/// Decodes <c>vortex.listview</c>: unordered (offset, size) pairs over an elements child. Unlike a
+/// list's offsets these are not ordered, so nothing can be inferred from monotonicity and every
+/// row is range-checked, the null ones included.
+/// </summary>
 public sealed class ListViewDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
@@ -76,32 +67,24 @@ public sealed class ListViewDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// Class I: <c>offset >= 0</c>, <c>size >= 0</c> and <c>offset + size &lt;= elementsLength</c>
-    /// for every row, with the addition done UNSIGNED so it cannot wrap. A signed add of two
-    /// legal i64 offsets near 2^62 wraps to a negative sum that passes the bound.
+    /// Checks <c>offset >= 0</c>, <c>size >= 0</c> and <c>offset + size &lt;= elementsLength</c>
+    /// for every row, with the addition done unsigned so it cannot wrap. A signed add of two
+    /// individually legal offsets near the top of the range wraps to a negative sum, and a negative
+    /// sum compares below the bound, turning the guard into a pass.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// PERF-AUDIT-v2.md R7. This is the ONE loop of a listview scan: a canonical ListView borrows
-    /// its offsets and sizes buffers as they are, so once the children are decoded there is nothing
-    /// else per row to do. Which means the type switch inside <c>ReadInteger</c> — twice per row,
-    /// on a property of the CALL and not of the row — was the scan. Short-circuited on
-    /// `listview.vortex` at a million rows, the free version reads **164 µs against 2 552**: the
-    /// check was **93,6 %** of it.
+    /// A canonical list view borrows its offsets and sizes buffers as they are, so this is the only
+    /// per-row work a listview decode does. Both physical types are therefore resolved before the
+    /// loop — one switch for the offsets, a second for the sizes — so the loop that runs is
+    /// monomorphic in both rather than switching on a type per value read.
     /// </para>
     /// <para>
-    /// THE TWO TYPES ARE RESOLVED BEFORE THE LOOP, the way <c>RowKernels.Gather</c> resolves its
-    /// codes: one switch picks the offsets' type, a second picks the sizes' type, and
-    /// the loop that runs is monomorphic in both. Only the pairs a file actually uses are ever
-    /// instantiated, and in practice that is one.
-    /// </para>
-    /// <para>
-    /// THE SEMANTICS ARE THE OLD ONES, TO THE MESSAGE. <see cref="Widen{T}"/> reproduces
-    /// <c>ReadInteger</c>'s saturation exactly — a <c>u64</c> above <c>long.MaxValue</c> becomes
-    /// <c>long.MaxValue</c>, which stays non-negative and fails the bound on the second check
-    /// rather than the first — so a malformed file gets the same exception with the same numbers as
-    /// before. The integer-ness of both ptypes is already established by
-    /// <c>RequireIntegerPType</c> above, which is why the last arm widens rather than throwing.
+    /// <see cref="Widen{T}"/> reproduces the shared integer read's saturation exactly: a
+    /// <c>u64</c> above <c>long.MaxValue</c> becomes <c>long.MaxValue</c>, which stays non-negative
+    /// and so fails the bound check rather than the sign check, and a malformed file gets the same
+    /// exception with the same numbers either way. Both ptypes are known to be integers by the time
+    /// this runs, which is why the last arm widens rather than throwing.
     /// </para>
     /// </remarks>
     internal static void ValidateRanges(
@@ -186,8 +169,7 @@ public sealed class ListViewDecoder : ArrayDecoder
     /// </summary>
     /// <remarks>
     /// Written as <c>typeof(T) == typeof(X)</c> rather than generic math because that is the form
-    /// the JIT folds away per instantiation — <c>RowKernels.WidenCode</c> is the same shape, for
-    /// the same reason.
+    /// the runtime folds away per instantiation, leaving one widening conversion.
     /// </remarks>
     internal static long Widen<T>(T value)
         where T : unmanaged

@@ -1,62 +1,3 @@
-// The FSST decode kernel - fsst-rs-0.6.0/src/lib.rs `Decompressor::decompress_into`.
-//
-// FSST compresses text by replacing recurring byte sequences with one-byte codes drawn from a table
-// of at most 255 symbols, each 1 to 8 bytes. Code 255 is the ESCAPE: the byte after it is emitted
-// literally, which is how a byte that no symbol covers still round-trips. Decoding is therefore a
-// flat walk over the code stream with no state at all beyond the output cursor:
-//
-//     code == 255  -> copy the next input byte
-//     otherwise    -> copy the first lengths[code] bytes of symbols[code]
-//
-// The reference's kernel looks nothing like that, because it loads eight codes at a time, tests
-// them for escapes with a SWAR mask, and writes every symbol as one unaligned 8-byte store that it
-// then advances by the symbol's real length. That is a pure optimization of the loop above - the
-// wide store writes garbage past the symbol and the next store overwrites it - and reproducing
-// its shape rather than its semantics would buy nothing until the rest of the library is
-// vectorized (docs/01-scope.md §3, SIMD is its own piece of work).
-//
-// What DOES transfer is the reason the reference's buffer is oversized: it needs 8 writable bytes
-// to store a symbol whose real length may be 1. This implementation writes exactly the symbol's
-// length, so it needs no slack -- stated here because the absence of FSST_DECODE_SLACK is otherwise
-// an unexplained divergence.
-//
-// SO THE WIDE STORE IS NOW HERE TOO, and the story of getting there is the useful part. This file
-// used to argue that reproducing the reference's shape "would buy nothing until the rest of the
-// library is vectorized". Measuring per-encoding ratios against Rust (docs/05-benchmarks.md §1b)
-// made FSST our slowest kernel, so the shape was tried - and a whole-file benchmark said it was 8%
-// SLOWER, which I nearly wrote down as a finding. It was drift: three runs of effectively identical
-// code came back 135, 146 and 202 us, and a 35 us open cost sat in front of the kernel in every one
-// of them. Measured properly, both shapes in one process over one code stream
-// (FsstKernelBenchmarks), the wide store is 7.9x FASTER - 307 us against 39 us on 64 KiB of codes.
-//
-// Two lessons, both already written down in docs/05 §5 and neither of which I applied first time: a
-// microbenchmark of the thing being changed beats an end-to-end one diluted by a fixed cost, and
-// two candidates have to be measured against ONE clock or thermal drift decides the winner.
-//
-// AND THEN THE OTHER HALF OF THE REFERENCE'S SHAPE, which the first pass took the store from and
-// left the loop behind. `dotnet-trace` over a 1M-row `vortex.fsst` scan puts 76.7% of the whole
-// scan inside this one method -- it is not a hot path, it IS the path -- and per code it was doing
-// a bounds-checked load of the code, a compare against the escape, a compare against the table
-// size, a bounds-checked load of the width and a compare against the destination's slack, to
-// perform one store.
-//
-// `fsst-rs` loads EIGHT codes as one u64 and tests all eight for the escape with a SWAR has-zero-
-// byte mask. When none of them is an escape -- a trained table produces one escape in dozens of
-// codes -- it runs eight unconditional stores with no branch between them. That needs two things
-// this file did not have:
-//
-//   * THE TABLES PADDED TO THE FULL CODE SPACE. Dropping the `code >= count` branch means an
-//     out-of-table code would index past the symbol buffer, which is the out-of-bounds read this
-//     library promises never to perform. So the 256 widths and the 2 KiB of symbols are built once
-//     per node into caller scratch, zero-filled, and an absent code reads a zero width. The check
-//     does not disappear, it becomes BRANCHLESS: `bad |= width - 1` is 0..7 for a real symbol and
-//     0xFFFFFFFF for an absent one, tested once at the end of the stream.
-//   * THE SLACK CHECKED PER BLOCK RATHER THAN PER CODE. Eight symbols advance the cursor by at
-//     most 64 bytes, so one compare before the block covers all eight stores.
-//
-// Preparing the tables costs a 2.3 KiB clear and copy per NODE, against 65 536 branches saved per
-// 64 KiB of codes; and it is why `Prepare` takes the scratch from its caller -- the selective path
-// decodes row by row and must not rebuild the table per row.
 using System;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
@@ -64,7 +5,14 @@ using System.Runtime.InteropServices;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>A validated FSST symbol table, and the decode over it.</summary>
+/// <summary>
+/// A validated FSST symbol table, and the decode over it. The encoding replaces recurring byte
+/// sequences with one-byte codes naming symbols of one to eight bytes; code 255 is the escape and
+/// the byte after it is emitted literally, which is how a byte no symbol covers still round-trips.
+/// Decoding is therefore a flat walk over the code stream with no state beyond the output cursor:
+/// an escape copies the next input byte, any other code copies the first <c>width</c> bytes of its
+/// symbol.
+/// </summary>
 internal readonly ref struct FsstSymbolTable
 {
     /// <summary>The escape code: the following input byte is a literal.</summary>
@@ -144,14 +92,14 @@ internal readonly ref struct FsstSymbolTable
     internal const int WidthScratchBytes = 256;
 
     /// <summary>
-    /// Builds the padded decode tables into caller-owned scratch, ONCE per node.
+    /// Builds the padded decode tables into caller-owned scratch, once per node.
     /// </summary>
     /// <param name="symbolScratch">At least <see cref="SymbolScratchBytes"/> writable bytes.</param>
     /// <param name="widthScratch">At least <see cref="WidthScratchBytes"/> writable bytes.</param>
     /// <remarks>
     /// The scratch is the caller's because the selective path calls <see cref="FsstDecodeTable.Decode"/>
-    /// once per wanted row, and rebuilding a 2.3 KiB table per row would cost more than the branches
-    /// it removes.
+    /// once per wanted row, and rebuilding the padded tables per row would cost more than the
+    /// branches they remove.
     /// </remarks>
     internal FsstDecodeTable Prepare(Span<byte> symbolScratch, Span<byte> widthScratch)
     {
@@ -192,11 +140,11 @@ internal readonly ref struct FsstSymbolTable
     /// what lets an equality be answered on the codes.
     /// </para>
     /// <para>
-    /// A LINEAR SCAN OVER AT MOST 255 SYMBOLS, where the writer builds a hash of prefixes and a
-    /// table of every two-byte pair. That table is 128 KiB and the writer amortizes it over a whole
-    /// column; here one needle is compressed once for a whole scan, so the index would cost more to
-    /// build than the scan it accelerates. Keeping the two implementations apart is also what lets a
-    /// test compress the corpus both ways and compare, which is the only honest check that they
+    /// A linear scan over at most 255 symbols, where the writer instead builds a hash of prefixes
+    /// and a table of every two-byte pair. The writer amortizes that index over a whole column;
+    /// here one needle is compressed once for a whole scan, so building the index would cost more
+    /// than the scan it accelerates. Keeping the two implementations apart is also what lets a test
+    /// compress the same input both ways and compare, which is the only honest check that they
     /// agree.
     /// </para>
     /// </remarks>
@@ -255,9 +203,19 @@ internal readonly ref struct FsstSymbolTable
 /// The padded decode tables of one <c>vortex.fsst</c> node, and the kernel over them.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Separate from <see cref="FsstSymbolTable"/> because the padding is built once per node while
-/// <see cref="Decode"/> runs once per node OR once per wanted row, and the two lifetimes have to be
+/// <see cref="Decode"/> runs once per node or once per wanted row, and the two lifetimes have to be
 /// expressible apart.
+/// </para>
+/// <para>
+/// The kernel reads eight codes as one word, tests all eight for the escape at once, and writes
+/// each symbol as a single unaligned eight-byte store that it advances by the symbol's real width,
+/// the slack past the symbol being overwritten by the next store. That shape needs the tables
+/// padded to the whole code space, so an absent code reads a zero width instead of indexing past
+/// the symbol buffer, and it needs the output's remaining room checked once per block rather than
+/// once per code.
+/// </para>
 /// </remarks>
 internal readonly ref struct FsstDecodeTable
 {
@@ -287,24 +245,21 @@ internal readonly ref struct FsstDecodeTable
     }
 
     /// <summary>
-    /// Whether every byte this table can emit from a SYMBOL is below 0x80.
+    /// Whether every byte this table can emit from a symbol is below 0x80.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE UTF-8 GUARANTEE, PRICED AT TWO KILOBYTES INSTEAD OF FIFTY-TWO MEGABYTES. Every byte of a
-    /// decoded heap comes from exactly one of two places: the first <c>width</c> bytes of some
-    /// symbol, or a raw byte written by the escape path. Nothing else writes it -- the eight-byte
-    /// store past a symbol's width is overwritten by the next symbol's store at
-    /// <c>written + width</c>, and the final symbols take the exact-copy tail, so no byte beyond
-    /// <c>written</c> survives. So "every symbol is ASCII and every escape byte is ASCII" implies
-    /// "the whole heap is ASCII", which implies valid UTF-8, with no sweep of the heap at all.
+    /// This is how a decoded heap earns its text validity from the table alone, instead of a sweep
+    /// over the heap. Every byte of the heap comes from exactly one of two places: the first
+    /// <c>width</c> bytes of some symbol, or a raw byte written by the escape path. Nothing else
+    /// writes it -- the eight-byte store past a symbol's width is overwritten by the next symbol's
+    /// store at <c>written + width</c>, and the final symbols take the exact-copy tail, so no byte
+    /// beyond <c>written</c> survives. "Every symbol is ASCII and every escape byte is ASCII"
+    /// therefore implies that the whole heap is ASCII, which is valid text.
     /// </para>
     /// <para>
-    /// This is the same argument `ZstdDecoder` makes frame by frame, and it is worth as much: the
-    /// whole-heap `Utf8.IsValid` is <b>763 us of a 7 400 us `fsst` scan, 9.4 %</b>, measured by
-    /// short-circuiting it (bench/ab.sh, 2026-09-18). The guarantee is NOT weakened -- a table with
-    /// one high byte, or a stream with one high escape byte, falls back to the full sweep -- so
-    /// this is not the question PERF-GAPS.md D6 asks.
+    /// The guarantee is not weakened by this: a table with one high byte, or a stream with one high
+    /// escape byte, falls back to validating the whole heap.
     /// </para>
     /// </remarks>
     internal bool SymbolsAreAscii => _symbolsAreAscii;
@@ -339,7 +294,7 @@ internal readonly ref struct FsstDecodeTable
     /// <returns>How many bytes were written.</returns>
     /// <exception cref="VortexFormatException">
     /// A code names a symbol the table does not hold, an escape is the last byte of the stream, or
-    /// the output is too small for what the stream decodes to. The reference asserts all three.
+    /// the output is too small for what the stream decodes to.
     /// </exception>
     /// <param name="escapeBits">
     /// Accumulates, by OR, every raw byte the escape path writes. With
@@ -358,7 +313,7 @@ internal readonly ref struct FsstDecodeTable
         int i = 0;
         uint bad = 0;
 
-        // Past this point a symbol no longer has eight writable bytes behind it, so the wide store
+        // Past this point a symbol lacks eight writable bytes behind it, so the wide store
         // would run off the end and the exact copy takes over. Negative for a destination under
         // eight bytes, which is right: the wide path is then never taken at all.
         int wideLimit = destination.Length - FsstSymbolTable.SymbolSize;
@@ -367,17 +322,12 @@ internal readonly ref struct FsstDecodeTable
 
         while (true)
         {
-            // EIGHT AT A TIME while the block is escape-free and the slack covers eight stores.
-            // One compare for the slack and one SWAR test for the escapes, against eight of each.
+            // Eight at a time while the block is escape-free and the slack covers eight stores:
+            // one compare for the slack and one SWAR test for the escapes, against eight of each.
             //
-            // Nothing is owed to the escape here, because trained tables barely produce one. Counted
-            // over every file of the corpus: 622 escapes in 264 038 codes, a quarter of a per cent,
-            // and 1 640 breaks out of this loop for them -- two and a half per escape, because the
-            // 0xFF stays in the eight-byte window until the scalar path has consumed it and the
-            // literal that follows an escape can be 0xFF itself. On the million-row `fsst` file the
-            // benchmarks read there is not one escape in 9 877 674 codes. Upstream's other shape,
-            // which keeps the escape inside the block of eight, would therefore be answering a
-            // question this data does not ask.
+            // Nothing is owed to the escape here, because a trained table barely produces one and
+            // the loop simply falls out to the scalar path when it meets one. A shape that handled
+            // the escape inside the block would be answering a question the data does not ask.
             while (i <= blockEnd && written <= blockLimit)
             {
                 ulong word = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref input, (uint)i));
@@ -451,7 +401,7 @@ internal readonly ref struct FsstDecodeTable
             i++;
         }
 
-        // ONE TEST FOR THE WHOLE STREAM. A width of zero means the code names no symbol; every real
+        // One test for the whole stream. A width of zero means the code names no symbol; every real
         // width is 1..8, so `width - 1` stays in 0..7 for every legal code and wraps to 0xFFFFFFFF
         // for an absent one. The stores such a code made wrote into slack the next store overwrites
         // and advanced nothing, so nothing has escaped the destination by the time this fires.
@@ -476,14 +426,11 @@ internal readonly ref struct FsstDecodeTable
                 ref Unsafe.Add(ref table, (uint)(code * FsstSymbolTable.SymbolSize))));
         uint width = Unsafe.Add(ref widths, (uint)code);
 
-        // THE PER-SYMBOL CODE CHECK STAYS, and it was priced: removing it entirely reads 0.904
-        // against 0.919-0.926 for the same tree with the check in (bench/ab.sh on `fsst` fullscan,
-        // 2026-09-18), so it is worth about 2 % of the axis -- inside the 3-5 % this measurement can
-        // see. It is a subtract and an or in the shadow of an eight-byte store, and upstream's
-        // `get_unchecked` buys that 2 % by decoding a corrupt code into a wrong value in silence.
-        // A generic flag could drop it for a full 255-symbol table, where no code CAN be absent;
-        // that is a second shape of the hottest loop in the library for a gain this bench cannot
-        // resolve, so it is written down rather than written.
+        // The per-symbol code check stays. It is a subtract and an or in the shadow of an eight-byte
+        // store, and dropping it would buy back that much by decoding a corrupt code into a wrong
+        // value in silence. A table that fills the whole code space could not have an absent code
+        // and could skip it, but that means a second shape of the hottest loop in the library for a
+        // gain too small to see.
         bad |= width - 1;
         return written + (int)width;
     }

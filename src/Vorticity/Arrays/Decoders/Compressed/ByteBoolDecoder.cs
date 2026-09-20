@@ -1,7 +1,3 @@
-// vortex.bytebool - vortex-bytebool-0.86.1/src/array.rs.
-// Empty metadata, exactly one buffer of exactly `len` bytes, and an optional validity child at
-// index 0. ANY non-zero byte is true, not just 1: upstream's canonicalization is
-// `BitBuffer::from_iter(bytes.iter().map(|&b| b != 0))`.
 using System;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
@@ -9,7 +5,10 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.bytebool</c>: one byte per boolean, into a canonical bitmap.</summary>
+/// <summary>
+/// Decodes <c>vortex.bytebool</c>: one byte per boolean, into a canonical bitmap. Any non-zero
+/// byte means true, not only one.
+/// </summary>
 public sealed class ByteBoolDecoder : ArrayDecoder
 {
     private const string Id = "vortex.bytebool";
@@ -41,7 +40,7 @@ public sealed class ByteBoolDecoder : ArrayDecoder
             CompressedThrow.Format($"{Id} requires a Bool dtype, not {dtype}.");
         }
 
-        // Class I: one byte per element, exactly. Upstream's validate is `buffer.len() == len`.
+        // The buffer holds one byte per element, exactly; anything else is a malformed node.
         VortexBuffer values = node.GetBuffer(0);
         if (values.Length != length)
         {

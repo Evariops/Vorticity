@@ -1,11 +1,3 @@
-// Materializes a `vortex.constant` node: n rows of one scalar, in whatever canonical form the
-// dtype takes. Upstream's `constant_canonicalize`
-// (vortex-array-0.86.1/src/arrays/constant/compute/canonical.rs) does the same job.
-//
-// The one interesting case is a list. A ListView's offsets are arbitrary - that is the whole point
-// of the encoding - so a constant list is n rows all pointing at ONE copy of the k elements:
-// O(k) work rather than O(n * k). A fixed-size list has no offsets and is positional, so there the
-// k elements really are tiled n times, through the same concat machinery `vortex.chunked` uses.
 using System;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Buffers;
@@ -16,6 +8,12 @@ using Vorticity.Types.Variant;
 namespace Vorticity.Arrays.Decoders.Canonical;
 
 /// <summary>Builds the canonical form of a repeated scalar.</summary>
+/// <remarks>
+/// A list is the one case that is not a single node: a list view's offsets are arbitrary, so every
+/// row of a constant list points at one shared copy of the row's elements, which is work
+/// proportional to one row rather than to the column. A fixed-size list is positional and has no
+/// offsets, so there the elements really are tiled once per row.
+/// </remarks>
 internal static class ConstantCanonicalizer
 {
     private const int Align = CanonicalSupport.MaxRequiredAlignment;
@@ -49,8 +47,8 @@ internal static class ConstantCanonicalizer
 
         CanonicalArena arena = context.Canonical;
 
-        // An extension's scalar is interpreted against its storage dtype (Phase 1 contract §0a C3),
-        // which is exactly what TypedScalarReader already unwrapped it to.
+        // An extension's scalar is interpreted against its storage dtype, which is exactly what
+        // the scalar reader has already unwrapped it to.
         if (dtype.Kind == DTypeKind.Extension)
         {
             int storage = Build(context, dtype.StorageType, length, in scalar, depth + 1);
@@ -93,15 +91,13 @@ internal static class ConstantCanonicalizer
             {
                 PType ptype = dtype.PType;
 
-                // The element is written ONCE instead of `length` times: at a million rows of eight
-                // bytes that is eight bytes rather than eight megabytes. A full scan of the 1M
-                // `constant` file goes from 201 us to 144 -- 28,4 % of it was tiling a value that
-                // never changes.
+                // The element is written once instead of once per row: a constant column stores
+                // one value and a count, not a value repeated across the whole buffer.
                 int bytes = ArrayDecodeContext.CheckedMultiply(
                     length, ptype.ByteWidth(), "constant values");
 
-                // The ceiling is charged against what the node stands for, not against the
-                // eight bytes it stores: see `RequireStandsForWithinBudget`.
+                // The ceiling is charged against what the node stands for, not against the handful
+                // of bytes it stores.
                 CanonicalSupport.RequireStandsForWithinBudget(context, bytes);
 
                 int width = ptype.ByteWidth();
@@ -141,11 +137,10 @@ internal static class ConstantCanonicalizer
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A `vortex.variant` over a constant carrier holds a TYPED SCALAR -- `variant(i32 = 1)` in the
-    /// corpus -- and the canonical form this library gives every variant column is the Parquet
-    /// Variant binary pair (see `VariantDecoder`'s header for why). So this is the one place that
-    /// has to ENCODE rather than decode, and `ParquetVariant.WriteValue` does exactly the
-    /// primitives, no more: an object or an array raises rather than being approximated.
+    /// A variant over a constant carrier holds a typed scalar, while the canonical form every
+    /// variant column takes here is the binary metadata-and-value pair. This is therefore the one
+    /// place that has to encode rather than decode, and it encodes the primitives only: an object
+    /// or an array raises rather than being approximated.
     /// </para>
     /// <para>
     /// The two columns are themselves constants -- every row is the same bytes -- so they are built
@@ -215,20 +210,13 @@ internal static class ConstantCanonicalizer
     private static int BuildDecimal(
         ArrayDecodeContext context, DType dtype, int length, scoped in TypedScalar scalar, Validity validity)
     {
-        // The width comes from the SCALAR, not from the precision. Upstream's
-        // `constant_canonicalize` (vortex-array-0.86.1/src/arrays/constant/vtable/canonical.rs)
-        // uses `match_each_decimal_value!(value, ..)`, so the DecimalArray's values_type is the
-        // scalar's own DecimalValue variant - which `bytes_from_proto` derives from the serialized
-        // bytes_value LENGTH; `smallest_decimal_value_type` appears only in the all-null arm, which
-        // CanonicalFill already matches. Upstream does not tie an array's values_type to its
-        // precision either (DecimalData's own doc: "a DecimalArray can be built that stores a set
-        // of precision=2 values in a Buffer<i256>"), and every Arrow-sourced decimal column is
-        // i128/i256 whatever its precision - so a chunk the compressor folded to vortex.constant
-        // must report the same width as the chunks around it, or a caller who reads
-        // DecimalColumn.Storage once and uses the matching narrowed accessor breaks on one batch.
+        // The storage width comes from the scalar, not from the precision: a decimal column may be
+        // stored wider than its precision needs, and a chunk a compressor folded to a constant has
+        // to report the same width as the chunks around it. Otherwise a caller who reads the
+        // column's storage once and picks the matching narrowed accessor breaks on that one batch.
         //
-        // Never NARROWER than the precision, though: DecimalDecoder refuses that shape on the
-        // vortex.decimal path and the rest of the arena assumes it, so take the max.
+        // Never narrower than the precision, though: the decimal decoder refuses that shape and
+        // the rest of the arena assumes it, so take the wider of the two.
         DecimalStorageType precisionStorage = DecimalStorage.ForPrecision(dtype.Precision);
         int precisionWidth = DecimalStorage.ByteWidth(precisionStorage);
         int width = Math.Max(scalar.DecimalWidth, precisionWidth);
@@ -236,11 +224,10 @@ internal static class ConstantCanonicalizer
         Span<byte> full = stackalloc byte[Int256.ByteCount];
         scalar.AsDecimal.Unscaled.WriteLittleEndianBytes(full);
 
-        // The VALUE is checked against the precision's width whatever it is stored at: that stands
-        // in for upstream's Scalar::try_new -> validate -> DecimalValue::fits_in_precision, which
-        // rejects an over-precision constant at deserialization. Every byte above the precision's
-        // width has to already be the sign extension, and the sign bit must survive. Widening from
-        // there to `width` is then a pure sign extension.
+        // The value is checked against the precision's width whatever it is stored at, so that an
+        // over-precision constant is rejected here rather than travelling on. Every byte above the
+        // precision's width has to already be the sign extension, and the sign bit must survive;
+        // widening from there is then a pure sign extension.
         byte sign = (byte)((full[Int256.ByteCount - 1] & 0x80) != 0 ? 0xFF : 0x00);
         for (int i = precisionWidth; i < Int256.ByteCount; i++)
         {
@@ -257,10 +244,9 @@ internal static class ConstantCanonicalizer
                 $"A constant decimal does not fit its {precisionStorage} storage.");
         }
 
-        // The same form the other three kinds take, once the checks above have passed: sixteen
-        // bytes and a count rather than sixteen bytes a row. `MaterializeConstant` reads the
-        // storage back off the element's width, which is why `storage` is not carried on the
-        // record -- the width already is.
+        // The same form the other kinds take, once the checks above have passed: one element and a
+        // count rather than an element a row. The storage type is not carried on the record
+        // because the element's width already says what it is.
         int bytes = ArrayDecodeContext.CheckedMultiply(length, width, "constant decimals");
         CanonicalSupport.RequireStandsForWithinBudget(context, bytes);
         return context.Canonical.AddConstant(dtype, length, validity, full[..width]);
@@ -275,9 +261,9 @@ internal static class ConstantCanonicalizer
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             length, CanonicalSupport.ViewSize, "constant views");
 
-        // The string half, and where the `variant` axis's 6.5x came from: a constant variant column
-        // is two constant BINARY columns, and tiling them was 2 x 1M views, 32 MB of buffer for two
-        // values that never change.
+        // The string half matters most for a constant variant column, which is two constant binary
+        // columns: tiling them would build a full view buffer twice over, for two values that
+        // never change.
         CanonicalSupport.RequireStandsForWithinBudget(context, viewBytes);
         return arena.AddConstant(dtype, length, validity, value);
     }

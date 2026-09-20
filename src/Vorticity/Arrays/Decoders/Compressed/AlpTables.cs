@@ -1,24 +1,25 @@
-// The ALP scaling tables - alp-0.0.4/src/alp/mod.rs, `impl ALPFloat for f32` / `for f64`.
-//
-// decode_single is `from_int(encoded) * F10[f] * IF10[e]`, and the ONLY way to reproduce it bit for
-// bit is to reproduce it literally: the same two table lookups, the same order, the same precision.
-//
-// The inverse table is not 1/F10[e] computed at runtime. 0.1 is not representable in binary
-// floating point, so `x * IF10[1]` and `x / F10[1]` round differently for some inputs, and a
-// decoder that "simplifies" one into the other disagrees with the reference on real data rather
-// than on adversarial data. Likewise the f32 tables are f32 literals, not narrowed f64 ones:
-// 10^10 rounds to a different f32 depending on which way it is reached.
-//
-// The tables run past MAX_EXPONENT upstream (24 entries for f64, whose MAX_EXPONENT is 18), and
-// that is deliberate there - the encoder searches only up to MAX_EXPONENT, but the decoder indexes
-// whatever the file declares. So the bound a READER must enforce is the table length: it is what
-// keeps the lookup in memory.
 using System;
 using System.Numerics;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Powers of ten, and their reciprocals, in each float width ALP supports.</summary>
+/// <summary>
+/// Powers of ten, and their reciprocals, in each float width ALP supports. Decoding a value is one
+/// multiplication by an entry of each table, in that order, which is what reproduces the encoder's
+/// result bit for bit.
+/// </summary>
+/// <remarks>
+/// The reciprocals are stored rather than divided out at run time: a tenth has no exact binary
+/// representation, so multiplying by the stored reciprocal and dividing by the power round
+/// differently for some inputs, and a decoder that simplifies one into the other disagrees with the
+/// reference encoder on ordinary data. For the same reason the single-precision tables are written
+/// as single-precision literals rather than narrowed from double, since a power of ten lands on a
+/// different value depending on the route it takes.
+///
+/// The tables hold more entries than an encoder ever searches, because a file may declare any
+/// exponent; the bound a reader must enforce is therefore the table length, which is what keeps the
+/// lookup in memory.
+/// </remarks>
 internal static class AlpTables
 {
     /// <summary>10^k as <see cref="float"/>, for k in [0, 10].</summary>
@@ -57,7 +58,9 @@ internal static class AlpTables
         0.0000000000000000000001, 0.00000000000000000000001,
     ];
 
-    /// <summary><c>decoded[i] = (float)encoded[i] * F10[f] * IF10[e]</c>.</summary>
+    /// <summary>
+    /// <c>destination[i] = (float)encoded[i] * F10Single[f] * If10Single[e]</c>.
+    /// </summary>
     /// <param name="encoded">The i32 values, little-endian, at least <c>destination.Length</c>.</param>
     /// <param name="destination">The f32 output.</param>
     /// <param name="exponentE">Index into <see cref="If10Single"/>, already bounds-checked.</param>
@@ -90,7 +93,9 @@ internal static class AlpTables
         }
     }
 
-    /// <summary><c>decoded[i] = (double)encoded[i] * F10[f] * IF10[e]</c>.</summary>
+    /// <summary>
+    /// <c>destination[i] = (double)encoded[i] * F10Double[f] * If10Double[e]</c>.
+    /// </summary>
     /// <param name="encoded">The i64 values, little-endian, at least <c>destination.Length</c>.</param>
     /// <param name="destination">The f64 output.</param>
     /// <param name="exponentE">Index into <see cref="If10Double"/>, already bounds-checked.</param>

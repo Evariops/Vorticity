@@ -1,26 +1,3 @@
-// vortex.zstd - vortex-zstd-0.86.1/src/array.rs (`deserialize`, `validate`, `decompress_slice`,
-// `decompress`, `walk_views`).
-//
-// Zstd here is an ARRAY encoding, not segment compression: the values of a utf8/binary/primitive
-// column are stored as one or more zstd frames, optionally sharing a trained dictionary. Frames
-// exist so a slice can decompress only what it needs; a whole-node decode like ours needs all of
-// them, which collapses upstream's frame-selection walk to "every frame until the values run out".
-//
-// TWO THINGS ABOUT THIS ENCODING ARE UNLIKE EVERY OTHER DECODER HERE.
-//
-// First, NULLS ARE NOT STORED. The frames hold only the valid values, back to back, so the
-// decompressed stream has `true_count` values for `length` rows and the output has to be scattered
-// back across the null slots. Upstream says it outright: "ZSTD is a compact block compressor,
-// meaning that null values are not stored inline in the data frames."
-//
-// Second, for utf8/binary the decompressed stream is NOT an Arrow layout. It is a bare sequence of
-// `[u32 little-endian length][bytes]` records with no offsets array, walked forward to rebuild the
-// views (`walk_views`). The length prefixes stay in the data buffer and the views point past them.
-//
-// Upstream segments that buffer at MAX_BUFFER_LEN = i32::MAX so view offsets fit in a u32. Our
-// buffers are int-length by construction and a single allocation can never exceed int.MaxValue
-// bytes, so the second segment is unreachable here and the views always carry buffer index 0. That
-// is an argument about our own bounds, not an assumption about the file, so it holds for any input.
 using System;
 using System.Runtime.InteropServices;
 using System.Buffers.Binary;
@@ -34,7 +11,19 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.zstd</c> into a canonical primitive or varbin view.</summary>
+/// <summary>
+/// Decodes <c>vortex.zstd</c> into a canonical primitive or varbin view. Zstd is an array encoding
+/// here rather than segment compression: a column's values sit in one or more frames that may share
+/// a trained dictionary, and nulls are not stored at all, so the decompressed stream holds only the
+/// valid values and has to be spread back over the null rows.
+/// </summary>
+/// <remarks>
+/// For utf8 and binary the decompressed stream is not an Arrow layout but a bare sequence of
+/// little-endian length-prefixed records with no offsets array, walked forward to rebuild the
+/// views; the prefixes stay in the data buffer and the views point past them. A single allocation
+/// can never exceed <c>int.MaxValue</c> bytes here, so the values always fit one buffer and every
+/// view carries buffer index 0, whatever the file declares.
+/// </remarks>
 public sealed class ZstdDecoder : ArrayDecoder
 {
     /// <summary>The wire id.</summary>
@@ -71,15 +60,10 @@ public sealed class ZstdDecoder : ArrayDecoder
                 $"{Id} stores primitive, utf8 or binary values; this node's dtype is {dtype}.");
         }
 
-        // PERF-AUDIT-v2.md R3a. One managed array per decode, and its size is the file's: a
-        // million-row `zstd` column carries **977 frames**, so the array was 15 656 bytes and
-        // **10,9 % of everything that scan allocated on the managed heap**. Every consumer below
-        // already took a span, so the array was never anything but a transient.
-        //
-        // SIXTEEN ON THE STACK, because that is the shape the corpus actually has -- the 4 096-row
-        // files carry one to four frames -- and the pool takes the tail for the files that do not
-        // fit. `ZstdFrameMetadata` is not a primitive, so the rental is wiped on the way back;
-        // that is `Scratch`'s rule and it is right here, the struct being two file-supplied
+        // The frame table is sized by the file, and a wide column can declare a great many frames,
+        // so it never becomes a managed array: every consumer below takes a span. Small counts fit
+        // the stack, which is the common shape, and the pool takes the tail. `ZstdFrameMetadata` is
+        // not a primitive, so the rental is wiped on the way back: the struct holds file-supplied
         // integers the next renter has no business reading.
         int frameCount = ZstdMetadata.CountFrames(node.Metadata);
         Span<ZstdFrameMetadata> stack = stackalloc ZstdFrameMetadata[16];
@@ -99,8 +83,8 @@ public sealed class ZstdDecoder : ArrayDecoder
 
         int total = PlanFrames(frames, dtype, isPrimitive, byteWidth, valueCount, out int usedFrames);
 
-        // The UTF-8 shortcut is decided FRAME BY FRAME, inside the decompression loop, rather than
-        // by one sweep of the finished heap. See `Decompress` for why that is the same predicate.
+        // The UTF-8 shortcut is decided frame by frame, inside the decompression loop, rather than
+        // by one sweep of the finished heap; `Decompress` says why the two are the same predicate.
         bool scanAscii = dtype.Kind == DTypeKind.Utf8;
         VortexBuffer values = Decompress(
             context, in node, metadata, frames, usedFrames, hasDictionary, total, byteWidth,
@@ -192,15 +176,14 @@ public sealed class ZstdDecoder : ArrayDecoder
         bool scanAscii,
         out bool allAscii)
     {
-        // The cap applies here and not one line later: `total` is a file-supplied sum, and a 1 KiB
-        // frame can claim to expand to 100 GiB (docs/08-semantics.md §6).
+        // The cap applies here and not one line later: `total` is a file-supplied sum, and a tiny
+        // frame can claim to expand to an arbitrary size.
         //
-        // UNINITIALIZED, unlike the sixteen-megabyte view buffer below, and for a reason the two
-        // do not share. The frames are written back to back from offset 0 and the loop refuses to
-        // return unless `written == total`, so every byte of this block is produced by
-        // `TryDecompress` before anyone reads it; and nothing here rereads a byte it has not
-        // written first, so there is no cold-miss-against-memset trade to make -- the fill would be
-        // a whole extra pass over thirty-two megabytes. See `CanonicalArena.AllocateUninitialized`.
+        // The block is left uninitialized, unlike the view buffer below, for a reason the two do
+        // not share. The frames are written back to back from offset 0 and the loop refuses to
+        // return unless `written == total`, so every byte here is produced before anyone reads it,
+        // and nothing rereads a byte it has not written first. A fill would therefore be a whole
+        // extra pass over the decompressed size, buying nothing.
         VortexBuffer output = CanonicalSupport.AllocateUninitialized(
             context, total, byteWidth, out Span<byte> destination);
         allAscii = scanAscii;
@@ -249,12 +232,12 @@ public sealed class ZstdDecoder : ArrayDecoder
                         "metadata left for it.");
                 }
 
-                // THE ASCII SWEEP, HERE AND NOT OVER THE FINISHED HEAP. The frames partition the
-                // stream -- they are written back to back from 0 and their sizes sum to `total` --
-                // so "every frame is ASCII" and "the heap is ASCII" are the same statement, and the
-                // guarantee handed to `BuildViews` is untouched. What changes is the memory: a
-                // second pass over thirty-two megabytes of DRAM becomes a test on the ~32 KiB
-                // `TryDecompress` has just written, still in cache.
+                // The ASCII sweep runs here rather than over the finished heap. The frames
+                // partition the stream, written back to back from 0 with sizes summing to `total`,
+                // so "every frame is ASCII" and "the heap is ASCII" say the same thing and the
+                // guarantee handed to `BuildViews` is untouched. Testing each region right after
+                // it is written keeps the bytes in cache instead of paying a second pass over the
+                // whole heap.
                 if (scanAscii && allAscii)
                 {
                     allAscii = Ascii.IsValid(region[..produced]);
@@ -305,7 +288,7 @@ public sealed class ZstdDecoder : ArrayDecoder
         ValidityMask mask = ValidityMask.From(context, validity);
         if (mask.AllValid)
         {
-            // Already dense: the decompressed buffer IS the values buffer.
+            // Already dense: the decompressed buffer is the values buffer.
             return context.Canonical.AddPrimitive(
                 dtype, length, validity, dtype.PType, values.Slice(0, required));
         }
@@ -315,16 +298,9 @@ public sealed class ZstdDecoder : ArrayDecoder
             context, span, byteWidth, out Span<byte> destination);
         ReadOnlySpan<byte> source = values.Span;
 
-        // THE WIDTH IS RESOLVED ONCE, NOT PER ROW. PERF-AUDIT-v2.md R3b: this was a
-        // `Slice(..).CopyTo(..)` whose length is a runtime `byteWidth`, so every valid row paid a
-        // `memmove` call for four or eight bytes. Measured by short-circuiting the loop on a
-        // million-row nullable column: **1,97 ms of 3,57, or 55 % of the whole scan**.
-        //
-        // It could not be measured before, and that is the other half of the point: no corpus file
-        // reached this loop at all. `encodings/zstd` is a `VarBinView`, so it goes to `BuildViews`;
-        // `zstd_buffers` is non-nullable, so the `mask.AllValid` return above takes it. The file
-        // that exercises it -- `encodings/zstd_nullable`, a nullable i64 with a null every seventh
-        // row -- was added to the generator by this point.
+        // The width is resolved once here and not per row: a copy whose length is only known at
+        // run time costs a call per valid row to move four or eight bytes, which dominates the
+        // scatter on a nullable column.
         switch (byteWidth)
         {
             case 1:
@@ -367,8 +343,8 @@ public sealed class ZstdDecoder : ArrayDecoder
 
     /// <summary>The same, for a width no primitive type has. Kept so the switch is total.</summary>
     /// <remarks>
-    /// No <c>PType</c> is 3, 5, 6 or 7 bytes wide, so this is unreachable today. It is here because
-    /// a `default` that threw would turn a future width into a crash on a file, and one that did
+    /// No <c>PType</c> is 3, 5, 6 or 7 bytes wide, so nothing reaches this. It exists because a
+    /// <c>default</c> that threw would turn another width into a crash on a file, and one that did
     /// nothing would turn it into silent zeros.
     /// </remarks>
     private static void ExpandWide(
@@ -403,28 +379,24 @@ public sealed class ZstdDecoder : ArrayDecoder
 
         ValidityMask mask = ValidityMask.From(context, validity);
 
-        // THE ZERO FILL STAYS, and it was measured rather than assumed. An all-valid array writes
-        // every one of the sixteen bytes of every view, so `AllocateUninitialized` is provable
-        // here -- and it is 1% SLOWER (535 against 541 scans per 4 s). The memset is not pure
-        // overhead: it pulls the sixteen-megabyte view buffer into cache just ahead of the loop
-        // that rewrites it, so dropping it trades a sequential fill for a cold miss per row.
-        // A null row needs the zeros anyway: it keeps `empty_view()` and the loop skips it.
+        // The zero fill stays even though an all-valid array overwrites every view. It is not pure
+        // overhead: the sequential fill pulls the view buffer into cache just ahead of the loop
+        // that rewrites it, so dropping it trades that fill for a cold miss per row. A null row
+        // needs the zeros anyway, since it keeps the empty view the loop skips over.
         VortexBuffer views = CanonicalSupport.Allocate(
             context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
         ReadOnlySpan<byte> heap = values.Span;
 
-        // ONE SWEEP OF THE STREAM INSTEAD OF A CALL PER ROW, and `requireUtf8` is its answer,
-        // decided frame by frame in `Decompress`. Every byte below 0x80 is a complete, valid UTF-8
-        // sequence on its own, so if the whole decompressed stream is ASCII then so is every value
-        // inside it, whatever the boundaries -- and no per-row validation can fail. The per-row
-        // `Utf8.IsValid` was 19% of a zstd scan, because a validator called on twenty bytes at a
-        // time never reaches its stride.
+        // `requireUtf8` is the answer to one sweep of the whole stream, decided frame by frame in
+        // `Decompress`, instead of a validation call per row. Every byte below 0x80 is a complete,
+        // valid UTF-8 sequence on its own, so an ASCII stream makes every value inside it valid
+        // whatever the boundaries, and a validator called twenty bytes at a time never reaches its
+        // stride.
         //
-        // The four-byte length prefixes sit inside the heap and are NOT text, but they are ASCII
-        // whenever a value is shorter than 128 bytes (the low byte) with three zero bytes above
-        // it, which is the shape of essentially every string column. When the sweep does find a
-        // high byte -- a real non-ASCII value, or a value at least 128 bytes long -- the per-row
-        // path below is exactly what it was.
+        // The four-byte length prefixes sit inside the heap and are not text, but they are ASCII
+        // whenever a value is shorter than 128 bytes with three zero bytes above it, which is the
+        // shape of essentially every string column. When the sweep does find a high byte, whether
+        // a genuinely non-ASCII value or one at least 128 bytes long, the per-row path below runs.
 
         int offset = 0;
         int written = 0;
@@ -458,9 +430,9 @@ public sealed class ZstdDecoder : ArrayDecoder
                 throw new VortexFormatException($"Row {row} of a Utf8 array is not valid UTF-8.");
             }
 
-            // Buffer index 0: see the header note on why the second segment is unreachable. One
-            // call for both shapes, and two register stores rather than a memset plus a Memmove
-            // per row - the same change ViewKernels.Write documents.
+            // Buffer index 0 always: the values of a node fit one buffer here, so there is never a
+            // second one to point at. The single call covers both the inline and the referenced
+            // shape, and writes two registers rather than clearing and copying the view per row.
             Span<byte> view = writable.Slice(row * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
             CanonicalSupport.WriteView(view, value, (int)size, bufferIndex: 0, offset: start);
 
@@ -519,9 +491,8 @@ public sealed class ZstdDecoder : ArrayDecoder
             return 0;
         }
 
-        // A CALL PER ROW became a popcount per eight bytes. `mask` is a Bitmap here -- the two
-        // uniform kinds returned above -- so the bits are exactly what the kernel counts
-        // (PERF-AUDIT §4.2).
+        // A popcount per word rather than a call per row. The two uniform kinds returned above
+        // leave only a bitmap here, so the bits are exactly what the kernel counts.
         return BitmapKernels.CountSet(mask.Bits, mask.BitOffset, length);
     }
 

@@ -1,12 +1,3 @@
-// The element-wise integer kernels the compressed decoders need, written once and monomorphized
-// over the physical widths (docs/03-architecture.md §4 invariant 3: the enum switch happens once
-// per node, never once per element).
-//
-// Both are correct on signed types too, because two's-complement addition and the zigzag identity
-// are bit-pattern operations: `x + r` and `(x >> 1) ^ -(x & 1)` produce the same bits whether the
-// operands are read as signed or unsigned. That is why FoR does not need a signed variant, and why
-// its wrapping is free rather than something to guard against
-// (vortex-fastlanes-0.86.1/src/for/array/for_decompress.rs uses `wrapping_add`).
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -15,6 +6,13 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
+/// <summary>
+/// The element-wise integer kernels the compressed decoders need, written once and monomorphized
+/// over the physical widths so that the type switch happens once per node, never once per element.
+/// They are correct on signed types too: two's-complement addition and the zigzag identity are
+/// bit-pattern operations, so the same bits come out whether the operands are read as signed or as
+/// unsigned, and the wrapping needs no signed variant to guard it.
+/// </summary>
 internal static class IntegerKernels
 {
     /// <summary>
@@ -81,16 +79,13 @@ internal static class IntegerKernels
         }
     }
 
-    // POINTWISE, CONTIGUOUS, NO BRANCH: the shape a vector unit exists for, and bench/SIMD.md left
-    // both of these in its "unknown" column rather than its "measured not to help" one. The JIT does
-    // not vectorize a generic loop over `IBinaryInteger<T>` -- verified by the scalar and
-    // DOTNET_EnableHWIntrinsic=0 runs reading the same time -- so it is written out. `Vector<T>`
-    // rather than a fixed width, so the same source is 128-bit here and wider on a machine that has
-    // it, and the guard leaves a complete scalar implementation behind for the no-intrinsics run to
-    // exercise. That guard USED TO BE `Vector<T>.IsSupported`, which is a question about the TYPE
-    // and is true everywhere, so the no-intrinsics run walked an EMULATED vector path instead of
-    // this scalar one -- it exercised the opposite of what it was there to exercise. Now
-    // `Vector.IsHardwareAccelerated`, a question about the machine (BENCH-AUDIT.md B21).
+    // Pointwise, contiguous and branch-free: the shape a vector unit exists for. The loop is
+    // written out because the jit does not vectorize a generic loop over `IBinaryInteger<T>`, and
+    // it uses `Vector<T>` rather than a fixed width so the same source widens to whatever the
+    // machine offers. The guard must stay `Vector.IsHardwareAccelerated`, a question about the
+    // machine: `Vector<T>.IsSupported` asks about the type, is true everywhere, and would send a
+    // run with intrinsics disabled down an emulated vector path instead of the scalar tail this
+    // guard exists to leave behind.
     private static void AddWrapping<T>(ReadOnlySpan<byte> source, Span<byte> destination, T reference)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
@@ -200,20 +195,19 @@ internal static class IntegerKernels
     }
 
     /// <summary>
-    /// <c>destination[i] = a[i] * scaleA + b[i] * scaleB + c[i]</c>, wrapping, in ONE pass.
+    /// <c>destination[i] = a[i] * scaleA + b[i] * scaleB + c[i]</c>, wrapping, in one pass.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// PERF-AUDIT-v2.md R1. The same arithmetic as <see cref="WidenScaled(ReadOnlySpan{byte},
-    /// PType, Span{long}, long)"/> followed by two <see cref="AddWidenScaled(ReadOnlySpan{byte},
-    /// PType, Span{long}, long)"/>, with the two read-modify-write passes over the destination
-    /// gone: three reads and one write per element instead of three reads and five accesses to the
-    /// output. On `datetimeparts` at a million rows the three-pass form was **93,2 %** of the scan.
+    /// The same arithmetic as <see cref="WidenScaled(ReadOnlySpan{byte}, PType, Span{long},
+    /// long)"/> followed by two <see cref="AddWidenScaled(ReadOnlySpan{byte}, PType, Span{long},
+    /// long)"/>, with the read-modify-write passes over the destination gone: three reads and one
+    /// write per element. Splitting it back into three passes makes the destination traffic
+    /// dominate a date-time-parts scan, so it stays fused.
     /// </para>
     /// <para>
-    /// THE THREE TYPES ARE RESOLVED BEFORE THE LOOP, nested the way <c>RowKernels.Gather</c>
-    /// resolves its codes. Only the shapes a file actually uses are ever instantiated, and the
-    /// reference corpus has exactly one (I64, I32, I32).
+    /// The three types are resolved before the loop, nested the way <c>RowKernels.Gather</c>
+    /// resolves its codes, so only the shapes a file actually uses are ever instantiated.
     /// </para>
     /// <para>
     /// The wrapping is the three kernels' wrapping, unchanged: <c>CreateTruncating</c> and

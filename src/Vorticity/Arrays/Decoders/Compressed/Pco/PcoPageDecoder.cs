@@ -1,23 +1,26 @@
-// pco page decoding - pco-1.0.3/src/{page_latent_decompressor,wrapped/page_decompressor}.rs.
-//
-// A page is decoded in batches of 256. Per batch and per latent variable: pull one symbol per value
-// from the tANS stream, then read that value's offset from a SECOND stream that starts where the
-// symbols end, then undo the delta encoding. Finally the latent variables are joined into numbers
-// according to the chunk's mode.
-//
-// FOUR INTERLEAVED ANS STATES, round-robin, so value i advances state i % 4 and its successor comes
-// four values later. Decoding with one state would produce a plausible-looking sequence that is
-// wrong from the second value on.
-//
-// THE OFFSETS ARE NOT INLINE with the symbols. The symbol pass records each value's offset WIDTH and
-// a running sum of those widths; the offset pass then reads value i at `base + csum[i]` for
-// `width[i]` bits. Reading offsets inline would consume the stream in the wrong order.
 using System;
 using System.Numerics;
 
 namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 
-/// <summary>Decodes one pco page into latents and then into numbers.</summary>
+/// <summary>
+/// Decodes one pco page into latents and then into numbers. A page goes batch by batch: per latent
+/// variable, pull one symbol per value from the tANS stream, read that value's offset from a
+/// second stream that starts where the symbols end, undo the delta encoding, and finally join the
+/// latent variables according to the chunk's mode.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The ANS states are interleaved four ways, round-robin, so value i advances state i % 4 and its
+/// successor comes four values later. Decoding with a single state yields a plausible-looking
+/// sequence that is wrong from the second value on.
+/// </para>
+/// <para>
+/// The offsets are not inline with the symbols: the symbol pass records each value's offset width
+/// and a running sum of those widths, and the offset pass then reads value i at that running sum
+/// past the base. Reading an offset inline would consume the stream in the wrong order.
+/// </para>
+/// </remarks>
 internal static class PcoPageDecoder
 {
     /// <summary>Latent variables a page can have: the delta, the primary and the secondary.</summary>
@@ -39,7 +42,7 @@ internal static class PcoPageDecoder
     /// secondary latent variable.
     /// </param>
     /// <param name="scratch">
-    /// A batch's working buffers, caller-owned so that a thousand pages rent them once.
+    /// A batch's working buffers, caller-owned so that every page of a node shares one rental.
     /// </param>
     /// <returns>
     /// The decoded latents, joined by the chunk's mode. A view over one of the two buffers, valid
@@ -51,16 +54,14 @@ internal static class PcoPageDecoder
     {
         PcoBitReader reader = new PcoBitReader(page);
 
-        // THE THREE STATES ARE THE CALLER'S AND ARE RESET, NOT BUILT. PERF-AUDIT-v2.md R13: each one
-        // used to be a fresh object with an `int[4]` and a `ulong[deltaOrder]` of its own, and a
-        // page has up to three -- on a million-row column that was **1 954 states and 226 664
-        // bytes, 59 % of everything the scan allocated on the managed heap**. A page needs at most
-        // three and never keeps them, so `PcoDecoder` builds three per NODE and every page resets
-        // them in place.
+        // The latent states are the caller's and are reset, not built. Each one owns two small
+        // arrays, a page needs at most three of them and never keeps them, so `PcoDecoder` builds
+        // them once per node and every page refills them in place rather than leaving a page's
+        // worth of objects on the managed heap.
         //
-        // Reset rather than a ref struct over borrowed spans, which was tried first: `Read` returns
-        // the state, so spans it captured could outlive their frame and the compiler says so
-        // (CS8352). Three objects per node is the same saving without arguing with ref-safety.
+        // Reset rather than a ref struct over borrowed spans: this method returns the state, so
+        // spans it captured could outlive their frame and ref-safety refuses it. Objects reused
+        // per node are the same saving without that argument.
         PcoLatentState? delta = chunk.DeltaLatent is { } deltaVar
             ? scratch.States[0].Reset(ref reader, deltaVar, 0)
             : null;
@@ -73,9 +74,8 @@ internal static class PcoPageDecoder
 
         reader.DrainEmptyByte("page metadata");
 
-        // THE THREE PAGE ARRAYS ARE THE CALLER'S. A million-row pco column is a thousand pages,
-        // and this used to allocate two or three `ulong[valueCount]` for each of them -- contract
-        // §1.3's "no managed allocation on a decode path", a thousand times over.
+        // The page arrays are the caller's too: a large column runs to many hundreds of pages, and
+        // a decode path must not allocate a value-sized array for each of them.
         primaryOut = primaryOut[..valueCount];
         secondaryOut = secondary is null ? default : secondaryOut[..valueCount];
 
@@ -130,8 +130,8 @@ internal static class PcoPageDecoder
             CompressedThrow.Format("A pco IntMult chunk has no secondary latent variable.");
         }
 
-        // In place, into the primary: nothing reads it again, and a third array per page was the
-        // same allocation the other two were.
+        // In place, into the primary: nothing reads it again, and a third array per page would be
+        // the allocation the other two already avoid.
         Span<ulong> joined = primary;
         for (int i = 0; i < primary.Length; i++)
         {
@@ -146,18 +146,16 @@ internal static class PcoPageDecoder
 /// <summary>The three per-batch working buffers of a page decode, owned by the caller.</summary>
 /// <remarks>
 /// <para>
-/// These are written at the top of a batch and consumed before it ends -- nothing in them
-/// survives the call -- but they were instance fields of <see cref="PcoLatentState"/>, so a page
-/// carrying one latent variable allocated 5 kB of them and a chunk of a thousand pages dropped
-/// that a thousand times, against contract 1.3's "no managed allocation on a decode path".
+/// These are written at the top of a batch and consumed before it ends, so nothing in them
+/// survives the call; holding them per latent state instead would allocate a few kilobytes on
+/// every page of every chunk.
 /// </para>
 /// <para>
-/// THEY WERE THREAD-STATIC FOR ONE COMMIT AND THAT WAS THE WRONG ANSWER. A <c>[ThreadStatic]</c>
-/// is only correct while no <c>await</c> separates taking the buffer from finishing with it, and
-/// this decode is reached from <c>BatchAsyncEnumerable</c>: the property holds today because the
-/// decode happens to be synchronous throughout, which is not a property any test states and not
-/// one an edit three layers up would notice breaking. The buffers belong to whoever owns the
-/// decode, and <c>PcoDecoder</c> already rents the two page buffers exactly that way.
+/// They must be owned by whoever owns the decode rather than held in a <c>[ThreadStatic]</c>: a
+/// thread-static is only correct while no <c>await</c> can separate taking the buffer from
+/// finishing with it, and this decode is reached from an async batch enumerable, so that would
+/// rest on the decode staying synchronous end to end -- something no test states and an edit
+/// several layers up would not notice breaking.
 /// </para>
 /// </remarks>
 internal readonly ref struct PcoBatchScratch
@@ -168,7 +166,7 @@ internal readonly ref struct PcoBatchScratch
     /// <param name="offsetCumulative">Per-value offset positions.</param>
     /// <param name="states">
     /// <see cref="PcoPageDecoder.MaxLatentVars"/> reusable latent states, one per variable slot,
-    /// built once for the node and reset by each page (R13).
+    /// built once for the node and reset by each page.
     /// </param>
     internal PcoBatchScratch(
         Span<ulong> values,
@@ -191,7 +189,7 @@ internal readonly ref struct PcoBatchScratch
     /// <summary>Each value's bit position within the offset stream.</summary>
     internal Span<long> OffsetCumulative { get; }
 
-    /// <summary>The page's three latent-state slots, reset per page rather than rebuilt (R13).</summary>
+    /// <summary>The page's three latent-state slots, reset per page rather than rebuilt.</summary>
     internal PcoLatentState[] States { get; }
 }
 
@@ -203,14 +201,14 @@ internal sealed class PcoLatentState
     private int _binCount;
     private int _deltaOrder;
 
-    // PER STATE, because both carry across the batches of one page: the four interleaved ANS
-    // positions are read-modify-written per value, and a delta moment is updated by the untransform
-    // and read again by the next batch.
+    // Both belong to the state rather than to a batch, because both carry across the batches of
+    // one page: the interleaved ANS positions are read-modify-written per value, and a delta
+    // moment is updated by the untransform and read again by the next batch.
     //
-    // SIZED BY THE FORMAT AND REUSED ACROSS PAGES (R13). Four, because the interleaving is four;
-    // seven, because the metadata writes the delta order in three bits
-    // (`PcoChunkMeta.DeltaOrderBits`), so it can never ask for more. Only `_deltaOrder` of the
-    // moments are live, which is why every reader below slices rather than walking the array.
+    // Both are sized by the format and reused across pages. Four, because the interleaving is
+    // four; seven, because the metadata writes the delta order in three bits, so it can never ask
+    // for more. Only `_deltaOrder` of the moments are live, which is why every reader below slices
+    // rather than walking the array.
     private readonly int[] _stateIndices = new int[4];
     private readonly ulong[] _deltaMoments = new ulong[PcoPageDecoder.MaxDeltaOrder];
 
@@ -303,8 +301,8 @@ internal sealed class PcoLatentState
         }
         else
         {
-            // A single bin means every value is that bin: upstream skips the ANS stream entirely
-            // rather than reading zero-width symbols. Every value then has the SAME width, so the
+            // A single bin means every value is that bin, and the ANS stream is skipped entirely
+            // rather than read as zero-width symbols. Every value then has the same width, so the
             // per-value width and cumulative-position arrays describe nothing -- the position of
             // value i is `base + i * offsetBits`, and the fill is one vectorized store.
             int uniformBits = _table.Nodes[0].OffsetBits;
@@ -313,11 +311,10 @@ internal sealed class PcoLatentState
 
             if (uniformBits == 0)
             {
-                // ...AND A BIN THAT NEEDS NO OFFSET BITS READS NOTHING AT ALL. The whole batch is
-                // the bin's lower bound, and the reader does not move. That is what a delta-encoded
-                // arithmetic ramp becomes -- the commonest shape a pco column has -- and it was
-                // running two loops per value to discover it, plus 20 bytes of bookkeeping written
-                // per value and read back to be skipped.
+                // A bin that needs no offset bits reads nothing at all: the whole batch is the
+                // bin's lower bound and the reader does not move. That is what a delta-encoded
+                // arithmetic ramp becomes, which is the commonest shape a pco column has, so it
+                // is worth leaving before the per-value bookkeeping starts.
                 return;
             }
 
@@ -350,7 +347,7 @@ internal sealed class PcoLatentState
 
     /// <summary>Undoes a consecutive delta over the batch, consuming the page's moments.</summary>
     /// <remarks>
-    /// Each order is one prefix sum that WRITES the running moment into a slot before reading what
+    /// Each order is one prefix sum that writes the running moment into a slot before reading what
     /// was there, so the first values of a page come from the moments themselves. The moments are
     /// carried across batches, which is why they live on this object rather than on the batch.
     /// </remarks>

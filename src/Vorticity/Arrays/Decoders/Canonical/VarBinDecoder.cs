@@ -1,15 +1,3 @@
-// vortex.varbin - vortex-array-0.86.1/src/arrays/varbin/vtable/mod.rs `deserialize`, then
-// vortex-array-0.86.1/src/arrays/varbinview/build_views.rs `build_views_from_offsets`.
-//
-// VarBin has no canonical form of its own: `Canonical::VarBin` does not exist and upstream
-// canonicalizes it to a VarBinView. Phase 1 contract §9.2 requires the conversion to happen HERE,
-// in the decoder, so nothing downstream ever sees an offsets-and-bytes array.
-//
-// The offsets are class I. Upstream documents "monotonically non-decreasing", "the first value
-// must be 0" and "no offset may exceed bytes.len()" as invariants of `new_unchecked` but its
-// `validate` only enforces the last of the three, and `build_views_from_offsets` computes lengths
-// with a `wrapping_sub`. A non-monotone pair there produces a huge wrapped length that then indexes
-// out of the byte heap, so all three are checked before a single view is written.
 using System;
 using System.Text.Unicode;
 using Vorticity.Arrays.Metadata;
@@ -18,7 +6,11 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
-/// <summary>Decodes <c>vortex.varbin</c> into the canonical <c>VarBinView</c> form.</summary>
+/// <summary>
+/// Decodes <c>vortex.varbin</c> into the canonical <c>VarBinView</c> form. VarBin has no canonical
+/// form of its own, so the conversion happens in the decoder and nothing downstream ever sees an
+/// offsets-and-bytes array.
+/// </summary>
 public sealed class VarBinDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
@@ -45,23 +37,21 @@ public sealed class VarBinDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// The rows a take asks for, WITHOUT building a view for the million it did not ask for.
+    /// Builds views for the rows a take asks for, and for no others.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// PERF-GAPS.md V2. The offsets child is still decoded whole and still validated whole -- it is
-    /// a <c>vortex.primitive</c> read zero-copy, so "decoding" it is a buffer wrap, and
-    /// <see cref="ArrayDecodeContext.IsNodeChecked"/> makes the O(n) offset walk run once per node
-    /// per scan rather than once per batch (v2 R26). What this skips is the part that is actually
-    /// expensive and actually per-row: sixteen bytes of view, and a UTF-8 check, for every row of
-    /// the node. On the corpus's `parquet_variant` that is two columns of a million views, 32 MB,
-    /// built to return sixty-four rows.
+    /// The offsets child is still decoded and validated whole: it is a <c>vortex.primitive</c> read
+    /// zero-copy, so decoding it is a buffer wrap, and
+    /// <see cref="ArrayDecodeContext.IsNodeChecked"/> keeps the offset walk to once per node per
+    /// scan rather than once per batch. What this skips is the per-row work: sixteen bytes of view,
+    /// and a UTF-8 check, for every row of the node when a take wants a few of them.
     /// </para>
     /// <para>
-    /// IT EXISTS BECAUSE <c>vortex.parquet.variant</c> DECLARES ITSELF SELECTIVE. A root that
-    /// answers <see cref="SelectsWithoutFullDecode"/> takes `FlatLayoutReader`'s pushed route, which
-    /// has no retained-chunk cache behind it, so an unspecialized child would decode its whole node
-    /// once PER BATCH -- the quadratic take of v2 R23. The two changes are one change.
+    /// It exists because <c>vortex.parquet.variant</c> declares itself selective. A root that
+    /// answers <see cref="SelectsWithoutFullDecode"/> takes the flat layout reader's pushed route,
+    /// which has no retained-chunk cache behind it, so a child without a selective path would
+    /// decode its whole node once per batch.
     /// </para>
     /// </remarks>
     public override int DecodeSelected(
@@ -104,10 +94,10 @@ public sealed class VarBinDecoder : ArrayDecoder
         VortexBuffer bytes = node.GetBuffer(0);
         ReadOnlySpan<byte> offsetBytes = offsets.Values.Span;
 
-        // WALKED ONCE PER NODE, NOT ONCE PER BATCH. "The offsets start at zero, never decrease and
-        // stay inside the heap" is a property of the NODE, and a selective read visits the same
-        // node once per batch of the take. v2 R26's scope is exactly for this; outside it
-        // `IsNodeChecked` answers false and every scan walks as before.
+        // "The offsets start at zero, never decrease and stay inside the heap" is a property of the
+        // node, and a selective read visits the same node once per batch of the take, so the walk
+        // is remembered per node. Outside a scope that remembers it, `IsNodeChecked` answers false
+        // and every read walks the offsets again.
         if (!context.IsNodeChecked(in node))
         {
             ValidateOffsets(offsetBytes, offsetsPType, length, bytes.Length);
@@ -155,12 +145,14 @@ public sealed class VarBinDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// Class I: offsets must start at zero, never decrease, and never leave the byte heap.
+    /// Offsets must start at zero, never decrease, and never leave the byte heap. A view's length
+    /// is the difference of two consecutive offsets, so a decreasing pair would produce a length
+    /// that reaches past the heap; all three properties are checked before a single view is written.
     /// </summary>
     /// <remarks>
-    /// THE MONOTONICITY CHECK IS A SHIFTED COMPARE, and the same one `vortex.list`'s size vector
-    /// and `vortex.patched`'s indices use. It was a `ReadInteger` switch twice per row -- 16% of a
-    /// 1M-row `vortex.parquet.variant` scan, which is two varbin columns and nothing else.
+    /// The monotonicity check is a shifted compare, the same one <c>vortex.list</c>'s size vector
+    /// and <c>vortex.patched</c>'s indices use, because reading each offset through a per-element
+    /// type switch dominates a scan whose columns are variable-width.
     /// </remarks>
     private static void ValidateOffsets(
         ReadOnlySpan<byte> offsets, PType ptype, int length, int byteCount)

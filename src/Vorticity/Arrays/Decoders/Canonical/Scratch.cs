@@ -1,7 +1,3 @@
-// Phase 1 contract §1.3: no managed allocation on a decode path; `stackalloc` for small fixed
-// bounds and ArrayPool<T>.Shared for transients, always returned in a finally. This is the one
-// place that rule is implemented, so no decoder hand-rolls a rent/return pair and forgets the
-// finally.
 using System;
 using System.Buffers;
 using System.Runtime.CompilerServices;
@@ -11,6 +7,8 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// <summary>
 /// A transient span of <typeparamref name="T"/>: the caller's <c>stackalloc</c> when it fits, a
 /// pooled array otherwise. Dispose returns the rental; <c>using</c> supplies the <c>finally</c>.
+/// A decode path must not allocate on the managed heap, and this is the single implementation of
+/// that rule, so that no decoder hand-rolls a rent and return pair and forgets to return.
 /// </summary>
 /// <typeparam name="T">Element type; only value types are used here.</typeparam>
 internal ref struct Scratch<T>
@@ -20,20 +18,20 @@ internal ref struct Scratch<T>
     /// </summary>
     /// <remarks>
     /// <para>
-    /// IT IS THE POINTER THAT HAS TO GO, not the bytes. A <c>VortexBuffer</c> left in a pooled
-    /// array is a raw pointer into a segment this batch no longer owns, and a <c>DType</c> holds an
+    /// It is the pointer that has to go, not the bytes. A <c>VortexBuffer</c> left in a pooled
+    /// array is a raw pointer into a segment whose ownership the batch has handed back, and a
+    /// <c>DType</c> holds an
     /// arena reference the next batch has no business keeping alive - so those are cleared. A span
     /// of <c>int</c> holds neither: the pool's own contract already says a renter reads only what
     /// it wrote, so wiping it buys nothing and costs a pass over the whole rental on the way out.
+    /// Most rentals in this assembly are spans of <c>int</c>.
     /// </para>
     /// <para>
-    /// Twenty of the thirty instantiations in this assembly are <c>Scratch&lt;int&gt;</c>, and the
-    /// clear was showing up under <c>ArrayPool.Return</c> in the profile of a pco scan. The test is
-    /// a static readonly <see cref="bool"/> over a type the JIT knows, so it folds to a constant in
-    /// each instantiation and the branch disappears.
+    /// The test is a static readonly <see cref="bool"/> over a type the runtime knows, so it folds
+    /// to a constant in each instantiation and the branch disappears.
     /// </para>
     /// <para>
-    /// <c>IsReferenceOrContainsReferences</c> alone would NOT be enough: it reports false for
+    /// <c>IsReferenceOrContainsReferences</c> alone would not be enough: it reports false for
     /// <c>VortexBuffer</c>, whose pointer is unmanaged. Requiring a primitive is the conservative
     /// side of that line - every non-primitive clears, whether or not it turns out to need to.
     /// </para>

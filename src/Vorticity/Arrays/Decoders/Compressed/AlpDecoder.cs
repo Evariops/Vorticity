@@ -1,23 +1,3 @@
-// vortex.alp - vortex-alp-0.86.1/src/alp/array.rs `deserialize` and src/alp/decompress.rs.
-//
-// "Adaptive Lossless floating-Point": a float whose decimal representation is short is stored as
-// the integer `round(value * 10^e / 10^f)`, which then bit-packs like any other small integer.
-// Decoding undoes the scaling with two table lookups (AlpTables) and is exact by construction for
-// every value the encoder accepted. Values it could NOT represent are carried verbatim in the patch
-// set, which is why an ALP array is lossless despite the rounding.
-//
-// Child layout, from `deserialize`:
-//     no patches                -> [encoded]
-//     patches, no chunk offsets -> [encoded, patch_indices, patch_values]
-//     patches, chunk offsets    -> [encoded, patch_indices, patch_values, patch_chunk_offsets]
-//
-// There is NO validity child: `decompress_unchunked_core` takes the validity off the encoded child,
-// so an ALP array's nullability rides on the integers.
-//
-// The exponents are file-supplied indices into the scaling tables, and upstream only checks that
-// they fit in a u8 -- an out-of-range exponent indexes past the end of a static slice there. Here
-// they are bounded by the table length before use, because that is exactly the class I check that
-// keeps the lookup in memory (docs/08-semantics.md §5).
 using System;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -27,7 +7,16 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.alp</c> into the float array it encodes.</summary>
+/// <summary>
+/// Decodes <c>vortex.alp</c> into the float array it encodes: a float whose decimal form is short
+/// is stored as a scaled integer, and the values the encoder could not represent that way are
+/// carried verbatim as patches, which is what makes the encoding lossless despite the rounding.
+/// </summary>
+/// <remarks>
+/// The children are the encoded integers, then, when the metadata declares patches, the patch
+/// indices and the patch values, and last the per-chunk index offsets when those are declared too.
+/// There is no validity child: the array's nullability rides on its encoded integers.
+/// </remarks>
 public sealed class AlpDecoder : ArrayDecoder
 {
     /// <summary>The wire id.</summary>
@@ -60,16 +49,9 @@ public sealed class AlpDecoder : ArrayDecoder
     /// ALP is pointwise, so a take reaches straight through it to the integers underneath.
     /// </summary>
     /// <remarks>
-    /// [90-registry.md](../../docs/90-registry.md)'s take table put `vortex.alp` under "decode the
-    /// containing zone, then index", alongside FSST and OnPair. That grouping is wrong: ALP is
-    /// `value * 10^-e * 10^f` per row, one output for one input, with the exceptions carried as
-    /// patches - the same shape as `fastlanes.for`. It reaches the bit-packing underneath, which is
-    /// where the saving actually is.
-    ///
-    /// (The reason once given for keeping FSST and OnPair in the fallback - that a variable-length
-    /// encoding cannot find row n without walking 0..n-1 - turned out to be wrong about those two
-    /// as well: both carry a `codes_offsets` child that bounds each row's codes. docs/90 records it
-    /// as a defect to fix rather than a limit.)
+    /// One output row comes from one input row, scaled, with the exceptions carried as patches, so
+    /// a take never needs a row it was not asked for. It reaches the bit-packing underneath, which
+    /// is where the saving is.
     /// </remarks>
     public override int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
@@ -116,7 +98,7 @@ public sealed class AlpDecoder : ArrayDecoder
             context, encodedIndex, encodedPType, produced, Id + " encoded");
 
         int total = ArrayDecodeContext.CheckedMultiply(produced, width, Id + " values");
-        // UNINITIALIZED: both DecodeSingle and DecodeDouble write all `produced` values, and
+        // Uninitialized: both DecodeSingle and DecodeDouble write all `produced` values, and
         // `produced == 0` means `total == 0`, so there is no uncovered case. Patches only overwrite.
         VortexBuffer output = CanonicalSupport.AllocateUninitialized(
             context, total, width, out Span<byte> destination);
@@ -153,10 +135,10 @@ public sealed class AlpDecoder : ArrayDecoder
     /// Overwrites the rows the encoder could not represent with the values it stored verbatim.
     /// </summary>
     /// <remarks>
-    /// Applied AFTER the whole array is decoded, not per chunk. Upstream has a chunked path that
-    /// decodes and patches one <c>PATCH_CHUNK_SIZE</c> window at a time, which is a cache
-    /// optimization for a sliced read; over a whole array the two produce the same bytes, because a
-    /// patch overwrites its row outright rather than combining with what the decode wrote there.
+    /// Applied once the whole array is decoded rather than one window at a time. Patching per
+    /// window only helps a sliced read stay in cache; over a whole array both orders produce the
+    /// same bytes, because a patch overwrites its row outright rather than combining with what the
+    /// decode wrote there.
     /// </remarks>
     private static void ApplyPatches(
         ArrayDecodeContext context,
@@ -176,8 +158,8 @@ public sealed class AlpDecoder : ArrayDecoder
             patchesMetadata.IndicesPType, Nullability.NonNullable);
         int indicesIndex = context.DecodeChild(in node, 1, indicesType, patchCount);
 
-        // The patch values are FLOATS at the array's own dtype - the unencodable originals, not
-        // encoded integers.
+        // The patch values are floats at the array's own dtype: the originals the encoder could not
+        // represent, not encoded integers.
         int valuesIndex = context.DecodeChild(in node, 2, dtype, patchCount);
 
         if (patchesMetadata.HasChunkOffsets)
@@ -202,8 +184,8 @@ public sealed class AlpDecoder : ArrayDecoder
             context.MarkNodeChecked(in node);
         }
 
-        // The patch values are read as a SPAN below, so a constant child is expanded rather than
-        // refused: see `CanonicalSupport.RequirePrimitiveChild`.
+        // The patch values are read as a span below, so a constant child is expanded into one
+        // rather than refused.
         CanonicalNode values = context.Canonical.GetNode(
             CanonicalSupport.ExpandIfConstant(context, valuesIndex));
         if (values.Kind != CanonicalKind.Primitive)
@@ -233,6 +215,10 @@ public sealed class AlpDecoder : ArrayDecoder
         patches.ApplyAll(source, width, destination);
     }
 
+    /// <summary>
+    /// Bounds a file-supplied exponent by the length of the table it indexes; nothing else keeps
+    /// the lookup in memory.
+    /// </summary>
     private static int CheckExponent(uint value, int tableLength, string name)
     {
         if (value >= (uint)tableLength)

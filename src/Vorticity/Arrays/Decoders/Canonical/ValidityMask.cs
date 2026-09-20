@@ -1,17 +1,15 @@
-// A read-only view over the four validity states of Phase 1 contract §2.6, so a decoder can ask
-// "is row i valid?" without branching on ValidityKind at every row and without materializing a
-// bitmap for the three constant cases.
-//
-// It exists because upstream validates only the VALID entries of a VarBinView
-// (vortex-array-0.86.1/src/arrays/varbinview/array.rs `validate`): a null slot's view is garbage by
-// construction and dereferencing it is exactly the out-of-bounds read this library promises never
-// to perform.
 using System;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
-/// <summary>Row-level validity lookup over a <see cref="Validity"/> and its bitmap, if any.</summary>
+/// <summary>
+/// Row-level validity lookup over a <see cref="Validity"/> and its bitmap, if any: a read-only view
+/// of the four validity states, so a caller can ask whether a row holds a value without branching
+/// on the kind per row and without materializing a bitmap for the three uniform kinds. A validation
+/// pass needs it because a null slot's payload is garbage by construction, and reading it would be
+/// exactly the out-of-bounds access this library promises never to perform.
+/// </summary>
 internal readonly ref struct ValidityMask
 {
     private readonly ReadOnlySpan<byte> _bits;
@@ -56,7 +54,7 @@ internal readonly ref struct ValidityMask
 
     /// <summary>
     /// The backing bits, for a caller that has ruled out the two uniform kinds and wants to read a
-    /// RANGE of them through <see cref="BitmapKernels"/> rather than a row at a time.
+    /// range of them through <see cref="BitmapKernels"/> rather than a row at a time.
     /// </summary>
     internal ReadOnlySpan<byte> Bits => _bits;
 

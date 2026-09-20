@@ -1,17 +1,15 @@
-// vortex.struct - vortex-array-0.86.1/src/arrays/struct_/vtable/mod.rs `deserialize`.
-//
-// This is the one encoding whose validity child comes FIRST. Every other encoding with validity
-// puts it last, so the shared ArrayDecodeContext.DecodeValidity helper - which is written around a
-// trailing child - cannot be used here (Phase 1 contract §9.1). The constant collapse of §2.6
-// rule 3 still applies, so it is repeated explicitly rather than skipped: an all-null struct
-// arrives as a vortex.constant(false) child and must report AllInvalid.
 using System;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
-/// <summary>Decodes <c>vortex.struct</c>: one canonical child per field, validity first.</summary>
+/// <summary>
+/// Decodes <c>vortex.struct</c>: one canonical child per field, with the validity child before
+/// them. It is the only encoding that puts validity first, so the shared helper, which is written
+/// around a trailing validity child, cannot be used here and the collapse of a constant validity
+/// to an all-valid or all-invalid kind is repeated explicitly instead of inherited.
+/// </summary>
 public sealed class StructDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
@@ -63,7 +61,7 @@ public sealed class StructDecoder : ArrayDecoder
             return -1;
         }
 
-        // TAKEN AND CLEARED IN ONE MOVE, so it applies to this struct and to nothing under it: a
+        // Taken and cleared in one move, so it applies to this struct and to nothing under it: a
         // nested struct, a dictionary's values, a zone map's row of aggregates all decode through
         // here too, and a projection meant for the top level would name their fields by accident.
         // Read before it is taken: reading allocates nothing, and taking would create the holder on
@@ -200,7 +198,7 @@ public sealed class StructDecoder : ArrayDecoder
     /// <summary>
     /// The body of <see cref="ArrayDecodeContext.DecodeValidity"/> for a validity child at index 0.
     /// The validity array may itself be encoded, so this goes through the normal dispatch and
-    /// never a bitmap fast path (contract §2.6 rule 2).
+    /// never a bitmap fast path.
     /// </summary>
     private static Validity DecodeLeadingValidity(
         ArrayDecodeContext context, in ArrayNode node, int length)

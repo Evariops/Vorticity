@@ -1,12 +1,3 @@
-// vortex.sparse - vortex-sparse-0.86.1/src/lib.rs and src/canonical.rs.
-//
-// Two traps, both stated in the reference's own comments:
-//   * "Note that we DO NOT serialize the fill value since that is stored in the buffers" - the
-//     fill value is BUFFER 0, a bare protobuf ScalarValue, and SparseMetadata carries only the
-//     patch descriptor. Same shape as vortex.constant (contract §0a C1);
-//   * the node has EXACTLY 2 children even when PatchesMetadata declares chunk offsets: the
-//     deserialize path passes `None` for chunk offsets unconditionally, so reading a third child
-//     is a bug. Every sparse node in the corpus is c2/b1.
 using System;
 using System.Buffers.Binary;
 using Vorticity.Arrays.Metadata;
@@ -16,7 +7,12 @@ using Vorticity.Types.Numerics;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.sparse</c>: a fill value everywhere, patched at the listed rows.</summary>
+/// <summary>
+/// Decodes <c>vortex.sparse</c>: a fill value everywhere, patched at the listed rows. The fill
+/// value is not part of the metadata; it sits alone in the node's single buffer as a bare protobuf
+/// scalar. The node always carries exactly two children, the patch indices and the patch values,
+/// even when the patch descriptor declares chunk offsets, so a third child would be a bug.
+/// </summary>
 public sealed class SparseDecoder : ArrayDecoder
 {
     private const string Id = "vortex.sparse";
@@ -42,18 +38,9 @@ public sealed class SparseDecoder : ArrayDecoder
     /// wanted row coincide.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// PERF-GAPS.md E8, which REOPENS v2 R17. R17 closed this encoding "by measurement" at 1,12 --
-    /// but the one decoder it did write, `alprd`, went from 2,94 to 0,42 by pushing the selection
-    /// down, and the shape of the waste is the same here and visible in the code: a take of
-    /// sixty-four rows wrote a million-row fill and then walked 15 625 patches to place at most
-    /// sixty-four values.
-    /// </para>
-    /// <para>
-    /// The fill is the whole of the saving. Everything else is `Decode` line for line, which is why
-    /// the two share `Core` -- including the R5 fast path, whose `ApplyAll` becomes R27's
-    /// `ApplySelected`, the merge that drives off whichever of the two lists is shorter.
-    /// </para>
+    /// The saving is the fill: a selective read writes it once per delivered row instead of once
+    /// per row of the node. Everything else matches <c>Decode</c> line for line, which is why both
+    /// go through the same core.
     /// </remarks>
     public override int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
@@ -66,12 +53,9 @@ public sealed class SparseDecoder : ArrayDecoder
     /// <inheritdoc/>
     public override bool SelectsWithoutFullDecode => true;
 
-    // NO PUSHED COMPARISON HERE, for two reasons that each suffice. Nothing could measure one: this
-    // encoding is read and never written, so every file carrying it is a bare array from the
-    // reference with no column a predicate could name. And the shape says there is nothing to win:
-    // expanding a sparse column is a fill of one value plus its patches, and answering a comparison
-    // over it would be a fill too -- both write one state a row, which is the cost. The same
-    // reasoning closed the run-end comparison, where it was measured at one and a half per cent.
+    // There is deliberately no pushed comparison: expanding a sparse column is a fill of one value
+    // plus its patches, and answering a comparison over it would be a fill too, so both write one
+    // state per row and there is nothing to win.
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
@@ -112,7 +96,8 @@ public sealed class SparseDecoder : ArrayDecoder
 
         // A VarBinView fill longer than 12 bytes cannot be inlined into its view, so it needs a
         // data buffer of its own at index 0 - which shifts every copied patch view's buffer index
-        // by one. The bytes must be COPIED: they live in the ScalarStore, which ResetBatch clears.
+        // by one. The bytes must be copied: they live in the scalar store, which a batch reset
+        // clears.
         bool hasFillBuffer = false;
         VortexBuffer fillBuffer = VortexBuffer.Empty;
         ReadOnlySpan<byte> fillBytes = default;
@@ -132,18 +117,15 @@ public sealed class SparseDecoder : ArrayDecoder
             context.Canonical, in values, hasFillBuffer, fillBuffer);
         try
         {
-            // UNINITIALIZED WHEN THERE IS A FILL, because a fill covers every row before a single
-            // patch is applied: `WriteFill` writes the whole buffer for a Primitive, and row by row
-            // for a Decimal or a VarBinView, and now for a Bool too. A NULL fill writes nothing at
-            // all -- the null rows ARE the zeros -- so that case keeps them.
+            // The buffer is left uninitialized when there is a fill, because the fill covers every
+            // row before a single patch is applied. A null fill writes nothing at all, since its
+            // null rows are the zeros, so that case keeps them. Bool needs no special case:
+            // `CreateUninitialized` declines for a bitmap on its own, because a bitmap's last byte
+            // holds bits past the row count that nothing writes. Zeroing first would mean filling
+            // the whole node only to tile over it.
             //
-            // Bool needs no special case here: `CreateUninitialized` declines for a bitmap on its
-            // own, because a bitmap's last byte holds bits past the row count that nothing writes.
-            //
-            // It was 14% of a scattered-take profile: a zero fill of the whole node, immediately
-            // tiled over.
-            // THE OUTPUT IS AS LONG AS THE SELECTION, and that is where a selective read's saving
-            // is: the fill is written once per ROW DELIVERED rather than once per row of the node.
+            // The output is as long as the selection, which is where a selective read saves: the
+            // fill is written once per delivered row rather than once per row of the node.
             int produced = selective ? wanted.Length : length;
 
             ValueWriter writer = fillIsNull
@@ -162,19 +144,12 @@ public sealed class SparseDecoder : ArrayDecoder
                 validity.SetValidRange(0, produced);
             }
 
-            // THE CASE THE ENCODING IS FOR, TAKEN WHOLE. PERF-AUDIT-v2.md R5: the loop below asks
-            // three questions per patch that are properties of the ARRAY -- what kind the writer is
-            // (inside `Copy`), whether this patch value is null, and whether validity is tracked --
-            // and on a `vortex.sparse` node the usual answers are "primitive", "no" and "already
-            // set". Measured by short-circuiting it: the loop is **23,5 %** of a million-row sparse
-            // scan (0,136 ms against 0,104).
-            //
-            // WHEN THE FILL IS NOT NULL AND NO PATCH VALUE IS, the per-patch validity work is not
-            // merely hoistable, it is REDUNDANT: `SetValidRange(0, length)` above has already set
-            // every bit this loop would set again. So the fast path is a pure scatter, and
-            // `Patches.ApplyAll` is already that scatter, typed on both the index width and the
-            // value width -- it is what `AlpDecoder` uses and what R4 found the other callers did
-            // not need.
+            // The case the encoding exists for, taken whole. The general loop below asks three
+            // questions per patch that are really properties of the array: what kind the writer is,
+            // whether the patch value is null, and whether validity is tracked. When the fill is
+            // not null and no patch value is, the per-patch validity work is redundant, because
+            // `SetValidRange` above has already set every bit it would set again, so the fast path
+            // is a pure scatter typed on both the index width and the value width.
             //
             // Primitive only. `Copy` also shifts a VarBinView's buffer index and writes a bit for a
             // Bool, and `ApplyAll` does neither; a Decimal is fixed-width but goes through the same
@@ -196,12 +171,11 @@ public sealed class SparseDecoder : ArrayDecoder
 
             if (selective)
             {
-                // THE SAME LOOP, AT THE POSITIONS THE SELECTION LEAVES. A patch only survives if
-                // its row was wanted, and then it lands at that row's INDEX IN THE SELECTION, not
-                // at its index in the node. Driven off the wanted side and searching the patches --
-                // R27's argument, and for R27's reason: a take asks for a handful of rows and the
-                // ALP axis carries 16 454 patches, so walking the patch list per batch is the cost
-                // that specializing was supposed to remove.
+                // The same loop, at the positions the selection leaves. A patch only survives if
+                // its row was wanted, and it then lands at that row's index in the selection, not
+                // at its index in the node. The walk is driven off the wanted side and searches the
+                // patches, because a take asks for a handful of rows while the patch list can be
+                // long, and walking it whole per batch would undo the saving.
                 int from = 0;
                 for (int w = 0; w < wanted.Length && from < patches.Count; w++)
                 {
@@ -272,10 +246,10 @@ public sealed class SparseDecoder : ArrayDecoder
         {
             case CanonicalKind.Primitive:
             {
-                // DType.PType raises InvalidOperationException off a non-Primitive dtype, which
-                // §1.4 forbids for file-driven input, so the mismatch is checked rather than
-                // relied on: the patch values decoded to a Primitive but the node's own dtype is
-                // something else.
+                // DType.PType raises InvalidOperationException off a non-Primitive dtype, and
+                // file-driven input must never reach an invalid-operation throw, so the mismatch
+                // is checked rather than relied on: the patch values decoded to a Primitive but
+                // the node's own dtype is something else.
                 if (dtype.Kind != DTypeKind.Primitive)
                 {
                     CompressedThrow.Format(
@@ -290,12 +264,11 @@ public sealed class SparseDecoder : ArrayDecoder
 
             case CanonicalKind.Bool:
 
-                // BOTH VALUES ARE WRITTEN, not just `true`. Relying on the allocator's zeros for a
-                // `false` fill was correct and invisible: it made the buffer's coverage depend on
-                // the fill's VALUE, which is exactly the property `CreateUninitialized` above has
-                // to be able to reason about. Writing the run either way says what it means, and
-                // costs a vectorized fill instead of `length` read-modify-writes of the same byte
-                // (PERF-AUDIT §4.2).
+                // Both values are written, not just `true`. Leaning on the allocator's zeros for a
+                // `false` fill would make the buffer's coverage depend on the fill's value, which
+                // is the very property the uninitialized allocation above has to reason about. A
+                // run written either way is also one vectorized fill rather than a
+                // read-modify-write per row.
                 writer.FillBits(0, length, fill.AsBool);
                 return;
 

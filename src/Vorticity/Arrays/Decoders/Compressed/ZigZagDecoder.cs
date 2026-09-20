@@ -1,13 +1,14 @@
-// vortex.zigzag - vortex-zigzag-0.86.1/src/array.rs and src/compress.rs.
-// Empty metadata, no buffers, one child: the unsigned counterpart of the array's own signed
-// primitive type, with the SAME nullability. Decode is (x >> 1) ^ -(x & 1).
 using System;
 using Vorticity.Buffers;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.zigzag</c> back into its signed primitive type.</summary>
+/// <summary>
+/// Decodes <c>vortex.zigzag</c> back into its signed primitive type. The node has empty metadata,
+/// no buffers and one child, whose type is the unsigned counterpart of the array's own signed
+/// primitive type and carries the same nullability.
+/// </summary>
 public sealed class ZigZagDecoder : ArrayDecoder
 {
     private const string Id = "vortex.zigzag";
@@ -36,10 +37,8 @@ public sealed class ZigZagDecoder : ArrayDecoder
     /// for are the rows its child is asked for.
     /// </summary>
     /// <remarks>
-    /// Not in the take table, and it belongs there for the same reason `fastlanes.for` does: since
-    /// the writer started choosing between them, zigzag is the other thing that sits directly above
-    /// `fastlanes.bitpacked`, and without this the positional access underneath is unreachable on
-    /// every column that took the zigzag branch.
+    /// Zigzag is one of the two encodings that sit directly above bit-packing, so without this the
+    /// positional access underneath would be unreachable on every column encoded this way.
     /// </remarks>
     public override int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
@@ -101,9 +100,8 @@ public sealed class ZigZagDecoder : ArrayDecoder
                 dtype, produced, child.Validity, signed, VortexBuffer.Empty);
         }
 
-        // Uninitialized: ZigZagDecode is pointwise over spans it requires to be the same length,
-        // so it writes every byte of the destination. See CanonicalArena.AllocateUninitialized for
-        // why that bar is "provably", not "probably".
+        // Left uninitialized: the decode is pointwise over spans it requires to be the same length,
+        // so it provably writes every byte of the destination.
         VortexBuffer output = CompressedValues.AllocateUninitialized(
             context, total, width, Id, out Span<byte> destination);
         IntegerKernels.ZigZagDecode(child.Values.Span[..total], destination, width);

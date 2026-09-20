@@ -1,27 +1,3 @@
-// vortex.onpair - vortex-onpair-0.86.1/src/array.rs `deserialize`, src/canonical.rs
-// `canonicalize_onpair`, and onpair-0.2.1 (`try_decode_into`, `CompactDictionary::validate_safety`).
-//
-// FSST's competitor at write time, and its structural twin at read time. Where FSST has 255 symbols
-// of at most 8 bytes addressed by one byte, OnPair has up to 65536 TOKENS of at most 16 bytes
-// addressed by a u16 -- and no escape, because a conformant dictionary contains all 256 single-byte
-// tokens and can therefore encode any byte string. Decoding is a concatenation:
-//
-//     for each code: append dict_bytes[dict_offsets[code] .. dict_offsets[code + 1]]
-//
-// and, exactly as in FSST, the ROW BOUNDARIES ARE ON THE DECODED SIDE: `codes_offsets` bounds the
-// code stream, `uncompressed_lengths` cuts the decoded heap.
-//
-// Children, from `deserialize`:
-//     [dict_offsets, codes, codes_offsets, uncompressed_lengths, validity?]
-//
-// with their lengths carried in the metadata rather than on the wire -- `dict_size + 1`, `codes_len`
-// and `len + 1` respectively -- because slot children do not persist their own.
-//
-// One rule is deliberately relaxed. `validate_safety` requires the dictionary blob to be READ-PADDED
-// to MAX_TOKEN_SIZE past the last token's start, because its decoder copies a fixed 16 bytes per
-// token and advances by the real length. This one copies the real length, so it needs the logical
-// bound -- the last offset within the blob -- and not the padding. A padded file satisfies both; an
-// unpadded one is readable here and not there, which is the safe direction to differ in.
 using System;
 using System.Buffers;
 using System.Runtime.CompilerServices;
@@ -35,13 +11,23 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.onpair</c> into a canonical varbin view.</summary>
+/// <summary>
+/// Decodes <c>vortex.onpair</c> into a canonical varbin view. A code is a <c>u16</c> naming one of
+/// up to 65536 dictionary tokens of at most sixteen bytes, and there is no escape code because a
+/// conformant dictionary holds all 256 single-byte tokens; decoding a row is therefore a plain
+/// concatenation of the tokens its codes name, with the row boundaries living on the decoded side.
+/// </summary>
+/// <remarks>
+/// The children are <c>[dict_offsets, codes, codes_offsets, uncompressed_lengths, validity?]</c>,
+/// and their lengths come from the metadata rather than from the wire, because slot children do
+/// not persist their own.
+/// </remarks>
 public sealed class OnPairDecoder : ArrayDecoder
 {
     /// <summary>The wire id.</summary>
     public const string Id = "vortex.onpair";
 
-    /// <summary><c>MAX_TOKEN_SIZE</c>: the longest dictionary token, in bytes.</summary>
+    /// <summary>The longest dictionary token, in bytes.</summary>
     private const int MaxTokenSize = 16;
 
     /// <summary>
@@ -54,7 +40,7 @@ public sealed class OnPairDecoder : ArrayDecoder
     /// </remarks>
     private const int InlineScratchBytes = 512;
 
-    /// <summary><c>MAX_NUM_TOKENS</c>: a code is a <c>u16</c>, so the dictionary holds at most 2^16.</summary>
+    /// <summary>A code is a <c>u16</c>, so the dictionary holds at most 2^16 tokens.</summary>
     private const int MaxTokenCount = 1 << 16;
 
     /// <summary>The shared, stateless instance.</summary>
@@ -73,12 +59,9 @@ public sealed class OnPairDecoder : ArrayDecoder
     /// <inheritdoc/>
     public override bool SelectsWithoutFullDecode => true;
 
-    // NO PUSHED COMPARISON HERE, and the reason is that nothing could measure one. This encoding is
-    // read and never written: the writer has no scheme for it and no hint reaches it, so every file
-    // that carries one comes from the reference implementation, and those are bare arrays with no
-    // column a predicate could name. The gain would very likely be the one a compressed-string
-    // column gets -- the same shape, values never materialized -- but it would be a number nobody
-    // can produce, which is not a number.
+    // No pushed-down comparison here: this encoding is read and never written, so the only files
+    // carrying it are bare arrays from the reference implementation, with no named column a
+    // predicate could reach.
 
     /// <inheritdoc/>
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
@@ -91,18 +74,17 @@ public sealed class OnPairDecoder : ArrayDecoder
     /// Decodes only the wanted rows, by concatenating only their codes.
     /// </summary>
     /// <remarks>
-    /// Structurally identical to <c>FsstDecoder.DecodeSelected</c>, for the reason the header gives:
-    /// these two encodings are twins at read time. `codes_offsets[i]..[i+1]` bounds row i's codes
-    /// exactly, so a row is addressable without walking the rows before it - the reference simply
-    /// does not decode that way, and docs/90 classified the encoding from the reference's strategy
-    /// rather than from the format.
+    /// Structurally identical to <c>FsstDecoder.DecodeSelected</c>, because the two encodings are
+    /// twins at read time. `codes_offsets[i]..[i+1]` bounds row i's codes exactly, so a row is
+    /// addressable without walking the rows before it, even though the reference implementation
+    /// does not decode that way.
     ///
-    /// `codes_offsets` is not itself pushed down: row i needs offsets i AND i+1, so its wanted set
+    /// `codes_offsets` is not itself pushed down: row i needs offsets i and i+1, so its wanted set
     /// is the union of `wanted` and `wanted + 1`, which costs more to build than the one integer
-    /// decode it would save. `uncompressed_lengths` IS pushed down, because one per wanted row is
+    /// decode it would save. `uncompressed_lengths` is pushed down, because one per wanted row is
     /// all the views need.
     ///
-    /// The dictionary offset table is built ONCE and shared across the wanted rows rather than per
+    /// The dictionary offset table is built once and shared across the wanted rows rather than per
     /// row. It is also the part of this decode that a take does not shrink: it is sized by the
     /// dictionary, not by the selection.
     /// </remarks>
@@ -147,12 +129,9 @@ public sealed class OnPairDecoder : ArrayDecoder
 
         int produced = selective ? wanted.Length : length;
 
-        // Child 3: the decoded length of each row, zero for a null one.
-        //
-        // NOT pushed down, and that is measured rather than assumed. Selecting it costs 192 bytes
-        // per split - a canonical node and its buffer - against the 1024 integers it saves
-        // decoding, and the scattered take allocated 4 536 bytes MORE with the push-down than
-        // without it. The allocation ratchet caught that; the ceiling stayed where it was.
+        // Child 3: the decoded length of each row, zero for a null one. Not pushed down: selecting
+        // it costs a canonical node and its buffer per split, which outweighs the integer decoding
+        // it saves and leaves a scattered take allocating more rather than less.
         CanonicalNode uncompressedLengths = DecodePart(
             context, in node, 3, "uncompressed_lengths", metadata.UncompressedLengthsPType, length);
 
@@ -166,16 +145,13 @@ public sealed class OnPairDecoder : ArrayDecoder
             uncompressedLengths, metadata.UncompressedLengthsPType, length, wanted, selective,
             out int longestRow);
 
-        // A HEAP NOBODY POINTS INTO IS NOT WORTH RENTING, and on a take that is the common case: a
+        // A heap nobody points into is not worth renting, and on a take that is the common case: a
         // value of 12 bytes or fewer lives inside its own view, so a selection of short rows leaves
-        // the heap unread. Renting it anyway costs a block from the pool's smallest size class,
-        // which retains 8 - so 64 splits in one batch allocate a fresh owner object for nearly
-        // every one of them. That was measured, not guessed: the allocation ratchet went red by
-        // 4 536 bytes on a scattered take, which is 64 splits x one 71-byte NativeSegmentOwner.
-        // The selective path makes FEWER rents than the fallback it replaces; it simply moved them
-        // all into the one bucket that cannot serve them.
-        // The bound on the LONGEST ROW is what makes the stack safe, not the bound on the total:
-        // a view over a value longer than MaxInlineViewLength holds a POINTER into the heap, and a
+        // the heap unread. Renting it anyway takes a block from the pool's smallest size class,
+        // which retains only a few, so a batch of many splits allocates a fresh owner object for
+        // nearly every one of them.
+        // The bound on the longest row is what makes the stack safe, not the bound on the total:
+        // a view over a value longer than MaxInlineViewLength holds a pointer into the heap, and a
         // pointer into a stack frame that is about to return is a use-after-free that no test over
         // short strings would ever catch.
         bool inlineOnly = selective
@@ -221,20 +197,19 @@ public sealed class OnPairDecoder : ArrayDecoder
             produced, CanonicalSupport.ViewSize, Id + " views");
 
         // Uninitialized: ViewKernels writes all sixteen bytes of every view. A null row stores a
-        // zero length upstream, so it consumes nothing of the heap and gets an empty view -- now
-        // WRITTEN rather than inherited from the allocator.
+        // zero length, so it consumes nothing of the heap and gets an empty view that is written
+        // out rather than inherited from the allocator.
         VortexBuffer views = CanonicalSupport.AllocateUninitialized(
             context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
-        // THE UTF-8 SWEEP RUNS OVER THE DICTIONARY, NOT OVER THE HEAP, and the argument is shorter
-        // here than it is for FSST because this encoding HAS NO ESCAPE: every byte of the decoded
-        // heap is copied from the dictionary blob, verbatim. So "the dictionary is ASCII" and "the
-        // heap is ASCII" are the same statement, ASCII is valid UTF-8, and a blob of at most a
-        // megabyte answers a question the fifty-megabyte heap was being swept for. Anything with a
-        // high byte in it falls through to the per-heap sweep exactly as before.
+        // The UTF-8 sweep runs over the dictionary and not over the heap: this encoding has no
+        // escape, so every byte of the decoded heap is copied from the dictionary blob verbatim,
+        // "the dictionary is ASCII" and "the heap is ASCII" are the same statement, and the blob
+        // is bounded while the heap is not. Anything with a high byte in it falls through to the
+        // per-heap sweep.
         //
-        // The blob is bounded by its LAST OFFSET and not by its length: `ValidateDictionary` has
-        // already established that bound, and the bytes past it are the read padding upstream
-        // requires, which no token ever emits.
+        // The blob is bounded by its last offset and not by its length: `ValidateDictionary` has
+        // already established that bound, and the bytes past it are the read padding the reference
+        // implementation requires, which no token ever emits.
         bool heapIsAscii = dtype.Kind == DTypeKind.Utf8
             && Ascii.IsValid(dictionary.Span[..dictionaryBytes]);
 
@@ -268,7 +243,7 @@ public sealed class OnPairDecoder : ArrayDecoder
     /// whole reason this is not a loop over <see cref="DecodeCodes"/>: that method rents, fills and
     /// returns the table per call, and a take would pay for it per row.
     ///
-    /// Each row concatenates into the REMAINING heap rather than a slice of exactly its own length.
+    /// Each row concatenates into the remaining heap rather than a slice of exactly its own length.
     /// The 16-byte store is only legal while sixteen writable bytes remain, so an exactly-sized
     /// destination would push every token of every row onto the exact-copy path. The declared
     /// length is still enforced against what the row actually wrote.
@@ -337,7 +312,7 @@ public sealed class OnPairDecoder : ArrayDecoder
         ReadOnlySpan<byte> dictionary,
         Span<byte> destination)
     {
-        // The token offsets are read ONCE into an int table rather than twice per code through
+        // The token offsets are read once into an int table rather than twice per code through
         // CanonicalSupport.ReadInteger's physical-type switch. There are at most 65536 tokens and
         // usually far more codes than that, so this trades a bounded pass for two switches and two
         // bounds checks on every code. ValidateDictionary has already proved every offset lies
@@ -357,12 +332,12 @@ public sealed class OnPairDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// Packs each token's start and size into ONE <see cref="long"/>: <c>start | size &lt;&lt; 32</c>.
+    /// Packs each token's start and size into one <see cref="long"/>: <c>start | size &lt;&lt; 32</c>.
     /// </summary>
     /// <remarks>
-    /// The loop this feeds read <c>offsets[code]</c> and <c>offsets[code + 1]</c> -- two bounds-
-    /// checked loads to describe one token, on every code of the stream. Packing makes it one load
-    /// and one shift, and there are at most 65 536 tokens against usually far more codes.
+    /// Unpacked, describing one token costs <c>offsets[code]</c> and <c>offsets[code + 1]</c> --
+    /// two bounds-checked loads on every code of the stream. Packed it is one load and one shift,
+    /// and there are at most 65 536 tokens against usually far more codes.
     /// <see cref="ValidateDictionary"/> has already proved every offset lies inside the blob, never
     /// decreases and spans at most <see cref="MaxTokenSize"/>, so the table needs no checking of
     /// its own and every size fits comfortably in the high half.
@@ -381,8 +356,8 @@ public sealed class OnPairDecoder : ArrayDecoder
 
     /// <summary>The concatenation itself, with the code width resolved once.</summary>
     /// <remarks>
-    /// INTERNAL RATHER THAN PRIVATE so `OnPairKernelBenchmarks` can put it against the loop it
-    /// replaced in one process (BENCH-AUDIT.md §3.2). It has no callers outside this file.
+    /// Internal rather than private so that the kernel benchmarks can call it in the same process.
+    /// It has no callers outside this file.
     /// </remarks>
     internal static int Concatenate(
         ReadOnlySpan<byte> codes,
@@ -405,15 +380,14 @@ public sealed class OnPairDecoder : ArrayDecoder
     /// </summary>
     /// <remarks>
     /// <para>
-    /// FOUR TESTS PER CODE BECAME ONE. What the loop used to do to move one token: a switch on the
-    /// code's physical type, a compare against the token count, two bounds-checked loads from the
-    /// offsets table, a compare of <c>written + size</c> against the destination length, and a
-    /// compare of <c>start</c> against the blob's wide-store limit. bench/BRANCHING.md measured a
-    /// switch here at +0.9% and concluded it was refuted -- which held while the rest of the body
-    /// was this expensive.
+    /// Resolving the code width once per instantiation is what makes the inner loop cheap: moving
+    /// one token otherwise costs a switch on the code's physical type, a compare against the token
+    /// count, two bounds-checked loads from the offsets table, a compare of <c>written + size</c>
+    /// against the destination length, and a compare of <c>start</c> against the blob's wide-store
+    /// limit.
     /// </para>
     /// <para>
-    /// The destination bound is the one that DISAPPEARS rather than moving, and only because the
+    /// The destination bound disappears rather than moving, and only because the
     /// wide path already implies it: <c>written &lt;= wideLimit</c> is
     /// <c>written + MaxTokenSize &lt;= destination.Length</c>, and a token is at most
     /// <see cref="MaxTokenSize"/> bytes, so <c>written + size</c> is inside by construction. The
@@ -432,15 +406,15 @@ public sealed class OnPairDecoder : ArrayDecoder
         ReadOnlySpan<TCode> typed = MemoryMarshal.Cast<byte, TCode>(codes);
         int written = 0;
 
-        // Past these points the wide store is unsafe and the exact copy takes over: the output no
-        // longer has sixteen writable bytes behind it, or the token no longer has sixteen readable
-        // ones ahead of it.
+        // Past these points the wide store is unsafe and the exact copy takes over: the output
+        // lacks sixteen writable bytes behind it, or the token lacks sixteen readable ones ahead
+        // of it.
         int wideLimit = destination.Length - MaxTokenSize;
         int wideStart = dictionary.Length - MaxTokenSize;
         ref byte output = ref MemoryMarshal.GetReference(destination);
         ref byte source = ref MemoryMarshal.GetReference(dictionary);
 
-        // FOUR AT A TIME, and the reason is the dependency chain rather than the instruction count.
+        // Four at a time, and the reason is the dependency chain rather than the instruction count.
         // One token per iteration serializes: the store's address needs `written`, `written` needs
         // this token's size, and the size needs a load from the table indexed by a code that was
         // itself just loaded. That is a load-to-add-to-store chain of five or six cycles that
@@ -555,9 +529,8 @@ public sealed class OnPairDecoder : ArrayDecoder
 
         if (written <= wideLimit && start <= wideStart)
         {
-            // ONE 16-BYTE STORE PER TOKEN, then advance by the token's REAL length - the same
-            // trick FSST's decoder uses, and legal for the same reason: the bytes past the token
-            // are garbage the next store overwrites.
+            // One 16-byte store per token, then advance by the token's real length: legal because
+            // the bytes past the token are garbage the next store overwrites.
             Vector128.StoreUnsafe(
                 Vector128.LoadUnsafe(ref Unsafe.Add(ref source, (uint)start)),
                 ref Unsafe.Add(ref output, (uint)written));
@@ -606,8 +579,8 @@ public sealed class OnPairDecoder : ArrayDecoder
     /// token), describe tokens of at most <see cref="MaxTokenSize"/> bytes, and end inside the blob.
     /// </summary>
     /// <returns>
-    /// The dictionary's LAST OFFSET, which bounds the live bytes of the blob: everything past it is
-    /// the read padding upstream requires and no token can emit. Returned rather than read again by
+    /// The dictionary's last offset, which bounds the live bytes of the blob: everything past it is
+    /// read padding that no token can emit. Returned rather than read again by
     /// the caller because this walk has it in hand, and a second
     /// <see cref="CanonicalSupport.ReadInteger"/> would be a second per-node dispatch for a value
     /// already computed.
@@ -642,7 +615,10 @@ public sealed class OnPairDecoder : ArrayDecoder
             previous = current;
         }
 
-        // The logical end, not the reference's read-padded one: see the header note.
+        // The logical end, not the reference implementation's read-padded one. That decoder copies
+        // a fixed sixteen bytes per token and so needs padding past the last token's start; this
+        // one copies the real length and needs only the last offset to fall inside the blob, which
+        // accepts a padded file too and refuses only files the reference would also refuse.
         if (previous > dictionary.Length)
         {
             CompressedThrow.Format(
@@ -690,11 +666,11 @@ public sealed class OnPairDecoder : ArrayDecoder
         CanonicalNode lengths, PType ptype, int length, ReadOnlySpan<int> wanted, bool selective,
         out int longestRow)
     {
-        // Typed once rather than per row: this loop was 13.7% of a 1M-row onpair scan, and every
-        // iteration of it went through `ReadInteger`'s switch on the physical type to add one
-        // number. The overflow cap is checked ONCE at the end instead of per row -- a sum of at
-        // most 2^31 values each below 2^63 cannot wrap a `long`, so the running total is exact
-        // until it is tested.
+        // Typed once rather than per row, because otherwise every iteration goes through
+        // `ReadInteger`'s switch on the physical type just to add one number, and this loop runs
+        // over every row of the scan. The overflow cap is checked at the end instead of per row --
+        // a sum of at most 2^31 values each below 2^63 cannot wrap a `long`, so the running total
+        // is exact until it is tested.
         ReadOnlySpan<byte> raw = lengths.Values.Span;
         int count = selective ? wanted.Length : length;
         (long total, long longest, int negative) = ViewKernels.SumLengths(

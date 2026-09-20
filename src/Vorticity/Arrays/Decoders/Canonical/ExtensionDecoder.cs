@@ -1,21 +1,14 @@
-// vortex.ext - vortex-array-0.86.1/src/arrays/extension/vtable/mod.rs `deserialize`.
-//
-// Exactly one child, the storage, at the extension dtype's storage dtype. There is NO validity
-// child: `ValidityVTableFromChild` means an extension's validity IS its storage's, which is why
-// CanonicalArena.AddExtension takes no Validity at all (Phase 1 contract §9.1).
-//
-// Upstream validates the extension dtype at dtype-parse time (`try_with_vtable` always calls
-// `validate_dtype`). Phase 1 defers unsupported-component failures to first USE of the field
-// (contract §2.3), so the validation runs here, from the decoder, and again from the column
-// accessor. The metadata layouts are hand-rolled, not protobuf; they live in
-// ExtensionDTypeRegistry (contract §8.7) because `columns` needs them too.
 using System;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
-/// <summary>Decodes <c>vortex.ext</c>: a logical type wrapped around a canonical storage child.</summary>
+/// <summary>
+/// Decodes <c>vortex.ext</c>: a logical type wrapped around a canonical storage child, its only
+/// child. There is no validity child, because an extension's validity is its storage's, which is
+/// why the canonical extension node carries no validity of its own.
+/// </summary>
 public sealed class ExtensionDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
@@ -52,10 +45,10 @@ public sealed class ExtensionDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// Resolves the extension id and parses its metadata against the storage dtype. This is the
-    /// only site in a decode that may raise <see cref="VortexUnsupportedException"/> with kind
-    /// <c>"dtype"</c>, and it does so through
-    /// <see cref="ExtensionDTypeRegistry.RequireSupported"/> (contract §2.3).
+    /// Resolves the extension id and parses its metadata against the storage dtype. An unsupported
+    /// extension component fails here, when the field is first used, rather than when the dtype was
+    /// parsed: this is the only site in a decode that may raise
+    /// <see cref="VortexUnsupportedException"/> with kind <c>"dtype"</c>.
     /// </summary>
     internal static void ValidateExtensionDType(DType dtype, DType storage)
     {

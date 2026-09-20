@@ -1,19 +1,3 @@
-// pco's tANS table - pco-1.0.3/src/ans/{spec,decoding}.rs.
-//
-// TWO STEPS THAT MUST BOTH BE EXACT, because neither is self-checking: the table is built from the
-// bin weights alone and any disagreement with the encoder silently decodes to different symbols.
-//
-// 1. SPREADING. Each symbol is scattered across the table by stepping with a stride of about three
-//    fifths of the table size, forced odd so it is coprime with the power-of-two size and therefore
-//    visits every slot. Upstream calls this out as "needs to remain backward compatible", which is
-//    another way of saying a reimplementation has no freedom here at all.
-// 2. THE NODE TABLE. For each table slot, how many bits the next state consumes and where that
-//    state starts. `bits_to_read` is the difference in leading zeros between the symbol's running
-//    occurrence count and the table size - the number of bits needed to distinguish the states that
-//    symbol owns.
-//
-// Decoding is 4-WAY INTERLEAVED: four independent states advanced round-robin, so a value's state
-// comes from four back, not one.
 using System;
 using System.Numerics;
 
@@ -25,7 +9,11 @@ namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 /// <param name="BitsToRead">Bits the next state consumes.</param>
 internal readonly record struct PcoAnsNode(int NextStateIndexBase, int OffsetBits, int BitsToRead);
 
-/// <summary>pco's tANS decoding table, built from a latent variable's bin weights.</summary>
+/// <summary>
+/// pco's tANS decoding table, built from a latent variable's bin weights. Both the spreading order
+/// and the node table have to match the encoder exactly and neither is self-checking, so any
+/// departure from the published order decodes silently to different symbols rather than failing.
+/// </summary>
 internal sealed class PcoAnsTable
 {
     private PcoAnsTable(int sizeLog, uint[] stateSymbols, PcoAnsNode[] nodes, ulong[] stateLowers)

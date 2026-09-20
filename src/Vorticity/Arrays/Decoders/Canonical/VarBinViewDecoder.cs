@@ -1,20 +1,3 @@
-// vortex.varbinview - vortex-array-0.86.1/src/arrays/varbinview/vtable/mod.rs `deserialize`.
-//
-// Two things decide correctness here.
-//
-// 1. The `views` buffer is the LAST one, not the first: upstream is
-//    `let Some((views_handle, data_handles)) = buffers.split_last() else { bail }`, so a node with
-//    N + 1 buffers has N data buffers and there may be zero of them. Reading buffer 0 as the views
-//    would read a data buffer as 16-byte views and produce plausible garbage.
-// 2. Every view a consumer may dereference is validated first (class I, docs/08-semantics.md §5):
-//    a reference view needs `buffer_index < N`, `offset + size <= buffers[buffer_index].len()`,
-//    and a 4-byte prefix equal to the first four bytes of the value it references
-//    (`validate_view`, vortex-array-0.86.1/src/arrays/varbinview/array.rs). The prefix is not a
-//    hint: it is a redundant copy the Arrow columnar spec requires, and it is what makes
-//    prefix-first comparison sound for anyone reading `CanonicalNode.Views`.
-//    NULL rows are deliberately NOT validated - upstream skips them too
-//    (`VarBinViewArray::validate`) because a null slot's view is garbage by construction. Their
-//    contract is that no consumer dereferences a null row.
 using System;
 using System.Text.Unicode;
 using Vorticity.Arrays.Metadata;
@@ -23,7 +6,12 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
-/// <summary>Decodes <c>vortex.varbinview</c>: Arrow-style 16-byte views over N data buffers.</summary>
+/// <summary>
+/// Decodes <c>vortex.varbinview</c>: Arrow-style 16-byte views over a node's data buffers. The
+/// views are the last buffer, not the first, and the data buffers are all the others, of which
+/// there may be none; reading the first buffer as views would read data as views and produce
+/// plausible garbage.
+/// </summary>
 public sealed class VarBinViewDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
@@ -85,7 +73,11 @@ public sealed class VarBinViewDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// Bounds-checks (and, for Utf8, UTF-8-checks) every view a consumer may dereference.
+    /// Bounds-checks (and, for Utf8, UTF-8-checks) every view a consumer may dereference. A
+    /// referencing view's four-byte prefix is compared with the value it points at: the prefix is a
+    /// redundant copy the Arrow columnar layout requires, and checking it is what makes
+    /// prefix-first comparison sound for readers of the canonical views. Null rows are skipped,
+    /// since a null slot's view is garbage by construction and no consumer may dereference it.
     /// </summary>
     internal static void ValidateViews(
         ArrayDecodeContext context,
@@ -160,19 +152,17 @@ public sealed class VarBinViewDecoder : ArrayDecoder
     /// <param name="view">The whole sixteen-byte view; its bytes 4..16 hold the value.</param>
     /// <param name="size">The value's length, twelve or fewer by the inline rule.</param>
     /// <remarks>
-    /// PERF-AUDIT-v2.md R28, and the counts chose this shape rather than the one the point
-    /// proposed. `ViewKernels` replaces a per-row <c>Utf8.IsValid</c> with a whole-heap pass plus
-    /// one byte test per boundary, which works because those encodings TILE their heap. A
-    /// VarBinView does not tile, and on the 1M axis **65 % of its views carry their value INLINE**
-    /// -- inside the sixteen bytes of the view itself, where there is no buffer to sweep. So the
-    /// equivalence could have covered at most the other 35 %, and this covers the 65 instead.
+    /// Encodings whose values tile a heap can validate the whole heap in one pass and test one byte
+    /// per boundary; a varbinview does not tile, and most of its views carry their value inline,
+    /// inside the sixteen bytes of the view itself, where there is no buffer to sweep. So the
+    /// inline case is the one worth answering without a call.
     ///
-    /// THE TWELVE BYTES ARE ALWAYS READABLE, which is what makes this branchless: the value lives
-    /// at [4, 4 + size) of a view that is exactly sixteen bytes, so the two loads below are in
-    /// bounds whatever `size` is, and the mask is what restricts them to the value. A first attempt
-    /// walked the bytes in a loop instead and was MEASURED SLOWER than the call it replaced --
-    /// `varbinview` 3 398 -> 4 708 us -- because on sixteen bytes an intrinsified validator beats a
-    /// scalar loop. The cost is the call, so what replaces it must not be a loop.
+    /// The twelve inline bytes are always readable, which is what makes this branchless: the value
+    /// lives at [4, 4 + size) of a view that is exactly sixteen bytes, so the two loads below are
+    /// in bounds whatever <paramref name="size"/> is, and the mask is what restricts them to the
+    /// value. Walking those bytes in a loop instead is slower than the call it would replace, since
+    /// on so few bytes an intrinsified validator beats a scalar loop; the cost being removed is the
+    /// call itself, so whatever replaces it must not be a loop.
     ///
     /// Everything with a high bit set falls through to <c>Utf8.IsValid</c>, which decides. Nothing
     /// here changes what is accepted.

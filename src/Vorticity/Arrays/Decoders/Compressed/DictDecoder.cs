@@ -1,28 +1,18 @@
-// vortex.dict - vortex-array-0.86.1/src/arrays/dict/vtable/mod.rs and .../dict/array.rs.
-//
-// Two children, no buffers: `codes` of the array's own length and `values` of `values_len`.
-// Contract §10.5 fixes the codes' nullability, which is NOT simply the array's:
-//
-//     is_nullable_codes = true  -> Nullable
-//     is_nullable_codes = false -> NonNullable
-//     is_nullable_codes absent  -> the array dtype's nullability   (back-compat fallback)
-//
-// The absent case is not the same as `false`; getting it wrong changes the codes child's dtype,
-// which changes how ITS validity child is read, which silently changes values.
-//
-// Class I: every code is bounds-checked against `values_len` before it indexes anything.
-// `all_values_referenced` is a pure hint - absent or false means "unknown" - and must never let a
-// bounds check be skipped. Float dictionary keys are compared by bit pattern upstream, never by
-// IEEE equality, so a decoder must copy the key bytes and never canonicalize them (corpus
-// manifest caveat 2: distributions/float_specials_f64_* hold 15 distinct keys including both
-// zeros and several NaNs).
 using System;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.dict</c> by gathering the dictionary values through the codes.</summary>
+/// <summary>
+/// Decodes <c>vortex.dict</c> by gathering the dictionary values through the codes, from a
+/// <c>codes</c> child of the array's own length and a <c>values</c> child of the declared
+/// dictionary length. The codes' nullability is not simply the array's: the metadata flag decides
+/// it and its absence falls back to the array's dtype rather than meaning non-nullable, because
+/// that dtype governs how the codes child's own validity is read. Every code is bounds-checked
+/// against the dictionary length before it indexes anything, and dictionary keys are matched by
+/// bit pattern, never canonicalized, so that the special float values stay distinct.
+/// </summary>
 public sealed class DictDecoder : ArrayDecoder
 {
     private const string Id = "vortex.dict";
@@ -48,34 +38,30 @@ public sealed class DictDecoder : ArrayDecoder
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A dictionary of sixteen labels over sixty-five thousand rows answers an equality with
-    /// sixteen comparisons and one pass of code lookups, against sixty-five thousand string
-    /// comparisons over strings that had to be materialized first. The kernel that compares the
-    /// values is the same one the evaluator would have run over the decoded column, so the answer
-    /// is the same answer, three-valued and row for row.
+    /// A dictionary of a few labels over many rows answers an equality with one comparison per
+    /// label and one pass of code lookups, rather than one comparison per row over values that had
+    /// to be materialized first. The kernel that compares the values is the same one the evaluator
+    /// would have run over the decoded column, so the answer is the same answer, three-valued and
+    /// row for row.
     /// </para>
     /// <para>
-    /// It gives up on a dictionary wider than the rows it covers, which is upstream's own guard:
-    /// there is nothing to win by comparing more values than there are rows, and the codes still
-    /// have to be walked.
+    /// It gives up on a dictionary wider than the rows it covers: there is nothing to win by
+    /// comparing more values than there are rows, and the codes still have to be walked.
     /// </para>
     /// <para>
-    /// Class I, like every other path through this decoder: a code is bounds-checked before it
-    /// indexes the answers, and the check is what stops a corrupt file reading past them.
+    /// A code is bounds-checked before it indexes the answers, and the check is what stops a
+    /// corrupt file reading past them.
     /// </para>
     /// <para>
-    /// There is no extreme beside it, and that is a decision rather than an omission. The reference
-    /// carries one because its pruning computes a column's bounds as it goes; ours reads the bounds
-    /// the writer put in the zone maps, so nothing on the read path asks a dictionary for its
-    /// smallest value. The one caller that computes an extreme is the min-and-max terminal, over a
-    /// column already decoded, and no gate measures it -- there is no such scenario in the bench and
-    /// no such axis in the ratio check. An extreme here would be correct and unreachable.
+    /// There is no extreme beside it, and that is a decision rather than an omission: the read path
+    /// takes a column's bounds from the zone maps the writer left, so nothing here ever asks a
+    /// dictionary for its smallest value. The one caller that computes an extreme works over a
+    /// column already decoded, so an extreme on this path would be correct and unreachable.
     /// </para>
     /// <para>
-    /// The chunk-level probe is the neighbour, not the duplicate. It is written by default and
-    /// prunes whole chunks that cannot hold the literal before they are read; this answers the rows
-    /// of a chunk that was read. The numbers above were measured with it present, so the two
-    /// compose, and what they share is one decode of the values child on a chunk it kept.
+    /// The chunk-level probe is the neighbour, not the duplicate: it prunes whole chunks that
+    /// cannot hold the literal before they are read, while this answers the rows of a chunk that
+    /// was read. The two compose, and share one decode of the values child.
     /// </para>
     /// </remarks>
     public override bool TryCompare(
@@ -168,14 +154,13 @@ public sealed class DictDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// Takes on the CODES and leaves the values alone, which is the whole point of a dictionary.
+    /// Takes on the codes and leaves the values alone, which is the whole point of a dictionary.
     /// </summary>
     /// <remarks>
-    /// The `vortex.dict` row of the take table, verbatim: "take on codes, values untouched". The
-    /// values child is shared by every row, so a take has to have all of it whatever it asks for;
-    /// the codes are one per row and are where the selection bites. The codes child is very often
-    /// `fastlanes.for` over `fastlanes.bitpacked` - our own writer cascades them there - so this is
-    /// also what lets the positional access underneath be reached at all.
+    /// The values child is shared by every row, so a take needs all of it whatever it asks for; the
+    /// codes are one per row and are where the selection bites. The codes child is very often
+    /// <c>fastlanes.for</c> over <c>fastlanes.bitpacked</c>, so this is also what lets the
+    /// positional access underneath be reached at all.
     /// </remarks>
     public override int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
@@ -339,9 +324,8 @@ public sealed class DictDecoder : ArrayDecoder
         }
     }
 
-    // Class I. Upstream leans on the compressor's invariant plus its `take` kernel; this is
-    // untrusted input, so the check is unconditional -- what moved is where it is spelled, not
-    // whether it runs.
+    // The bounds check that leads here is unconditional: the file is untrusted, so a code cannot be
+    // assumed to respect the invariant the compressor kept.
     [System.Diagnostics.CodeAnalysis.DoesNotReturn]
     private static void ThrowCode(
         ReadOnlySpan<byte> codes, PType codesPType, int row, int valuesLength) =>

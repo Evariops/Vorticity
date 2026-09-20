@@ -1,33 +1,3 @@
-// Cutting a decoded byte heap into Arrow views, once, for the five encodings that all do it.
-//
-// `vortex.varbin`, `vortex.fsst`, `vortex.onpair`, `vortex.zstd` and `vortex.varbinview` each ended
-// up with their own copy of the same loop: read this row's length or offset through
-// `switch (ptype)`, slice the heap, CALL `Utf8.IsValid` ON THOSE FIVE TO TWENTY BYTES, then write
-// a 16-byte view. On the 1M-row axis those encodings read 9x to 14x the reference.
-//
-// THE UTF-8 CHECK IS THE INTERESTING ONE, because the fix is an equivalence rather than a faster
-// loop. `Utf8.IsValid` is vectorized and good at it; what it is not good at is being CALLED a
-// million times on a five-byte span, where the whole cost is the call and the fixed set-up of a
-// vector loop that then runs for zero iterations.
-//
-// The rows of these encodings TILE the heap: row i occupies [offset, offset + length) and row i+1
-// starts where it ends, with null rows contributing zero bytes. For a tiling,
-//
-//     every row is valid UTF-8   <=>   the heap is valid UTF-8
-//                                      AND no row boundary is a continuation byte.
-//
-// (=>) a concatenation of valid sequences is valid, and each boundary begins a code point.
-// (<=) a valid heap decomposes uniquely into code points; a boundary that is not a continuation
-// byte is a code-point start, so each row is a whole number of code points.
-//
-// So the check becomes ONE vectorized pass over the whole heap plus one byte test per row. When it
-// fails, the row is located by the per-row loop the fast path replaced -- an error path may cost
-// whatever it likes.
-//
-// THE TILING IS THE PRECONDITION, and `vortex.varbin` only satisfies it when every row is valid:
-// its offsets are arbitrary, a null row's span is skipped by the per-row check today, and folding
-// those bytes into a whole-heap check would refuse a file the reference accepts. So VarBin takes
-// the fast path when its validity says every row is valid, and the row-at-a-time path otherwise.
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -38,7 +8,30 @@ using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
-/// <summary>Builds Arrow binary views over a decoded heap.</summary>
+/// <summary>
+/// Builds Arrow binary views over a decoded heap, in one place for the several encodings that cut
+/// a heap into rows the same way.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The rows of those encodings tile the heap: row i occupies [offset, offset + length), row i + 1
+/// starts where it ends, and a null row contributes no bytes. For a tiling, every row is valid
+/// UTF-8 exactly when the heap is valid UTF-8 and no row boundary falls on a continuation byte: a
+/// concatenation of valid sequences is valid and every boundary begins a code point, and
+/// conversely a valid heap decomposes uniquely into code points, so a boundary that is not a
+/// continuation byte starts one. The check is therefore one vectorized pass over the heap plus one
+/// byte test per row, rather than a validator call per row on a few bytes, where the whole cost is
+/// the call and the set-up of a vector loop that then runs for no iterations. When the heap fails,
+/// the offending row is found with the per-row loop the fast path replaces; an error path may cost
+/// whatever it likes.
+/// </para>
+/// <para>
+/// The tiling is the precondition. Where rows are cut by arbitrary offsets, a null row's span is
+/// skipped by the per-row check, so folding those bytes into a whole-heap check would refuse a
+/// file that is well-formed; such a heap takes the whole-heap check only when validity says every
+/// row is valid, and the row-at-a-time path otherwise.
+/// </para>
+/// </remarks>
 internal static class ViewKernels
 {
     /// <summary>Bytes in one view.</summary>
@@ -56,25 +49,24 @@ internal static class ViewKernels
     /// <param name="count">Rows to sum.</param>
     /// <returns>
     /// The total, the longest single row (only tracked when <paramref name="wanted"/> is given,
-    /// because only a selective decode asks), and the index of the first NEGATIVE length or -1.
+    /// because only a selective decode asks), and the index of the first negative length, or -1.
     /// </returns>
     /// <remarks>
-    /// Shared by `vortex.fsst` and `vortex.onpair`, which both cut their decoded heap with the same
-    /// child and both had their own copy of this loop going through <c>ReadInteger</c>'s switch on
-    /// every row. It was 15% of a 1M-row scan of either.
+    /// Shared by the encodings that cut their decoded heap with a lengths child, so that the
+    /// physical type is resolved once here instead of once per row in each of them.
     /// </remarks>
     internal static (long Total, long Longest, int Negative) SumLengths(
         ReadOnlySpan<byte> lengths, PType ptype, ReadOnlySpan<int> wanted, int count)
     {
         bool selective = !wanted.IsEmpty;
 
-        // THE DENSE UNSIGNED SUM IS A REDUCTION, so it is one. The generic loop below reads one
-        // length at a time through a bounds check and adds it to a scalar - about 5% of a 1M-row
-        // FSST scan and 10% of an OnPair one, to add a million numbers. Widening into 64-bit lanes
-        // keeps the total exact for every unsigned width: a `uint` length is at most 2^32-1 and
-        // there are at most 2^31 of them, so the sum cannot leave a `ulong`, and the narrower types
-        // only make that slacker. The SIGNED types keep the scalar loop, because their answer is
-        // not the sum - it is the INDEX of the first negative length, which a reduction discards.
+        // The dense unsigned sum is a reduction, so it is written as one rather than as a scalar
+        // loop reading one length at a time through a bounds check. Widening into 64-bit lanes
+        // keeps the total exact for every unsigned width: the widest length and the largest row
+        // count a 32-bit array can hold still multiply to less than a `ulong` holds, and the
+        // narrower types only leave more room. The signed types keep the scalar loop, because their
+        // answer is not the sum but the index of the first negative length, which a reduction
+        // discards.
         if (!selective)
         {
             switch (ptype)
@@ -106,11 +98,10 @@ internal static class ViewKernels
     /// <summary>Sums and maxes the lengths with the physical type resolved before the loop.</summary>
     /// <returns>The total, the longest row, and the index of the first negative length or -1.</returns>
     /// <remarks>
-    /// Two loops, not one with a flag in it. The dense path is the one that runs a million times
-    /// per chunk, and it needs neither the <c>wanted</c> indirection nor the longest row --
-    /// <c>longestRow</c> decides whether a SELECTIVE decode may use the stack, and a dense one
-    /// never asks. For an unsigned length type the sign test is dropped too, because there is
-    /// nothing to test.
+    /// Two loops, not one with a flag in it. The dense path is the one that runs once per row of a
+    /// chunk, and it needs neither the <c>wanted</c> indirection nor the longest row, which only a
+    /// selective decode asks for, to decide whether it may use the stack. For an unsigned length
+    /// type the sign test is dropped too, because there is nothing to test.
     /// </remarks>
     private static (long Total, long Longest, int Negative) SumLengths<TLen>(
         ReadOnlySpan<byte> raw, ReadOnlySpan<int> wanted, bool selective, int count)
@@ -166,37 +157,23 @@ internal static class ViewKernels
     /// <param name="values">The lengths, exactly as many as are wanted.</param>
     /// <returns>The total.</returns>
     /// <remarks>
+    /// <para>
     /// <c>Vector.Widen</c> splits each vector into two of the next width up, so a byte vector takes
     /// three splits to reach 64-bit lanes and a <see cref="uint"/> one takes a single split. The
     /// accumulators stay in 64-bit lanes throughout rather than summing narrow and widening at the
     /// end, because the whole point is that no intermediate can overflow.
-    /// </remarks>
-    /// <remarks>
-    /// WRITTEN OUT PER WIDTH RATHER THAN ONCE GENERICALLY, because the widening ladder changes the
-    /// element type at every rung and a generic method cannot: a recursive
-    /// <c>WidenToUInt64&lt;T&gt;</c> that re-enters through <c>Vector.As</c> REINTERPRETS the bits
-    /// instead of widening them, so <c>T</c> never changes and the recursion never ends. It cost a
-    /// stack overflow in the corpus suite, which is the only reason that is written down here.
-    /// </remarks>
-    /// <remarks>
-    /// GUARDED ON THE HARDWARE, NOT ON THE TYPE, and the three rungs below were guarded on the type.
-    /// <c>Vector&lt;uint&gt;.IsSupported</c> asks whether <c>uint</c> is a legal element type; it is,
-    /// everywhere, so the guard was always true and a machine without SIMD walked this ladder in
-    /// SOFTWARE-EMULATED <c>Vector&lt;T&gt;</c>. Measured under <c>DOTNET_EnableHWIntrinsic=0</c>,
-    /// `sum lengths` cost 62.09 µs against the 20.28 µs of the per-row loop this kernel replaced -
-    /// <b>3.06x slower than what it was written to beat</b> - and it is a widening ladder, so the
-    /// emulation pays for three splits and four adds where the scalar loop pays one add.
-    ///
-    /// The other two kernels in this file were NOT in that position when R19 measured them:
-    /// `require ascending` read 0.70 and `build views` 0.39 without SIMD, because a compare or a
-    /// byte move survives emulation where a widening ladder does not. A guard is not a style rule;
-    /// each of these was measured (v2 R19).
+    /// </para>
     /// <para>
-    /// SINCE B21 (2026-09-15) NO TYPE GUARD REMAINS IN THE REPOSITORY. Surviving emulation is not
-    /// the same as being unharmed by it, and the twelve sites were measured together: with the type
-    /// guard, the no-intrinsics leg cost up to <b>four times</b> what the scalar fallback costs --
-    /// `alp_no_patches` 2 208 against 548 µs, `zigzag` 1 405 against 464. `require ascending` was
-    /// among the twelve and is now on the hardware question like its neighbour.
+    /// Written out per width rather than once generically: the ladder changes the element type at
+    /// every rung, and a generic version re-entering through <c>Vector.As</c> reinterprets the bits
+    /// instead of widening them, so its type parameter never changes and the recursion never ends.
+    /// </para>
+    /// <para>
+    /// The guard is on hardware acceleration, not on the element type. Asking whether
+    /// <see cref="uint"/> is a legal vector element type is always answered yes, so such a guard
+    /// would send a machine without SIMD down this ladder in software emulation, where each rung
+    /// costs a split and an add for the one add a scalar loop would pay. No kernel here guards on
+    /// the element type.
     /// </para>
     /// </remarks>
     private static long SumWidening(ReadOnlySpan<uint> values)
@@ -229,7 +206,7 @@ internal static class ViewKernels
         return (long)total;
     }
 
-    /// <inheritdoc cref="SumWidening(ReadOnlySpan{uint})"/>
+    /// <summary>Sums 16-bit lengths, widening in two rungs so nothing can wrap.</summary>
     private static long SumWidening(ReadOnlySpan<ushort> values)
     {
         ulong total = 0;
@@ -262,7 +239,7 @@ internal static class ViewKernels
         return (long)total;
     }
 
-    /// <inheritdoc cref="SumWidening(ReadOnlySpan{uint})"/>
+    /// <summary>Sums byte lengths, widening in three rungs so nothing can wrap.</summary>
     private static long SumWidening(ReadOnlySpan<byte> values)
     {
         ulong total = 0;
@@ -357,7 +334,7 @@ internal static class ViewKernels
     }
 
     /// <summary>
-    /// Class I: the offsets that cut a heap must not decrease.
+    /// The offsets that cut a heap must not decrease.
     /// </summary>
     /// <param name="offsets"><paramref name="count"/> offsets, as <paramref name="ptype"/>.</param>
     /// <param name="ptype">Their physical type.</param>
@@ -365,10 +342,10 @@ internal static class ViewKernels
     /// <param name="encodingId">The encoding asking, for the message.</param>
     /// <exception cref="VortexFormatException">A pair decreases.</exception>
     /// <remarks>
-    /// Upstream's <c>build_views_from_offsets</c> computes lengths with a <c>wrapping_sub</c>, so a
-    /// non-monotone pair produces a huge wrapped length that then indexes out of the heap -- which
-    /// is why this is a hard check here and only a `debug_assert` there. A shifted compare puts it
-    /// on the vector unit; the scalar loop names the offending pair when a block fails.
+    /// A row's length is the difference of two consecutive offsets, so a decreasing pair produces a
+    /// length that reaches past the heap; the check is therefore hard rather than an assertion. A
+    /// shifted compare puts it on the vector unit, and the scalar loop names the offending pair
+    /// once a block has failed.
     /// </remarks>
     internal static void RequireAscending(
         ReadOnlySpan<byte> offsets, PType ptype, int count, string encodingId)
@@ -410,10 +387,9 @@ internal static class ViewKernels
         int i = 1;
         if (Vector.IsHardwareAccelerated && count > Vector<T>.Count)
         {
-            // The base reference is taken once. `LoadUnsafe(in typed[i])` bounds-checks the
-            // INDEXER before handing over a reference the load then treats as unchecked anyway, so
-            // the check bought nothing and cost a compare and a branch per vector - on a loop whose
-            // body is one compare.
+            // The base reference is taken once. Loading through the indexer instead would
+            // bounds-check it before handing over a reference the load treats as unchecked anyway,
+            // adding a compare and a branch per vector to a loop whose body is one compare.
             ref T source = ref MemoryMarshal.GetReference(typed);
             int lanes = Vector<T>.Count;
             for (; i <= count - lanes; i += lanes)
@@ -445,8 +421,8 @@ internal static class ViewKernels
     /// <param name="ptype">The lengths' physical type.</param>
     /// <param name="wanted">
     /// Row indices into <paramref name="lengths"/>, or empty for rows 0..count-1. The heap holds
-    /// the produced rows back to back in selection order either way, so the OFFSET walks the output
-    /// while the LENGTH is read at the row's own index.
+    /// the produced rows back to back in selection order either way, so the offset walks the output
+    /// while the length is read at the row's own index.
     /// </param>
     /// <param name="heap">The decoded bytes, exactly tiled by the rows.</param>
     /// <param name="views">Exactly <paramref name="count"/> views of room; every byte is written.</param>
@@ -487,13 +463,13 @@ internal static class ViewKernels
 
         if (wanted.IsEmpty)
         {
-            // THE DENSE LOOP IS ITS OWN LOOP. `selective` is loop-invariant, and testing it per row
-            // cost a branch AND the `wanted[i]` bounds check on a path that has no `wanted` at all.
-            // The two spans are addressed by reference for the same reason: `heap.Slice` and
-            // `views.Slice` each built a span - a check and a two-field construction - per row, to
-            // hand WriteView a pointer it takes the reference of immediately.
+            // The dense loop is its own loop: `selective` is loop-invariant, and testing it per row
+            // would add a branch and a bounds check on a path that has no selection at all. The two
+            // spans are addressed by reference for the same reason: slicing them per row is a check
+            // and a span construction, handed to a method that takes the reference of each
+            // immediately.
             //
-            // The remaining per-row check is the one that is NOT redundant: `size` comes from the
+            // The remaining per-row check is the one that is not redundant: `size` comes from the
             // file, and the sum of the sizes is what the caller allocated the heap from, so a row
             // running past the end means the two disagree and the file is malformed.
             ReadOnlySpan<TLen> dense = typed[..count];
@@ -511,9 +487,9 @@ internal static class ViewKernels
 
                 ref byte value = ref Unsafe.Add(ref heapRef, offset);
 
-                // The whole heap is already known valid; a row is valid iff it starts on a
-                // code-point boundary. The row AFTER the last one ends at the heap's end, which is
-                // a boundary by construction, so only the starts are tested.
+                // The whole heap is already known valid, so a row is valid exactly when it starts
+                // on a code-point boundary. The last row ends at the heap's end, which is a
+                // boundary by construction, so only the starts are tested.
                 if (requireUtf8 && size != 0 && (value & 0xC0) == 0x80)
                 {
                     ThrowInvalidRow(i);
@@ -610,7 +586,7 @@ internal static class ViewKernels
     }
 
     /// <summary>
-    /// <see cref="BuildFromOffsets"/> for a SELECTION: one view per entry of
+    /// <see cref="BuildFromOffsets"/> for a selection: one view per entry of
     /// <paramref name="wanted"/>, cut at <c>offsets[w]..offsets[w + 1]</c>.
     /// </summary>
     /// <param name="offsets">
@@ -621,14 +597,13 @@ internal static class ViewKernels
     /// <param name="views">Exactly <c>wanted.Length</c> views of room; every byte is written.</param>
     /// <param name="wanted">Row indices into the node, strictly ascending.</param>
     /// <param name="requireUtf8">Whether the dtype is Utf8.</param>
-    /// <param name="mask">Validity of the SELECTED rows, indexed by position in
+    /// <param name="mask">Validity of the selected rows, indexed by position in
     /// <paramref name="wanted"/>.</param>
     /// <exception cref="VortexFormatException">A valid row is not valid UTF-8.</exception>
     /// <remarks>
-    /// THE WHOLE-HEAP UTF-8 SHORTCUT IS NOT AVAILABLE HERE and must not be borrowed: it is sound
-    /// only because every byte of the heap belongs to some row the loop then visits, and a
-    /// selection visits a few of them. The per-row `Utf8.IsValid` is what a take pays, on the bytes
-    /// it actually returns.
+    /// The whole-heap check is not available here and must not be borrowed: it is sound only
+    /// because every byte of the heap belongs to a row the loop then visits, and a selection visits
+    /// few of them. A take pays a per-row check instead, on the bytes it actually returns.
     /// </remarks>
     internal static void BuildFromOffsetsSelected(
         ReadOnlySpan<byte> offsets, PType ptype, ReadOnlySpan<byte> heap, Span<byte> views,
@@ -681,7 +656,7 @@ internal static class ViewKernels
 
             if (!allValid && !mask.IsValid(i))
             {
-                // BinaryView::empty_view(), written rather than inherited from the allocator.
+                // The empty view, written out rather than inherited from the allocator.
                 Unsafe.WriteUnaligned(ref view, 0UL);
                 Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), 0UL);
                 continue;
@@ -712,12 +687,12 @@ internal static class ViewKernels
         bool requireUtf8, bool wholeHeap, in ValidityMask mask)
         where TOff : unmanaged
     {
-        // Addressed by reference for the reason FromLengths documents: the two `Slice` calls were a
-        // bounds check and a span construction per row, handed to a method that takes the reference
-        // of each immediately. `offsets` is sliced once to the count+1 entries the caller promised,
-        // and the heap range is checked per row because the offsets come from the FILE - the
-        // ascending and in-heap properties were established by RequireAscending on the whole
-        // buffer, and this is the check that keeps that from being load-bearing here.
+        // Addressed by reference, so that slicing the heap and the views does not cost a bounds
+        // check and a span construction per row for a method that takes the reference of each
+        // immediately. `offsets` is sliced once to the count + 1 entries the caller promised, and
+        // the heap range is checked per row because the offsets come from the file: the ascending
+        // and in-heap properties are established elsewhere, and this check is what keeps them from
+        // being load-bearing here.
         ReadOnlySpan<TOff> typed = MemoryMarshal.Cast<byte, TOff>(offsets)[..(count + 1)];
         bool allValid = mask.AllValid;
         int start = (int)Widen(typed[0]);
@@ -733,7 +708,7 @@ internal static class ViewKernels
 
             if (!allValid && !mask.IsValid(i))
             {
-                // BinaryView::empty_view(), written rather than inherited from the allocator.
+                // The empty view, written out rather than inherited from the allocator.
                 Unsafe.WriteUnaligned(ref view, 0UL);
                 Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), 0UL);
                 start = end;
@@ -773,9 +748,8 @@ internal static class ViewKernels
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool Write(Span<byte> view, ReadOnlySpan<byte> value, int size, int offset) =>
 
-        // Two register stores, no memset and no Memmove. This was `view.Clear()` plus
-        // `WriteInlineView` - two out-of-line calls per row to move at most twelve bytes - and it
-        // was 78% of a 1M-row `vortex.parquet.variant` scan. See CanonicalSupport.WriteView.
+        // Two register stores, with neither a clear nor a move: at twelve bytes or fewer, an
+        // out-of-line call per row costs more than the bytes it writes.
         CanonicalSupport.WriteView(view, value, size, bufferIndex: 0, offset: offset);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

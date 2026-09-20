@@ -1,14 +1,3 @@
-// vortex.chunked - vortex-array-0.86.1/src/arrays/chunked/vtable/mod.rs `deserialize`, then the
-// encoding's `execute`, which canonicalizes by concatenating.
-//
-// Child 0 is a u64 chunk-offsets array of `nchunks + 1` entries and must be materialized BEFORE any
-// chunk can be decoded, because the chunks' lengths come out of it. Upstream then computes
-// `end - start` with an unchecked usize subtraction, so a non-monotone offsets array underflows
-// there into an enormous chunk length; every entry is therefore range-checked and the sequence
-// checked for monotonicity first (Phase 1 contract §9.3 step 3).
-//
-// A zero-length chunk is legal and appears in the corpus (encodings/chunked_empty_chunks: zero-row
-// chunks first, in the middle and last).
 using System;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
@@ -16,6 +5,11 @@ using Vorticity.Types;
 namespace Vorticity.Arrays.Decoders.Canonical;
 
 /// <summary>Decodes <c>vortex.chunked</c>: the concatenation of its chunks, canonicalized.</summary>
+/// <remarks>
+/// Child 0 is a <c>u64</c> array of one more offset than there are chunks, and it has to be
+/// materialized and validated before any chunk is decoded, since the chunks' lengths are the
+/// differences between its entries. A zero-length chunk is legal, wherever it sits.
+/// </remarks>
 public sealed class ChunkedDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
@@ -65,10 +59,9 @@ public sealed class ChunkedDecoder : ArrayDecoder
             Span<int> chunks = scratch.Span;
             ReadOnlySpan<byte> offsetBytes = offsets.Values.Span;
 
-            // The WHOLE offsets array is validated before a single chunk is decoded. Checking the
-            // last offset afterwards would be too late: `chunk_offsets = [0, 2^31 - 1]` on a
-            // two-row array would already have decoded a two-billion-row chunk before the mismatch
-            // was noticed.
+            // The whole offsets array is validated before a single chunk is decoded. Checking the
+            // last offset afterwards would be too late: offsets that end far past the declared row
+            // count would already have had an enormous chunk decoded from them.
             long previous = ReadOffset(offsetBytes, 0);
             if (previous != 0)
             {

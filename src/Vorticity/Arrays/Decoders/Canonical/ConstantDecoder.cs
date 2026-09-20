@@ -1,20 +1,14 @@
-// vortex.constant - vortex-array-0.86.1/src/arrays/constant/vtable/mod.rs `deserialize`.
-//
-// Phase 1 contract §0a C1 corrects spec/METADATA.md here: the metadata is EMPTY and the serialized
-// ScalarValue is BUFFER 0. Upstream names the parameter `_metadata` and reads the scalar from
-// `buffers[0]`, so the metadata is ignored rather than required-empty - rejecting a stray byte
-// there would reject a file upstream reads. This is the one exception to
-// EncodingMetadata.RequireEmpty, and it is deliberate.
-//
-// 494 of the 819 corpus files contain a constant node, because the compressor folds every constant
-// column and every all-valid or all-null validity array into one. The filling is done with
-// Span.Fill-style bulk writes and a null scalar short-circuits to AllInvalid over zeroed buffers.
 using System;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
 /// <summary>Decodes <c>vortex.constant</c>: one scalar, repeated.</summary>
+/// <remarks>
+/// The serialized scalar is the node's only buffer, and the node's metadata is ignored rather than
+/// required to be empty: writers leave bytes there, and refusing them would refuse files that are
+/// otherwise readable. This is the one encoding whose metadata is not checked.
+/// </remarks>
 public sealed class ConstantDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
@@ -41,7 +35,7 @@ public sealed class ConstantDecoder : ArrayDecoder
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        // Exactly one buffer, and it is the scalar. `node.Metadata` is NOT read: see the header.
+        // Exactly one buffer, and it is the scalar; the node's metadata is deliberately not read.
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
 
         TypedScalar scalar = TypedScalarReader.Read(
@@ -54,10 +48,9 @@ public sealed class ConstantDecoder : ArrayDecoder
     /// Every row is the same value, so selecting rows only changes how many are built.
     /// </summary>
     /// <remarks>
-    /// The take table calls this one "pointwise, trivial" and it is: the selection's only effect is
-    /// its length. Worth having anyway - a constant column is what a compressor produces from a
-    /// degenerate one, so it is common, and building 65 536 copies to keep 64 is the exact shape of
-    /// waste this whole path exists to remove.
+    /// The selection's only effect is its length. It is worth overriding anyway: a constant column
+    /// is what a compressor makes of a degenerate one, so it is common, and building a whole batch
+    /// of copies to keep a handful of rows is the waste this path exists to remove.
     /// </remarks>
     public override int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,

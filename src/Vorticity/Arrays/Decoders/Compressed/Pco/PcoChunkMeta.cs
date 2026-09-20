@@ -1,13 +1,3 @@
-// pco chunk metadata - pco-1.0.3/src/metadata/{chunk,mode,delta_encoding,chunk_latent_var,bin}.rs.
-//
-// One continuous bit stream, LSB first, with NO alignment between sections: upstream's
-// `BitReaderBuilder::with_reader` hands out a fresh reader per section but carries the bit index
-// across, so the format version's two aligned bytes are the only byte-aligned thing here.
-//
-// The shape is: a format version, a mode, a delta encoding, then one latent-variable table per
-// latent the mode and delta encoding say exist - optionally delta, then primary, then optionally
-// secondary. Each table is an ANS size and a list of bins, and each bin is a weight, a lower bound
-// and a count of offset bits.
 using System;
 
 namespace Vorticity.Arrays.Decoders.Compressed.Pco;
@@ -51,11 +41,16 @@ internal readonly record struct PcoBin(uint Weight, ulong Lower, int OffsetBits)
 /// <param name="AnsSizeLog">Log2 of the ANS table size; zero when there is a single bin.</param>
 /// <param name="Bins">The bins, in wire order.</param>
 /// <param name="Table">
-/// The tANS decoding table for these bins, built ONCE PER CHUNK.
+/// The tANS decoding table for these bins, built once per chunk.
 /// </param>
 internal readonly record struct PcoLatentVar(int AnsSizeLog, PcoBin[] Bins, PcoAnsTable Table);
 
-/// <summary>A pco chunk's metadata.</summary>
+/// <summary>
+/// A pco chunk's metadata: a format version, a mode, a delta encoding, then one latent-variable
+/// table for each latent the mode and delta encoding imply, each table an ANS size and a list of
+/// bins. It is one continuous bit stream with no alignment between sections, so the format
+/// version's leading bytes are the only byte-aligned part of it.
+/// </summary>
 internal sealed class PcoChunkMeta
 {
     private const int ModeVariantBits = 4;
@@ -260,12 +255,11 @@ internal sealed class PcoChunkMeta
             bins[i] = new PcoBin(weight, lower, offsetBits);
         }
 
-        // THE TABLE IS A PROPERTY OF THE CHUNK, NOT OF A PAGE, and it used to be rebuilt for every
-        // page of every latent variable: `dotnet-trace` put `PcoAnsTable.Build` at 83.7% of a
-        // 1M-row `vortex.pco` scan. It spreads up to 16 384 symbols across the table and walks
-        // every slot, which is a fixed cost per build and therefore entirely wasted when the bins
-        // it is built from have not changed. Building it here ties it to the metadata it actually
-        // depends on. The table is immutable, so sharing it across pages needs no copy.
+        // The table is a property of the chunk and not of a page, so it is built here, with the
+        // metadata it depends on. Building it spreads every symbol across the table and walks
+        // every slot, a cost that does not shrink with the page, so rebuilding it per page would
+        // dominate a scan for no change in the result. The table is immutable, so sharing it
+        // across pages needs no copy.
         return new PcoLatentVar(ansSizeLog, bins, PcoAnsTable.Build(ansSizeLog, bins));
     }
 

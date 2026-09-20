@@ -1,10 +1,3 @@
-// Builds a canonical node of a given dtype whose every byte is zero: the shape an all-null column
-// takes, and the shape a zero-row array takes. `vortex.constant` with a null scalar and the
-// zero-chunk case of `vortex.chunked` both land here.
-//
-// It is recursive over the dtype, not over any file data, so its depth is the dtype's depth and is
-// already bounded by VortexLimits.MaxDTypeDepth at parse time; the explicit budget below is belt
-// and braces.
 using System;
 using Vorticity.Buffers;
 using Vorticity.Types;
@@ -13,6 +6,10 @@ using Vorticity.Types.Numerics;
 namespace Vorticity.Arrays.Decoders.Canonical;
 
 /// <summary>Zero-filled canonical nodes, for all-null and zero-row arrays.</summary>
+/// <remarks>
+/// The recursion walks the dtype rather than any file data, so its depth is the dtype's depth,
+/// which parsing has already bounded; the depth budget here is a second guard.
+/// </remarks>
 internal static class CanonicalFill
 {
     private const int Align = CanonicalSupport.MaxRequiredAlignment;
@@ -79,7 +76,7 @@ internal static class CanonicalFill
             case DTypeKind.Utf8:
             case DTypeKind.Binary:
             {
-                // A zeroed view is BinaryView::empty_view(), so no data buffer is needed at all.
+                // A zeroed view is the empty view, so no data buffer is needed at all.
                 int bytes = ArrayDecodeContext.CheckedMultiply(
                     length, CanonicalSupport.ViewSize, "views");
                 VortexBuffer views = CanonicalSupport.Allocate(context, bytes, CanonicalSupport.ViewSize);

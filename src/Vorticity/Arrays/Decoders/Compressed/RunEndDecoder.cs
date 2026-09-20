@@ -1,18 +1,15 @@
-// vortex.runend - vortex-runend-0.86.1/src/array.rs (`validate_parts`, `run_end_canonicalize`)
-// and src/compress.rs (`runend_decode_slice`, `trimmed_ends_iter`).
-//
-// Exactly two children and no buffers: ends and values, both `num_runs` long. Row r of the output
-// takes the value of the first run whose (end - offset) exceeds r. Upstream only `debug_assert`s
-// that the ends are strictly increasing and its `take` binary-searches them, so this is a hard
-// check here; `num_runs` and `offset` are u64 and upstream converts them with `vortex_expect`,
-// which is a panic - here they are checked narrowings.
 using System;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
-/// <summary>Decodes <c>vortex.runend</c> by expanding each run over its rows.</summary>
+/// <summary>
+/// Decodes <c>vortex.runend</c> by expanding each run over its rows. The node has no buffers and
+/// exactly two children, the run ends and the run values, both one entry per run; row r takes the
+/// value of the first run whose offset-adjusted end is above r. That the ends strictly increase is
+/// a hard check here rather than an assumption, because the search a take does relies on it.
+/// </summary>
 public sealed class RunEndDecoder : ArrayDecoder
 {
     private const string Id = "vortex.runend";
@@ -40,27 +37,16 @@ public sealed class RunEndDecoder : ArrayDecoder
     /// Binary-searches each wanted row to its run instead of expanding every run.
     /// </summary>
     /// <remarks>
-    /// The `vortex.runend` row of the take table: "binary search in `ends`". The ends and values
-    /// children are one entry per RUN, so they are decoded whole - ~~that is not the expensive
-    /// part~~; the expansion to one value per ROW is, and it is what this skips.
-    ///
-    /// The search is over the ends MINUS the offset, which is the same space `length` and the
-    /// wanted rows live in, so a sliced run-end array needs no separate translation.
-    ///
-    /// MEASURED 2026-09-14, AND THE STRUCK-OUT CLAUSE IS TRUE PER CALL AND FALSE IN AGGREGATE. It
-    /// compares one decode of the children against one expansion, and on that comparison it is
-    /// right. But the caller is `FlatLayoutReader`, which serves a take one BATCH at a time: counted
-    /// on the 1M-row axis, this method ran 37 056 times for 37 056 wanted rows - one row each - and
-    /// re-did everything above the gather every time, for 15 625 runs. A take of 64 rows costs
-    /// 1 584 µs where a full scan of the same file costs 205: SEVEN AND A HALF SCANS for 64 rows.
-    ///
-    /// WHAT REPEATS IS THE CHECKING, NOT THE DECODING, and that took a probe to establish rather
-    /// than a reading. Memoizing the two children across batches hit 98.4% of the time and moved the
-    /// clock by NOTHING. Short-circuiting `ValidateEnds` on this path instead took the same take from
-    /// 1 086 µs to 72 - `6.99` to `0.72`, so NINETY-THREE PER CENT of a selective run-end take is one
-    /// O(num_runs) monotonicity walk, re-run for every batch over a property of the NODE that cannot
-    /// change between them. Hoisting the verdict is v2 R26; it costs a bit, where memoizing the
-    /// decode cost an arena and bought nothing.
+    /// The ends and values children are one entry per run, so they are decoded whole; what this
+    /// skips is the expansion to one value per row. The search is over the ends minus the offset,
+    /// which is the space the wanted rows already live in, so a sliced run-end array needs no
+    /// separate translation.
+    /// <para>
+    /// A take is served one batch at a time, so this method runs once per batch over the same node.
+    /// What repeats then is not the decoding of the two children but the monotonicity walk over the
+    /// ends, which is a property of the node and cannot change between batches, so its verdict is
+    /// remembered rather than recomputed.
+    /// </para>
     /// </remarks>
     public override int DecodeSelected(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
@@ -79,7 +65,8 @@ public sealed class RunEndDecoder : ArrayDecoder
 
         RunEndMetadata metadata = RunEndMetadata.Read(node.Metadata);
 
-        // Class I: the ends ptype is the stride the run-end buffer is read at.
+        // The ends ptype is the stride the run-end buffer is read at, so it has to be checked
+        // before anything indexes with it.
         if (!metadata.EndsPType.IsUnsignedInteger())
         {
             CompressedThrow.Format(
@@ -105,8 +92,8 @@ public sealed class RunEndDecoder : ArrayDecoder
 
         if (runCount == 0)
         {
-            // "non-zero offset provided for empty RunEndArray", and with no runs there is nothing
-            // to expand, so the array must be empty too.
+            // With no runs there is nothing to expand, so the array must be empty and its offset
+            // zero.
             if (offset != 0)
             {
                 CompressedThrow.Format($"{Id} has no runs but a non-zero offset of {offset}.");
@@ -118,10 +105,9 @@ public sealed class RunEndDecoder : ArrayDecoder
             }
         }
 
-        // ONCE PER NODE PER SCAN, not once per batch. The ends belong to the node and cannot change
-        // between two batches of it, so the walk is a question already answered -- see
-        // `ArrayDecodeContext.IsNodeChecked`, which answers false outside a take on an oversized
-        // node and therefore leaves every other path walking exactly as before.
+        // Once per node per scan, not once per batch: the ends belong to the node and cannot change
+        // between two batches of it, so the walk is a question already answered. The context only
+        // remembers the verdict for a take over an oversized node, so every other path still walks.
         if (!context.IsNodeChecked(in node))
         {
             ValidateEnds(ends, metadata.EndsPType, runCount, offset, length);
@@ -142,24 +128,22 @@ public sealed class RunEndDecoder : ArrayDecoder
             context.Canonical, in values, false, default);
         try
         {
-            // UNINITIALIZED, AND THE LOOP BELOW IS THE PROOF: `position` starts at 0, every
-            // iteration writes exactly [position, endRow) and then sets position = endRow, so the
-            // written rows are contiguous from 0 with no gap -- and the `position != length` check
-            // after the loop turns "did not reach the end" into a format error rather than a
-            // buffer holding whatever the pool last put there. Zero-filling 4 MB that `Repeat`
-            // overwrites in full was 10% of a 1M-row run-end scan.
+            // The buffer is left uninitialized and the loop below is the proof: `position` starts
+            // at 0, every iteration writes exactly [position, endRow) and then sets position to
+            // endRow, so the written rows are contiguous from 0 with no gap, and the check after
+            // the loop turns "did not reach the end" into a format error rather than a buffer
+            // holding whatever the pool last put there. Zero-filling first would be a whole pass
+            // that the expansion immediately overwrites.
             ValueWriter writer = ValueWriter.CreateUninitialized(context, in values, length, 0, Id);
             ValidityWriter validity = ValidityWriter.Create(context, length, tracked, Id);
 
             ulong unsignedOffset = (ulong)offset;
             ulong unsignedLength = (ulong)(uint)length;
 
-            // PERF-AUDIT-v2.md R29. The loop below is correct and stays; what it cannot do is stop
-            // paying, once per run, for two answers that hold for the whole node -- the ends'
-            // physical type and the value width. `RepeatRuns` resolves both once and runs the same
-            // loop typed; it returns -1 for the shapes it has no kernel for, and those still walk
-            // here. R22 measured what that per-run resolution costs on the 1M axis: 32,8 % of the
-            // scan in fixed cost, against 27 % of actual filling.
+            // The general loop below is correct and stays, but it pays once per run for two answers
+            // that hold for the whole node: the ends' physical type and the value width.
+            // `RepeatRuns` resolves both once and runs the same loop typed, returning -1 for the
+            // shapes it has no kernel for, which then walk here.
             int position = writer.RepeatRuns(
                 in values, ends, metadata.EndsPType, runCount, unsignedOffset, length,
                 in valuesValidity, in validity, tracked);

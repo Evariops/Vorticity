@@ -1,17 +1,15 @@
-// vortex.fixed_size_list - vortex-array-0.86.1/src/arrays/fixed_size_list/vtable/mod.rs
-// `deserialize`. Phase 1 contract §9.1: child 0 is the elements, of length `n * list_size`, and an
-// optional validity child at index 1.
-//
-// Two traps. `list_size` is a u32 in the dtype, so `n * list_size` is an unchecked multiply
-// upstream and goes through CheckedMultiply here. And `list_size == 0` is legal: upstream
-// special-cases it because `elements.len() / 0` is undefined, so nothing here divides by it.
 using System;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
-/// <summary>Decodes <c>vortex.fixed_size_list</c>: positional groups over an elements child.</summary>
+/// <summary>
+/// Decodes <c>vortex.fixed_size_list</c>: positional groups over an elements child of
+/// <c>length * list_size</c> values, with an optional validity child after it. The list size is a
+/// <c>u32</c>, so the product is checked for overflow; a list size of zero is legal, so nothing
+/// here divides by it.
+/// </summary>
 public sealed class FixedSizeListDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
