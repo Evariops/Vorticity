@@ -656,7 +656,7 @@ internal static class ThroughputCheck
         new("dict", 0.96, 0.037),   // 3 passes, spread 0.94-0.98; HELD at 0.96: 2 of 3 passes above, peak 0.98, no loosening
         new("dict_nullable_codes", 0.67, 0.018),   // 3 passes, spread 0.66-0.67; was 0.73, -7.8%
         new("dict_nullable_values_nonnull_codes", 0.79, 0.012),   // 3 passes, spread 0.78-0.79; was 0.79, -0.5%
-        new("dict_u64_codes", 0.83, 0.016),   // 3 passes, spread 1.10-1.11; HELD at 0.83: 3 of 3 passes above, peak 1.11, no loosening
+        new("dict_u64_codes", 1.08, 0.044),   // raised deliberately: our read of the file measured unchanged since 0.83 was set; the reference's time moved
         new("dict_u8_codes", 0.93, 0.008),   // 3 passes, spread 0.93-0.93; HELD at 0.93: 2 of 3 passes above, peak 0.93, no loosening
         new("ext", 0.25, 0.150),   // 3 passes, spread 0.21-0.25; was 0.25, -1.6%
         new("fastlanes_bitpacked", 1.20, 0.022),   // 3 passes, spread 1.18-1.20; was 1.24, -3.0%
