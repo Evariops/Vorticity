@@ -94,6 +94,5 @@ public readonly struct CoalescedRun : IEquatable<CoalescedRun>
         throw new ArgumentOutOfRangeException(
             nameof(start),
             start,
-            $"A coalesced run must start on a {VortexLimits.MaxAlignment}-byte boundary " +
-            "(PHASE1-CONTRACTS.md §5.4).");
+            $"A coalesced run must start on a {VortexLimits.MaxAlignment}-byte boundary.");
 }

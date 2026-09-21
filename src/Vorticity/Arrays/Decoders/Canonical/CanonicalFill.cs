@@ -25,7 +25,7 @@ internal static class CanonicalFill
     /// <param name="validity">The validity the result carries.</param>
     /// <returns>The new canonical node's index.</returns>
     /// <exception cref="VortexFormatException">
-    /// <paramref name="dtype"/> is a Map, Union or Variant, which Phase 1 does not canonicalize.
+    /// <paramref name="dtype"/> is a Map, Union or Variant, which have no zeroed canonical form.
     /// </exception>
     internal static int BuildZeroed(
         ArrayDecodeContext context, DType dtype, int length, Validity validity) =>
@@ -116,7 +116,7 @@ internal static class CanonicalFill
 
             default:
                 throw new VortexFormatException(
-                    $"Phase 1 has no canonical form for a {dtype.Kind} dtype.");
+                    $"There is no zeroed canonical form for a {dtype.Kind} dtype.");
         }
     }
 

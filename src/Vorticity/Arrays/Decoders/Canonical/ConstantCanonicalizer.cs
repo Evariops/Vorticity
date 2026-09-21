@@ -128,7 +128,7 @@ internal static class ConstantCanonicalizer
 
             default:
                 throw new VortexFormatException(
-                    $"Phase 1 has no canonical form for a {dtype.Kind} dtype.");
+                    $"There is no canonical form for a constant {dtype.Kind} column.");
         }
     }
 

@@ -745,5 +745,5 @@ public static class TypedScalarReader
         throw new VortexUnsupportedException(
             id,
             VortexComponentKind.DType,
-            "Phase 1 models no canonical form for this dtype.");
+            "This dtype has no typed scalar form.");
 }

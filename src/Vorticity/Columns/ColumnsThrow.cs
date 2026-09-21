@@ -62,8 +62,7 @@ internal static class ColumnsThrow
     internal static void WrongElementType(PType actual, Type requested) =>
         throw new InvalidOperationException(
             $"This column holds {actual.Name()}; AsPrimitive<{requested.Name}>() requires the " +
-            "exactly matching .NET type. Reinterpreting one width as another is the caller's job " +
-            "(Phase 1 contract §12.3).");
+            "exactly matching .NET type. Reinterpreting one width as another is the caller's job.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     [DoesNotReturn]
