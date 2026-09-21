@@ -372,6 +372,22 @@ public sealed class RecordBatch : IDisposable
         return new RecordBatch(_arena, root, _startRow + start);
     }
 
+    /// <summary>
+    /// The same rows and selection, counted from <paramref name="startRow"/>: for a reader that
+    /// delivers several files as one sequence of rows, each of which counts its own from zero.
+    /// </summary>
+    /// <param name="startRow">The row of the whole that row 0 of this batch is.</param>
+    /// <returns>A view in this batch's arena, valid as long as this batch; disposing it releases nothing.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="startRow"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
+    internal RecordBatch Rebased(long startRow)
+    {
+        ThrowIfDisposed();
+        RecordBatch view = new RecordBatch(_arena, _root, startRow) { _publicSchema = _publicSchema, Session = Session };
+        view.Select(_selection, _selected);
+        return view;
+    }
+
     /// <summary>A batch over the same rows holding only the columns <paramref name="projection"/> names.</summary>
     /// <param name="projection">
     /// The columns, compiled against <em>this batch's</em> schema with <see cref="Projection.Parse"/>.
