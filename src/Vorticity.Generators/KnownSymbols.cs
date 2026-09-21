@@ -13,6 +13,17 @@ internal sealed class KnownSymbols
         RecordInterface = compilation.GetTypeByMetadataName("Vorticity.IVortexRecord`1");
         ExtensionInterface = compilation.GetTypeByMetadataName("Vorticity.IVortexExtension`1");
         VortexDecimal = compilation.GetTypeByMetadataName("Vorticity.VortexDecimal");
+        Column = compilation.GetTypeByMetadataName("Vorticity.Column`1");
+        Columns = compilation.GetTypeByMetadataName("Vorticity.Columns`1");
+        BatchView = compilation.GetTypeByMetadataName("Vorticity.BatchView");
+        Selection = compilation.GetTypeByMetadataName("Vorticity.Selection");
+        DictionaryView = compilation.GetTypeByMetadataName("Vorticity.DictionaryView`1");
+        RunEndView = compilation.GetTypeByMetadataName("Vorticity.RunEndView`1");
+        RecordBatch = compilation.GetTypeByMetadataName("Vorticity.RecordBatch");
+        TypedScan = compilation.GetTypeByMetadataName("Vorticity.Scan`1");
+        ToolScan = compilation.GetTypeByMetadataName("Vorticity.Scan");
+        FilterHandler = compilation.GetTypeByMetadataName("Vorticity.FilterHandler");
+        RowRange = compilation.GetTypeByMetadataName("Vorticity.RowRange");
         Half = compilation.GetTypeByMetadataName("System.Half");
         DateOnly = compilation.GetTypeByMetadataName("System.DateOnly");
         TimeOnly = compilation.GetTypeByMetadataName("System.TimeOnly");
@@ -20,6 +31,8 @@ internal sealed class KnownSymbols
         Guid = compilation.GetTypeByMetadataName("System.Guid");
         ReadOnlyMemory = compilation.GetTypeByMetadataName("System.ReadOnlyMemory`1");
         Memory = compilation.GetTypeByMetadataName("System.Memory`1");
+        Span = compilation.GetTypeByMetadataName("System.Span`1");
+        ReadOnlySpan = compilation.GetTypeByMetadataName("System.ReadOnlySpan`1");
     }
 
     public INamedTypeSymbol? RecordAttribute { get; }
@@ -34,6 +47,28 @@ internal sealed class KnownSymbols
 
     public INamedTypeSymbol? VortexDecimal { get; }
 
+    public INamedTypeSymbol? Column { get; }
+
+    public INamedTypeSymbol? Columns { get; }
+
+    public INamedTypeSymbol? BatchView { get; }
+
+    public INamedTypeSymbol? Selection { get; }
+
+    public INamedTypeSymbol? DictionaryView { get; }
+
+    public INamedTypeSymbol? RunEndView { get; }
+
+    public INamedTypeSymbol? RecordBatch { get; }
+
+    public INamedTypeSymbol? TypedScan { get; }
+
+    public INamedTypeSymbol? ToolScan { get; }
+
+    public INamedTypeSymbol? FilterHandler { get; }
+
+    public INamedTypeSymbol? RowRange { get; }
+
     public INamedTypeSymbol? Half { get; }
 
     public INamedTypeSymbol? DateOnly { get; }
@@ -47,6 +82,10 @@ internal sealed class KnownSymbols
     public INamedTypeSymbol? ReadOnlyMemory { get; }
 
     public INamedTypeSymbol? Memory { get; }
+
+    public INamedTypeSymbol? Span { get; }
+
+    public INamedTypeSymbol? ReadOnlySpan { get; }
 
     public static bool Is(ITypeSymbol? type, INamedTypeSymbol? known) =>
         type is not null && known is not null && SymbolEqualityComparer.Default.Equals(type.OriginalDefinition, known);
