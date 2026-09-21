@@ -1,6 +1,6 @@
 // Small self-contained helpers: a recorded PRNG, base64, hex, SHA-256 of a file.
 //
-// The PRNG is hand-rolled on purpose. The corpus contract in docs/04-conformance.md §3 is that
+// The PRNG is hand-rolled on purpose. The corpus contract is that
 // two runs produce byte-identical files, which means the random stream must be reproducible
 // across machines *and* across dependency updates. A crates.io RNG can change its stream in a
 // minor version without breaking semver; sixteen lines of SplitMix64 cannot.

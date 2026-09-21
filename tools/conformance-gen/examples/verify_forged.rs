@@ -1,8 +1,8 @@
 //! Checks that the forged fixture set behaves the way its manifest claims.
 //!
 //! `tests/Vorticity.Conformance/forged/manifest.json` states three expectations for
-//! `negative/unknown_encoding_id`, and they are the whole reason the fixture exists
-//! (docs/04-conformance.md §6). An unvalidated expectation in a manifest is worse than none, so
+//! `negative/unknown_encoding_id`, and they are the whole reason the fixture exists.
+//! An unvalidated expectation in a manifest is worse than none, so
 //! this example asserts all three against the Rust reader — the same reader the .NET side is being
 //! held to.
 //!

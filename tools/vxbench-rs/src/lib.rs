@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Vortex's Rust reader behind a C ABI, so docs/05-benchmarks.md §2 can happen: both
+// Vortex's Rust reader behind a C ABI, so the benchmarks can compare the right way: both
 // implementations measured IN ONE PROCESS, on the same bytes, with the same clock and the same
 // page-cache state. Cross-process comparison is what makes a 1.4x ratio unreadable.
 //
-// WHY THIS IS NOT `vortex-ffi`. §2 originally named it, but `vortex-ffi` is `publish = false`
+// WHY THIS IS NOT `vortex-ffi`. The design once named it, but `vortex-ffi` is `publish = false`
 // upstream, so using it would mean a second git dependency; and it is a general-purpose C API with
 // its own object model, whose per-call overhead would land inside the measurement. A shim built
 // against the same crates.io pin the corpus was generated with (`vortex = "=0.86.1"`) measures the
 // scan path and nothing else, which is the thing being compared.
 //
 // SINGLE-THREADED ON PURPOSE. `vortex::io::runtime::single::block_on` is the one-thread runtime,
-// matching our own reader, which has no worker pool. §5 requires the thread count to be pinned on
+// matching our own reader, which has no worker pool. The thread count has to be pinned on
 // both sides - otherwise the ratio measures a threading-model difference rather than
 // implementation quality.
 //
@@ -65,7 +65,7 @@ const ERR_FAILED: i64 = -2;
 /// The reader panicked. Reported rather than allowed to unwind across the ABI, which is UB.
 const ERR_PANIC: i64 = -3;
 
-/// The empty call: the FFI floor, so it can be subtracted when it matters (docs/05 §2).
+/// The empty call: the FFI floor, so it can be subtracted when it matters.
 ///
 /// # Safety
 /// None; takes and returns nothing.
@@ -164,10 +164,10 @@ pub unsafe extern "C" fn vxbench_scan_canonical(path: *const c_char) -> i64 {
 
 /// Scans `path` canonically on upstream's multi-threaded runtime with exactly `threads` workers.
 ///
-/// THE CONTENTION FAMILY HAD NO NUMBER AT ALL (BENCH-AUDIT.md D2, PERF-AUDIT-v2.md §7). Our reader
+/// THE CONTENTION FAMILY HAD NO NUMBER AT ALL. Our reader
 /// has `WithDegreeOfParallelism` and nothing measured it; the reference side was single-threaded by
 /// construction here, so a ratio at more than one lane could not exist. It can now, and the thread
-/// count is PINNED on both sides -- docs/05 §5's rule -- because a ratio between an `n`-lane reader
+/// count is PINNED on both sides, because a ratio between an `n`-lane reader
 /// and a reference free to use every core measures a threading model, not a decoder.
 ///
 /// `threads = 1` is NOT the same measurement as `vxbench_scan_canonical`: this one still hands the
@@ -306,7 +306,7 @@ pub unsafe extern "C" fn vxbench_open_first_batch(path: *const c_char) -> i64 {
 
 /// Reads `path` and WRITES it back out with the default strategy, returning the rows written.
 ///
-/// THE WRITE AXIS HAD NO REFERENCE AT ALL. `docs/05-benchmarks.md` compares reading against Vortex
+/// THE WRITE AXIS HAD NO REFERENCE AT ALL. The benchmark design compares reading against Vortex
 /// Rust on five axes and writing against nothing, so every write-side change in this repository has
 /// been measured against its own past and never against the implementation it is a port of. The
 /// read is included in the measurement on BOTH sides -- it is the same file and the same reader, so
@@ -339,7 +339,7 @@ pub unsafe extern "C" fn vxbench_write(path: *const c_char) -> i64 {
 
 /// Takes `count` rows of `path`, one every `stride`, canonicalizing, and counts them.
 ///
-/// THE TAKE AXIS HAD NO REFERENCE. docs/05's take figure was "0.32x of a full scan", which is a
+/// THE TAKE AXIS HAD NO REFERENCE. Our take figure was "0.32x of a full scan", which is a
 /// ratio against ourselves and says nothing about whether the path is fast. The indices are a
 /// stride rather than a list so the same call describes a scattered take of any density without
 /// marshalling an array across the ABI -- the .NET side's `TakeBenchmarks` uses exactly this shape,
@@ -382,7 +382,7 @@ pub unsafe extern "C" fn vxbench_take(path: *const c_char, count: i64, stride: i
 
 /// Scans `path` under `field >= lo AND field < lo + width`, canonicalizing, and counts the rows.
 ///
-/// THE FILTER AXIS HAD NO REFERENCE EITHER. `bench/BRANCHING.md` priced the comparison kernel's
+/// THE FILTER AXIS HAD NO REFERENCE EITHER. A branching study priced the comparison kernel's
 /// remedy at 6.0x and `FilterSelectivityBenchmarks` measured the whole path at four selectivities,
 /// but nothing said whether 230 microseconds for a 1% band was good, bad or indifferent -- the
 /// reference had no filter entry point to ask.
@@ -761,7 +761,7 @@ pub unsafe extern "C" fn vxbench_batch_count(path: *const c_char) -> i64 {
 /// Decodes the C string, runs the body on the shared session, and turns every failure mode -
 /// including a panic, which must never unwind across the ABI - into a negative return.
 ///
-/// THE ERROR IS PRINTED BEFORE IT IS FLATTENED, and BENCH-AUDIT.md B14 is why. An i64 can carry
+/// THE ERROR IS PRINTED BEFORE IT IS FLATTENED. An i64 can carry
 /// "it failed" across the ABI and nothing more, so discarding the `VortexError` left the .NET side
 /// with a message it had invented -- "the Rust reader returned an error" -- and no way to learn
 /// which call, which encoding, or what the reference actually refused. One `eprintln!` is the

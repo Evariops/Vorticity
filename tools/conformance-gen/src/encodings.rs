@@ -1,11 +1,11 @@
 //! Dimension B — one file per array encoding, with that encoding *forced*.
 //!
-//! docs/04-conformance.md §3 wants "each target encoding, forced individually … so that a single
+//! The corpus matrix wants "each target encoding, forced individually … so that a single
 //! encoding is exercised in isolation rather than whichever one sampling happens to pick".
 //!
 //! A compressor allowlist cannot deliver that. `vortex-compressor` "compresses with the best
 //! scheme and verifies the result is smaller" (`compressor/mod.rs:34`), so restricting the scheme
-//! set makes an encoding *possible*, never *guaranteed* — API-NOTES.md §3.0 demonstrates a
+//! set makes an encoding *possible*, never *guaranteed* — API-NOTES.md demonstrates a
 //! FoR-only configuration that produced no FoR at all on 64 rows.
 //!
 //! So every case here builds the array *already in the target encoding* and the caller writes it
@@ -165,7 +165,7 @@ fn b_struct(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
 
 /// A table the compressor sees as a table: integers, floats, timestamps and strings together.
 ///
-/// BENCH-AUDIT.md B6 / D3: every ratio in this repository is measured on ONE file of 65 536 rows
+/// The gap this fills: every ratio in this repository is measured on ONE file of 65 536 rows
 /// and five columns, or on single-encoding files of a million. Neither is what a reader meets. This
 /// is the mixture -- a monotone key, a high-cardinality measure, a low-cardinality label, a price
 /// and a timestamp -- at a million rows, so the compressor makes five different decisions in one
@@ -208,8 +208,8 @@ fn b_table_mixed(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
 
 /// Fifty columns, so a projection can keep one of fifty.
 ///
-/// docs/05 §3 describes the projection axis as "1 column of 50" and the only file it could run on
-/// had five (BENCH-AUDIT.md B6). Keeping one column of fifty is a different question from keeping
+/// The benchmark design describes the projection axis as "1 column of 50" and the only file it
+/// could run on had five. Keeping one column of fifty is a different question from keeping
 /// one of five: it is mostly about how much of the layout tree a reader walks to decide it does not
 /// need a column, and that cost does not show at all at five.
 fn b_table_wide(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
@@ -314,7 +314,7 @@ fn b_chunked(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
 
 /// A `vortex.chunked` whose chunks are Bool, so `ConcatBool` has a file to be read from.
 ///
-/// PERF-AUDIT-v2.md F1. `b_chunked` and its two degenerate siblings are all `PrimitiveArray<i64>`
+/// `b_chunked` and its two degenerate siblings are all `PrimitiveArray<i64>`
 /// `NonNullable`, so the only concatenation path any corpus file exercised was `ConcatPrimitive` --
 /// the one path that borrows adjacent chunks instead of copying. The other four were reachable only
 /// from unit tests, which is a correctness gap before it is a performance one.
@@ -334,7 +334,7 @@ fn b_chunked_bool(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
 
 /// Chunks that represent their validity differently, which is what `ConcatValidity` is for.
 ///
-/// NOT "CHUNKS THAT DISAGREE ABOUT NULLABILITY", which PERF-AUDIT-v2.md F1 asked for and which the
+/// NOT "CHUNKS THAT DISAGREE ABOUT NULLABILITY", which was once asked for and which the
 /// format cannot express: `ChunkedArray::try_new` requires one dtype across the chunks and
 /// nullability is part of a dtype, so a `NonNullable` chunk beside an `AllValid` one is rejected
 /// with "expected type: i64 but instead got i64?". The dtype here is `i64?` throughout.
@@ -591,7 +591,7 @@ fn b_zstd(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
 
 /// A `vortex.zstd` over a NULLABLE PRIMITIVE column, which is the shape its scatter is for.
 ///
-/// PERF-AUDIT-v2.md R3b. The existing `zstd` case is a `VarBinView`, so it exercises
+/// The existing `zstd` case is a `VarBinView`, so it exercises
 /// `ZstdDecoder.BuildViews`; and `zstd_buffers` is non-nullable, so `ZstdDecoder.Scatter` returns
 /// early on `mask.AllValid` and its loop -- the one the point is about -- runs on no corpus file at
 /// all. Nulls every seventh row, so the compact-to-sparse expansion has real gaps to walk.
@@ -670,7 +670,7 @@ fn b_parquet_variant(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
     )
 }
 
-/// Every array encoding docs/90-registry.md claims, one case each.
+/// Every array encoding the registry claims, one case each.
 ///
 /// Two ids from the registry are deliberately absent and are reported as skips instead:
 ///
@@ -1053,10 +1053,10 @@ pub fn encoding_cases() -> Vec<EncodingCase> {
         },
         // --- ids that belong to no core edition -------------------------------------------
         // Both are reachable only with `disable_editions()`. They are NOT 1.0 conformance
-        // targets — docs/90-registry.md puts `fastlanes.delta` in no edition at all and defers
+        // targets — the registry puts `fastlanes.delta` in no edition at all and defers
         // `vortex.zstd_buffers` to 1.1 — but "no core edition contains it" is not the same
         // claim as "this release cannot write one", and the corpus should not assert the
-        // stronger one. They are the fixtures docs/04-conformance.md §6 needs: a structurally
+        // stronger one. They are the fixtures the forward-compatibility tests need: a structurally
         // valid file carrying an encoding a conformant reader may legitimately not know.
         EncodingCase {
             id: "fastlanes_delta",
@@ -1122,7 +1122,7 @@ fn b_zstd_buffers(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef
 
 /// A `vortex.bool` whose bits start `offset` bits into their buffer.
 ///
-/// docs/90-registry.md names the bit offset as the distinguishing feature of `vortex.bool`, and
+/// The registry names the bit offset as the distinguishing feature of `vortex.bool`, and
 /// the reader applies it as a *bit* index (`BoolData::try_new_from_handle`,
 /// vortex-array-0.86.1/src/arrays/bool/vtable/mod.rs:187). Through corpus format/1 every bool
 /// array and every bool validity child had `metadata_len == 0` — a protobuf field equal to zero is

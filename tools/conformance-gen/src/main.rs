@@ -1,6 +1,6 @@
 //! Golden corpus generator for Vorticity conformance tests.
 //!
-//! docs/04-conformance.md states the problem this crate exists to solve: an implementation that
+//! The conformance strategy states the problem this crate exists to solve: an implementation that
 //! only tests against itself proves nothing, because a round trip through our own writer and
 //! reader is self-consistent and can be uniformly wrong. Everything must be anchored to files
 //! produced by the Rust reference implementation. This binary produces them, plus an
@@ -605,7 +605,7 @@ fn report(
     println!("  skips:  {}", skips.len());
 
     println!("\n=== coverage ===");
-    // The gate of docs/04-conformance.md §3: every 1.0-scope component must have a corpus file.
+    // The corpus coverage gate: every 1.0-scope component must have a corpus file.
     let mut gate_failed = Vec::new();
     for (label, set) in [
         ("arrays", &coverage.arrays),
@@ -624,7 +624,7 @@ fn report(
         }
     }
     println!(
-        "  {:<11} {}/{} covered (docs/90-registry.md defers these to 1.1; not gating)",
+        "  {:<11} {}/{} covered (the registry's late arrivals; not gating)",
         "deferred",
         coverage.deferred_arrays.covered.len(),
         coverage.deferred_arrays.claimed
@@ -636,7 +636,7 @@ fn report(
         );
     }
     if !coverage.unclaimed_observed.is_empty() {
-        println!("  observed but listed nowhere in docs/90-registry.md:");
+        println!("  observed but listed nowhere in docs/design/90-registry.md:");
         for (label, ids) in [
             ("arrays", &coverage.unclaimed_observed.arrays),
             ("layouts", &coverage.unclaimed_observed.layouts),
@@ -648,8 +648,8 @@ fn report(
             }
         }
     }
-    // A missing component is only a build failure if nothing explains it. docs/04-conformance.md
-    // §3 fails the build on a "claimed-but-untested" component; a component with a SkipRecord
+    // A missing component is only a build failure if nothing explains it. The coverage gate
+    // fails the build on a "claimed-but-untested" component; a component with a SkipRecord
     // naming the upstream limitation is documented, not untested-by-omission.
     let mut documented = Vec::new();
     let mut undocumented = Vec::new();

@@ -1,7 +1,7 @@
 //! Independent coverage verifier: re-derives the corpus coverage union straight from the written
 //! footers, without reading `manifest.json` and without sharing the generator's extraction code.
 //!
-//! docs/04-conformance.md §3 states the gate in terms of `array_specs` and `layout_specs`, so this
+//! The corpus coverage gate is stated in terms of `array_specs` and `layout_specs`, so this
 //! reports *both* readings and the gap between them:
 //!
 //! * `declared` — the footer's `array_specs`, i.e. `ReadContext::ids()` on each flat leaf. The

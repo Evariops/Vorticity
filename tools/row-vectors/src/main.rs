@@ -2,7 +2,7 @@
 //
 // Golden row-encoding vectors, produced by the REFERENCE implementation.
 //
-// docs/04-conformance.md §7: "Being merely order-compatible is not enough - two implementations
+// The conformance strategy: "Being merely order-compatible is not enough - two implementations
 // could each be internally consistent and still disagree, which would silently break any
 // cross-language comparison." So this binary builds a fixed set of tables with vortex-row, encodes
 // them, and writes the resulting bytes out; Vorticity builds THE SAME tables and compares byte
@@ -46,7 +46,7 @@ use vortex_row::RowSortField;
 use vortex_row::convert_columns;
 
 /// The Vortex release these vectors were produced by. A mismatch on the C# side is a loud failure
-/// rather than a silent re-baseline (docs/04-conformance.md §7, "version pinning").
+/// rather than a silent re-baseline.
 const VORTEX_VERSION: &str = "0.86.1";
 
 fn main() -> VortexResult<()> {

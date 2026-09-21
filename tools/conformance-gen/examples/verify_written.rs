@@ -1,4 +1,4 @@
-//! Criterion 2 of docs/01-scope.md §4: **any file written by Vorticity is read back correctly by
+//! Acceptance criterion 2 for 1.0: **any file written by Vorticity is read back correctly by
 //! Vortex Rust**.
 //!
 //! This is the direction the golden corpus cannot test. A corpus proves we read what Rust wrote; a
@@ -102,7 +102,7 @@ fn main() -> anyhow::Result<()> {
             // belongs to no edition. Asking a pinned session to read it fails on the REFERENCE's
             // own bytes, before ours are looked at, and reporting that as "1 of 820 files
             // disagreed" said the opposite of what had happened for as long as anyone remembered
-            // to run this (BENCH-AUDIT.md B7).
+            // to run this.
             if let Err(error) = read_all(&session, &theirs).await {
                 skipped.push(format!(
                     "{}: the reference's own file is unreadable under the enabled editions \

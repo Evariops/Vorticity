@@ -1,7 +1,7 @@
 //! Fixtures no conformant writer can produce, made by byte-patching one that it can.
 //!
-//! docs/04-conformance.md §6 needs a structurally valid file that declares an array encoding id
-//! belonging to no edition, and uses it for two tests:
+//! Two forward-compatibility tests need a structurally valid file that declares an array
+//! encoding id belonging to no edition:
 //!
 //! 1. projecting the affected column fails with `VortexUnsupportedException`, naming the id and
 //!    the component kind;

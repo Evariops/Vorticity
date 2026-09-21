@@ -9,7 +9,7 @@ description = "Emits golden row-encoding vectors from the reference vortex-row i
 #
 # `vortex-row` is marked `publish = false` upstream: it exists only inside the vortex monorepo and
 # has never been pushed to crates.io, so the crates.io pin that tools/conformance-gen uses cannot
-# reach it. docs/04-conformance.md §7 nevertheless asks for byte-exactness against Rust, on the
+# reach it. The conformance strategy nevertheless asks for byte-exactness against Rust, on the
 # grounds that two implementations can each be internally consistent and still disagree - which
 # would silently break every cross-language comparison, the one thing this format is for.
 #

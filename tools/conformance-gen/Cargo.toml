@@ -5,11 +5,11 @@ edition = "2021"
 publish = false
 description = "Generates the golden Vortex corpus and expected-value sidecars for Vorticity conformance tests."
 
-# Pinned deliberately and exactly. docs/04-conformance.md §3: every release records the Vortex
+# Pinned deliberately and exactly. Every release records the Vortex
 # version its corpus was generated against, and a version bump is a corpus regeneration, not a
 # dependency update.
 #
-# 0.86.1 is the version docs/99-sources.md derived the specification against, and the newest
+# 0.86.1 is the version the specification was derived against, and the newest
 # release; it can target every frozen core edition up to core2026.08.3, so the corpus can cover
 # every component in our 1.0 scope with nothing left out. It requires rustc >= 1.95 (local
 # toolchain is 1.98.1, verified).
@@ -31,7 +31,7 @@ anyhow = "1"
 # Only for `FutureExt::catch_unwind`: several 0.86.1 writer limitations surface as panics
 # rather than errors, and one unsupported recipe must not take the whole corpus run down.
 futures-lite = "2"
-# Ground truth for the Parquet-compatible Bloom variant (docs/10-indexes.md §10): the filter our
+# Ground truth for the Parquet-compatible Bloom variant: the filter our
 # `BloomHash.XxHash64` writes must be bit-identical to a Parquet SBBF over the same keys, and the
 # only honest way to say that is to build one with Parquet's own implementation. Default features
 # off, so this pulls the format crate and not arrow; `bloom_filter::Sbbf` needs nothing else.

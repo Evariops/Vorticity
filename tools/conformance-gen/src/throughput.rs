@@ -3,7 +3,7 @@
 //! WHY THESE ARE NOT CORPUS FILES. The conformance corpus answers "does this read correctly", and
 //! for that 4096 rows is plenty — every file carries a sidecar holding all of its values, 128 to a
 //! line, which is the oracle the .NET tests compare against. These answer "how fast", and for that
-//! 4096 rows is useless: `bench/BASELINE.md`'s per-encoding table says so in its own words, "this is
+//! 4096 rows is useless: the per-encoding baseline table says so in its own words, "this is
 //! a ranking, not a measurement", because ~35 µs of every row in it is the fixed open-and-walk cost
 //! both implementations pay before a single value is decoded. `fastlanes.bitpacked` reads 40.9 µs
 //! against Rust's 35.4 — five microseconds of signal under thirty-five of noise, which is why that

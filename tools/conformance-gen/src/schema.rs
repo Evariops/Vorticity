@@ -1,6 +1,6 @@
 //! The type matrix and the value distributions.
 //!
-//! docs/04-conformance.md §3 asks for *each DType × nullability × row count*, plus an adversarial
+//! The corpus matrix asks for *each DType × nullability × row count*, plus an adversarial
 //! set of value distributions, because the distribution is what selects the encoding.
 //!
 //! Two rules keep the matrix honest:
@@ -43,8 +43,8 @@ use vortex::scalar::Scalar;
 
 use crate::util::Rng;
 
-/// The row counts of docs/04-conformance.md §3. 1024 is the FastLanes block, 8192 the default row
-/// block; the values either side of each are where off-by-one bugs live.
+/// The row counts the conformance corpus is built at. 1024 is the FastLanes block, 8192 the
+/// default row block; the values either side of each are where off-by-one bugs live.
 pub const ROW_COUNTS: &[usize] = &[0, 1, 1023, 1024, 1025, 8191, 8192, 8193];
 
 /// Rows on which [`build_column`] emits a null for a nullable dtype.
@@ -197,7 +197,7 @@ fn d_struct_flat(n: Nullability) -> VortexResult<DType> {
     ))
 }
 
-/// Four levels of nesting, with a list at the bottom. docs/04-conformance.md §3 calls this out
+/// Four levels of nesting, with a list at the bottom. The corpus matrix calls this out
 /// specifically: a shallow struct exercises none of the recursive layout/child machinery.
 fn d_struct_nested(n: Nullability) -> VortexResult<DType> {
     let nn = Nullability::NonNullable;
@@ -701,7 +701,7 @@ fn v_extension(dtype: &DType, i: usize) -> VortexResult<Scalar> {
     }
 }
 
-/// The type matrix of docs/04-conformance.md §3.
+/// The type matrix of the golden corpus.
 ///
 /// `DType::Union` is deliberately absent: `vortex.union` belongs to no core edition
 /// (spec/editions/*.toml), so the writer rejects it and no conformant file can contain one. The
@@ -1154,7 +1154,7 @@ fn dist_empty_strings(rows: usize, _: &mut Rng) -> VortexResult<ArrayRef> {
     })
 }
 
-/// A single string well over 1 MiB, which docs/04-conformance.md §3 calls out explicitly.
+/// A single string well over 1 MiB, which the corpus matrix calls out explicitly.
 fn dist_huge_string(rows: usize, _: &mut Rng) -> VortexResult<ArrayRef> {
     let dtype = DType::Utf8(NN);
     build_column_with(&dtype, rows, |i| {

@@ -1,8 +1,8 @@
-//! Generates Parquet split-block Bloom filter vectors for docs/10-indexes.md §10: the keys, and the
+//! Generates Parquet split-block Bloom filter vectors: the keys, and the
 //! bitset PARQUET's own `Sbbf` builds over them.
 //!
 //! WHY THIS EXISTS, next to `gen_bloom_vectors`. That one proves our default filter is upstream
-//! Vortex's, byte for byte. This one proves the other claim of §5.1: `BloomHash.XxHash64` makes a
+//! Vortex's, byte for byte. This one proves the design's other claim: `BloomHash.XxHash64` makes a
 //! filter a Parquet reader can use unchanged. Both claims are about bits, and the only honest way
 //! to make either is to have the other implementation build the bits. So `parquet`'s own `Sbbf`
 //! inserts the keys here -- its hash (xxHash64, seed 0), its block choice, its eight salts in its

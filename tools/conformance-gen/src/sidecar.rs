@@ -1,6 +1,6 @@
 //! The expected-value sidecar: what the **Rust reader** says the file contains.
 //!
-//! docs/04-conformance.md §3.2 makes this the contract, so that day-to-day .NET test runs need no
+//! The golden corpus makes this the contract, so that day-to-day .NET test runs need no
 //! Rust toolchain. It has to be lossless enough to catch a wrong decode, which rules out every
 //! convenient shortcut:
 //!
@@ -76,7 +76,7 @@ pub struct SidecarInfo {
 
 /// One node of a serialized array encoding tree, read back out of the written bytes.
 ///
-/// docs/04-conformance.md's whole point is that a value-only comparison cannot see a structurally
+/// Conformance testing's whole point is that a value-only comparison cannot see a structurally
 /// different decode: `map(listview(struct(...)))` and `listview(map(...))` hold the same values.
 /// So the tree is recorded as a tree, with each node's metadata bytes, buffer count and child
 /// order — the three things a reader must reproduce exactly.
@@ -789,7 +789,7 @@ fn stats_set_json(
 /// Split `vortex.bounded_min(64)` into its component id and argument, and say whether the value
 /// under it is exact or a bound.
 ///
-/// docs/08-semantics.md §1 makes the distinction load-bearing for pruning: an `Inexact` minimum is
+/// The query semantics make the distinction load-bearing for pruning: an `Inexact` minimum is
 /// a lower bound on the true minimum, so a predicate may not use it to prove a zone empty the way
 /// it can with an exact one.
 fn aggregate_detail_json(spec: &str) -> Value {

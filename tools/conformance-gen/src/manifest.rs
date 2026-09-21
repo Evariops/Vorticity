@@ -1,6 +1,6 @@
 //! `manifest.json` — what is in the corpus, and what is not.
 //!
-//! docs/04-conformance.md §3 makes the manifest a load-bearing artifact, not documentation: the
+//! The corpus contract makes the manifest a load-bearing artifact, not documentation: the
 //! **corpus coverage gate** ("the union of array_specs and layout_specs across the corpus must
 //! cover every component we claim to support; a claimed-but-untested encoding fails the build")
 //! is decided from [`Coverage`], and the honest-gap rule ("for each you cannot, record WHY")
@@ -23,13 +23,12 @@ pub const VORTEX_VERSION: &str = "0.86.1";
 /// Bumped whenever the manifest shape changes in a way a consumer must notice.
 pub const MANIFEST_FORMAT: &str = "vortex-conformance-corpus/2";
 
-/// The array encodings docs/90-registry.md puts **in 1.0 scope** — its three component tables
+/// The array encodings the registry puts **in 1.0 scope** — its three component tables
 /// (canonical and structural, compressed integer, float/string/temporal), and nothing else.
 ///
-/// This is the list the coverage gate of docs/04-conformance.md §3 runs against. The registry's
-/// "Deferred to 1.1" table is deliberately NOT in it: folding those in would let the gate read
-/// 34/34 while saying nothing about whether the 30 components we actually claim are tested.
-/// They are tracked separately in [`DEFERRED_ARRAYS`], as a bonus rather than a requirement.
+/// This is the list the corpus coverage gate runs against. The registry's late arrivals, five
+/// encodings it first deferred to 1.1 and that were built inside 1.0 since, are NOT in it: they
+/// are tracked separately in [`DEFERRED_ARRAYS`], so a miss among them does not fail the gate.
 pub const CLAIMED_ARRAYS: &[&str] = &[
     // canonical and structural
     "vortex.bool",
@@ -66,9 +65,9 @@ pub const CLAIMED_ARRAYS: &[&str] = &[
     "vortex.zstd",
 ];
 
-/// docs/90-registry.md's "Deferred to 1.1" table. Not gating: a miss here is not a build failure.
-/// The corpus carries them anyway wherever 0.86.1 can write one, so the 1.1 work starts with
-/// fixtures already in hand rather than with a corpus regeneration.
+/// The registry's late arrivals, first deferred to 1.1 and built inside 1.0 since. Not gating:
+/// a miss here is not a build failure, although all five are in 1.0 scope and the corpus carries
+/// each of them.
 pub const DEFERRED_ARRAYS: &[&str] = &[
     "vortex.map",
     "vortex.parquet.variant",
@@ -77,7 +76,7 @@ pub const DEFERRED_ARRAYS: &[&str] = &[
     "vortex.zstd_buffers",
 ];
 
-/// The layouts docs/90-registry.md claims.
+/// The layouts the registry claims.
 pub const CLAIMED_LAYOUTS: &[&str] = &[
     "vortex.chunked",
     "vortex.dict",
@@ -88,13 +87,13 @@ pub const CLAIMED_LAYOUTS: &[&str] = &[
 ];
 
 /// Layout ids that exist in 0.86.1 but belong to no core edition, and so are not in
-/// docs/90-registry.md's layout table. `vortex.list` is reachable only under
+/// the registry's layout table. `vortex.list` is reachable only under
 /// `VORTEX_EXPERIMENTAL_LIST_LAYOUT=1`; a file containing one is a forward-compatibility fixture,
 /// not a conformance target, exactly as `vortex.patched` is on the array side. Listed here so the
 /// unclaimed-observed report stays a signal rather than a permanent known-noise line.
 pub const EXPERIMENTAL_LAYOUTS: &[&str] = &["vortex.list"];
 
-/// The extension dtypes docs/90-registry.md claims.
+/// The extension dtypes the registry claims.
 pub const CLAIMED_EXTENSION_DTYPES: &[&str] = &[
     "vortex.date",
     "vortex.time",
@@ -102,7 +101,7 @@ pub const CLAIMED_EXTENSION_DTYPES: &[&str] = &[
     "vortex.uuid",
 ];
 
-/// The zone-map aggregates docs/90-registry.md claims.
+/// The zone-map aggregates the registry claims.
 pub const CLAIMED_AGGREGATES: &[&str] = &[
     "vortex.bounded_max",
     "vortex.bounded_min",
@@ -197,7 +196,7 @@ pub struct Determinism {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRecord {
     pub id: String,
-    /// A..E, matching the dimensions of docs/04-conformance.md §3.
+    /// A..E, the corpus plan's dimensions: types, encodings, distributions, containers, editions.
     pub dimension: String,
     pub description: String,
     pub path: String,
@@ -220,7 +219,7 @@ pub struct FileRecord {
     /// its own read path — `is_nullable_codes` was added after stabilisation
     /// (vortex-array-0.86.1/src/arrays/dict/array.rs:35).
     pub dict_nodes: Vec<String>,
-    /// Largest `vortex.bool` bit offset in the file. docs/90-registry.md names the bit offset as
+    /// Largest `vortex.bool` bit offset in the file. The registry names the bit offset as
     /// the distinguishing feature of the encoding, and a reader that ignores it passes a corpus
     /// where the value is always 0.
     pub max_bool_bit_offset: u32,
@@ -297,9 +296,9 @@ pub struct Coverage {
     pub layouts: CoverageSet,
     pub extension_dtypes: CoverageSet,
     pub aggregates: CoverageSet,
-    /// docs/90-registry.md's deferred-to-1.1 arrays. Informational: not part of the gate.
+    /// The registry's late arrivals, [`DEFERRED_ARRAYS`]. Informational: not part of the gate.
     pub deferred_arrays: CoverageSet,
-    /// Ids observed that docs/90-registry.md does not claim, per component kind. Not an error —
+    /// Ids observed that the registry does not claim, per component kind. Not an error —
     /// the writer is free to emit an in-memory-only id we chose not to list — but it must be
     /// visible. Applied to layouts, aggregates and extension dtypes as well as arrays: through
     /// format/1 it covered arrays only, which is why `vortex.list` sat in the corpus as a layout

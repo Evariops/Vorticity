@@ -1,4 +1,4 @@
-//! Generates split-block Bloom filter vectors for docs/10-indexes.md §5.1: typed values, and the
+//! Generates split-block Bloom filter vectors for our Bloom index: typed values, and the
 //! filter bytes the REFERENCE's own `vortex.bloom_filter.sbbf` accumulator builds over them.
 //!
 //! WHY THIS EXISTS. The spec claims our filter is bit-identical to upstream's `BloomPartial`: same

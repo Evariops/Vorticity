@@ -88,7 +88,7 @@ pub enum StrategyKind {
     RowBlock(usize),
     /// `chunked(flat)`: no repartition, no canonicalization, no compression, no zone maps.
     /// Whatever encoding the array already carries is what lands in the file — the only way to
-    /// force an encoding deterministically (API-NOTES.md §3.5).
+    /// force an encoding deterministically (API-NOTES.md).
     Verbatim,
     /// No compression and no zone maps, but still struct-split: only canonical encodings.
     Canonical,
@@ -235,7 +235,7 @@ pub fn build_options(session: &VortexSession, spec: &WriteSpec) -> VortexWriteOp
                 WriteStrategyBuilder::default()
                     .with_row_block_size(*rows)
                     // Required, not decorative: the 1 MiB coalescing target would merge the
-                    // blocks straight back into one (API-NOTES.md §3.6).
+                    // blocks straight back into one (API-NOTES.md).
                     .with_data_block_target_bytes(None)
                     // Passing `with_strategy` opts out of the writer's own
                     // `retain_allowed_encodings`, so it has to be reapplied by hand — otherwise a
@@ -1187,8 +1187,8 @@ fn container_entries() -> Vec<Entry> {
     out.push(chunked_layout);
 
     // The zone-map substrate. 64 zones, and every zone's bounds differ from every other zone's,
-    // so a predicate can eliminate any strict non-trivial subset of them. docs/04-conformance.md
-    // §6 wants every filter test run twice — pruning on and off, identical result sets — and that
+    // so a predicate can eliminate any strict non-trivial subset of them. The conformance strategy
+    // wants every filter test run twice — pruning on and off, identical result sets — and that
     // test proves nothing on a corpus where pruning can never eliminate anything.
     let mut many_zones = entry(
         "containers/zoned_many_zones",
@@ -1524,7 +1524,7 @@ fn container_entries() -> Vec<Entry> {
 
 /// A table shaped to elect the components a given edition *adds*.
 ///
-/// docs/04-conformance.md §8 wants one file per core edition precisely to catch hard-coding
+/// The read-forever test wants one file per core edition precisely to catch hard-coding
 /// today's encodings, and that only works if each file actually contains the thing its edition
 /// froze. Through corpus format/1 all seven edition files wrote the same table, and five of the
 /// seven contained none of their own additions: `core2025.10.0`'s array ids were byte-identical to
@@ -1810,7 +1810,7 @@ fn edition_entries() -> Vec<Entry> {
 
 // --- dimensions this release cannot produce -------------------------------------------------
 
-/// Corpus dimensions docs/04-conformance.md §3 asks for that Vortex 0.86.1 cannot write.
+/// Corpus dimensions the conformance strategy asks for that Vortex 0.86.1 cannot write.
 ///
 /// Each one was checked against the crate source, not guessed. An honest gap is useful; a silent
 /// one is a hole in the conformance claim.
