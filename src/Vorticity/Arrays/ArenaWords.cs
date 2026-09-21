@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 
@@ -14,10 +15,14 @@ namespace Vorticity.Arrays;
 /// <remarks>
 /// A decoded bitmap is used as it is when it already has that shape: no bit offset, a word-aligned
 /// address and clear trailing bits. Otherwise it is rebuilt once into the arena and the words are
-/// kept on the node until the arena is reset.
+/// kept on the node that holds the bits until the arena is reset: a bool node's values, or the
+/// bitmap node a column's validity points to. So a nullable bool column keeps its values and its
+/// validity on two nodes, and neither answer can stand in for the other.
 /// </remarks>
 internal static class ArenaWords
 {
+    private static ulong[] s_zeros = [];
+
     /// <summary>The validity words of <paramref name="node"/>; empty when every row is valid.</summary>
     internal static ReadOnlySpan<ulong> Validity(CanonicalArena arena, int node)
     {
@@ -29,18 +34,17 @@ internal static class ArenaWords
             case ValidityKind.AllValid:
                 return default;
             case ValidityKind.AllInvalid:
-                return !record.Words.IsEmpty
-                    ? record.Words.Cast<ulong>()
-                    : Cached(arena, node, record.Length, bits: default, bitOffset: 0, fill: false);
+                return Zeros(record.Length);
             default:
-                if (!record.Words.IsEmpty)
+                int length = record.Length;
+                int bitmap = validity.CanonicalNodeIndex;
+                ref readonly CanonicalRecord bits = ref arena.RecordRef(bitmap);
+                if (bits.Length == length)
                 {
-                    return record.Words.Cast<ulong>();
+                    return Bits(arena, bitmap);
                 }
 
-                int length = record.Length;
-                ref readonly CanonicalRecord bits = ref arena.RecordRef(validity.CanonicalNodeIndex);
-                return Cached(arena, node, length, bits.BufferA.Span, bits.BitOffset, fill: true);
+                return Cached(arena, cacheOn: -1, length, bits.BufferA.Span, bits.BitOffset, fill: true);
         }
     }
 
@@ -58,7 +62,7 @@ internal static class ArenaWords
                 return record.Words.Cast<ulong>();
             }
 
-            return Cached(arena, node, record.Length, bits: default, bitOffset: 0, fill: value);
+            return Cached(arena, cacheOn: node, record.Length, bits: default, bitOffset: 0, fill: value);
         }
 
         if (!record.Words.IsEmpty)
@@ -66,7 +70,21 @@ internal static class ArenaWords
             return record.Words.Cast<ulong>();
         }
 
-        return Cached(arena, node, record.Length, record.BufferA.Span, record.BitOffset, fill: true);
+        return Cached(arena, cacheOn: node, record.Length, record.BufferA.Span, record.BitOffset, fill: true);
+    }
+
+    /// <summary>Zero words for <paramref name="length"/> rows, from one array shared by every arena and never written.</summary>
+    private static ReadOnlySpan<ulong> Zeros(int length)
+    {
+        int words = (length + 63) >> 6;
+        ulong[] zeros = Volatile.Read(ref s_zeros);
+        if (zeros.Length < words)
+        {
+            zeros = new ulong[Math.Max(words, zeros.Length * 2)];
+            Volatile.Write(ref s_zeros, zeros);
+        }
+
+        return zeros.AsSpan(0, words);
     }
 
     /// <summary>The number of null rows of <paramref name="node"/>, counted by population count.</summary>
@@ -112,7 +130,8 @@ internal static class ArenaWords
         return ((bits.BufferA.Span[bit >> 3] >> (bit & 7)) & 1) != 0;
     }
 
-    private static ReadOnlySpan<ulong> Cached(CanonicalArena arena, int node, int length, ReadOnlySpan<byte> bits, int bitOffset, bool fill)
+    /// <summary>The words of a bitmap, kept on node <paramref name="cacheOn"/> when it is not negative.</summary>
+    private static ReadOnlySpan<ulong> Cached(CanonicalArena arena, int cacheOn, int length, ReadOnlySpan<byte> bits, int bitOffset, bool fill)
     {
         int words = (length + 63) >> 6;
         if (words == 0)
@@ -147,7 +166,11 @@ internal static class ArenaWords
             destination[^1] &= (1UL << remainder) - 1;
         }
 
-        arena.RecordRefMutable(node).Words = buffer;
+        if (cacheOn >= 0)
+        {
+            arena.RecordRefMutable(cacheOn).Words = buffer;
+        }
+
         return destination;
     }
 
