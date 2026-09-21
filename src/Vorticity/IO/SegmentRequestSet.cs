@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
 using Vorticity.Buffers;
 using Vorticity.Serialization.Schemas;
 
@@ -180,6 +181,38 @@ public sealed class SegmentRequestSet : IDisposable
         }
 
         return _buffers[slot];
+    }
+
+    /// <summary>
+    /// The owner whose segment holds the first byte of <paramref name="buffer"/>, or null when no
+    /// segment of this set does, which is always the answer for an empty buffer or an unread set.
+    /// </summary>
+    /// <param name="buffer">A view that may lie inside one of this set's segments.</param>
+    /// <returns>The owner, held by this set; no reference is taken.</returns>
+    internal unsafe SegmentOwner? OwnerHolding(VortexBuffer buffer)
+    {
+        if (!_populated || buffer.Length == 0)
+        {
+            return null;
+        }
+
+        byte* at = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(buffer.Span));
+        for (int slot = 0; slot < _count; slot++)
+        {
+            VortexBuffer segment = _buffers[slot];
+            if (segment.Length == 0)
+            {
+                continue;
+            }
+
+            byte* start = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(segment.Span));
+            if (at >= start && at < start + segment.Length)
+            {
+                return _owners[slot];
+            }
+        }
+
+        return null;
     }
 
     /// <summary>The owner backing <paramref name="slot"/>.</summary>

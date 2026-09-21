@@ -127,7 +127,17 @@ public abstract class LayoutReader
         ArgumentNullException.ThrowIfNull(context);
         SegmentRequestSet segments = context.Segments;
         int slot = segments.Add(SpecOf(in node, which));
-        return segments.GetBuffer(slot);
+        VortexBuffer buffer = segments.GetBuffer(slot);
+
+        // What is decoded out of these bytes can be views onto them, and a decode retained past
+        // this batch has to keep the segment alive: while one runs, the context notes whose bytes
+        // these are.
+        if (context.IsRetaining)
+        {
+            context.NoteSegment(segments.GetOwner(slot));
+        }
+
+        return buffer;
     }
 
     /// <summary>The reader for one child, resolved through the table.</summary>

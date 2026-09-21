@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Text;
+using Vorticity.Buffers;
 using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Types;
@@ -191,13 +192,16 @@ public sealed class ScanContext : IDisposable
     /// from outside a single <c>LayoutReader.Execute</c> call, and every node the redirected decode
     /// produces is reachable only through the index that call returns.
     /// </remarks>
-    public CanonicalArena Canonical => _redirect ?? _batchCanonical;
+    public CanonicalArena Canonical => _building?.Arena ?? _batchCanonical;
 
     /// <summary>The batch's own arena, which <see cref="ResetBatch"/> clears.</summary>
     private readonly CanonicalArena _batchCanonical;
 
-    /// <summary>Set while a chunk is being decoded straight into the arena that will retain it.</summary>
-    private CanonicalArena? _redirect;
+    /// <summary>
+    /// Set while a chunk is being decoded straight into the arena that will retain it: the entry it
+    /// will become, which gathers the segments the decode depends on as it runs.
+    /// </summary>
+    private RetainedChunk? _building;
 
     /// <summary>
     /// The <see cref="Vorticity.Buffers.SegmentOwner"/> references for this batch's segments. Exactly one refcount
@@ -421,6 +425,71 @@ public sealed class ScanContext : IDisposable
 
         /// <summary>The batch number that last asked for this entry.</summary>
         internal long LastTouched;
+
+        /// <summary>
+        /// The segment its records view. A decode can hand back views onto the segment it read, a
+        /// primitive's values for one, and the batch that read the segment releases it at
+        /// <see cref="ResetBatch"/> while this entry lives on, so the entry holds a reference of
+        /// its own from the moment it is published until it is evicted.
+        /// </summary>
+        internal SegmentOwner? Segment;
+
+        /// <summary>Any further segment the decode read, when it read more than one.</summary>
+        internal List<SegmentOwner>? MoreSegments;
+
+        /// <summary>
+        /// Adds a segment the decode depends on, once; no reference is taken here.
+        /// </summary>
+        internal void Depend(SegmentOwner? owner)
+        {
+            if (owner is null || ReferenceEquals(Segment, owner))
+            {
+                return;
+            }
+
+            if (Segment is null)
+            {
+                Segment = owner;
+                return;
+            }
+
+            MoreSegments ??= [];
+            if (!MoreSegments.Contains(owner))
+            {
+                MoreSegments.Add(owner);
+            }
+        }
+
+        /// <summary>
+        /// Takes a reference on every segment gathered, as the entry is published.
+        /// </summary>
+        internal void RetainSegments()
+        {
+            Segment?.Retain();
+            if (MoreSegments is { } more)
+            {
+                foreach (SegmentOwner owner in more)
+                {
+                    owner.Retain();
+                }
+            }
+        }
+
+        /// <summary>Drops the references <see cref="RetainSegments"/> took.</summary>
+        internal void ReleaseSegments()
+        {
+            Segment?.Release();
+            Segment = null;
+            if (MoreSegments is { } more)
+            {
+                foreach (SegmentOwner owner in more)
+                {
+                    owner.Release();
+                }
+
+                MoreSegments = null;
+            }
+        }
     }
 
     /// <summary>
@@ -624,7 +693,14 @@ public sealed class ScanContext : IDisposable
             : null;
 
     /// <summary>Whether a retained decode is already in flight, so another may not be opened.</summary>
-    internal bool IsRetaining => _redirect is not null;
+    internal bool IsRetaining => _building is not null;
+
+    /// <summary>
+    /// Records that a layout reader loaded <paramref name="owner"/>'s segment into the node arena
+    /// while a retained decode runs, so the entry keeps that segment alive.
+    /// </summary>
+    /// <param name="owner">The owner, held by the batch's request set; no reference taken.</param>
+    internal void NoteSegment(SegmentOwner owner) => _building?.Depend(owner);
 
     /// <summary>The retained decode for <paramref name="key"/>, if one is held.</summary>
     /// <param name="key">From <see cref="SegmentKey"/> or <see cref="LayoutKey"/>.</param>
@@ -682,7 +758,7 @@ public sealed class ScanContext : IDisposable
     /// </remarks>
     internal CanonicalArena BeginRetainedDecode()
     {
-        if (_redirect is not null)
+        if (_building is not null)
         {
             // A flat layout is a leaf: its decode never re-enters Execute, so a nested redirect
             // would mean the reader tree changed shape under an assumption this method makes.
@@ -703,6 +779,7 @@ public sealed class ScanContext : IDisposable
             }
 
             entry.Arena.Reset();
+            entry.ReleaseSegments();
             (_spareArenas ??= new Stack<CanonicalArena>()).Push(entry.Arena);
             _retained.Remove(held.Key);
         }
@@ -710,7 +787,11 @@ public sealed class ScanContext : IDisposable
         CanonicalArena fresh = _spareArenas is { Count: > 0 }
             ? _spareArenas.Pop()
             : new CanonicalArena();
-        _redirect = fresh;
+        _building = new RetainedChunk { Arena = fresh };
+
+        // What the decode views is the blob in the node arena, which a flat reader loads just
+        // before it begins; a child decoded inside the redirect notes its own segment as it loads.
+        _building.Depend(Segments.OwnerHolding(Nodes.FirstBlobBuffer()));
         return fresh;
     }
 
@@ -727,27 +808,26 @@ public sealed class ScanContext : IDisposable
     /// </remarks>
     internal void EndRetainedDecode(long key, int nodeIndex)
     {
-        CanonicalArena? fresh = _redirect;
-        _redirect = null;
-        if (fresh is null)
+        RetainedChunk? entry = _building;
+        _building = null;
+        if (entry is null)
         {
             return;
         }
 
         if (nodeIndex < 0)
         {
-            fresh.Reset();
-            (_spareArenas ??= new Stack<CanonicalArena>()).Push(fresh);
+            // Nothing was retained on the gathered segments yet, so there is nothing to release.
+            entry.Arena.Reset();
+            (_spareArenas ??= new Stack<CanonicalArena>()).Push(entry.Arena);
             return;
         }
 
-        (_retained ??= [])[key] = new RetainedChunk
-        {
-            Arena = fresh,
-            Key = key,
-            NodeIndex = nodeIndex,
-            LastTouched = _batchNumber,
-        };
+        entry.Key = key;
+        entry.NodeIndex = nodeIndex;
+        entry.LastTouched = _batchNumber;
+        entry.RetainSegments();
+        (_retained ??= [])[key] = entry;
     }
 
     /// <summary>
@@ -800,6 +880,7 @@ public sealed class ScanContext : IDisposable
             foreach (RetainedChunk entry in _retained.Values)
             {
                 entry.Arena.Reset();
+                entry.ReleaseSegments();
             }
 
             _retained.Clear();

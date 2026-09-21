@@ -233,6 +233,23 @@ public sealed class ArrayNodeArena
     /// <summary>Index of the root node, or -1 before a successful <c>Load</c>.</summary>
     public int RootIndex => _rootIndex;
 
+    /// <summary>
+    /// The first non-empty buffer of the blob held, which names the segment every buffer of the
+    /// blob is a view of; empty when the blob has no bytes outside its tree.
+    /// </summary>
+    internal VortexBuffer FirstBlobBuffer()
+    {
+        for (int i = 0; i < _globalBufferCount; i++)
+        {
+            if (_globalBuffers[i].Length > 0)
+            {
+                return _globalBuffers[i];
+            }
+        }
+
+        return VortexBuffer.Empty;
+    }
+
     /// <summary>Number of entries in the blob's flat, global buffer list.</summary>
     public int GlobalBufferCount => _globalBufferCount;
 
