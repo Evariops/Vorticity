@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Expressions;
+using Vorticity.Keys;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 
@@ -60,6 +61,12 @@ internal abstract class ScanSource
 
     /// <summary>Whether the statistics alone rule the filter out; never false for a filter that may match.</summary>
     internal abstract bool MayMatch(VortexExpr filter);
+
+    /// <summary>A walker over the keys of the column at <paramref name="path"/>, from the source's key structures.</summary>
+    internal abstract ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken);
+
+    /// <summary>Which key source <see cref="OpenKeysAsync"/> would walk.</summary>
+    internal abstract ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken);
 }
 
 /// <summary>A scan over one open file, compiled to the engine's builder.</summary>
@@ -103,6 +110,23 @@ internal sealed class FileScanSource : ScanSource
     }
 
     internal override bool MayMatch(VortexExpr filter) => Compute.FileStatisticsPruner.MayMatch(_file, filter);
+
+    internal override async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
+        await KeysOf(path, distinct, indexes).OpenAsync(cancellationToken).ConfigureAwait(false);
+
+    internal override ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
+        KeysOf(path, distinct, indexes).ExplainAsync(cancellationToken);
+
+    private KeyCursorBuilder KeysOf(string path, bool distinct, bool indexes)
+    {
+        KeyCursorBuilder builder = _file.Keys(path);
+        if (distinct)
+        {
+            builder.Distinct();
+        }
+
+        return indexes ? builder : builder.WithSource(KeySourceKind.SortedColumn);
+    }
 
     /// <summary>The engine's builder for <paramref name="spec"/>.</summary>
     internal ScanBuilder Builder(ScanSpec spec, ScanMetrics metrics)
