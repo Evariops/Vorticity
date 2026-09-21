@@ -79,9 +79,8 @@ public enum ComparisonOp : byte
 /// <remarks>
 /// The tree is an ordinary immutable object graph rather than an arena, because it is built once per
 /// scan and never per batch, where nothing may allocate. Three-valued logic lives in the evaluator,
-/// not here: these types are only the shape. Two limits hold when a node is built rather than being
-/// discovered mid-scan: a comparison is between a field and a literal, and a literal's type is
-/// checked against the column only when the filter runs, since the schema is out of scope here.
+/// not here: these types are only the shape. A literal's type is checked against its column only
+/// when the filter runs, since the schema is out of scope while the tree is built.
 /// </remarks>
 public abstract class VortexExpr
 {
@@ -531,6 +530,11 @@ public static class Expr
     /// Normalizes a comparison so the field is on the left, rejecting the two shapes the 1.0 filter
     /// does not evaluate.
     /// </summary>
+    /// <remarks>
+    /// Refused here, when the node is built, rather than discovered during a scan. Comparing two
+    /// columns would need a second dispatch dimension in every kernel and prunes nothing from a
+    /// zone map, so one exception at build time replaces a matrix of kernels.
+    /// </remarks>
     private static ComparisonExpr Compare(VortexExpr left, ComparisonOp op, VortexExpr right)
     {
         ArgumentNullException.ThrowIfNull(left);

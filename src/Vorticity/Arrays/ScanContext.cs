@@ -512,8 +512,9 @@ public sealed class ScanContext : IDisposable
     /// </para>
     /// <para>
     /// Caching the decode instead would cost a retained <see cref="CanonicalArena"/> per entry,
-    /// which the scan paths' allocation ceilings do not leave room for. A verdict is a long in an
-    /// inline array, so the whole mechanism allocates nothing, on any path, ever.
+    /// which the scan paths' allocation ceilings do not leave room for. A verdict is one long in a
+    /// small array allocated the first time a reader opens a scope, so a scan that never opens one
+    /// allocates nothing for it.
     /// </para>
     /// <para>
     /// Never cleared by <see cref="ResetBatch"/>, and it must not be: the fact it records is about

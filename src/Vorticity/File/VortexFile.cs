@@ -933,9 +933,10 @@ public sealed partial class VortexFile : IAsyncDisposable
     }
 
     /// <summary>
-    /// The DType a <c>sum</c> statistic is typed against, which is the field's widened. Every
-    /// result is nullable because an overflowing sum is recorded as null. <c>default</c> means the
-    /// field has no summable DType and the statistic is skipped.
+    /// The DType a <c>sum</c> statistic is typed against: a <c>u64</c> count for a bool, the 64-bit
+    /// type of the same family for an integer, <c>f64</c> for a float, and ten more digits of
+    /// precision, up to the maximum, for a decimal. Every result is nullable because an overflowing
+    /// sum is recorded as null. <c>default</c> means the field has no summable DType and the statistic is skipped.
     /// </summary>
     private static DType SumDType(DType fieldDType, DTypeArena types)
     {

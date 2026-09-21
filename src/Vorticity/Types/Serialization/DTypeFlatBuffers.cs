@@ -394,8 +394,8 @@ public static class DTypeFlatBuffers
         FlatBufferVector names = table.GetVector(UnionNames);
         FlatBufferVector dtypes = table.GetVector(UnionDTypes);
 
-        // `type_ids: [byte]` is signed in the schema but the .fbs comment says "interpreted as
-        // unsigned", so the bytes are taken verbatim: a type id of 255 stays 255, not -1. The
+        // `type_ids: [byte]` is declared signed but defined as unsigned, so the bytes are taken
+        // verbatim: a type id of 255 stays 255, not -1. The
         // element width is 1 either way, so the [ubyte] accessor reads the same bytes.
         ReadOnlySpan<byte> typeIds = table.GetByteVector(UnionTypeIds);
         bool nullable = table.GetBool(UnionNullable);
