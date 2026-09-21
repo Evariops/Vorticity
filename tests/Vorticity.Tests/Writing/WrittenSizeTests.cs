@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.File;
+using Vorticity.Layouts;
 using Vorticity.Scan;
 using Vorticity.Tests.Scan;
 using Vorticity.Writing;
@@ -71,7 +72,8 @@ public sealed class WrittenSizeTests
     /// 512 rows is set by the SMALLEST file on this axis, not by the largest: `encodings/fsst` and
     /// `encodings/dict` have 4 096 rows, so 1024 gave them four chunks and the axis would have been
     /// measuring the single-chunk path on half its entries. At 512 they write eight, and the
-    /// 8 193-row text files write seventeen.
+    /// 8 193-row text files write seventeen. The byte target is off for this axis: at its default
+    /// 1 MiB none of these files reaches it, and every column stays one chunk.
     /// </para>
     /// </remarks>
     private const int ChunkedRowBlock = 512;
@@ -87,12 +89,17 @@ public sealed class WrittenSizeTests
     /// it exists to remove.
     /// </remarks>
     /// <remarks>
-    /// A ZONE IS A BLOCK of <c>RowBlockSize</c> rows counted from row 0, not a chunk. These
-    /// four write one chunk (the 1 MiB byte target is never reached at 512 rows a batch) and
-    /// carry 17, 17, 8 and 8 zones, which is <c>ceil(rows / 512)</c> -- the granularity the
-    /// caller asks for when it sets <c>RowBlockSize = 512</c>. Eight bytes a zone per column for
-    /// the two utf8 files (null count only, no bounds on a string column) and seven bytes a zone
-    /// for the other two.
+    /// A ZONE IS A BLOCK of <c>RowBlockSize</c> rows counted from row 0, not a chunk; here the
+    /// two coincide, since every chunk is one 512-row block. These four carry 17, 17, 8 and 8
+    /// zones, which is <c>ceil(rows / 512)</c> -- the granularity the caller asks for when it sets
+    /// <c>RowBlockSize = 512</c>. Eight bytes a zone per column for the two utf8 files (null count
+    /// only, no bounds on a string column) and seven bytes a zone for the other two.
+    /// <para>
+    /// Each chunk is encoded on its own, with its own dictionary or symbol table, array blob and
+    /// segment entry, which at 512 rows is most of what these files weigh: the utf8 files write
+    /// close to three times what they do as one chunk. That is the cost this axis exists to show,
+    /// and the first thing a table shared between chunks would lower.
+    /// </para>
     /// <para>
     /// It is a size increase that buys pruning, which is the only kind this table accepts; the
     /// whole-corpus ratio above did not move, because the default 8192-row block leaves every corpus
@@ -107,12 +114,12 @@ public sealed class WrittenSizeTests
         // directory); the file's identity in every postscript -- 16 bytes of value, the entry's
         // key and segment, and the padding they move (72 or 96 B); and the index directory's
         // XXH3-64 trailer, on the files that carry one (8 B).
-        ("types/utf8_nonnull_r8193", 16_902),    // 17 chunks in, 17 zones; including the file statistics segment (96 B), the dictionary probe (138 B), the identity (72 B) and the directory checksum (8 B)
-        ("types/utf8_nullable_r8193", 17_382),   // 17 chunks in, 17 zones; including the same four
+        ("types/utf8_nonnull_r8193", 47_062),    // 17 chunks, 17 zones; including the file statistics segment (96 B), the dictionary probe (138 B), the identity (72 B) and the directory checksum (8 B)
+        ("types/utf8_nullable_r8193", 46_718),   // 17 chunks, 17 zones; including the same four
         // The copy of the carried remainder materializes only the bytes its views name, so the
         // heap written for a chunk never carries the strings of blocks already emitted.
-        ("encodings/fsst", 4_004),               // 8 chunks in, 8 zones; including the file statistics segment (96 B) and the identity (96 B)
-        ("encodings/dict", 3_134),               // 8 chunks in, 8 zones; including the file statistics segment (96 B), the dictionary probe (138 B), the identity (72 B) and the directory checksum (8 B)
+        ("encodings/fsst", 6_740),               // 8 chunks, 8 zones; including the file statistics segment (96 B) and the identity (96 B)
+        ("encodings/dict", 7_654),               // 8 chunks, 8 zones; including the file statistics segment (96 B), the dictionary probe (138 B), the identity (72 B) and the directory checksum (8 B)
     ];
 
     [Fact]
@@ -188,8 +195,8 @@ public sealed class WrittenSizeTests
     /// <remarks>
     /// This axis exists because the corpus sweep cannot see the multi-chunk path, so a change
     /// confined to it is invisible to the only size oracle this repository has.
-    /// Here every file is written in eight batches or more, so every column carries eight zones
-    /// or more, and the assertion is equality.
+    /// Here every column of every file is cut into eight chunks or more, read back from the
+    /// written layout, and the assertion is equality.
     /// </remarks>
     [Fact]
     public async Task TheMultiChunkPathWritesTheSameBytes()
@@ -204,13 +211,15 @@ public sealed class WrittenSizeTests
         foreach ((string id, long expected) in Chunked)
         {
             CorpusEntry entry = CorpusManifest.Get(id);
-            (long written, int chunks) = await RewriteChunked(entry);
+            (long written, int batches, int chunks) = await RewriteChunked(entry);
             report.Append("    ")
                 .Append(id.PadRight(34))
                 .Append(written.ToString(CultureInfo.InvariantCulture).PadLeft(9))
                 .Append(" bytes  expected ")
                 .Append(expected.ToString(CultureInfo.InvariantCulture).PadLeft(9))
-                .Append("  chunks ")
+                .Append("  batches ")
+                .Append(batches.ToString(CultureInfo.InvariantCulture))
+                .Append("  chunks per column ")
                 .Append(chunks.ToString(CultureInfo.InvariantCulture))
                 .Append('\n');
 
@@ -219,9 +228,9 @@ public sealed class WrittenSizeTests
                 moved.Add($"{id}: {written} bytes, expected {expected} ({written - expected:+#;-#;0})");
             }
 
-            // `chunks` counts the batches written. Eight or more gives every column eight zones or
-            // more, which is what makes this axis different from the sweep.
-            Assert.True(chunks >= 8, $"{id} wrote {chunks} chunks; this axis needs 8 or more");
+            // Eight chunks or more in every column is what makes this axis different from the
+            // sweep, which writes one; the count is read back from the written layout.
+            Assert.True(chunks >= 8, $"{id} wrote a column in {chunks} chunk(s); this axis needs 8 or more");
         }
 
         Console.Out.Write(report.ToString());
@@ -231,13 +240,20 @@ public sealed class WrittenSizeTests
     }
 
     /// <summary>Rewrites one file in small chunks; returns its size and how many batches went in.</summary>
-    private static async Task<(long Bytes, int Chunks)> RewriteChunked(CorpusEntry entry)
+    private static async Task<(long Bytes, int Batches, int Chunks)> RewriteChunked(CorpusEntry entry)
     {
         string written = Path.Combine(Path.GetTempPath(), $"vorticity-chunked-{Guid.NewGuid():N}.vortex");
-        VortexWriteOptions options = new VortexWriteOptions { RowBlockSize = ChunkedRowBlock };
+
+        // No byte target: at the default 1 MiB these files never reach it and every column would
+        // stay one chunk, whatever the row block.
+        VortexWriteOptions options = new VortexWriteOptions
+        {
+            RowBlockSize = ChunkedRowBlock,
+            DataBlockTargetBytes = null,
+        };
         try
         {
-            int chunks = 0;
+            int batches = 0;
             await using (VortexFile source = await VortexFile.OpenAsync(
                 entry.Path, OpenOptionsFor(entry), CancellationToken.None))
             await using (VortexFileWriter writer =
@@ -247,14 +263,16 @@ public sealed class WrittenSizeTests
                     .WithMaxBatchRows(ChunkedRowBlock).ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
-                    chunks++;
+                    batches++;
                     await writer.WriteAsync(batch, CancellationToken.None);
                 }
 
                 await writer.CompleteAsync(CancellationToken.None);
             }
 
-            return (new FileInfo(written).Length, chunks);
+            await using VortexFile result = await VortexFile.OpenAsync(written, CancellationToken.None);
+            int chunks = FewestChunks(LayoutTree.Parse(result).Root);
+            return (new FileInfo(written).Length, batches, chunks);
         }
         finally
         {
@@ -263,6 +281,44 @@ public sealed class WrittenSizeTests
                 System.IO.File.Delete(written);
             }
         }
+    }
+
+    /// <summary>The fewest chunks any column of the written file is cut into.</summary>
+    private static int FewestChunks(LayoutNode root)
+    {
+        if (root.Encoding != LayoutEncodingId.Struct)
+        {
+            return ColumnChunks(root);
+        }
+
+        int fewest = int.MaxValue;
+        for (int i = 0; i < root.ChildCount; i++)
+        {
+            fewest = Math.Min(fewest, ColumnChunks(root.GetChild(i)));
+        }
+
+        return fewest;
+    }
+
+    /// <summary>
+    /// The child count of the column's <c>vortex.chunked</c> node, or one when it has none. The
+    /// largest over the subtree, because a column also carries single-leaf children that are not
+    /// its data: the zone table under <c>vortex.zoned</c>, for one.
+    /// </summary>
+    private static int ColumnChunks(LayoutNode node)
+    {
+        if (node.Encoding == LayoutEncodingId.Chunked)
+        {
+            return node.ChildCount;
+        }
+
+        int most = 1;
+        for (int i = 0; i < node.ChildCount; i++)
+        {
+            most = Math.Max(most, ColumnChunks(node.GetChild(i)));
+        }
+
+        return most;
     }
 
     /// <summary>Writes one corpus file out and returns how many bytes it took.</summary>
