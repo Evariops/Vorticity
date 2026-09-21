@@ -40,7 +40,7 @@ internal sealed class KeyRange
             return range;
         }
 
-        DType dtype = ClusteringKey.Resolve(dataset.Schema, key.Paths[0]);
+        DType dtype = ClusteringKey.Resolve(dataset.DType, key.Paths[0]);
         bool bounded = dtype.Kind switch
         {
             DTypeKind.Primitive => !dtype.PType.IsFloat(),

@@ -256,7 +256,7 @@ internal static class DatasetCompactor
 
         IReadOnlyList<string> paths = key.Paths;
         KeyOrderedMerge merge = new KeyOrderedMerge(
-            dataset,
+            dataset.Snapshot,
             inputs.Select(static held => held.Object).ToAsyncEnumerable(),
             key.Paths,
             descending: false,

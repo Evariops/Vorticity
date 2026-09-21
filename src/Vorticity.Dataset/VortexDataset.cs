@@ -72,6 +72,12 @@ internal sealed record DatasetOptions
 
     /// <summary>The clock a commit's creation time is read from; the system's by default.</summary>
     public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
+
+    /// <summary>
+    /// The session whose pool, cache, bound on reads in flight and parallelism the dataset's scans
+    /// use; <see cref="VortexSession.Default"/> unless given.
+    /// </summary>
+    public VortexSession Session { get; init; } = VortexSession.Default;
 }
 
 /// <summary>One data object being written; its identity is minted before a byte is written.</summary>
@@ -93,72 +99,100 @@ internal sealed class VortexDataset : IAsyncDisposable
     private readonly DatasetOptions _options;
     private readonly DTypeArena _types = new DTypeArena();
     private readonly ObjectCache _objects;
-    private CommitHeader _header;
-    private DatasetLevels _levels;
-    private CommitPageSource _pages;
+    private DatasetSnapshot _snapshot;
 
-    private VortexDataset(
-        IObjectStore store, DatasetOptions options, CommitHeader header, DatasetLevels levels, CommitPageSource pages)
+    private VortexDataset(IObjectStore store, DatasetOptions options, CommitHeader header, CommitPageSource pages)
     {
         _store = store;
         _options = options;
-        _objects = new ObjectCache(store, options.MaxOpenObjects);
-        _header = header;
-        _levels = levels;
-        _pages = pages;
-        Schema = header.Schema.IsEmpty
+        _objects = new ObjectCache(store, options.MaxOpenObjects, options.Session);
+        _snapshot = new DatasetSnapshot(header, pages, _objects);
+        DType = header.Schema.IsEmpty
             ? default
             : DTypeProtobuf.Read(header.Schema.Span, _types);
-        Key = Schema.IsDefault ? null : ClusteringKey.For(header.ClusteringKey, Schema);
+        Schema = DType.IsDefault ? VortexSchema.Create([]) : VortexTypes.SchemaOf(DType);
+        Key = DType.IsDefault ? null : ClusteringKey.For(header.ClusteringKey, DType);
     }
 
-    /// <summary>The version this handle reads.</summary>
-    public ulong Version => _header.Version;
+    /// <summary>The version this handle reads; it moves only when this handle commits or refreshes.</summary>
+    public ulong Version => _snapshot.Version;
 
-    /// <summary>The dataset's schema.</summary>
-    public DType Schema { get; }
+    /// <summary>The columns every object of the dataset holds.</summary>
+    public VortexSchema Schema { get; }
+
+    /// <summary>The session the dataset's scans run in.</summary>
+    public VortexSession Session => _options.Session;
 
     /// <summary>The rows of every object it holds, over every level.</summary>
-    public long RowCount => _levels.Rows;
+    public long RowCount => _snapshot.RowCount;
 
     /// <summary>The data objects it holds, over every level.</summary>
-    public long ObjectCount => _levels.Entries;
-
-    /// <summary>Its levels, where level 0 is the one an append lands in.</summary>
-    public DatasetLevels Levels => _levels;
-
-    /// <summary>Where this version's tree pages are read from, for a caller walking the levels.</summary>
-    public IPageSource Pages => _pages;
-
-    /// <summary>The levels of level 0's tree: 0 when it is empty, 1 when one leaf page holds it all.</summary>
-    public int Depth => _levels[0].Depth;
+    public long ObjectCount => _snapshot.Levels.Entries;
 
     /// <summary>
     /// The objects level 0 holds above its ceiling. Reported, never refused: compaction is the
     /// user's background job, and a non-zero lag says how far a read bound has degraded.
     /// </summary>
-    public long Lag => _levels.LagAtLevelZero();
-
-    /// <summary>The seed every boundary of its trees is decided under.</summary>
-    public ulong Seed => _header.Seed;
-
-    /// <summary>The compaction settings its header carries, zero-valued when it states none.</summary>
-    public CompactionSettings Compaction => _header.Compaction;
-
-    /// <summary>What vacuum keeps, as the header carries it.</summary>
-    public RetentionSettings Retention => _header.Retention;
+    public long Lag => _snapshot.Levels.LagAtLevelZero();
 
     /// <summary>The columns it is ordered by, empty when it is ordered by row position.</summary>
-    public IReadOnlyList<string> ClusteringKeyPaths => _header.ClusteringKey;
+    public IReadOnlyList<string> ClusteringKeyPaths => _snapshot.Header.ClusteringKey;
+
+    /// <summary>The dataset's schema as the engine holds it.</summary>
+    internal DType DType { get; }
+
+    /// <summary>The version this handle reads, whole: what a scan built now keeps reading.</summary>
+    internal DatasetSnapshot Snapshot => Volatile.Read(ref _snapshot);
+
+    /// <summary>The options it was opened with.</summary>
+    internal DatasetOptions Options => _options;
+
+    /// <summary>Its levels, where level 0 is the one an append lands in.</summary>
+    internal DatasetLevels Levels => _snapshot.Levels;
+
+    /// <summary>Where this version's tree pages are read from, for a caller walking the levels.</summary>
+    internal IPageSource Pages => _snapshot.Pages;
+
+    /// <summary>The levels of level 0's tree: 0 when it is empty, 1 when one leaf page holds it all.</summary>
+    internal int Depth => _snapshot.Levels[0].Depth;
+
+    /// <summary>The seed every boundary of its trees is decided under.</summary>
+    internal ulong Seed => _snapshot.Header.Seed;
+
+    /// <summary>The compaction settings its header carries, zero-valued when it states none.</summary>
+    internal CompactionSettings Compaction => _snapshot.Header.Compaction;
+
+    /// <summary>What vacuum keeps, as the header carries it.</summary>
+    internal RetentionSettings Retention => _snapshot.Header.Retention;
 
     /// <summary>Its clustering key, or null when it is ordered by row position.</summary>
-    public ClusteringKey? Key { get; }
+    internal ClusteringKey? Key { get; }
+
+    /// <summary>
+    /// Creates a dataset in a store that holds none, and returns a handle on its first version.
+    /// </summary>
+    /// <param name="store">The store; the dataset is everything under its <c>commit/</c> and <c>data/</c> keys.</param>
+    /// <param name="schema">The columns every object of the dataset holds.</param>
+    /// <param name="options">The clustering key, the retention and how objects are written; null for the defaults.</param>
+    /// <param name="cancellationToken">Cancels the requests.</param>
+    /// <returns>The handle, on version 1; the caller disposes it.</returns>
+    /// <exception cref="ObjectStoreException">The store already holds a dataset.</exception>
+    /// <exception cref="ArgumentException">A clustering key column is not in the schema.</exception>
+    public static ValueTask<VortexDataset> CreateAsync(
+        IObjectStore store,
+        VortexSchema schema,
+        DatasetOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(schema);
+        return CreateAsync(store, VortexTypes.ToDType(schema, new DTypeArena()), options, cancellationToken);
+    }
 
     /// <summary>
     /// Creates a dataset under a store prefix — everything under its keys — and returns a handle on
     /// version 1.
     /// </summary>
-    public static async ValueTask<VortexDataset> CreateAsync(
+    internal static async ValueTask<VortexDataset> CreateAsync(
         IObjectStore store,
         DType schema,
         DatasetOptions? options = null,
@@ -192,7 +226,14 @@ internal sealed class VortexDataset : IAsyncDisposable
         return await OpenAsync(store, options, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Opens the dataset's latest version; the seed is the dataset's own, not the options'.</summary>
+    /// <summary>
+    /// Opens a dataset's latest version, found with one listing and read with one request.
+    /// </summary>
+    /// <param name="store">The store holding the dataset.</param>
+    /// <param name="options">How this handle reads and writes; the settings fixed at creation come from the dataset itself.</param>
+    /// <param name="cancellationToken">Cancels the requests.</param>
+    /// <returns>The handle, pinned to the latest version until it commits or refreshes; the caller disposes it.</returns>
+    /// <exception cref="ObjectNotFoundException">The store holds no dataset.</exception>
     public static async ValueTask<VortexDataset> OpenAsync(
         IObjectStore store, DatasetOptions? options = null, CancellationToken cancellationToken = default)
     {
@@ -204,34 +245,67 @@ internal sealed class VortexDataset : IAsyncDisposable
             throw ObjectNotFoundException.For(CommitKey.Prefix);
         }
 
-        CommitPageSource pages = new CommitPageSource(store) { Reading = version };
-        pages.Inline(commit.Header);
-        pages.Know(version, commit.HeaderEnd);
         return new VortexDataset(
             store,
             (options ?? new DatasetOptions()) with { Seed = commit.Header.Seed },
             commit.Header,
-            DatasetLevels.Of(commit.Header),
-            pages);
+            PagesOf(store, version, commit));
     }
 
-    /// <summary>Re-reads the latest version and returns what this handle now reads.</summary>
+    /// <summary>Moves this handle to the latest version.</summary>
+    /// <param name="cancellationToken">Cancels the requests.</param>
+    /// <returns>The version the handle now reads.</returns>
     public async ValueTask<ulong> RefreshAsync(CancellationToken cancellationToken = default)
     {
         (ulong version, CommitObject? commit) = await DatasetCommitter
             .LatestAsync(_store, cancellationToken).ConfigureAwait(false);
         if (commit is null)
         {
-            return _header.Version;
+            return Version;
         }
 
-        CommitPageSource pages = new CommitPageSource(_store) { Reading = version };
+        Volatile.Write(ref _snapshot, new DatasetSnapshot(commit.Header, PagesOf(_store, version, commit), _objects));
+        return version;
+    }
+
+    /// <summary>A scan of the version this handle holds, typed by <typeparamref name="TRecord"/>, over every object.</summary>
+    /// <typeparam name="TRecord">The record; its members bind to the dataset's columns by name.</typeparam>
+    /// <returns>A fresh scan of the version the handle holds now, whatever the handle does next.</returns>
+    /// <remarks>
+    /// A batch's <c>StartRow</c> counts the dataset's rows, object after object in the tree's order,
+    /// as <c>Rows</c> does. Objects whose summaries refute the filter are not opened.
+    /// </remarks>
+    public Scan<TRecord> Scan<TRecord>()
+        where TRecord : IVortexRecord<TRecord> => new Scan<TRecord>(new DatasetScanSource(this, Snapshot));
+
+    /// <summary>A scan of the version this handle holds for a caller without a record type: columns by name, filters as text.</summary>
+    /// <param name="columns">The columns to read, by top-level name or <c>.</c>-separated path; none reads every column.</param>
+    /// <returns>A fresh scan of the version the handle holds now.</returns>
+    public Scan Scan(params ReadOnlySpan<string> columns) => new Scan(new DatasetScanSource(this, Snapshot), columns);
+
+    /// <summary>
+    /// Whether the version this handle holds may hold a row <paramref name="filter"/> is true for,
+    /// from the object and subtree summaries its header already carries: false is a proof, true is not.
+    /// </summary>
+    /// <typeparam name="TRecord">The record the filter is written against.</typeparam>
+    /// <param name="filter">A lambda over the record's columns.</param>
+    /// <returns>False when the summaries prove no row matches.</returns>
+    public bool MayMatch<TRecord>(Func<Probe<TRecord>, Predicate> filter)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        RecordBinding binding = RecordBinding.For<TRecord>(Schema, Session.Options.Extensions);
+        Predicate predicate = filter(new Probe<TRecord>(binding));
+        return !predicate.IsNone && (predicate.IsAll ? RowCount > 0 : Snapshot.MayMatch(predicate.Node!));
+    }
+
+    /// <summary>A page source for one version, holding the pages its header inlines.</summary>
+    private static CommitPageSource PagesOf(IObjectStore store, ulong version, CommitObject commit)
+    {
+        CommitPageSource pages = new CommitPageSource(store) { Reading = version };
         pages.Inline(commit.Header);
         pages.Know(version, commit.HeaderEnd);
-        _header = commit.Header;
-        _levels = DatasetLevels.Of(commit.Header);
-        _pages = pages;
-        return version;
+        return pages;
     }
 
     /// <summary>
@@ -261,7 +335,7 @@ internal sealed class VortexDataset : IAsyncDisposable
             {
                 // Every object has the dataset's schema; one with another is refused here rather
                 // than failing the first scan.
-                if (!Schema.IsDefault && file.DType != Schema)
+                if (!DType.IsDefault && file.DType != DType)
                 {
                     throw new ArgumentException(
                         $"The object '{objectKey}' has a schema other than the dataset's; a dataset " +
@@ -307,7 +381,7 @@ internal sealed class VortexDataset : IAsyncDisposable
             ? await ApplyAsync(
                 [new DatasetOperation.AddObject(produced.Key, produced.Entry)], cancellationToken)
                 .ConfigureAwait(false)
-            : _header.Version;
+            : Version;
     }
 
     /// <summary>
@@ -322,7 +396,7 @@ internal sealed class VortexDataset : IAsyncDisposable
         IReadOnlyList<DatasetOperation> operations, CancellationToken cancellationToken)
     {
         CommitResult result = await DatasetCommitter
-            .CommitAsync(_store, operations, Commit(_options, _header), cancellationToken).ConfigureAwait(false);
+            .CommitAsync(_store, operations, Commit(_options, Snapshot.Header), cancellationToken).ConfigureAwait(false);
         await RefreshAsync(cancellationToken).ConfigureAwait(false);
         return result;
     }
@@ -408,16 +482,13 @@ internal sealed class VortexDataset : IAsyncDisposable
                 (Key is null ? "none (13 §4.1)." : "a composite one: rank a tuple's leading column with a count instead."));
         }
 
-        return Scan()
+        return ScanBuilder()
             .Where(Expr.Lt(Expr.Field(clustering.Paths[0]), Expr.Literal(key)))
             .CountAsync(cancellationToken);
     }
 
-    /// <summary>A scan over every object of this version.</summary>
-    public DatasetScanBuilder Scan() => new DatasetScanBuilder(this);
-
-    /// <summary>A scan over the dataset's rows <c>[from, to)</c>, in the tree's order.</summary>
-    public DatasetScanBuilder Rows(long from, long to) => new DatasetScanBuilder(this).Rows(from, to);
+    /// <summary>The engine's scan over every object of the version this handle holds now.</summary>
+    internal DatasetScanBuilder ScanBuilder() => new DatasetScanBuilder(this, Snapshot);
 
     /// <inheritdoc/>
     public ValueTask DisposeAsync() => _objects.DisposeAsync();
@@ -426,51 +497,9 @@ internal sealed class VortexDataset : IAsyncDisposable
     /// The objects inside <c>[from, to)</c> whose summaries, and their ancestors', do not refute
     /// the pruner, in key order. A null pruner keeps every object.
     /// </summary>
-    internal async IAsyncEnumerable<PositionedObject> WalkAsync(
-        SummaryPruner? pruner,
-        long from,
-        long to,
-        DatasetScanMetrics? metrics,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        Func<InternalEntry, bool>? descend = pruner is null ? null : node =>
-        {
-            if (node.Summary.IsEmpty
-                || ObjectSummaries.FromBytes(node.Summary.Span).MayMatch(pruner, node.Rows))
-            {
-                return true;
-            }
-
-            if (metrics is { } counters)
-            {
-                counters.SubtreesSkipped++;
-            }
-
-            return false;
-        };
-
-        await foreach ((TreeEntry held, long firstRow, int level) in
-            EntriesAsync(from, to, descend, cancellationToken).ConfigureAwait(false))
-        {
-            ObjectEntry entry = ObjectEntry.FromBytes(held.Value.Span);
-            if (metrics is { } counters)
-            {
-                counters.ObjectsConsidered++;
-            }
-
-            if (pruner is not null && !entry.Summaries.MayMatch(pruner, entry.Rows))
-            {
-                if (metrics is { } skipped)
-                {
-                    skipped.ObjectsSkipped++;
-                }
-
-                continue;
-            }
-
-            yield return new PositionedObject(entry, firstRow) { Level = level, TreeKey = held.Key };
-        }
-    }
+    internal IAsyncEnumerable<PositionedObject> WalkAsync(
+        SummaryPruner? pruner, long from, long to, DatasetScanMetrics? metrics, CancellationToken cancellationToken) =>
+        Snapshot.WalkAsync(pruner, from, to, metrics, cancellationToken);
 
     /// <summary>
     /// What orders an object in its tree: its tree key without the uid that ends it, which is the
@@ -480,117 +509,21 @@ internal sealed class VortexDataset : IAsyncDisposable
     internal static ReadOnlyMemory<byte> OrderOf(ReadOnlyMemory<byte> treeKey) => treeKey[..^UidBytes];
 
     /// <summary>
-    /// Every level's entries, merged into one key order, each with its first row in the dataset. A
-    /// single level takes its own walk, which tests a subtree's row sum before descending into it;
-    /// across levels the row offsets are not known until the merge has produced them, so the range
-    /// is applied per entry instead and the cost is the objects rather than the rows.
-    /// </summary>
-    private async IAsyncEnumerable<(TreeEntry Entry, long FirstRow, int Level)> EntriesAsync(
-        long from,
-        long to,
-        Func<InternalEntry, bool>? descend,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        List<DatasetTree> trees = [];
-        List<int> levels = [];
-        foreach ((int level, DatasetTree tree) in _levels.Occupied())
-        {
-            trees.Add(tree);
-            levels.Add(level);
-        }
-
-        if (trees.Count <= 1)
-        {
-            DatasetTree only = trees.Count == 1 ? trees[0] : DatasetTree.Empty;
-            int level = trees.Count == 1 ? levels[0] : 0;
-            await foreach (PositionedEntry positioned in
-                only.WalkAsync(_pages, from, to, descend, cancellationToken).ConfigureAwait(false))
-            {
-                yield return (positioned.Entry, positioned.FirstRow, level);
-            }
-
-            yield break;
-        }
-
-        IAsyncEnumerator<PositionedEntry>[] walks = new IAsyncEnumerator<PositionedEntry>[trees.Count];
-        bool[] live = new bool[trees.Count];
-        try
-        {
-            for (int i = 0; i < trees.Count; i++)
-            {
-                walks[i] = trees[i]
-                    .WalkAsync(_pages, 0, long.MaxValue, descend, cancellationToken)
-                    .GetAsyncEnumerator(cancellationToken);
-                live[i] = await walks[i].MoveNextAsync().ConfigureAwait(false);
-            }
-
-            long row = 0;
-            while (true)
-            {
-                int smallest = -1;
-                for (int i = 0; i < walks.Length; i++)
-                {
-                    if (live[i]
-                        && (smallest < 0
-                            || TreePage.Compare(
-                                walks[i].Current.Entry.Key.Span, walks[smallest].Current.Entry.Key.Span) < 0))
-                    {
-                        smallest = i;
-                    }
-                }
-
-                if (smallest < 0)
-                {
-                    yield break;
-                }
-
-                TreeEntry entry = walks[smallest].Current.Entry;
-                if (row < to && row + entry.Rows > from)
-                {
-                    yield return (entry, row, levels[smallest]);
-                }
-
-                row += entry.Rows;
-                live[smallest] = await walks[smallest].MoveNextAsync().ConfigureAwait(false);
-            }
-        }
-        finally
-        {
-            foreach (IAsyncEnumerator<PositionedEntry>? walk in walks)
-            {
-                if (walk is not null)
-                {
-                    await walk.DisposeAsync().ConfigureAwait(false);
-                }
-            }
-        }
-    }
-
-    /// <summary>
     /// Borrows one of the dataset's data objects, open with the index fragments its entry names.
     /// The caller disposes the lease when it is done reading.
     /// </summary>
     /// <exception cref="ObjectNotFoundException">
     /// The object is gone: this version fell out of the retention window and vacuum took it.
     /// </exception>
-    internal async ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await _objects.RentAsync(entry, _pages, cancellationToken).ConfigureAwait(false);
-        }
-        catch (ObjectNotFoundException missing) when (missing.Version == 0)
-        {
-            throw ObjectNotFoundException.InVersion(entry.Key, Version, missing);
-        }
-    }
+    internal ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken) =>
+        Snapshot.RentAsync(entry, cancellationToken);
 
     /// <summary>
     /// The bytes of one of this version's index fragments, checked against the reference an
     /// object's leaf entry carries.
     /// </summary>
     internal ValueTask<ReadOnlyMemory<byte>> ReadFragmentAsync(PageReference reference, CancellationToken cancellationToken) =>
-        _pages.ReadFragmentAsync(reference, cancellationToken);
+        Snapshot.Pages.ReadFragmentAsync(reference, cancellationToken);
 
     /// <summary>
     /// Starts one data object: a fresh identity, the sink that will hold it, and the writer the
@@ -609,7 +542,7 @@ internal sealed class VortexDataset : IAsyncDisposable
             write = clustering.Applied(write);
         }
 
-        return new ObjectDraft(identity, key, sink, VortexFileWriter.Create(sink, Schema, write));
+        return new ObjectDraft(identity, key, sink, VortexFileWriter.Create(sink, DType, write));
     }
 
     /// <summary>
