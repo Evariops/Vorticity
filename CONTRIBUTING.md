@@ -124,6 +124,37 @@ can follow a link.
 Do not add new ones. A comment that needs a journal to be understood is a comment that has not been
 written yet.
 
+## Commit messages
+
+English, Conventional Commits, and the body carries the argument.
+
+```
+<type>(<scope>): <summary>
+
+<why, in sentences that stand on their own>
+
+BREAKING CHANGE: <what a caller has to change>
+```
+
+**Type** is one of `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`,
+`bench`. **Scope** is optional and names the part that moved: `reader`, `writer`, `scan`, `filter`,
+`index`, `dataset`, `rowenc`, `bench`, `tools`, `docs`. A change that breaks a caller takes a `!`
+after the scope and a `BREAKING CHANGE:` trailer saying what they have to do.
+
+**The summary is an instruction, not a report** — `fix the budget`, never `fixed the budget`. Aim
+for 72 characters and do not pass 80; a summary that needs more is usually two commits. No full
+stop: it is a title.
+
+**The body says why, and the numbers belong in it.** Before and after, measured, with the unit:
+that is what makes a commit worth reading a year later. What the diff already shows does not need
+saying twice.
+
+**Every sentence stands on its own.** No document name, no section mark, no numbered step, no
+finding id, no commit hash. Those point at things a reader of this repository cannot open — the
+journals are not published, and a hash does not survive a rewrite. The reasoning in
+[References in comments](#references-in-comments) is the same reasoning: if a message needs a
+journal to be understood, it has not been written yet.
+
 ## Style
 
 * No file headers, and no `Copyright` lines: `LICENSE` and `NOTICE` carry that.
@@ -131,4 +162,3 @@ written yet.
   this way, not what it used to be.
 * A comment earns its place by saying something the code cannot: a measurement, a constraint from
   the format, a road not taken and the reason.
-* Commit messages are English Conventional Commits, and the body says the why with the numbers.
