@@ -87,7 +87,7 @@ internal static class SegmentIo
     }
 
     /// <summary>
-    /// The clamping rule <see cref="ISegmentSource.ReadRangeAsync"/> shares across sources:
+    /// The clamping rule <see cref="ISegmentReader.ReadRangeAsync"/> shares across sources:
     /// negative arguments are caller errors, a start past the end is a file error, and a length
     /// that runs off the end is truncated rather than rejected.
     /// </summary>

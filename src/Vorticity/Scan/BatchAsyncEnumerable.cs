@@ -197,7 +197,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 {
     private readonly LayoutTree _tree;
-    private readonly ISegmentSource _source;
+    private readonly ISegmentReader _source;
     private readonly FieldMask _mask;
     private readonly FieldMask _keep;
     private readonly DType _schema;

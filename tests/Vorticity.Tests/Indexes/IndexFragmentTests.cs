@@ -106,7 +106,7 @@ public sealed class IndexFragmentTests
         Decoders.EnsureRegistered();
         byte[] data = await WriteAsync(Guid.NewGuid(), WritePolicy.None);
         IndexFragment fragment = await FragmentAsync(
-            data, WritePolicy.None.For("id", IndexPolicy.Bloom(falsePositivePpm: 100)), Middle);
+            data, WritePolicy.None.For("id", IndexSpec.Bloom(falsePositivePpm: 100)), Middle);
 
         await using VortexFile file = await OpenAsync(data, fragment.Bytes);
         IndexRun run = Assert.Single(Assert.Single((await file.ReadIndexDirectoryAsync())!.Entries).Runs);
@@ -130,7 +130,7 @@ public sealed class IndexFragmentTests
         Decoders.EnsureRegistered();
         byte[] data = await WriteAsync(Guid.NewGuid(), Runs("id"));
         IndexFragment fragment = await FragmentAsync(
-            data, WritePolicy.None.For("tag", IndexPolicy.Bloom(falsePositivePpm: 100)), new RowRange(0, Rows));
+            data, WritePolicy.None.For("tag", IndexSpec.Bloom(falsePositivePpm: 100)), new RowRange(0, Rows));
 
         await using VortexFile file = await OpenAsync(data, fragment.Bytes);
         IndexDirectory directory = (await file.ReadIndexDirectoryAsync())!;
@@ -313,7 +313,7 @@ public sealed class IndexFragmentTests
     /// budget would otherwise abandon it at any size.
     /// </summary>
     private static WritePolicy Runs(string column) =>
-        WritePolicy.None.For(column, IndexPolicy.SortedRuns.AsRequired());
+        WritePolicy.None.For(column, IndexSpec.SortedRuns.AsRequired());
 
     /// <summary>
     /// A key no row holds that every block's bounds still admit, so a zone map proves nothing and

@@ -312,21 +312,21 @@ internal sealed record IndexDirectory(
     /// whose zero is a request rather than an absence, so it goes out whenever it differs from its
     /// default.
     /// </remarks>
-    private static void WriteColumnPolicy(ref ProtoWriter writer, string path, IndexPolicy policy)
+    private static void WriteColumnPolicy(ref ProtoWriter writer, string path, IndexSpec policy)
     {
         writer.WriteString(ColumnPath, path);
         writer.WriteUInt32(ColumnKind, (uint)policy.Kind);
-        WriteIfNot(ref writer, ColumnFpp, policy.FalsePositivePpm, IndexPolicy.DefaultFalsePositivePpm);
-        WriteIfNot(ref writer, ColumnResolutions, policy.Resolutions, IndexPolicy.DefaultResolutions);
-        WriteIfNot(ref writer, ColumnMaxBlocks, policy.MaxBlocks, IndexPolicy.DefaultMaxBlocks);
-        if (policy.MinDistinct != IndexPolicy.DefaultMinDistinct)
+        WriteIfNot(ref writer, ColumnFpp, policy.FalsePositivePpm, IndexSpec.DefaultFalsePositivePpm);
+        WriteIfNot(ref writer, ColumnResolutions, policy.Resolutions, IndexSpec.DefaultResolutions);
+        WriteIfNot(ref writer, ColumnMaxBlocks, policy.MaxBlocks, IndexSpec.DefaultMaxBlocks);
+        if (policy.MinDistinct != IndexSpec.DefaultMinDistinct)
         {
             writer.WriteUInt32Always(ColumnMinDistinct, (uint)policy.MinDistinct);
         }
 
         writer.WriteUInt32(ColumnHash, (uint)policy.Hash);
         writer.WriteBool(ColumnCaseInsensitive, policy.CaseInsensitive);
-        WriteIfNot(ref writer, ColumnSegmentEntries, policy.SegmentEntries, IndexPolicy.DefaultSegmentEntries);
+        WriteIfNot(ref writer, ColumnSegmentEntries, policy.SegmentEntries, IndexSpec.DefaultSegmentEntries);
         writer.WriteBool(ColumnRequired, policy.Required);
     }
 
@@ -717,8 +717,8 @@ internal sealed record IndexDirectory(
 
     private static WritePolicy ReadPolicy(ProtoReader reader)
     {
-        IndexPolicy fallback = IndexPolicy.None;
-        Dictionary<string, IndexPolicy> columns = new Dictionary<string, IndexPolicy>(StringComparer.Ordinal);
+        IndexSpec fallback = IndexSpec.None;
+        Dictionary<string, IndexSpec> columns = new Dictionary<string, IndexSpec>(StringComparer.Ordinal);
         List<CompositeKeyPolicy> keys = [];
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
@@ -728,7 +728,7 @@ internal sealed record IndexDirectory(
                     fallback = ReadColumnPolicy(reader.ReadMessage(), out _, out _);
                     break;
                 case PolicyColumns when wire == ProtoWireType.LengthDelimited:
-                    IndexPolicy column = ReadColumnPolicy(reader.ReadMessage(), out string path, out _);
+                    IndexSpec column = ReadColumnPolicy(reader.ReadMessage(), out string path, out _);
                     if (path.Length > 0)
                     {
                         columns[path] = column;
@@ -736,7 +736,7 @@ internal sealed record IndexDirectory(
 
                     break;
                 case PolicyKeys when wire == ProtoWireType.LengthDelimited:
-                    IndexPolicy key = ReadColumnPolicy(reader.ReadMessage(), out _, out List<string> paths);
+                    IndexSpec key = ReadColumnPolicy(reader.ReadMessage(), out _, out List<string> paths);
                     if (paths.Count >= 2 && key.Kind == IndexPolicyKind.SortedRuns)
                     {
                         keys.Add(new CompositeKeyPolicy(paths, key));
@@ -752,7 +752,7 @@ internal sealed record IndexDirectory(
         return WritePolicy.FromStored(fallback, columns, keys);
     }
 
-    private static IndexPolicy ReadColumnPolicy(ProtoReader reader, out string path, out List<string> keyPaths)
+    private static IndexSpec ReadColumnPolicy(ProtoReader reader, out string path, out List<string> keyPaths)
     {
         path = string.Empty;
         keyPaths = [];
@@ -808,7 +808,7 @@ internal sealed record IndexDirectory(
             }
         }
 
-        return IndexPolicy.FromStored(
+        return IndexSpec.FromStored(
             (int)Math.Min(kind, int.MaxValue),
             (int)Math.Min(fpp, int.MaxValue),
             (int)Math.Min(resolutions, int.MaxValue),

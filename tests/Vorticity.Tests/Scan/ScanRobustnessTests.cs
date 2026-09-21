@@ -254,13 +254,13 @@ public sealed class ScanRobustnessTests
     /// arrives as a FAULTED ValueTask, not an inline throw - and which records the request set it
     /// was handed on each call.
     /// </summary>
-    private sealed class RecordingFaultingSource : ISegmentSource
+    private sealed class RecordingFaultingSource : ISegmentReader
     {
         private readonly TrackingSegmentSource _inner;
         private readonly int _failOnCall;
         private int _calls;
 
-        internal RecordingFaultingSource(ISegmentSource inner, int failOnCall)
+        internal RecordingFaultingSource(ISegmentReader inner, int failOnCall)
         {
             _inner = new TrackingSegmentSource(inner);
             _failOnCall = failOnCall;
@@ -305,13 +305,13 @@ public sealed class ScanRobustnessTests
     }
 
     /// <summary>A tracking source that starts failing after <c>n</c> successful batched reads.</summary>
-    private sealed class FailAfterSource : ISegmentSource
+    private sealed class FailAfterSource : ISegmentReader
     {
         private readonly TrackingSegmentSource _inner;
         private readonly int _allow;
         private int _calls;
 
-        internal FailAfterSource(ISegmentSource inner, int allow)
+        internal FailAfterSource(ISegmentReader inner, int allow)
         {
             _inner = new TrackingSegmentSource(inner);
             _allow = allow;

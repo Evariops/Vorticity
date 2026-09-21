@@ -12,7 +12,7 @@ namespace Vorticity.IO;
 /// <see cref="SegmentOwner.Release"/> gives that reference back, so the mapping cannot be unmapped
 /// while a slice of it is still live. <see cref="SegmentRequestSet.SetSharedResult"/> is the
 /// allocation-free path for the same idea and is what <c>ReadManyAsync</c> uses; this type exists
-/// for the single-segment <see cref="ISegmentSource.ReadAsync"/> entry point, which must hand back
+/// for the single-segment <see cref="ISegmentReader.ReadAsync"/> entry point, which must hand back
 /// an owner of its own.
 /// </remarks>
 internal sealed class SliceSegmentOwner : SegmentOwner

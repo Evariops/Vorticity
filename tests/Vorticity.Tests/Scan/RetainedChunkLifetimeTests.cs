@@ -173,7 +173,7 @@ public sealed class RetainedChunkLifetimeTests
             VortexWriteOptions options = new VortexWriteOptions
             {
                 Compress = false,
-                WritePolicy = WritePolicy.None.For("value", IndexPolicy.SortedRuns.AsRequired()),
+                WritePolicy = WritePolicy.None.For("value", IndexSpec.SortedRuns.AsRequired()),
             };
             await using (VortexFileWriter writer = VortexFileWriter.Create(
                 new StreamSegmentSink(stream, ownsStream: false), Schema, options))
@@ -223,7 +223,7 @@ public sealed class RetainedChunkLifetimeTests
     /// does, and overwrites it when its last reference goes. The memory itself stays allocated for
     /// the source's lifetime, so a late read sees the overwrite and never a crash.
     /// </summary>
-    private sealed class PoisoningSegmentSource(byte[] bytes) : ISegmentSource
+    private sealed class PoisoningSegmentSource(byte[] bytes) : ISegmentReader
     {
         private readonly List<PoisoningSegmentOwner> _owners = [];
         private int _freed;

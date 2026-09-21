@@ -13,24 +13,23 @@ using Vorticity.Serialization.Schemas;
 namespace Vorticity.IO;
 
 /// <summary>
-/// A zero-copy <see cref="ISegmentSource"/> over a memory-mapped local file.
+/// A zero-copy source over a memory-mapped local file: every lease is a pointer into the mapping.
 /// </summary>
 /// <remarks>
 /// <para>
 /// The whole file is mapped once at construction and every segment is a pointer into it. There is
-/// no I/O on the read path at all, so <see cref="ReadManyAsync"/> does no coalescing: a run is
-/// only ever a way to turn several small reads into one, and there are no reads. A view is handed
-/// out directly; the accessor's own read methods, which copy, are deliberately unused.
+/// no I/O on the read path at all, so a batch of ranges is not coalesced: a run is only ever a way
+/// to turn several small reads into one, and there are no reads.
 /// </para>
 /// <para>
 /// <b>Alignment.</b> A mapping base is page-aligned, so a segment at file offset <c>o</c> sits at
 /// an address congruent to <c>o</c> modulo the page size; a writer that aligned <c>o</c> to
-/// <c>2^k</c> with <c>k ≤ 6</c> therefore yields an address aligned to <c>2^k</c>.
-/// <see cref="ReadRangeAsync"/> is the one entry point that can be asked for an alignment the file
-/// offset does not satisfy, and it copies in exactly that case.
+/// <c>2^k</c> with <c>k ≤ 6</c> therefore yields an address aligned to <c>2^k</c>. The tail read of
+/// an open is the one request that can ask for an alignment the file offset does not satisfy, and
+/// it copies in exactly that case.
 /// </para>
 /// </remarks>
-internal sealed class MemoryMappedSegmentSource : ISegmentSource
+public sealed class MemoryMappedSegmentSource : ISegmentSource, ISegmentReader
 {
     private readonly MappedFileOwner? _mapping;
     private readonly SafeFileHandle? _emptyFileHandle;
@@ -43,6 +42,20 @@ internal sealed class MemoryMappedSegmentSource : ISegmentSource
         Length = length;
     }
 
+    /// <summary>Opens <paramref name="path"/> read-only and maps it whole.</summary>
+    /// <param name="path">A local file path.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
+    /// <exception cref="IOException">The file could not be opened or mapped.</exception>
+    public MemoryMappedSegmentSource(string path)
+        : this(Open(path))
+    {
+    }
+
+    private MemoryMappedSegmentSource(MemoryMappedSegmentSource opened)
+        : this(opened._mapping, opened._emptyFileHandle, opened.Length)
+    {
+    }
+
     /// <summary>The file length in bytes.</summary>
     public long Length { get; }
 
@@ -51,7 +64,7 @@ internal sealed class MemoryMappedSegmentSource : ISegmentSource
     /// <returns>A source over the whole file.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
     /// <exception cref="IOException">The file could not be opened or mapped.</exception>
-    public static MemoryMappedSegmentSource Open(string path)
+    internal static MemoryMappedSegmentSource Open(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
 
@@ -71,6 +84,14 @@ internal sealed class MemoryMappedSegmentSource : ISegmentSource
         }
     }
 
+    /// <inheritdoc/>
+    public ValueTask<SegmentLease> ReadAsync(SegmentRange range, CancellationToken cancellationToken) =>
+        SegmentLeases.ReadAsync(this, range, cancellationToken);
+
+    /// <inheritdoc/>
+    public ValueTask ReadAsync(ReadOnlyMemory<SegmentRange> ranges, Memory<SegmentLease> leases, CancellationToken cancellationToken) =>
+        SegmentLeases.ReadAsync(this, ranges, leases, cancellationToken);
+
     /// <summary>Maps an already-open file handle.</summary>
     /// <param name="handle">A readable file handle.</param>
     /// <param name="length">The file length in bytes.</param>
@@ -81,7 +102,7 @@ internal sealed class MemoryMappedSegmentSource : ISegmentSource
     /// <returns>A source over the whole file.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="handle"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="length"/> is negative.</exception>
-    public static MemoryMappedSegmentSource Create(SafeFileHandle handle, long length, bool ownsHandle)
+    internal static MemoryMappedSegmentSource Create(SafeFileHandle handle, long length, bool ownsHandle)
     {
         ArgumentNullException.ThrowIfNull(handle);
         ArgumentOutOfRangeException.ThrowIfNegative(length);
@@ -107,15 +128,13 @@ internal sealed class MemoryMappedSegmentSource : ISegmentSource
         return new MemoryMappedSegmentSource(mapping, null, length);
     }
 
-    /// <inheritdoc/>
-    public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken)
+    ValueTask<long> ISegmentReader.GetLengthAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return new ValueTask<long>(Length);
     }
 
-    /// <inheritdoc/>
-    public ValueTask<SegmentOwner> ReadAsync(SegmentSpec spec, CancellationToken cancellationToken)
+    ValueTask<SegmentOwner> ISegmentReader.ReadAsync(SegmentSpec spec, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ThrowIfDisposed();
@@ -140,8 +159,7 @@ internal sealed class MemoryMappedSegmentSource : ISegmentSource
         }
     }
 
-    /// <inheritdoc/>
-    public ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
+    ValueTask ISegmentReader.ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(requests);
         cancellationToken.ThrowIfCancellationRequested();
@@ -198,8 +216,7 @@ internal sealed class MemoryMappedSegmentSource : ISegmentSource
         return ValueTask.CompletedTask;
     }
 
-    /// <inheritdoc/>
-    public ValueTask<SegmentOwner> ReadRangeAsync(
+    ValueTask<SegmentOwner> ISegmentReader.ReadRangeAsync(
         long offset, int length, int alignment, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -244,7 +261,8 @@ internal sealed class MemoryMappedSegmentSource : ISegmentSource
         }
     }
 
-    /// <inheritdoc/>
+    /// <summary>Drops the source's reference to the mapping; leases still held keep it alive until they are disposed.</summary>
+    /// <returns>A completed task.</returns>
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)

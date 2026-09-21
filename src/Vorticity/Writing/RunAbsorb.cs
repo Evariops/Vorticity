@@ -129,7 +129,7 @@ internal static class RunAbsorb
         using RawRunWriter writer = new RawRunWriter(
             scratch, hasRows, layout.Width, checked((int)run.FirstBlock), checked((int)run.BlockCount));
         using ScanContext context = file.CreateIndexContext(run);
-        ISegmentSource source = file.IndexSourceOf(run);
+        ISegmentReader source = file.IndexSourceOf(run);
         try
         {
             for (long s = 0; s < table!.SegmentCount; s++)

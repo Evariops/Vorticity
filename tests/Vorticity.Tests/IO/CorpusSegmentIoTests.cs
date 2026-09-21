@@ -87,7 +87,7 @@ public sealed class CorpusSegmentIoTests
         long expected = new FileInfo(path).Length;
 
         await using MemoryMappedSegmentSource mapped = MemoryMappedSegmentSource.Open(path);
-        await using RandomAccessSegmentSource random = RandomAccessSegmentSource.Open(path);
+        await using FileSegmentSource random = FileSegmentSource.Open(path);
         await using HttpRangeSegmentSource http =
             new HttpRangeSegmentSource(new InMemoryRangeTransport(global::System.IO.File.ReadAllBytes(path)));
 
@@ -109,10 +109,10 @@ public sealed class CorpusSegmentIoTests
         foreach (SegmentSourceKind kind in
                  (SegmentSourceKind[])Enum.GetValues(typeof(SegmentSourceKind)))
         {
-            ISegmentSource source = kind switch
+            ISegmentReader source = kind switch
             {
                 SegmentSourceKind.MemoryMapped => MemoryMappedSegmentSource.Open(path),
-                SegmentSourceKind.RandomAccess => RandomAccessSegmentSource.Open(path),
+                SegmentSourceKind.RandomAccess => FileSegmentSource.Open(path),
                 _ => new HttpRangeSegmentSource(new InMemoryRangeTransport(expected)),
             };
 
@@ -159,7 +159,7 @@ public sealed class CorpusSegmentIoTests
         int tailLength = (int)(expected.Length - start);
 
         await using MemoryMappedSegmentSource mapped = MemoryMappedSegmentSource.Open(path);
-        await using RandomAccessSegmentSource random = RandomAccessSegmentSource.Open(path);
+        await using FileSegmentSource random = FileSegmentSource.Open(path);
 
         SegmentOwner a = await mapped.ReadRangeAsync(start, tailWanted, 8, CancellationToken.None);
         SegmentOwner b = await random.ReadRangeAsync(start, tailWanted, 8, CancellationToken.None);
@@ -188,7 +188,7 @@ public sealed class CorpusSegmentIoTests
         long length = new FileInfo(path).Length;
 
         await using MemoryMappedSegmentSource mapped = MemoryMappedSegmentSource.Open(path);
-        await using RandomAccessSegmentSource random = RandomAccessSegmentSource.Open(path);
+        await using FileSegmentSource random = FileSegmentSource.Open(path);
 
         SegmentSpec overrun = Spec((ulong)length - 8, 64, 3);
 

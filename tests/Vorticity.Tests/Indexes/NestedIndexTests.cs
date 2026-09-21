@@ -47,12 +47,12 @@ public sealed class NestedIndexTests
     private static readonly RowSortField Asc = RowSortField.Ascending;
 
     private static WritePolicy Policy => WritePolicy.None
-        .For("person.name", IndexPolicy.Postings)
-        .For("person.age", IndexPolicy.Bloom(minDistinct: 1))
-        .For("person.address.city", IndexPolicy.SortedRuns.WithSegmentEntries(500))
-        .For("person.nope", IndexPolicy.Bloom())
-        .For("person.address", IndexPolicy.Auto)
-        .ForKey(["person.address.city", "id"], IndexPolicy.SortedRuns);
+        .For("person.name", IndexSpec.Postings)
+        .For("person.age", IndexSpec.Bloom(minDistinct: 1))
+        .For("person.address.city", IndexSpec.SortedRuns.WithSegmentEntries(500))
+        .For("person.nope", IndexSpec.Bloom())
+        .For("person.address", IndexSpec.Auto)
+        .ForKey(["person.address.city", "id"], IndexSpec.SortedRuns);
 
     [Fact]
     public async Task EveryOverrideIsBuiltOrSaysWhyNot()

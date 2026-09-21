@@ -11,39 +11,39 @@ internal static class EncodingHints
     internal static async Task RunAsync()
     {
         // The same two columns, written with one hint after another.
-        foreach (VortexEncodingHint hint in new[]
+        foreach (EncodingHint hint in new[]
         {
-            VortexEncodingHint.Auto,
-            VortexEncodingHint.Canonical,
-            VortexEncodingHint.Dictionary,
-            VortexEncodingHint.Fsst,
-            VortexEncodingHint.Zstd,
-            VortexEncodingHint.RunEnd,
+            EncodingHint.Auto,
+            EncodingHint.Canonical,
+            EncodingHint.Dictionary,
+            EncodingHint.Fsst,
+            EncodingHint.Zstd,
+            EncodingHint.RunEnd,
         })
         {
             await Hinted("city", hint);
         }
 
-        foreach (VortexEncodingHint hint in new[]
+        foreach (EncodingHint hint in new[]
         {
-            VortexEncodingHint.Auto,
-            VortexEncodingHint.Canonical,
-            VortexEncodingHint.Alp,
-            VortexEncodingHint.BitPacked,
-            VortexEncodingHint.Sequence,
-            VortexEncodingHint.Zstd,
+            EncodingHint.Auto,
+            EncodingHint.Canonical,
+            EncodingHint.Alp,
+            EncodingHint.BitPacked,
+            EncodingHint.Sequence,
+            EncodingHint.Zstd,
         })
         {
             await Hinted("celsius", hint);
         }
     }
 
-    private static async Task Hinted(string column, VortexEncodingHint hint)
+    private static async Task Hinted(string column, EncodingHint hint)
     {
         string path = Demo.Path($"hint-{column}-{hint}.vortex");
         WriteReport report = await Demo.WriteCitiesAsync(path, new VortexWriteOptions
         {
-            EncodingHints = new Dictionary<string, VortexEncodingHint> { [column] = hint },
+            EncodingHints = new Dictionary<string, EncodingHint> { [column] = hint },
         });
 
         string chosen = "?";

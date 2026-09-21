@@ -93,7 +93,7 @@ public sealed class IndexWriteTests
         Assert.Null(file.IndexDirectoryRefusal);
         Assert.Equal((ulong)Rows, directory!.RowCount);
         Assert.Equal(0UL, directory.PreviousEof);
-        Assert.Equal(IndexPolicy.Auto, directory.Policy.Default);
+        Assert.Equal(IndexSpec.Auto, directory.Policy.Default);
 
         IndexEntry entry = Assert.Single(directory.Entries);
         Assert.Equal(IndexKinds.DictProbe, entry.Kind);
@@ -132,8 +132,8 @@ public sealed class IndexWriteTests
     {
         Decoders.EnsureRegistered();
         WritePolicy policy = WritePolicy.None
-            .For("label", IndexPolicy.Bloom())
-            .For("id", IndexPolicy.SortedRuns);
+            .For("label", IndexSpec.Bloom())
+            .For("id", IndexSpec.SortedRuns);
         (byte[] bytes, WriteReport report) = await WriteAsync(Options(policy));
 
         Assert.Equal(2, report.Indexes.Count);

@@ -186,8 +186,8 @@ public sealed class CompositeKeyTests
         // The composite entry does not pose as a single column's source.
         KeyPlan single = await file.Keys("country").ExplainAsync();
         Assert.Equal(KeySourceKind.None, single.Source);
-        Assert.Throws<ArgumentException>(() => WritePolicy.None.ForKey(["country"], IndexPolicy.SortedRuns));
-        Assert.Throws<ArgumentException>(() => WritePolicy.None.ForKey(["a", "b"], IndexPolicy.Postings));
+        Assert.Throws<ArgumentException>(() => WritePolicy.None.ForKey(["country"], IndexSpec.SortedRuns));
+        Assert.Throws<ArgumentException>(() => WritePolicy.None.ForKey(["a", "b"], IndexSpec.Postings));
     }
 
     /// <summary>Every row's key, the null ones left out, sorted by key then row.</summary>
@@ -301,7 +301,7 @@ public sealed class CompositeKeyTests
             DType utf8n = types.Utf8(Nullability.Nullable);
             DType i32 = types.Primitive(PType.I32, Nullability.NonNullable);
             DType schema = types.Struct(["country", "city", "n"], [utf8, utf8n, i32], Nullability.NonNullable);
-            IndexPolicy runs = IndexPolicy.SortedRuns.WithSegmentEntries(64);
+            IndexSpec runs = IndexSpec.SortedRuns.WithSegmentEntries(64);
             VortexWriteOptions options = new VortexWriteOptions
             {
                 RowBlockSize = Block,

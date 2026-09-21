@@ -122,18 +122,18 @@ public sealed class RoundTripSweepTests
             // references them. The data the verifier compares is the default write's.
             WritePolicy policy = (written % 6) switch
             {
-                0 => WritePolicy.None.WithDefault(IndexPolicy.Bloom(resolutions: 3)),
-                1 => WritePolicy.None.WithDefault(IndexPolicy.Postings),
-                2 => WritePolicy.None.WithDefault(IndexPolicy.SortedRuns.WithSegmentEntries(500)),
-                4 => WritePolicy.None.WithDefault(IndexPolicy.NgramBloom(resolutions: 3)),
-                5 => WritePolicy.None.WithDefault(IndexPolicy.NgramPostings(caseInsensitive: true).WithSegmentEntries(500)),
+                0 => WritePolicy.None.WithDefault(IndexSpec.Bloom(resolutions: 3)),
+                1 => WritePolicy.None.WithDefault(IndexSpec.Postings),
+                2 => WritePolicy.None.WithDefault(IndexSpec.SortedRuns.WithSegmentEntries(500)),
+                4 => WritePolicy.None.WithDefault(IndexSpec.NgramBloom(resolutions: 3)),
+                5 => WritePolicy.None.WithDefault(IndexSpec.NgramPostings(caseInsensitive: true).WithSegmentEntries(500)),
                 _ => WritePolicy.Auto,
             };
             if (written % 6 == 3 && source.DType.Kind == DTypeKind.Struct)
             {
                 for (int field = 1; field < source.DType.FieldCount; field += 2)
                 {
-                    policy = policy.For(source.DType.GetFieldName(field), IndexPolicy.Bloom(resolutions: 3));
+                    policy = policy.For(source.DType.GetFieldName(field), IndexSpec.Bloom(resolutions: 3));
                 }
             }
 

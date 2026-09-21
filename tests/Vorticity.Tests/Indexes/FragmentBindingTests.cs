@@ -37,7 +37,7 @@ public sealed class FragmentBindingTests
     private static readonly DType Schema = Types.Struct(
         ["id"], [Types.Primitive(PType.I64, Nullability.NonNullable)], Nullability.NonNullable);
 
-    private static readonly WritePolicy Policy = WritePolicy.None.For("id", IndexPolicy.SortedRuns);
+    private static readonly WritePolicy Policy = WritePolicy.None.For("id", IndexSpec.SortedRuns);
 
     private static long Id(int row) => (row * 7_919L) % 100_003;
 
@@ -230,7 +230,7 @@ public sealed class FragmentBindingTests
     }
 
     /// <summary>Counts what goes through a source.</summary>
-    private sealed class CountingSource(ISegmentSource inner) : ISegmentSource
+    private sealed class CountingSource(ISegmentReader inner) : ISegmentReader
     {
         internal int Reads { get; private set; }
 

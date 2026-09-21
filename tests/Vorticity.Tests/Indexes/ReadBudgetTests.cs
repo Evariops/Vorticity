@@ -50,8 +50,8 @@ public sealed class ReadBudgetTests
     private static string S(int row) => "tenant-" + ((row * 31) % 4_099).ToString("D5", System.Globalization.CultureInfo.InvariantCulture);
 
     private static WritePolicy Policy => WritePolicy.None
-        .For("k", IndexPolicy.SortedRuns.WithSegmentEntries(1_024))
-        .For("s", IndexPolicy.Bloom());
+        .For("k", IndexSpec.SortedRuns.WithSegmentEntries(1_024))
+        .For("s", IndexSpec.Bloom());
 
     [Fact]
     public async Task TheCountingSourceCountsRoundsRangesAndBytes()

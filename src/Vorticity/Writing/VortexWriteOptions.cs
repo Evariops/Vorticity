@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using Vorticity.Editions;
+using System.Collections.Immutable;
 using Vorticity.Indexes;
 using Vorticity.Writing;
 
@@ -19,115 +19,152 @@ internal enum WriteProfile
     Fastest = 1,
 }
 
-/// <summary>Policy for one written file.</summary>
-public sealed class VortexWriteOptions
+/// <summary>What the writer optimises for when it prices a column's encodings.</summary>
+public enum CompressionProfile : byte
 {
-    /// <summary>The defaults: compression on.</summary>
-    internal VortexWriteOptions()
-    {
-    }
+    /// <summary>Size and decode speed together, per column chunk.</summary>
+    Auto,
 
-    /// <summary>
-    /// A copy, which the <c>With…</c> methods override one option of. An option added below is
-    /// copied here, once: this is the only field list.
-    /// </summary>
-    private VortexWriteOptions(VortexWriteOptions other)
-    {
-        ArgumentNullException.ThrowIfNull(other);
-        WritePolicy = other.WritePolicy;
-        Profile = other.Profile;
-        EncodingHints = other.EncodingHints;
-        IndexBudgetPerMille = other.IndexBudgetPerMille;
-        KeyEncoder = other.KeyEncoder;
-        Identity = other.Identity;
-        ScratchDirectory = other.ScratchDirectory;
-        ScratchMemoryBytes = other.ScratchMemoryBytes;
-        WideRowsAbove = other.WideRowsAbove;
-        Fences = other.Fences;
-        ElementStatistics = other.ElementStatistics;
-        Compress = other.Compress;
-        FileStatistics = other.FileStatistics;
-        StringBoundBytes = other.StringBoundBytes;
-        TargetEdition = other.TargetEdition;
-        RowBlockSize = other.RowBlockSize;
-        DataBlockTargetBytes = other.DataBlockTargetBytes;
-    }
+    /// <summary>The cheapest encodings to write, and no index.</summary>
+    Fastest,
 
-    /// <summary>The defaults: compression on.</summary>
+    /// <summary>Size over decode speed.</summary>
+    Smallest,
+
+    /// <summary>Every column canonical: no encoding at all.</summary>
+    None,
+}
+
+/// <summary>What one written file looks like: its blocks, encodings, edition, statistics, indexes and metadata.</summary>
+public sealed record VortexWriteOptions
+{
+    private readonly int _blockRows = 8_192;
+    private readonly int _chunkTargetBytes = 1 << 20;
+    private readonly int _stringBoundBytes = 16;
+    private readonly IndexPolicy _indexes = IndexPolicy.None;
+    private readonly ImmutableDictionary<string, EncodingHint> _hints = ImmutableDictionary<string, EncodingHint>.Empty.WithComparers(StringComparer.Ordinal);
+    private readonly ImmutableDictionary<string, ReadOnlyMemory<byte>> _metadata = ImmutableDictionary<string, ReadOnlyMemory<byte>>.Empty.WithComparers(StringComparer.Ordinal);
+    private bool _oneChunkPerWrite;
+    private bool _noByteTarget;
+    private WritePolicy? _writePolicy;
+    private int? _budgetPerMille;
+    private IKeyEncoder? _keyEncoder;
+    private WriteProfile? _profile;
+
+    /// <summary>The defaults.</summary>
     internal static VortexWriteOptions Default { get; } = new VortexWriteOptions();
 
-    /// <summary>
-    /// The index policy: per column path an <see cref="IndexPolicy"/>. Default
-    /// <see cref="WritePolicy.Auto"/>, which keeps an index only where it pays. The policy is
-    /// serialized into the index directory, so an append reuses it without being told.
-    /// </summary>
-    internal WritePolicy WritePolicy { get; init; } = WritePolicy.Auto;
+    /// <summary>Rows per block: the unit of pruning, of a take, and of a batch a scan delivers.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
+    public int BlockRows
+    {
+        get => _blockRows;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            _blockRows = value;
+        }
+    }
 
-    /// <summary>How much the writer does beyond the data. Default <see cref="WriteProfile.Default"/>.</summary>
-    internal WriteProfile Profile { get; init; } = WriteProfile.Default;
+    /// <summary>The bytes gathered before a chunk of whole blocks is sealed at a flush.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
+    public int ChunkTargetBytes
+    {
+        get => _chunkTargetBytes;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _chunkTargetBytes = value;
+        }
+    }
 
-    /// <summary>
-    /// The scheme to write a column with, by column path, for callers who know. The hint is priced
-    /// against each chunk's own statistics and written when it still applies; a chunk it cannot
-    /// describe is priced in full, and the next chunk is offered the hint again. A path that names
-    /// nothing in the schema throws at
-    /// <see cref="VortexFileWriter.Create(ISegmentSink, Types.DType, VortexWriteOptions)"/>, because
-    /// a hint that silently did nothing would have no channel to say so.
-    /// </summary>
-    internal IReadOnlyDictionary<string, VortexEncodingHint>? EncodingHints { get; init; }
-
-    /// <summary>
-    /// The bytes the file's indexes may occupy together, as a share of the data bytes, in parts per
-    /// thousand. Default 100 (10 %). A builder that would take the file past this is abandoned
-    /// whole, with the reason in the <see cref="WriteReport"/>.
-    /// </summary>
-    internal int IndexBudgetPerMille { get; init; } = 100;
-
-    /// <summary>
-    /// The encoder of the composite keys <see cref="WritePolicy.ForKey"/> asks for; null by default.
-    /// The core does not row-encode, so a composite key asked for without an encoder is abandoned,
-    /// with that reason in the <see cref="WriteReport"/>.
-    /// </summary>
-    internal IKeyEncoder? KeyEncoder { get; init; }
+    /// <summary>What the writer optimises for; <see cref="CompressionProfile.None"/> writes every column canonically.</summary>
+    public CompressionProfile Compression { get; init; } = CompressionProfile.Auto;
 
     /// <summary>
-    /// The identity the file's postscript carries, or null -- the default -- for a fresh random
-    /// one. Pinning it makes a write a pure function of its batches, byte for byte; two different
-    /// files must never share one.
+    /// The encoding to write a column with, by column path, for a caller who knows. A hint is priced
+    /// against each chunk and written when it still applies. An unknown path throws at <c>CreateWriter</c>.
     /// </summary>
+    public ImmutableDictionary<string, EncodingHint> Hints
+    {
+        get => _hints;
+        init => _hints = value ?? throw new ArgumentNullException(nameof(value));
+    }
+
+    /// <summary>
+    /// The edition every component of the file must belong to: which readers must be able to open it.
+    /// The default is the edition the most deployed Rust reader accepts, not the newest.
+    /// </summary>
+    public VortexEdition TargetEdition { get; init; } = VortexEditions.Default;
+
+    /// <summary>Whether the file carries its statistics: per column the exact minimum, maximum, sum, null count and order.</summary>
+    public bool Statistics { get; init; } = true;
+
+    /// <summary>The byte limit of the bounds a text or binary column's zones carry, so that text filters prune; 0 for none.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
+    public int StringBoundBytes
+    {
+        get => _stringBoundBytes;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _stringBoundBytes = value;
+        }
+    }
+
+    /// <summary>The indexes to build; <see cref="IndexPolicy.None"/> by default.</summary>
+    public IndexPolicy Indexes
+    {
+        get => _indexes;
+        init => _indexes = value ?? throw new ArgumentNullException(nameof(value));
+    }
+
+    /// <summary>The identity the file carries, pinned for a reproducible write: the same input gives the same bytes. Null draws a fresh one.</summary>
     public Guid? Identity { get; init; }
 
-    /// <summary>These options with <see cref="Identity"/> pinned to <paramref name="identity"/>.</summary>
-    /// <param name="identity">The sixteen bytes the postscript will carry.</param>
-    /// <returns>A copy; these options are unchanged.</returns>
-    internal VortexWriteOptions WithIdentity(Guid identity) =>
-        new VortexWriteOptions(this) { Identity = identity };
-
-    /// <summary>These options with a different index policy.</summary>
-    /// <param name="indexes">The policy to write under.</param>
-    /// <returns>A copy; these options are unchanged.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="indexes"/> is null.</exception>
-    internal VortexWriteOptions WithIndexes(WritePolicy indexes)
+    /// <summary>User metadata the file carries, by key; read back through <c>VortexFile.Metadata</c>.</summary>
+    public ImmutableDictionary<string, ReadOnlyMemory<byte>> Metadata
     {
-        ArgumentNullException.ThrowIfNull(indexes);
-        return new VortexWriteOptions(this) { WritePolicy = indexes };
+        get => _metadata;
+        init => _metadata = value ?? throw new ArgumentNullException(nameof(value));
     }
 
-    /// <summary>These options with a composite-key encoder.</summary>
-    /// <param name="keyEncoder">The encoder, from the <c>Vorticity.RowEncoding</c> package.</param>
-    /// <returns>A copy; these options are unchanged.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="keyEncoder"/> is null.</exception>
-    internal VortexWriteOptions WithKeyEncoder(IKeyEncoder keyEncoder)
+    /// <summary>The index policy the engine writes under: the internal override when set, <see cref="Indexes"/> otherwise.</summary>
+    internal WritePolicy WritePolicy
     {
-        ArgumentNullException.ThrowIfNull(keyEncoder);
-        return new VortexWriteOptions(this) { KeyEncoder = keyEncoder };
+        get => _writePolicy ?? _indexes.ToWritePolicy();
+        init => _writePolicy = value;
     }
 
-    /// <summary>
-    /// Where a locating index's chunk runs wait for their merge once they pass the memory budget,
-    /// or null -- the default -- for the system's temporary directory. The files are deleted when
-    /// the writer is disposed.
-    /// </summary>
+    /// <summary>How much the writer does beyond the data.</summary>
+    internal WriteProfile Profile
+    {
+        get => _profile ?? (Compression == CompressionProfile.Fastest ? WriteProfile.Fastest : WriteProfile.Default);
+        init => _profile = value;
+    }
+
+    /// <summary><see cref="Hints"/> as the engine reads them; null when there is none.</summary>
+    internal IReadOnlyDictionary<string, EncodingHint>? EncodingHints
+    {
+        get => _hints.IsEmpty ? null : _hints;
+        init => _hints = value is null ? ImmutableDictionary<string, EncodingHint>.Empty : value.ToImmutableDictionary(StringComparer.Ordinal);
+    }
+
+    /// <summary>The bytes the file's indexes may occupy together, per thousand bytes of data.</summary>
+    internal int IndexBudgetPerMille
+    {
+        get => _budgetPerMille ?? _indexes.BudgetPerMille;
+        init => _budgetPerMille = value;
+    }
+
+    /// <summary>The encoder of the composite keys the index policy asks for.</summary>
+    internal IKeyEncoder? KeyEncoder
+    {
+        get => _keyEncoder ?? _indexes.KeyEncoder;
+        init => _keyEncoder = value;
+    }
+
+    /// <summary>Where a locating index's chunk runs wait for their merge; null for the system's temporary directory.</summary>
     internal string? ScratchDirectory { get; init; }
 
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
@@ -142,76 +179,72 @@ public sealed class VortexWriteOptions
     /// <summary>Whether the chooser reads a list's elements from their ingest blocks.</summary>
     internal bool ElementStatistics { get; init; } = true;
 
-    /// <summary>A copy with the three things an append decides from the file.</summary>
-    internal VortexWriteOptions ForAppend(
-        int rowBlockSize, WritePolicy indexes, bool fileStatistics, int budgetPerMille) =>
-        new VortexWriteOptions(this)
+    /// <summary>Whether the writer may pick an encoding per column chunk.</summary>
+    internal bool Compress
+    {
+        get => Compression != CompressionProfile.None;
+        init => Compression = value ? (Compression == CompressionProfile.None ? CompressionProfile.Auto : Compression) : CompressionProfile.None;
+    }
+
+    /// <summary><see cref="Statistics"/>, as the engine names it.</summary>
+    internal bool FileStatistics
+    {
+        get => Statistics;
+        init => Statistics = value;
+    }
+
+    /// <summary>Rows per chunk, as a multiple; null writes one chunk per call, which only the engine's own tests ask for.</summary>
+    internal int? RowBlockSize
+    {
+        get => _oneChunkPerWrite ? null : _blockRows;
+        init
+        {
+            _oneChunkPerWrite = value is null;
+            if (value is { } rows)
+            {
+                BlockRows = rows;
+            }
+        }
+    }
+
+    /// <summary>Canonical bytes to accumulate before a chunk is emitted; null for no byte threshold.</summary>
+    internal long? DataBlockTargetBytes
+    {
+        get => _noByteTarget ? null : _chunkTargetBytes;
+        init
+        {
+            _noByteTarget = value is null;
+            if (value is { } bytes)
+            {
+                ChunkTargetBytes = (int)Math.Min(bytes, int.MaxValue);
+            }
+        }
+    }
+
+    /// <summary>These options with <see cref="Identity"/> pinned to <paramref name="identity"/>.</summary>
+    internal VortexWriteOptions WithIdentity(Guid identity) => this with { Identity = identity };
+
+    /// <summary>These options with a different index policy.</summary>
+    internal VortexWriteOptions WithIndexes(WritePolicy indexes)
+    {
+        ArgumentNullException.ThrowIfNull(indexes);
+        return this with { WritePolicy = indexes };
+    }
+
+    /// <summary>These options with a composite-key encoder.</summary>
+    internal VortexWriteOptions WithKeyEncoder(IKeyEncoder keyEncoder)
+    {
+        ArgumentNullException.ThrowIfNull(keyEncoder);
+        return this with { KeyEncoder = keyEncoder };
+    }
+
+    /// <summary>A copy with the four things an append decides from the file.</summary>
+    internal VortexWriteOptions ForAppend(int rowBlockSize, WritePolicy indexes, bool fileStatistics, int budgetPerMille) =>
+        this with
         {
             WritePolicy = indexes,
             IndexBudgetPerMille = budgetPerMille,
             FileStatistics = fileStatistics,
             RowBlockSize = rowBlockSize,
         };
-
-    /// <summary>
-    /// Whether the writer may pick an encoding per column chunk. Default <see langword="true"/>;
-    /// off writes every column canonically.
-    /// </summary>
-    internal bool Compress { get; init; } = true;
-
-    /// <summary>
-    /// Whether the file carries a statistics segment: per top-level field its exact
-    /// <c>min</c> / <c>max</c>, <c>null_count</c>, and <c>is_sorted</c> /
-    /// <c>is_strict_sorted</c> when the pass tracked the column's order. Default on.
-    /// </summary>
-    internal bool FileStatistics { get; init; } = true;
-
-    /// <summary>
-    /// The byte limit of the string bounds a utf8 or binary column's zones carry, or 0 — the
-    /// default — for none.
-    /// </summary>
-    /// <remarks>
-    /// The lower bound is a prefix and the upper one a prefix with its last character incremented,
-    /// so a maximum no cut can bound is written as <c>unknown</c> and prunes nothing. An append
-    /// keeps the old zones' bounds only when the old file has them at the same limit.
-    /// </remarks>
-    public int StringBoundBytes { get; init; }
-
-    /// <summary>
-    /// The edition every component in the file must belong to: a frozen set of component ids, and
-    /// the only way to say which readers must be able to open the result. Default
-    /// <see cref="EditionRegistry.Newest"/>.
-    /// </summary>
-    /// <remarks>
-    /// Lower targets are honoured rather than approximated: the zone map is omitted below the
-    /// edition that introduced it, and a component the target cannot express fails the write rather
-    /// than producing a file the target's readers cannot open.
-    /// </remarks>
-    public VortexEdition TargetEdition { get; init; } = EditionRegistry.Newest;
-
-    /// <summary>
-    /// Rows per written chunk, as a multiple. Default 8192; <c>null</c> writes one chunk per
-    /// <c>WriteAsync</c> call. Every emitted chunk but the last is a multiple of it.
-    /// </summary>
-    /// <remarks>
-    /// Each chunk carries its own array blob, segment entry and zone-map row, so small chunks pay
-    /// that fixed cost over and over. The writer therefore decides the chunking: a batch handed to
-    /// <c>WriteAsync</c> is not guaranteed to have reached the sink when the call returns, and rows
-    /// are held until a block fills or <c>CompleteAsync</c> runs.
-    /// </remarks>
-    internal int? RowBlockSize { get; init; } = 8192;
-
-    /// <summary>
-    /// Uncompressed bytes to accumulate before a chunk is emitted. Default 1 MiB; <c>null</c>
-    /// disables byte-size coalescing and leaves the row granularity to
-    /// <see cref="RowBlockSize"/>.
-    /// </summary>
-    /// <remarks>
-    /// A block is emitted once it is both at least this many bytes and at least
-    /// <see cref="RowBlockSize"/> rows, then in whole multiples of the row block; the remainder
-    /// goes out at close. Measured in canonical bytes, before compression, since that is the only
-    /// size available when the decision is made, and over the whole batch, since the zones here are
-    /// shared across columns.
-    /// </remarks>
-    internal long? DataBlockTargetBytes { get; init; } = 1L << 20;
 }

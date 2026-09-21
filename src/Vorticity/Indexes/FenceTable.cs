@@ -440,7 +440,7 @@ internal sealed class FenceTable
     /// <param name="source">Where the run's regions are read: <c>VortexFile.IndexSourceOf(run)</c>.</param>
     /// <param name="index">The segment's place in the run.</param>
     /// <param name="cancellationToken">Cancels the page reads.</param>
-    internal ValueTask<Fence> GetAsync(ISegmentSource source, long index, CancellationToken cancellationToken)
+    internal ValueTask<Fence> GetAsync(ISegmentReader source, long index, CancellationToken cancellationToken)
     {
         if (_inline is not null)
         {
@@ -455,7 +455,7 @@ internal sealed class FenceTable
     /// <param name="source">Where the file's index regions are read.</param>
     /// <param name="position">An entry's place in the run.</param>
     /// <param name="cancellationToken">Cancels the page reads.</param>
-    internal ValueTask<Fence> OfPositionAsync(ISegmentSource source, long position, CancellationToken cancellationToken)
+    internal ValueTask<Fence> OfPositionAsync(ISegmentReader source, long position, CancellationToken cancellationToken)
     {
         if (_inline is not null)
         {
@@ -473,7 +473,7 @@ internal sealed class FenceTable
     /// <param name="source">Where the file's index regions are read.</param>
     /// <param name="probe">What a fence's last key is compared with.</param>
     /// <param name="cancellationToken">Cancels the page reads.</param>
-    internal async ValueTask<long> LowerBoundAsync<TProbe>(ISegmentSource source, TProbe probe, CancellationToken cancellationToken)
+    internal async ValueTask<long> LowerBoundAsync<TProbe>(ISegmentReader source, TProbe probe, CancellationToken cancellationToken)
         where TProbe : IFenceProbe
     {
         if (_inline is not null)
@@ -522,7 +522,7 @@ internal sealed class FenceTable
         return low;
     }
 
-    private async ValueTask<Fence> DescendAsync(ISegmentSource source, long target, bool bySegment, CancellationToken cancellationToken)
+    private async ValueTask<Fence> DescendAsync(ISegmentReader source, long target, bool bySegment, CancellationToken cancellationToken)
     {
         FencePage page = _root!;
         long baseSegment = 0;
@@ -600,7 +600,7 @@ internal sealed class FenceTable
 
     /// <summary>A child page, from the table's own cache or the file.</summary>
     private async ValueTask<FencePage> PageAsync(
-        ISegmentSource source, IndexSegment region, int level, long segments, CancellationToken cancellationToken)
+        ISegmentReader source, IndexSegment region, int level, long segments, CancellationToken cancellationToken)
     {
         if (_pages.TryGetValue(region.Offset, out FencePage? cached))
         {

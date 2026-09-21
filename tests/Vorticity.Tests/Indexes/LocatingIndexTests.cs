@@ -55,12 +55,12 @@ public sealed class LocatingIndexTests
 
     private static WritePolicy Policy() =>
         WritePolicy.None
-            .For("key", IndexPolicy.Postings)
-            .For("name", IndexPolicy.SortedRuns.WithSegmentEntries(300))
-            .For("price", IndexPolicy.SortedRuns)
-            .For("opt", IndexPolicy.Postings.WithSegmentEntries(50))
-            .For("status", IndexPolicy.SortedRuns)
-            .For("flag", IndexPolicy.Postings);
+            .For("key", IndexSpec.Postings)
+            .For("name", IndexSpec.SortedRuns.WithSegmentEntries(300))
+            .For("price", IndexSpec.SortedRuns)
+            .For("opt", IndexSpec.Postings.WithSegmentEntries(50))
+            .For("status", IndexSpec.SortedRuns)
+            .For("flag", IndexSpec.Postings);
 
     [Fact]
     public async Task TheWriterMergesTheChunkRunsIntoOneRunAndCountsItsEntries()

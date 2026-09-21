@@ -13,7 +13,7 @@ using Vorticity.Serialization.Schemas;
 namespace Vorticity.Tests.File;
 
 /// <summary>An in-memory, call-counting segment source over a byte array.</summary>
-internal sealed class TestSegmentSource : ISegmentSource
+internal sealed class TestSegmentSource : ISegmentReader
 {
     private readonly byte[] _bytes;
     private readonly long _declaredLength;

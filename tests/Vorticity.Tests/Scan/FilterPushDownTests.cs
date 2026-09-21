@@ -45,7 +45,7 @@ public sealed class FilterPushDownTests
     [MemberData(nameof(Encodings))]
     public async Task AnEncodingAnswersAnEqualityWithoutBuildingTheColumn(string encoding)
     {
-        (VortexEncodingHint hint, Func<int, string> value, string needle) = Fixture(encoding);
+        (EncodingHint hint, Func<int, string> value, string needle) = Fixture(encoding);
         string path = Write(hint, value);
         try
         {
@@ -71,13 +71,13 @@ public sealed class FilterPushDownTests
     }
 
     /// <summary>The hint, the value of a row, and a needle the column holds.</summary>
-    private static (VortexEncodingHint Hint, Func<int, string> Value, string Needle) Fixture(
+    private static (EncodingHint Hint, Func<int, string> Value, string Needle) Fixture(
         string encoding) => encoding switch
         {
             // Short and repeated: sixteen entries over the whole column, which is what a dictionary
             // is for, and one row in sixteen matches.
             "dictionary" => (
-                VortexEncodingHint.Dictionary,
+                EncodingHint.Dictionary,
                 row => string.Create(CultureInfo.InvariantCulture, $"label-{row % Labels:D2}"),
                 "label-07"),
 
@@ -89,7 +89,7 @@ public sealed class FilterPushDownTests
             // proved before anything is read, and no predicate left to push. Which is the right
             // path when it exists, and not the one this measures.
             "fsst" => (
-                VortexEncodingHint.Fsst,
+                EncodingHint.Fsst,
                 row => string.Create(
                     CultureInfo.InvariantCulture,
                     $"https://example.invalid/vortex/conformance/{(row * 7_919) % Rows:D9}"),
@@ -123,7 +123,7 @@ public sealed class FilterPushDownTests
     }
 
     /// <summary>A one-column file pinned to <paramref name="hint"/>.</summary>
-    private static string Write(VortexEncodingHint hint, Func<int, string> value)
+    private static string Write(EncodingHint hint, Func<int, string> value)
     {
         const int ViewSize = 16;
         const int MaxInline = 12;
@@ -184,7 +184,7 @@ public sealed class FilterPushDownTests
     }
 
     private static async Task WriteAsync(
-        string path, DType schema, CanonicalArena arena, int root, VortexEncodingHint hint)
+        string path, DType schema, CanonicalArena arena, int root, EncodingHint hint)
     {
         // NO INDEX, and that is what this measures. An exact index answers an equality before a
         // scan reads anything, and the scan then takes the rows it proved -- a different path, and
@@ -192,7 +192,7 @@ public sealed class FilterPushDownTests
         // fixture that carried one would be testing the index.
         VortexWriteOptions options = new VortexWriteOptions
         {
-            EncodingHints = new Dictionary<string, VortexEncodingHint> { [Field] = hint },
+            EncodingHints = new Dictionary<string, EncodingHint> { [Field] = hint },
             WritePolicy = Vorticity.Indexes.WritePolicy.None,
         };
 

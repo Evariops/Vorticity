@@ -1,443 +1,166 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
+using System.Collections.Immutable;
+using Vorticity.Indexes;
 
-namespace Vorticity.Indexes;
+namespace Vorticity;
 
-/// <summary>Which index a column gets.</summary>
-internal enum IndexPolicyKind
+/// <summary>The kinds of index a file can carry.</summary>
+public enum IndexKind : byte
 {
-    /// <summary>Nothing beyond the zone map.</summary>
-    None = 0,
+    /// <summary>A split-block Bloom filter per block: equality and membership.</summary>
+    Bloom,
 
-    /// <summary>Every cheap builder starts; the statistics and the budget decide what survives.</summary>
-    Auto = 1,
+    /// <summary>A Bloom filter of trigrams per block: <c>Contains</c> and <c>Like</c>.</summary>
+    NgramBloom,
 
-    /// <summary>A split-block Bloom filter.</summary>
-    Bloom = 2,
+    /// <summary>Value to blocks, exact: equality, membership, and the distinct keys of a cursor.</summary>
+    Postings,
 
-    /// <summary>A trigram Bloom for <c>Like</c>.</summary>
-    NgramBloom = 3,
+    /// <summary>Trigram to blocks, exact: <c>Contains</c> and <c>Like</c>.</summary>
+    NgramPostings,
 
-    /// <summary>Value to blocks.</summary>
-    Postings = 4,
-
-    /// <summary>Value to rows, exact.</summary>
-    SortedRuns = 5,
-
-    /// <summary>Trigram to blocks.</summary>
-    NgramPostings = 6,
+    /// <summary>Value to rows, sorted: ranges, key order and the key cursor.</summary>
+    SortedRuns,
 }
 
-/// <summary>Which hash a Bloom filter uses.</summary>
-internal enum BloomHash
-{
-    /// <summary>
-    /// XxHash3-64, the default and the hash the reference split-block filter uses, so a filter
-    /// built here is bit-identical to one built there.
-    /// </summary>
-    XxHash3 = 0,
-
-    /// <summary>
-    /// xxHash64, which makes the filter bit-identical to a Parquet SBBF. A variant for the rare
-    /// caller that exchanges filters with Parquet tooling, never the default.
-    /// </summary>
-    XxHash64 = 1,
-}
-
-/// <summary>The index policy of one column.</summary>
+/// <summary>The indexes a writer builds, column by column, within a budget.</summary>
 /// <remarks>
-/// A policy decides when to abandon an index, never when to start one: <see cref="Auto"/> starts
-/// every cheap builder at the first block and drops the ones the statistics disqualify or the
-/// budget refuses, which is what lets the first block be indexed like every other. Everything
-/// abandoned is named in the write report with its reason, so a caller who expected an index learns
-/// why there is none. A policy is also wire format — it is serialized into the directory so that an
-/// append reuses it without being told — which is why its options are plain integers with fixed
-/// meanings rather than a callback.
+/// Immutable: every method returns a new policy. An index marked <c>required</c> that the writer
+/// cannot build within the budget makes <c>CompleteAsync</c> throw; one that is not required and is
+/// abandoned leaves no bytes in the file. An unknown column throws at <c>CreateWriter</c>.
 /// </remarks>
-internal readonly struct IndexPolicy : IEquatable<IndexPolicy>
+public sealed class IndexPolicy
 {
-    /// <summary>1 %, as parts per million: the default false-positive rate of a Bloom filter.</summary>
-    public const int DefaultFalsePositivePpm = 10_000;
+    private readonly WritePolicy _policy;
+    private readonly ImmutableArray<string> _paths;
 
-    /// <summary>4 096 blocks of 256 bits = 128 KiB, the default ceiling on one filter.</summary>
-    public const int DefaultMaxBlocks = 4_096;
-
-    /// <summary>
-    /// Below eight distinct values a block gets no filter: the zone map or the dictionary already
-    /// answers equality there.
-    /// </summary>
-    public const int DefaultMinDistinct = 8;
-
-    /// <summary>One filter per block, and one per generation of sixteen.</summary>
-    public const int DefaultResolutions = 2;
-
-    // Zero means "the default" in every field, so that `default(IndexPolicy)` is a usable `None`
-    // with every option at its documented value. `MinDistinct` is the one option whose zero is also
-    // a legitimate request -- a filter on every block -- so it is stored shifted by one.
-    private readonly int _fppPpm;
-    private readonly int _resolutions;
-    private readonly int _maxBlocks;
-    private readonly int _minDistinctPlusOne;
-    private readonly int _segmentEntries;
-
-    /// <summary>The default for the most entries one segment of a locating run holds.</summary>
-    public const int DefaultSegmentEntries = 65_536;
-
-    private IndexPolicy(
-        IndexPolicyKind kind, int fppPpm, int resolutions, int maxBlocks, int minDistinct,
-        BloomHash hash, bool caseInsensitive, int segmentEntries = 0, bool required = false)
+    private IndexPolicy(WritePolicy policy, ImmutableArray<string> paths, int budgetPerMille, IKeyEncoder? keyEncoder)
     {
-        Kind = kind;
-        _fppPpm = fppPpm;
-        _resolutions = resolutions;
-        _maxBlocks = maxBlocks;
-        _minDistinctPlusOne = minDistinct < 0 ? 0 : minDistinct + 1;
-        Hash = hash;
-        CaseInsensitive = caseInsensitive;
-        _segmentEntries = segmentEntries;
-        Required = required;
+        _policy = policy;
+        _paths = paths;
+        BudgetPerMille = budgetPerMille;
+        KeyEncoder = keyEncoder;
     }
 
-    /// <summary>
-    /// Whether the budget of <c>VortexWriteOptions.IndexBudgetPerMille</c> may abandon this index.
-    /// </summary>
-    /// <remarks>
-    /// The budget guards against <see cref="Auto"/>, and this is how a caller says the index is not
-    /// a suggestion. The share of the data an index may take is the right question for a filter
-    /// nobody asked for and the wrong one for an index a structure depends on: a dataset's
-    /// clustering run is mandatory, and on a narrow table a run over one column is intrinsically
-    /// comparable in size to that column, so no object is ever big enough to bring it under the
-    /// budget. A required index still counts toward the budget — it has first claim on it, not
-    /// immunity from arithmetic — so the optional ones around it are abandoned first and, if it
-    /// alone is over, it survives and the report says what it cost.
-    /// </remarks>
-    public bool Required { get; }
+    /// <summary>No index: the zone maps and the statistics alone.</summary>
+    public static IndexPolicy None { get; } = new IndexPolicy(WritePolicy.None, [], 100, null);
 
-    /// <summary>The same policy, which the budget may not abandon.</summary>
-    /// <returns>A new policy.</returns>
-    /// <exception cref="InvalidOperationException">The policy is <see cref="None"/> or <see cref="Auto"/>.</exception>
-    public IndexPolicy AsRequired()
+    /// <summary>Every cheap index on every column, kept only where the statistics and the budget say it pays.</summary>
+    public static IndexPolicy Auto { get; } = new IndexPolicy(WritePolicy.Auto, [], 100, null);
+
+    /// <summary>The bytes the file's indexes may take together, per thousand bytes of data.</summary>
+    internal int BudgetPerMille { get; }
+
+    /// <summary>The encoder of composite keys, from the row-encoding package.</summary>
+    internal IKeyEncoder? KeyEncoder { get; }
+
+    /// <summary>Every column path the policy names, for the check at <c>CreateWriter</c>.</summary>
+    internal ImmutableArray<string> Paths => _paths;
+
+    /// <summary>A Bloom filter on <paramref name="column"/>.</summary>
+    /// <param name="column">The column path, <c>.</c>-separated for a nested field.</param>
+    /// <param name="falsePositiveRate">The target false-positive rate, in (0, 0.5].</param>
+    /// <param name="required">Whether the write fails rather than abandon it.</param>
+    /// <returns>The policy with the index.</returns>
+    public IndexPolicy Bloom(string column, double falsePositiveRate = 0.01, bool required = false)
     {
-        if (Kind is IndexPolicyKind.None or IndexPolicyKind.Auto)
+        if (!(falsePositiveRate > 0 && falsePositiveRate <= 0.5))
         {
-            throw new InvalidOperationException(
-                $"An index policy of {Kind} names no index to require; name the kind first.");
+            throw new ArgumentOutOfRangeException(nameof(falsePositiveRate), falsePositiveRate, "A rate in (0, 0.5].");
+        }
+
+        int ppm = Math.Max(1, (int)Math.Round(falsePositiveRate * 1_000_000));
+        return With(column, IndexSpec.Bloom(ppm), required);
+    }
+
+    /// <summary>A Bloom filter of <paramref name="n"/>-grams on a text column, for <c>Contains</c> and <c>Like</c>.</summary>
+    /// <param name="column">The column path.</param>
+    /// <param name="n">The gram length; 3 is the length the format defines.</param>
+    /// <param name="required">Whether the write fails rather than abandon it.</param>
+    /// <returns>The policy with the index.</returns>
+    public IndexPolicy NgramBloom(string column, int n = 3, bool required = false)
+    {
+        if (n != 3)
+        {
+            throw new ArgumentOutOfRangeException(nameof(n), n, "Trigrams are the only grams the index format defines.");
+        }
+
+        return With(column, IndexSpec.NgramBloom(), required);
+    }
+
+    /// <summary>Exact postings, value to blocks, on <paramref name="column"/>.</summary>
+    /// <param name="column">The column path.</param>
+    /// <param name="required">Whether the write fails rather than abandon it.</param>
+    /// <returns>The policy with the index.</returns>
+    public IndexPolicy Postings(string column, bool required = false) => With(column, IndexSpec.Postings, required);
+
+    /// <summary>Sorted runs, value to rows, on <paramref name="column"/>: ranges, key order, the key cursor.</summary>
+    /// <param name="column">The column path.</param>
+    /// <param name="required">Whether the write fails rather than abandon it.</param>
+    /// <returns>The policy with the index.</returns>
+    public IndexPolicy SortedRuns(string column, bool required = false) => With(column, IndexSpec.SortedRuns, required);
+
+    /// <summary>An index of <paramref name="kind"/> on the tuple of <paramref name="columns"/>.</summary>
+    /// <param name="columns">The key's columns, in key order; one column is a plain column index.</param>
+    /// <param name="kind">The index kind; a key of several columns is served by <see cref="IndexKind.SortedRuns"/>.</param>
+    /// <param name="required">Whether the write fails rather than abandon it.</param>
+    /// <returns>The policy with the index.</returns>
+    public IndexPolicy ForKey(ReadOnlySpan<string> columns, IndexKind kind, bool required = false)
+    {
+        if (columns.IsEmpty)
+        {
+            throw new ArgumentException("A key has at least one column.", nameof(columns));
+        }
+
+        IndexSpec spec = SpecOf(kind);
+        if (columns.Length == 1)
+        {
+            return With(columns[0], spec, required);
+        }
+
+        if (kind != IndexKind.SortedRuns)
+        {
+            throw new ArgumentException("A key of several columns is served by sorted runs and by no other kind.", nameof(kind));
+        }
+
+        string[] paths = columns.ToArray();
+        foreach (string path in paths)
+        {
+            ArgumentException.ThrowIfNullOrEmpty(path, nameof(columns));
         }
 
         return new IndexPolicy(
-            Kind, _fppPpm, _resolutions, _maxBlocks, _minDistinctPlusOne - 1, Hash, CaseInsensitive,
-            _segmentEntries, required: true);
+            _policy.ForKey(paths, required ? spec.AsRequired() : spec), _paths.AddRange(paths), BudgetPerMille, KeyEncoder);
     }
 
-    /// <summary>The most entries one segment of a locating run holds.</summary>
-    public int SegmentEntries => _segmentEntries == 0 ? DefaultSegmentEntries : _segmentEntries;
-
-    /// <summary>The same policy with another segment size for its locating runs.</summary>
-    /// <param name="entries">The most entries a segment holds; at least 1.</param>
-    /// <returns>A new policy.</returns>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="entries"/> is not positive.</exception>
-    public IndexPolicy WithSegmentEntries(int entries)
+    /// <summary>The bytes the indexes may take together, per thousand bytes of data; 100 by default.</summary>
+    /// <param name="perMille">The budget; 0 abandons every index that is not required.</param>
+    /// <returns>The policy with the budget.</returns>
+    public IndexPolicy WithBudgetPerMille(int perMille)
     {
-        ArgumentOutOfRangeException.ThrowIfLessThan(entries, 1);
-        return new IndexPolicy(
-            Kind, _fppPpm, _resolutions, _maxBlocks, _minDistinctPlusOne - 1, Hash, CaseInsensitive, entries,
-            Required);
+        ArgumentOutOfRangeException.ThrowIfNegative(perMille);
+        return new IndexPolicy(_policy, _paths, perMille, KeyEncoder);
     }
 
-    /// <summary>What the column gets.</summary>
-    public IndexPolicyKind Kind { get; }
+    /// <summary>The policy with the encoder its composite keys are written with.</summary>
+    internal IndexPolicy WithKeyEncoder(IKeyEncoder encoder) => new IndexPolicy(_policy, _paths, BudgetPerMille, encoder);
 
-    /// <summary>The Bloom false-positive rate, as parts per million.</summary>
-    public int FalsePositivePpm => _fppPpm == 0 ? DefaultFalsePositivePpm : _fppPpm;
+    internal WritePolicy ToWritePolicy() => _policy;
 
-    /// <summary>
-    /// How much of a Bloom filter's tree carries filters: 1 = the blocks alone; 2 = the blocks and
-    /// every node above them, generations and root included, each while it fits
-    /// <see cref="MaxBlocks"/>; 3 = the same, with the root under the file-level ceiling.
-    /// </summary>
-    public int Resolutions => _resolutions == 0 ? DefaultResolutions : _resolutions;
-
-    /// <summary>The ceiling on one filter's 256-bit blocks.</summary>
-    public int MaxBlocks => _maxBlocks == 0 ? DefaultMaxBlocks : _maxBlocks;
-
-    /// <summary>Below this many distinct values in a block, no filter is built for it.</summary>
-    public int MinDistinct => _minDistinctPlusOne == 0 ? DefaultMinDistinct : _minDistinctPlusOne - 1;
-
-    /// <summary>The hash a Bloom filter uses.</summary>
-    public BloomHash Hash { get; }
-
-    /// <summary>Whether a trigram Bloom lower-cases its trigrams.</summary>
-    public bool CaseInsensitive { get; }
-
-    /// <summary>Nothing beyond the zone map.</summary>
-    public static IndexPolicy None => new IndexPolicy(
-        IndexPolicyKind.None, 0, 0, 0, -1, BloomHash.XxHash3, false);
-
-    /// <summary>Start everything cheap; abandon what the statistics or the budget refuse.</summary>
-    public static IndexPolicy Auto => new IndexPolicy(
-        IndexPolicyKind.Auto, 0, 0, 0, -1, BloomHash.XxHash3, false);
-
-    /// <summary>Value to blocks.</summary>
-    public static IndexPolicy Postings => new IndexPolicy(
-        IndexPolicyKind.Postings, 0, 0, 0, -1, BloomHash.XxHash3, false);
-
-    /// <summary>Value to rows, exact.</summary>
-    public static IndexPolicy SortedRuns => new IndexPolicy(
-        IndexPolicyKind.SortedRuns, 0, 0, 0, -1, BloomHash.XxHash3, false);
-
-    /// <summary>Trigram to blocks, for <c>Like</c> and <c>Contains</c>.</summary>
-    /// <param name="caseInsensitive">Whether trigrams are ASCII-lower-cased on both sides.</param>
-    /// <returns>The policy.</returns>
-    public static IndexPolicy NgramPostings(bool caseInsensitive = false) => new IndexPolicy(
-        IndexPolicyKind.NgramPostings, 0, 0, 0, -1, BloomHash.XxHash3, caseInsensitive);
-
-    /// <summary>A split-block Bloom filter.</summary>
-    /// <param name="falsePositivePpm">
-    /// The target false-positive rate as parts per million, in <c>[1, 500 000]</c>. Default 1 %.
-    /// </param>
-    /// <param name="resolutions">1, 2 or 3; see <see cref="Resolutions"/>.</param>
-    /// <param name="maxBlocks">The ceiling on one filter's 256-bit blocks, a positive number.</param>
-    /// <param name="minDistinct">Below this many distinct values a block gets no filter.</param>
-    /// <param name="hash">The hash; <see cref="BloomHash.XxHash64"/> gives a Parquet-compatible filter.</param>
-    /// <returns>The policy.</returns>
-    /// <exception cref="ArgumentOutOfRangeException">An option is outside its range.</exception>
-    public static IndexPolicy Bloom(
-        int falsePositivePpm = DefaultFalsePositivePpm,
-        int resolutions = DefaultResolutions,
-        int maxBlocks = DefaultMaxBlocks,
-        int minDistinct = DefaultMinDistinct,
-        BloomHash hash = BloomHash.XxHash3)
+    private IndexPolicy With(string column, IndexSpec spec, bool required)
     {
-        CheckBloom(falsePositivePpm, resolutions, maxBlocks, minDistinct);
-        return new IndexPolicy(
-            IndexPolicyKind.Bloom, falsePositivePpm, resolutions, maxBlocks, minDistinct, hash,
-            false);
+        ArgumentException.ThrowIfNullOrEmpty(column);
+        return new IndexPolicy(_policy.For(column, required ? spec.AsRequired() : spec), _paths.Add(column), BudgetPerMille, KeyEncoder);
     }
 
-    /// <summary>A trigram Bloom for <c>Like</c> and <c>Contains</c>.</summary>
-    /// <param name="falsePositivePpm">As <see cref="Bloom"/>.</param>
-    /// <param name="resolutions">As <see cref="Bloom"/>.</param>
-    /// <param name="maxBlocks">As <see cref="Bloom"/>.</param>
-    /// <param name="caseInsensitive">Whether trigrams are lower-cased on both sides.</param>
-    /// <returns>The policy.</returns>
-    /// <exception cref="ArgumentOutOfRangeException">An option is outside its range.</exception>
-    public static IndexPolicy NgramBloom(
-        int falsePositivePpm = DefaultFalsePositivePpm,
-        int resolutions = DefaultResolutions,
-        int maxBlocks = DefaultMaxBlocks,
-        bool caseInsensitive = false)
+    private static IndexSpec SpecOf(IndexKind kind) => kind switch
     {
-        CheckBloom(falsePositivePpm, resolutions, maxBlocks, DefaultMinDistinct);
-        return new IndexPolicy(
-            IndexPolicyKind.NgramBloom, falsePositivePpm, resolutions, maxBlocks,
-            DefaultMinDistinct, BloomHash.XxHash3, caseInsensitive);
-    }
-
-    /// <summary>
-    /// Rebuilds a policy from the integers a directory stores, clamping rather than throwing: these
-    /// bytes come from a file and a bad option must cost the entry, never the open.
-    /// </summary>
-    /// <param name="kind">The policy kind; an unknown value becomes <see cref="None"/>.</param>
-    /// <param name="fppPpm">The false-positive rate in ppm, clamped into range.</param>
-    /// <param name="resolutions">The resolution count, clamped into <c>[1, 3]</c>.</param>
-    /// <param name="maxBlocks">The block ceiling, clamped positive.</param>
-    /// <param name="minDistinct">The distinct floor; a negative value, which a file cannot hold, means the default.</param>
-    /// <param name="hash">The hash; an unknown value becomes <see cref="BloomHash.XxHash3"/>.</param>
-    /// <param name="caseInsensitive">Whether trigrams are lower-cased.</param>
-    /// <param name="segmentEntries">The locating segment size; 0 for the default.</param>
-    /// <param name="required">Whether the budget may not abandon it; ignored for a kind-less policy.</param>
-    /// <returns>A policy inside every range.</returns>
-    internal static IndexPolicy FromStored(
-        int kind, int fppPpm, int resolutions, int maxBlocks, int minDistinct, int hash,
-        bool caseInsensitive, int segmentEntries = 0, bool required = false)
-    {
-        IndexPolicyKind policy = kind is >= (int)IndexPolicyKind.None and <= (int)IndexPolicyKind.NgramPostings
-            ? (IndexPolicyKind)kind
-            : IndexPolicyKind.None;
-        return new IndexPolicy(
-            policy,
-            Math.Clamp(fppPpm == 0 ? DefaultFalsePositivePpm : fppPpm, 1, 500_000),
-            Math.Clamp(resolutions == 0 ? DefaultResolutions : resolutions, 1, 3),
-            Math.Max(maxBlocks == 0 ? DefaultMaxBlocks : maxBlocks, 1),
-            minDistinct,
-            hash == (int)BloomHash.XxHash64 ? BloomHash.XxHash64 : BloomHash.XxHash3,
-            caseInsensitive,
-            Math.Max(segmentEntries, 0),
-
-            // A kind-less policy is never required, whatever the bytes said: `AsRequired` refuses to
-            // produce one, so reading one back would be a state this library cannot otherwise reach.
-            required && policy is not (IndexPolicyKind.None or IndexPolicyKind.Auto));
-    }
-
-    private static void CheckBloom(int falsePositivePpm, int resolutions, int maxBlocks, int minDistinct)
-    {
-        ArgumentOutOfRangeException.ThrowIfLessThan(falsePositivePpm, 1);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(falsePositivePpm, 500_000);
-        ArgumentOutOfRangeException.ThrowIfLessThan(resolutions, 1);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(resolutions, 3);
-        ArgumentOutOfRangeException.ThrowIfLessThan(maxBlocks, 1);
-        ArgumentOutOfRangeException.ThrowIfNegative(minDistinct);
-    }
-
-    /// <inheritdoc/>
-    public bool Equals(IndexPolicy other) =>
-        Kind == other.Kind
-        && FalsePositivePpm == other.FalsePositivePpm
-        && Resolutions == other.Resolutions
-        && MaxBlocks == other.MaxBlocks
-        && MinDistinct == other.MinDistinct
-        && Hash == other.Hash
-        && CaseInsensitive == other.CaseInsensitive
-        && SegmentEntries == other.SegmentEntries
-        && Required == other.Required;
-
-    /// <inheritdoc/>
-    public override bool Equals(object? obj) => obj is IndexPolicy other && Equals(other);
-
-    /// <inheritdoc/>
-    public override int GetHashCode() =>
-        HashCode.Combine(
-            Kind, FalsePositivePpm, Resolutions, MaxBlocks, MinDistinct, Hash, CaseInsensitive,
-            HashCode.Combine(SegmentEntries, Required));
-
-    /// <summary>Whether two policies ask for the same thing.</summary>
-    /// <param name="left">One policy.</param>
-    /// <param name="right">The other.</param>
-    /// <returns>Whether they are equal.</returns>
-    public static bool operator ==(IndexPolicy left, IndexPolicy right) => left.Equals(right);
-
-    /// <summary>Whether two policies differ.</summary>
-    /// <param name="left">One policy.</param>
-    /// <param name="right">The other.</param>
-    /// <returns>Whether they differ.</returns>
-    public static bool operator !=(IndexPolicy left, IndexPolicy right) => !left.Equals(right);
-
-    /// <inheritdoc/>
-    public override string ToString() =>
-        Kind switch
-        {
-            IndexPolicyKind.Bloom or IndexPolicyKind.NgramBloom => string.Create(
-                CultureInfo.InvariantCulture,
-                $"{Kind}(fpp={FalsePositivePpm}ppm, resolutions={Resolutions}, hash={Hash})"),
-            _ => Kind.ToString(),
-        };
+        IndexKind.Bloom => IndexSpec.Bloom(),
+        IndexKind.NgramBloom => IndexSpec.NgramBloom(),
+        IndexKind.Postings => IndexSpec.Postings,
+        IndexKind.NgramPostings => IndexSpec.NgramPostings(),
+        IndexKind.SortedRuns => IndexSpec.SortedRuns,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Not a defined index kind."),
+    };
 }
-
-/// <summary>The index policy of a whole file: a default, and overrides by column path.</summary>
-/// <remarks>
-/// Paths are the scan's own: <c>"a"</c> for a top-level field, <c>"a.b"</c> for a nested one.
-/// A path naming no column is not an error here -- a policy is written before the schema is walked
-/// and survives into the directory -- it simply never matches, and the report says the column was
-/// never seen.
-/// </remarks>
-internal sealed class WritePolicy
-{
-    private readonly Dictionary<string, IndexPolicy> _columns;
-    private readonly List<CompositeKeyPolicy> _keys;
-
-    private WritePolicy(IndexPolicy fallback, Dictionary<string, IndexPolicy> columns, List<CompositeKeyPolicy>? keys = null)
-    {
-        Default = fallback;
-        _columns = columns;
-        _keys = keys ?? [];
-    }
-
-    /// <summary>The composite keys, in the order they were added.</summary>
-    public IReadOnlyList<CompositeKeyPolicy> Keys => _keys;
-
-    /// <summary>
-    /// The same policy with a locating index over the tuple of <paramref name="columnPaths"/>,
-    /// keyed by its row encoding.
-    /// </summary>
-    /// <param name="columnPaths">Two or more columns, in key order, <c>.</c>-separated for a nested field.</param>
-    /// <param name="policy"><see cref="IndexPolicy.SortedRuns"/>, with its options.</param>
-    /// <returns>A new policy.</returns>
-    /// <remarks>
-    /// The writer needs an encoder for it, <c>VortexWriteOptions.KeyEncoder</c>, which the
-    /// <c>Vorticity.RowEncoding</c> package provides; without one the index is abandoned and the
-    /// report says so. A row whose tuple holds a null is not an entry.
-    /// </remarks>
-    /// <exception cref="ArgumentException">Fewer than two paths, an empty one, or a policy that is not sorted runs.</exception>
-    public WritePolicy ForKey(IReadOnlyList<string> columnPaths, IndexPolicy policy)
-    {
-        ArgumentNullException.ThrowIfNull(columnPaths);
-        if (columnPaths.Count < 2)
-        {
-            throw new ArgumentException("A composite key has at least two columns; use For for one.", nameof(columnPaths));
-        }
-
-        foreach (string path in columnPaths)
-        {
-            ArgumentException.ThrowIfNullOrEmpty(path, nameof(columnPaths));
-        }
-
-        if (policy.Kind != IndexPolicyKind.SortedRuns)
-        {
-            throw new ArgumentException(
-                "A composite key is served by a sorted-runs index and by no other kind.",
-                nameof(policy));
-        }
-
-        List<CompositeKeyPolicy> keys = [.. _keys, new CompositeKeyPolicy([.. columnPaths], policy)];
-        return new WritePolicy(Default, new Dictionary<string, IndexPolicy>(_columns, StringComparer.Ordinal), keys);
-    }
-
-    /// <summary>Every column indexed by <see cref="IndexPolicy.Auto"/>.</summary>
-    public static WritePolicy Auto { get; } =
-        new WritePolicy(IndexPolicy.Auto, new Dictionary<string, IndexPolicy>(StringComparer.Ordinal));
-
-    /// <summary>No index anywhere.</summary>
-    public static WritePolicy None { get; } =
-        new WritePolicy(IndexPolicy.None, new Dictionary<string, IndexPolicy>(StringComparer.Ordinal));
-
-    /// <summary>What a column with no override gets.</summary>
-    public IndexPolicy Default { get; }
-
-    /// <summary>The overrides, by column path.</summary>
-    public IReadOnlyDictionary<string, IndexPolicy> Columns => _columns;
-
-    /// <summary>The same policy with a different fallback.</summary>
-    /// <param name="fallback">What a column with no override gets.</param>
-    /// <returns>A new policy.</returns>
-    public WritePolicy WithDefault(IndexPolicy fallback) =>
-        new WritePolicy(fallback, new Dictionary<string, IndexPolicy>(_columns, StringComparer.Ordinal), [.. _keys]);
-
-    /// <summary>The same policy with one column overridden.</summary>
-    /// <param name="columnPath">The column, as the scan spells it: <c>"a"</c> or <c>"a.b"</c>.</param>
-    /// <param name="policy">What that column gets.</param>
-    /// <returns>A new policy.</returns>
-    /// <exception cref="ArgumentException">The path is empty.</exception>
-    public WritePolicy For(string columnPath, IndexPolicy policy)
-    {
-        ArgumentException.ThrowIfNullOrEmpty(columnPath);
-        Dictionary<string, IndexPolicy> columns =
-            new Dictionary<string, IndexPolicy>(_columns, StringComparer.Ordinal)
-            {
-                [columnPath] = policy,
-            };
-        return new WritePolicy(Default, columns, [.. _keys]);
-    }
-
-    /// <summary>The policy that applies to one column.</summary>
-    /// <param name="columnPath">The column path.</param>
-    /// <returns>The override when there is one, otherwise <see cref="Default"/>.</returns>
-    public IndexPolicy Of(string columnPath) =>
-        columnPath is not null && _columns.TryGetValue(columnPath, out IndexPolicy policy)
-            ? policy
-            : Default;
-
-    /// <summary>Rebuilds a policy read from a directory.</summary>
-    /// <param name="fallback">The stored default.</param>
-    /// <param name="columns">The stored overrides.</param>
-    /// <param name="keys">The stored composite keys.</param>
-    /// <returns>The policy.</returns>
-    internal static WritePolicy FromStored(
-        IndexPolicy fallback, Dictionary<string, IndexPolicy> columns, List<CompositeKeyPolicy>? keys = null) =>
-        new WritePolicy(fallback, columns, keys);
-}
-
-/// <summary>A locating index over the tuple of several columns.</summary>
-/// <param name="Paths">The columns, in key order.</param>
-/// <param name="Policy">The index: sorted runs.</param>
-internal sealed record CompositeKeyPolicy(IReadOnlyList<string> Paths, IndexPolicy Policy);

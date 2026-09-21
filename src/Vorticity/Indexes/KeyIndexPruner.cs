@@ -604,7 +604,7 @@ internal sealed class KeyIndexPruner
         /// not come before it, and the segments after it whose first key does not pass it.
         /// </summary>
         internal async ValueTask<List<Fence>> CandidatesAsync(
-            ISegmentSource source, FenceTable table, CancellationToken cancellationToken)
+            ISegmentReader source, FenceTable table, CancellationToken cancellationToken)
         {
             SortedDictionary<long, Fence> found = [];
             for (int i = 0; i < _keys.Length; i++)

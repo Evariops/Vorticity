@@ -58,7 +58,7 @@ internal sealed class ClusteringKey
         ArgumentNullException.ThrowIfNull(options);
         // Required rather than budgeted: on a narrow table the index budget would drop the run, and
         // a dataset whose objects have no run cannot be walked in key order at all.
-        IndexPolicy run = IndexPolicy.SortedRuns.AsRequired();
+        IndexSpec run = IndexSpec.SortedRuns.AsRequired();
         if (!IsComposite)
         {
             return options.WithIndexes(options.WritePolicy.For(_paths[0], run));

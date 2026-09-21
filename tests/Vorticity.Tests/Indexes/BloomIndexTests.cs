@@ -51,11 +51,11 @@ public sealed class BloomIndexTests
 
     private static WritePolicy Policy(int resolutions = 3) =>
         WritePolicy.None
-            .For("key", IndexPolicy.Bloom(resolutions: resolutions))
-            .For("name", IndexPolicy.Bloom(resolutions: resolutions))
-            .For("price", IndexPolicy.Bloom(resolutions: resolutions))
-            .For("flag", IndexPolicy.Bloom())
-            .For("small", IndexPolicy.Bloom());
+            .For("key", IndexSpec.Bloom(resolutions: resolutions))
+            .For("name", IndexSpec.Bloom(resolutions: resolutions))
+            .For("price", IndexSpec.Bloom(resolutions: resolutions))
+            .For("flag", IndexSpec.Bloom())
+            .For("small", IndexSpec.Bloom());
 
     [Fact]
     public async Task TheWriterBuildsEveryResolutionAndTheReportSaysSo()
@@ -361,7 +361,7 @@ public sealed class BloomIndexTests
         // so no file is ever large enough to bring it under a share of the data. `AsRequired`
         // says so, and the optional filters around it are still the first thing the budget takes.
         Decoders.EnsureRegistered();
-        WritePolicy policy = Policy().For("key", IndexPolicy.Bloom(resolutions: 3).AsRequired());
+        WritePolicy policy = Policy().For("key", IndexSpec.Bloom(resolutions: 3).AsRequired());
         await using Written written = await Written.CreateAsync(policy, budgetPerMille: 1);
 
         IndexWriteReport key = Assert.IsType<IndexWriteReport>(written.Report.Index("key", IndexKinds.BloomSbbf));
@@ -386,16 +386,16 @@ public sealed class BloomIndexTests
     [Fact]
     public void AKindlessPolicyCannotBeRequired()
     {
-        Assert.Throws<InvalidOperationException>(() => IndexPolicy.Auto.AsRequired());
-        Assert.Throws<InvalidOperationException>(() => IndexPolicy.None.AsRequired());
-        Assert.True(IndexPolicy.SortedRuns.AsRequired().Required);
-        Assert.False(IndexPolicy.SortedRuns.Required);
+        Assert.Throws<InvalidOperationException>(() => IndexSpec.Auto.AsRequired());
+        Assert.Throws<InvalidOperationException>(() => IndexSpec.None.AsRequired());
+        Assert.True(IndexSpec.SortedRuns.AsRequired().Required);
+        Assert.False(IndexSpec.SortedRuns.Required);
 
         // The flag survives the other copy method, which is the one that could drop it.
-        Assert.True(IndexPolicy.SortedRuns.AsRequired().WithSegmentEntries(4_096).Required);
+        Assert.True(IndexSpec.SortedRuns.AsRequired().WithSegmentEntries(4_096).Required);
 
         // And it is part of what a policy asks for, so two policies that differ by it differ.
-        Assert.NotEqual(IndexPolicy.SortedRuns, IndexPolicy.SortedRuns.AsRequired());
+        Assert.NotEqual(IndexSpec.SortedRuns, IndexSpec.SortedRuns.AsRequired());
     }
 
     [Fact]
@@ -405,7 +405,7 @@ public sealed class BloomIndexTests
         // requirement that did not survive the round trip would hold for the first write and
         // quietly stop holding for every one after it.
         Decoders.EnsureRegistered();
-        WritePolicy policy = Policy().For("key", IndexPolicy.Bloom(resolutions: 3).AsRequired());
+        WritePolicy policy = Policy().For("key", IndexSpec.Bloom(resolutions: 3).AsRequired());
         await using Written written = await Written.CreateAsync(policy);
 
         IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());

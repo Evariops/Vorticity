@@ -275,7 +275,7 @@ public sealed class DatasetKeyOrderTests
         DatasetOptions indexed = Unclustered() with
         {
             Write = Unclustered().Write.WithIndexes(
-                WritePolicy.Auto.For("key", IndexPolicy.SortedRuns.AsRequired())),
+                WritePolicy.Auto.For("key", IndexSpec.SortedRuns.AsRequired())),
         };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, indexed);
         foreach (int quarter in (int[])[2, 0, 3, 1])

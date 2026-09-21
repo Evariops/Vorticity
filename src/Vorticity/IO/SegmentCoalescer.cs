@@ -16,7 +16,7 @@ namespace Vorticity.IO;
 /// read path.
 /// </para>
 /// <para>
-/// Public because it is the piece an external <see cref="ISegmentSource"/> implementer most wants
+/// Public because it is the piece an external <see cref="ISegmentReader"/> implementer most wants
 /// to reuse, and because the alignment rule it enforces has to be testable on its own rather than
 /// only through a file.
 /// </para>

@@ -1,11 +1,12 @@
 using System;
-using Vorticity.Types;
+using System.Collections.Immutable;
 using Vorticity.File;
+using Vorticity.Types;
 
 namespace Vorticity;
 
 /// <summary>What an open does with a file whose tail does not parse.</summary>
-public enum VortexTornTailPolicy
+public enum VortexTornTailPolicy : byte
 {
     /// <summary>
     /// The default: a file that begins as a Vortex file and whose tail does not parse opens at the
@@ -14,59 +15,28 @@ public enum VortexTornTailPolicy
     /// </summary>
     ReadPrevious = 0,
 
-    /// <summary>The tail must parse, or the open fails.</summary>
+    /// <summary>The tail must parse, or the open fails with <see cref="VortexFormatException"/>.</summary>
     Refuse = 1,
 }
 
-/// <summary>
-/// Options for <see cref="VortexFile.OpenAsync(string, VortexOpenOptions, System.Threading.CancellationToken)"/>.
-/// Every option here but <see cref="TornTail"/> exists to remove input/output: a supplied
-/// <see cref="DType"/> drops the dtype segment from the second-read decision, a supplied
-/// <see cref="FileLength"/> drops the length probe, and a raised <see cref="InitialReadSize"/> can
-/// only reduce round trips. <see cref="TornTail"/> is the one that can add reads, and only on a
-/// file that would otherwise not open at all.
-/// </summary>
-public sealed class VortexOpenOptions
+/// <summary>What an open reads, trusts and refuses.</summary>
+/// <remarks>
+/// Every option here but <see cref="TornTail"/> exists to remove input/output or to bound work: a
+/// supplied <see cref="Schema"/> drops the dtype segment from the tail read, a supplied
+/// <see cref="Length"/> drops the length probe, and a raised <see cref="InitialReadSize"/> can only
+/// reduce round trips.
+/// </remarks>
+public sealed record VortexOpenOptions
 {
-    private readonly long _fileLength = -1;
-    private readonly int _initialReadSize = VortexFileFormat.InitialReadSize;
-    private readonly VortexReadOptions _read = VortexReadOptions.Default;
+    private readonly int _initialReadSize = 65_536;
+    private readonly long? _length;
+    private readonly long _maxDecompressedSize = VortexLimits.DefaultMaxDecompressedSize;
+    private readonly VortexReadOptions? _read;
 
-    /// <summary>The defaults: probe the length, read 65535 tail bytes, own the source.</summary>
+    /// <summary>The defaults.</summary>
     internal static VortexOpenOptions Default { get; } = new VortexOpenOptions();
 
-    /// <summary>
-    /// The file's DType, supplied out of band.
-    /// </summary>
-    /// <remarks>
-    /// <b>Required</b> for a file written with its dtype segment excluded. When both this and an
-    /// embedded dtype segment are present, <b>this wins</b>: the segment is never read, never
-    /// parsed, and is excluded from the second-read decision. There is deliberately no consistency
-    /// check and no warning, since a check would cost the very read that supplying a DType exists
-    /// to avoid. Leave it <c>default</c> to read the embedded one.
-    /// </remarks>
-    internal DType DType { get; init; }
-
-    /// <summary>
-    /// The file length in bytes, when the caller already knows it. <c>-1</c> (the default) issues
-    /// one length probe.
-    /// </summary>
-    /// <exception cref="ArgumentOutOfRangeException">The value is below <c>-1</c>.</exception>
-    internal long FileLength
-    {
-        get => _fileLength;
-        init
-        {
-            ArgumentOutOfRangeException.ThrowIfLessThan(value, -1);
-            _fileLength = value;
-        }
-    }
-
-    /// <summary>
-    /// Bytes to read from the tail before parsing. Floored at
-    /// <see cref="VortexFileFormat.InitialReadSize"/> (65535) and clamped to the file; raising it
-    /// can only reduce round trips.
-    /// </summary>
+    /// <summary>Bytes read from the tail at open; floored at 64 KiB and clamped to the file.</summary>
     /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
     public int InitialReadSize
     {
@@ -78,58 +48,107 @@ public sealed class VortexOpenOptions
         }
     }
 
-    /// <summary>
-    /// When <see langword="true"/>, disposing the file leaves the segment source open. Ignored by
-    /// the path-based overloads, which always own the source they created.
-    /// </summary>
-    internal bool LeaveSourceOpen { get; init; }
-
-    /// <summary>Read-time policy for every scan of the opened file. Never <see langword="null"/>.</summary>
-    /// <exception cref="ArgumentNullException">The value is null.</exception>
-    internal VortexReadOptions Read
+    /// <summary>The file length, when the caller knows it; null probes the source.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
+    public long? Length
     {
-        get => _read;
+        get => _length;
         init
         {
-            ArgumentNullException.ThrowIfNull(value);
-            _read = value;
+            if (value is < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value, "A file length is not negative.");
+            }
+
+            _length = value;
         }
     }
 
-    /// <summary>
-    /// What to do with a file whose tail does not parse: open the last whole version before it, the
-    /// default, or refuse.
-    /// </summary>
-    /// <remarks>
-    /// An in-place append is not atomic: a tear leaves the old file whole before the torn bytes.
-    /// Reading that version is safe -- it is a file that was complete
-    /// -- and <see cref="VortexFile.TornTail"/> says it happened. Finding it walks back from the end
-    /// for an end-of-file record, so it costs reads in proportion to the torn bytes; a file that does
-    /// not begin with the Vortex magic is refused without the walk.
-    /// </remarks>
-    public VortexTornTailPolicy TornTail { get; init; }
+    /// <summary>What to do with a file whose tail does not parse: open the last whole version before it, or refuse.</summary>
+    public VortexTornTailPolicy TornTail { get; init; } = VortexTornTailPolicy.ReadPrevious;
 
-    /// <summary>
-    /// Whether the open also reads the index directory -- its fragments included -- rather than the
-    /// first scan that needs it. Default <see langword="false"/>.
-    /// </summary>
-    /// <remarks>
-    /// For an object store, where a lazy read is one more round trip in the middle of a query. The
-    /// directory usually lies inside the tail the open reads anyway, and then preloading it costs no
-    /// request at all; <see cref="VortexFile.Indexes"/> answers from it without one.
-    /// </remarks>
+    /// <summary>Whether a statistic is checked against what is decoded rather than trusted; a statistic is a claim.</summary>
+    public bool VerifyStatistics { get; init; }
+
+    /// <summary>Whether an encoding or layout this library does not implement is refused only when a scan needs it, rather than at open.</summary>
+    public bool AllowUnknownComponents { get; init; }
+
+    /// <summary>The schema of a file written without one, or to skip reading the one it embeds; it wins over the file's.</summary>
+    public VortexSchema? Schema { get; init; }
+
+    /// <summary>The most bytes one decode may produce; a decode is a block.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
+    public long MaxDecompressedSize
+    {
+        get => _maxDecompressedSize;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            _maxDecompressedSize = value;
+        }
+    }
+
+    /// <summary>Index fragments built for this file elsewhere, consulted with its own indexes.</summary>
+    public ImmutableArray<IndexFragment> IndexFragments { get; init; }
+
+    /// <summary>The file's dtype, from <see cref="Schema"/>, or default to read the embedded one.</summary>
+    internal DType DType { get; init; }
+
+    /// <summary>These options with <see cref="DType"/> built from <see cref="Schema"/>, once, before the open reads it.</summary>
+    internal VortexOpenOptions Resolved() =>
+        !DType.IsDefault || Schema is null ? this : this with { DType = VortexTypes.ToDType(Schema, new DTypeArena()) };
+
+    /// <summary><see cref="Length"/> as the engine reads it: -1 for unknown.</summary>
+    internal long FileLength
+    {
+        get => _length ?? -1;
+        init => _length = value < 0 ? null : value;
+    }
+
+    /// <summary>Whether disposing the file leaves a caller's source open.</summary>
+    internal bool LeaveSourceOpen { get; init; }
+
+    /// <summary>Whether the open also reads the index directory, rather than the first scan that needs it.</summary>
     internal bool PreloadIndexes { get; init; }
+
+    /// <summary>The bytes the index run cache of the file may hold.</summary>
+    internal long IndexCacheBytes { get; init; } = VortexReadOptions.DefaultIndexCacheBytes;
+
+    /// <summary>Read-time policy for every scan of the opened file.</summary>
+    internal VortexReadOptions Read
+    {
+        get => _read ?? new VortexReadOptions
+        {
+            MaxDecompressedSize = MaxDecompressedSize,
+            VerifyStatistics = VerifyStatistics,
+            AllowUnknownComponents = AllowUnknownComponents,
+            IndexCacheBytes = IndexCacheBytes,
+            IndexFragments = Fragments(IndexFragments),
+        };
+        init => _read = value;
+    }
 
     /// <summary>These options for the first <paramref name="fileLength"/> bytes, refusing a torn tail there.</summary>
     /// <param name="fileLength">The prefix's length.</param>
-    internal VortexOpenOptions ForPrefix(long fileLength) => new VortexOpenOptions
+    internal VortexOpenOptions ForPrefix(long fileLength) => this with
     {
-        DType = DType,
         FileLength = fileLength,
-        InitialReadSize = InitialReadSize,
-        LeaveSourceOpen = LeaveSourceOpen,
-        Read = Read,
         TornTail = VortexTornTailPolicy.Refuse,
-        PreloadIndexes = PreloadIndexes,
     };
+
+    private static ReadOnlyMemory<byte>[] Fragments(ImmutableArray<IndexFragment> fragments)
+    {
+        if (fragments.IsDefaultOrEmpty)
+        {
+            return [];
+        }
+
+        ReadOnlyMemory<byte>[] bytes = new ReadOnlyMemory<byte>[fragments.Length];
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            bytes[i] = fragments[i].Bytes;
+        }
+
+        return bytes;
+    }
 }

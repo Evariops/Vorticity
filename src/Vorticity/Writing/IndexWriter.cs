@@ -28,7 +28,7 @@ internal sealed class IndexWriter : IDisposable
     private readonly bool _isTabular;
     private readonly int _budgetPerMille;
     private readonly string[] _paths;
-    private readonly IndexPolicy[] _columns;
+    private readonly IndexSpec[] _columns;
     private readonly List<IndexBuilder>[] _builders;
     private readonly string?[] _refusals;
     private readonly long[] _columnBytes;
@@ -82,7 +82,7 @@ internal sealed class IndexWriter : IDisposable
         int keys = policy.Keys.Count;
         int total = fieldCount + keys + (nested?.Count ?? 0);
         _paths = new string[total];
-        _columns = new IndexPolicy[total];
+        _columns = new IndexSpec[total];
         _builders = new List<IndexBuilder>[total];
         _refusals = new string?[total];
         _columnBytes = new long[total];
@@ -91,7 +91,7 @@ internal sealed class IndexWriter : IDisposable
         {
             int slot = fieldCount + keys + n;
             string path = nested![n];
-            IndexPolicy column = policy.Of(path);
+            IndexSpec column = policy.Of(path);
             _paths[slot] = path;
             _columns[slot] = column;
             _builders[slot] = [];
@@ -125,7 +125,7 @@ internal sealed class IndexWriter : IDisposable
         for (int field = 0; field < fieldCount; field++)
         {
             _paths[field] = isTabular ? schema.GetFieldName(field) : string.Empty;
-            IndexPolicy column = policy.Of(_paths[field]);
+            IndexSpec column = policy.Of(_paths[field]);
             _columns[field] = column;
             DType dtype = isTabular ? schema.GetField(field) : schema;
             List<IndexBuilder> builders = [];
@@ -139,7 +139,7 @@ internal sealed class IndexWriter : IDisposable
                     // per chunk and postings an intern per row, so neither is ever Auto's.
                     if (BloomBuilder.Supports(dtype, out _))
                     {
-                        builders.Add(new BloomBuilder(IndexPolicy.Bloom())
+                        builders.Add(new BloomBuilder(IndexSpec.Bloom())
                         {
                             AutoShare = AutoBloomShare,
                             BlockRows = blockRows,
@@ -180,7 +180,7 @@ internal sealed class IndexWriter : IDisposable
     internal RunScratch? Scratch => _scratch;
 
     /// <summary>The builder a policy names for a column, or why there is none.</summary>
-    private static string? Explicit(IndexPolicy column, DType dtype, List<IndexBuilder> builders)
+    private static string? Explicit(IndexSpec column, DType dtype, List<IndexBuilder> builders)
     {
         string? reason = null;
         switch (column.Kind)
@@ -790,7 +790,7 @@ internal sealed class IndexWriter : IDisposable
     {
         get
         {
-            foreach (IndexPolicy column in _columns)
+            foreach (IndexSpec column in _columns)
             {
                 if (column.Kind != IndexPolicyKind.None)
                 {
@@ -1088,7 +1088,7 @@ internal sealed class IndexWriter : IDisposable
 
         for (int field = 0; field < _columns.Length; field++)
         {
-            IndexPolicy policy = _columns[field];
+            IndexSpec policy = _columns[field];
             List<IndexBuilder> builders = _builders[field];
             IndexBuilder? only = builders.Count > 0 ? builders[0] : null;
             switch (policy.Kind)
@@ -1150,7 +1150,7 @@ internal sealed class IndexWriter : IDisposable
             return;
         }
 
-        IndexPolicy policy = bloom.Policy;
+        IndexSpec policy = bloom.Policy;
 
         // One entry, one run, one root: the tree names every other region itself.
         if (bloom.Tree is not { Payload: { Segment: { } root, DType: { } dtype } } tree)
@@ -1428,7 +1428,7 @@ internal sealed class IndexWriter : IDisposable
             throw new InvalidOperationException("The fence pages are written before the directory that names them.");
         }
 
-        bool defaultPolicy = _policy.Default == IndexPolicy.Auto && _policy.Columns.Count == 0;
+        bool defaultPolicy = _policy.Default == IndexSpec.Auto && _policy.Columns.Count == 0;
         List<IndexEntry> entries = Merged();
         return entries.Count == 0 && defaultPolicy && _previousEof == 0 && fragment is null
             ? null

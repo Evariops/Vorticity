@@ -95,7 +95,7 @@ public sealed class EncodingHintTests
         Fixture fixture = new Fixture(Rows);
         (WriteReport plain, string plainPath) = await WriteAsync(fixture, hints: null);
         (WriteReport hinted, string hintedPath) = await WriteAsync(
-            fixture, new Dictionary<string, VortexEncodingHint> { ["dense"] = VortexEncodingHint.Zstd });
+            fixture, new Dictionary<string, EncodingHint> { ["dense"] = EncodingHint.Zstd });
         try
         {
             // Without a hint the dense column bit-packs, chunk after chunk.
@@ -129,7 +129,7 @@ public sealed class EncodingHintTests
         Decoders.EnsureRegistered();
         Fixture fixture = new Fixture(Rows);
         (WriteReport hinted, string path) = await WriteAsync(
-            fixture, new Dictionary<string, VortexEncodingHint> { ["text"] = VortexEncodingHint.Dictionary });
+            fixture, new Dictionary<string, EncodingHint> { ["text"] = EncodingHint.Dictionary });
         try
         {
             IReadOnlyList<string> schemes = hinted.Columns[1].Encodings;
@@ -150,7 +150,7 @@ public sealed class EncodingHintTests
         Decoders.EnsureRegistered();
         Fixture fixture = new Fixture(Rows);
         (WriteReport hinted, string path) = await WriteAsync(
-            fixture, new Dictionary<string, VortexEncodingHint> { ["step"] = VortexEncodingHint.Zstd });
+            fixture, new Dictionary<string, EncodingHint> { ["step"] = EncodingHint.Zstd });
         try
         {
             Assert.All(hinted.Columns[2].Encodings, scheme => Assert.Equal("Sequence", scheme));
@@ -168,9 +168,9 @@ public sealed class EncodingHintTests
         Decoders.EnsureRegistered();
         Fixture fixture = new Fixture(Rows);
         (_, string plain) = await WriteAsync(fixture, hints: null);
-        (_, string empty) = await WriteAsync(fixture, new Dictionary<string, VortexEncodingHint>());
+        (_, string empty) = await WriteAsync(fixture, new Dictionary<string, EncodingHint>());
         (_, string auto) = await WriteAsync(
-            fixture, new Dictionary<string, VortexEncodingHint> { ["dense"] = VortexEncodingHint.Auto });
+            fixture, new Dictionary<string, EncodingHint> { ["dense"] = EncodingHint.Auto });
         try
         {
             byte[] expected = await System.IO.File.ReadAllBytesAsync(plain);
@@ -195,7 +195,7 @@ public sealed class EncodingHintTests
             fixture.Schema,
             new VortexWriteOptions
             {
-                EncodingHints = new Dictionary<string, VortexEncodingHint> { ["absent"] = VortexEncodingHint.Zstd },
+                EncodingHints = new Dictionary<string, EncodingHint> { ["absent"] = EncodingHint.Zstd },
             }));
         Assert.Contains("'absent'", refused.Message, StringComparison.Ordinal);
     }
@@ -217,7 +217,7 @@ public sealed class EncodingHintTests
         try
         {
             await using (VortexFileWriter writer = VortexFileWriter.Create(path, schema, Options(
-                new Dictionary<string, VortexEncodingHint> { ["outer.deep"] = VortexEncodingHint.Zstd })))
+                new Dictionary<string, EncodingHint> { ["outer.deep"] = EncodingHint.Zstd })))
             {
                 using RecordBatch batch = new RecordBatch(arena, root, 0);
                 await writer.WriteAsync(batch);
@@ -232,7 +232,7 @@ public sealed class EncodingHintTests
             try
             {
                 await using (VortexFileWriter writer = VortexFileWriter.Create(flat, i64, Options(
-                    new Dictionary<string, VortexEncodingHint> { [string.Empty] = VortexEncodingHint.Zstd })))
+                    new Dictionary<string, EncodingHint> { [string.Empty] = EncodingHint.Zstd })))
                 {
                     using RecordBatch batch = new RecordBatch(arena, values, 0);
                     await writer.WriteAsync(batch);
@@ -256,7 +256,7 @@ public sealed class EncodingHintTests
     private static string Temp() =>
         Path.Combine(Path.GetTempPath(), $"vorticity-hint-{Guid.NewGuid():N}.vortex");
 
-    private static VortexWriteOptions Options(IReadOnlyDictionary<string, VortexEncodingHint>? hints) =>
+    private static VortexWriteOptions Options(IReadOnlyDictionary<string, EncodingHint>? hints) =>
         new VortexWriteOptions
         {
             RowBlockSize = 2_048,
@@ -267,7 +267,7 @@ public sealed class EncodingHintTests
         };
 
     private static async Task<(WriteReport Report, string Path)> WriteAsync(
-        Fixture fixture, IReadOnlyDictionary<string, VortexEncodingHint>? hints)
+        Fixture fixture, IReadOnlyDictionary<string, EncodingHint>? hints)
     {
         string path = Temp();
         await using VortexFileWriter writer = VortexFileWriter.Create(path, fixture.Schema, Options(hints));

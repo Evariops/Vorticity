@@ -143,7 +143,7 @@ public sealed class InMergeTests
         RowBlockSize = Block,
         IndexBudgetPerMille = 1_000_000,
         Identity = new Guid("32323232-3232-4232-8232-323232323232"),
-        WritePolicy = WritePolicy.None.For("key", IndexPolicy.SortedRuns),
+        WritePolicy = WritePolicy.None.For("key", IndexSpec.SortedRuns),
     };
 
     private static async Task<string> WriteAsync()

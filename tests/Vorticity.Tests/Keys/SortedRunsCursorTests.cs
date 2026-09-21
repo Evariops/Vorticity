@@ -576,7 +576,7 @@ public sealed class SortedRunsCursorTests
     public async Task TheDictionariesServeADistinctWalkOfTheColumnsTheWriterEncodedSo()
     {
         Decoders.EnsureRegistered();
-        await using Written written = await Written.CreateAsync(IndexPolicy.Auto);
+        await using Written written = await Written.CreateAsync(IndexSpec.Auto);
         int served = 0;
         List<string> refused = [];
         foreach (string column in (string[])[.. Names, "label"])
@@ -662,9 +662,9 @@ public sealed class SortedRunsCursorTests
         Assert.True(plan.HasRows);
     }
 
-    private static IndexPolicy PolicyOf(KeySourceKind source) => source == KeySourceKind.Postings
-        ? IndexPolicy.Postings.WithSegmentEntries(SegmentEntries)
-        : IndexPolicy.SortedRuns.WithSegmentEntries(SegmentEntries);
+    private static IndexSpec PolicyOf(KeySourceKind source) => source == KeySourceKind.Postings
+        ? IndexSpec.Postings.WithSegmentEntries(SegmentEntries)
+        : IndexSpec.SortedRuns.WithSegmentEntries(SegmentEntries);
 
     /// <summary>
     /// A distinct cursor forced onto <paramref name="source"/> visits the oracle's keys once each,
@@ -1179,10 +1179,10 @@ public sealed class SortedRunsCursorTests
         internal VortexFile File { get; }
 
         internal static Task<Written> CreateAsync() =>
-            CreateAsync(IndexPolicy.SortedRuns.WithSegmentEntries(SegmentEntries));
+            CreateAsync(IndexSpec.SortedRuns.WithSegmentEntries(SegmentEntries));
 
         /// <summary>The fixture, every column but `row` indexed with <paramref name="policy"/>.</summary>
-        internal static async Task<Written> CreateAsync(IndexPolicy policy, Func<ISegmentSource, ISegmentSource>? wrap = null)
+        internal static async Task<Written> CreateAsync(IndexSpec policy, Func<ISegmentReader, ISegmentReader>? wrap = null)
         {
             string path = System.IO.Path.Combine(
                 System.IO.Path.GetTempPath(), $"vorticity-runs-{Guid.NewGuid():N}.vortex");
@@ -1192,7 +1192,7 @@ public sealed class SortedRunsCursorTests
                 return new Written(path, await VortexFile.OpenAsync(path, CancellationToken.None));
             }
 
-            ISegmentSource source = wrap(MemoryMappedSegmentSource.Open(path));
+            ISegmentReader source = wrap(MemoryMappedSegmentSource.Open(path));
             return new Written(path, await VortexFile.OpenAsync(source, new VortexOpenOptions(), CancellationToken.None));
         }
 
@@ -1202,7 +1202,7 @@ public sealed class SortedRunsCursorTests
             System.IO.File.Delete(Path);
         }
 
-        private static async Task WriteAsync(string path, IndexPolicy policy)
+        private static async Task WriteAsync(string path, IndexSpec policy)
         {
             DTypeArena types = new DTypeArena();
             DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
@@ -1221,7 +1221,7 @@ public sealed class SortedRunsCursorTests
                 IndexBudgetPerMille = 1_000_000,
                 WritePolicy = WritePolicy.None
                     .WithDefault(policy)
-                    .For("row", IndexPolicy.None),
+                    .For("row", IndexSpec.None),
             };
             await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, options);
             for (int start = 0; start < Rows; start += Block)

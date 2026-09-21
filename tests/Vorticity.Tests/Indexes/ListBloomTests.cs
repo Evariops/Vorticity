@@ -220,7 +220,7 @@ public sealed class ListBloomTests
             {
                 RowBlockSize = Block,
                 Identity = Pinned,
-                WritePolicy = WritePolicy.None.For("person.tags", IndexPolicy.Bloom(minDistinct: 1)),
+                WritePolicy = WritePolicy.None.For("person.tags", IndexSpec.Bloom(minDistinct: 1)),
                 IndexBudgetPerMille = Unbounded,
             };
 
@@ -258,9 +258,9 @@ public sealed class ListBloomTests
         ListShape map = ListShapes.Build("map_utf8_i64", 1_000);
         ListShape texts = ListShapes.Build("list_utf8", 1_000);
 
-        Assert.Contains("holds List", await ReasonAsync(lists, IndexPolicy.Bloom()), StringComparison.Ordinal);
-        Assert.Contains("Map", await ReasonAsync(map, IndexPolicy.Bloom()), StringComparison.Ordinal);
-        Assert.Contains("trigram", await ReasonAsync(texts, IndexPolicy.NgramBloom()), StringComparison.Ordinal);
+        Assert.Contains("holds List", await ReasonAsync(lists, IndexSpec.Bloom()), StringComparison.Ordinal);
+        Assert.Contains("Map", await ReasonAsync(map, IndexSpec.Bloom()), StringComparison.Ordinal);
+        Assert.Contains("trigram", await ReasonAsync(texts, IndexSpec.NgramBloom()), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -363,7 +363,7 @@ public sealed class ListBloomTests
 
     // ------------------------------------------------------------------------------ plumbing
 
-    private static readonly WritePolicy Policy = WritePolicy.None.For("items", IndexPolicy.Bloom(resolutions: 3));
+    private static readonly WritePolicy Policy = WritePolicy.None.For("items", IndexSpec.Bloom(resolutions: 3));
 
     /// <summary>An index budget no filter here reaches.</summary>
     private const int Unbounded = 1_000_000;
@@ -445,7 +445,7 @@ public sealed class ListBloomTests
         return path;
     }
 
-    private static async Task<string> ReasonAsync(ListShape shape, IndexPolicy policy)
+    private static async Task<string> ReasonAsync(ListShape shape, IndexSpec policy)
     {
         string path = Path.Combine(Path.GetTempPath(), $"vorticity-listbloom-{Guid.NewGuid():N}.vortex");
         try

@@ -39,8 +39,8 @@ public sealed class DatasetIndexingTests
     private const int Rows = Objects * PerObject;
 
     private static readonly WritePolicy Policy = WritePolicy.None
-        .For("tag", IndexPolicy.Bloom(falsePositivePpm: 100))
-        .For("id", IndexPolicy.SortedRuns.AsRequired());
+        .For("tag", IndexSpec.Bloom(falsePositivePpm: 100))
+        .For("id", IndexSpec.SortedRuns.AsRequired());
 
     // A budget that cannot refuse anything here, because none of these tests is about the budget:
     // the objects are a few kilobytes and their filters outweigh them, so at 1000 per mille the
@@ -222,7 +222,7 @@ public sealed class DatasetIndexingTests
             new RowRange(0, 2 * BlockRows), new RowRange(2 * BlockRows, 4 * BlockRows),
             new RowRange(4 * BlockRows, 6 * BlockRows), new RowRange(6 * BlockRows, PerObject)])
         {
-            await DatasetIndexer.IndexAsync(dataset, target, WritePolicy.None.For("tag", IndexPolicy.Bloom(falsePositivePpm: 1_000)), again, Build);
+            await DatasetIndexer.IndexAsync(dataset, target, WritePolicy.None.For("tag", IndexSpec.Bloom(falsePositivePpm: 1_000)), again, Build);
         }
 
         Assert.NotNull(await dataset.CompactAsync());

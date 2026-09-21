@@ -136,7 +136,7 @@ public sealed class BloomVectorTests
         // buffer at its width, a view that is inline or points into a data buffer, a validity
         // bitmap -- and the bytes it hashes must be the ones the reference hashed.
         Vector vector = Find(name, blocks);
-        IndexPolicy policy = IndexPolicy.Bloom(falsePositivePpm: 1, resolutions: 1, maxBlocks: blocks, minDistinct: 0);
+        IndexSpec policy = IndexSpec.Bloom(falsePositivePpm: 1, resolutions: 1, maxBlocks: blocks, minDistinct: 0);
 
         DTypeArena types = new DTypeArena();
         CanonicalArena arena = new CanonicalArena();

@@ -143,13 +143,13 @@ public sealed class DegreeOfParallelismTests
     }
 
     /// <summary>Records the largest number of <c>ReadManyAsync</c> calls ever open at once.</summary>
-    private sealed class OverlapCountingSource : ISegmentSource
+    private sealed class OverlapCountingSource : ISegmentReader
     {
-        private readonly ISegmentSource _inner;
+        private readonly ISegmentReader _inner;
         private int _inFlight;
         private int _peak;
 
-        internal OverlapCountingSource(ISegmentSource inner) => _inner = inner;
+        internal OverlapCountingSource(ISegmentReader inner) => _inner = inner;
 
         internal int Peak => Volatile.Read(ref _peak);
 

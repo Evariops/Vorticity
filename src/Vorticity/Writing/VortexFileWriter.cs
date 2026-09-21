@@ -179,7 +179,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
         int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
-        FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, VortexEncodingHint>? hints)
+        FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints)
     {
         _sink = sink;
         _elementStatistics = elementStatistics;
@@ -249,11 +249,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// Pins the scheme of every column the caller named, before the first batch, since the ingest
     /// state a scheme reads starts with it.
     /// </summary>
-    private void Pin(IReadOnlyDictionary<string, VortexEncodingHint> hints)
+    private void Pin(IReadOnlyDictionary<string, EncodingHint> hints)
     {
-        foreach ((string path, VortexEncodingHint hint) in hints)
+        foreach ((string path, EncodingHint hint) in hints)
         {
-            if (hint == VortexEncodingHint.Auto)
+            if (hint == EncodingHint.Auto)
             {
                 continue;
             }
@@ -266,14 +266,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
             column!.Pin(hint switch
             {
-                VortexEncodingHint.Canonical => ColumnScheme.None,
-                VortexEncodingHint.RunEnd => ColumnScheme.RunEnd,
-                VortexEncodingHint.Dictionary => ColumnScheme.Dict,
-                VortexEncodingHint.BitPacked => ColumnScheme.BitPacked,
-                VortexEncodingHint.Fsst => ColumnScheme.Fsst,
-                VortexEncodingHint.Alp => ColumnScheme.Alp,
-                VortexEncodingHint.Sequence => ColumnScheme.Sequence,
-                VortexEncodingHint.Zstd => ColumnScheme.Zstd,
+                EncodingHint.Canonical => ColumnScheme.None,
+                EncodingHint.RunEnd => ColumnScheme.RunEnd,
+                EncodingHint.Dictionary => ColumnScheme.Dict,
+                EncodingHint.BitPacked => ColumnScheme.BitPacked,
+                EncodingHint.Fsst => ColumnScheme.Fsst,
+                EncodingHint.Alp => ColumnScheme.Alp,
+                EncodingHint.Sequence => ColumnScheme.Sequence,
+                EncodingHint.Zstd => ColumnScheme.Zstd,
                 _ => throw new ArgumentOutOfRangeException(
                     nameof(hints), hint, "not a defined encoding hint"),
             });
@@ -458,6 +458,34 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             path, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None);
         VortexFileWriter writer = Create(new StreamSegmentSink(stream, ownsStream: true), schema, options);
         writer._createdPath = path;
+        return writer;
+    }
+
+    /// <summary>A writer at <paramref name="path"/>, in <paramref name="session"/>.</summary>
+    internal static VortexFileWriter Create(string path, DType schema, VortexWriteOptions options, VortexSession session)
+    {
+        VortexFileWriter writer = Create(path, schema, options);
+        writer.Session = session;
+        return writer;
+    }
+
+    /// <summary>A writer over <paramref name="sink"/>, in <paramref name="session"/>.</summary>
+    internal static VortexFileWriter Create(System.IO.Pipelines.PipeWriter sink, DType schema, VortexWriteOptions options, VortexSession session)
+    {
+        VortexFileWriter writer = Create(new PipeSegmentSink(sink), schema, options);
+        writer.Session = session;
+        return writer;
+    }
+
+    /// <summary>The session the writer belongs to.</summary>
+    internal VortexSession Session { get; private set; } = VortexSession.Default;
+
+    /// <summary>An append to <paramref name="path"/>, in <paramref name="session"/>.</summary>
+    internal static async ValueTask<VortexFileWriter> AppendInSessionAsync(
+        string path, VortexWriteOptions? options, VortexSession session, CancellationToken cancellationToken)
+    {
+        VortexFileWriter writer = await AppendAsync(path, options, cancellationToken).ConfigureAwait(false);
+        writer.Session = session;
         return writer;
     }
 

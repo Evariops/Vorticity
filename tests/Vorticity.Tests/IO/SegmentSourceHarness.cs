@@ -5,13 +5,13 @@ using static Vorticity.Tests.IO.IoTestData;
 
 namespace Vorticity.Tests.IO;
 
-/// <summary>Which <see cref="ISegmentSource"/> a shared contract test is running against.</summary>
+/// <summary>Which <see cref="ISegmentReader"/> a shared contract test is running against.</summary>
 public enum SegmentSourceKind
 {
     /// <summary><see cref="MemoryMappedSegmentSource"/> — zero-copy over a mapping.</summary>
     MemoryMapped,
 
-    /// <summary><see cref="RandomAccessSegmentSource"/> — positional reads into aligned buffers.</summary>
+    /// <summary><see cref="FileSegmentSource"/> — positional reads into aligned buffers.</summary>
     RandomAccess,
 
     /// <summary><see cref="HttpRangeSegmentSource"/> — the reference out-of-core implementation.</summary>
@@ -41,8 +41,8 @@ internal sealed class SegmentSourceHarness : IAsyncDisposable
             case SegmentSourceKind.RandomAccess:
                 _file = new TempFile(content);
                 Source = options is null
-                    ? RandomAccessSegmentSource.Open(_file.Path_)
-                    : new RandomAccessSegmentSource(
+                    ? FileSegmentSource.Open(_file.Path_)
+                    : new FileSegmentSource(
                         System.IO.File.OpenHandle(
                             _file.Path_,
                             System.IO.FileMode.Open,
@@ -63,7 +63,7 @@ internal sealed class SegmentSourceHarness : IAsyncDisposable
         }
     }
 
-    internal ISegmentSource Source { get; }
+    internal ISegmentReader Source { get; }
 
     internal byte[] Content { get; }
 

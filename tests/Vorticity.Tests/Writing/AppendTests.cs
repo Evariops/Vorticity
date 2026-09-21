@@ -46,9 +46,9 @@ public sealed class AppendTests
     private static double F(int row) => ((row * 13) % 101) / 4.0;
 
     private static WritePolicy Policy => WritePolicy.Auto
-        .For("v", IndexPolicy.SortedRuns.WithSegmentEntries(512))
-        .For("s", IndexPolicy.Postings)
-        .For("f", IndexPolicy.Bloom(resolutions: 3));
+        .For("v", IndexSpec.SortedRuns.WithSegmentEntries(512))
+        .For("s", IndexSpec.Postings)
+        .For("f", IndexSpec.Bloom(resolutions: 3));
 
     public static TheoryData<int[]> Splits() => new()
     {

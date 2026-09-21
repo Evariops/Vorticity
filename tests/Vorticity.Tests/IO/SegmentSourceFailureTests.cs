@@ -25,7 +25,7 @@ public sealed class SegmentSourceFailureTests
     /// A source that fills slots one at a time and then fails, keeping every owner it created so
     /// the test can prove each one was given back.
     /// </summary>
-    private sealed class RecordingSegmentSource : ISegmentSource
+    private sealed class RecordingSegmentSource : ISegmentReader
     {
         private readonly byte[] _content;
         private readonly int _failAfter;
@@ -330,8 +330,8 @@ public sealed class SegmentSourceFailureTests
         SafeFileHandle handle = global::System.IO.File.OpenHandle(
             file.Path_, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, FileOptions.Asynchronous);
 
-        await using RandomAccessSegmentSource source =
-            new RandomAccessSegmentSource(handle, ownsHandle: true, SegmentReadOptions.Default);
+        await using FileSegmentSource source =
+            new FileSegmentSource(handle, ownsHandle: true, SegmentReadOptions.Default);
 
         Assert.Equal(8192, source.Length);
 

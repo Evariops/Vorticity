@@ -336,8 +336,8 @@ public sealed class DatasetBudgetTests
             {
                 RowBlockSize = 128,
                 WritePolicy = WritePolicy.None
-                    .For("key", IndexPolicy.SortedRuns.AsRequired())
-                    .For("measure", IndexPolicy.Bloom(falsePositivePpm: 100)),
+                    .For("key", IndexSpec.SortedRuns.AsRequired())
+                    .For("measure", IndexSpec.Bloom(falsePositivePpm: 100)),
             },
         };
 

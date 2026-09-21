@@ -123,7 +123,7 @@ public sealed class FileIdentityTests
 
             Guid pinned = Guid.NewGuid();
             await VortexFileIndexer.AppendIndexesAsync(
-                path, WritePolicy.None.For("id", IndexPolicy.Postings), new VortexWriteOptions { Identity = pinned });
+                path, WritePolicy.None.For("id", IndexSpec.Postings), new VortexWriteOptions { Identity = pinned });
             Guid? indexed = await IdentityOf(path);
 
             Assert.NotNull(written);

@@ -10,7 +10,7 @@ namespace Vorticity.IO;
 
 /// <summary>
 /// A caller-owned, reusable set of segment reads. Register everything a split needs, then issue
-/// <b>one</b> <see cref="ISegmentSource.ReadManyAsync"/> — that single call is what makes
+/// <b>one</b> <see cref="ISegmentReader.ReadManyAsync"/> — that single call is what makes
 /// coalescing possible. It carries both the requests and their results because an async method
 /// cannot take a <c>Span&lt;T&gt;</c> parameter, and, holding the owners, it is where the rule of
 /// exactly one reference per segment per batch is enforced.
@@ -19,7 +19,7 @@ namespace Vorticity.IO;
 /// <para>
 /// <b>Not thread-safe, by design.</b> A request set belongs to exactly one decode flow, the same
 /// way a <c>ScanContext</c> does. Concurrent splits each get their own set.
-/// <see cref="ISegmentSource"/> implementations, by contrast, must be thread-safe.
+/// <see cref="ISegmentReader"/> implementations, by contrast, must be thread-safe.
 /// </para>
 /// <para>
 /// <b>Lifetime.</b> Every slot holds one reference to a <see cref="SegmentOwner"/> and
@@ -69,7 +69,7 @@ internal sealed class SegmentRequestSet : IDisposable
     /// <summary>How many distinct segments are registered.</summary>
     public int Count => _count;
 
-    /// <summary>True once a <see cref="ISegmentSource.ReadManyAsync"/> over this set completed.</summary>
+    /// <summary>True once a <see cref="ISegmentReader.ReadManyAsync"/> over this set completed.</summary>
     public bool IsPopulated => _populated;
 
     /// <summary>

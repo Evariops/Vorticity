@@ -283,8 +283,8 @@ public sealed class DatasetFuzzTests
         await using VortexDataset second = await VortexDataset.OpenAsync(store, options);
         VortexDataset[] handles = [dataset, second];
         WritePolicy policy = WritePolicy.None
-            .For("key", IndexPolicy.SortedRuns.AsRequired())
-            .For("measure", IndexPolicy.Bloom(falsePositivePpm: 100));
+            .For("key", IndexSpec.SortedRuns.AsRequired())
+            .For("measure", IndexSpec.Bloom(falsePositivePpm: 100));
         VortexWriteOptions build = new VortexWriteOptions { IndexBudgetPerMille = 1_000 };
         RowRange[] ranges = [new RowRange(0, 300), new RowRange(0, 128), new RowRange(128, 300)];
 
@@ -369,7 +369,7 @@ public sealed class DatasetFuzzTests
         await using VortexDataset second = await VortexDataset.OpenAsync(store, options);
         VortexDataset[] handles = [dataset, second];
         CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 64 << 10 };
-        WritePolicy policy = WritePolicy.None.For("measure", IndexPolicy.Bloom(falsePositivePpm: 100));
+        WritePolicy policy = WritePolicy.None.For("measure", IndexSpec.Bloom(falsePositivePpm: 100));
         VortexWriteOptions build = new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 };
 
         Random random = new Random(seed);

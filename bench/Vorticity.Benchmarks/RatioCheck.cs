@@ -1108,7 +1108,7 @@ internal static class RatioCheck
             // Runs of a permutation are as large as the columns they index, which the default
             // budget refuses; the axis is about reading the index, not about whether it pays.
             IndexBudgetPerMille = 1_000_000,
-            Indexes = Vorticity.Indexes.WritePolicy.None.For(ShuffledField, Vorticity.Indexes.IndexPolicy.SortedRuns),
+            Indexes = Vorticity.Indexes.WritePolicy.None.For(ShuffledField, Vorticity.Indexes.IndexSpec.SortedRuns),
         };
 
         await using Vorticity.Writing.VortexFileWriter writer =

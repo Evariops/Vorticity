@@ -72,19 +72,19 @@ public sealed partial class VortexFile
     /// <param name="Owned">Whether the file disposes the source with itself.</param>
     /// <param name="FileHash">The file's XXH3-128 a fragment recorded, which only a verification reads.</param>
     private sealed record IndexOrigin(
-        ISegmentSource Source, IReadOnlyList<string>? Encodings, bool Owned, UInt128? FileHash = null);
+        ISegmentReader Source, IReadOnlyList<string>? Encodings, bool Owned, UInt128? FileHash = null);
 
     /// <summary>
     /// Where a run's regions are read: the file itself, or the fragment it came from.
     /// </summary>
     /// <param name="run">A run of the directory <see cref="ReadIndexDirectoryAsync"/> returned.</param>
     /// <returns>The source its offsets count in.</returns>
-    internal ISegmentSource IndexSourceOf(IndexRun run) => IndexSourceOf(run.Origin);
+    internal ISegmentReader IndexSourceOf(IndexRun run) => IndexSourceOf(run.Origin);
 
     /// <summary>Where the regions of the runs of one origin are read.</summary>
     /// <param name="origin">A run's <see cref="IndexRun.Origin"/>.</param>
     /// <returns>The source their offsets count in.</returns>
-    internal ISegmentSource IndexSourceOf(int origin) => OriginOf(origin).Source;
+    internal ISegmentReader IndexSourceOf(int origin) => OriginOf(origin).Source;
 
     /// <summary>
     /// A context to decode a run's payloads in: over the file's encoding table, or over the table the

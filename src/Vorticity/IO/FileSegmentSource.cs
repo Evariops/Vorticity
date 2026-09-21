@@ -13,8 +13,8 @@ using Vorticity.Serialization.Schemas;
 namespace Vorticity.IO;
 
 /// <summary>
-/// An <see cref="ISegmentSource"/> that reads a local file through
-/// <see cref="RandomAccess"/> into aligned native buffers.
+/// A source that reads a local file through <see cref="RandomAccess"/> into aligned native buffers,
+/// coalescing the ranges of a batch into as few positional reads as their gaps allow.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -36,7 +36,7 @@ namespace Vorticity.IO;
 /// concurrent calls on one instance are safe. The source itself holds no mutable state.
 /// </para>
 /// </remarks>
-internal sealed class RandomAccessSegmentSource : ISegmentSource
+public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
 {
     private readonly SafeFileHandle _handle;
     private readonly bool _ownsHandle;
@@ -52,12 +52,30 @@ internal sealed class RandomAccessSegmentSource : ISegmentSource
     /// </summary>
     private const int AlwaysSliceRunBytes = 64 * 1024;
 
+    /// <summary>Opens <paramref name="path"/> read-only for positional reads.</summary>
+    /// <param name="path">A local file path.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
+    /// <exception cref="IOException">The file could not be opened.</exception>
+    public FileSegmentSource(string path)
+        : this(OpenHandle(path), ownsHandle: true, SegmentReadOptions.Default)
+    {
+    }
+
+    /// <summary>Reads through an already-open handle.</summary>
+    /// <param name="handle">A readable file handle; positional reads are used exclusively.</param>
+    /// <param name="ownsHandle">Whether <see cref="DisposeAsync"/> disposes the handle.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="handle"/> is null.</exception>
+    public FileSegmentSource(SafeFileHandle handle, bool ownsHandle = false)
+        : this(handle, ownsHandle, SegmentReadOptions.Default)
+    {
+    }
+
     /// <summary>Wraps an already-open file handle.</summary>
     /// <param name="handle">A readable file handle. Positional reads are used exclusively.</param>
     /// <param name="ownsHandle">Whether <see cref="DisposeAsync"/> disposes the handle.</param>
     /// <param name="options">Coalescing and pooling budgets.</param>
     /// <exception cref="ArgumentNullException"><paramref name="handle"/> or <paramref name="options"/> is null.</exception>
-    public RandomAccessSegmentSource(SafeFileHandle handle, bool ownsHandle, SegmentReadOptions options)
+    internal FileSegmentSource(SafeFileHandle handle, bool ownsHandle, SegmentReadOptions options)
     {
         ArgumentNullException.ThrowIfNull(handle);
         ArgumentNullException.ThrowIfNull(options);
@@ -92,13 +110,22 @@ internal sealed class RandomAccessSegmentSource : ISegmentSource
     /// <param name="path">A local file path.</param>
     /// <returns>A source over the whole file, with <see cref="SegmentReadOptions.Default"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
-    public static RandomAccessSegmentSource Open(string path)
+    internal static FileSegmentSource Open(string path) => new FileSegmentSource(path);
+
+    /// <summary>Wraps an already-open handle with the default options.</summary>
+    /// <param name="handle">A readable file handle.</param>
+    /// <param name="ownsHandle">Whether <see cref="DisposeAsync"/> disposes the handle.</param>
+    /// <returns>A source over the whole file.</returns>
+    internal static FileSegmentSource Create(SafeFileHandle handle, bool ownsHandle) =>
+        new FileSegmentSource(handle, ownsHandle, SegmentReadOptions.Default);
+
+    private static SafeFileHandle OpenHandle(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
 
-        // System.IO.File spelled out: this library has a `Vorticity.File` type of its own, and it
-        // shadows a bare `File` everywhere in the assembly because namespace lookup beats a using.
-        SafeFileHandle handle = System.IO.File.OpenHandle(
+        // System.IO.File spelled out: this library has a `Vorticity.File` namespace of its own,
+        // and it shadows a bare `File` everywhere in the assembly because namespace lookup beats a using.
+        return System.IO.File.OpenHandle(
             path,
             FileMode.Open,
             FileAccess.Read,
@@ -106,34 +133,23 @@ internal sealed class RandomAccessSegmentSource : ISegmentSource
             // Asynchronous is what makes RandomAccess.ReadAsync genuinely overlapped on Windows;
             // RandomAccess is what makes it a positional, thread-safe read everywhere.
             FileOptions.Asynchronous | FileOptions.RandomAccess);
-
-        try
-        {
-            return new RandomAccessSegmentSource(handle, ownsHandle: true, SegmentReadOptions.Default);
-        }
-        catch
-        {
-            handle.Dispose();
-            throw;
-        }
     }
 
-    /// <summary>Wraps an already-open handle with the default options.</summary>
-    /// <param name="handle">A readable file handle.</param>
-    /// <param name="ownsHandle">Whether <see cref="DisposeAsync"/> disposes the handle.</param>
-    /// <returns>A source over the whole file.</returns>
-    public static RandomAccessSegmentSource Create(SafeFileHandle handle, bool ownsHandle) =>
-        new RandomAccessSegmentSource(handle, ownsHandle, SegmentReadOptions.Default);
+    /// <inheritdoc/>
+    public ValueTask<SegmentLease> ReadAsync(SegmentRange range, CancellationToken cancellationToken) =>
+        SegmentLeases.ReadAsync(this, range, cancellationToken);
 
     /// <inheritdoc/>
-    public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken)
+    public ValueTask ReadAsync(ReadOnlyMemory<SegmentRange> ranges, Memory<SegmentLease> leases, CancellationToken cancellationToken) =>
+        SegmentLeases.ReadAsync(this, ranges, leases, cancellationToken);
+
+    ValueTask<long> ISegmentReader.GetLengthAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return new ValueTask<long>(Length);
     }
 
-    /// <inheritdoc/>
-    public async ValueTask<SegmentOwner> ReadAsync(SegmentSpec spec, CancellationToken cancellationToken)
+    async ValueTask<SegmentOwner> ISegmentReader.ReadAsync(SegmentSpec spec, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ThrowIfDisposed();
@@ -182,7 +198,7 @@ internal sealed class RandomAccessSegmentSource : ISegmentSource
     /// evicted per file without privileges.
     /// </para>
     /// </remarks>
-    public async ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
+    async ValueTask ISegmentReader.ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(requests);
         cancellationToken.ThrowIfCancellationRequested();
@@ -265,8 +281,7 @@ internal sealed class RandomAccessSegmentSource : ISegmentSource
         }
     }
 
-    /// <inheritdoc/>
-    public async ValueTask<SegmentOwner> ReadRangeAsync(
+    async ValueTask<SegmentOwner> ISegmentReader.ReadRangeAsync(
         long offset, int length, int alignment, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -298,7 +313,8 @@ internal sealed class RandomAccessSegmentSource : ISegmentSource
         return owner;
     }
 
-    /// <inheritdoc/>
+    /// <summary>Closes the handle when the source owns it; leases already handed out stay valid.</summary>
+    /// <returns>A completed task.</returns>
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
@@ -540,7 +556,7 @@ internal sealed class RandomAccessSegmentSource : ISegmentSource
     {
         if (Volatile.Read(ref _disposed) != 0)
         {
-            throw new ObjectDisposedException(nameof(RandomAccessSegmentSource));
+            throw new ObjectDisposedException(nameof(FileSegmentSource));
         }
     }
 

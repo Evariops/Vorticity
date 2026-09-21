@@ -53,8 +53,8 @@ public sealed class TrigramIndexTests
 
     private static WritePolicy Policy(string kind, bool fold) =>
         WritePolicy.None.For("url", kind == "bloom"
-            ? IndexPolicy.NgramBloom(resolutions: 2, caseInsensitive: fold)
-            : IndexPolicy.NgramPostings(fold).WithSegmentEntries(64));
+            ? IndexSpec.NgramBloom(resolutions: 2, caseInsensitive: fold)
+            : IndexSpec.NgramPostings(fold).WithSegmentEntries(64));
 
     private static readonly (string Label, StringMatchOp Op, string Pattern)[] Predicates =
     [

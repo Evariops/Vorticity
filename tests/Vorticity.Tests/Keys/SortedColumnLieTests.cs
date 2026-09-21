@@ -134,7 +134,7 @@ public sealed class SortedColumnLieTests
             VortexWriteOptions options = new VortexWriteOptions
             {
                 RowBlockSize = Block,
-                EncodingHints = new Dictionary<string, VortexEncodingHint> { ["sorted"] = VortexEncodingHint.Canonical },
+                EncodingHints = new Dictionary<string, EncodingHint> { ["sorted"] = EncodingHint.Canonical },
             };
 
             await using (VortexFileWriter writer = VortexFileWriter.Create(path, schema, options))

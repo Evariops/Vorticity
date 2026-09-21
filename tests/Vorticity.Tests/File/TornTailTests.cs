@@ -43,7 +43,7 @@ public sealed class TornTailTests
     {
         RowBlockSize = Block,
         DataBlockTargetBytes = null,
-        WritePolicy = WritePolicy.None.For("id", IndexPolicy.Bloom()),
+        WritePolicy = WritePolicy.None.For("id", IndexSpec.Bloom()),
     };
 
     [Fact]
@@ -152,14 +152,14 @@ public sealed class TornTailTests
             VortexFormatException append = await Assert.ThrowsAsync<VortexFormatException>(
                 async () => await VortexFileWriter.AppendAsync(path, Options));
             VortexFormatException index = await Assert.ThrowsAsync<VortexFormatException>(
-                async () => await VortexFileIndexer.AppendIndexesAsync(path, WritePolicy.None.For("id", IndexPolicy.SortedRuns)));
+                async () => await VortexFileIndexer.AppendIndexesAsync(path, WritePolicy.None.For("id", IndexSpec.SortedRuns)));
             VortexFormatException fragment;
             await using (VortexFile previous = await VortexFile.OpenAsync(path))
             {
                 Assert.NotNull(previous.TornTail);
                 fragment = await Assert.ThrowsAsync<VortexFormatException>(
                     async () => await VortexFileIndexer.BuildFragmentAsync(
-                        previous, WritePolicy.None.For("id", IndexPolicy.SortedRuns), new RowRange(0, previous.RowCount)));
+                        previous, WritePolicy.None.For("id", IndexSpec.SortedRuns), new RowRange(0, previous.RowCount)));
             }
 
             foreach (VortexFormatException refusal in (VortexFormatException[])[append, index, fragment])
@@ -187,7 +187,7 @@ public sealed class TornTailTests
     // ------------------------------------------------------------------------------ helpers
 
     /// <summary>Counts what an open reads.</summary>
-    private sealed class CountingSource(ISegmentSource inner) : ISegmentSource
+    private sealed class CountingSource(ISegmentReader inner) : ISegmentReader
     {
         internal int Reads { get; private set; }
 

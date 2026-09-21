@@ -430,7 +430,7 @@ public static class ScenarioSet
         DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
         string[] names = new string[PrunedColumns];
         DType[] fields = new DType[PrunedColumns];
-        Dictionary<string, VortexEncodingHint> hints = new Dictionary<string, VortexEncodingHint>();
+        Dictionary<string, EncodingHint> hints = new Dictionary<string, EncodingHint>();
         for (int c = 0; c < PrunedColumns; c++)
         {
             names[c] = c == 0 ? PrunedField : "p" + c.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -440,7 +440,7 @@ public static class ScenarioSet
             // decoded once, retained, and the batch's rows come out of it. An encoding that selects
             // for itself -- bit-packing, which is what the cascade picks for a monotone column left
             // to itself -- never reaches that path and would measure the wrong branch.
-            hints[names[c]] = VortexEncodingHint.Zstd;
+            hints[names[c]] = EncodingHint.Zstd;
         }
 
         DType schema = types.Struct(names, fields, Nullability.NonNullable);

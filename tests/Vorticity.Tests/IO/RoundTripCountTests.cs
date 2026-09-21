@@ -122,11 +122,11 @@ public sealed class RoundTripCountTests
     /// decorator that counted the ranges instead would report the reader as profligate when it is
     /// being exactly the opposite.
     /// </remarks>
-    private sealed class CountingSource : ISegmentSource
+    private sealed class CountingSource : ISegmentReader
     {
-        private readonly ISegmentSource _inner;
+        private readonly ISegmentReader _inner;
 
-        internal CountingSource(ISegmentSource inner) => _inner = inner;
+        internal CountingSource(ISegmentReader inner) => _inner = inner;
 
         internal int Trips { get; private set; }
 

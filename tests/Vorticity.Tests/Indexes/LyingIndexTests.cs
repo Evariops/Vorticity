@@ -531,17 +531,17 @@ public sealed class LyingIndexTests
 
     private static WritePolicy Policy(int policy) => policy == 0
         ? WritePolicy.None
-            .For("id", IndexPolicy.SortedRuns.WithSegmentEntries(256))
-            .For("v", IndexPolicy.SortedRuns.WithSegmentEntries(512))
-            .For("s", IndexPolicy.Postings.WithSegmentEntries(64))
-            .For("f", IndexPolicy.Bloom(resolutions: 3))
-            .For("t", IndexPolicy.NgramBloom(resolutions: 3))
+            .For("id", IndexSpec.SortedRuns.WithSegmentEntries(256))
+            .For("v", IndexSpec.SortedRuns.WithSegmentEntries(512))
+            .For("s", IndexSpec.Postings.WithSegmentEntries(64))
+            .For("f", IndexSpec.Bloom(resolutions: 3))
+            .For("t", IndexSpec.NgramBloom(resolutions: 3))
         : WritePolicy.None
-            .For("id", IndexPolicy.Bloom(resolutions: 3))
-            .For("v", IndexPolicy.Postings)
-            .For("s", IndexPolicy.Bloom(resolutions: 2))
-            .For("f", IndexPolicy.SortedRuns)
-            .For("t", IndexPolicy.NgramPostings(caseInsensitive: true).WithSegmentEntries(128));
+            .For("id", IndexSpec.Bloom(resolutions: 3))
+            .For("v", IndexSpec.Postings)
+            .For("s", IndexSpec.Bloom(resolutions: 2))
+            .For("f", IndexSpec.SortedRuns)
+            .For("t", IndexSpec.NgramPostings(caseInsensitive: true).WithSegmentEntries(128));
 
     private static readonly DTypeArena Types = new DTypeArena();
 

@@ -47,7 +47,7 @@ internal sealed class BloomBuilder : IndexBuilder
     /// <summary>The blocks `Auto` watches for a column that repeats one set.</summary>
     private const int RepeatBlocks = 4;
 
-    private readonly IndexPolicy _policy;
+    private readonly IndexSpec _policy;
     private readonly int _maxBlocks;
     private int _firstDistinct;
     private long _blockRawStart;
@@ -73,7 +73,7 @@ internal sealed class BloomBuilder : IndexBuilder
     private readonly bool _trigrams;
 
     /// <param name="policy">A <see cref="IndexPolicyKind.Bloom"/> or <see cref="IndexPolicyKind.NgramBloom"/> policy.</param>
-    internal BloomBuilder(IndexPolicy policy)
+    internal BloomBuilder(IndexSpec policy)
     {
         _policy = policy;
         _maxBlocks = MaxBlocksOf(policy);
@@ -83,7 +83,7 @@ internal sealed class BloomBuilder : IndexBuilder
 
     /// <summary>A policy's ceiling, within what a reader takes (<see cref="BloomBuilderLimits.MaxFilterBlocks"/>).</summary>
     /// <param name="policy">The policy.</param>
-    internal static int MaxBlocksOf(IndexPolicy policy) =>
+    internal static int MaxBlocksOf(IndexSpec policy) =>
         (int)Math.Min((uint)policy.MaxBlocks, BloomBuilderLimits.MaxFilterBlocks);
 
     /// <summary>The kind this builder writes.</summary>
@@ -117,7 +117,7 @@ internal sealed class BloomBuilder : IndexBuilder
     internal int Leaves { get; private set; }
 
     /// <summary>The policy this builder serves.</summary>
-    internal IndexPolicy Policy => _policy;
+    internal IndexSpec Policy => _policy;
 
     /// <summary>Whether the dtype can be indexed at all, and why not.</summary>
     /// <param name="dtype">The column's dtype.</param>
@@ -670,7 +670,7 @@ internal sealed class BloomBuilder : IndexBuilder
     /// hash and one set insert per row, which is invisible on a wide table and doubles the write of
     /// a column the chooser already encodes for almost nothing. A writer cannot tell those two
     /// apart without timing itself, which would make the bytes it produces depend on the machine,
-    /// so it declines here and an explicit <see cref="IndexPolicy"/> Bloom buys the root back.
+    /// so it declines here and an explicit <see cref="IndexSpec"/> Bloom buys the root back.
     /// </para>
     /// </remarks>
     /// <param name="block">The block just sealed.</param>

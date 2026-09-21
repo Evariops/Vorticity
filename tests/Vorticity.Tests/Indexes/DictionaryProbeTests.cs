@@ -209,7 +209,7 @@ public sealed class DictionaryProbeTests
         // bytes a view and two columns, this cuts a chunk every couple of thousand rows.
         DataBlockTargetBytes = 64 << 10,
         Identity = new Guid("32323232-3232-4232-8232-323232323232"),
-        EncodingHints = dictionaries.ToDictionary(column => column, _ => VortexEncodingHint.Dictionary),
+        EncodingHints = dictionaries.ToDictionary(column => column, _ => EncodingHint.Dictionary),
     };
 
     private static async Task<string> WriteAsync()

@@ -63,8 +63,8 @@ public sealed class BloomTreeTests
     }
 
     /// <summary>A rate low enough that a descent of three levels meets no false positive here.</summary>
-    private static IndexPolicy Policy(int maxBlocks = IndexPolicy.DefaultMaxBlocks, int resolutions = 2) =>
-        IndexPolicy.Bloom(falsePositivePpm: 100, resolutions: resolutions, maxBlocks: maxBlocks);
+    private static IndexSpec Policy(int maxBlocks = IndexSpec.DefaultMaxBlocks, int resolutions = 2) =>
+        IndexSpec.Bloom(falsePositivePpm: 100, resolutions: resolutions, maxBlocks: maxBlocks);
 
     // ------------------------------------------------------------------------------ the node
 
@@ -249,7 +249,7 @@ public sealed class BloomTreeTests
             {
                 RowBlockSize = rowsPerBlock,
                 DataBlockTargetBytes = null,
-                WritePolicy = auto ? WritePolicy.Auto : WritePolicy.None.For("s", IndexPolicy.Bloom()),
+                WritePolicy = auto ? WritePolicy.Auto : WritePolicy.None.For("s", IndexSpec.Bloom()),
                 IndexBudgetPerMille = 1_000_000,
             };
             WriteReport report;
@@ -508,7 +508,7 @@ public sealed class BloomTreeTests
     private static async Task<VortexFile> OpenAsync(byte[] bytes) =>
         await VortexFile.OpenAsync(new MemorySegmentSource(bytes), VortexOpenOptions.Default);
 
-    private static VortexWriteOptions Options(IndexPolicy policy) => new VortexWriteOptions
+    private static VortexWriteOptions Options(IndexSpec policy) => new VortexWriteOptions
     {
         RowBlockSize = Block,
         DataBlockTargetBytes = null,
@@ -516,7 +516,7 @@ public sealed class BloomTreeTests
         IndexBudgetPerMille = 1_000_000,
     };
 
-    private static async Task<(byte[] Bytes, WriteReport Report)> WriteAsync(int rows, IndexPolicy policy)
+    private static async Task<(byte[] Bytes, WriteReport Report)> WriteAsync(int rows, IndexSpec policy)
     {
         using MemoryStream stream = new MemoryStream();
         WriteReport report;

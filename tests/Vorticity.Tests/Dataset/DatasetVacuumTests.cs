@@ -167,7 +167,7 @@ public sealed class DatasetVacuumTests
         await dataset.AppendAsync(Of(types, schema, 0, PerObject));
         PositionedObject target = await SingleObjectAsync(dataset);
         IndexingResult indexed = await DatasetIndexer.IndexAsync(
-            dataset, target, WritePolicy.None.For("measure", IndexPolicy.Bloom(falsePositivePpm: 1_000)),
+            dataset, target, WritePolicy.None.For("measure", IndexSpec.Bloom(falsePositivePpm: 1_000)),
             options: new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 });
         Assert.Equal(OperationOutcome.Applied, indexed.Outcome);
         ulong indexing = dataset.Version;
@@ -247,7 +247,7 @@ public sealed class DatasetVacuumTests
             if (i == 0)
             {
                 IndexingResult indexed = await DatasetIndexer.IndexAsync(
-                    dataset, await SingleObjectAsync(dataset), WritePolicy.None.For("measure", IndexPolicy.Bloom(falsePositivePpm: 1_000)),
+                    dataset, await SingleObjectAsync(dataset), WritePolicy.None.For("measure", IndexSpec.Bloom(falsePositivePpm: 1_000)),
                     options: new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 });
                 Assert.Equal(OperationOutcome.Applied, indexed.Outcome);
             }

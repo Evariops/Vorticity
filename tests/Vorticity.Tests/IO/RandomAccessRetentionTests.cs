@@ -22,7 +22,7 @@ public sealed class RandomAccessRetentionTests
     public async Task A_dense_run_is_delivered_as_zero_copy_views()
     {
         using TempFile file = new TempFile(Pattern(FileLength));
-        await using RandomAccessSegmentSource source = RandomAccessSegmentSource.Open(file.Path_);
+        await using FileSegmentSource source = FileSegmentSource.Open(file.Path_);
         using SegmentRequestSet set = new SegmentRequestSet();
 
         // 16 contiguous 64 KiB segments: one 1 MiB run, 100% useful.
@@ -44,7 +44,7 @@ public sealed class RandomAccessRetentionTests
     {
         byte[] content = Pattern(FileLength);
         using TempFile file = new TempFile(content);
-        await using RandomAccessSegmentSource source = RandomAccessSegmentSource.Open(file.Path_);
+        await using FileSegmentSource source = FileSegmentSource.Open(file.Path_);
         using SegmentRequestSet set = new SegmentRequestSet();
 
         // Eight 8-byte segments spread half a MiB apart: one ~3.5 MiB run carrying 64 useful
@@ -75,7 +75,7 @@ public sealed class RandomAccessRetentionTests
     {
         byte[] content = Pattern(FileLength);
         using TempFile file = new TempFile(content);
-        await using RandomAccessSegmentSource source = RandomAccessSegmentSource.Open(file.Path_);
+        await using FileSegmentSource source = FileSegmentSource.Open(file.Path_);
         using SegmentRequestSet set = new SegmentRequestSet();
 
         int a = set.Add(Spec(0, 8, 3));
@@ -94,7 +94,7 @@ public sealed class RandomAccessRetentionTests
     {
         byte[] content = Pattern(FileLength);
         using TempFile file = new TempFile(content);
-        await using RandomAccessSegmentSource source = RandomAccessSegmentSource.Open(file.Path_);
+        await using FileSegmentSource source = FileSegmentSource.Open(file.Path_);
         using SegmentRequestSet set = new SegmentRequestSet();
 
         for (int round = 0; round < 3; round++)

@@ -6,7 +6,7 @@ namespace Vorticity;
 /// The scheme a column is written with, when the caller pins one. These name schemes, not wire
 /// encodings: one scheme may write more than one array id.
 /// </summary>
-public enum VortexEncodingHint : byte
+public enum EncodingHint : byte
 {
     /// <summary>No hint: the chooser prices the candidates, which is the default.</summary>
     Auto = 0,

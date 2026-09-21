@@ -49,7 +49,7 @@ internal static class IndexContainer
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The directory, or the reason it was refused.</returns>
     internal static async ValueTask<(IndexDirectory? Directory, string? Reason)> ReadAsync(
-        ISegmentSource source, long length, VortexFile file, CancellationToken cancellationToken)
+        ISegmentReader source, long length, VortexFile file, CancellationToken cancellationToken)
     {
         if (length < Magic.Length + TrailerSize)
         {
@@ -171,7 +171,7 @@ internal static class IndexContainer
     /// <param name="source">The file.</param>
     /// <param name="length">Its length.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
-    internal static async ValueTask<UInt128> HashAsync(ISegmentSource source, long length, CancellationToken cancellationToken)
+    internal static async ValueTask<UInt128> HashAsync(ISegmentReader source, long length, CancellationToken cancellationToken)
     {
         XxHash128 hash = new XxHash128();
         for (long at = 0; at < length; at += 1 << 20)

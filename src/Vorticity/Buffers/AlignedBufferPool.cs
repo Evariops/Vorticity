@@ -111,6 +111,20 @@ internal sealed class AlignedBufferPool
         _buckets = buckets;
     }
 
+    /// <summary>A pool whose retention is bounded by bytes: each size class keeps its share of <paramref name="maxRetainedBytes"/>.</summary>
+    /// <param name="maxRetainedBytes">The most bytes the pool keeps parked across every class.</param>
+    internal AlignedBufferPool(long maxRetainedBytes)
+        : this(8 * 1024 * 1024, 0, graded: false)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maxRetainedBytes);
+        long share = maxRetainedBytes / _buckets.Length;
+        for (int i = 0; i < _buckets.Length; i++)
+        {
+            long blocks = share / (MinBlockSize << i);
+            _buckets[i] = new Bucket((int)Math.Min(blocks, 64));
+        }
+    }
+
     /// <summary>The process-wide pool used by the default segment sources.</summary>
     public static AlignedBufferPool Shared { get; }
         = new AlignedBufferPool(8 * 1024 * 1024, 8, graded: true);

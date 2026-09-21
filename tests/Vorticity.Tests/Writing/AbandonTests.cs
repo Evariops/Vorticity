@@ -244,7 +244,7 @@ public sealed class AbandonTests
         RowBlockSize = Block,
         DataBlockTargetBytes = 1L << 14,
         IndexBudgetPerMille = 1_000_000,
-        WritePolicy = WritePolicy.Auto.For("s", IndexPolicy.Postings),
+        WritePolicy = WritePolicy.Auto.For("s", IndexSpec.Postings),
     };
 
     private static async Task WriteAsync(string path, int start, int end) =>

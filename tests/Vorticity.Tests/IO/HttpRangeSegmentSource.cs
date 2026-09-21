@@ -30,7 +30,7 @@ namespace Vorticity.Tests.IO;
 /// </para>
 /// <para>Thread-safe: it holds no mutable state beyond two counters.</para>
 /// </remarks>
-public sealed class HttpRangeSegmentSource : ISegmentSource
+public sealed class HttpRangeSegmentSource : ISegmentReader
 {
     private readonly IRangeTransport _transport;
     private readonly SegmentReadOptions _options;

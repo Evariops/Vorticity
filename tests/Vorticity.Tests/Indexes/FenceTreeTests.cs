@@ -66,8 +66,8 @@ public sealed class FenceTreeTests
 
     /// <summary>A sorted run of 16 entries a segment, postings of 8.</summary>
     private static WritePolicy Policy => WritePolicy.None
-        .For("k", IndexPolicy.SortedRuns.WithSegmentEntries(16))
-        .For("s", IndexPolicy.Postings.WithSegmentEntries(8));
+        .For("k", IndexSpec.SortedRuns.WithSegmentEntries(16))
+        .For("s", IndexSpec.Postings.WithSegmentEntries(8));
 
     // ------------------------------------------------------------------------------ the pages
 

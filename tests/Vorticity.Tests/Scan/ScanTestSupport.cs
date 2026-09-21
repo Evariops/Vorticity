@@ -100,16 +100,16 @@ internal static class Decoders
 }
 
 /// <summary>
-/// An <see cref="ISegmentSource"/> decorator that counts calls and records every spec it was asked
+/// An <see cref="ISegmentReader"/> decorator that counts calls and records every spec it was asked
 /// for. This is the only way to see the two scan properties a value comparison cannot
 /// show: exactly one <c>ReadManyAsync</c> per batch, and no I/O at all for an unprojected column.
 /// </summary>
-internal sealed class RecordingSegmentSource : ISegmentSource
+internal sealed class RecordingSegmentSource : ISegmentReader
 {
-    private readonly ISegmentSource _inner;
+    private readonly ISegmentReader _inner;
     private readonly List<SegmentSpec> _requested = new List<SegmentSpec>();
 
-    internal RecordingSegmentSource(ISegmentSource inner) => _inner = inner;
+    internal RecordingSegmentSource(ISegmentReader inner) => _inner = inner;
 
     internal int ReadManyCalls { get; private set; }
 
@@ -185,12 +185,12 @@ internal sealed class RecordingSegmentSource : ISegmentSource
 /// <see cref="TaskCompletionSource"/> the test releases. It drives the enumerator's asynchronous
 /// path - the ManualResetValueTaskSourceCore branch - which a memory-mapped file never reaches.
 /// </summary>
-internal sealed class GatedSegmentSource : ISegmentSource
+internal sealed class GatedSegmentSource : ISegmentReader
 {
-    private readonly ISegmentSource _inner;
+    private readonly ISegmentReader _inner;
     private readonly List<TaskCompletionSource> _gates = new List<TaskCompletionSource>();
 
-    internal GatedSegmentSource(ISegmentSource inner) => _inner = inner;
+    internal GatedSegmentSource(ISegmentReader inner) => _inner = inner;
 
     /// <summary>Releases every read parked so far.</summary>
     internal void ReleaseAll()
@@ -259,12 +259,12 @@ internal sealed class GatedSegmentSource : ISegmentSource
 /// the per-segment refcount behind a run buffer, and the property under test is the scan's, not the
 /// source's.
 /// </remarks>
-internal sealed class TrackingSegmentSource : ISegmentSource
+internal sealed class TrackingSegmentSource : ISegmentReader
 {
-    private readonly ISegmentSource _inner;
+    private readonly ISegmentReader _inner;
     private readonly List<TrackedOwner> _owners = new List<TrackedOwner>();
 
-    internal TrackingSegmentSource(ISegmentSource inner) => _inner = inner;
+    internal TrackingSegmentSource(ISegmentReader inner) => _inner = inner;
 
     internal int OwnerCount
     {

@@ -761,7 +761,7 @@ internal sealed partial class SortedRunsSource : KeySource
 
         // The first segment whose last key does not come before the key: a binary search over the
         // bounds in memory, or a descent through the fence pages when they are paged out.
-        ISegmentSource source = _file.IndexSourceOf(run.Meta);
+        ISegmentReader source = _file.IndexSourceOf(run.Meta);
         long low = await table.LowerBoundAsync(source, new MaxProbe(this, key), cancellationToken).ConfigureAwait(false);
         for (long s = low; s < table.SegmentCount; s++)
         {

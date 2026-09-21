@@ -20,9 +20,9 @@ public sealed class IndexDirectoryTests
     public void ADirectoryRoundTripsEveryField()
     {
         WritePolicy policy = WritePolicy.Auto
-            .For("id", IndexPolicy.SortedRuns)
-            .For("name", IndexPolicy.Bloom(falsePositivePpm: 2_500, resolutions: 3, maxBlocks: 64, minDistinct: 0, hash: BloomHash.XxHash64))
-            .For("body", IndexPolicy.NgramBloom(caseInsensitive: true));
+            .For("id", IndexSpec.SortedRuns)
+            .For("name", IndexSpec.Bloom(falsePositivePpm: 2_500, resolutions: 3, maxBlocks: 64, minDistinct: 0, hash: BloomHash.XxHash64))
+            .For("body", IndexSpec.NgramBloom(caseInsensitive: true));
         IndexDirectory written = new IndexDirectory(
             Rows,
             PreviousEof: 4_096,
@@ -59,9 +59,9 @@ public sealed class IndexDirectoryTests
         Assert.Empty(probe.ColumnPath);
         Assert.Empty(probe.Runs[0].Payload);
 
-        Assert.Equal(IndexPolicy.Auto, read.Policy.Default);
-        Assert.Equal(IndexPolicy.SortedRuns, read.Policy.Of("id"));
-        IndexPolicy name = read.Policy.Of("name");
+        Assert.Equal(IndexSpec.Auto, read.Policy.Default);
+        Assert.Equal(IndexSpec.SortedRuns, read.Policy.Of("id"));
+        IndexSpec name = read.Policy.Of("name");
         Assert.Equal(IndexPolicyKind.Bloom, name.Kind);
         Assert.Equal(2_500, name.FalsePositivePpm);
         Assert.Equal(3, name.Resolutions);
@@ -69,7 +69,7 @@ public sealed class IndexDirectoryTests
         Assert.Equal(0, name.MinDistinct);
         Assert.Equal(BloomHash.XxHash64, name.Hash);
         Assert.True(read.Policy.Of("body").CaseInsensitive);
-        Assert.Equal(IndexPolicy.Auto, read.Policy.Of("unlisted"));
+        Assert.Equal(IndexSpec.Auto, read.Policy.Of("unlisted"));
     }
 
     [Fact]
@@ -128,8 +128,8 @@ public sealed class IndexDirectoryTests
     public void TheSamePolicySerializesToTheSameBytes()
     {
         // Overrides live in a dictionary; the bytes must not depend on its iteration order.
-        WritePolicy one = WritePolicy.None.For("b", IndexPolicy.Postings).For("a", IndexPolicy.SortedRuns);
-        WritePolicy two = WritePolicy.None.For("a", IndexPolicy.SortedRuns).For("b", IndexPolicy.Postings);
+        WritePolicy one = WritePolicy.None.For("b", IndexSpec.Postings).For("a", IndexSpec.SortedRuns);
+        WritePolicy two = WritePolicy.None.For("a", IndexSpec.SortedRuns).For("b", IndexSpec.Postings);
         Assert.Equal(
             new IndexDirectory(Rows, 0, one, []).ToBytes(),
             new IndexDirectory(Rows, 0, two, []).ToBytes());
@@ -203,7 +203,7 @@ public sealed class IndexDirectoryTests
     {
         // The fuzzer's cheapest form: a torn write at every length.
         byte[] bytes = new IndexDirectory(
-            Rows, 7, WritePolicy.Auto.For("x", IndexPolicy.Bloom()),
+            Rows, 7, WritePolicy.Auto.For("x", IndexSpec.Bloom()),
             [new IndexEntry(IndexKinds.BloomSbbf, [0u, 2u], 1_024, [5, 5], [new IndexRun(0, 3, [Seg(0), Seg(64)], [[1], [2]])]), Probe(3, 2)])
             .ToBytes();
         for (int length = 0; length <= bytes.Length; length++)
@@ -216,23 +216,23 @@ public sealed class IndexDirectoryTests
     [Fact]
     public void PolicyOptionsAreCheckedAtTheCallAndClampedFromAFile()
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => IndexPolicy.Bloom(falsePositivePpm: 0));
-        Assert.Throws<ArgumentOutOfRangeException>(() => IndexPolicy.Bloom(resolutions: 4));
-        Assert.Throws<ArgumentOutOfRangeException>(() => IndexPolicy.Bloom(maxBlocks: 0));
-        Assert.Throws<ArgumentException>(() => WritePolicy.Auto.For(string.Empty, IndexPolicy.None));
+        Assert.Throws<ArgumentOutOfRangeException>(() => IndexSpec.Bloom(falsePositivePpm: 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => IndexSpec.Bloom(resolutions: 4));
+        Assert.Throws<ArgumentOutOfRangeException>(() => IndexSpec.Bloom(maxBlocks: 0));
+        Assert.Throws<ArgumentException>(() => WritePolicy.Auto.For(string.Empty, IndexSpec.None));
 
-        IndexPolicy clamped = IndexPolicy.FromStored(99, 9_000_000, 17, 0, 3, 5, false);
+        IndexSpec clamped = IndexSpec.FromStored(99, 9_000_000, 17, 0, 3, 5, false);
         Assert.Equal(IndexPolicyKind.None, clamped.Kind);
         Assert.Equal(500_000, clamped.FalsePositivePpm);
         Assert.Equal(3, clamped.Resolutions);
-        Assert.Equal(IndexPolicy.DefaultMaxBlocks, clamped.MaxBlocks);
+        Assert.Equal(IndexSpec.DefaultMaxBlocks, clamped.MaxBlocks);
         Assert.Equal(3, clamped.MinDistinct);
         Assert.Equal(BloomHash.XxHash3, clamped.Hash);
 
         // `default` is a usable None with every option at its documented value.
-        IndexPolicy zero = default;
-        Assert.Equal(IndexPolicy.None, zero);
-        Assert.Equal(IndexPolicy.DefaultMinDistinct, zero.MinDistinct);
+        IndexSpec zero = default;
+        Assert.Equal(IndexSpec.None, zero);
+        Assert.Equal(IndexSpec.DefaultMinDistinct, zero.MinDistinct);
     }
 
     private static IndexSegment Seg(ulong offset) => new IndexSegment(offset, 16, 0);

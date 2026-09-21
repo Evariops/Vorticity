@@ -45,8 +45,8 @@ public sealed class RunMergeTests
     private static string S(int row) => "s" + ((row * 31) % 509).ToString(CultureInfo.InvariantCulture);
 
     private static WritePolicy Policy => WritePolicy.None
-        .For("k", IndexPolicy.SortedRuns.WithSegmentEntries(1_000))
-        .For("s", IndexPolicy.Postings.WithSegmentEntries(64));
+        .For("k", IndexSpec.SortedRuns.WithSegmentEntries(1_000))
+        .For("s", IndexSpec.Postings.WithSegmentEntries(64));
 
     [Fact]
     public async Task HundredsOfChunksWriteOneRunPerEntryAndALookupReadsOneSegment()

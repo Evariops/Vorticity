@@ -10,12 +10,12 @@ using Vorticity.Serialization.Schemas;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// An <see cref="ISegmentSource"/> over one object of an <see cref="IObjectStore"/>. Nearby
+/// An <see cref="ISegmentReader"/> over one object of an <see cref="IObjectStore"/>. Nearby
 /// segments are coalesced into runs and the runs issued together, so a split costs a few round
 /// trips instead of one per segment; each segment is then copied, since a buffer must sit at its
 /// declared alignment and a run's bytes arrive in a pooled array that guarantees nothing.
 /// </summary>
-internal sealed class ObjectSegmentSource : ISegmentSource
+internal sealed class ObjectSegmentSource : ISegmentReader
 {
     private readonly IObjectStore _store;
     private readonly string _key;

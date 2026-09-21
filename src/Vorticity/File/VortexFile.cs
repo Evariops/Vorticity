@@ -50,7 +50,7 @@ namespace Vorticity;
 /// </remarks>
 public sealed partial class VortexFile : IAsyncDisposable
 {
-    private readonly ISegmentSource _source;
+    private readonly ISegmentReader _source;
     private readonly bool _ownsSource;
     private readonly SegmentOwner _tail;
     private readonly long _tailOffset;
@@ -111,7 +111,10 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
     /// <exception cref="VortexFormatException">The file is not a well-formed Vortex file.</exception>
     public static ValueTask<VortexFile> OpenAsync(string path, CancellationToken cancellationToken = default) =>
-        OpenAsync(path, VortexOpenOptions.Default, cancellationToken);
+        VortexSession.Default.OpenAsync(path, null, cancellationToken);
+
+    /// <summary>The session the file was opened in, whose pool, cache and parallelism its scans use.</summary>
+    public VortexSession Session { get; internal set; } = VortexSession.Default;
 
     /// <summary>Opens a Vortex file from a path.</summary>
     /// <param name="path">A local file path.</param>
@@ -177,7 +180,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="source"/> or <paramref name="options"/> is null.</exception>
     /// <exception cref="VortexFormatException">The file is not a well-formed Vortex file.</exception>
     internal static ValueTask<VortexFile> OpenAsync(
-        ISegmentSource source, VortexOpenOptions options, CancellationToken cancellationToken = default)
+        ISegmentReader source, VortexOpenOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(options);
@@ -190,8 +193,9 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// version before the tear. The source is disposed on failure when the file would own it.
     /// </summary>
     private static async ValueTask<VortexFile> OpenCoreAsync(
-        ISegmentSource source, VortexOpenOptions options, bool ownsSource, CancellationToken cancellationToken)
+        ISegmentReader source, VortexOpenOptions options, bool ownsSource, CancellationToken cancellationToken)
     {
+        options = options.Resolved();
         try
         {
             try
@@ -232,7 +236,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// begin as a Vortex file or no prefix of it opens.
     /// </summary>
     private static async ValueTask<VortexFile?> OpenPreviousAsync(
-        ISegmentSource source, VortexOpenOptions options, bool ownsSource, VortexFormatException torn,
+        ISegmentReader source, VortexOpenOptions options, bool ownsSource, VortexFormatException torn,
         CancellationToken cancellationToken)
     {
         long length = options.FileLength >= 0
@@ -258,7 +262,7 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     /// <summary>Parses the tail of the file as it stands; leaves the source to the caller on failure.</summary>
     private static async ValueTask<VortexFile> OpenTailAsync(
-        ISegmentSource source, VortexOpenOptions options, bool ownsSource, long fileLength, CancellationToken cancellationToken)
+        ISegmentReader source, VortexOpenOptions options, bool ownsSource, long fileLength, CancellationToken cancellationToken)
     {
         SegmentOwner? tail = null;
         try
@@ -583,7 +587,7 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     private readonly ref struct OpenState
     {
-        public required ISegmentSource Source { get; init; }
+        public required ISegmentReader Source { get; init; }
         public required bool OwnsSource { get; init; }
         public required SegmentOwner Tail { get; init; }
         public required long TailOffset { get; init; }
@@ -607,7 +611,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     }
 
     private static VortexFile Build(
-        ISegmentSource source,
+        ISegmentReader source,
         bool ownsSource,
         VortexOpenOptions options,
         long fileLength,
@@ -1067,7 +1071,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     internal DTypeArena Types => _schema.Arena;
 
     /// <summary>The segment source this file reads through.</summary>
-    internal ISegmentSource Segments => _source;
+    internal ISegmentReader Segments => _source;
 
     /// <summary>Read-time policy, copied into every scan context.</summary>
     internal VortexReadOptions ReadOptions { get; }
@@ -1294,6 +1298,7 @@ public sealed partial class VortexFile : IAsyncDisposable
             return;
         }
 
+        Session.Detach(this);
         _tail.Release();
         if (_indexState is { } indexes)
         {

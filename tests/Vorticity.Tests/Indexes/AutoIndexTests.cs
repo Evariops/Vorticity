@@ -122,8 +122,8 @@ public sealed class AutoIndexTests
     [Fact]
     public void AFirstBlockThatClimbsGivesTheBloomUpOnlyUnderAuto()
     {
-        using BloomBuilder auto = new BloomBuilder(IndexPolicy.Bloom()) { AutoShare = IndexWriter.AutoBloomShare };
-        using BloomBuilder asked = new BloomBuilder(IndexPolicy.Bloom());
+        using BloomBuilder auto = new BloomBuilder(IndexSpec.Bloom()) { AutoShare = IndexWriter.AutoBloomShare };
+        using BloomBuilder asked = new BloomBuilder(IndexSpec.Bloom());
         auto.FirstBlock(sorted: true);
         asked.FirstBlock(sorted: true);
 

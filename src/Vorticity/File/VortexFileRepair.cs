@@ -103,7 +103,7 @@ public static class VortexFileRepair
     /// <param name="source">The file.</param>
     /// <param name="length">Its length.</param>
     /// <param name="cancellationToken">Cancels the walk.</param>
-    internal static async ValueTask<long> PreviousEndAsync(ISegmentSource source, long length, CancellationToken cancellationToken)
+    internal static async ValueTask<long> PreviousEndAsync(ISegmentReader source, long length, CancellationToken cancellationToken)
     {
         // Walk back window by window; a marker may straddle two windows, so they overlap.
         int magicLength = VortexFileFormat.MagicBytes.Length;
@@ -162,7 +162,7 @@ public static class VortexFileRepair
     /// <param name="source">The file.</param>
     /// <param name="length">Its length.</param>
     /// <param name="cancellationToken">Cancels the read.</param>
-    internal static async ValueTask<bool> BeginsAsVortexAsync(ISegmentSource source, long length, CancellationToken cancellationToken)
+    internal static async ValueTask<bool> BeginsAsVortexAsync(ISegmentReader source, long length, CancellationToken cancellationToken)
     {
         int magicLength = VortexFileFormat.MagicBytes.Length;
         if (length < VortexFileFormat.EofSize + magicLength)
@@ -196,7 +196,7 @@ public static class VortexFileRepair
         return -1;
     }
 
-    private static async ValueTask<bool> OpensAsync(ISegmentSource source, long length, CancellationToken cancellationToken)
+    private static async ValueTask<bool> OpensAsync(ISegmentReader source, long length, CancellationToken cancellationToken)
     {
         try
         {
@@ -225,7 +225,7 @@ public static class VortexFileRepair
     /// <param name="inner">The whole file.</param>
     /// <param name="length">Where the prefix ends.</param>
     /// <param name="ownsInner">Whether disposing the prefix disposes the file.</param>
-    internal sealed class PrefixSource(ISegmentSource inner, long length, bool ownsInner) : ISegmentSource
+    internal sealed class PrefixSource(ISegmentReader inner, long length, bool ownsInner) : ISegmentReader
     {
         public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken) => new ValueTask<long>(length);
 

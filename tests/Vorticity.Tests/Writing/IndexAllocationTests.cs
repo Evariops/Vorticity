@@ -81,11 +81,11 @@ public sealed class IndexAllocationTests
     {
         "none" => WritePolicy.None,
         "auto" => WritePolicy.Auto,
-        "bloom" => WritePolicy.None.WithDefault(IndexPolicy.Bloom()),
-        "ngram-bloom" => WritePolicy.None.For("text", IndexPolicy.NgramBloom()),
-        "postings" => WritePolicy.None.WithDefault(IndexPolicy.Postings),
-        "ngram-postings" => WritePolicy.None.For("text", IndexPolicy.NgramPostings()),
-        _ => WritePolicy.None.WithDefault(IndexPolicy.SortedRuns),
+        "bloom" => WritePolicy.None.WithDefault(IndexSpec.Bloom()),
+        "ngram-bloom" => WritePolicy.None.For("text", IndexSpec.NgramBloom()),
+        "postings" => WritePolicy.None.WithDefault(IndexSpec.Postings),
+        "ngram-postings" => WritePolicy.None.For("text", IndexSpec.NgramPostings()),
+        _ => WritePolicy.None.WithDefault(IndexSpec.SortedRuns),
     };
 
     /// <summary>The floor of several writes, after warm-ups, so the pool is in its steady state.</summary>

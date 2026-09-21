@@ -121,7 +121,7 @@ public sealed class Phase1CompositionTests
     /// <summary>
     /// The same walk driven the way a scan will drive it: one <see cref="ScanContext"/>, every
     /// segment registered in its <see cref="SegmentRequestSet"/>, one coalesced
-    /// <see cref="ISegmentSource.ReadManyAsync"/>, then the blobs parsed out of the populated set.
+    /// <see cref="ISegmentReader.ReadManyAsync"/>, then the blobs parsed out of the populated set.
     /// Proves that a batch's segments live until its reset, against a real source and a real file.
     /// </summary>
     [Theory]
