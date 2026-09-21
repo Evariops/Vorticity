@@ -81,23 +81,12 @@ Thumbs.db
 
 # ---- Working notes, kept on the maintainer's machine ----
 # The engineering journals and the working notes beside them: French, dated, raw. They are the
-# project's memory and a hundred code comments name them, so they are not deleted -- but a public
-# repository's history is not the place for them, so they live in one ignored directory and stay
-# off the published tree. Anything of that kind belongs there rather than at the root, which is why
-# this is a single rule: a working note that appears anywhere else is visible, and that is the
-# point. docs/history/README.md says what each file is.
-#
-# The contents rather than the directory, because git never descends into an excluded directory and
-# the two exceptions below could then never match.
-docs/history/**
-
-# Two exceptions, and they end with the plan. The release plan and its notes live with the other
-# working notes but are still tracked, because the loop that works through them requires an item's
-# mark and its note to land in the same commit. Without these two lines `git add` skips them in
-# silence, which is how a mark stays uncommitted. They are removed, and the files detached from the
-# index, at the plan's closing step.
-!docs/history/RELEASE-PLAN.md
-!docs/history/RELEASE-PLAN-NOTES.md
+# project's memory, so they are not deleted -- but a public repository's history is not the place
+# for them, so they live in one ignored directory and stay off the published tree. Anything of that
+# kind belongs there rather than at the root, which is why this is a single rule: a working note
+# that appears anywhere else is visible, and that is the point. docs/history/README.md says what
+# each file is.
+docs/history/
 
 # ---- Recorded benchmark runs (bench/compare.sh --record) ----
 bench/.runs/
