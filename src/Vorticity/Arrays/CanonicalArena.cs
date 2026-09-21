@@ -986,7 +986,7 @@ internal sealed class CanonicalArena
         return ref _records[index];
     }
 
-    /// <summary>The same record, writable: only the constant memo uses it.</summary>
+    /// <summary>The same record, writable: for the memos that repoint a node once it has been read.</summary>
     /// <param name="index">The node's index.</param>
     /// <returns>A mutable reference into the record array.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -15,18 +15,39 @@ internal static class ColumnData
 {
     private const int ViewSize = 16;
     private const int MaxInlineLength = 12;
+    private const int ValuesAlignment = 64;
 
-    /// <summary>The contiguous value bytes of a primitive or decimal node.</summary>
+    /// <summary>The contiguous value bytes of a primitive or decimal node, 64-byte aligned.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static ReadOnlySpan<byte> Values(CanonicalArena arena, int node)
     {
         ref readonly CanonicalRecord record = ref arena.RecordRef(node);
-        if (record.Kind is CanonicalKind.Primitive or CanonicalKind.Decimal)
+        if (record.Kind is not (CanonicalKind.Primitive or CanonicalKind.Decimal))
         {
-            return record.BufferA.Span;
+            node = EncodedForms.Canonical(arena, node);
+            record = ref arena.RecordRef(node);
         }
 
-        return arena.RecordRef(EncodedForms.Canonical(arena, node)).BufferA.Span;
+        ReadOnlySpan<byte> values = record.BufferA.Span;
+        return IsAligned(values) ? values : Realign(arena, node);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe bool IsAligned(ReadOnlySpan<byte> values) =>
+        ((nuint)Unsafe.AsPointer(ref MemoryMarshal.GetReference(values)) & (ValuesAlignment - 1)) == 0;
+
+    /// <summary>
+    /// Copies a node's values into an aligned block of its arena and repoints the node at it, once:
+    /// a buffer read in place from a segment is only as aligned as the file laid the segment out.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ReadOnlySpan<byte> Realign(CanonicalArena arena, int node)
+    {
+        ReadOnlySpan<byte> source = arena.RecordRef(node).BufferA.Span;
+        VortexBuffer copy = arena.AllocateUninitialized(source.Length, ValuesAlignment, out Span<byte> destination);
+        source.CopyTo(destination);
+        arena.RecordRefMutable(node).BufferA = copy;
+        return copy.Span;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
