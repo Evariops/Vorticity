@@ -77,6 +77,17 @@ internal static class LiteralReader
                         return false;
                 }
 
+            // One row is one entry of the values: the code names it, or the run holding the row
+            // does, and the validity was checked above on the row itself.
+            case CanonicalKind.Dictionary:
+                return TryRead(
+                    arena, node.EncodedValuesIndex,
+                    (int)BinaryPrimitives.ReadUInt32LittleEndian(node.Codes.Span[(row * sizeof(uint))..]),
+                    out literal);
+
+            case CanonicalKind.RunEnd:
+                return TryRead(arena, node.EncodedValuesIndex, RunOf(node.RunEnds.Span, row), out literal);
+
             default:
                 return false;
         }
@@ -100,7 +111,8 @@ internal static class LiteralReader
         CanonicalArena arena, int nodeIndex, int row, out FilterLiteral literal)
     {
         literal = default;
-        CanonicalNode node = arena.GetNode(ComparisonKernels.Unwrap(arena, nodeIndex));
+        int index = ComparisonKernels.Unwrap(arena, nodeIndex);
+        CanonicalNode node = arena.GetNode(index);
         if ((uint)row >= (uint)node.Length || !ValidityMask.From(arena, node.Validity).IsValid(row))
         {
             return false;
@@ -108,6 +120,9 @@ internal static class LiteralReader
 
         switch (node.Kind)
         {
+            case CanonicalKind.Dictionary or CanonicalKind.RunEnd:
+                return TryReadDecimal(arena, arena.MaterializeEncoded(index), row, out literal);
+
             case CanonicalKind.Decimal:
                 literal = Decimal(ComparisonKernels.Widen(
                     node.Values.Span, DecimalStorage.ByteWidth(node.Storage), row));
@@ -146,6 +161,28 @@ internal static class LiteralReader
         Span<byte> wide = stackalloc byte[Int256.ByteCount];
         value.WriteLittleEndianBytes(wide);
         return FilterLiteral.From(wide);
+    }
+
+    /// <summary>The run holding <paramref name="row"/>: the first whose exclusive end is above it.</summary>
+    private static int RunOf(ReadOnlySpan<byte> ends, int row)
+    {
+        ReadOnlySpan<uint> typed = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(ends);
+        int low = 0;
+        int high = typed.Length - 1;
+        while (low < high)
+        {
+            int middle = low + ((high - low) >> 1);
+            if (typed[middle] > (uint)row)
+            {
+                high = middle;
+            }
+            else
+            {
+                low = middle + 1;
+            }
+        }
+
+        return low;
     }
 
     /// <summary>Reads one primitive value out of a values buffer, whatever node it came from.</summary>

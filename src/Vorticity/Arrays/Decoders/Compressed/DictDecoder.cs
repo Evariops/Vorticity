@@ -174,6 +174,9 @@ internal sealed class DictDecoder : ArrayDecoder
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
         ReadOnlySpan<int> wanted, bool selective)
     {
+        // Read before the children are decoded, which take the grant over.
+        bool keep = context.KeepsEncoding;
+
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, Id);
 
@@ -230,6 +233,13 @@ internal sealed class DictDecoder : ArrayDecoder
         if (values.Length != valuesLength)
         {
             CompressedThrow.ChildLength(Id, "values", values.Length, valuesLength);
+        }
+
+        if (keep)
+        {
+            // The consumer reads the codes and the values as they are: no gather, and a selection
+            // has already narrowed the codes alone.
+            return EncodedNodes.Dictionary(context, dtype, codesIndex, valuesIndex, valuesLength, Id, Id);
         }
 
         ReadOnlySpan<byte> codes = codesNode.Values.Span;

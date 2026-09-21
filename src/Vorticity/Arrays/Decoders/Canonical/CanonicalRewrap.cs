@@ -62,6 +62,12 @@ internal static class CanonicalRewrap
             // Re-publishing a constant under another dtype and validity leaves its value alone.
             CanonicalKind.Constant =>
                 arena.AddConstant(dtype, length, validity, source.ConstantElement),
+
+            // The validity given is the new row validity; codes, ends and values stay shared.
+            CanonicalKind.Dictionary =>
+                arena.AddDictionary(dtype, length, validity, source.Codes, source.EncodedValuesIndex),
+            CanonicalKind.RunEnd =>
+                arena.AddRunEnd(dtype, length, validity, source.RunEnds, source.EncodedValuesIndex),
             _ => throw new UnreachableException($"CanonicalKind {(byte)source.Kind} is not defined."),
         };
     }

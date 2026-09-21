@@ -168,13 +168,19 @@ internal abstract class LayoutReader
     /// those answering a predicate would hand its parent a boolean column where the format promises
     /// integers. A reader whose children carry the same rows as itself says so with
     /// <see cref="ExecuteRowChild"/>.
+    /// <para>
+    /// Encoded delivery is cleared for the same reason: the parent reads such a child's values,
+    /// and a codes child left as a dictionary would be refused where a primitive is required.
+    /// </para>
     /// </remarks>
     protected static int ExecuteChild(
         in LayoutNode child, RowRange rows, in FieldMask fields, ScanContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
         bool outer = context.PredicateAtNode;
+        bool encoded = context.KeepEncodings;
         context.PredicateAtNode = false;
+        context.KeepEncodings = false;
         try
         {
             return LayoutReaderTable.Require(in child).Execute(in child, rows, in fields, context);
@@ -182,6 +188,7 @@ internal abstract class LayoutReader
         finally
         {
             context.PredicateAtNode = outer;
+            context.KeepEncodings = encoded;
         }
     }
 

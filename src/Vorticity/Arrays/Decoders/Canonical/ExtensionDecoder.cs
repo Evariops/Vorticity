@@ -40,6 +40,9 @@ internal sealed class ExtensionDecoder : ArrayDecoder
         DType storageDType = dtype.StorageType;
         ValidateExtensionDType(dtype, storageDType, context.Scan.HasFile ? context.Scan.File.Session.Options.Extensions : null);
 
+        // The storage is the column itself under a label, so it may stay encoded when this node
+        // may: a dictionary of dates is read by code like a dictionary of integers.
+        context.KeepEncodingInChild();
         int storageIndex = context.DecodeChild(in node, 0, storageDType, length);
         return context.Canonical.AddExtension(dtype, length, storageIndex);
     }

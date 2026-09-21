@@ -513,6 +513,224 @@ internal static class RowKernels
     }
 
     /// <summary>
+    /// Widens <paramref name="destination"/>'s length of codes to <see cref="uint"/>, checking every
+    /// non-null code against <paramref name="valuesLength"/>, and writes the row validity of a
+    /// dictionary kept encoded.
+    /// </summary>
+    /// <param name="codes">The codes, as their own physical type.</param>
+    /// <param name="codesPType">The codes' physical type.</param>
+    /// <param name="valuesLength">Rows in the dictionary.</param>
+    /// <param name="destination">One code per row; a null code is written as 0.</param>
+    /// <param name="codeBits">The codes' validity bitmap, or empty when every code is valid.</param>
+    /// <param name="codeBitOffset">Bit position of row 0 in <paramref name="codeBits"/>.</param>
+    /// <param name="valueBits">The values' validity bitmap, or empty when <paramref name="valuesAllValid"/> settles it.</param>
+    /// <param name="valueBitOffset">Bit position of value 0 in <paramref name="valueBits"/>.</param>
+    /// <param name="valuesAllValid">Whether every value row is valid.</param>
+    /// <param name="outputBits">The row validity, starting all-clear; empty when no row can be null.</param>
+    /// <returns>The row of the first out-of-range code, or -1.</returns>
+    internal static int WidenCodes(
+        ReadOnlySpan<byte> codes, PType codesPType, int valuesLength, Span<uint> destination,
+        ReadOnlySpan<byte> codeBits, int codeBitOffset,
+        ReadOnlySpan<byte> valueBits, int valueBitOffset, bool valuesAllValid,
+        Span<byte> outputBits) => codesPType switch
+        {
+            PType.U8 => WidenTyped<byte>(
+                codes, valuesLength, destination, codeBits, codeBitOffset, valueBits, valueBitOffset,
+                valuesAllValid, outputBits),
+            PType.U16 => WidenTyped<ushort>(
+                codes, valuesLength, destination, codeBits, codeBitOffset, valueBits, valueBitOffset,
+                valuesAllValid, outputBits),
+            PType.U32 => WidenTyped<uint>(
+                codes, valuesLength, destination, codeBits, codeBitOffset, valueBits, valueBitOffset,
+                valuesAllValid, outputBits),
+            PType.U64 => WidenTyped<ulong>(
+                codes, valuesLength, destination, codeBits, codeBitOffset, valueBits, valueBitOffset,
+                valuesAllValid, outputBits),
+            PType.I8 => WidenTyped<sbyte>(
+                codes, valuesLength, destination, codeBits, codeBitOffset, valueBits, valueBitOffset,
+                valuesAllValid, outputBits),
+            PType.I16 => WidenTyped<short>(
+                codes, valuesLength, destination, codeBits, codeBitOffset, valueBits, valueBitOffset,
+                valuesAllValid, outputBits),
+            PType.I32 => WidenTyped<int>(
+                codes, valuesLength, destination, codeBits, codeBitOffset, valueBits, valueBitOffset,
+                valuesAllValid, outputBits),
+            _ => WidenTyped<long>(
+                codes, valuesLength, destination, codeBits, codeBitOffset, valueBits, valueBitOffset,
+                valuesAllValid, outputBits),
+        };
+
+    /// <summary>The first code at or above <paramref name="limit"/>, or -1.</summary>
+    /// <param name="codes">Codes already 32 bits wide, a negative signed one reading as a large one.</param>
+    /// <param name="limit">Rows in the dictionary.</param>
+    internal static int FirstCodeOutside(ReadOnlySpan<uint> codes, uint limit)
+    {
+        int row = 0;
+        if (Vector128.IsHardwareAccelerated)
+        {
+            ref uint source = ref MemoryMarshal.GetReference(codes);
+            Vector128<uint> bound = Vector128.Create(limit);
+            for (; row + Vector128<uint>.Count <= codes.Length; row += Vector128<uint>.Count)
+            {
+                if (Vector128.GreaterThanOrEqualAny(Vector128.LoadUnsafe(ref source, (nuint)row), bound))
+                {
+                    break;
+                }
+            }
+        }
+
+        for (; row < codes.Length; row++)
+        {
+            if (codes[row] >= limit)
+            {
+                return row;
+            }
+        }
+
+        return -1;
+    }
+
+    private static int WidenTyped<TCode>(
+        ReadOnlySpan<byte> codes, int valuesLength, Span<uint> destination,
+        ReadOnlySpan<byte> codeBits, int codeBitOffset,
+        ReadOnlySpan<byte> valueBits, int valueBitOffset, bool valuesAllValid,
+        Span<byte> outputBits)
+        where TCode : unmanaged
+    {
+        ReadOnlySpan<TCode> typed = MemoryMarshal.Cast<byte, TCode>(codes)[..destination.Length];
+        uint limit = (uint)valuesLength;
+        bool tracked = !outputBits.IsEmpty;
+        if (codeBits.IsEmpty && !tracked)
+        {
+            return WidenDense(typed, limit, destination);
+        }
+
+        bool codesAllValid = codeBits.IsEmpty;
+        for (int row = 0; row < destination.Length; row++)
+        {
+            if (!codesAllValid &&
+                (codeBits[(codeBitOffset + row) >> 3] & (1 << ((codeBitOffset + row) & 7))) == 0)
+            {
+                // A null position may carry any code at all, so it is never read.
+                destination[row] = 0;
+                continue;
+            }
+
+            uint code = WidenCode(typed[row]);
+            if (code >= limit)
+            {
+                return row;
+            }
+
+            destination[row] = code;
+            if (!tracked)
+            {
+                continue;
+            }
+
+            int bit = valueBitOffset + (int)code;
+            if (valuesAllValid ||
+                (!valueBits.IsEmpty && (valueBits[bit >> 3] & (1 << (bit & 7))) != 0))
+            {
+                outputBits[row >> 3] |= (byte)(1 << (row & 7));
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>The widen with no validity on either side: a vector pass for the narrow codes, then the rest.</summary>
+    private static int WidenDense<TCode>(ReadOnlySpan<TCode> codes, uint limit, Span<uint> destination)
+        where TCode : unmanaged
+    {
+        // The vector pass stops at the first block holding a code out of range, and the scalar loop
+        // resumes there, so the row it reports is the exact one.
+        int row = 0;
+        if (typeof(TCode) == typeof(byte))
+        {
+            row = WidenBytes(MemoryMarshal.Cast<TCode, byte>(codes), limit, destination);
+        }
+        else if (typeof(TCode) == typeof(ushort))
+        {
+            row = WidenShorts(MemoryMarshal.Cast<TCode, ushort>(codes), limit, destination);
+        }
+
+        for (; row < destination.Length; row++)
+        {
+            uint code = WidenCode(codes[row]);
+            if (code >= limit)
+            {
+                return row;
+            }
+
+            destination[row] = code;
+        }
+
+        return -1;
+    }
+
+    private static int WidenBytes(ReadOnlySpan<byte> codes, uint limit, Span<uint> destination)
+    {
+        if (!Vector128.IsHardwareAccelerated)
+        {
+            return 0;
+        }
+
+        // A byte code is always below 256, so only a smaller dictionary needs the compare.
+        bool bounded = limit < 256;
+        Vector128<byte> bound = Vector128.Create((byte)Math.Min(limit, 255u));
+        ref byte source = ref MemoryMarshal.GetReference(codes);
+        ref uint target = ref MemoryMarshal.GetReference(destination);
+        int row = 0;
+        for (; row + 16 <= destination.Length; row += 16)
+        {
+            Vector128<byte> block = Vector128.LoadUnsafe(ref source, (nuint)row);
+            if (bounded && Vector128.GreaterThanOrEqualAny(block, bound))
+            {
+                return row;
+            }
+
+            (Vector128<ushort> low, Vector128<ushort> high) = Vector128.Widen(block);
+            (Vector128<uint> first, Vector128<uint> second) = Vector128.Widen(low);
+            (Vector128<uint> third, Vector128<uint> fourth) = Vector128.Widen(high);
+            first.StoreUnsafe(ref target, (nuint)row);
+            second.StoreUnsafe(ref target, (nuint)(row + 4));
+            third.StoreUnsafe(ref target, (nuint)(row + 8));
+            fourth.StoreUnsafe(ref target, (nuint)(row + 12));
+        }
+
+        return row;
+    }
+
+    private static int WidenShorts(ReadOnlySpan<ushort> codes, uint limit, Span<uint> destination)
+    {
+        if (!Vector128.IsHardwareAccelerated)
+        {
+            return 0;
+        }
+
+        bool bounded = limit < 65536;
+        Vector128<ushort> bound = Vector128.Create((ushort)Math.Min(limit, 65535u));
+        ref ushort source = ref MemoryMarshal.GetReference(codes);
+        ref uint target = ref MemoryMarshal.GetReference(destination);
+        int row = 0;
+        for (; row + 8 <= destination.Length; row += 8)
+        {
+            Vector128<ushort> block = Vector128.LoadUnsafe(ref source, (nuint)row);
+            if (bounded && Vector128.GreaterThanOrEqualAny(block, bound))
+            {
+                return row;
+            }
+
+            (Vector128<uint> low, Vector128<uint> high) = Vector128.Widen(block);
+            low.StoreUnsafe(ref target, (nuint)row);
+            high.StoreUnsafe(ref target, (nuint)(row + 4));
+        }
+
+        return row;
+    }
+
+    /// <summary>
     /// Reads code <paramref name="index"/> as an unsigned value, saturating a negative or
     /// over-large one to <see cref="uint.MaxValue"/> so the caller's range check rejects it.
     /// </summary>

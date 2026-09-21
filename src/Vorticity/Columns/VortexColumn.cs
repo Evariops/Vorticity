@@ -132,7 +132,7 @@ internal readonly ref struct VortexColumn
     /// a column can be in: a caller switching on this property is asking
     /// what the column holds, not how the decoder chose to store it. So a constant column reports
     /// the form its dtype stands for, and <see cref="StandsFor"/> is the one place that mapping
-    /// lives.
+    /// lives. A dictionary or run-end column likewise reports the form its values decode to.
     /// </remarks>
     public CanonicalKind Kind => Reported(_batch.Node(_node));
 
@@ -152,9 +152,16 @@ internal readonly ref struct VortexColumn
         _ => CanonicalKind.Constant,
     };
 
-    /// <summary>The kind this column presents, with the constant form resolved away.</summary>
-    private static CanonicalKind Reported(CanonicalNode node) =>
-        node.Kind == CanonicalKind.Constant ? StandsFor(node.DType) : node.Kind;
+    /// <summary>
+    /// The kind this column presents, with the constant form resolved away, and a dictionary or
+    /// run-end node reported as the kind of its values, which is the form its decode takes.
+    /// </summary>
+    private CanonicalKind Reported(CanonicalNode node) => node.Kind switch
+    {
+        CanonicalKind.Constant => StandsFor(node.DType),
+        CanonicalKind.Dictionary or CanonicalKind.RunEnd => _batch.Node(node.EncodedValuesIndex).Kind,
+        _ => node.Kind,
+    };
 
     /// <summary>
     /// Resolves the node a typed accessor should read, materializing a constant when the caller
@@ -175,6 +182,11 @@ internal readonly ref struct VortexColumn
         if (node.Kind == CanonicalKind.Constant && StandsFor(node.DType) == kind)
         {
             return _batch.Arena.MaterializeConstant(_node);
+        }
+
+        if (node.Kind is CanonicalKind.Dictionary or CanonicalKind.RunEnd && Reported(node) == kind)
+        {
+            return _batch.Arena.MaterializeEncoded(_node);
         }
 
         if (node.Kind != kind)

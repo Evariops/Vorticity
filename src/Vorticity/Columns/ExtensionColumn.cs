@@ -361,7 +361,7 @@ internal readonly ref struct ExtensionColumn
         ColumnCore.CheckRow(index, extension.Length);
         RequireNotNull(index);
 
-        CanonicalNode storage = _batch.Node(extension.StorageIndex);
+        CanonicalNode storage = _batch.Node(_batch.Arena.Decoded(extension.StorageIndex));
         if (storage.Kind != CanonicalKind.Primitive)
         {
             ColumnsThrow.Format(

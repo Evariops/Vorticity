@@ -137,6 +137,7 @@ public readonly ref struct DictionaryView<T>
     }
 
     /// <summary>One code per row, the index of its value in <see cref="Values"/>; widened to 32 bits when the file stores narrower codes.</summary>
+    /// <remarks>A null row's code is 0, and the column's validity is what says the row is null.</remarks>
     public ReadOnlySpan<uint> Codes { get; }
 
     /// <summary>The distinct values, in code order.</summary>

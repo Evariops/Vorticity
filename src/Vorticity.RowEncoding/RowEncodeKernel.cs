@@ -68,6 +68,12 @@ internal static class RowEncodeKernel
                 EncodeFixedSizeList(arena, node, field, offsets, cursors, destination);
                 return;
 
+            // A row's key is its value, so an encoded column is encoded from its decoded twin.
+            case CanonicalKind.Dictionary:
+            case CanonicalKind.RunEnd:
+                Encode(arena, arena.MaterializeEncoded(nodeIndex), field, offsets, cursors, destination);
+                return;
+
             default:
                 throw RowThrow.UnsupportedCanonical(node);
         }

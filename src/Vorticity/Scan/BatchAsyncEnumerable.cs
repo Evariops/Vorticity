@@ -129,13 +129,16 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, _take, live: null, _metrics,
-            cancellationToken, reverse: _reverse, compact: Compact);
+            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings);
 
     /// <summary>Batches decoded ahead of the consumer, on lanes of their own.</summary>
     internal int Prefetch { get; init; }
 
     /// <summary>Whether a filtered batch is compacted to its surviving rows rather than delivered whole with a selection.</summary>
     internal bool Compact { get; init; } = true;
+
+    /// <summary>Whether a dictionary or run-end column reaches the consumer in its encoded form.</summary>
+    internal bool KeepEncodings { get; init; }
 
     /// <summary>The lanes the scan runs on: the degree, widened by the read-ahead.</summary>
     private int Lanes => _reverse ? 1 : Math.Max(_degree, Prefetch > 0 ? Prefetch + 1 : 1);
@@ -147,7 +150,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         BlockMask? live, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, _take, live, _metrics,
-            cancellationToken, reverse: _reverse, compact: Compact);
+            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings);
 
     /// <summary>
     /// Starts a scan whose filter an exact index has already answered: it reads exactly the rows
@@ -160,7 +163,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         BlockMask? live, RowSelection proven, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, proven, live, _metrics,
-            cancellationToken, filterProven: true, reverse: _reverse);
+            cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings);
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
     internal bool HasTake => _take is not null;
@@ -250,7 +253,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         CancellationToken cancellationToken,
         bool filterProven = false,
         bool reverse = false,
-        bool compact = true)
+        bool compact = true,
+        bool keepEncodings = false)
     {
         _compact = compact;
         _filterProven = filterProven;
@@ -271,11 +275,12 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         for (int i = 0; i < degree; i++)
         {
             _lanes[i] = new Lane(new ScanContext(file));
-            // The mask and the metrics sink outlive every batch of the scan, so they are set once
-            // here and never by `ResetBatch`; the readers read the mask in file coordinates and
-            // add what they materialize to the sink.
+            // The mask, the metrics sink and the encoded delivery outlive every batch of the scan,
+            // so they are set once here and never by `ResetBatch`; the readers read the mask in
+            // file coordinates and add what they materialize to the sink.
             _lanes[i].Context.LiveBlocks = live;
             _lanes[i].Context.Metrics = metrics;
+            _lanes[i].Context.KeepEncodings = keepEncodings;
         }
     }
 

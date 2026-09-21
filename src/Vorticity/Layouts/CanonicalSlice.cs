@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -132,8 +133,104 @@ internal static class CanonicalSlice
             // value, so `start` plays no part.
             CanonicalKind.Constant =>
                 destination.AddConstant(dtype, length, validity, node.ConstantElement),
+            CanonicalKind.Dictionary =>
+                SliceDictionary(source, destination, in node, dtype, validity, start, length),
+            CanonicalKind.RunEnd =>
+                SliceRunEnd(source, destination, nodeIndex, dtype, validity, start, length, depth),
             _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
         };
+    }
+
+    /// <remarks>
+    /// The codes narrow like any fixed-width buffer; the distinct values are every row's, so they
+    /// are shared whole, as a list's elements are.
+    /// </remarks>
+    private static int SliceDictionary(
+        CanonicalArena source,
+        CanonicalArena destination,
+        in CanonicalNode node,
+        DType dtype,
+        Validity validity,
+        int start,
+        int length)
+    {
+        int values = ReferenceEquals(source, destination)
+            ? node.EncodedValuesIndex
+            : destination.ReferenceFrom(source, node.EncodedValuesIndex);
+        return destination.AddDictionary(
+            dtype, length, validity, node.Codes.Slice(start * sizeof(uint), length * sizeof(uint)), values);
+    }
+
+    /// <remarks>
+    /// The runs the window touches are kept and their ends rebased to it, the first and the last
+    /// clipped, since the ends are relative to row 0 and a window may start or stop inside a run.
+    /// That is a buffer of one end per kept run; a window from row 0 that stops on a run boundary
+    /// needs none and narrows the ends in place.
+    /// </remarks>
+    private static int SliceRunEnd(
+        CanonicalArena source,
+        CanonicalArena destination,
+        int nodeIndex,
+        DType dtype,
+        Validity validity,
+        int start,
+        int length,
+        int depth)
+    {
+        CanonicalNode node = source.GetNode(nodeIndex);
+        VortexBuffer endsBuffer = node.RunEnds;
+        ReadOnlySpan<uint> ends = MemoryMarshal.Cast<byte, uint>(endsBuffer.Span);
+        int valuesIndex = node.EncodedValuesIndex;
+
+        if (length == 0)
+        {
+            int none = Slice(source, destination, valuesIndex, 0, 0, depth + 1);
+            return destination.AddRunEnd(dtype, 0, validity, VortexBuffer.Empty, none);
+        }
+
+        uint stop = (uint)(start + length);
+        int first = FirstEndAbove(ends, (uint)start);
+        int last = FirstEndAbove(ends, stop - 1);
+        int count = last - first + 1;
+
+        VortexBuffer rebased;
+        if (start == 0 && ends[last] == stop)
+        {
+            rebased = endsBuffer.Slice(0, count * sizeof(uint));
+        }
+        else
+        {
+            rebased = destination.AllocateUninitialized(count * sizeof(uint), sizeof(uint), out Span<byte> raw);
+            Span<uint> into = MemoryMarshal.Cast<byte, uint>(raw)[..count];
+            for (int i = 0; i < into.Length; i++)
+            {
+                into[i] = Math.Min(ends[first + i], stop) - (uint)start;
+            }
+        }
+
+        int values = Slice(source, destination, valuesIndex, first, count, depth + 1);
+        return destination.AddRunEnd(dtype, length, validity, rebased, values);
+    }
+
+    /// <summary>The first run whose exclusive end is above <paramref name="row"/>, by binary search.</summary>
+    private static int FirstEndAbove(ReadOnlySpan<uint> ends, uint row)
+    {
+        int low = 0;
+        int high = ends.Length - 1;
+        while (low < high)
+        {
+            int middle = low + ((high - low) >> 1);
+            if (ends[middle] > row)
+            {
+                high = middle;
+            }
+            else
+            {
+                low = middle + 1;
+            }
+        }
+
+        return low;
     }
 
     /// <remarks>

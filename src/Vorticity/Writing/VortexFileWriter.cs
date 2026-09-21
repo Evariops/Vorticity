@@ -523,6 +523,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         }
 
         RequireMatchingSchema(batch);
+
+        // A batch delivered encoded is decoded here, once, so that the statistics, the distinct
+        // tables, the indexes and the blob writer behind this line only ever meet canonical nodes.
+        int decoded = batch.Arena.DecodedTree(batch.RootIndex);
+        if (decoded != batch.RootIndex)
+        {
+            batch = new RecordBatch(batch.Arena, decoded, batch.StartRow);
+        }
+
         await StartAsync(cancellationToken).ConfigureAwait(false);
 
         // The statistics pass runs before any copy or emission: the decode that produced the batch

@@ -91,9 +91,13 @@ internal static partial class ComparisonKernels
         }
     }
 
-    /// <summary>The node itself, or the materialized twin of a constant.</summary>
-    private static int Expanded(CanonicalArena arena, int index) =>
-        arena.GetNode(index).Kind == CanonicalKind.Constant ? arena.MaterializeConstant(index) : index;
+    /// <summary>The node itself, or the materialized twin of a constant, a dictionary or a run-end node.</summary>
+    private static int Expanded(CanonicalArena arena, int index) => arena.GetNode(index).Kind switch
+    {
+        CanonicalKind.Constant => arena.MaterializeConstant(index),
+        CanonicalKind.Dictionary or CanonicalKind.RunEnd => arena.MaterializeEncoded(index),
+        _ => index,
+    };
 
     private static NotSupportedException ColumnsMismatch(string what) =>
         new NotSupportedException(
