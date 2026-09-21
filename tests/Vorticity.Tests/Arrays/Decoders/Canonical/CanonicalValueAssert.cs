@@ -57,6 +57,14 @@ internal static class CanonicalValueAssert
                 AssertVarBinView(in node, row, expected);
                 return;
 
+            case CanonicalKind.ListView when dtype.Kind == DTypeKind.Map:
+            {
+                long offset = ReadIndex(node.Offsets.Span, node.OffsetPType, row);
+                long size = ReadIndex(node.Sizes.Span, node.SizePType, row);
+                AssertEntries(scan, node.ElementsIndex, dtype, offset, size, expected);
+                return;
+            }
+
             case CanonicalKind.ListView:
             {
                 long offset = ReadIndex(node.Offsets.Span, node.OffsetPType, row);
@@ -131,6 +139,28 @@ internal static class CanonicalValueAssert
         }
     }
 
+    // A map node is a ListView of Struct{key, value} under the map dtype, and the sidecar writes a
+    // map row as an array of {"key", "value"} objects.
+    private static void AssertEntries(
+        ScanContext scan, int entriesIndex, DType map, long offset, long size, JsonElement expected)
+    {
+        Assert.Equal(JsonValueKind.Array, expected.ValueKind);
+        Assert.Equal(size, expected.GetArrayLength());
+
+        CanonicalNode entries = scan.Canonical.GetNode(entriesIndex);
+        Assert.Equal(CanonicalKind.Struct, entries.Kind);
+        Assert.Equal(2, entries.FieldCount);
+
+        int i = 0;
+        foreach (JsonElement entry in expected.EnumerateArray())
+        {
+            int row = (int)(offset + i);
+            AssertRow(scan, entries.GetFieldIndex(0), map.KeyType, row, entry.GetProperty("key"));
+            AssertRow(scan, entries.GetFieldIndex(1), map.ValueType, row, entry.GetProperty("value"));
+            i++;
+        }
+    }
+
     private static void AssertPrimitive(ref readonly CanonicalNode node, int row, JsonElement expected)
     {
         ReadOnlySpan<byte> values = node.Values.Span;
@@ -193,6 +223,13 @@ internal static class CanonicalValueAssert
         }
 
         string? want = expected.GetProperty("bits").GetString();
+
+        // Some sidecars write the bits with a `0x` prefix, the same value.
+        if (want is not null && want.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            want = want[2..];
+        }
+
         Assert.Equal(want, new string(hex), ignoreCase: true);
     }
 

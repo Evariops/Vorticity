@@ -188,7 +188,8 @@ public sealed class WrittenSizeTests
     /// <remarks>
     /// This axis exists because the corpus sweep cannot see the multi-chunk path, so a change
     /// confined to it is invisible to the only size oracle this repository has.
-    /// Here every column of every file is in eight chunks or more, and the assertion is equality.
+    /// Here every file is written in eight batches or more, so every column carries eight zones
+    /// or more, and the assertion is equality.
     /// </remarks>
     [Fact]
     public async Task TheMultiChunkPathWritesTheSameBytes()
@@ -218,8 +219,8 @@ public sealed class WrittenSizeTests
                 moved.Add($"{id}: {written} bytes, expected {expected} ({written - expected:+#;-#;0})");
             }
 
-            // Eight or more is what makes this axis different from the sweep; below that it would
-            // be measuring the same single-chunk path twice.
+            // `chunks` counts the batches written. Eight or more gives every column eight zones or
+            // more, which is what makes this axis different from the sweep.
             Assert.True(chunks >= 8, $"{id} wrote {chunks} chunks; this axis needs 8 or more");
         }
 

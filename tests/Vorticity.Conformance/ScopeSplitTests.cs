@@ -96,8 +96,8 @@ public sealed class ScopeSplitTests
             Phase1Components.ShippedTableWasEmpty,
             "ArrayDecoderTable shipped EMPTY: no array decoder is registered by the library " +
             "itself, so VortexFile.Scan() throws VortexUnsupportedException on the first batch " +
-            "of every file. Its static constructor must register all 23 decoders (14 canonical, " +
-            "9 compressed: " +
+            "of every file. Its static constructor must register every decoder, the compressed " +
+            "ones included (" +
             string.Join(", ", Phase1Components.CompressedDecodersRegisteredByTheHarness) + ").");
 
         foreach (string id in Phase1Components.CompressedDecodersRegisteredByTheHarness)

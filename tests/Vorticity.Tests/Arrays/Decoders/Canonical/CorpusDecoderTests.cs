@@ -1,14 +1,17 @@
 // The oracle. Every one of these files was written by Vortex 0.86.1 and carries a JSONL sidecar of
 // expected values; agreeing with our own encoder would prove nothing.
 //
-// The set is exactly the corpus entries whose root layout is a single `vortex.flat` leaf and whose
-// array tree uses only the fourteen encodings this component owns, so the blob is reachable without
-// a layout reader. Each row count the corpus uses - 1, 1023, 1025 and the 4096 default - appears
-// here, which covers the FastLanes block (1024) and row block (8192) boundaries.
+// The set is exactly the corpus entries whose root layout is a single `vortex.flat` leaf, so the
+// blob is reachable without a layout reader. Each row count the corpus uses - 1, 1023, 1025 and the
+// 4096 default - appears here, which covers the FastLanes block (1024) and row block (8192)
+// boundaries.
+using System;
+using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Tests.Scan;
 using Xunit;
 
 namespace Vorticity.Tests.Arrays.Decoders.Canonical;
@@ -24,6 +27,22 @@ public sealed class CorpusDecoderTests
         }
 
         return data;
+    }
+
+    [Fact]
+    public void TheListIsEverySingleFlatLeafEntryOfTheManifest()
+    {
+        SortedSet<string> expected = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (CorpusEntry entry in CorpusManifest.All)
+        {
+            if (entry.LayoutIds is ["vortex.flat"])
+            {
+                expected.Add(entry.Id);
+            }
+        }
+
+        Assert.NotEmpty(expected);
+        Assert.Equal(expected, new SortedSet<string>(CorpusEntries.All, StringComparer.Ordinal));
     }
 
     [Theory]
