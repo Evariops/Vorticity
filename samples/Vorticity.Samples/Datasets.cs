@@ -1,0 +1,119 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.IO.Pipelines;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Vorticity.Dataset;
+
+namespace Vorticity.Samples;
+
+internal static class Datasets
+{
+    internal static async Task RunAsync()
+    {
+        await using IObjectStore store = new FileObjectStore(Demo.Path("dataset"));
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, new DatasetOptions
+        {
+            ClusteringKey = [Reading.ColumnNames.Day],
+        });
+        Console.WriteLine($"created: version {dataset.Version}, {dataset.RowCount} rows, clustered by {string.Join(", ", dataset.ClusteringKeyPaths)}");
+
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Reading>(Days(0, 50));
+            ulong version = await dataset.AppendAsync(draft);
+            Console.WriteLine($"appended {draft.Key}: version {version}, {dataset.RowCount} rows");
+        }
+
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Reading>(Days(50, 50));
+            await dataset.AppendAsync(draft);
+        }
+
+        string local = Demo.Path("days-100-119.vortex");
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Reading>(local))
+        {
+            await writer.WriteAsync<Reading>(Days(100, 20));
+            await writer.CompleteAsync();
+        }
+
+        await using (FileStream stream = System.IO.File.OpenRead(local))
+        {
+            await store.PutIfAbsentAsync("imports/days-100-119.vortex", PipeReader.Create(stream), stream.Length, CancellationToken.None);
+        }
+
+        ulong imported = await dataset.ImportAsync("imports/days-100-119.vortex");
+        Console.WriteLine($"imported: version {imported}, {dataset.RowCount} rows, {dataset.ObjectCount} objects, lag {dataset.Lag}");
+
+        List<DataObject> objects = await dataset.ObjectsAsync().ToListAsync();
+        foreach (DataObject entry in objects)
+        {
+            Console.WriteLine($"  {entry.Key}: level {entry.Level}, rows {entry.FirstRow} to {entry.FirstRow + entry.Rows}, {entry.Bytes} bytes");
+        }
+
+        Scan<Reading> recent = dataset.Scan<Reading>().Where(r => r.Day >= 100);
+        ScanPlan plan = await dataset.Scan<Reading>().Where(r => r.Day >= 100).ExplainAsync();
+        Console.WriteLine($"Day >= 100: {await recent.CountAsync()} rows; plan: {plan.LiveBlocks} of {plan.Blocks} blocks, " +
+            string.Join("; ", plan.Pruning.Select(step => $"{step.Structure} pruned {step.BlocksPruned}")));
+        Console.WriteLine($"may Day be 500? {dataset.MayMatch<Reading>(r => r.Day == 500)}; may Day be 75? {dataset.MayMatch<Reading>(r => r.Day == 75)}");
+
+        long firstRow = -1;
+        await foreach (Columns<Reading> batch in dataset.Scan<Reading>().Where(r => r.Day == 110))
+        {
+            firstRow = firstRow < 0 ? batch.StartRow : firstRow;
+        }
+
+        Console.WriteLine($"the first batch of day 110 starts at dataset row {firstRow}");
+
+        await using (KeyCursor<int> cursor = await dataset.Scan<Reading>().Keys(r => r.Day).OpenAsync())
+        {
+            bool found = await cursor.SeekAsync(75, SeekOp.AtOrAfter);
+            Console.WriteLine($"key cursor: seek 75 found {found}, key {cursor.Key} at row {cursor.Row}; {await cursor.KeyCountAsync()} entries");
+        }
+
+        await using VortexDataset reader = await VortexDataset.OpenAsync(store);
+        Scan<Reading> pinned = dataset.Scan<Reading>();
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Reading>(Days(120, 10));
+            await dataset.AppendAsync(draft);
+        }
+
+        Console.WriteLine($"after another append: the handle reads version {dataset.Version}, {dataset.RowCount} rows; " +
+            $"a scan built before it counts {await pinned.CountAsync()}; another handle reads version {reader.Version} " +
+            $"until it refreshes to {await reader.RefreshAsync()}");
+
+        DataObject first = objects[0];
+        await using (ObjectDraft rewritten = dataset.StartObject())
+        {
+            await rewritten.Writer.WriteAsync(dataset.Scan<Reading>()
+                .Rows(RowRange.FromLength(first.FirstRow, first.Rows))
+                .Where(r => r.Celsius.IsNotNull)
+                .ToRecordsAsync());
+            ReplaceResult replaced = await dataset.ReplaceAsync([first], [rewritten]);
+            Console.WriteLine($"replaced {first.Key} by the rows with a temperature: version {replaced.Version}, {replaced.Outcome}, {dataset.RowCount} rows");
+        }
+
+        DataObject importedObject = (await dataset.ObjectsAsync().ToListAsync()).Single(o => o.Key.StartsWith("imports/", StringComparison.Ordinal));
+        ReplaceResult removed = await dataset.RemoveAsync([importedObject]);
+        Console.WriteLine($"removed the import: version {removed.Version}, {removed.Outcome}, {dataset.RowCount} rows, {dataset.ObjectCount} objects");
+
+        ReplaceResult again = await dataset.RemoveAsync([importedObject]);
+        Console.WriteLine($"removing it again: {again.Outcome}, version {again.Version}");
+    }
+
+    private static Reading[] Days(int firstDay, int days)
+    {
+        Reading[] rows = new Reading[days * 1_000];
+        for (int i = 0; i < rows.Length; i++)
+        {
+            int row = firstDay * 1_000 + i;
+            rows[i] = new Reading(row / 1_000, row % 50 == 0 ? null : 10.0 + (row % 400 / 10.0), Demo.Cities[row / 7 % Demo.Cities.Length]);
+        }
+
+        return rows;
+    }
+}
