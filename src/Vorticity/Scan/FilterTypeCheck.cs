@@ -96,6 +96,10 @@ internal static class FilterTypeCheck
                 CheckText(schema, match.Field, match.Op, parameterName);
                 return;
 
+            case ColumnComparisonExpr columns:
+                CheckColumns(schema, columns, parameterName);
+                return;
+
             case NotExpr negation:
                 Walk(schema, negation.Operand, parameterName, depth + 1);
                 return;
@@ -166,6 +170,61 @@ internal static class FilterTypeCheck
             parameterName);
     }
 
+    /// <summary>
+    /// Refuses two columns the kernel cannot compare row by row: storages of different domains,
+    /// numbers of different widths, decimals of different scales, byte lists of different sizes,
+    /// or a form no comparison reads.
+    /// </summary>
+    private static void CheckColumns(DType schema, ColumnComparisonExpr columns, string parameterName)
+    {
+        if (!TryResolve(schema, columns.Left, out DType left) ||
+            !TryResolve(schema, columns.Right, out DType right))
+        {
+            return;
+        }
+
+        DType a = Storage(left);
+        DType b = Storage(right);
+        if (a.IsDefault || b.IsDefault || a.Kind == DTypeKind.Null || b.Kind == DTypeKind.Null)
+        {
+            // A null column is unknown against anything, which the kernel answers without a type.
+            return;
+        }
+
+        Domain domain = DomainOf(a);
+        bool comparable = domain == DomainOf(b) && domain switch
+        {
+            Domain.Bool => true,
+            Domain.Number => a.PType == b.PType,
+            Domain.Bytes => a.Kind == b.Kind,
+            Domain.Decimal => a.Scale == b.Scale,
+            Domain.FixedBytes => a.FixedSize == b.FixedSize,
+            _ => false,
+        };
+
+        if (comparable)
+        {
+            return;
+        }
+
+        throw new ArgumentException(
+            $"'{columns.Left.Path}' is a column of {left} and '{columns.Right.Path}' one of " +
+            $"{right}. Two columns compare when their types are the same: booleans, numbers, " +
+            "decimals, text, binary or fixed-size lists of bytes.",
+            parameterName);
+    }
+
+    /// <summary>A dtype past its extension labels, which is what a comparison reads.</summary>
+    private static DType Storage(DType column)
+    {
+        for (int i = 0; i < VortexLimits.MaxDTypeDepth && column.Kind == DTypeKind.Extension; i++)
+        {
+            column = column.StorageType;
+        }
+
+        return column;
+    }
+
     /// <summary>Walks a field path down the schema.</summary>
     /// <returns>
     /// <see langword="false"/> when the path names nothing, which is another check's error to
@@ -196,13 +255,9 @@ internal static class FilterTypeCheck
 
     private static Domain DomainOf(DType column)
     {
-        for (int i = 0; i < VortexLimits.MaxDTypeDepth && column.Kind == DTypeKind.Extension; i++)
-        {
-            // An extension is a label over a storage dtype, and a filter compares the storage:
-            // a date column takes the integer constant its storage takes.
-            column = column.StorageType;
-        }
-
+        // An extension is a label over a storage dtype, and a filter compares the storage: a date
+        // column takes the integer constant its storage takes.
+        column = Storage(column);
         return column.Kind switch
         {
             DTypeKind.Bool => Domain.Bool,
