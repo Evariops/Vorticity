@@ -353,7 +353,10 @@ internal static partial class ComparisonKernels
     }
 
     /// <summary>Row <paramref name="row"/> of a decimal values buffer, sign-extended to 256 bits.</summary>
-    private static Int256 Widen(ReadOnlySpan<byte> values, int width, int row)
+    /// <param name="values">Little-endian two's complement values, <paramref name="width"/> bytes each.</param>
+    /// <param name="width">One of 1, 2, 4, 8, 16 and 32.</param>
+    /// <param name="row">The row.</param>
+    internal static Int256 Widen(ReadOnlySpan<byte> values, int width, int row)
     {
         ReadOnlySpan<byte> slot = values.Slice(row * width, width);
         return width switch

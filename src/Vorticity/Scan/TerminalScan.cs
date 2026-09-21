@@ -375,6 +375,13 @@ internal sealed class TerminalScan
                 .PlanAsync(_file, _tree, Expr.IsNotNull(field), cancellationToken, steps: null, _metrics)
                 .ConfigureAwait(false);
             column = own.Zones?.Column(path);
+
+            // A decimal's bounds order as numbers, and the literal order that keeps the best
+            // bound below does not know it.
+            if (column is { IsDecimal: true })
+            {
+                column = null;
+            }
         }
 
         // Pass 1, no read: what the bounds decide, what they only bound, what they say nothing of.

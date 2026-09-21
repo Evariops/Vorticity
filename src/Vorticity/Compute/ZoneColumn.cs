@@ -15,16 +15,23 @@ internal sealed class ZoneColumn
 {
     private readonly ZoneBounds[] _zones;
 
-    internal ZoneColumn(FieldExpr field, long zoneLength, long rowCount, ZoneBounds[] zones)
+    internal ZoneColumn(FieldExpr field, long zoneLength, long rowCount, ZoneBounds[] zones, bool isDecimal = false)
     {
         Field = field;
         ZoneLength = zoneLength;
         RowCount = rowCount;
         _zones = zones;
+        IsDecimal = isDecimal;
     }
 
     /// <summary>The column, as the filter names it.</summary>
     internal FieldExpr Field { get; }
+
+    /// <summary>
+    /// Whether the bounds are unscaled decimals -- signed integers, or sixteen or thirty-two
+    /// little-endian bytes -- which order as the numbers they are, never bytewise.
+    /// </summary>
+    internal bool IsDecimal { get; }
 
     /// <summary>Rows per zone; zero means the map is unusable.</summary>
     internal long ZoneLength { get; }

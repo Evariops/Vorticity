@@ -1,6 +1,7 @@
 using System;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.Types.Numerics;
 
 namespace Vorticity.Compute;
 
@@ -295,6 +296,12 @@ internal sealed class ZonePruner : IBlockPruner
     /// </summary>
     private bool PrefixMayMatch(FieldExpr field, ReadOnlySpan<byte> prefix, RowRange rows)
     {
+        // A decimal's bounds are numbers, and a byte prefix is no range over them.
+        if (Find(field) is { IsDecimal: true })
+        {
+            return true;
+        }
+
         if (!MayMatchComparison(
                 field, ComparisonOp.GreaterOrEqual, FilterLiteral.From(prefix), rows))
         {
@@ -401,6 +408,20 @@ internal sealed class ZonePruner : IBlockPruner
     /// <summary>The type the bounds are in, or null when the zone has none.</summary>
     private static FilterLiteralKind? BoundsKind(ZoneBounds bounds) =>
         bounds.HasMin ? bounds.Min.Kind : bounds.HasMax ? bounds.Max.Kind : null;
+
+    /// <summary>
+    /// How many of the zone's rows are NaN: <c>nan_count</c> when the zone has one, none when
+    /// its bounds are of a type that has none, undecided otherwise.
+    /// </summary>
+    private static long? NaNs(ZoneBounds bounds, long rows)
+    {
+        if (bounds.HasNanCount)
+        {
+            return Math.Min(bounds.NanCount, rows);
+        }
+
+        return BoundsKind(bounds) is FilterLiteralKind kind && kind != FilterLiteralKind.Float ? 0 : null;
+    }
 
     private static bool IsOrdering(ComparisonOp op) =>
         op is ComparisonOp.Less or ComparisonOp.LessOrEqual
@@ -602,12 +623,12 @@ internal sealed class ZonePruner : IBlockPruner
     /// minimum is at or above the stated one and <c>min ≥ v</c> therefore proves <c>x ≥ v</c>;
     /// equality is proven only from exact bounds.
     /// </summary>
-    private static Proof Prove(ZoneBounds bounds, ComparisonOp op, FilterLiteral value)
+    private static Proof Prove(ZoneColumn column, ZoneBounds bounds, ComparisonOp op, FilterLiteral value)
     {
         int low = 0;
         int high = 0;
-        bool hasLow = bounds.HasMin && TryCompare(bounds.Min, value, out low);
-        bool hasHigh = bounds.HasMax && TryCompare(bounds.Max, value, out high);
+        bool hasLow = bounds.HasMin && TryOrder(column, bounds.Min, value, out low);
+        bool hasHigh = bounds.HasMax && TryOrder(column, bounds.Max, value, out high);
         switch (op)
         {
             case ComparisonOp.GreaterOrEqual:
@@ -748,23 +769,9 @@ internal sealed class ZonePruner : IBlockPruner
             }
         }
 
-        /// <summary>
-        /// How many of the zone's rows are NaN: <c>nan_count</c> when the zone has one, none when
-        /// its bounds are of a type that has none, undecided otherwise.
-        /// </summary>
-        private static long? NaNs(ZoneBounds bounds, long rows)
-        {
-            if (bounds.HasNanCount)
-            {
-                return Math.Min(bounds.NanCount, rows);
-            }
-
-            return BoundsKind(bounds) is FilterLiteralKind kind && kind != FilterLiteralKind.Float ? 0 : null;
-        }
-
         private RangeVerdict Comparison(ZoneColumn column, ZoneBounds bounds, long rows, long? nulls)
         {
-            Proof proof = Prove(bounds, _op, _value);
+            Proof proof = Prove(column, bounds, _op, _value);
             long? nans = NaNs(bounds, rows);
             if (_op == ComparisonOp.NotEqual)
             {
@@ -822,7 +829,7 @@ internal sealed class ZonePruner : IBlockPruner
                         continue;
                     }
 
-                    Proof proof = Prove(bounds, ComparisonOp.Equal, literals[i]);
+                    Proof proof = Prove(column, bounds, ComparisonOp.Equal, literals[i]);
                     anyAll |= proof == Proof.All;
                     allNone &= proof == Proof.None;
                 }
@@ -847,7 +854,7 @@ internal sealed class ZonePruner : IBlockPruner
         /// </summary>
         private RangeVerdict PrefixRange(ZoneColumn column, ZoneBounds bounds, long rows, long? nulls)
         {
-            if (BoundsKind(bounds) != FilterLiteralKind.Bytes)
+            if (column.IsDecimal || BoundsKind(bounds) != FilterLiteralKind.Bytes)
             {
                 return RangeVerdict.Of(rows, null, null, nulls, column);
             }
@@ -929,24 +936,24 @@ internal sealed class ZonePruner : IBlockPruner
                 // ordered against k settles nothing, and reading the 0 that says so as "equal"
                 // would rule the zone out -- every zone, for a constant of another kind, which is
                 // an empty answer where an error is owed.
-                return !bounds.HasMax || !TryCompare(bounds.Max, value, out int over) ||
+                return !bounds.HasMax || !TryOrder(column, bounds.Max, value, out int over) ||
                        Satisfiable(op, over, upper: true);
 
             case ComparisonOp.Less:
             case ComparisonOp.LessOrEqual:
-                return !bounds.HasMin || !TryCompare(bounds.Min, value, out int under) ||
+                return !bounds.HasMin || !TryOrder(column, bounds.Min, value, out int under) ||
                        Satisfiable(op, under, upper: false);
 
             case ComparisonOp.Equal:
                 // k has to sit inside [min, max]. Inexact bounds only widen that interval, so the
                 // containment test stays sound; what they forbid is the opposite shortcut,
                 // "min == max means the zone is constant", which is not used here.
-                if (bounds.HasMin && Compare(bounds.Min, value) is int low && low > 0)
+                if (bounds.HasMin && TryOrder(column, bounds.Min, value, out int low) && low > 0)
                 {
                     return false;
                 }
 
-                if (bounds.HasMax && Compare(bounds.Max, value) is int high && high < 0)
+                if (bounds.HasMax && TryOrder(column, bounds.Max, value, out int high) && high < 0)
                 {
                     return false;
                 }
@@ -981,14 +988,28 @@ internal sealed class ZonePruner : IBlockPruner
     };
 
     /// <summary>
-    /// Orders a bound against a constant, in the comparison kernels' own domain.
+    /// Orders a bound of <paramref name="column"/> against a constant the way the kernels order
+    /// that column's values: numerically for a decimal, whose bounds and constants are unscaled
+    /// integers at one scale, and by <see cref="TryCompare"/> otherwise.
     /// </summary>
-    /// <returns>
-    /// The sign of <c>bound - value</c>, or <c>0</c> when the two are not comparable -- which makes
-    /// every caller fall back to "may match" rather than guessing an order.
-    /// </returns>
-    private static int Compare(FilterLiteral bound, FilterLiteral value) =>
-        TryCompare(bound, value, out int order) ? order : 0;
+    /// <returns>Whether the two are comparable; a caller that cannot order them claims nothing.</returns>
+    private static bool TryOrder(ZoneColumn column, FilterLiteral bound, FilterLiteral value, out int order)
+    {
+        if (!column.IsDecimal)
+        {
+            return TryCompare(bound, value, out order);
+        }
+
+        if (ComparisonKernels.TryDecimal(bound, out Int256 left) &&
+            ComparisonKernels.TryDecimal(value, out Int256 right))
+        {
+            order = left.CompareTo(right);
+            return true;
+        }
+
+        order = 0;
+        return false;
+    }
 
     /// <summary>
     /// Orders a bound against a constant the way the comparison kernels order a value against
@@ -1113,10 +1134,17 @@ internal sealed class ZonePruner : IBlockPruner
 
     /// <summary>
     /// The ordered candidates of <paramref name="membership"/>, built on first use and kept for
-    /// the pruner's life, or <see langword="null"/> when they do not order.
+    /// the pruner's life, or <see langword="null"/> when they do not order or the column is a
+    /// decimal.
     /// </summary>
     private OrderedCandidates? OrderedFor(InExpr membership)
     {
+        // The candidates are sorted in the generic order, bytes bytewise, which is not a decimal's.
+        if (Find(membership.Field) is { IsDecimal: true })
+        {
+            return null;
+        }
+
         Ordered[]? known = _ordered;
         if (known is not null)
         {

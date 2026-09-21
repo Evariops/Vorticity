@@ -5,6 +5,7 @@ using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Expressions;
 using Vorticity.Types;
+using Vorticity.Types.Numerics;
 
 namespace Vorticity.Compute;
 
@@ -79,6 +80,72 @@ internal static class LiteralReader
             default:
                 return false;
         }
+    }
+
+    /// <summary>
+    /// Reads row <paramref name="row"/> of a decimal column as the literal a decimal filter
+    /// carries: the unscaled value, a signed integer when it fits one, sixteen or thirty-two
+    /// little-endian bytes otherwise.
+    /// </summary>
+    /// <param name="arena">The arena the node lives in.</param>
+    /// <param name="nodeIndex">The column.</param>
+    /// <param name="row">The row.</param>
+    /// <param name="literal">The value, when the row holds one.</param>
+    /// <returns><see langword="false"/> for a null row or a column that is not a decimal.</returns>
+    /// <remarks>
+    /// Apart from <see cref="TryRead"/> on purpose: such bytes order numerically and not bytewise,
+    /// so only a caller that knows the column is a decimal, and compares accordingly, reads them.
+    /// </remarks>
+    internal static bool TryReadDecimal(
+        CanonicalArena arena, int nodeIndex, int row, out FilterLiteral literal)
+    {
+        literal = default;
+        CanonicalNode node = arena.GetNode(ComparisonKernels.Unwrap(arena, nodeIndex));
+        if ((uint)row >= (uint)node.Length || !ValidityMask.From(arena, node.Validity).IsValid(row))
+        {
+            return false;
+        }
+
+        switch (node.Kind)
+        {
+            case CanonicalKind.Decimal:
+                literal = Decimal(ComparisonKernels.Widen(
+                    node.Values.Span, DecimalStorage.ByteWidth(node.Storage), row));
+                return true;
+
+            case CanonicalKind.Constant when node.DType.Kind == DTypeKind.Decimal:
+                literal = Decimal(ComparisonKernels.Widen(
+                    node.ConstantElement, DecimalStorage.ByteWidth(node.Storage), 0));
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// An unscaled decimal as a filter literal: a signed integer when it fits one, sixteen or
+    /// thirty-two little-endian bytes otherwise, the shapes <see cref="ComparisonKernels.TryDecimal"/>
+    /// reads back.
+    /// </summary>
+    /// <param name="value">The unscaled value.</param>
+    internal static FilterLiteral Decimal(Int256 value)
+    {
+        if (value.TryToInt64(out long narrow))
+        {
+            return FilterLiteral.From(narrow);
+        }
+
+        if (value.TryToInt128(out Int128 middle))
+        {
+            Span<byte> sixteen = stackalloc byte[16];
+            BinaryPrimitives.WriteInt128LittleEndian(sixteen, middle);
+            return FilterLiteral.From(sixteen);
+        }
+
+        Span<byte> wide = stackalloc byte[Int256.ByteCount];
+        value.WriteLittleEndianBytes(wide);
+        return FilterLiteral.From(wide);
     }
 
     /// <summary>Reads one primitive value out of a values buffer, whatever node it came from.</summary>
