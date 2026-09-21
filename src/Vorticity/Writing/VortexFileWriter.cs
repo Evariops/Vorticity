@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using Vorticity.Editions;
 using System.Text;
 using System.Threading;
@@ -22,10 +23,16 @@ using Vorticity.Writing;
 namespace Vorticity;
 
 /// <summary>
-/// Writes a Vortex file, one batch at a time, in a single forward pass. Segments go out as batches
-/// arrive; the layout, footer and postscript can only be written once every segment's offset is
-/// known, so they all belong to <see cref="CompleteAsync"/> and the sink never has to seek.
+/// Writes a Vortex file in a single forward pass. Rows arrive through the writer's builder, as
+/// records, or as batches; whole blocks are sealed into chunks and encoded on the calling thread,
+/// and <see cref="FlushAsync"/> hands the encoded bytes to the sink. The layout, footer and
+/// postscript can only be written once every segment's offset is known, so they belong to
+/// <see cref="CompleteAsync"/> and the sink never has to seek.
 /// </summary>
+/// <remarks>
+/// A writer is used by one thread at a time. Disposing it without <see cref="CompleteAsync"/>
+/// abandons the file, as <see cref="Abandon"/> does.
+/// </remarks>
 public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 {
     private readonly ISegmentSink _sink;
@@ -159,15 +166,35 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     private byte[][]? _zoneMetadata;
     private long _rowCount;
     private bool _started;
+
+    /// <summary>Whether the writer takes no more rows: completed, completing, or abandoned.</summary>
     private bool _completed;
+
+    /// <summary>Whether the footer went out and the sink accepted it: the file is whole.</summary>
+    private bool _finished;
     private bool _abandoned;
 
     /// <summary>
     /// The path this writer created, or null when the caller brought the sink: what
-    /// <see cref="Abandon"/> may delete, since a created file holds nothing but a half-written
-    /// attempt while an appended one holds the caller's rows.
+    /// <see cref="Abandon"/> deletes, since a created file holds nothing but a half-written attempt.
     /// </summary>
     private string? _createdPath;
+
+    /// <summary>The file an append continues, which an abandon truncates back to <see cref="_appendOrigin"/>.</summary>
+    private string? _appendedPath;
+    private long _appendOrigin;
+
+    /// <summary>The pipe over the file this writer opened, which it completes or abandons.</summary>
+    private FilePipeWriter? _filePipe;
+
+    /// <summary>The caller's pipe, which the writer completes when the file is whole and fails when it is abandoned.</summary>
+    private System.IO.Pipelines.PipeWriter? _callerPipe;
+
+    /// <summary>Whether the sink has been closed, one way or the other.</summary>
+    private bool _sinkClosed;
+
+    /// <summary>The user metadata the postscript carries, in the order it is written.</summary>
+    private KeyValuePair<string, ReadOnlyMemory<byte>>[] _metadata = [];
     // Shared, because nothing writes to them and the sink takes memory rather than a span.
     private static readonly byte[] Padding = new byte[VortexLimits.MaxAlignment];
     private static readonly byte[] Magic = VortexFileFormat.MagicBytes.ToArray();
@@ -178,7 +205,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     // Null when the policy asks for nothing, so such a write allocates none of the index machinery.
     private readonly IndexWriter? _indexes;
     private WriteBytes _reportBytes;
-    private ColumnWriteReport[]? _reportColumns;
 
     private VortexFileWriter(
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
@@ -231,10 +257,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             }
             : null;
     }
-
-
-    /// <summary>How many rows have been written.</summary>
-    public long RowCount => _rowCount;
 
     /// <summary>
     /// The row count a caller should batch in multiples of: such a batch, carrying at least
@@ -371,15 +393,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     internal static VortexFileWriter Create(ISegmentSink sink, DType schema, VortexWriteOptions options)
     {
         ArgumentNullException.ThrowIfNull(sink);
-        ArgumentNullException.ThrowIfNull(options);
-        if (schema.IsDefault)
-        {
-            throw new ArgumentException("The schema has not been set.", nameof(schema));
-        }
-
-        // Checked before the first batch rather than at serialization: the answer cannot change
-        // once the writer exists, and the caller should hear it early.
-        RequireSchemaInTarget(schema, options.TargetEdition);
+        Validate(schema, options);
 
         int rowBlock = options.RowBlockSize ?? 0;
         if (rowBlock < 0)
@@ -408,8 +422,47 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints)
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
+            _metadata = UserMetadata.Ordered(options.Metadata),
         };
     }
+
+    /// <summary>
+    /// Refuses options that cannot describe a file of <paramref name="schema"/>, before anything is
+    /// opened or written: a component the target edition lacks, a hint or an index naming no
+    /// column, metadata the postscript cannot carry.
+    /// </summary>
+    internal static void Validate(DType schema, VortexWriteOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (schema.IsDefault)
+        {
+            throw new ArgumentException("The schema has not been set.", nameof(schema));
+        }
+
+        RequireSchemaInTarget(schema, options.TargetEdition);
+        bool tabular = schema.Kind == DTypeKind.Struct;
+        foreach (string path in options.Hints.Keys)
+        {
+            if (!Names(schema, tabular, path))
+            {
+                throw new ArgumentException($"The encoding hint '{path}' names no column of the schema {schema}.", nameof(options));
+            }
+        }
+
+        foreach (string path in options.Indexes.Paths)
+        {
+            if (!Names(schema, tabular, path))
+            {
+                throw new ArgumentException($"The index policy names '{path}', which is no column of the schema {schema}.", nameof(options));
+            }
+        }
+
+        UserMetadata.Validate(options.Metadata);
+    }
+
+    /// <summary>Whether <paramref name="path"/> is a column: a top-level name, a dotted path through structs, or the empty path of a file whose root is not a struct.</summary>
+    private static bool Names(DType schema, bool tabular, string path) =>
+        tabular ? IndexWriter.TryResolve(schema, tabular, path, out _, out _, out _) : path.Length == 0;
 
     /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
     private static void RequireSchemaInTarget(DType dtype, VortexEdition target)
@@ -459,28 +512,37 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <param name="options">Write-time policy.</param>
     /// <returns>The writer, which owns the underlying stream.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
-    internal static VortexFileWriter Create(string path, DType schema, VortexWriteOptions options)
-    {
-        ArgumentNullException.ThrowIfNull(path);
-        System.IO.FileStream stream = new System.IO.FileStream(
-            path, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None);
-        VortexFileWriter writer = Create(new StreamSegmentSink(stream, ownsStream: true), schema, options);
-        writer._createdPath = path;
-        return writer;
-    }
+    internal static VortexFileWriter Create(string path, DType schema, VortexWriteOptions options) =>
+        Create(path, schema, options, VortexSession.Default);
 
-    /// <summary>A writer at <paramref name="path"/>, in <paramref name="session"/>.</summary>
+    /// <summary>A writer at <paramref name="path"/>, in <paramref name="session"/>: a pipe over the file's handle, whose flush is the only I/O.</summary>
+    /// <remarks>The options are checked before the file is opened, so a refused writer leaves whatever was at the path.</remarks>
     internal static VortexFileWriter Create(string path, DType schema, VortexWriteOptions options, VortexSession session)
     {
-        VortexFileWriter writer = Create(path, schema, options);
-        writer.Session = session;
-        return writer;
+        ArgumentNullException.ThrowIfNull(path);
+        Validate(schema, options);
+        FilePipeWriter pipe = FilePipeWriter.Create(path, session.Options.MemoryPool);
+        try
+        {
+            VortexFileWriter writer = Create(new PipeSegmentSink(pipe), schema, options);
+            writer._createdPath = path;
+            writer._filePipe = pipe;
+            writer.Session = session;
+            return writer;
+        }
+        catch
+        {
+            pipe.Abandon();
+            System.IO.File.Delete(path);
+            throw;
+        }
     }
 
-    /// <summary>A writer over <paramref name="sink"/>, in <paramref name="session"/>.</summary>
+    /// <summary>A writer over <paramref name="sink"/>, in <paramref name="session"/>; the writer completes the pipe.</summary>
     internal static VortexFileWriter Create(System.IO.Pipelines.PipeWriter sink, DType schema, VortexWriteOptions options, VortexSession session)
     {
         VortexFileWriter writer = Create(new PipeSegmentSink(sink), schema, options);
+        writer._callerPipe = sink;
         writer.Session = session;
         return writer;
     }
@@ -492,70 +554,68 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     internal static async ValueTask<VortexFileWriter> AppendInSessionAsync(
         string path, VortexWriteOptions? options, VortexSession session, CancellationToken cancellationToken)
     {
-        VortexFileWriter writer = await AppendAsync(path, options, cancellationToken).ConfigureAwait(false);
+        VortexFileWriter writer = await AppendAsync(path, options, null, session, cancellationToken).ConfigureAwait(false);
         writer.Session = session;
         return writer;
     }
 
-    /// <summary>Gives up on the file: nothing more is written, and a created file is removed.</summary>
-    /// <remarks>
-    /// The exit <see cref="DisposeAsync"/> does not give: disposal completes an unfinished file, so
-    /// a producer that throws half way through still leaves a valid one holding the rows it managed
-    /// to write. An abandoned append deletes nothing -- those bytes are the caller's rows -- and
-    /// leaves a tail that does not parse, which is what <see cref="VortexFileRepair"/> is for.
-    /// Safe to call more than once; after it the writer accepts no further rows.
-    /// </remarks>
-    public void Abandon()
-    {
-        _completed = true;
-        _abandoned = true;
-    }
-
-    /// <summary>Appends <paramref name="batch"/> as one chunk of every column.</summary>
-    /// <param name="batch">The rows. Its schema must equal <see cref="DType"/>.</param>
+    /// <summary>
+    /// Takes the rows of node <paramref name="root"/> into the file: whole blocks are written where
+    /// they lie when nothing is pending, anything else waits in the transit arena for the rows that
+    /// complete its last block.
+    /// </summary>
+    /// <param name="arena">The arena holding the rows; the caller keeps it, and may reset it once this returns.</param>
+    /// <param name="root">The rows' node. Its dtype must be the file's.</param>
+    /// <param name="seal">
+    /// Whether whole blocks go out now whatever their bytes: a flush, or the writer's own builder,
+    /// whose buffers are only borrowed for the call.
+    /// </param>
     /// <param name="cancellationToken">Cancels the writes.</param>
-    /// <returns>A task that completes when the batch's segments are with the sink.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="batch"/> is null.</exception>
-    /// <exception cref="ArgumentException">The batch's schema does not match the file's.</exception>
-    /// <exception cref="InvalidOperationException">The file has already been completed.</exception>
-    internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken = default)
+    /// <returns>A task that completes when the rows' segments are with the sink.</returns>
+    private async ValueTask WriteCoreAsync(CanonicalArena arena, int root, bool seal, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(batch);
-        ObjectDisposedException.ThrowIf(_completed, this);
-
-        if (batch.RowCount == 0)
+        int rows = arena.GetNode(root).Length;
+        if (rows == 0)
         {
             // An empty chunk is legal but pointless, and it would make the chunk lists of the
             // columns disagree with a reader's expectation of non-degenerate children.
             return;
         }
 
-        RequireMatchingSchema(batch);
+        RequireMatchingSchema(arena.GetNode(root).DType);
         await StartAsync(cancellationToken).ConfigureAwait(false);
 
         // The statistics pass runs before any copy or emission: the decode that produced the batch
         // has just touched every byte, and a row's block does not depend on where the row ends up.
-        Ingest(batch);
+        Ingest(arena, root);
 
         if (_rowBlock == 0)
         {
             // One call, one chunk.
-            await EmitChunkAsync(batch.Arena, batch.RootIndex, batch.RowCount, cancellationToken)
-                .ConfigureAwait(false);
+            await EmitChunkAsync(arena, root, rows, cancellationToken).ConfigureAwait(false);
             return;
         }
 
         // Nothing pending and already big enough: write it where it lies, with no transit copy.
         if (_pending.Count == 0 &&
-            batch.RowCount >= _rowBlock &&
-            batch.Arena.ByteSize(batch.RootIndex) >= _blockBytes &&
-            batch.RowCount % _rowBlock == 0)
+            rows >= _rowBlock &&
+            (seal || arena.ByteSize(root) >= _blockBytes) &&
+            rows % _rowBlock == 0)
         {
-            await EmitChunkAsync(batch.Arena, batch.RootIndex, batch.RowCount, cancellationToken)
-                .ConfigureAwait(false);
+            await EmitChunkAsync(arena, root, rows, cancellationToken).ConfigureAwait(false);
             return;
         }
 
+        Hold(arena, root);
+        while (_pendingRows >= _rowBlock && (seal || _pendingBytes >= _blockBytes))
+        {
+            await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Copies the rows of node <paramref name="root"/> into the transit arena, where they wait for their chunk.</summary>
+    private void Hold(CanonicalArena arena, int root)
+    {
         // Materialized, not borrowed: the batch's arena is the scan's and is reset as soon as the
         // caller asks for the next batch, so held rows must own their bytes. Narrowed before it is
         // owned, since a batch cut from a large list chunk shares that chunk's elements whole and
@@ -564,13 +624,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         // concatenation tight, because rebasing uses each chunk's whole child length.
         CanonicalArena transit = Transit();
         _pending.Add(_mayShareChildren
-            ? transit.CopyFrom(
-                transit, ChunkCompactor.Compact(transit, transit.ReferenceFrom(batch.Arena, batch.RootIndex)))
-            : transit.CopyFrom(batch.Arena, batch.RootIndex));
-        _pendingRows += batch.RowCount;
+            ? transit.CopyFrom(transit, ChunkCompactor.Compact(transit, transit.ReferenceFrom(arena, root)))
+            : transit.CopyFrom(arena, root));
+        _pendingRows += arena.GetNode(root).Length;
         _pendingBytes += transit.ByteSize(_pending[^1]);
+    }
 
-        while (_pendingRows >= _rowBlock && _pendingBytes >= _blockBytes)
+    /// <summary>Seals the whole blocks waiting in transit into a chunk, whatever their bytes.</summary>
+    private async ValueTask SealAsync(CancellationToken cancellationToken)
+    {
+        if (_rowBlock > 0 && _pendingRows >= _rowBlock)
         {
             await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -580,12 +643,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// Folds one batch into the open block of every column, closing blocks as it crosses them: a
     /// batch that straddles a boundary is cut there and its leftover continues the next block.
     /// </summary>
-    private void Ingest(RecordBatch batch)
+    private void Ingest(CanonicalArena arena, int rootIndex)
     {
-        CanonicalArena arena = batch.Arena;
+        CanonicalNode root = arena.GetNode(rootIndex);
         if (_isTabular)
         {
-            CanonicalNode root = arena.GetNode(batch.RootIndex);
             for (int field = 0; field < _fieldCount; field++)
             {
                 _fieldNodes[field] = root.GetFieldIndex(field);
@@ -593,10 +655,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         }
         else
         {
-            _fieldNodes[0] = batch.RootIndex;
+            _fieldNodes[0] = rootIndex;
         }
 
-        int rows = batch.RowCount;
+        int rows = root.Length;
         if (_blockRows == 0)
         {
             // The batch is the block: repartitioning is off, so batches are the pruning unit.
@@ -899,21 +961,33 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     }
 
     /// <summary>
-    /// Writes the layout, footer, postscript and EOF marker, and finishes the file.
+    /// Writes the last chunk, then the zone maps, statistics, indexes, layout, footer, postscript
+    /// and EOF marker, and finishes the file.
     /// </summary>
+    /// <param name="tailArena">The arena of the last rows, which the caller keeps; null when there are none.</param>
+    /// <param name="tailRoot">
+    /// The last rows' node: written where they lie when nothing waits in transit, behind the
+    /// waiting rows otherwise.
+    /// </param>
     /// <param name="cancellationToken">Cancels the writes.</param>
-    /// <returns>
-    /// What was written: bytes by kind, each column's encodings, and every index the policy asked
-    /// for, built or abandoned with its reason.
-    /// </returns>
-    /// <exception cref="InvalidOperationException">The file has already been completed.</exception>
-    public async ValueTask<WriteReport> CompleteAsync(CancellationToken cancellationToken = default)
+    /// <exception cref="VortexException">An index the policy marked required was not built.</exception>
+    private async ValueTask CompleteCoreAsync(CanonicalArena? tailArena, int tailRoot, CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_completed, this);
-        _completed = true;
-
         // A file with no batches still has to start with the magic.
         await StartAsync(cancellationToken).ConfigureAwait(false);
+
+        bool direct = false;
+        int tailRows = tailArena is null ? 0 : tailArena.GetNode(tailRoot).Length;
+        if (tailRows > 0)
+        {
+            RequireMatchingSchema(tailArena!.GetNode(tailRoot).DType);
+            Ingest(tailArena, tailRoot);
+            direct = _pending.Count == 0;
+            if (!direct)
+            {
+                Hold(tailArena, tailRoot);
+            }
+        }
 
         // The trailing block is closed before the last chunk goes out: that chunk covers this
         // block, and emission reads the closed blocks for the chooser's statistics. Closing it here
@@ -926,7 +1000,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
         // The last chunk goes out whatever its size: the row-block multiple and the byte target are
         // conditions on the chunks before the last one.
-        if (_pendingRows > 0)
+        if (direct)
+        {
+            await EmitChunkAsync(tailArena!, tailRoot, tailRows, cancellationToken).ConfigureAwait(false);
+        }
+        else if (_pendingRows > 0)
         {
             ScanContext from = _transit![_current]!;
             int total = checked((int)_pendingRows);
@@ -948,6 +1026,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         _indexes?.SettleBudget(dataEnd - interleaved);
         await FlushIndexesAsync(cancellationToken, judged: true).ConfigureAwait(false);
         _indexes?.Close(_columns, _chunkRows, _blockRows, dataEnd - interleaved);
+
+        // Before any byte of the tail: a file missing an index its policy required is not completed.
+        if (_indexes?.MissingRequired() is { } missing)
+        {
+            throw new VortexException(
+                $"The {missing.Kind} index on '{missing.Column}' is required and was not built: {missing.Reason}. The file is not completed.");
+        }
 
         // A long run's fence pages, which name the regions just written.
         if (_indexes is { } closed)
@@ -999,111 +1084,62 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
                 dtypeOffset, dtype.Length, layoutOffset, layout.Length, footerOffset, footer.Length,
                 statisticsOffset, statisticsLength, directoryOffset, directory?.Length ?? 0),
             _identity,
+            _metadata,
             cancellationToken).ConfigureAwait(false);
 
         await _sink.FlushAsync(cancellationToken).ConfigureAwait(false);
 
         // Runs written between chunks sit inside `dataEnd`, and are moved to the index count.
+        long data = dataEnd - interleaved;
+        long zoneMaps = zoneMapsEnd - indexStart;
+        long indexBytes = interleaved + (indexStart - dataEnd) + (directory?.Length ?? 0);
+        long footerBytes = _sink.Position - dtypeOffset;
         _reportBytes = new WriteBytes(
-            Data: dataEnd - interleaved,
-            ZoneMaps: zoneMapsEnd - indexStart,
+            Total: data + zoneMaps + statisticsLength + indexBytes + footerBytes,
+            Data: data,
             Statistics: statisticsLength,
-            Indexes: interleaved + (indexStart - dataEnd) + (directory?.Length ?? 0),
-            Footer: _sink.Position - dtypeOffset);
-        return new WriteReport(this);
+            ZoneMaps: zoneMaps,
+            Indexes: indexBytes,
+            Footer: footerBytes);
     }
 
-
-    internal int ReportBlockRows => _blockRows;
-
-    internal IReadOnlyList<long> ReportChunkRows => _chunkRows;
-
-    internal WriteBytes ReportBytes => _reportBytes;
-
-    internal IReadOnlyList<IndexWriteReport> ReportIndexes =>
-        _indexes?.Reports ?? (IReadOnlyList<IndexWriteReport>)Array.Empty<IndexWriteReport>();
-
-    internal ColumnWriteReport[] ReportColumns()
+    /// <summary>What the completed file holds, from the writer's own accounts.</summary>
+    private WriteReport BuildReport()
     {
-        if (_reportColumns is { } built)
+        ImmutableArray<int>.Builder chunks = ImmutableArray.CreateBuilder<int>(_chunkRows.Count);
+        foreach (long rows in _chunkRows)
         {
-            return built;
+            chunks.Add(checked((int)rows));
         }
 
-        ColumnWriteReport[] reports = new ColumnWriteReport[_fieldCount];
+        ImmutableArray<IndexWriteReport> indexes = _indexes is { } writer
+            ? [.. writer.Reports]
+            : ImmutableArray<IndexWriteReport>.Empty;
+        return new WriteReport(_rowCount, _blockRows, chunks.MoveToImmutable(), _reportBytes, ReportColumns(), indexes);
+    }
+
+    private ImmutableArray<ColumnWriteReport> ReportColumns()
+    {
+        ImmutableArray<ColumnWriteReport>.Builder reports = ImmutableArray.CreateBuilder<ColumnWriteReport>(_fieldCount);
         for (int field = 0; field < _fieldCount; field++)
         {
             ColumnWriter column = _columns[field];
-            string[] encodings = new string[_chunkRows.Count];
+            ImmutableArray<string>.Builder encodings = ImmutableArray.CreateBuilder<string>(_chunkRows.Count);
             int block = 0;
             for (int chunk = 0; chunk < _chunkRows.Count; chunk++)
             {
-                encodings[chunk] = column.SchemeAt(block)?.ToString() ?? string.Empty;
+                encodings.Add(column.SchemeAt(block)?.ToString() ?? string.Empty);
                 block += ChunkBlocks(_chunkRows[chunk], _blockRows);
             }
 
-            reports[field] = new ColumnWriteReport(
-                _isTabular ? _schema.GetFieldName(field) : string.Empty,
-                encodings, column.PlansPriced, column.PlansHeld);
-        }
-
-        _reportColumns = reports;
-        return reports;
-    }
-
-    /// <summary>Completes the file if it is not complete, then releases the sink.</summary>
-    /// <remarks>
-    /// Completing is what disposal does, which on an error path is rarely what is wanted: a
-    /// producer that throws part way through leaves, through an <c>await using</c> alone, a file
-    /// that opens and holds the batches it managed to write, indistinguishable from one meant to
-    /// end there. <see cref="Abandon"/> is the exit; call it before disposing when the rows are not
-    /// wanted.
-    /// </remarks>
-    /// <returns>A task that completes when everything is released.</returns>
-    public async ValueTask DisposeAsync()
-    {
-        if (!_completed)
-        {
-            await CompleteAsync(CancellationToken.None).ConfigureAwait(false);
-        }
-
-        // The transit contexts own pooled native blocks: dropped rather than disposed, each block
-        // is freed on the finalizer thread instead of returning to the pool.
-        if (_transit is not null)
-        {
-            for (int i = 0; i < _transit.Length; i++)
+            reports.Add(new ColumnWriteReport(_isTabular ? _schema.GetFieldName(field) : string.Empty, encodings.MoveToImmutable())
             {
-                _transit[i]?.Dispose();
-                _transit[i] = null;
-            }
+                PlansPriced = column.PlansPriced,
+                PlansHeld = column.PlansHeld,
+            });
         }
 
-        // The index builders hold pooled hash sets and a payload arena; their results survive.
-        _indexes?.Dispose();
-
-        if (_sink is IAsyncDisposable disposable)
-        {
-            await disposable.DisposeAsync().ConfigureAwait(false);
-        }
-
-        // After the sink, because the stream holds the file with FileShare.None and a delete under
-        // it fails on Windows.
-        if (_abandoned && _createdPath is not null)
-        {
-            try
-            {
-                System.IO.File.Delete(_createdPath);
-            }
-            catch (System.IO.IOException)
-            {
-                // A file already gone is the outcome asked for, and one the caller has since
-                // replaced is not this writer's to judge.
-            }
-            catch (UnauthorizedAccessException)
-            {
-                // The same answer for a read-only file or a path that has become a directory.
-            }
-        }
+        return reports.MoveToImmutable();
     }
 
     /// <summary>
@@ -1352,20 +1388,30 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <param name="sink">The file's sink, positioned right after the footer.</param>
     /// <param name="placement">The segments the postscript names.</param>
     /// <param name="identity">The identity the options pinned, or null for a fresh one.</param>
+    /// <param name="metadata">The user metadata, each value a segment the postscript names by its key.</param>
     /// <param name="cancellationToken">Cancels the writes.</param>
     /// <remarks>
-    /// The identity goes last before the postscript, so the tail every open reads covers it.
+    /// The metadata and the identity go last before the postscript, so the tail every open reads
+    /// covers them.
     /// </remarks>
     internal static async ValueTask WriteEndAsync(
-        ISegmentSink sink, PostscriptPlacement placement, Guid? identity, CancellationToken cancellationToken)
+        ISegmentSink sink, PostscriptPlacement placement, Guid? identity,
+        IReadOnlyList<KeyValuePair<string, ReadOnlyMemory<byte>>> metadata, CancellationToken cancellationToken)
     {
+        long[] metadataOffsets = new long[metadata.Count];
+        for (int i = 0; i < metadata.Count; i++)
+        {
+            metadataOffsets[i] = sink.Position;
+            await sink.WriteAsync(metadata[i].Value, cancellationToken).ConfigureAwait(false);
+        }
+
         long identityOffset = sink.Position;
         await FileIdentity.WriteAsync(sink, identity, cancellationToken).ConfigureAwait(false);
 
         int postscriptLength;
         using (FlatBufferBuilder builder = new FlatBufferBuilder())
         {
-            ReadOnlyMemory<byte> postscript = BuildPostscript(builder, placement, identityOffset);
+            ReadOnlyMemory<byte> postscript = BuildPostscript(builder, placement, identityOffset, metadata, metadataOffsets);
             if (postscript.Length > VortexLimits.MaxPostscriptSize)
             {
                 throw new InvalidOperationException(
@@ -1394,15 +1440,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
     /// <summary>Builds the postscript in <paramref name="builder"/> and lends its bytes.</summary>
     private static ReadOnlyMemory<byte> BuildPostscript(
-        FlatBufferBuilder builder, in PostscriptPlacement placement, long identityOffset)
+        FlatBufferBuilder builder, in PostscriptPlacement placement, long identityOffset,
+        IReadOnlyList<KeyValuePair<string, ReadOnlyMemory<byte>>> user, ReadOnlySpan<long> userOffsets)
     {
         // The metadata vector's entries must exist before the postscript table that lists them:
-        // the index directory when there is one, then the identity, which every file carries.
+        // the index directory when there is one, the caller's own entries, then the identity,
+        // which every file carries.
         int identitySegment = PostscriptWriter.WriteSegment(
             builder, new SegmentSpec((ulong)identityOffset, FileIdentity.Length, 0, 0, 0),
             CompressionScheme.None);
         int identity = PostscriptWriter.WriteMetadata(builder, FileIdentity.MetadataKeyUtf8, identitySegment);
-        Span<int> metadata = stackalloc int[2];
+        Span<int> metadata = stackalloc int[VortexLimits.MaxMetadataSegments];
         int entries = 0;
         if (placement.DirectoryLength > 0)
         {
@@ -1410,6 +1458,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
                 builder, new SegmentSpec((ulong)placement.DirectoryOffset, (uint)placement.DirectoryLength, 0, 0, 0),
                 CompressionScheme.None);
             metadata[entries++] = PostscriptWriter.WriteMetadata(builder, IndexDirectory.MetadataKeyUtf8, segment);
+        }
+
+        for (int i = 0; i < user.Count; i++)
+        {
+            int segment = PostscriptWriter.WriteSegment(
+                builder, new SegmentSpec((ulong)userOffsets[i], checked((uint)user[i].Value.Length), 0, 0, 0),
+                CompressionScheme.None);
+            metadata[entries++] = PostscriptWriter.WriteMetadata(builder, Encoding.UTF8.GetBytes(user[i].Key), segment);
         }
 
         metadata[entries++] = identity;
@@ -1519,16 +1575,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         return offsets;
     }
 
-    private void RequireMatchingSchema(RecordBatch batch)
+    private void RequireMatchingSchema(DType batchSchema)
     {
-        DType batchSchema = batch.DType;
         int fields = batchSchema.Kind == DTypeKind.Struct ? batchSchema.FieldCount : 1;
         if ((batchSchema.Kind == DTypeKind.Struct) != _isTabular || fields != _fieldCount)
         {
             throw new ArgumentException(
                 $"The batch has {fields} column(s) under a {batchSchema.Kind} root; the file's " +
                 $"schema has {_fieldCount} under a {_schema.Kind} one.",
-                nameof(batch));
+                "batch");
         }
     }
 }

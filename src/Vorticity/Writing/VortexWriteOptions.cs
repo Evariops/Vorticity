@@ -127,6 +127,11 @@ public sealed record VortexWriteOptions
     public Guid? Identity { get; init; }
 
     /// <summary>User metadata the file carries, by key; read back through <c>VortexFile.Metadata</c>.</summary>
+    /// <remarks>
+    /// At most 14 entries, keys of at most 64 UTF-8 bytes, and none of the keys this library writes
+    /// itself; <c>CreateWriter</c> refuses the rest. An append keeps the file's own entries, and an
+    /// entry named again takes its new value.
+    /// </remarks>
     public ImmutableDictionary<string, ReadOnlyMemory<byte>> Metadata
     {
         get => _metadata;

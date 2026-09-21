@@ -893,6 +893,50 @@ internal sealed class IndexWriter : IDisposable
         {
             AbandonForBudget(dataBytes);
         }
+
+        // What is left over the budget once every other index has given way is the required ones':
+        // they are not kept past it, they fail the write, and dropped here their payloads never go out.
+        long required = RequiredBytes;
+        if (dataBytes >= BudgetFloor && required * 1000 > dataBytes * _budgetPerMille)
+        {
+            for (int field = 0; field < _builders.Length; field++)
+            {
+                if (!_columns[field].Required)
+                {
+                    continue;
+                }
+
+                foreach (IndexBuilder builder in _builders[field])
+                {
+                    builder.Abandon(
+                        $"the required indexes take {required} bytes against {dataBytes} bytes of data, over the budget of " +
+                        $"{_budgetPerMille}‰; raise it with IndexPolicy.WithBudgetPerMille");
+                }
+            }
+        }
+    }
+
+    /// <summary>The bytes of the required indexes still alive.</summary>
+    private long RequiredBytes
+    {
+        get
+        {
+            long bytes = 0;
+            for (int slot = 0; slot < _builders.Length; slot++)
+            {
+                if (!_columns[slot].Required)
+                {
+                    continue;
+                }
+
+                foreach (IndexBuilder builder in _builders[slot])
+                {
+                    bytes += builder.Abandoned is null ? builder.Bytes : 0;
+                }
+            }
+
+            return bytes;
+        }
     }
 
     /// <summary>Closes what the end of the data closes: partial generations, file-level filters.</summary>
@@ -1145,7 +1189,29 @@ internal sealed class IndexWriter : IDisposable
     }
 
     private void Abandoned(int field, string kind, string reason) =>
-        _reports.Add(new IndexWriteReport(_paths[field], kind, IndexOutcome.Abandoned, reason, 0, 0, 0));
+        Report(field, kind, IndexOutcome.Abandoned, reason, 0, 0, 0);
+
+    private void Report(int field, string kind, IndexOutcome outcome, string? reason, long bytes, int generations, int runs) =>
+        _reports.Add(new IndexWriteReport(_paths[field], kind, outcome, reason, bytes)
+        {
+            Generations = generations,
+            Runs = runs,
+            Required = _columns[field].Required,
+        });
+
+    /// <summary>The first index the policy marked required that ended abandoned, or null.</summary>
+    internal IndexWriteReport? MissingRequired()
+    {
+        foreach (IndexWriteReport report in _reports)
+        {
+            if (report.Required && report.Outcome == IndexOutcome.Abandoned)
+            {
+                return report;
+            }
+        }
+
+        return null;
+    }
 
     /// <summary>
     /// A Bloom entry: one per resolution the builder kept, each listing the runs whose payload is
@@ -1185,10 +1251,10 @@ internal sealed class IndexWriter : IDisposable
         _entries.Add(new IndexEntry(kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), options.ToBytes(), [run]));
 
         string? fileNote = policy.Resolutions >= 3 ? bloom.FileAbandoned : null;
-        _reports.Add(new IndexWriteReport(
-            _paths[field], kind, IndexOutcome.Built,
+        Report(
+            field, kind, IndexOutcome.Built,
             fileNote is null ? null : "built without its file-level filter: " + fileNote,
-            bloom.WrittenBytes, tree.Nodes, 1));
+            bloom.WrittenBytes, tree.Nodes, 1);
     }
 
     /// <summary>
@@ -1248,7 +1314,7 @@ internal sealed class IndexWriter : IDisposable
 
         _entries.Add(new IndexEntry(
             kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), ExpectedOptions(field, keys), runs));
-        _reports.Add(new IndexWriteReport(_paths[field], kind, IndexOutcome.Built, null, bytes, 0, runs.Count));
+        Report(field, kind, IndexOutcome.Built, null, bytes, 0, runs.Count);
         foreach (PagedRun pages in paged ?? [])
         {
             pages.Report = _reports.Count - 1;
@@ -1391,8 +1457,7 @@ internal sealed class IndexWriter : IDisposable
 
         _entries.Add(new IndexEntry(
             IndexKinds.DictProbe, ColumnPath(field), (ulong)Math.Max(blockRows, 1), [], runs));
-        _reports.Add(new IndexWriteReport(
-            _paths[field], IndexKinds.DictProbe, IndexOutcome.Built, null, 0, 0, runs.Count));
+        Report(field, IndexKinds.DictProbe, IndexOutcome.Built, null, 0, 0, runs.Count);
 
         static void Flush(List<IndexRun> runs, long first, long end)
         {

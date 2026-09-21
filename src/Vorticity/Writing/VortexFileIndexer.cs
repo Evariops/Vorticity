@@ -479,13 +479,14 @@ public static class VortexFileIndexer
         await sink.WriteAsync(footer, cancellationToken).ConfigureAwait(false);
 
         // A new postscript is a new version of the bytes, even though no data byte moved: an index
-        // built against the old bytes does not describe it.
+        // built against the old bytes does not describe it. The caller's metadata goes on with it.
         await VortexFileWriter.WriteEndAsync(
             sink,
             new VortexFileWriter.PostscriptPlacement(
                 dtypeOffset, dtype.Length, layoutOffset, old.Layout.Length, footerOffset, footer.Length,
                 statisticsOffset, statisticsLength, directoryOffset, directory?.Length ?? 0),
             identity,
+            UserMetadata.Ordered(await UserMetadata.ReadAsync(file, cancellationToken).ConfigureAwait(false)),
             cancellationToken).ConfigureAwait(false);
     }
 

@@ -1,34 +1,30 @@
 using System;
-using System.Collections.Generic;
-using Vorticity.Writing;
+using System.Collections.Immutable;
 
 namespace Vorticity;
 
-/// <summary>The bytes of a written file, by what they hold.</summary>
+/// <summary>The bytes of a written file, by what they hold; they sum to its length.</summary>
+/// <param name="Total">The file's length.</param>
 /// <param name="Data">The magic and the column chunks, padding included.</param>
-/// <param name="ZoneMaps">The <c>vortex.zoned</c> zones tables.</param>
 /// <param name="Statistics">The file statistics segment.</param>
+/// <param name="ZoneMaps">The zones tables.</param>
 /// <param name="Indexes">Index runs and the index directory.</param>
-/// <param name="Footer">The dtype, layout, footer, postscript and EOF marker.</param>
-public readonly record struct WriteBytes(long Data, long ZoneMaps, long Statistics, long Indexes, long Footer)
-{
-    /// <summary>The file's length.</summary>
-    public long Total => Data + ZoneMaps + Statistics + Indexes + Footer;
-}
+/// <param name="Footer">The dtype, layout, footer, user metadata, identity, postscript and end-of-file marker.</param>
+public readonly record struct WriteBytes(long Total, long Data, long Statistics, long ZoneMaps, long Indexes, long Footer);
 
 /// <summary>What one top-level column was written as.</summary>
-/// <param name="Path">The column, as a scan spells it; empty for a non-struct root.</param>
+/// <param name="Path">The column, as a scan spells it; empty for a file whose root is not a struct.</param>
 /// <param name="Encodings">The scheme each chunk was encoded with, in chunk order.</param>
-/// <param name="PlansPriced">Chunks that had a remembered plan to consult.</param>
-/// <param name="PlansHeld">Of those, the ones whose remembered plan held and was kept.</param>
-public sealed record ColumnWriteReport(
-    string Path,
-    IReadOnlyList<string> Encodings,
-    int PlansPriced,
-    int PlansHeld)
+public sealed record ColumnWriteReport(string Path, ImmutableArray<string> Encodings)
 {
-    /// <summary>How often plan memory held, or <c>0</c> for a column that never had a plan to consult.</summary>
-    public double PlanMemoryHitRate => PlansPriced == 0 ? 0 : (double)PlansHeld / PlansPriced;
+    /// <summary>Chunks that had a remembered plan to consult.</summary>
+    internal int PlansPriced { get; init; }
+
+    /// <summary>Of those, the ones whose remembered plan held and was kept.</summary>
+    internal int PlansHeld { get; init; }
+
+    /// <summary>How often plan memory held, or 0 for a column that never had a plan to consult.</summary>
+    internal double PlanMemoryHitRate => PlansPriced == 0 ? 0 : (double)PlansHeld / PlansPriced;
 }
 
 /// <summary>Whether an index a policy asked for is in the file.</summary>
@@ -37,67 +33,49 @@ public enum IndexOutcome
     /// <summary>Written, and listed in the directory.</summary>
     Built = 0,
 
-    /// <summary>Dropped whole, for the reason the report gives.</summary>
+    /// <summary>Dropped whole, for the reason the report gives; it left no bytes in the file.</summary>
     Abandoned = 1,
 }
 
-/// <summary>
-/// One index a policy asked for, and what became of it. <c>Reason</c> is set only when the index
-/// was abandoned, and <c>Generations</c> counts the filters it carries coarser than a block.
-/// </summary>
-public sealed record IndexWriteReport(
-    string Path,
-    string Kind,
-    IndexOutcome Outcome,
-    string? Reason,
-    long Bytes,
-    int Generations,
-    int Runs);
-
-/// <summary>
-/// What one <see cref="VortexFileWriter"/> wrote. A lazy view over the completed writer that stays
-/// valid after it is disposed; <c>default</c> reads as an empty file.
-/// </summary>
-public readonly struct WriteReport : IEquatable<WriteReport>
+/// <summary>One index a policy asked for, and what became of it.</summary>
+/// <param name="Column">The column, or the key's columns in parentheses.</param>
+/// <param name="Kind">The index kind, as the index directory names it.</param>
+/// <param name="Outcome">Whether it is in the file.</param>
+/// <param name="Reason">Why it was abandoned, or what it was built without; null otherwise.</param>
+/// <param name="Bytes">The bytes its runs take in the file.</param>
+public sealed record IndexWriteReport(string Column, string Kind, IndexOutcome Outcome, string? Reason, long Bytes)
 {
-    private readonly VortexFileWriter? _writer;
+    /// <summary>The filters it carries coarser than a block.</summary>
+    internal int Generations { get; init; }
 
-    internal WriteReport(VortexFileWriter writer) => _writer = writer;
+    /// <summary>The runs its directory entry lists.</summary>
+    internal int Runs { get; init; }
 
-    /// <summary>Rows written.</summary>
-    public long RowCount => _writer?.RowCount ?? 0;
+    /// <summary>Whether the policy marked it required, so that its abandonment fails the write.</summary>
+    internal bool Required { get; init; }
+}
 
-    /// <summary>
-    /// Rows per block: the zone length, and the unit index runs are counted in; <c>0</c> when
-    /// repartitioning was off, in which case every chunk is one block.
-    /// </summary>
-    public int BlockRows => _writer?.ReportBlockRows ?? 0;
-
-    /// <summary>
-    /// The row count of every chunk, in order. Chunks are shared by every column, and each but the
-    /// last is a whole number of blocks.
-    /// </summary>
-    public IReadOnlyList<long> ChunkRows => _writer?.ReportChunkRows ?? Array.Empty<long>();
-
-    /// <summary>The file's bytes, by kind; they sum to its length.</summary>
-    public WriteBytes Bytes => _writer?.ReportBytes ?? default;
-
-    /// <summary>One entry per top-level column.</summary>
-    public IReadOnlyList<ColumnWriteReport> Columns =>
-        _writer?.ReportColumns() ?? Array.Empty<ColumnWriteReport>();
-
-    /// <summary>One entry per index a policy asked for, built or abandoned.</summary>
-    public IReadOnlyList<IndexWriteReport> Indexes =>
-        _writer?.ReportIndexes ?? Array.Empty<IndexWriteReport>();
-
-    /// <summary>The report for one column's index of one kind.</summary>
-    /// <returns>The entry, or <see langword="null"/> when the policy never asked for it.</returns>
-    public IndexWriteReport? Index(string path, string kind)
+/// <summary>What one <see cref="VortexFileWriter"/> wrote.</summary>
+/// <param name="RowCount">Rows in the file.</param>
+/// <param name="BlockRows">Rows per block: the zone length, and the unit index runs are counted in.</param>
+/// <param name="ChunkRows">The rows of every chunk, in order; each chunk but the last is a whole number of blocks.</param>
+/// <param name="Bytes">The file's bytes, by kind.</param>
+/// <param name="Columns">One entry per top-level column.</param>
+/// <param name="Indexes">One entry per index the policy asked for, built or abandoned.</param>
+public sealed record WriteReport(
+    long RowCount,
+    int BlockRows,
+    ImmutableArray<int> ChunkRows,
+    WriteBytes Bytes,
+    ImmutableArray<ColumnWriteReport> Columns,
+    ImmutableArray<IndexWriteReport> Indexes)
+{
+    /// <summary>The report of one column's index of one kind, or null when the policy never asked for it.</summary>
+    internal IndexWriteReport? Index(string column, string kind)
     {
         foreach (IndexWriteReport index in Indexes)
         {
-            if (string.Equals(index.Path, path, StringComparison.Ordinal)
-                && string.Equals(index.Kind, kind, StringComparison.Ordinal))
+            if (string.Equals(index.Column, column, StringComparison.Ordinal) && string.Equals(index.Kind, kind, StringComparison.Ordinal))
             {
                 return index;
             }
@@ -105,19 +83,4 @@ public readonly struct WriteReport : IEquatable<WriteReport>
 
         return null;
     }
-
-    /// <summary>Two reports are equal when they view the same writer.</summary>
-    public bool Equals(WriteReport other) => ReferenceEquals(_writer, other._writer);
-
-    /// <inheritdoc/>
-    public override bool Equals(object? obj) => obj is WriteReport other && Equals(other);
-
-    /// <inheritdoc/>
-    public override int GetHashCode() => _writer?.GetHashCode() ?? 0;
-
-    /// <summary>Whether two reports view the same writer.</summary>
-    public static bool operator ==(WriteReport left, WriteReport right) => left.Equals(right);
-
-    /// <summary>Whether two reports view different writers.</summary>
-    public static bool operator !=(WriteReport left, WriteReport right) => !left.Equals(right);
 }

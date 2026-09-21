@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -60,7 +61,7 @@ public sealed partial class VortexFileWriter
     /// <exception cref="VortexFormatException">The file is malformed.</exception>
     internal static async ValueTask<VortexFileWriter> AppendAsync(
         string path, VortexWriteOptions? options = null, CancellationToken cancellationToken = default) =>
-        await AppendAsync(path, options, null, cancellationToken).ConfigureAwait(false);
+        await AppendAsync(path, options, null, VortexSession.Default, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// The same append, over a sink <paramref name="wrap"/> builds from the opened stream and the
@@ -70,15 +71,25 @@ public sealed partial class VortexFileWriter
         string path,
         VortexWriteOptions? options,
         Func<Stream, long, ISegmentSink>? wrap,
+        CancellationToken cancellationToken) =>
+        await AppendAsync(path, options, wrap, VortexSession.Default, cancellationToken).ConfigureAwait(false);
+
+    private static async ValueTask<VortexFileWriter> AppendAsync(
+        string path,
+        VortexWriteOptions? options,
+        Func<Stream, long, ISegmentSink>? wrap,
+        VortexSession session,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(path);
         AppendPlan plan;
+        ImmutableDictionary<string, ReadOnlyMemory<byte>> metadata;
         VortexFile file = await VortexFile.OpenAsync(path, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
         {
             VortexFileRepair.ThrowIfTorn(path, file, "An append");
             plan = await AppendPlan.ReadAsync(file, options, cancellationToken).ConfigureAwait(false);
+            metadata = await UserMetadata.ReadAsync(file, cancellationToken).ConfigureAwait(false);
         }
 
         VortexWriteOptions effective = (options ?? VortexWriteOptions.Default).ForAppend(
@@ -87,27 +98,15 @@ public sealed partial class VortexFileWriter
             plan.Statistics is not null && (options?.FileStatistics ?? true),
             options?.IndexBudgetPerMille ?? plan.BudgetPerMille);
 
-        FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
-        VortexFileWriter writer;
-        try
-        {
-            if (stream.Length != plan.FileLength)
-            {
-                throw new IOException($"{path} changed while it was being opened for an append.");
-            }
+        // The file's own metadata carries over; an entry the caller names again takes the new value.
+        effective = effective with { Metadata = metadata.SetItems(effective.Metadata) };
 
-            stream.Seek(0, SeekOrigin.End);
-            ISegmentSink sink = wrap is null
-                ? new StreamSegmentSink(stream, ownsStream: true, plan.FileLength)
-                : wrap(stream, plan.FileLength);
-            writer = Create(sink, plan.Schema, effective);
-        }
-        catch
-        {
-            await stream.DisposeAsync().ConfigureAwait(false);
-            plan.AbsorbedScratch?.Dispose();
-            throw;
-        }
+        VortexFileWriter writer = wrap is null
+            ? OpenAppend(path, plan, effective, session)
+            : await OpenWrappedAsync(path, plan, effective, wrap).ConfigureAwait(false);
+        writer._appendedPath = path;
+        writer._appendOrigin = plan.FileLength;
+        writer.Session = session;
 
         try
         {
@@ -117,7 +116,7 @@ public sealed partial class VortexFileWriter
                 CanonicalArena arena = batch.Arena;
                 using (batch)
                 {
-                    await writer.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
+                    await writer.WriteCoreAsync(arena, batch.RootIndex, seal: false, cancellationToken).ConfigureAwait(false);
                 }
 
                 // The owned copy rented from the pool; the writer has taken what it keeps.
@@ -126,16 +125,73 @@ public sealed partial class VortexFileWriter
         }
         catch
         {
-            // Abandon before disposing, or disposal completes the file: the reopened chunk has not
-            // been re-emitted yet, so a footer written here would drop the original's last chunk
-            // from a file that still parses, which repair cannot see. Abandoning leaves an
-            // unparseable tail instead, which repair truncates back to the last postscript.
+            // The reopened chunk has not been re-emitted, so a footer written now would drop the
+            // original's last chunk from a file that still parses. Abandoning truncates the file
+            // back to what it was.
             writer.Abandon();
             await writer.DisposeAsync().ConfigureAwait(false);
             throw;
         }
 
         return writer;
+    }
+
+    /// <summary>The append's writer over a pipe on the file's handle, positioned at its end.</summary>
+    private static VortexFileWriter OpenAppend(
+        string path, AppendPlan plan, VortexWriteOptions options, VortexSession session)
+    {
+        Microsoft.Win32.SafeHandles.SafeFileHandle handle = System.IO.File.OpenHandle(
+            path, FileMode.Open, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
+        FilePipeWriter? pipe = null;
+        try
+        {
+            if (RandomAccess.GetLength(handle) != plan.FileLength)
+            {
+                throw new IOException($"{path} changed while it was being opened for an append.");
+            }
+
+            pipe = new FilePipeWriter(handle, plan.FileLength, session.Options.MemoryPool);
+            VortexFileWriter writer = Create(new PipeSegmentSink(pipe, plan.FileLength), plan.Schema, options);
+            writer._filePipe = pipe;
+            return writer;
+        }
+        catch
+        {
+            if (pipe is null)
+            {
+                handle.Dispose();
+            }
+            else
+            {
+                pipe.Complete();
+            }
+
+            plan.AbsorbedScratch?.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>The append's writer over the sink a test builds from the file's stream.</summary>
+    private static async ValueTask<VortexFileWriter> OpenWrappedAsync(
+        string path, AppendPlan plan, VortexWriteOptions options, Func<Stream, long, ISegmentSink> wrap)
+    {
+        FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
+        try
+        {
+            if (stream.Length != plan.FileLength)
+            {
+                throw new IOException($"{path} changed while it was being opened for an append.");
+            }
+
+            stream.Seek(0, SeekOrigin.End);
+            return Create(wrap(stream, plan.FileLength), plan.Schema, options);
+        }
+        catch
+        {
+            await stream.DisposeAsync().ConfigureAwait(false);
+            plan.AbsorbedScratch?.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Takes over the old file: segments, encodings, chunks, blocks, index runs.</summary>
@@ -146,6 +202,7 @@ public sealed partial class VortexFileWriter
         _segments.AddRange(plan.Segments);
         _chunkRows.AddRange(plan.KeptChunkRows);
         _rowCount = plan.KeptRows;
+        _acceptedRows = plan.KeptRows;
         _emittedBlocks = plan.Boundary;
         bool[] noZoneMap = new bool[_fieldCount];
         _append = new AppendState
