@@ -14,15 +14,14 @@ namespace Vorticity.RowEncoding;
 /// <remarks>
 /// The bytes carry no type tags, no field names and no sort options, so two keys are comparable
 /// only when they came from the same schema with the same options, and the layout may change
-/// between Vortex releases: these bytes do not belong in a durable index. Supported are
-/// <c>Null</c>, <c>Bool</c>, every primitive, <c>Decimal</c> up to 128 bits, <c>Utf8</c>,
-/// <c>Binary</c>, <c>Struct</c> and <c>FixedSizeList</c>, nested arbitrarily; variable-size
-/// <c>List</c>, <c>Map</c>, <c>Variant</c>, <c>Union</c>, <c>Extension</c> and 256-bit
-/// <c>Decimal</c> raise <see cref="VortexUnsupportedException"/> because the format defines no
-/// ordering for them, which also means a timestamp or date column must be normalized to its
-/// storage type first. NaNs are not canonicalized, so two NaNs with different payloads differ.
+/// between Vortex releases. Supported are nulls, booleans, every integer and float, decimals up to
+/// 128 bits, text, binary, nested records and fixed-size lists, nested arbitrarily; a date, time,
+/// timestamp or other extension column is ordered by its storage. Variable-size lists, maps,
+/// variants, unions and 256-bit decimals raise <see cref="VortexUnsupportedException"/> because the
+/// format defines no order for them. NaNs are not canonicalized, so two NaNs with different
+/// payloads differ.
 /// </remarks>
-internal static partial class RowEncoder
+public static partial class RowEncoder
 {
     /// <summary>
     /// The Vortex release whose byte layout this encoder reproduces; with the package version, it
@@ -30,11 +29,44 @@ internal static partial class RowEncoder
     /// </summary>
     public const string VortexVersion = "0.86.1";
 
-    /// <summary>
-    /// Encodes the fields of a batch's root struct, one column per field, taking one entry of
-    /// <paramref name="fields"/> per root field in schema order. The caller disposes the keys.
-    /// </summary>
-    public static RowKeys Encode(RecordBatch batch, ReadOnlySpan<RowSortField> fields)
+    /// <summary>Encodes the members of a record, one column per member in declaration order.</summary>
+    /// <typeparam name="TRecord">The record the scan is typed by.</typeparam>
+    /// <param name="columns">The batch's columns.</param>
+    /// <param name="fields">One sort field per member, one for every member, or none for ascending with nulls first.</param>
+    /// <returns>One key per row of the batch, selected or not; the caller disposes it.</returns>
+    /// <exception cref="VortexUnsupportedException">A member's column has no order the format defines.</exception>
+    public static RowKeys Encode<TRecord>(Columns<TRecord> columns, params ReadOnlySpan<RowSortField> fields)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        int count = columns.MemberCount;
+        Span<int> nodes = count <= 32 ? stackalloc int[count] : new int[count];
+        for (int i = 0; i < count; i++)
+        {
+            nodes[i] = Storage(columns.Arena, columns.ColumnNode(i));
+        }
+
+        return Encode(columns.Arena, nodes, PerColumn(fields, count));
+    }
+
+    /// <summary>Encodes the columns of a batch, in schema order.</summary>
+    /// <param name="batch">The batch.</param>
+    /// <param name="fields">One sort field per column, one for every column, or none for ascending with nulls first.</param>
+    /// <returns>One key per row of the batch, selected or not; the caller disposes it.</returns>
+    /// <exception cref="VortexUnsupportedException">A column has no order the format defines.</exception>
+    public static RowKeys Encode(BatchView batch, params ReadOnlySpan<RowSortField> fields)
+    {
+        int count = batch.Schema.Count;
+        Span<int> nodes = count <= 32 ? stackalloc int[count] : new int[count];
+        for (int i = 0; i < count; i++)
+        {
+            nodes[i] = Storage(batch.Arena, batch.ColumnNode(i));
+        }
+
+        return Encode(batch.Arena, nodes, PerColumn(fields, count));
+    }
+
+    /// <summary>Encodes the fields of a batch's root struct, one column per field, taking one entry of <paramref name="fields"/> per root field in schema order.</summary>
+    internal static RowKeys Encode(RecordBatch batch, ReadOnlySpan<RowSortField> fields)
     {
         ArgumentNullException.ThrowIfNull(batch);
         if (!batch.IsTabular)
@@ -64,11 +96,35 @@ internal static partial class RowEncoder
         }
     }
 
+    /// <summary>The storage below every extension wrapping <paramref name="node"/>.</summary>
+    internal static int Storage(CanonicalArena arena, int node)
+    {
+        while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
+        {
+            node = arena.GetNode(node).StorageIndex;
+        }
+
+        return node;
+    }
+
+    /// <summary>One sort field per column: <paramref name="fields"/> itself, or its single entry or the default repeated.</summary>
+    private static ReadOnlySpan<RowSortField> PerColumn(ReadOnlySpan<RowSortField> fields, int columns)
+    {
+        if (fields.Length == columns || fields.Length > 1)
+        {
+            return fields;
+        }
+
+        RowSortField[] each = new RowSortField[columns];
+        each.AsSpan().Fill(fields.IsEmpty ? RowSortField.Ascending : fields[0]);
+        return each;
+    }
+
     /// <summary>
     /// Encodes columns, given one canonical node index and one sort field per column in key order,
     /// into pooled row keys the caller disposes.
     /// </summary>
-    public static RowKeys Encode(
+    internal static RowKeys Encode(
         CanonicalArena arena, ReadOnlySpan<int> columns, ReadOnlySpan<RowSortField> fields)
     {
         int rowCount = Validate(arena, columns, fields);
@@ -117,7 +173,7 @@ internal static partial class RowEncoder
     /// Pass 1: fills <paramref name="sizes"/>, one entry per row, and returns the total number of
     /// bytes the encoding needs.
     /// </summary>
-    public static int ComputeSizes(
+    internal static int ComputeSizes(
         CanonicalArena arena, ReadOnlySpan<int> columns, ReadOnlySpan<RowSortField> fields, Span<int> sizes)
     {
         int rowCount = Validate(arena, columns, fields);
@@ -174,7 +230,7 @@ internal static partial class RowEncoder
     /// Turns per-row sizes into per-row start offsets, the exclusive prefix sum, and returns its
     /// final value.
     /// </summary>
-    public static int ComputeOffsets(ReadOnlySpan<int> sizes, Span<int> offsets)
+    internal static int ComputeOffsets(ReadOnlySpan<int> sizes, Span<int> offsets)
     {
         if (sizes.Length != offsets.Length)
         {
@@ -190,7 +246,7 @@ internal static partial class RowEncoder
     /// <see cref="ComputeSizes"/> returned. <paramref name="cursors"/> is zeroed on entry and
     /// holds each row's byte count on return.
     /// </summary>
-    public static void Encode(
+    internal static void Encode(
         CanonicalArena arena,
         ReadOnlySpan<int> columns,
         ReadOnlySpan<RowSortField> fields,

@@ -11,12 +11,13 @@ using Vorticity.Types;
 namespace Vorticity.RowEncoding;
 
 /// <summary>
-/// The row encoding as the key encoder of a composite index. The encoding of the leading columns
-/// alone is a byte prefix of the whole tuple's, so a prefix query is a seek and a walk. These bytes
-/// outlive the process, so <see cref="Format"/> names the layout they follow and lets a reader see
-/// that its seek keys do not compare with an index written under another one.
+/// The row encoding as the key encoder of a composite index, for <c>IndexPolicy.ForKey</c>. The
+/// encoding of the leading columns alone is a byte prefix of the whole tuple's, so a prefix query is
+/// a seek and a walk. These bytes outlive the process, so <see cref="Format"/> names the layout they
+/// follow and lets a reader see that its seek keys do not compare with an index written under
+/// another one.
 /// </summary>
-internal sealed class RowKeyEncoder : IKeyEncoder
+public sealed class RowKeyEncoder : IKeyEncoder
 {
     private readonly RowSortField[] _fields;
 
@@ -24,21 +25,16 @@ internal sealed class RowKeyEncoder : IKeyEncoder
     /// An encoder taking one sort field per key column, in key order; a single field applies to
     /// every column, so one encoder then serves keys of any width.
     /// </summary>
-    public RowKeyEncoder(params RowSortField[] fields)
+    /// <param name="fields">The sort fields; none means ascending with nulls first for every column.</param>
+    public RowKeyEncoder(params ReadOnlySpan<RowSortField> fields)
     {
-        ArgumentNullException.ThrowIfNull(fields);
-        if (fields.Length == 0)
-        {
-            throw new ArgumentException("A key has at least one column.", nameof(fields));
-        }
-
-        _fields = [.. fields];
+        _fields = fields.IsEmpty ? [RowSortField.Ascending] : fields.ToArray();
         StringBuilder format = new StringBuilder("vortex-row ").Append(RowEncoder.VortexVersion).Append(' ');
-        for (int i = 0; i < fields.Length; i++)
+        for (int i = 0; i < _fields.Length; i++)
         {
             format.Append(i == 0 ? string.Empty : ",")
-                .Append(fields[i].Descending ? "desc" : "asc")
-                .Append(fields[i].NullsFirst ? "-nf" : "-nl");
+                .Append(_fields[i].Descending ? "desc" : "asc")
+                .Append(_fields[i].NullsFirst ? "-nf" : "-nl");
         }
 
         Format = format.ToString();
@@ -51,21 +47,11 @@ internal sealed class RowKeyEncoder : IKeyEncoder
     public ReadOnlySpan<RowSortField> Fields => _fields;
 
     /// <inheritdoc/>
-    public IEncodedKeys Encode(CanonicalArena arena, ReadOnlySpan<int> columns)
-    {
-        if (_fields.Length != 1 || columns.Length == 1)
-        {
-            return RowEncoder.Encode(arena, columns, _fields);
-        }
-
-        RowSortField[] fields = new RowSortField[columns.Length];
-        fields.AsSpan().Fill(_fields[0]);
-        return RowEncoder.Encode(arena, columns, fields);
-    }
+    public IEncodedKeys Encode(BatchView columns) => RowEncoder.Encode(columns, _fields);
 }
 
 /// <summary>The single-tuple overloads.</summary>
-internal static partial class RowEncoder
+public static partial class RowEncoder
 {
     /// <summary>
     /// The row encoding of one tuple: the seek key of a composite cursor, or its prefix when fewer
@@ -76,7 +62,7 @@ internal static partial class RowEncoder
     /// float as <c>f64</c>, bytes as <c>utf8</c>, all non-nullable -- and the bytes depend on them,
     /// so a key column of another width or a nullable one needs the overload taking dtypes.
     /// </remarks>
-    public static byte[] EncodeKey(ReadOnlySpan<FilterLiteral> values, ReadOnlySpan<RowSortField> fields)
+    internal static byte[] EncodeKey(ReadOnlySpan<FilterLiteral> values, ReadOnlySpan<RowSortField> fields)
     {
         DTypeArena types = new DTypeArena();
         DType[] dtypes = new DType[values.Length];
@@ -102,7 +88,7 @@ internal static partial class RowEncoder
     /// The row encoding of one tuple at the key columns' own dtypes, whose width and nullability
     /// shape the bytes.
     /// </summary>
-    public static byte[] EncodeKey(
+    internal static byte[] EncodeKey(
         ReadOnlySpan<FilterLiteral> values, ReadOnlySpan<DType> dtypes, ReadOnlySpan<RowSortField> fields)
     {
         if (values.Length != dtypes.Length || values.Length != fields.Length || values.Length == 0)
