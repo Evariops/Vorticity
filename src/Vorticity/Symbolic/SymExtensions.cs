@@ -56,4 +56,40 @@ public static class SymExtensions
         /// <returns>The predicate.</returns>
         public Predicate Contains(T value) => SymLowering.ListContains(list.Column, value);
     }
+
+    extension<T1, T2>(Sym<(T1, T2)> key)
+    {
+        /// <summary>The first column of a group's composite key.</summary>
+        public Sym<T1> Item1 => Aggregating.KeyItems.Item<(T1, T2), T1>(key, 0);
+
+        /// <summary>The second column of a group's composite key.</summary>
+        public Sym<T2> Item2 => Aggregating.KeyItems.Item<(T1, T2), T2>(key, 1);
+    }
+
+    extension<T1, T2, T3>(Sym<(T1, T2, T3)> key)
+    {
+        /// <summary>The first column of a group's composite key.</summary>
+        public Sym<T1> Item1 => Aggregating.KeyItems.Item<(T1, T2, T3), T1>(key, 0);
+
+        /// <summary>The second column of a group's composite key.</summary>
+        public Sym<T2> Item2 => Aggregating.KeyItems.Item<(T1, T2, T3), T2>(key, 1);
+
+        /// <summary>The third column of a group's composite key.</summary>
+        public Sym<T3> Item3 => Aggregating.KeyItems.Item<(T1, T2, T3), T3>(key, 2);
+    }
+
+    extension<T1, T2, T3, T4>(Sym<(T1, T2, T3, T4)> key)
+    {
+        /// <summary>The first column of a group's composite key.</summary>
+        public Sym<T1> Item1 => Aggregating.KeyItems.Item<(T1, T2, T3, T4), T1>(key, 0);
+
+        /// <summary>The second column of a group's composite key.</summary>
+        public Sym<T2> Item2 => Aggregating.KeyItems.Item<(T1, T2, T3, T4), T2>(key, 1);
+
+        /// <summary>The third column of a group's composite key.</summary>
+        public Sym<T3> Item3 => Aggregating.KeyItems.Item<(T1, T2, T3, T4), T3>(key, 2);
+
+        /// <summary>The fourth column of a group's composite key.</summary>
+        public Sym<T4> Item4 => Aggregating.KeyItems.Item<(T1, T2, T3, T4), T4>(key, 3);
+    }
 }
