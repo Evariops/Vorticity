@@ -638,15 +638,15 @@ internal static class ThroughputCheck
         new("alp_patched_no_chunk_offsets", 0.81, 0.019),   // 3 passes, spread 0.80-0.81; was 0.83, -2.2%
         new("alprd", 1.23, 0.014),   // 3 passes, spread 1.33-1.35; HELD at 1.23: 3 of 3 passes above, peak 1.35, no loosening
         new("bool", 0.78, 0.014),   // 3 passes, spread 0.77-0.78; was 0.82, -4.8%
-        new("bool_bit_offset3", 0.80, 0.055),   // 3 passes, spread 0.76-0.80; was 0.83, -3.6%
+        new("bool_bit_offset3", 0.78, 0.021),   // 3 passes, spread 0.77-0.78; was 0.80, -2.0%
         new("bool_bit_offset7", 0.78, 0.044),   // 3 passes, spread 0.74-0.78; was 0.80, -2.6%
-        new("bool_bit_offset_straddle", 0.78, 0.020),   // 3 passes, spread 0.76-0.78; was 0.81, -3.7%
-        new("bytebool", 1.02, 0.041),   // 3 passes, spread 0.97-1.02; was 1.04, -2.4%
+        new("bool_bit_offset_straddle", 0.77, 0.027),   // 3 passes, spread 0.75-0.77; was 0.78, -0.7%
+        new("bytebool", 1.01, 0.006),   // 3 passes, spread 1.00-1.01; was 1.02, -1.5%
         new("chunked", 0.25, 0.076),   // 3 passes, spread 0.23-0.25; was 0.25, -1.3%
         new("chunked_bool", 0.61, 0.010),   // 3 passes, spread 0.61-0.61; was 0.65, -5.8%
         new("chunked_decimal", 0.23, 0.046),   // 3 passes, spread 0.22-0.23; HELD at 0.23: 1 of 3 passes above, peak 0.23, no loosening
         new("chunked_empty_chunks", 0.25, 0.047),   // 3 passes, spread 0.23-0.25; was 0.25, -1.9%
-        new("chunked_mixed_validity", 1.11, 0.062),   // 3 passes, spread 1.04-1.11; was 1.13, -1.7%
+        new("chunked_mixed_validity", 1.10, 0.061),   // 3 passes, spread 1.04-1.10; was 1.11, -0.5%
         new("chunked_one_chunk", 0.26, 0.131),   // 3 passes, spread 0.26-0.29; HELD at 0.26: 3 of 3 above, peak 0.29, no loosening
         new("chunked_varbinview", 0.056, 0.048),   // 3 passes, spread 0.054-0.056; was 0.058, -3.0%
         new("constant", 0.42, 0.003),   // 3 passes, spread 0.41-0.42; was 0.96, -56.8% (ConstantForm par defaut)
@@ -657,10 +657,10 @@ internal static class ThroughputCheck
         new("dict_nullable_codes", 0.67, 0.018),   // 3 passes, spread 0.66-0.67; was 0.73, -7.8%
         new("dict_nullable_values_nonnull_codes", 0.79, 0.012),   // 3 passes, spread 0.78-0.79; was 0.79, -0.5%
         new("dict_u64_codes", 1.08, 0.044),   // raised deliberately: our read of the file measured unchanged since 0.83 was set; the reference's time moved
-        new("dict_u8_codes", 0.93, 0.008),   // 3 passes, spread 0.93-0.93; HELD at 0.93: 2 of 3 passes above, peak 0.93, no loosening
+        new("dict_u8_codes", 0.92, 0.016),   // 3 passes, spread 0.91-0.92; was 0.93, -0.8%
         new("ext", 0.25, 0.150),   // 3 passes, spread 0.21-0.25; was 0.25, -1.6%
         new("fastlanes_bitpacked", 1.20, 0.022),   // 3 passes, spread 1.18-1.20; was 1.24, -3.0%
-        new("fastlanes_bitpacked_patched_no_chunk_offsets", 1.12, 0.035),   // 3 passes, spread 1.08-1.12; was 1.16, -3.5%
+        new("fastlanes_bitpacked_patched_no_chunk_offsets", 1.11, 0.011),   // 3 passes, spread 1.10-1.11; was 1.12, -0.5%
         new("fastlanes_delta", 1.02, 0.055),   // 3 passes, spread 0.96-1.02; was 1.07, -4.9%
         new("fastlanes_for", 1.00, 0.032),   // 3 passes, spread 0.97-1.00; HELD at 1.00: 1 of 3 passes above, peak 1.00, no loosening
         new("fastlanes_rle", 0.85, 0.049),   // 3 passes, spread 0.81-0.85; was 0.86, -1.2%
@@ -672,14 +672,14 @@ internal static class ThroughputCheck
         new("masked", 0.31, 0.008),   // 3 passes, spread 0.31-0.31; was 0.33, -4.8%
         new("masked_all_invalid", 0.32, 0.089),   // 3 passes, spread 0.32-0.35; HELD at 0.32: 3 of 3 passes above, peak 0.35, no loosening
         new("masked_all_valid", 0.32, 0.048),   // 3 passes, spread 0.31-0.32; was 0.34, -4.8%
-        new("null", 0.91, 0.024),   // 3 passes, spread 0.89-0.91; was 0.92, -1.2%
-        new("onpair", 1.18, 0.055),   // 3 passes, spread 1.15-1.21; HELD at 1.18: 2 of 3 passes above, peak 1.21, no loosening
+        new("null", 0.89, 0.028),   // 3 passes, spread 0.87-0.89; was 0.91, -2.2%
+        new("onpair", 1.14, 0.041),   // 3 passes, spread 1.10-1.14; was 1.18, -3.1%
         new("parquet_variant", 0.98, 0.112),   // 3 passes, spread 0.97-1.08; HELD at 0.98: 2 of 3 passes above, peak 1.08, no loosening
         new("pco", 0.83, 0.035),   // 3 passes, spread 0.81-0.84; HELD at 0.83: 2 of 3 passes above, peak 0.84, no loosening
         new("primitive", 0.23, 0.052),   // 3 passes, spread 0.24-0.25; HELD at 0.23: 3 of 3 passes above, peak 0.25, no loosening
         new("runend", 0.78, 0.020),   // 3 passes, spread 0.77-0.78; was 0.82, -4.6%
         new("sequence", 0.93, 0.020),   // 3 passes, spread 0.91-0.93; was 0.94, -1.5%
-        new("sparse", 0.64, 0.074),   // 3 passes, spread 0.59-0.64; was 0.65, -2.3%
+        new("sparse", 0.63, 0.035),   // 3 passes, spread 0.61-0.63; was 0.64, -1.2%
         new("struct", 0.039, 0.050),   // 3 passes, spread 0.038-0.040; HELD at 0.039: 1 of 3 passes above, peak 0.040, no loosening
         new("table_mixed", 0.058, 0.018),   // 3 passes, spread 0.057-0.058; was 0.059, -1.4%
         new("table_wide", 0.10, 0.019),   // 3 passes, spread 0.11-0.11; HELD at 0.10: 3 of 3 passes above, peak 0.11, no loosening
@@ -873,9 +873,9 @@ internal static class ThroughputCheck
         new("alp_patched_no_chunk_offsets", 0.44, 0.015),   // 3 passes, spread 0.44-0.44; was 0.52, -14.9%
         new("alprd", 0.21, 0.040),   // 3 passes, spread 0.20-0.21; was 0.23, -7.5%
         new("bool", 0.32, 0.074),   // 3 passes; TENU à la main : --rebase proposait +2.5 %, et une référence ne monte jamais
-        new("bool_bit_offset3", 0.37, 0.077),   // 3 passes, spread 0.34-0.37; was 0.44, -16.1%
+        new("bool_bit_offset3", 0.36, 0.113),   // 3 passes, spread 0.32-0.36; was 0.37, -1.9%
         new("bool_bit_offset7", 0.37, 0.056),   // 3 passes, spread 0.35-0.37; was 0.43, -14.9%
-        new("bool_bit_offset_straddle", 0.36, 0.082),   // 3 passes, spread 0.33-0.36; was 0.43, -16.1%
+        new("bool_bit_offset_straddle", 0.35, 0.166),   // 3 passes, spread 0.29-0.35; was 0.36, -1.9%
         new("bytebool", 0.34, 0.054),   // 3 passes, spread 0.32-0.34; HELD at 0.34: 1 of 3 passes above, peak 0.34, no loosening
         new("chunked", 0.22, 0.036),   // 3 passes, spread 0.21-0.22; was 0.23, -3.5%
         new("chunked_bool", 0.27, 0.101),   // 3 passes, spread 0.25-0.28; HELD at 0.27: 2 of 3 passes above, peak 0.28, no loosening
@@ -883,30 +883,30 @@ internal static class ThroughputCheck
         new("chunked_empty_chunks", 0.16, 0.003),   // 3 passes, spread 0.16-0.16; was 0.17, -4.6%
         new("chunked_mixed_validity", 0.57, 0.019),   // 3 passes, spread 0.56-0.57; was 0.70, -18.8%
         new("chunked_one_chunk", 0.14, 0.056),   // 3 passes, spread 0.13-0.14; HELD at 0.14: 1 of 3 passes above, peak 0.14, no loosening
-        new("chunked_varbinview", 0.21, 0.029),   // 3 passes, spread 0.20-0.21; was 0.24, -13.5%
+        new("chunked_varbinview", 0.20, 0.014),   // 3 passes, spread 0.20-0.20; was 0.21, -2.6%
         new("constant", 0.049, 0.061),   // 3 passes, spread 0.046-0.049; was 0.072, -32.2%
         new("datetimeparts", 0.21, 0.028),   // 3 passes, spread 0.20-0.21; was 0.23, -8.6%
         new("decimal", 0.14, 0.039),   // 3 passes, spread 0.14-0.15; HELD at 0.14: 3 of 3 passes above, peak 0.15, no loosening
         new("decimal_byte_parts", 0.14, 0.070),   // 3 passes, spread 0.14-0.15; HELD at 0.14: 3 of 3 passes above, peak 0.15, no loosening
-        new("dict", 0.84, 0.007),   // raised deliberately: three processes never measured under it
-        new("dict_nullable_codes", 1.00, 0.039),   // raised deliberately: three processes never measured under it
-        new("dict_nullable_values_nonnull_codes", 1.02, 0.037),   // 3 passes, spread 1.00-1.02; was 1.14, -10.7%
-        new("dict_u64_codes", 0.84, 0.015),   // raised deliberately: three processes never measured under it
-        new("dict_u8_codes", 1.00, 0.036),   // raised deliberately: three processes never measured under it
+        new("dict", 0.75, 0.069),   // 3 passes, spread 0.70-0.75; was 0.84, -10.3%
+        new("dict_nullable_codes", 0.94, 0.022),   // 3 passes, spread 0.91-0.94; was 1.00, -6.5%
+        new("dict_nullable_values_nonnull_codes", 1.00, 0.035),   // 3 passes, spread 0.96-1.00; was 1.02, -2.1%
+        new("dict_u64_codes", 0.77, 0.031),   // 3 passes, spread 0.75-0.77; was 0.84, -8.0%
+        new("dict_u8_codes", 0.84, 0.023),   // 3 passes, spread 0.82-0.84; was 1.00, -15.7%
         new("ext", 0.068, 0.042),   // 3 passes, spread 0.071-0.073; HELD at 0.068: 3 of 3 passes above, peak 0.073, no loosening
         new("fastlanes_bitpacked", 0.45, 0.018),   // 3 passes, spread 0.44-0.45; was 0.46, -2.9%
         new("fastlanes_bitpacked_patched_no_chunk_offsets", 0.31, 0.027),   // 3 passes, spread 0.31-0.31; was 0.32, -1.6%
         new("fastlanes_delta", 0.18, 0.042),   // 3 passes, spread 0.19-0.20; HELD at 0.18: 3 of 3 passes above, peak 0.20, no loosening
         new("fastlanes_for", 0.59, 0.048),   // 3 passes, spread 0.58-0.60; HELD at 0.59: 2 of 3 passes above, peak 0.60, no loosening
-        new("fastlanes_rle", 0.26, 0.025),   // 3 passes, spread 0.25-0.26; was 0.28, -8.4%
+        new("fastlanes_rle", 0.25, 0.037),   // 3 passes, spread 0.24-0.25; was 0.26, -2.2%
         new("fixed_size_list", 0.065, 0.049),   // 3 passes, spread 0.069-0.072; HELD at 0.065: 3 of 3 passes above, peak 0.072, no loosening
         new("fsst", 0.25, 0.063),   // 3 passes, spread 0.23-0.25; was 0.26, -5.3%
-        new("masked", 0.66, 0.071),   // 3 passes, spread 0.61-0.66; was 0.78, -15.4%
+        new("masked", 0.65, 0.058),   // 3 passes, spread 0.61-0.65; was 0.66, -1.0%
         new("masked_all_invalid", 0.37, 0.018),   // 3 passes, spread 0.36-0.37; was 0.38, -2.3%
         new("masked_all_valid", 0.083, 0.171),   // 3 passes, spread 0.069-0.083; was 0.086, -3.4%
         new("null", 0.23, 0.049),   // 3 passes, spread 0.21-0.23; was 0.23, -1.9%
-        new("onpair", 0.94, 0.215),   // 3 passes, spread 0.74-0.94; was 1.13, -16.8%
-        new("parquet_variant", 0.99, 0.019),   // 3 passes, spread 0.97-0.99; was 1.05, -6.1%
+        new("onpair", 0.94, 0.025),   // 3 passes, spread 0.94-0.96; HELD at 0.94: 2 of 3 passes above, peak 0.96, no loosening
+        new("parquet_variant", 0.98, 0.038),   // 3 passes, spread 0.95-0.98; was 0.99, -0.5%
         new("pco", 0.13, 0.030),   // 3 passes, spread 0.12-0.13; was 0.13, -2.0%
         new("primitive", 0.14, 0.079),   // 3 passes, spread 0.13-0.14; HELD at 0.14: 1 of 3 passes above, peak 0.14, no loosening
         new("runend", 0.15, 0.022),   // 3 passes, spread 0.15-0.15; was 0.17, -12.5%
@@ -919,11 +919,11 @@ internal static class ThroughputCheck
         new("varbinview", 0.19, 0.013),   // 3 passes, spread 0.18-0.19; was 0.22, -15.1%
         new("variant", 0.081, 0.181),   // 3 passes, spread 0.066-0.081; was 0.093, -12.9%
         new("zigzag", 0.28, 0.056),   // 3 passes, spread 0.27-0.28; was 0.33, -14.0%
-        new("zstd", 0.76, 0.151),   // 3 passes, spread 0.64-0.76; was 0.91, -16.5%
+        new("zstd", 0.76, 0.007),   // 3 passes, spread 0.76-0.76; HELD at 0.76: 1 of 3 passes above, peak 0.76, no loosening
         new("zstd_buffers", 0.051, 0.010),   // 3 passes, spread 0.051-0.051; was 0.060, -14.6%
         new("list", 0.81, 0.009),   // 3 passes, spread 0.80-0.81; was 0.97, -16.8%
         new("listview", 0.50, 0.003),   // 3 passes, spread 0.50-0.50; was 0.58, -13.2%
-        new("map", 0.35, 0.044),   // 3 passes, spread 0.33-0.35; was 0.36, -3.9%
+        new("map", 0.34, 0.023),   // 3 passes, spread 0.33-0.34; was 0.35, -4.0%
     ];
 
     private static readonly Reference[] TakeReferences =
@@ -932,18 +932,18 @@ internal static class ThroughputCheck
         new("alp_no_patches", 0.33, 0.206),   // 3 passes, spread 0.26-0.33; was 0.36, -7.3%
         new("alp_patched_no_chunk_offsets", 0.39, 0.036),   // 3 passes, spread 0.38-0.39; HELD at 0.39: 1 of 3 passes above, peak 0.39, no loosening
         new("alprd", 0.46, 0.066),   // 3 passes, spread 0.43-0.46; was 0.46, -1.0%
-        new("bool", 0.75, 0.054),   // 3 passes, spread 0.71-0.75; was 0.76, -1.5%
+        new("bool", 0.73, 0.005),   // 3 passes, spread 0.73-0.73; was 0.75, -2.0%
         new("bool_bit_offset3", 0.74, 0.019),   // 3 passes, spread 0.73-0.74; was 0.76, -2.4%
         new("bool_bit_offset7", 0.74, 0.037),   // 3 passes, spread 0.71-0.74; was 0.76, -2.8%
-        new("bool_bit_offset_straddle", 0.76, 0.035),   // 3 passes, spread 0.73-0.76; was 0.77, -1.9%
+        new("bool_bit_offset_straddle", 0.74, 0.013),   // 3 passes, spread 0.73-0.74; was 0.76, -2.8%
         new("bytebool", 0.87, 0.014),   // 3 passes, spread 0.86-0.87; was 0.92, -5.0%
         new("chunked", 0.31, 0.024),   // 3 passes, spread 0.31-0.31; was 0.32, -2.0%
         new("chunked_empty_chunks", 0.31, 0.053),   // 3 passes, spread 0.31-0.32; HELD at 0.31: 1 of 3 above, peak 0.32, no loosening
-        new("chunked_one_chunk", 0.32, 0.137),   // 3 passes, spread 0.28-0.33; HELD at 0.32: 1 of 3 passes above, peak 0.33, no loosening
-        new("constant", 0.88, 0.034),   // 3 passes, spread 0.85-0.88; was 0.93, -5.4%
-        new("datetimeparts", 0.29, 0.143),   // 3 passes, spread 0.25-0.29; HELD at 0.29: 1 of 3 passes above, peak 0.29, no loosening
+        new("chunked_one_chunk", 0.31, 0.060),   // 3 passes, spread 0.29-0.31; was 0.32, -2.6%
+        new("constant", 0.85, 0.013),   // 3 passes, spread 0.84-0.85; was 0.88, -3.1%
+        new("datetimeparts", 0.28, 0.055),   // 3 passes, spread 0.26-0.28; was 0.29, -4.3%
         new("decimal", 0.33, 0.019),   // 3 passes, spread 0.32-0.34; HELD at 0.33: 2 of 3 above, peak 0.34, no loosening
-        new("decimal_byte_parts", 0.33, 0.033),   // 3 passes, spread 0.31-0.33; was 0.36, -9.7%
+        new("decimal_byte_parts", 0.32, 0.084),   // 3 passes, spread 0.29-0.32; was 0.33, -2.5%
         new("dict", 0.56, 0.060),   // 3 passes, spread 0.53-0.56; was 0.60, -6.6%
         new("dict_nullable_codes", 0.58, 0.020),   // 3 passes, spread 0.57-0.58; was 0.64, -9.2%
         new("dict_nullable_values_nonnull_codes", 0.73, 0.021),   // 3 passes, spread 0.72-0.73; was 0.81, -9.8%
@@ -957,34 +957,34 @@ internal static class ThroughputCheck
         new("fastlanes_rle", 0.84, 0.028),   // 3 passes, spread 0.82-0.84; was 0.88, -4.1%
         new("fixed_size_list", 0.24, 0.054),   // 3 passes, spread 0.22-0.24; was 0.26, -6.4%
         new("fsst", 0.24, 0.007),   // 3 passes, spread 0.22-0.24; was 0.25, -5.0%
-        new("list", 0.64, 0.087),   // 3 passes, spread 0.59-0.64; was 0.65, -1.3%
+        new("list", 0.61, 0.043),   // 3 passes, spread 0.58-0.61; was 0.64, -5.5%
         new("listview", 0.18, 0.036),   // 3 passes, spread 0.18-0.18; HELD at 0.18: 1 of 3 passes above, peak 0.18, no loosening
         new("map", 0.070, 0.067),   // raised deliberately: our take of the file measured unchanged since 0.058 was set; the reference's time moved
         new("masked", 0.44, 0.110),   // 3 passes, spread 0.44-0.48; HELD at 0.44: 3 of 3 above, peak 0.48, no loosening
         new("masked_all_invalid", 0.44, 0.037),   // 3 passes, spread 0.42-0.44; was 0.46, -4.3%
         new("masked_all_valid", 0.46, 0.129),   // 3 passes, spread 0.43-0.49; HELD at 0.46: 2 of 3 passes above, peak 0.49, no loosening
-        new("null", 0.83, 0.026),   // 3 passes, spread 0.81-0.83; HELD at 0.83: 1 of 3 passes above, peak 0.83, no loosening
+        new("null", 0.79, 0.024),   // 3 passes, spread 0.77-0.79; was 0.83, -4.8%
         new("onpair", 0.50, 0.056),   // 3 passes, spread 0.47-0.50; was 0.55, -8.5%
-        new("parquet_variant", 1.00, 0.166),   // 3 passes, spread 0.83-1.00; was 1.08, -7.3%
+        new("parquet_variant", 1.00, 0.111),   // 3 passes, spread 0.89-1.00; was 1.00, -0.2%
         new("pco", 0.83, 0.030),   // 3 passes, spread 0.81-0.84; HELD at 0.83: 1 of 3 passes above, peak 0.84, no loosening
         new("primitive", 0.32, 0.058),   // 3 passes, spread 0.32-0.34; HELD at 0.32: 2 of 3 passes above, peak 0.34, no loosening
-        new("runend", 0.96, 0.064),   // 3 passes, spread 0.90-0.96; was 1.00, -3.9%
+        new("runend", 0.94, 0.035),   // 3 passes, spread 0.90-0.94; was 0.96, -2.4%
         new("sequence", 0.94, 0.060),   // 3 passes, spread 0.88-0.94; was 1.00, -6.1%
         new("sparse", 0.79, 0.012),   // 3 passes, spread 0.78-0.79; was 0.83, -5.1%
         new("struct", 0.035, 0.121),   // 3 passes, spread 0.037-0.041; HELD at 0.035: 3 of 3 passes above, peak 0.041, no loosening
         new("varbin", 0.008, 0.053),   // 3 passes, spread 0.008-0.008; HELD at 0.008: 2 of 3 passes above, peak 0.008, no loosening
         new("varbinview", 0.044, 0.022),   // 3 passes, spread 0.043-0.044; was 0.044, -0.3%
         new("variant", 0.93, 0.011),   // 3 passes, spread 0.92-0.93; was 1.01, -8.1%
-        new("zigzag", 0.51, 0.016),   // 3 passes, spread 0.50-0.51; was 0.52, -2.1%
+        new("zigzag", 0.50, 0.024),   // 3 passes, spread 0.49-0.50; was 0.51, -2.5%
         new("zstd", 1.08, 0.005),   // 3 passes, spread 1.07-1.08; was 1.08, -0.1%
         new("zstd_buffers", 0.14, 0.010),   // 3 passes, spread 0.14-0.14; HELD at 0.14: 3 of 3 passes above, peak 0.14, no loosening
         new("chunked_bool", 0.51, 0.023),   // 3 passes, spread 0.50-0.51; was 0.56, -8.3%
-        new("chunked_decimal", 0.31, 0.160),   // 3 passes, spread 0.26-0.31; was 0.32, -1.9%
+        new("chunked_decimal", 0.31, 0.153),   // 3 passes, spread 0.29-0.34; HELD at 0.31: 1 of 3 passes above, peak 0.34, no loosening
         new("chunked_mixed_validity", 1.03, 0.018),   // 3 passes, spread 1.01-1.03; was 1.08, -4.6%
-        new("chunked_varbinview", 0.059, 0.071),   // 3 passes, spread 0.055-0.059; was 0.060, -1.0%
+        new("chunked_varbinview", 0.058, 0.024),   // 3 passes, spread 0.057-0.058; was 0.059, -1.0%
         new("table_mixed", 0.060, 0.077),   // 3 passes, spread 0.061-0.065; HELD at 0.060: 3 of 3 passes above, peak 0.065, no loosening
         new("table_wide", 0.18, 0.106),   // 3 passes, spread 0.16-0.18; was 0.19, -6.3%
-        new("zstd_nullable", 0.62, 0.026),   // 3 passes, spread 0.60-0.62; was 0.69, -10.8%
+        new("zstd_nullable", 0.61, 0.008),   // 3 passes, spread 0.61-0.61; was 0.62, -1.2%
     ];
 
     private const double StaleBelow = 0.70;

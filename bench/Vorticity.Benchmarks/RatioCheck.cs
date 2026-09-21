@@ -388,33 +388,33 @@ internal static class RatioCheck
     private static readonly Dictionary<string, Reference> References = new()
     {
         ["full scan"] = new(0.307, 2, 0.007),   // 3 passes, spread 0.305-0.307; was 0.335, -8.3%
-        ["full scan, upstream lazy"] = new(0.426, 2, 0.022),   // 3 passes, spread 0.417-0.426; was 0.460, -7.4%
+        ["full scan, upstream lazy"] = new(0.419, 2, 0.012),   // 3 passes, spread 0.414-0.419; was 0.426, -1.7%
         ["projected scan, 1 of 5 columns"] = new(0.366, 9, 0.013),   // 3 passes, spread 0.362-0.366; was 0.370, -1.0%
         ["projected scan, upstream lazy"] = new(0.406, 9, 0.019),   // 3 passes, spread 0.399-0.406; was 0.409, -0.6%
         ["open to first batch"] = new(0.076, 10, 0.032),   // 3 passes, spread 0.074-0.076; was 0.085, -10.1%
         ["open, footer only"] = new(0.706, 29, 0.016),   // 3 passes, spread 0.695-0.706; was 0.776, -9.0%
         ["read and write back"] = new(0.297, 1, 0.009),   // 3 passes, spread 0.294-0.297; was 0.322, -7.9%
         ["filtered scan, 1% band"] = new(0.197, 10, 0.055),   // 3 passes, spread 0.186-0.197; was 0.204, -3.3%
-        ["filtered scan, half the rows"] = new(0.254, 5, 0.010),   // 3 passes, spread 0.252-0.254; was 0.271, -6.2%
+        ["filtered scan, half the rows"] = new(0.251, 5, 0.029),   // 3 passes, spread 0.244-0.251; was 0.254, -1.2%
         ["scattered take, 64 of 64 splits"] = new(0.191, 3, 0.035),   // 3 passes, spread 0.185-0.191; was 0.202, -5.2%
         ["rewritten zoned, reference's"] = new(0.307, 2, 0.004),   // 3 passes, spread 0.306-0.307; was 0.330, -6.9%
         ["rewritten zoned, ours"] = new(1.070, 2, 0.006),   // 3 passes, spread 1.063-1.070; was 1.077, -0.7%
-        ["rewritten high card, reference's"] = new(0.858, 28, 0.044),   // 3 passes, spread 0.821-0.858; was 0.878, -2.2%
+        ["rewritten high card, reference's"] = new(0.850, 27, 0.009),   // 3 passes, spread 0.843-0.850; was 0.858, -0.9%
         ["rewritten high card, ours"] = new(0.915, 22, 0.049),   // 3 passes, spread 0.871-0.915; HELD at 0.915: 3 passes peaked at 0.915, no loosening
-        ["key order, sorted column, 1% band"] = new(0.658, 12, 0.046),   // 3 passes, spread 0.628-0.658; was 0.683, -3.6%
+        ["key order, sorted column, 1% band"] = new(0.627, 11, 0.029),   // 3 passes, spread 0.608-0.627; was 0.658, -4.8%
         ["key order, uncorrelated, 64 rows"] = new(1.077, 8, 0.091),   // 3 passes, spread 0.979-1.077; was 1.148, -6.2%
-        ["count, exact cover, 1% band"] = new(0.633, 7, 0.142),   // 3 passes, spread 0.567-0.657; HELD at 0.633: 3 passes peaked at 0.657, no loosening
+        ["count, exact cover, 1% band"] = new(0.615, 6, 0.062),   // 3 passes, spread 0.577-0.615; was 0.633, -2.9%
         ["filtered scan, string equality, fsst"] = new(0.923, 4, 0.031),   // 3 passes, spread 0.894-0.923; was 1.131, -18.4%
-        ["filtered scan, string prefix, fsst"] = new(1.269, 2, 0.003),   // 3 passes, spread 1.265-1.269; was 1.281, -1.0%
+        ["filtered scan, string prefix, fsst"] = new(1.264, 2, 0.040),   // 3 passes, spread 1.214-1.264; was 1.269, -0.4%
         // Nine passes, not three: three read 0.024 and this axis swings sixteen times that. It is
         // the shortest of the four string axes, and the only one whose dispersion needs more
         // processes than the default to show itself at all.
         ["filtered scan, string equality, dict"] = new(1.713, 7, 0.051),   // 3 passes, spread 1.625-1.713; was 2.084, -17.8%; and 2.473 before the dictionary answered the equality from its values
         ["filtered scan, string prefix, dict"] = new(1.444, 6, 0.016),   // 3 passes, spread 1.442-1.465; HELD at 1.444: 3 passes peaked at 1.465, no loosening
-        ["filtered scan, band, runend"] = new(1.134, 12, 0.051),   // 3 passes, spread 1.076-1.134; was 1.160, -2.3%
+        ["filtered scan, band, runend"] = new(1.117, 11, 0.009),   // 3 passes, spread 1.106-1.117; was 1.134, -1.5%
         ["filtered scan, band, bitpacked"] = new(1.113, 12, 0.014),   // 3 passes, spread 1.097-1.113; was 1.142, -2.6%
         ["full scan, 1M table"] = new(0.057, 1, 0.017),   // 3 passes, spread 0.056-0.057; was 0.057, -0.1%
-        ["projected scan, 1 of 50 columns"] = new(0.102, 10, 0.035),   // 3 passes, spread 0.099-0.102; was 0.103, -0.5%
+        ["projected scan, 1 of 50 columns"] = new(0.095, 9, 0.068),   // 3 passes, spread 0.089-0.095; was 0.102, -6.6%
     };
 
     /// <summary>
