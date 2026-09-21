@@ -74,6 +74,12 @@ internal sealed class RecordBinding
             return binding;
         }
 
+        if (!file.RootIsStruct)
+        {
+            throw new VortexSchemaException(
+                $"{typeof(TRecord).Name} binds to the columns of a file whose root is a struct; this file holds one column of {file.Root}. Read it with the tool scan, file.Scan().");
+        }
+
         binding = Bind(typeof(TRecord), TRecord.Schema, file.FieldArray, [], [], extensions);
         Cache<TRecord>.Bindings.AddOrUpdate(file, binding);
         return binding;
