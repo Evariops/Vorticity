@@ -6,8 +6,9 @@ using System.Threading.Tasks;
 using Vorticity.Buffers;
 using Vorticity.IO;
 using Vorticity.Serialization.Schemas;
+using Vorticity.File;
 
-namespace Vorticity.File;
+namespace Vorticity;
 
 /// <summary>What <see cref="VortexFileRepair.RepairAsync"/> did.</summary>
 /// <param name="OriginalLength">The file's length before.</param>

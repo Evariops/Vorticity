@@ -663,14 +663,14 @@ public sealed class ScanBuilder
     private async System.Threading.Tasks.ValueTask<OrderPlan> OrderAsync(System.Threading.CancellationToken cancellationToken)
     {
         Keys.KeySource? source;
-        Keys.KeySourceKind kind;
+        KeySourceKind kind;
         string named = _orderComposite is null ? _orderPath! : "(" + string.Join(", ", _orderComposite) + ")";
         if (_orderComposite is not null)
         {
             (source, _) = _indexes
                 ? await Keys.SortedRunsSource.OpenCompositeAsync(_file, _orderComposite, cancellationToken).ConfigureAwait(false)
                 : (null, null);
-            kind = source is null ? Keys.KeySourceKind.None : Keys.KeySourceKind.SortedRuns;
+            kind = source is null ? KeySourceKind.None : KeySourceKind.SortedRuns;
         }
         else
         {
@@ -681,7 +681,7 @@ public sealed class ScanBuilder
 
         if (source is null)
         {
-            return new OrderPlan(named, Keys.KeySourceKind.None, 0, 0, null, 0, _descending);
+            return new OrderPlan(named, KeySourceKind.None, 0, 0, null, 0, _descending);
         }
 
         try

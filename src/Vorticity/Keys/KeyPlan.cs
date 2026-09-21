@@ -1,6 +1,7 @@
 using System.Collections.Generic;
+using Vorticity.Keys;
 
-namespace Vorticity.Keys;
+namespace Vorticity;
 
 /// <summary>The kinds of source a cursor over one column can be served by.</summary>
 public enum KeySourceKind : byte

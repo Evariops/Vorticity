@@ -466,7 +466,7 @@ internal static class Program
     {
         long rows = 0;
         long batches = 0;
-        await foreach (Vorticity.Columns.RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -497,7 +497,7 @@ internal static class Program
         long batches = 0;
         string? refusal = null;
 
-        await foreach (Vorticity.Columns.RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             using (batch)

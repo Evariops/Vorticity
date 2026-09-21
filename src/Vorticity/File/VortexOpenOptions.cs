@@ -1,7 +1,8 @@
 using System;
 using Vorticity.Types;
+using Vorticity.File;
 
-namespace Vorticity.File;
+namespace Vorticity;
 
 /// <summary>What an open does with a file whose tail does not parse.</summary>
 public enum VortexTornTailPolicy

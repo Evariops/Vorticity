@@ -1,4 +1,6 @@
-namespace Vorticity.Writing;
+using Vorticity.Writing;
+
+namespace Vorticity;
 
 /// <summary>
 /// The scheme a column is written with, when the caller pins one. These name schemes, not wire

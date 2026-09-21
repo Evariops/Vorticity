@@ -14,8 +14,9 @@ using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
+using Vorticity.Writing;
 
-namespace Vorticity.Writing;
+namespace Vorticity;
 
 public sealed partial class VortexFileWriter
 {
@@ -723,7 +724,7 @@ public sealed partial class VortexFileWriter
         internal static VortexUnsupportedException Refused(string why) =>
             new VortexUnsupportedException(
                 "append",
-                "layout",
+                ComponentKind.Feature,
                 $"This file cannot be appended to: {why}. Rewrite it instead.");
     }
 

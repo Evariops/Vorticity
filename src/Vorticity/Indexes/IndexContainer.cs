@@ -49,7 +49,7 @@ internal static class IndexContainer
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The directory, or the reason it was refused.</returns>
     internal static async ValueTask<(IndexDirectory? Directory, string? Reason)> ReadAsync(
-        ISegmentSource source, long length, File.VortexFile file, CancellationToken cancellationToken)
+        ISegmentSource source, long length, VortexFile file, CancellationToken cancellationToken)
     {
         if (length < Magic.Length + TrailerSize)
         {
@@ -117,7 +117,7 @@ internal static class IndexContainer
     /// </summary>
     /// <param name="directory">The fragment's directory.</param>
     /// <param name="file">The file it is offered for.</param>
-    internal static string? Unbound(IndexDirectory directory, File.VortexFile file)
+    internal static string? Unbound(IndexDirectory directory, VortexFile file)
     {
         if (directory.FileLength != (ulong)file.FileLength)
         {
@@ -158,14 +158,14 @@ internal static class IndexContainer
     /// The store tokens of files opened from a path with fragments to bind, taken at the open. A file
     /// opened otherwise has none, and pays nothing for the table.
     /// </summary>
-    private static readonly ConditionalWeakTable<File.VortexFile, string> Tokens = [];
+    private static readonly ConditionalWeakTable<VortexFile, string> Tokens = [];
 
     /// <summary>Records the store token of a file opened from <paramref name="path"/>.</summary>
     /// <param name="file">The open file.</param>
     /// <param name="path">Where it was opened from.</param>
-    internal static void RememberToken(File.VortexFile file, string path) => Tokens.AddOrUpdate(file, TokenOf(path));
+    internal static void RememberToken(VortexFile file, string path) => Tokens.AddOrUpdate(file, TokenOf(path));
 
-    private static string? TokenOf(File.VortexFile file) => Tokens.TryGetValue(file, out string? token) ? token : null;
+    private static string? TokenOf(VortexFile file) => Tokens.TryGetValue(file, out string? token) ? token : null;
 
     /// <summary>The XXH3-128 of a whole file, read a mebibyte at a time.</summary>
     /// <param name="source">The file.</param>

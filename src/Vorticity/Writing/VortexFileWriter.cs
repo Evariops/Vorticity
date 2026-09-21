@@ -17,8 +17,9 @@ using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
+using Vorticity.Writing;
 
-namespace Vorticity.Writing;
+namespace Vorticity;
 
 /// <summary>
 /// Writes a Vortex file, one batch at a time, in a single forward pass. Segments go out as batches
@@ -465,7 +466,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// The exit <see cref="DisposeAsync"/> does not give: disposal completes an unfinished file, so
     /// a producer that throws half way through still leaves a valid one holding the rows it managed
     /// to write. An abandoned append deletes nothing -- those bytes are the caller's rows -- and
-    /// leaves a tail that does not parse, which is what <see cref="File.VortexFileRepair"/> is for.
+    /// leaves a tail that does not parse, which is what <see cref="VortexFileRepair"/> is for.
     /// Safe to call more than once; after it the writer accepts no further rows.
     /// </remarks>
     public void Abandon()

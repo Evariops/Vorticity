@@ -2,8 +2,9 @@ using System;
 using System.Collections.Generic;
 using Vorticity.Editions;
 using Vorticity.Indexes;
+using Vorticity.Writing;
 
-namespace Vorticity.Writing;
+namespace Vorticity;
 
 /// <summary>How much the writer does beyond the data.</summary>
 public enum WriteProfile

@@ -1,6 +1,7 @@
 using System.Collections.Generic;
+using Vorticity.Scanning;
 
-namespace Vorticity.Scanning;
+namespace Vorticity;
 
 /// <summary>
 /// One pruning structure's contribution to a scan's mask of live blocks, and what consulting it
@@ -79,4 +80,4 @@ public sealed record CountPlan(bool ExactCover, long ExactCount, int SplitsPrune
 /// <param name="EntriesInRange">The entries the range admits: the bound on the rows the windows gather.</param>
 /// <param name="Descending">Whether the order is reversed.</param>
 public sealed record OrderPlan(
-    string Path, Keys.KeySourceKind Source, int Runs, int RunsInRange, long? EntryCount, long EntriesInRange, bool Descending);
+    string Path, KeySourceKind Source, int Runs, int RunsInRange, long? EntryCount, long EntriesInRange, bool Descending);

@@ -1,4 +1,6 @@
-namespace Vorticity.Keys;
+using Vorticity.Keys;
+
+namespace Vorticity;
 
 /// <summary>How <see cref="KeyCursor.SeekAsync"/> positions itself relative to a key.</summary>
 /// <remarks>

@@ -1,8 +1,9 @@
 using System;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
+using Vorticity.File;
 
-namespace Vorticity.File;
+namespace Vorticity;
 
 /// <summary>
 /// File-level statistics, parsed once when the file opens. A struct root carries exactly one entry

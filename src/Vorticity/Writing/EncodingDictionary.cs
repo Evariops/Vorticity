@@ -98,17 +98,9 @@ internal sealed class EncodingDictionary
         }
 
         VortexEdition? introduced = EditionRegistry.IntroducedIn(_kind, id);
-        string kind = _kind switch
-        {
-            ComponentKind.Array => VortexComponentKind.Array,
-            ComponentKind.Layout => VortexComponentKind.Layout,
-            ComponentKind.DType => VortexComponentKind.DType,
-            _ => VortexComponentKind.Aggregate,
-        };
-
         throw new VortexUnsupportedException(
             id,
-            kind,
+            _kind,
             introduced is null
                 ? $"No core edition contains it, so no target can emit it."
                 : $"The write targets edition {EditionRegistry.Name(_target)}, which does not contain it; " +

@@ -26,6 +26,6 @@ internal static class ThrowHelper
             $"{what} range [{offset}, {offset + length}) is outside the available {limit} bytes.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    internal static T ThrowUnsupported<T>(string componentId, string kind) =>
+    internal static T ThrowUnsupported<T>(string componentId, ComponentKind kind) =>
         throw new VortexUnsupportedException(componentId, kind);
 }

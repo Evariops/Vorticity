@@ -1,7 +1,8 @@
 using System;
 using System.Collections.Generic;
+using Vorticity.Writing;
 
-namespace Vorticity.Writing;
+namespace Vorticity;
 
 /// <summary>The bytes of a written file, by what they hold.</summary>
 /// <param name="Data">The magic and the column chunks, padding included.</param>

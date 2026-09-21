@@ -128,7 +128,7 @@ public static class DatasetCompactor
         {
             throw new VortexUnsupportedException(
                 "clustering key",
-                "compaction",
+                ComponentKind.Feature,
                 "A leveled compaction merges on the clustering key, and this dataset declares none " +
                 "(13 §4.1). Compact it tiered, which concatenates.");
         }
@@ -150,7 +150,7 @@ public static class DatasetCompactor
                 {
                     throw new VortexUnsupportedException(
                         input.Entry.Key,
-                        "compaction",
+                        ComponentKind.Feature,
                         $"'{path}' holds {column.NullCount} null(s) in this object, and a composite key's " +
                         "run holds no tuple with a null (12 §4.6): the merge would drop those rows. Declare " +
                         "the composite clustering key on non-nullable columns.");

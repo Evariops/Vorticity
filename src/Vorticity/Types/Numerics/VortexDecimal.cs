@@ -1,8 +1,9 @@
 using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using Vorticity.Types.Numerics;
 
-namespace Vorticity.Types.Numerics;
+namespace Vorticity;
 
 /// <summary>
 /// One decimal value: the unscaled integer plus the DType's precision and scale. Precision runs to

@@ -182,7 +182,7 @@ public static partial class RowEncoder
 
             default:
                 throw new VortexUnsupportedException(
-                    dtype.Kind.ToString(), "dtype", "A seek key is built for boolean, primitive, utf8 and binary columns.");
+                    dtype.Kind.ToString(), ComponentKind.DType, "A seek key is built for boolean, primitive, utf8 and binary columns.");
         }
     }
 

@@ -388,7 +388,7 @@ internal sealed class KeyIndexPruner
         VortexFile file, Column column, string path, BlockMask live, CancellationToken cancellationToken)
     {
         (Keys.SortedRunsSource? source, _) = await Keys.SortedRunsSource
-            .OpenAsync(file, path, Keys.KeySourceKind.Dictionary, cancellationToken).ConfigureAwait(false);
+            .OpenAsync(file, path, KeySourceKind.Dictionary, cancellationToken).ConfigureAwait(false);
         if (source is null)
         {
             return;

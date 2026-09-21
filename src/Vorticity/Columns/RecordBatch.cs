@@ -8,8 +8,9 @@ using Vorticity.Compute;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;
+using Vorticity.Columns;
 
-namespace Vorticity.Columns;
+namespace Vorticity;
 
 /// <summary>
 /// One decoded batch of rows: the root canonical array, plus the schema and row offset that place

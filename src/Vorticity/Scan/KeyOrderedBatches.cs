@@ -247,7 +247,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                     : (null, "the scan was asked not to use indexes");
                 _source = source = runs ?? throw new VortexUnsupportedException(
                     IndexKinds.SortedRuns,
-                    "index",
+                    ComponentKind.Index,
                     $"InKeyOrder(({string.Join(", ", composite)})) needs the composite key's sorted runs " +
                     $"(WritePolicy.ForKey): {reason}.");
                 _slices = await ExactCover.RangeAsync(null, source, _owner._path, _token).ConfigureAwait(false);
@@ -259,7 +259,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                     .ConfigureAwait(false);
                 _source = source = opened ?? throw new VortexUnsupportedException(
                     IndexKinds.SortedRuns,
-                    "index",
+                    ComponentKind.Index,
                     $"InKeyOrder(\"{_owner._path}\") needs a key source: the column is neither stated sorted " +
                     "nor indexed with IndexPolicy.SortedRuns, and ordering an unindexed column would mean " +
                     "holding the whole column in memory.");

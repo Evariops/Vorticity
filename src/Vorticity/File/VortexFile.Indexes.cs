@@ -9,8 +9,9 @@ using Vorticity.Indexes;
 using Vorticity.IO;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
+using Vorticity.File;
 
-namespace Vorticity.File;
+namespace Vorticity;
 
 /// <summary>How an index's regions are laid out.</summary>
 public enum VortexIndexLayout

@@ -133,7 +133,7 @@ public sealed class KeyCursorBuilder
             // the postings; for a walk of rows, the sorted runs.
             throw new VortexUnsupportedException(
                 _distinct ? IndexKinds.PostingsBlocks : IndexKinds.SortedRuns,
-                "index",
+                ComponentKind.Index,
                 $"'{_path}' has no key source ({string.Join("; ", reasons)}). A cursor over an " +
                 "unindexed column would have to hold the column to sort it, which this library " +
                 "refuses. Write the file with " +

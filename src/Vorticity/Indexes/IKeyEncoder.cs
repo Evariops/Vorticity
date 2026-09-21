@@ -1,7 +1,8 @@
 using System;
 using Vorticity.Arrays;
+using Vorticity.Indexes;
 
-namespace Vorticity.Indexes;
+namespace Vorticity;
 
 /// <summary>
 /// Turns the rows of several columns into byte strings whose <c>memcmp</c> order is the tuple order.

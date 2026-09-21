@@ -287,7 +287,7 @@ public sealed class DatasetKeyCursor : IAsyncDisposable
         slot.Cursor = await _key.TryOpenAsync(slot.Lease.File, cancellationToken).ConfigureAwait(false)
             ?? throw new VortexUnsupportedException(
                 slot.Entry.Key,
-                "clustering key",
+                ComponentKind.Index,
                 "The object has no run on the clustering key and no sorted column to stand in, so a " +
                 "key-ordered walk would leave its rows out. Rewrite it through the dataset, or index it " +
                 "(13 §6.1's mandatory run).");

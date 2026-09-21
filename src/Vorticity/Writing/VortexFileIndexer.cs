@@ -15,8 +15,9 @@ using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
+using Vorticity.Writing;
 
-namespace Vorticity.Writing;
+namespace Vorticity;
 
 /// <summary>
 /// An index fragment — runs, a directory bound to the file, a trailer — and what building it did.

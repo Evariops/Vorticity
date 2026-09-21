@@ -4,51 +4,6 @@ using System.Collections.Generic;
 
 namespace Vorticity.Editions;
 
-/// <summary>A frozen edition of the <c>core</c> family, in publication order.</summary>
-/// <remarks>
-/// The numeric values are ordinals, so <c>&lt;=</c> is "is contained by": editions are cumulative
-/// within a family. Nothing outside this file may depend on the exact values.
-/// </remarks>
-public enum VortexEdition
-{
-    /// <summary><c>core2025.05.0</c>, minimum library version 0.36.0.</summary>
-    Core20250500 = 0,
-
-    /// <summary><c>core2025.06.0</c>, minimum library version 0.40.0.</summary>
-    Core20250600 = 1,
-
-    /// <summary><c>core2025.10.0</c>, minimum library version 0.54.0.</summary>
-    Core20251000 = 2,
-
-    /// <summary><c>core2026.08.0</c>, minimum library version 0.84.0.</summary>
-    Core20260800 = 3,
-
-    /// <summary><c>core2026.08.1</c>, minimum library version 0.84.0.</summary>
-    Core20260801 = 4,
-
-    /// <summary><c>core2026.08.2</c>, minimum library version 0.85.0.</summary>
-    Core20260802 = 5,
-
-    /// <summary><c>core2026.08.3</c>, minimum library version 0.85.0.</summary>
-    Core20260803 = 6,
-}
-
-/// <summary>Which kind of component an id names.</summary>
-public enum ComponentKind
-{
-    /// <summary>An array encoding id, such as <c>fastlanes.bitpacked</c>.</summary>
-    Array = 0,
-
-    /// <summary>A layout id, such as <c>vortex.zoned</c>.</summary>
-    Layout = 1,
-
-    /// <summary>An extension dtype id, such as <c>vortex.timestamp</c>.</summary>
-    DType = 2,
-
-    /// <summary>A zone-map aggregate id, such as <c>vortex.min</c>.</summary>
-    Aggregate = 3,
-}
-
 /// <summary>Membership of the frozen <c>core</c> editions.</summary>
 /// <remarks>
 /// <para>

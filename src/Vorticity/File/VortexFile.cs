@@ -12,8 +12,9 @@ using Vorticity.IO;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
+using Vorticity.File;
 
-namespace Vorticity.File;
+namespace Vorticity;
 
 /// <summary>
 /// An open Vortex file: schema, row count, footer dictionaries and the root layout.
