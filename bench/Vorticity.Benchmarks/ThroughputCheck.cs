@@ -613,8 +613,9 @@ internal static class ThroughputCheck
     /// Two numbers on a line are called a spread, and only one of them gates. The third field is
     /// the dispersion between the passes of the calibration that wrote the line, and it widens the
     /// ceiling once it exceeds the flat margin; the `spread a-b` in the comment is the range of the
-    /// same passes. The table is refreshed by `--recalibrate 3`, never a line by hand: editing a
-    /// line is editing a measurement.
+    /// same passes. Eight read encodings are held to a wider band still, their drift between runs
+    /// (<see cref="ReadDrift"/>). The table is refreshed by `--recalibrate 3`, never a line by
+    /// hand: editing a line is editing a measurement.
     /// </para>
     /// <para>
     /// A line is replaced only when its ceiling does not rise. `--recalibrate` never raises a
@@ -689,6 +690,28 @@ internal static class ThroughputCheck
         new("zstd", 1.05, 0.045),   // 3 passes, spread 1.01-1.05; was 1.06, -0.7%
         new("zstd_buffers", 0.14, 0.039),   // 3 passes, spread 0.14-0.14; HELD at 0.14: 2 of 3 passes above, peak 0.14, no loosening
         new("zstd_nullable", 0.61, 0.009),   // 3 passes, spread 0.60-0.61; was 0.66, -7.5%
+    ];
+
+    /// <summary>
+    /// Read encodings held to the spread their ratio showed between runs on an idle machine,
+    /// `(max - min) / min` over four runs, instead of the flat margin.
+    /// </summary>
+    /// <remarks>
+    /// On these eight the ratio moves between runs by more than the margin with nothing else
+    /// running, while the interval a run prints is a tenth of that, and both sides drift
+    /// independently. Their ceiling is wide enough to let through a regression smaller than the
+    /// spread, and every read `--check` says so under its table.
+    /// </remarks>
+    private static readonly (string Encoding, double Spread)[] ReadDrift =
+    [
+        ("chunked_empty_chunks", 0.350),
+        ("decimal", 0.529),
+        ("decimal_byte_parts", 0.444),
+        ("fastlanes_delta", 0.151),
+        ("fixed_size_list", 0.167),
+        ("list", 0.239),
+        ("masked_all_invalid", 0.194),
+        ("table_wide", 0.158),
     ];
 
     /// <summary>
@@ -1286,11 +1309,12 @@ internal static class ThroughputCheck
                     {
                         Reference reference = entry.Value;
 
-                        // The wider of the flat margin and what this encoding's own passes showed.
-                        // A five-microsecond axis and a fifty-millisecond one do not resolve the
-                        // same change, and a ceiling that pretends they do reports a regression
-                        // nobody caused on the short one.
-                        double band = Math.Max(Margin - 1, reference.Spread);
+                        // The widest of the flat margin, what this encoding's own passes showed and
+                        // the drift it shows between runs. A five-microsecond axis and a
+                        // fifty-millisecond one do not resolve the same change, and a ceiling that
+                        // pretends they do reports a regression nobody caused on the short one.
+                        double drift = DriftOf(name);
+                        double band = Math.Max(Margin - 1, Math.Max(reference.Spread, drift));
                         double ceiling = reference.Ratio * (1 + band);
                         suffix = string.Create(
                             CultureInfo.InvariantCulture,
@@ -1418,6 +1442,16 @@ internal static class ThroughputCheck
                 "these: it refuses to loosen, so it reprints the old value and says HELD forever " +
                 "(BENCH-AUDIT.md B23). Raising one is a deliberate, dated, justified edit:");
             pinned.ForEach(Console.Out.WriteLine);
+        }
+
+        if (check && Axis == Workload.Scan)
+        {
+            string held = string.Join(", ", ReadDrift.Select(d => string.Create(
+                CultureInfo.InvariantCulture, $"{d.Encoding} +{d.Spread:P0}")));
+            Console.Out.WriteLine(
+                $"\n{ReadDrift.Length} encoding(s) are held to their drift between runs " +
+                "instead of the flat margin, so a regression smaller than that drift passes " +
+                $"on them: {held}");
         }
 
         foreach (string failure in failures)
@@ -1680,6 +1714,27 @@ internal static class ThroughputCheck
         double[] copy = (double[])values.Clone();
         Array.Sort(copy);
         return copy[copy.Length / 2];
+    }
+
+    /// <summary>
+    /// The drift between runs an encoding is held to on the current axis, or zero.
+    /// </summary>
+    private static double DriftOf(string encoding)
+    {
+        if (Axis != Workload.Scan)
+        {
+            return 0;
+        }
+
+        foreach ((string name, double spread) in ReadDrift)
+        {
+            if (string.Equals(name, encoding, StringComparison.Ordinal))
+            {
+                return spread;
+            }
+        }
+
+        return 0;
     }
 
     /// <summary>The ratchet table of the current axis.</summary>
