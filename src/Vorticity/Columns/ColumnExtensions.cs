@@ -64,22 +64,6 @@ public static class ColumnExtensions
         public bool? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index) ? Bit(column.Arena, column.ValuesNode, index) : null;
     }
 
-    extension(Column<string> column)
-    {
-        /// <summary>The UTF-8 bytes of row <paramref name="index"/>, borrowed; empty for a null.</summary>
-        public ReadOnlySpan<byte> this[int index] => ColumnData.Bytes(column.Arena, column.Node, index);
-
-        /// <summary>Row <paramref name="index"/> as a <see cref="string"/>, which allocates; null for a null.</summary>
-        /// <param name="index">A row.</param>
-        /// <returns>The text.</returns>
-        public string? GetString(int index) => ColumnData.String(column.Arena, column.Node, index);
-
-        /// <summary>The UTF-8 byte length of row <paramref name="index"/>; 0 for a null.</summary>
-        /// <param name="index">A row.</param>
-        /// <returns>The length.</returns>
-        public int GetLength(int index) => ColumnData.ByteLength(column.Arena, column.Node, index);
-    }
-
     extension(Column<ReadOnlyMemory<byte>> column)
     {
         /// <summary>The bytes of row <paramref name="index"/>, borrowed; empty for a null.</summary>

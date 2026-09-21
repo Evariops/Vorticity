@@ -4,9 +4,15 @@ using Vorticity.Expressions;
 namespace Vorticity;
 
 /// <summary>The predicates that only some column types have: text matching, boolean tests, list membership.</summary>
+/// <remarks>
+/// The text predicates are generic over the text type so that <c>Sym&lt;string&gt;</c> and
+/// <c>Sym&lt;string?&gt;</c> both take them without a nullability warning; only <see cref="string"/>
+/// satisfies the constraint among the types a column maps to.
+/// </remarks>
 public static class SymExtensions
 {
-    extension(Sym<string> column)
+    extension<TText>(Sym<TText> column)
+        where TText : IComparable<string?>?
     {
         /// <summary>The rows whose text begins with <paramref name="prefix"/>, compared as UTF-8 bytes.</summary>
         /// <param name="prefix">The prefix.</param>
