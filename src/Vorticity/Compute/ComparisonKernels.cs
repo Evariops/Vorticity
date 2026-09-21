@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Numerics;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
@@ -48,7 +49,6 @@ internal static class ComparisonKernels
         // An extension is its storage plus a label; comparing the label is meaningless and
         // comparing the storage is what a timestamp filter actually wants.
         nodeIndex = Unwrap(arena, nodeIndex);
-        CanonicalNode node = arena.GetNode(nodeIndex);
 
         if (literal.Kind == FilterLiteralKind.Null)
         {
@@ -58,6 +58,29 @@ internal static class ComparisonKernels
             return;
         }
 
+        if (EncodedAnswers.IsEncoded(arena, nodeIndex))
+        {
+            if (EncodedAnswers.TryValues(arena, nodeIndex, destination.Length, out int values, out int count))
+            {
+                byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Max(count, 1));
+                try
+                {
+                    Span<byte> answers = rented.AsSpan(0, count);
+                    Compare(arena, values, op, literal, answers);
+                    EncodedAnswers.Expand(arena, nodeIndex, answers, destination);
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(rented);
+                }
+
+                return;
+            }
+
+            nodeIndex = arena.MaterializeEncoded(nodeIndex);
+        }
+
+        CanonicalNode node = arena.GetNode(nodeIndex);
         switch (node.Kind)
         {
             case CanonicalKind.Null:
@@ -100,6 +123,30 @@ internal static class ComparisonKernels
         Span<byte> destination)
     {
         int storage = Unwrap(arena, nodeIndex);
+        if (EncodedAnswers.IsEncoded(arena, storage))
+        {
+            // A pattern search is dearer than a compare, so this is where answering the distinct
+            // values instead of the rows gains the most.
+            if (EncodedAnswers.TryValues(arena, storage, destination.Length, out int values, out int count))
+            {
+                byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Max(count, 1));
+                try
+                {
+                    Span<byte> answers = rented.AsSpan(0, count);
+                    StringMatch(arena, values, op, pattern, escape, answers);
+                    EncodedAnswers.Expand(arena, storage, answers, destination);
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(rented);
+                }
+
+                return;
+            }
+
+            storage = arena.MaterializeEncoded(storage);
+        }
+
         CanonicalNode node = arena.GetNode(storage);
 
         if (node.Kind == CanonicalKind.Null)
@@ -236,6 +283,29 @@ internal static class ComparisonKernels
         CanonicalArena arena, int nodeIndex, ReadOnlySpan<FilterLiteral> literals,
         Span<byte> destination, Span<byte> scratch, InSet? prepared)
     {
+        int storage = Unwrap(arena, nodeIndex);
+        if (EncodedAnswers.IsEncoded(arena, storage))
+        {
+            if (EncodedAnswers.TryValues(arena, storage, destination.Length, out int values, out int count))
+            {
+                byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Max(count * 2, 1));
+                try
+                {
+                    Span<byte> answers = rented.AsSpan(0, count);
+                    In(arena, values, literals, answers, rented.AsSpan(count, count), prepared);
+                    EncodedAnswers.Expand(arena, storage, answers, destination);
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(rented);
+                }
+
+                return;
+            }
+
+            nodeIndex = arena.MaterializeEncoded(storage);
+        }
+
         if (prepared is not null && TryIntegerColumn(arena, nodeIndex, out CanonicalNode column, out bool signed) &&
             signed == prepared.Signed)
         {
@@ -265,7 +335,15 @@ internal static class ComparisonKernels
     internal static bool TryIntegerColumn(
         CanonicalArena arena, int nodeIndex, out CanonicalNode column, out bool signed)
     {
-        column = arena.GetNode(Unwrap(arena, nodeIndex));
+        // An encoded column is answered through its values, so their signedness is the one a set
+        // is built for.
+        int storage = Unwrap(arena, nodeIndex);
+        if (EncodedAnswers.IsEncoded(arena, storage))
+        {
+            storage = arena.GetNode(storage).EncodedValuesIndex;
+        }
+
+        column = arena.GetNode(storage);
         if (column.Kind != CanonicalKind.Primitive)
         {
             signed = false;

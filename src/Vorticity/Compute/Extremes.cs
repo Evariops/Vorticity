@@ -31,7 +31,9 @@ internal static class Extremes
     internal static bool TryFind(
         CanonicalArena arena, int nodeIndex, ReadOnlySpan<int> rows, bool listed, bool wantMin, out int bestRow)
     {
-        int index = ComparisonKernels.Unwrap(arena, nodeIndex);
+        // An encoded column is decoded: the row that holds the extreme is what is asked for, and a
+        // dictionary may hold entries no row names.
+        int index = arena.Decoded(ComparisonKernels.Unwrap(arena, nodeIndex));
         CanonicalNode node = arena.GetNode(index);
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
         int count = listed ? rows.Length : node.Length;

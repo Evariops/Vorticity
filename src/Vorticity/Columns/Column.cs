@@ -107,7 +107,9 @@ public readonly ref struct Column<T>
         get
         {
             CanonicalKind kind = Arena.RecordRef(Node).Kind;
-            return kind is CanonicalKind.Constant ? EncodedForms.Canonical(Arena, Node) : Node;
+            return kind is CanonicalKind.Constant or CanonicalKind.Dictionary or CanonicalKind.RunEnd
+                ? EncodedForms.Canonical(Arena, Node)
+                : Node;
         }
     }
 

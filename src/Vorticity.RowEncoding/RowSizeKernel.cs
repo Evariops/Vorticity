@@ -55,6 +55,12 @@ internal static class RowSizeKernel
                 AddFixedSizeList(arena, node, field, sizes);
                 return;
 
+            // Sized from the decoded twin, which the encoding pass reads too.
+            case CanonicalKind.Dictionary:
+            case CanonicalKind.RunEnd:
+                Add(arena, arena.MaterializeEncoded(nodeIndex), field, sizes);
+                return;
+
             default:
                 // Rejected here as well as by width classification: the canonical form is the last
                 // place a dtype and its physical shape can disagree.

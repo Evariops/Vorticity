@@ -76,9 +76,42 @@ internal static class LiteralReader
                         return false;
                 }
 
+            // One row is one entry of the values: the code names it, or the run holding the row
+            // does, and the validity was checked above on the row itself.
+            case CanonicalKind.Dictionary:
+                return TryRead(
+                    arena, node.EncodedValuesIndex,
+                    (int)BinaryPrimitives.ReadUInt32LittleEndian(node.Codes.Span[(row * sizeof(uint))..]),
+                    out literal);
+
+            case CanonicalKind.RunEnd:
+                return TryRead(arena, node.EncodedValuesIndex, RunOf(node.RunEnds.Span, row), out literal);
+
             default:
                 return false;
         }
+    }
+
+    /// <summary>The run holding <paramref name="row"/>: the first whose exclusive end is above it.</summary>
+    private static int RunOf(ReadOnlySpan<byte> ends, int row)
+    {
+        ReadOnlySpan<uint> typed = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(ends);
+        int low = 0;
+        int high = typed.Length - 1;
+        while (low < high)
+        {
+            int middle = low + ((high - low) >> 1);
+            if (typed[middle] > (uint)row)
+            {
+                high = middle;
+            }
+            else
+            {
+                low = middle + 1;
+            }
+        }
+
+        return low;
     }
 
     /// <summary>Reads one primitive value out of a values buffer, whatever node it came from.</summary>
