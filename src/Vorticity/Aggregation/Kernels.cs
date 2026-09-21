@@ -10,9 +10,8 @@ internal static class SumKernels
     // Lanes of 32 bits absorb this many vectors of 8- or 16-bit values without overflowing.
     private const int NarrowBlock = 16_384;
 
-    /// <summary>The sum of signed integers as a 64-bit integer.</summary>
-    /// <exception cref="OverflowException">The sum does not fit 64 bits.</exception>
-    internal static long Signed<T>(ReadOnlySpan<T> values)
+    /// <summary>The sum of signed integers, exact in 128 bits whatever their order.</summary>
+    internal static Int128 Signed<T>(ReadOnlySpan<T> values)
         where T : unmanaged, IBinaryInteger<T>
     {
         if (typeof(T) == typeof(int))
@@ -35,18 +34,17 @@ internal static class SumKernels
             return Int8(MemoryMarshal.Cast<T, sbyte>(values));
         }
 
-        long total = 0;
+        Int128 total = 0;
         foreach (T value in values)
         {
-            total = checked(total + long.CreateChecked(value));
+            total += Int128.CreateTruncating(value);
         }
 
         return total;
     }
 
-    /// <summary>The sum of unsigned integers as a 64-bit unsigned integer.</summary>
-    /// <exception cref="OverflowException">The sum does not fit 64 bits.</exception>
-    internal static ulong Unsigned<T>(ReadOnlySpan<T> values)
+    /// <summary>The sum of unsigned integers, exact in 128 bits whatever their order.</summary>
+    internal static UInt128 Unsigned<T>(ReadOnlySpan<T> values)
         where T : unmanaged, IBinaryInteger<T>
     {
         if (typeof(T) == typeof(uint))
@@ -69,10 +67,10 @@ internal static class SumKernels
             return UInt8(MemoryMarshal.Cast<T, byte>(values));
         }
 
-        ulong total = 0;
+        UInt128 total = 0;
         foreach (T value in values)
         {
-            total = checked(total + ulong.CreateChecked(value));
+            total += UInt128.CreateTruncating(value);
         }
 
         return total;
@@ -200,9 +198,9 @@ internal static class SumKernels
         return total;
     }
 
-    private static long Int64(ReadOnlySpan<long> values)
+    private static Int128 Int64(ReadOnlySpan<long> values)
     {
-        long total = 0;
+        Int128 total = 0;
         int i = 0;
         if (Vector.IsHardwareAccelerated && values.Length >= Vector<long>.Count)
         {
@@ -220,18 +218,26 @@ internal static class SumKernels
 
             if (Vector.LessThanAny(overflow, Vector<long>.Zero))
             {
-                throw new OverflowException("The sum does not fit a 64-bit integer.");
+                // A lane left 64 bits, which values near the ends of the range do: the span is
+                // summed again one value at a time, in 128 bits.
+                total = 0;
+                foreach (long value in values)
+                {
+                    total += value;
+                }
+
+                return total;
             }
 
             for (int lane = 0; lane < Vector<long>.Count; lane++)
             {
-                total = checked(total + acc[lane]);
+                total += acc[lane];
             }
         }
 
         for (; i < values.Length; i++)
         {
-            total = checked(total + values[i]);
+            total += values[i];
         }
 
         return total;
@@ -326,9 +332,9 @@ internal static class SumKernels
         return total;
     }
 
-    private static ulong UInt64(ReadOnlySpan<ulong> values)
+    private static UInt128 UInt64(ReadOnlySpan<ulong> values)
     {
-        ulong total = 0;
+        UInt128 total = 0;
         int i = 0;
         if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
         {
@@ -344,18 +350,25 @@ internal static class SumKernels
 
             if (overflow != Vector<ulong>.Zero)
             {
-                throw new OverflowException("The sum does not fit a 64-bit unsigned integer.");
+                // A lane left 64 bits: the span is summed again one value at a time, in 128 bits.
+                total = 0;
+                foreach (ulong value in values)
+                {
+                    total += value;
+                }
+
+                return total;
             }
 
             for (int lane = 0; lane < Vector<ulong>.Count; lane++)
             {
-                total = checked(total + acc[lane]);
+                total += acc[lane];
             }
         }
 
         for (; i < values.Length; i++)
         {
-            total = checked(total + values[i]);
+            total += values[i];
         }
 
         return total;

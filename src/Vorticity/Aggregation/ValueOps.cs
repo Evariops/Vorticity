@@ -39,64 +39,68 @@ internal struct ExtremeState<TValue>
     internal TValue Value;
 }
 
-/// <summary>A sum of signed integers in 64 bits, checked.</summary>
-internal readonly struct SignedSum<TValue> : IValueOp<TValue, SumState<long>>
+/// <summary>
+/// A sum of signed integers in 128 bits: exact for fewer than 2^64 values whatever their order, so
+/// neither the order of the rows nor the cut of a parallel aggregation decides whether it throws;
+/// only the conversion to the result's type is checked.
+/// </summary>
+internal readonly struct SignedSum<TValue> : IValueOp<TValue, SumState<Int128>>
     where TValue : unmanaged, IBinaryInteger<TValue>
 {
-    public static SumState<long> Seed() => default;
+    public static SumState<Int128> Seed() => default;
 
-    public static void Add(ref SumState<long> state, TValue value)
+    public static void Add(ref SumState<Int128> state, TValue value)
     {
-        state.Sum = checked(state.Sum + long.CreateTruncating(value));
+        state.Sum += Int128.CreateTruncating(value);
         state.Count++;
     }
 
-    public static void AddWeighted(ref SumState<long> state, TValue value, long count)
+    public static void AddWeighted(ref SumState<Int128> state, TValue value, long count)
     {
-        state.Sum = checked(state.Sum + checked(long.CreateTruncating(value) * count));
+        state.Sum += Int128.CreateTruncating(value) * count;
         state.Count += count;
     }
 
-    public static void AddSpan(ref SumState<long> state, ReadOnlySpan<TValue> values)
+    public static void AddSpan(ref SumState<Int128> state, ReadOnlySpan<TValue> values)
     {
-        state.Sum = checked(state.Sum + SumKernels.Signed(values));
+        state.Sum += SumKernels.Signed(values);
         state.Count += values.Length;
     }
 
-    public static void Merge(ref SumState<long> into, in SumState<long> other)
+    public static void Merge(ref SumState<Int128> into, in SumState<Int128> other)
     {
-        into.Sum = checked(into.Sum + other.Sum);
+        into.Sum += other.Sum;
         into.Count += other.Count;
     }
 }
 
-/// <summary>A sum of unsigned integers in 64 bits, checked.</summary>
-internal readonly struct UnsignedSum<TValue> : IValueOp<TValue, SumState<ulong>>
+/// <summary>A sum of unsigned integers in 128 bits, exact whatever the order, as <see cref="SignedSum{TValue}"/> is.</summary>
+internal readonly struct UnsignedSum<TValue> : IValueOp<TValue, SumState<UInt128>>
     where TValue : unmanaged, IBinaryInteger<TValue>
 {
-    public static SumState<ulong> Seed() => default;
+    public static SumState<UInt128> Seed() => default;
 
-    public static void Add(ref SumState<ulong> state, TValue value)
+    public static void Add(ref SumState<UInt128> state, TValue value)
     {
-        state.Sum = checked(state.Sum + ulong.CreateTruncating(value));
+        state.Sum += UInt128.CreateTruncating(value);
         state.Count++;
     }
 
-    public static void AddWeighted(ref SumState<ulong> state, TValue value, long count)
+    public static void AddWeighted(ref SumState<UInt128> state, TValue value, long count)
     {
-        state.Sum = checked(state.Sum + checked(ulong.CreateTruncating(value) * (ulong)count));
+        state.Sum += UInt128.CreateTruncating(value) * (ulong)count;
         state.Count += count;
     }
 
-    public static void AddSpan(ref SumState<ulong> state, ReadOnlySpan<TValue> values)
+    public static void AddSpan(ref SumState<UInt128> state, ReadOnlySpan<TValue> values)
     {
-        state.Sum = checked(state.Sum + SumKernels.Unsigned(values));
+        state.Sum += SumKernels.Unsigned(values);
         state.Count += values.Length;
     }
 
-    public static void Merge(ref SumState<ulong> into, in SumState<ulong> other)
+    public static void Merge(ref SumState<UInt128> into, in SumState<UInt128> other)
     {
-        into.Sum = checked(into.Sum + other.Sum);
+        into.Sum += other.Sum;
         into.Count += other.Count;
     }
 }
