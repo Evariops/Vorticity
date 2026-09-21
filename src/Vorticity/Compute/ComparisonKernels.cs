@@ -8,12 +8,13 @@ using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Types;
+using Vorticity.Types.Numerics;
 
 namespace Vorticity.Compute;
 
 /// <summary>
-/// Per-row comparison of a canonical column against a literal, under two rules that the obvious
-/// code gets wrong. Floats follow IEEE 754, so every comparison involving a NaN is false, including
+/// Per-row comparison of a canonical column against a literal or against another column, under two
+/// rules that the obvious code gets wrong. Floats follow IEEE 754, so every comparison involving a NaN is false, including
 /// equality against itself and inequality against anything: the kernels use C#'s own operators and
 /// never a three-way <c>CompareTo</c>, which orders NaN and would answer with the row encoding's
 /// total order instead. Signedness is resolved before the loop rather than folded into a cast,
@@ -25,7 +26,7 @@ namespace Vorticity.Compute;
 /// Validity belongs to the caller: every kernel writes unknown for a null row and never reads the
 /// value stored there.
 /// </remarks>
-internal static class ComparisonKernels
+internal static partial class ComparisonKernels
 {
     private const int ViewSize = 16;
     private const int MaxInlineLength = 12;
@@ -76,6 +77,16 @@ internal static class ComparisonKernels
                 CompareBytes(arena, node, op, literal, destination);
                 return;
 
+            case CanonicalKind.Decimal:
+                CompareDecimalValues(
+                    node.Storage, node.Values.Span, ValidityMask.From(arena, node.Validity), op,
+                    literal, destination);
+                return;
+
+            case CanonicalKind.FixedSizeList:
+                CompareFixedBytes(arena, node, op, literal, destination);
+                return;
+
             case CanonicalKind.Constant:
                 CompareConstant(arena, node, op, literal, destination);
                 return;
@@ -83,7 +94,8 @@ internal static class ComparisonKernels
             default:
                 throw new NotSupportedException(
                     $"A filter cannot compare a {node.Kind} column. A filter evaluates " +
-                    "booleans, primitives, utf8 and binary, plus extensions over those.");
+                    "booleans, primitives, decimals, utf8, binary and fixed-size lists of bytes, " +
+                    "plus extensions over those.");
         }
     }
 
@@ -236,12 +248,12 @@ internal static class ComparisonKernels
         CanonicalArena arena, int nodeIndex, ReadOnlySpan<FilterLiteral> literals,
         Span<byte> destination, Span<byte> scratch, InSet? prepared)
     {
-        if (prepared is not null && TryIntegerColumn(arena, nodeIndex, out CanonicalNode column, out bool signed) &&
+        if (prepared is not null && TryIntegerColumn(arena, nodeIndex, out PType ptype, out bool signed) &&
             signed == prepared.Signed)
         {
+            CanonicalNode column = arena.GetNode(Unwrap(arena, nodeIndex));
             prepared.Apply(
-                column.PType, column.Values.Span, ValidityMask.From(arena, column.Validity),
-                destination);
+                ptype, column.Values.Span, ValidityMask.From(arena, column.Validity), destination);
             return;
         }
 
@@ -260,20 +272,39 @@ internal static class ComparisonKernels
     /// <summary>Whether <paramref name="nodeIndex"/> is an integer column a set can be read against.</summary>
     /// <param name="arena">The arena.</param>
     /// <param name="nodeIndex">The column, before the extension wrapper is removed.</param>
-    /// <param name="column">The storage node.</param>
+    /// <param name="ptype">The integer type its values are stored as.</param>
     /// <param name="signed">Whether it is signed, which decides which set is valid for it.</param>
+    /// <remarks>
+    /// A decimal stored in eight bytes or fewer is one: its literals arrive unscaled, at the
+    /// column's scale, so membership is membership of the signed integers it stores.
+    /// </remarks>
     internal static bool TryIntegerColumn(
-        CanonicalArena arena, int nodeIndex, out CanonicalNode column, out bool signed)
+        CanonicalArena arena, int nodeIndex, out PType ptype, out bool signed)
     {
-        column = arena.GetNode(Unwrap(arena, nodeIndex));
-        if (column.Kind != CanonicalKind.Primitive)
+        CanonicalNode column = arena.GetNode(Unwrap(arena, nodeIndex));
+        switch (column.Kind)
         {
-            signed = false;
-            return false;
-        }
+            case CanonicalKind.Primitive:
+                ptype = column.PType;
+                signed = ptype.IsSignedInteger();
+                return signed || ptype.IsUnsignedInteger();
 
-        signed = column.PType.IsSignedInteger();
-        return signed || column.PType.IsUnsignedInteger();
+            case CanonicalKind.Decimal when column.Storage <= DecimalStorageType.I64:
+                ptype = column.Storage switch
+                {
+                    DecimalStorageType.I8 => PType.I8,
+                    DecimalStorageType.I16 => PType.I16,
+                    DecimalStorageType.I32 => PType.I32,
+                    _ => PType.I64,
+                };
+                signed = true;
+                return true;
+
+            default:
+                ptype = default;
+                signed = false;
+                return false;
+        }
     }
 
     /// <summary>Evaluates a column's null check, which is never unknown.</summary>
@@ -371,10 +402,21 @@ internal static class ComparisonKernels
                 break;
             }
 
+            case DTypeKind.Decimal:
+            {
+                Span<byte> one = stackalloc byte[1];
+                CompareDecimalValues(
+                    node.Storage, node.ConstantElement, ValidityMask.From(arena, Validity.AllValid),
+                    op, literal, one);
+                state = one[0];
+                break;
+            }
+
             default:
                 throw new NotSupportedException(
                     $"A filter cannot compare a constant {dtype.Kind} column. A filter " +
-                    "evaluates booleans, primitives, utf8 and binary, plus extensions over those.");
+                    "evaluates booleans, primitives, decimals, utf8 and binary, plus extensions " +
+                    "over those.");
         }
 
         if (mask.AllValid)

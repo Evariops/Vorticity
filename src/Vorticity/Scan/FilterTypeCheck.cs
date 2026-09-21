@@ -34,6 +34,15 @@ internal static class FilterTypeCheck
         /// <summary>Text and binary, which compare as bytes.</summary>
         Bytes,
 
+        /// <summary>
+        /// Decimals, compared against their unscaled value at the column's scale: a signed integer,
+        /// or sixteen or thirty-two bytes of little-endian two's complement.
+        /// </summary>
+        Decimal,
+
+        /// <summary>A fixed-size list of non-null bytes, a uuid among them, which compares as bytes.</summary>
+        FixedBytes,
+
         /// <summary>A list, which no comparison reads and <c>ListContains</c> looks inside.</summary>
         List,
     }
@@ -111,23 +120,32 @@ internal static class FilterTypeCheck
             return;
         }
 
-        Domain wanted = DomainOf(column);
-        Domain given = DomainOf(value.Kind);
-
         // A list column refuses every comparison, constant or not, and saying so is the kernel's;
         // a null constant is unknown for every row by design, and a null column answers unknown to
         // every constant.
-        if (wanted is Domain.Open or Domain.List || given == Domain.Open || wanted == given)
+        Domain wanted = DomainOf(column);
+        if (wanted is Domain.Open or Domain.List || value.Kind == FilterLiteralKind.Null ||
+            Accepts(wanted, value))
         {
             return;
         }
 
         throw new ArgumentException(
             $"'{field.Path}' is a column of {column} and the filter compares it against a " +
-            $"{Name(value.Kind)} constant. No comparison relates the two: build the constant " +
+            $"{Name(value)} constant. No comparison relates the two: build the constant " +
             "from the column's own type.",
             parameterName);
     }
+
+    /// <summary>Whether a column of <paramref name="wanted"/> compares against <paramref name="value"/>.</summary>
+    private static bool Accepts(Domain wanted, FilterLiteral value) => wanted switch
+    {
+        Domain.Bool => value.Kind == FilterLiteralKind.Bool,
+        Domain.Number => value.Kind is FilterLiteralKind.Signed or FilterLiteralKind.Unsigned or FilterLiteralKind.Float,
+        Domain.Bytes or Domain.FixedBytes => value.Kind == FilterLiteralKind.Bytes,
+        Domain.Decimal => ComparisonKernels.TryDecimal(value, out _),
+        _ => true,
+    };
 
     private static void CheckText(
         DType schema, FieldExpr field, StringMatchOp op, string parameterName)
@@ -190,26 +208,23 @@ internal static class FilterTypeCheck
             DTypeKind.Bool => Domain.Bool,
             DTypeKind.Primitive => Domain.Number,
             DTypeKind.Utf8 or DTypeKind.Binary => Domain.Bytes,
+            DTypeKind.Decimal => Domain.Decimal,
+            DTypeKind.FixedSizeList when IsByte(column.ElementType) => Domain.FixedBytes,
             DTypeKind.List or DTypeKind.FixedSizeList => Domain.List,
             _ => Domain.Open,
         };
     }
 
-    private static Domain DomainOf(FilterLiteralKind kind) => kind switch
-    {
-        FilterLiteralKind.Bool => Domain.Bool,
-        FilterLiteralKind.Signed or FilterLiteralKind.Unsigned or FilterLiteralKind.Float =>
-            Domain.Number,
-        FilterLiteralKind.Bytes => Domain.Bytes,
-        _ => Domain.Open,
-    };
+    private static bool IsByte(DType element) =>
+        !element.IsDefault && element.Kind == DTypeKind.Primitive && element.PType == PType.U8 &&
+        !element.IsNullable;
 
-    private static string Name(FilterLiteralKind kind) => kind switch
+    private static string Name(FilterLiteral value) => value.Kind switch
     {
         FilterLiteralKind.Bool => "boolean",
         FilterLiteralKind.Signed => "signed integer",
         FilterLiteralKind.Unsigned => "unsigned integer",
         FilterLiteralKind.Float => "float",
-        _ => "text or binary",
+        _ => $"{value.BytesValue.Length}-byte text or binary",
     };
 }
