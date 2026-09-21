@@ -103,6 +103,14 @@ internal static class CanonicalConcat
             }
         }
 
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            if (arena.GetNode(chunks[i]).Kind is CanonicalKind.Dictionary or CanonicalKind.RunEnd)
+            {
+                return ConcatDecoding(context, dtype, length, chunks, depth);
+            }
+        }
+
         CanonicalKind kind = arena.GetNode(chunks[0]).Kind;
         bool mixedConstants = false;
         for (int i = 1; i < chunks.Length; i++)
@@ -167,8 +175,41 @@ internal static class CanonicalConcat
             // than at decode: concatenation is the only place that sees the chunks together.
             CanonicalKind.Constant =>
                 ConcatConstant(context, dtype, length, chunks, validity, depth),
+            CanonicalKind.Dictionary or CanonicalKind.RunEnd => throw new UnreachableException(
+                $"{kind} chunks are decoded above, before ConcatValidity."),
             _ => throw new UnreachableException($"CanonicalKind {(byte)kind} is not defined."),
         };
+    }
+
+    /// <summary>
+    /// Concatenates chunks of which some are dictionary or run-end nodes: each of those is decoded
+    /// to its canonical twin, and the concat re-enters over the result.
+    /// </summary>
+    /// <remarks>
+    /// Two chunks' codes index two dictionaries, and two chunks' ends two row spaces, so neither
+    /// form survives a concatenation without a merge; decoding is the one answer that holds for
+    /// every pair. The re-entry terminates because the list it re-enters with holds no encoded node.
+    /// </remarks>
+    private static int ConcatDecoding(
+        ArrayDecodeContext context, DType dtype, int length, ReadOnlySpan<int> chunks, int depth)
+    {
+        CanonicalArena arena = context.Canonical;
+        Span<int> stack = stackalloc int[StackChunks];
+        Scratch<int> scratch = new Scratch<int>(chunks.Length, stack);
+        try
+        {
+            Span<int> decoded = scratch.Span;
+            for (int i = 0; i < chunks.Length; i++)
+            {
+                decoded[i] = arena.Decoded(chunks[i]);
+            }
+
+            return Concat(context, dtype, length, decoded, depth);
+        }
+        finally
+        {
+            scratch.Dispose();
+        }
     }
 
 

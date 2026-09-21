@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
@@ -79,8 +80,37 @@ internal static class CanonicalFilter
                 count,
                 FilterValidity(arena, node.Validity, indices),
                 node.ConstantElement),
+
+            // The codes are one per row and are what the selection picks; the distinct values are
+            // shared by every row, so they travel untouched.
+            CanonicalKind.Dictionary => FilterDictionary(arena, node, indices),
+
+            // A selection breaks runs apart, and a gather through the ends would cost a search per
+            // row for a form the consumer may never read: the runs are expanded once and gathered.
+            CanonicalKind.RunEnd => Apply(arena, arena.MaterializeEncoded(nodeIndex), indices),
             _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
         };
+    }
+
+    private static int FilterDictionary(
+        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices)
+    {
+        int count = indices.Length;
+        Validity validity = FilterValidity(arena, node.Validity, indices);
+        VortexBuffer codes = VortexBuffer.Empty;
+        if (count > 0)
+        {
+            // Uninitialized: the loop writes every code.
+            codes = arena.AllocateUninitialized(count * sizeof(uint), sizeof(uint), out Span<byte> raw);
+            ReadOnlySpan<uint> source = MemoryMarshal.Cast<byte, uint>(node.Codes.Span);
+            Span<uint> target = MemoryMarshal.Cast<byte, uint>(raw)[..count];
+            for (int i = 0; i < target.Length; i++)
+            {
+                target[i] = source[indices[i]];
+            }
+        }
+
+        return arena.AddDictionary(node.DType, count, validity, codes, node.EncodedValuesIndex);
     }
 
     private static int FilterBool(CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices)

@@ -70,6 +70,34 @@ internal enum CanonicalKind : byte
     /// </para>
     /// </remarks>
     Constant = 9,
+
+    /// <summary>
+    /// A 32-bit code per row into a child holding the distinct values in code order.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Only produced when the scan asks for encoded delivery, and only for a column's own node: a
+    /// decoder never receives one as a child. The node's validity is the row validity -- a null
+    /// code, or a code naming a null value, is a null row -- so every reader of validity is right
+    /// without looking at the codes. A null row's code is 0.
+    /// </para>
+    /// <para>
+    /// The value accessors of <see cref="CanonicalNode"/> read through a canonical twin memoized on
+    /// the record, as they do for a constant; a filter gathers the codes and shares the values, and
+    /// a slice narrows the codes.
+    /// </para>
+    /// </remarks>
+    Dictionary = 10,
+
+    /// <summary>
+    /// Exclusive 32-bit run ends relative to the node's row 0, and a child of one value per run.
+    /// </summary>
+    /// <remarks>
+    /// Produced under the same conditions as <see cref="Dictionary"/>. The ends strictly increase,
+    /// every run holds at least one row and the last end is the row count, so a slice rebases them
+    /// rather than keeping an offset. The validity is the row validity, as for a dictionary.
+    /// </remarks>
+    RunEnd = 11,
 }
 
 /// <summary>
@@ -113,20 +141,20 @@ internal readonly ref struct CanonicalNode
 
     /// <summary>Bit-packed, LSB-first boolean bits.</summary>
     /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Bool"/>.</exception>
-    public VortexBuffer Bits => Require(CanonicalKind.Bool).BufferA;
+    public VortexBuffer Bits => RequireDecoded(CanonicalKind.Bool).BufferA;
 
     /// <summary>
     /// The bit position of row 0 inside the first byte, 0..7. Consumers must apply it; the bitmap
     /// is never shifted, because that would be an allocation and a copy per batch.
     /// </summary>
     /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Bool"/>.</exception>
-    public int BitOffset => Require(CanonicalKind.Bool).BitOffset;
+    public int BitOffset => RequireDecoded(CanonicalKind.Bool).BitOffset;
 
     // ----------------------------------------------------------------------------- Primitive
 
     /// <summary>The values' physical type.</summary>
     /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Primitive"/>.</exception>
-    public PType PType => Require(CanonicalKind.Primitive).PType;
+    public PType PType => RequireDescribed(CanonicalKind.Primitive).PType;
 
     /// <summary>
     /// <c>Length * PType.ByteWidth()</c> bytes for a Primitive, or
@@ -138,6 +166,10 @@ internal readonly ref struct CanonicalNode
         get
         {
             ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
+            if (r.Kind is CanonicalKind.Primitive or CanonicalKind.Decimal)
+            {
+                return r.BufferA;
+            }
 
             // The constant form materializes here, and at the boundary `RequireMaterialized` draws
             // for a string column's views -- those two, and nowhere else. This property promises a
@@ -149,18 +181,20 @@ internal readonly ref struct CanonicalNode
             // The gain survives for everyone who never asks: a scan that filters, takes, prunes or
             // writes back never materializes, and those are the paths the form was chosen for. The
             // cost falls exactly on the caller who demands a contiguous span, and it is paid once,
-            // because the twin is memoized on the record.
+            // because the twin is memoized on the record. A dictionary or run-end node takes the
+            // same boundary through `Decoded`, for every value accessor rather than these two.
             if (r.Kind == CanonicalKind.Constant)
             {
                 return _arena.RecordRef(_arena.MaterializeConstant(_index)).BufferA;
             }
 
-            if (r.Kind is not (CanonicalKind.Primitive or CanonicalKind.Decimal))
+            ref readonly CanonicalRecord values = ref Decoded();
+            if (values.Kind is not (CanonicalKind.Primitive or CanonicalKind.Decimal))
             {
-                ArraysThrow.Kind(r.Kind, "Primitive or Decimal");
+                ArraysThrow.Kind(values.Kind, "Primitive or Decimal");
             }
 
-            return r.BufferA;
+            return values.BufferA;
         }
     }
 
@@ -182,7 +216,7 @@ internal readonly ref struct CanonicalNode
             ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
             return r.Kind == CanonicalKind.Constant && r.DType.Kind == DTypeKind.Decimal
                 ? DecimalStorage.FromByteWidth((int)r.FixedSize)
-                : Require(CanonicalKind.Decimal).Storage;
+                : RequireDescribed(CanonicalKind.Decimal).Storage;
         }
     }
 
@@ -195,7 +229,7 @@ internal readonly ref struct CanonicalNode
             ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
             return r.Kind == CanonicalKind.Constant && r.DType.Kind == DTypeKind.Decimal
                 ? r.DType.Precision
-                : Require(CanonicalKind.Decimal).Precision;
+                : RequireDescribed(CanonicalKind.Decimal).Precision;
         }
     }
 
@@ -208,7 +242,7 @@ internal readonly ref struct CanonicalNode
             ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
             return r.Kind == CanonicalKind.Constant && r.DType.Kind == DTypeKind.Decimal
                 ? r.DType.Scale
-                : Require(CanonicalKind.Decimal).Scale;
+                : RequireDescribed(CanonicalKind.Decimal).Scale;
         }
     }
 
@@ -323,6 +357,32 @@ internal readonly ref struct CanonicalNode
         }
     }
 
+    // ------------------------------------------------------------------ Dictionary and RunEnd
+
+    /// <summary><see cref="Length"/> little-endian <c>u32</c> codes, each below the values' length.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Dictionary"/>.</exception>
+    public VortexBuffer Codes => Require(CanonicalKind.Dictionary).BufferA;
+
+    /// <summary>One little-endian <c>u32</c> exclusive end per run, relative to row 0.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.RunEnd"/>.</exception>
+    public VortexBuffer RunEnds => Require(CanonicalKind.RunEnd).BufferA;
+
+    /// <summary>The child holding a dictionary's distinct values or a run-end node's run values.</summary>
+    /// <exception cref="VortexFormatException">The kind is neither Dictionary nor RunEnd.</exception>
+    public int EncodedValuesIndex
+    {
+        get
+        {
+            ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
+            if (r.Kind is not (CanonicalKind.Dictionary or CanonicalKind.RunEnd))
+            {
+                ArraysThrow.Kind(r.Kind, "Dictionary or RunEnd");
+            }
+
+            return _arena.ChildAt(r.ChildStart);
+        }
+    }
+
     private ref readonly CanonicalRecord Require(CanonicalKind kind)
     {
         ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
@@ -332,6 +392,66 @@ internal readonly ref struct CanonicalNode
         }
 
         return ref r;
+    }
+
+    /// <summary>
+    /// The record the value accessors read: this node's, or the canonical twin of a dictionary or
+    /// run-end node, materialized once and memoized.
+    /// </summary>
+    private ref readonly CanonicalRecord Decoded()
+    {
+        CanonicalKind kind = _arena.RecordRef(_index).Kind;
+        if (kind is not (CanonicalKind.Dictionary or CanonicalKind.RunEnd))
+        {
+            return ref _arena.RecordRef(_index);
+        }
+
+        // Taken after the materialization, which may grow the record array.
+        return ref _arena.RecordRef(_arena.MaterializeEncoded(_index));
+    }
+
+    /// <summary><see cref="Require"/> over <see cref="Decoded"/>.</summary>
+    private ref readonly CanonicalRecord RequireDecoded(CanonicalKind kind)
+    {
+        ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
+        if (r.Kind == kind)
+        {
+            return ref r;
+        }
+
+        ref readonly CanonicalRecord twin = ref Decoded();
+        if (twin.Kind != kind)
+        {
+            ArraysThrow.Kind(twin.Kind, kind.ToString());
+        }
+
+        return ref twin;
+    }
+
+    /// <summary>
+    /// <see cref="Require"/> over the record whose physical fields describe the values: a
+    /// dictionary's or a run-end node's values child describes them without a decode.
+    /// </summary>
+    private ref readonly CanonicalRecord RequireDescribed(CanonicalKind kind)
+    {
+        ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
+        if (r.Kind == kind)
+        {
+            return ref r;
+        }
+
+        if (r.Kind is not (CanonicalKind.Dictionary or CanonicalKind.RunEnd))
+        {
+            ArraysThrow.Kind(r.Kind, kind.ToString());
+        }
+
+        ref readonly CanonicalRecord values = ref _arena.RecordRef(_arena.ChildAt(r.ChildStart));
+        if (values.Kind != kind)
+        {
+            ArraysThrow.Kind(values.Kind, kind.ToString());
+        }
+
+        return ref values;
     }
 
     /// <summary>
@@ -349,6 +469,11 @@ internal readonly ref struct CanonicalNode
         ref readonly CanonicalRecord r = ref _arena.RecordRef(_index);
         if (r.Kind != CanonicalKind.Constant)
         {
+            if (r.Kind is CanonicalKind.Dictionary or CanonicalKind.RunEnd)
+            {
+                return ref RequireDecoded(kind);
+            }
+
             if (r.Kind != kind)
             {
                 ArraysThrow.Kind(r.Kind, kind.ToString());
@@ -373,7 +498,7 @@ internal readonly ref struct CanonicalNode
 /// The pooled store behind <see cref="CanonicalNode"/>. Owned by a <see cref="ScanContext"/>;
 /// <see cref="Reset"/> per batch.
 /// </summary>
-internal sealed class CanonicalArena
+internal sealed partial class CanonicalArena
 {
     private CanonicalRecord[] _records;
     private int _recordCount;
@@ -872,12 +997,14 @@ internal sealed class CanonicalArena
     /// <param name="length">Row count.</param>
     /// <param name="validity">Per-row validity.</param>
     /// <returns>The new node's index.</returns>
-    /// <exception cref="VortexFormatException"><paramref name="kind"/> is not a defined value.</exception>
+    /// <exception cref="VortexFormatException">
+    /// <paramref name="kind"/> is not a defined value, or is an encoded form, which has no bare shape.
+    /// </exception>
     public int AddBare(CanonicalKind kind, DType dtype, int length, Validity validity)
     {
         if ((uint)kind > (uint)CanonicalKind.Constant)
         {
-            ArraysThrow.Format($"CanonicalKind {(byte)kind} is not defined; 0..9 are.");
+            ArraysThrow.Format($"CanonicalKind {(byte)kind} has no bare form; 0..9 do.");
         }
 
         CanonicalRecord r = New(kind, dtype, length, validity);
@@ -1493,8 +1620,9 @@ internal struct CanonicalRecord
     internal uint FixedSize;
 
     /// <summary>
-    /// For a <see cref="CanonicalKind.Constant"/> node: the materialized twin, once someone has
-    /// asked for a contiguous span. -1 until then.
+    /// For a <see cref="CanonicalKind.Constant"/>, <see cref="CanonicalKind.Dictionary"/> or
+    /// <see cref="CanonicalKind.RunEnd"/> node: the materialized twin, once someone has asked for a
+    /// contiguous span. -1 until then.
     /// </summary>
     internal int Materialized;
 

@@ -45,8 +45,10 @@ internal static class ArenaWords
     }
 
     /// <summary>The values of the bool node <paramref name="node"/> as words.</summary>
+    /// <remarks>A dictionary or run-end node of booleans is read through its decoded twin.</remarks>
     internal static ReadOnlySpan<ulong> Bits(CanonicalArena arena, int node)
     {
+        node = arena.Decoded(node);
         ref readonly CanonicalRecord record = ref arena.RecordRef(node);
         if (record.Kind == CanonicalKind.Constant)
         {

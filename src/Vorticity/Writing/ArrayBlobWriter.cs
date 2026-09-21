@@ -1413,12 +1413,21 @@ internal static class ArrayBlobWriter
             // be the ones the corpus was written with.
             CanonicalKind.Constant => throw new UnreachableException(
                 "A constant node reached WriteNode; it is materialized in WriteCompressed."),
+
+            // A batch delivered encoded carries these, and the writer decodes them at its door; one
+            // met here is decoded the same way, so the file holds the canonical array whatever path
+            // the node took.
+            CanonicalKind.Dictionary or CanonicalKind.RunEnd => WriteNode(
+                builder, arena, arena.MaterializeEncoded(nodeIndex), buffers, encodings, compress, stats),
             _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
         };
     }
 
 
-    /// <summary>Expands a constant node back to its materialized form; anything else unchanged.</summary>
+    /// <summary>
+    /// Expands a constant, dictionary or run-end node back to its materialized form; anything else
+    /// unchanged.
+    /// </summary>
     /// <param name="arena">The arena holding the node.</param>
     /// <param name="nodeIndex">The node about to be compressed and written.</param>
     /// <returns>A node index the rest of the writer already knows how to handle.</returns>
@@ -1443,7 +1452,7 @@ internal static class ArrayBlobWriter
     internal static int Materialize(CanonicalArena arena, int nodeIndex) =>
         arena.GetNode(nodeIndex).Kind == CanonicalKind.Constant
             ? arena.MaterializeConstant(nodeIndex)
-            : nodeIndex;
+            : arena.Decoded(nodeIndex);
 
     /// <remarks>Writes a child that is a column in its own right, compressing it when asked.</remarks>
     private static int WriteChild(
