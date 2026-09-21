@@ -423,9 +423,10 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>One retained chunk: the arena that owns it, the node, and when it was last used.</summary>
-    private sealed class RetainedChunk
+    /// <remarks>Evicted entries are kept with their arena and refilled, so a scan that walks many chunks allocates none per chunk.</remarks>
+    private sealed class RetainedChunk(CanonicalArena arena)
     {
-        internal required CanonicalArena Arena { get; init; }
+        internal CanonicalArena Arena { get; } = arena;
 
         internal long Key;
 
@@ -487,16 +488,22 @@ internal sealed class ScanContext : IDisposable
         internal void ReleaseSegments()
         {
             Segment?.Release();
-            Segment = null;
             if (MoreSegments is { } more)
             {
                 foreach (SegmentOwner owner in more)
                 {
                     owner.Release();
                 }
-
-                MoreSegments = null;
             }
+
+            Forget();
+        }
+
+        /// <summary>Clears what the entry gathered without releasing it, for a decode that published nothing.</summary>
+        internal void Forget()
+        {
+            Segment = null;
+            MoreSegments?.Clear();
         }
     }
 
@@ -517,8 +524,8 @@ internal sealed class ScanContext : IDisposable
     /// </remarks>
     private Dictionary<long, RetainedChunk>? _retained;
 
-    /// <summary>Arenas whose entry was evicted, kept to be refilled rather than reallocated.</summary>
-    private Stack<CanonicalArena>? _spareArenas;
+    /// <summary>Evicted entries, with their arenas, kept to be refilled rather than reallocated.</summary>
+    private Stack<RetainedChunk>? _spareChunks;
 
     /// <summary>Counts batches, so an entry can say whether the batch in flight has used it.</summary>
     private long _batchNumber;
@@ -788,19 +795,18 @@ internal sealed class ScanContext : IDisposable
 
             entry.Arena.Reset();
             entry.ReleaseSegments();
-            (_spareArenas ??= new Stack<CanonicalArena>()).Push(entry.Arena);
+            (_spareChunks ??= new Stack<RetainedChunk>()).Push(entry);
             _retained.Remove(held.Key);
         }
 
-        CanonicalArena fresh = _spareArenas is { Count: > 0 }
-            ? _spareArenas.Pop()
-            : new CanonicalArena();
-        _building = new RetainedChunk { Arena = fresh };
+        _building = _spareChunks is { Count: > 0 }
+            ? _spareChunks.Pop()
+            : new RetainedChunk(new CanonicalArena());
 
         // What the decode views is the blob in the node arena, which a flat reader loads just
         // before it begins; a child decoded inside the redirect notes its own segment as it loads.
         _building.Depend(Segments.OwnerHolding(Nodes.FirstBlobBuffer()));
-        return fresh;
+        return _building.Arena;
     }
 
     /// <summary>
@@ -827,7 +833,8 @@ internal sealed class ScanContext : IDisposable
         {
             // Nothing was retained on the gathered segments yet, so there is nothing to release.
             entry.Arena.Reset();
-            (_spareArenas ??= new Stack<CanonicalArena>()).Push(entry.Arena);
+            entry.Forget();
+            (_spareChunks ??= new Stack<RetainedChunk>()).Push(entry);
             return;
         }
 
@@ -894,9 +901,9 @@ internal sealed class ScanContext : IDisposable
             _retained.Clear();
         }
 
-        while (_spareArenas is { Count: > 0 })
+        while (_spareChunks is { Count: > 0 })
         {
-            _spareArenas.Pop().Reset();
+            _spareChunks.Pop().Arena.Reset();
         }
 
         Segments.Dispose();
