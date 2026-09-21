@@ -1,23 +1,14 @@
 // How much the CALLER's batching decides the file's size.
 //
-// WrittenSizeTests measures one batching: whatever the source file's own chunking produces. That
-// leaves a property of the public API completely unguarded, and it is a large one. Rewriting
-// `types/binary_nonnull_r8193` at forced batch sizes, where the only variable is how many chunks
-// VortexFileWriter emits:
+// WrittenSizeTests measures one batching: whatever the source file's own chunking produces. This
+// rewrites `types/binary_nonnull_r8193` twice, once in the source's own batches and once in
+// 1024-row batches. The writer cuts its own blocks -- `RowBlockSize` rows, coalesced up to a byte
+// target -- so both writes emit the same chunks and the same bytes, and this test holds that. A
+// writer that let the caller's batching reach the file would pay a whole dictionary per extra
+// chunk: the multi-chunk axis of WrittenSizeTests, which forces the chunks, shows what that costs.
 //
-//     2 chunks (the source's own)     65 980 bytes
-//     3 chunks                        92 212
-//     5 chunks                       146 076
-//     9 chunks                       169 860
-//
-// Roughly 26 kB per extra chunk, because every chunk builds and writes its OWN dictionary of the
-// same distinct values. The reference shares one values child across a column's chunks through the
-// `vortex.dict` layout, which this writer does not emit.
-//
-// SO THIS IS A RATCHET ON A KNOWN-BAD NUMBER, which is the unusual case and worth saying plainly.
-// It does not assert that the behaviour is acceptable - it is not. It asserts that it does not get
-// WORSE while nobody is looking, and it is the test that will turn red, loudly and correctly, on
-// the day a shared dictionary layout lands. Lower the ceiling then.
+// 1024 divides the row block. Batches that do not can still move bytes, because the blocks follow
+// the rows the writer has been handed; the write specification states that limit.
 using System;
 using System.Globalization;
 using System.IO;
@@ -44,29 +35,29 @@ public sealed class BatchingSizeTests
     private const int SmallBatch = 1024;
 
     /// <summary>
-    /// What nine chunks may cost against two, as a multiple.
+    /// What the fragmented write may cost against the source's own batching, as a multiple.
     /// </summary>
     /// <remarks>
-    /// Measured at 2.57×. LOWER THIS when the writer stops rewriting a dictionary per chunk; it is
-    /// a bound on a defect, not a budget for one.
+    /// Measured at 1.00×: the caller's batching does not reach the file. Anything above is the
+    /// writer starting to follow the batches it is handed.
     /// </remarks>
-    private const double FragmentationCeiling = 2.65;
+    private const double FragmentationCeiling = 1.00;
 
     [Fact]
     public async Task SplittingTheSameRowsAcrossMoreBatchesStaysWithinItsRatchet()
     {
         Decoders.EnsureRegistered();
 
-        (long whole, int wholeChunks) = await Rewrite(cap: 0);
-        (long fragmented, int smallChunks) = await Rewrite(SmallBatch);
+        (long whole, int wholeBatches) = await Rewrite(cap: 0);
+        (long fragmented, int smallBatches) = await Rewrite(SmallBatch);
 
-        Assert.True(smallChunks > wholeChunks, "the small-batch write must produce more chunks");
+        Assert.True(smallBatches > wholeBatches, "the small-batch write must hand the writer more batches");
 
         double ratio = (double)fragmented / whole;
         string report = string.Create(
             CultureInfo.InvariantCulture,
-            $"BATCHING SIZE: {Entry} written as {wholeChunks} chunks is {whole} bytes, as " +
-            $"{smallChunks} chunks is {fragmented} -- {ratio:F2}x (ceiling {FragmentationCeiling:F2})");
+            $"BATCHING SIZE: {Entry} written from {wholeBatches} batches is {whole} bytes, from " +
+            $"{smallBatches} batches is {fragmented} -- {ratio:F2}x (ceiling {FragmentationCeiling:F2})");
         Console.Out.WriteLine(report);
 
         Assert.True(ratio <= FragmentationCeiling, report);
@@ -74,12 +65,12 @@ public sealed class BatchingSizeTests
 
     /// <summary>Reads the entry and writes it back, optionally forcing a batch size.</summary>
     /// <param name="cap">Rows per batch, or 0 to take the source's own chunking.</param>
-    private static async Task<(long Bytes, int Chunks)> Rewrite(int cap)
+    private static async Task<(long Bytes, int Batches)> Rewrite(int cap)
     {
         string written = Path.Combine(Path.GetTempPath(), $"vorticity-batching-{Guid.NewGuid():N}.vortex");
         try
         {
-            int chunks = 0;
+            int batches = 0;
             await using (VortexFile source = await VortexFile.OpenAsync(Corpus.Path(Entry), CancellationToken.None))
             await using (VortexFileWriter writer = VortexFileWriter.Create(written, source.Schema))
             {
@@ -92,14 +83,14 @@ public sealed class BatchingSizeTests
                 await foreach (RecordBatch batch in scan.ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
-                    chunks++;
+                    batches++;
                     await writer.WriteAsync(batch, CancellationToken.None);
                 }
 
                 await writer.CompleteAsync(CancellationToken.None);
             }
 
-            return (new FileInfo(written).Length, chunks);
+            return (new FileInfo(written).Length, batches);
         }
         finally
         {
