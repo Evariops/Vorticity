@@ -684,7 +684,7 @@ internal static class Program
     private static async Task Explain(StringBuilder output, VortexFile file, string expression)
     {
         Vorticity.Expressions.VortexExpr filter = FilterText.Parse(expression);
-        ScanPlan plan = await file.ScanBuilder().Where(filter).ExplainAsync().ConfigureAwait(false);
+        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync().ConfigureAwait(false);
         output.Append("\nexplain   ").Append(expression).Append('\n')
             .Append("  file may match   ").Append(plan.FileMayMatch ? "yes" : "no").Append('\n')
             .Append("  rows             ").Append(Text(plan.RowCount)).Append('\n')

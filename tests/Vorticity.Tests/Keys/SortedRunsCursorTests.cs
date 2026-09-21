@@ -417,7 +417,7 @@ public sealed class SortedRunsCursorTests
         (_, VortexExpr filter, Func<FilterLiteral, bool> matches) = Parse("i64 >= 2400");
         List<Entry> oracle = Oracle("i64").FindAll(e => matches(e.Key));
 
-        ScanPlan plan = await file.ScanBuilder().Where(filter).ExplainAsync();
+        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync();
         Assert.NotNull(plan.Count);
         Assert.True(plan.Count.ExactCover);
         Assert.Equal(oracle.Count, plan.Count.ExactCount);
@@ -426,12 +426,12 @@ public sealed class SortedRunsCursorTests
         Assert.Null(plan.Order);
 
         // Without the index, no cover; a take narrows it off too.
-        ScanPlan off = await file.ScanBuilder().Where(filter).WithIndexes(false).ExplainAsync();
+        ScanExplanation off = await file.ScanBuilder().Where(filter).WithIndexes(false).ExplainAsync();
         Assert.False(off.Count!.ExactCover);
         Assert.Equal(0, off.RowsSelectedByIndex);
 
-        ScanPlan ordered = await file.ScanBuilder().Where(filter).InKeyOrder("i64", descending: true).ExplainAsync();
-        OrderPlan order = Assert.IsType<OrderPlan>(ordered.Order);
+        ScanExplanation ordered = await file.ScanBuilder().Where(filter).InKeyOrder("i64", descending: true).ExplainAsync();
+        OrderExplanation order = Assert.IsType<OrderExplanation>(ordered.Order);
         Assert.Equal(KeySourceKind.SortedRuns, order.Source);
         Assert.Equal(oracle.Count, order.EntriesInRange);
         Assert.True(order.Descending);
@@ -453,7 +453,7 @@ public sealed class SortedRunsCursorTests
 
         Assert.Equal(runsWithKeys, order.RunsInRange);
 
-        ScanPlan nothing = await file.ScanBuilder().InKeyOrder("i64").WithIndexes(false).ExplainAsync();
+        ScanExplanation nothing = await file.ScanBuilder().InKeyOrder("i64").WithIndexes(false).ExplainAsync();
         Assert.Equal(KeySourceKind.None, nothing.Order!.Source);
     }
 

@@ -240,7 +240,7 @@ public sealed class AutoIndexTests
         // The tenant's generation filters keep the generations that hold it, sixteen blocks each, and
         // the zone map -- narrow here, two tenants a block -- cuts inside them.
         long tenant = Tenant(3 * Block);
-        ScanPlan byTenant = await written.File.ScanBuilder().Where(Parse(
+        ScanExplanation byTenant = await written.File.ScanBuilder().Where(Parse(
             string.Create(CultureInfo.InvariantCulture, $"tenant = {tenant}"))).ExplainAsync();
         int generations = 0;
         for (int g = 0; g * 16 < Rows / Block; g++)
@@ -255,7 +255,7 @@ public sealed class AutoIndexTests
         Assert.InRange(byTenant.LiveBlocks, Holding(row => Tenant(row) == tenant), generations * 16);
         Assert.Contains(byTenant.Pruning, step => step.Structure == "bloom filter" && step.BlocksPruned > 0);
 
-        ScanPlan byBlob = await written.File.ScanBuilder().Where(Parse("blob = " + Convert.ToHexString(Blob(12_345)))).ExplainAsync();
+        ScanExplanation byBlob = await written.File.ScanBuilder().Where(Parse("blob = " + Convert.ToHexString(Blob(12_345)))).ExplainAsync();
         Assert.InRange(byBlob.LiveBlocks, 1, 4);
     }
 

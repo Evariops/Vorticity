@@ -66,7 +66,7 @@ internal static class KeysInOrder
         }
 
         // A scan delivered in key order rather than in file order.
-        OrderPlan? order = (await file.ScanBuilder().InKeyOrder("day").ExplainAsync()).Order;
+        OrderExplanation? order = (await file.ScanBuilder().InKeyOrder("day").ExplainAsync()).Order;
         Console.WriteLine($"in key order: source {order?.Source}, {order?.Runs} runs, " +
             $"{order?.EntriesInRange} entries in range, descending {order?.Descending}");
 

@@ -128,8 +128,17 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </remarks>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new BatchAsyncEnumerator(
-            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, live: null, _metrics,
-            cancellationToken, reverse: _reverse);
+            _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, _take, live: null, _metrics,
+            cancellationToken, reverse: _reverse, compact: Compact);
+
+    /// <summary>Batches decoded ahead of the consumer, on lanes of their own.</summary>
+    internal int Prefetch { get; init; }
+
+    /// <summary>Whether a filtered batch is compacted to its surviving rows rather than delivered whole with a selection.</summary>
+    internal bool Compact { get; init; } = true;
+
+    /// <summary>The lanes the scan runs on: the degree, widened by the read-ahead.</summary>
+    private int Lanes => _reverse ? 1 : Math.Max(_degree, Prefetch > 0 ? Prefetch + 1 : 1);
 
     /// <summary>Starts a scan that reads only the splits <paramref name="live"/> keeps.</summary>
     /// <param name="live">The mask of live blocks the pruning pass refined, or null for every block.</param>
@@ -137,8 +146,8 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         BlockMask? live, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
-            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, _take, live, _metrics,
-            cancellationToken, reverse: _reverse);
+            _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, _take, live, _metrics,
+            cancellationToken, reverse: _reverse, compact: Compact);
 
     /// <summary>
     /// Starts a scan whose filter an exact index has already answered: it reads exactly the rows
@@ -150,7 +159,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         BlockMask? live, RowSelection proven, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
-            _file, _tree, _read, _keep, _schema, _plan, _degree, _filter, proven, live, _metrics,
+            _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, proven, live, _metrics,
             cancellationToken, filterProven: true, reverse: _reverse);
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
@@ -208,6 +217,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// </summary>
     private readonly FilterEvaluator? _evaluator;
     private readonly bool _filterProven;
+    private readonly bool _compact;
     private readonly RowSelection? _take;
     private readonly BlockMask? _live;
     private readonly ScanMetrics? _metrics;
@@ -239,8 +249,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ScanMetrics? metrics,
         CancellationToken cancellationToken,
         bool filterProven = false,
-        bool reverse = false)
+        bool reverse = false,
+        bool compact = true)
     {
+        _compact = compact;
         _filterProven = filterProven;
         _tree = tree;
         _take = take;
@@ -434,6 +446,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             {
                 return true;
             }
+
+            _metrics?.AddBlocksPruned(1);
         }
 
         return false;
@@ -456,10 +470,21 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             // Cancellation is honoured before the read and after it, never inside a decode kernel:
             // the granularity of a scan's cancellation is the batch.
             _token.ThrowIfCancellationRequested();
-            int root = ExecuteWithTake(lane.Context, _pending, out bool proven);
-            root = ApplyFilter(lane.Context, root, proven);
+            int root;
+            if (!_compact && !_filterProven)
+            {
+                root = ExecuteSelected(lane, _pending);
+            }
+            else
+            {
+                root = ExecuteWithTake(lane.Context, _pending, out bool proven);
+                root = ApplyFilter(lane, root, proven);
+            }
+
             _current = new RecordBatch(lane.Context, root, _pending.Start);
-            _metrics?.AddBatch(_current.RowCount);
+            _current.Select(lane.Selection, lane.Selected);
+            _metrics?.AddBatch(_current.SelectedRows);
+            _metrics?.AddBlocksDecoded(1);
             return true;
         }
         catch
@@ -635,14 +660,17 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// when every row passed -- the common case for a filter that selects a whole split -- so a
     /// non-selective filter costs one evaluation pass and no copying at all.
     /// </remarks>
-    /// <param name="context">The lane's context.</param>
+    /// <param name="lane">The lane the split decoded in; it receives the selection when the scan does not compact.</param>
     /// <param name="root">The decoded split.</param>
     /// <param name="proven">
     /// Whether the rows are already the ones the filter selects, which an exact index and an
     /// encoding that answered its comparison both make true.
     /// </param>
-    private int ApplyFilter(ScanContext context, int root, bool proven = false)
+    private int ApplyFilter(Lane lane, int root, bool proven = false)
     {
+        ScanContext context = lane.Context;
+        lane.Selection = default;
+        lane.Selected = 0;
         if (_evaluator is null)
         {
             return root;
@@ -663,7 +691,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             _evaluator!.Evaluate(context.Canonical, root, rows, window);
 
             int count = Trilean.CountTrue(window);
-            if (count != rows)
+            if (count != rows && !_compact)
+            {
+                // The block is delivered whole and the rows that passed are marked, not copied.
+                lane.Selection = SelectionWords(context.Canonical, window, rows);
+                lane.Selected = count;
+            }
+            else if (count != rows)
             {
                 selected = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
                 Span<int> indices = selected.AsSpan(0, count);
@@ -681,6 +715,98 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
+    }
+
+    /// <summary>
+    /// One split decoded whole, with the rows the take asks for and the filter keeps marked as a
+    /// selection instead of gathered: the delivery of a scan that does not compact.
+    /// </summary>
+    private int ExecuteSelected(Lane lane, RowRange split)
+    {
+        ScanContext context = lane.Context;
+        lane.Selection = default;
+        lane.Selected = 0;
+        int root = SplitExecution.Execute(context, _tree, in _mask, split, null);
+        int rows = context.Canonical.GetNode(root).Length;
+        if (_take is null && _evaluator is null)
+        {
+            return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
+        }
+
+        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
+        int[]? local = null;
+        try
+        {
+            Span<byte> window = states.AsSpan(0, rows);
+            if (_evaluator is not null)
+            {
+                _evaluator.Evaluate(context.Canonical, root, rows, window);
+            }
+            else
+            {
+                window.Fill(Trilean.True);
+            }
+
+            if (_take is not null)
+            {
+                // A row outside the take is not selected, whatever the filter says of it.
+                local = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+                int wanted = _take.LocalIndices(split, local);
+                byte[] kept = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
+                try
+                {
+                    Span<byte> taken = kept.AsSpan(0, rows);
+                    taken.Clear();
+                    for (int i = 0; i < wanted; i++)
+                    {
+                        taken[local[i]] = 1;
+                    }
+
+                    for (int row = 0; row < rows; row++)
+                    {
+                        if (taken[row] == 0)
+                        {
+                            window[row] = Trilean.False;
+                        }
+                    }
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(kept);
+                }
+            }
+
+            lane.Selected = Trilean.CountTrue(window);
+            lane.Selection = SelectionWords(context.Canonical, window, rows);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(states);
+            if (local is not null)
+            {
+                ArrayPool<int>.Shared.Return(local);
+            }
+        }
+
+        return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
+    }
+
+    /// <summary>The true states of a filter window as 64-bit words, in the batch's arena.</summary>
+    private static Buffers.VortexBuffer SelectionWords(CanonicalArena arena, ReadOnlySpan<byte> window, int rows)
+    {
+        int words = Math.Max((rows + 63) >> 6, 1);
+        Buffers.VortexBuffer buffer = arena.Allocate(words * 8, 64, out Span<byte> raw);
+        Span<ulong> bits = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(raw);
+        bits.Clear();
+        for (int row = 0; row < rows; row++)
+        {
+            if (window[row] == Trilean.True)
+            {
+                bits[row >> 6] |= 1UL << (row & 63);
+            }
+        }
+
+        return buffer;
     }
 
     // -------------------------------------------------------------------------------- pipelined
@@ -719,7 +845,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             _token.ThrowIfCancellationRequested();
             _current = new RecordBatch(lane.Context, root, lane.Rows.Start);
-            _metrics?.AddBatch(_current.RowCount);
+            _current.Select(lane.Selection, lane.Selected);
+            _metrics?.AddBatch(_current.SelectedRows);
+            _metrics?.AddBlocksDecoded(1);
         }
         catch
         {
@@ -771,8 +899,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             lane.Kept.Prepare(context.Segments);
             await _source.ReadManyAsync(context.Segments, _token).ConfigureAwait(false);
             lane.Kept.Adopt(context.Segments);
+            if (!_compact && !_filterProven)
+            {
+                return ExecuteSelected(lane, rows);
+            }
+
             int root = ExecuteWithTake(context, rows, out bool proven);
-            return ApplyFilter(context, root, proven);
+            return ApplyFilter(lane, root, proven);
         }
         catch
         {
@@ -863,5 +996,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         /// <summary>This lane's body, bound to it once so the pump allocates nothing to start it.</summary>
         internal Func<Task<int>>? Start { get; set; }
+
+        /// <summary>The rows the filter kept, as words in the batch's arena, when the block is delivered whole.</summary>
+        internal Buffers.VortexBuffer Selection { get; set; }
+
+        internal int Selected { get; set; }
     }
 }

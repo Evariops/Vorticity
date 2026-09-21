@@ -237,4 +237,58 @@ public readonly struct FieldStatistics
         value = _nanCount;
         return (_present & Present.NanCount) != 0;
     }
+
+    /// <summary>The column's type, which reads <see cref="Min"/> and <see cref="Max"/>.</summary>
+    private VortexType? FieldType { get; init; }
+
+    /// <summary>The widened type <see cref="Sum"/> is stored at.</summary>
+    private VortexType? SumType { get; init; }
+
+    /// <summary>These statistics, able to read their values back as the column's .NET type.</summary>
+    internal FieldStatistics Typed(VortexType field, VortexType sum) => this with { FieldType = field, SumType = sum };
+
+    /// <summary>The column's exact minimum among its non-null values, as <typeparamref name="T"/>.</summary>
+    /// <typeparam name="T">A .NET type the column maps to.</typeparam>
+    /// <param name="value">The minimum.</param>
+    /// <returns>Whether the file records it exactly; a bound is not reported.</returns>
+    public bool TryGetMin<T>(out T value) => TryRead(HasMin && _minPrecision == StatPrecision.Exact, _min, FieldType, out value);
+
+    /// <summary>The column's exact maximum among its non-null values, as <typeparamref name="T"/>.</summary>
+    /// <typeparam name="T">A .NET type the column maps to.</typeparam>
+    /// <param name="value">The maximum.</param>
+    /// <returns>Whether the file records it exactly; a bound is not reported.</returns>
+    public bool TryGetMax<T>(out T value) => TryRead(HasMax && _maxPrecision == StatPrecision.Exact, _max, FieldType, out value);
+
+    /// <summary>The sum of the column's non-null values, at the widened type the file stores it: <c>long</c> for a signed integer, <c>ulong</c> for an unsigned one, <c>double</c> for a float, <c>decimal</c> for a decimal.</summary>
+    /// <typeparam name="T">The sum's .NET type.</typeparam>
+    /// <param name="value">The sum.</param>
+    /// <returns>Whether the file records it; an overflowed sum is not.</returns>
+    public bool TryGetSum<T>(out T value) => TryRead(HasSum, _sum, SumType, out value);
+
+    /// <summary>The number of null values of the column.</summary>
+    /// <param name="count">The count.</param>
+    /// <returns>Whether the file records it.</returns>
+    public bool TryGetNullCount(out long count)
+    {
+        bool present = TryGetStoredNullCount(out ulong nulls) && nulls <= long.MaxValue;
+        count = present ? (long)nulls : 0;
+        return present;
+    }
+
+    private static bool TryRead<T>(bool present, ScalarValue scalar, VortexType? type, out T value)
+    {
+        value = default!;
+        if (!present || type is null || !Compute.FileStatisticsPruner.TryLiteral(scalar, out Expressions.FilterLiteral literal))
+        {
+            return false;
+        }
+
+        if (!ClrFit.Fits(ClrShape.For<T>.Value, type.NonNullable, null, out _) && !ClrFit.Fits(ClrShape.For<T>.Value, type, null, out _))
+        {
+            throw new VortexSchemaException($"The statistic is of a column of {type}, which {typeof(T)} does not map to.");
+        }
+
+        value = LiteralValues.ToValue<T>(literal, type)!;
+        return true;
+    }
 }

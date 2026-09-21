@@ -33,7 +33,7 @@ internal sealed class ScanBuilder
     private readonly VortexFile _file;
     private FieldMaskBuilder? _fields;
     private VortexExpr? _filter;
-    private List<string>? _filterPaths;
+    private List<FieldExpr>? _filterPaths;
     private bool _prune = true;
     private bool _indexes = true;
     private RowSelection? _take;
@@ -46,6 +46,23 @@ internal sealed class ScanBuilder
     private string? _orderPath;
     private string[]? _orderComposite;
     private bool _descending;
+    private int _prefetch;
+    private bool _compact = true;
+
+    /// <summary>Decodes <paramref name="batches"/> ahead of the consumer, so the decode overlaps the caller's work.</summary>
+    internal ScanBuilder WithPrefetch(int batches)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(batches);
+        _prefetch = batches;
+        return this;
+    }
+
+    /// <summary>Whether a filtered batch is compacted; false delivers whole blocks with the passing rows marked.</summary>
+    internal ScanBuilder WithCompaction(bool compact)
+    {
+        _compact = compact;
+        return this;
+    }
 
     internal ScanBuilder(VortexFile file)
     {
@@ -187,15 +204,15 @@ internal sealed class ScanBuilder
     {
         ArgumentNullException.ThrowIfNull(filter);
 
-        List<string> paths = [];
-        filter.CollectFields(paths);
+        List<FieldExpr> paths = [];
+        FieldsOf(filter, paths);
 
         // Resolved here rather than per batch, so a typo in a path is an error at build time with
         // the schema in hand, not an exception from inside an enumeration.
         FieldMaskBuilder probe = new FieldMaskBuilder();
         for (int i = 0; i < paths.Count; i++)
         {
-            Projection.IncludePath(_file.DType, paths[i], probe, nameof(filter));
+            Projection.IncludeField(_file.DType, paths[i], probe, nameof(filter));
         }
 
         // Same place, same reason, for the constants: a comparison the schema cannot make yields
@@ -460,7 +477,11 @@ internal sealed class ScanBuilder
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
 
         BatchAsyncEnumerable batches = new BatchAsyncEnumerable(
-            _file, tree, read, keep, plan, _degree, _filter, _take, _metrics);
+            _file, tree, read, keep, plan, _degree, _filter, _take, _metrics)
+        {
+            Prefetch = _prefetch,
+            Compact = _compact,
+        };
 
         if (_orderPath is not null)
         {
@@ -513,7 +534,7 @@ internal sealed class ScanBuilder
     /// its bytes is answered by this and <see cref="WithMetrics"/> together: what it would cost,
     /// and what it did.
     /// </remarks>
-    public async System.Threading.Tasks.ValueTask<ScanPlan> ExplainAsync(
+    public async System.Threading.Tasks.ValueTask<ScanExplanation> ExplainAsync(
         System.Threading.CancellationToken cancellationToken = default)
     {
         LayoutTree tree = _file.LayoutTree;
@@ -592,7 +613,7 @@ internal sealed class ScanBuilder
                     : Compute.FileStatisticsPruner.MayMatch(_file, _filter));
             // The exact cover, the first tier a count takes: a scan whose cover holds a batch or
             // fewer reads those rows and evaluates nothing.
-            CountPlan? count = null;
+            CountExplanation? count = null;
             long selected = 0;
             if (_filter is not null)
             {
@@ -602,11 +623,11 @@ internal sealed class ScanBuilder
                     selected = covered;
                 }
 
-                count = new CountPlan(exact, covered, splitsPruned, splitsProven, liveSplits - splitsProven);
+                count = new CountExplanation(exact, covered, splitsPruned, splitsProven, liveSplits - splitsProven);
             }
 
-            OrderPlan? order = _orderPath is null ? null : await OrderAsync(cancellationToken).ConfigureAwait(false);
-            return new ScanPlan(
+            OrderExplanation? order = _orderPath is null ? null : await OrderAsync(cancellationToken).ConfigureAwait(false);
+            return new ScanExplanation(
                 rows.Length, blockRows, blocks, liveBlocks, steps, splits, liveSplits,
                 selected, toRead, bytes, _file.FileLength, fileMayMatch)
             {
@@ -660,7 +681,7 @@ internal sealed class ScanBuilder
     }
 
     /// <summary>The key source <c>InKeyOrder</c> would walk, and the range it would walk.</summary>
-    private async System.Threading.Tasks.ValueTask<OrderPlan> OrderAsync(System.Threading.CancellationToken cancellationToken)
+    private async System.Threading.Tasks.ValueTask<OrderExplanation> OrderAsync(System.Threading.CancellationToken cancellationToken)
     {
         Keys.KeySource? source;
         KeySourceKind kind;
@@ -681,7 +702,7 @@ internal sealed class ScanBuilder
 
         if (source is null)
         {
-            return new OrderPlan(named, KeySourceKind.None, 0, 0, null, 0, _descending);
+            return new OrderExplanation(named, KeySourceKind.None, 0, 0, null, 0, _descending);
         }
 
         try
@@ -697,7 +718,7 @@ internal sealed class ScanBuilder
             }
 
             int runsInRange = await source.RunsOverlappingAsync(slices, cancellationToken).ConfigureAwait(false);
-            return new OrderPlan(named, kind, source.Runs, runsInRange, source.EntryCount, entries, _descending);
+            return new OrderExplanation(named, kind, source.Runs, runsInRange, source.EntryCount, entries, _descending);
         }
         finally
         {
@@ -838,14 +859,14 @@ internal sealed class ScanBuilder
     }
 
     /// <summary>The projection of exactly the fields a filter reads, plus one.</summary>
-    private Projection Only(List<string>? filterPaths, string? extraPath)
+    private Projection Only(List<FieldExpr>? filterPaths, string? extraPath)
     {
         FieldMaskBuilder builder = new FieldMaskBuilder();
         if (filterPaths is not null)
         {
             for (int i = 0; i < filterPaths.Count; i++)
             {
-                Projection.IncludePath(_file.DType, filterPaths[i], builder, "filter");
+                Projection.IncludeField(_file.DType, filterPaths[i], builder, "filter");
             }
         }
 
@@ -895,7 +916,7 @@ internal sealed class ScanBuilder
     {
         VortexExpr isNull = Expr.IsNull(Expr.Field(_orderPath!));
         VortexExpr filter = _filter is null ? isNull : Expr.And(isNull, _filter);
-        Projection read = Union(keep, [.. _filterPaths ?? [], _orderPath!]);
+        Projection read = Union(keep, [.. _filterPaths ?? [], Expr.Field(_orderPath!)]);
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
         return _descending
             ? ReversedAsync(tree, rows, read, keep, plan, filter, cap)
@@ -947,16 +968,62 @@ internal sealed class ScanBuilder
     }
 
     /// <summary>The projection widened by every field a filter reads.</summary>
-    private Projection Union(Projection keep, List<string> filterPaths)
+    private Projection Union(Projection keep, List<FieldExpr> filterPaths)
     {
         FieldMaskBuilder builder = new FieldMaskBuilder();
         builder.Include(keep.RootMask);
         for (int i = 0; i < filterPaths.Count; i++)
         {
-            Projection.IncludePath(_file.DType, filterPaths[i], builder, "filter");
+            Projection.IncludeField(_file.DType, filterPaths[i], builder, "filter");
         }
 
         return Projection.Create(builder.Build());
+    }
+
+    /// <summary>Every column a filter reads, in the order it names them.</summary>
+    internal static void FieldsOf(VortexExpr filter, List<FieldExpr> into)
+    {
+        switch (filter)
+        {
+            case FieldExpr field:
+                into.Add(field);
+                return;
+            case ComparisonExpr comparison:
+                into.Add(comparison.Field);
+                return;
+            case ColumnComparisonExpr columns:
+                into.Add(columns.Left);
+                into.Add(columns.Right);
+                return;
+            case NullCheckExpr check:
+                into.Add(check.Field);
+                return;
+            case InExpr membership:
+                into.Add(membership.Field);
+                return;
+            case StringMatchExpr match:
+                into.Add(match.Field);
+                return;
+            case ListContainsExpr contains:
+                into.Add(contains.Field);
+                return;
+            case NotExpr negation:
+                FieldsOf(negation.Operand, into);
+                return;
+            case LogicalExpr logical:
+                FieldsOf(logical.Left, into);
+                FieldsOf(logical.Right, into);
+                return;
+            default:
+                return;
+        }
+    }
+
+    /// <summary>Adds <paramref name="mask"/> to the projection: the columns a record reads, resolved by index.</summary>
+    internal ScanBuilder ProjectMask(in FieldMask mask)
+    {
+        Fields().Include(in mask);
+        return this;
     }
 
     private FieldMaskBuilder Fields() => _fields ??= new FieldMaskBuilder();

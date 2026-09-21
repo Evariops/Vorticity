@@ -596,7 +596,7 @@ internal static class Expr
         return new StringMatchExpr(field, op, pattern, escape);
     }
 
-    private static LogicalExpr Logical(bool isAnd, VortexExpr left, VortexExpr right)
+    internal static LogicalExpr Logical(bool isAnd, VortexExpr left, VortexExpr right)
     {
         ArgumentNullException.ThrowIfNull(left);
         ArgumentNullException.ThrowIfNull(right);

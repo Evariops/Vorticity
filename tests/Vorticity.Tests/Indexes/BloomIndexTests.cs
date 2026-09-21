@@ -171,7 +171,7 @@ public sealed class BloomIndexTests
         await using Written written = await Written.CreateAsync(Policy());
         int present = Key(40_000);
 
-        ScanPlan plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync();
+        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync();
         Assert.Equal(Blocks, plan.Blocks);
         PruningStep zones = Assert.Single(plan.Pruning, step => step.Structure == "zone map");
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
@@ -183,7 +183,7 @@ public sealed class BloomIndexTests
         Assert.Equal(Blocks - bloom.BlocksPruned, plan.LiveBlocks);
         Assert.True(bloom.SegmentsRead > 0);
 
-        ScanPlan off = await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithIndexes(false).ExplainAsync();
+        ScanExplanation off = await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithIndexes(false).ExplainAsync();
         Assert.Equal(Blocks, off.LiveBlocks);
         Assert.DoesNotContain(off.Pruning, step => step.Structure == "bloom filter");
     }
@@ -193,7 +193,7 @@ public sealed class BloomIndexTests
     {
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
-        ScanPlan plan = await written.File.ScanBuilder().Where(Parse("name = nope")).ExplainAsync();
+        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse("name = nope")).ExplainAsync();
 
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
         Assert.True(plan.LiveBlocks == 0, string.Join("; ", plan.Pruning));
@@ -245,7 +245,7 @@ public sealed class BloomIndexTests
         IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
         Assert.Equal(3, directory.Entries.Count);
 
-        ScanPlan plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync();
+        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync();
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
 
         // The root; the four generation nodes, one region; then the leaves of each generation still
@@ -287,7 +287,7 @@ public sealed class BloomIndexTests
             VortexExpr filter = Parse($"key = {present}");
             Assert.Equal(Oracle($"key = {present}"), await file.ScanBuilder().Where(filter).CountAsync());
 
-            ScanPlan plan = await file.ScanBuilder().Where(filter).ExplainAsync();
+            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync();
             PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
             Assert.Equal(0, bloom.BlocksPruned);
         }

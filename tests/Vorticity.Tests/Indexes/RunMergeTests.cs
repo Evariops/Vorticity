@@ -75,7 +75,7 @@ public sealed class RunMergeTests
         // its rows, whatever the number of chunks.
         long probe = K(12_345);
         VortexExpr equal = Expr.Eq(Expr.Field("k"), Expr.Literal(FilterLiteral.From(probe)));
-        ScanPlan plan = await file.ScanBuilder().Where(equal).ExplainAsync();
+        ScanExplanation plan = await file.ScanBuilder().Where(equal).ExplainAsync();
         PruningStep locating = Assert.Single(plan.Pruning, step => step.Structure == "locating index");
         Assert.Equal(3, locating.SegmentsRead);
         Assert.Equal(await OracleCountAsync(file, equal), await file.ScanBuilder().Where(equal).CountAsync());

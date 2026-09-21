@@ -128,6 +128,22 @@ public sealed class RecordBatch : IDisposable
     /// <summary>The session whose pool the batch's buffers come from.</summary>
     internal VortexSession? Session { get; private init; }
 
+    private Buffers.VortexBuffer _selection;
+    private int _selected;
+
+    /// <summary>Marks the rows a filter kept, for a batch delivered whole; empty words select every row.</summary>
+    internal void Select(Buffers.VortexBuffer words, int selected)
+    {
+        _selection = words;
+        _selected = selected;
+    }
+
+    /// <summary>The rows the filter kept as words, or empty when every row is selected.</summary>
+    internal ReadOnlySpan<ulong> SelectionWords => _selection.IsEmpty ? default : _selection.Cast<ulong>();
+
+    /// <summary>The number of selected rows.</summary>
+    internal int SelectedRows => _selection.IsEmpty ? _rowCount : _selected;
+
     /// <summary>The columns of the batch; for a projected scan, the projection's.</summary>
     /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
     public VortexSchema Schema

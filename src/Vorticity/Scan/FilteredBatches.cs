@@ -103,7 +103,8 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
 
         public async ValueTask<bool> MoveNextAsync()
         {
-            if (_inner is null && await ProvenAsync().ConfigureAwait(false) is { } proven)
+            // An exact index gathers the rows it proved, which a scan delivering whole blocks does not want.
+            if (_inner is null && _source.Compact && await ProvenAsync().ConfigureAwait(false) is { } proven)
             {
                 _inner = _source.GetAsyncEnumerator(live: null, proven, _token);
             }
@@ -124,7 +125,7 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
 
             while (await _inner.MoveNextAsync().ConfigureAwait(false))
             {
-                if (_inner.Current.RowCount > 0)
+                if (_inner.Current.SelectedRows > 0)
                 {
                     return true;
                 }

@@ -33,9 +33,12 @@ internal static class ExprText
         return text.ToString();
     }
 
-    internal static VortexExpr Parse(ReadOnlySpan<char> text)
+    internal static VortexExpr Parse(ReadOnlySpan<char> text) => Parse(text, null);
+
+    /// <summary>Parses <paramref name="text"/>, where <c>?N</c> stands for the literal <paramref name="parameters"/>[N].</summary>
+    internal static VortexExpr Parse(ReadOnlySpan<char> text, IReadOnlyList<FilterLiteral>? parameters)
     {
-        List<Token> tokens = Tokenize(text);
+        List<Token> tokens = Tokenize(text, parameters);
         int at = 0;
         VortexExpr expr = ParseOr(tokens, ref at);
         if (at != tokens.Count)
@@ -373,6 +376,8 @@ internal static class ExprText
         at++;
         switch (token.Kind)
         {
+            case TokenKind.Parameter:
+                return token.Value;
             case TokenKind.Text:
                 return FilterLiteral.From(token.Text);
             case TokenKind.Hex:
@@ -439,7 +444,7 @@ internal static class ExprText
     private static Token Next(List<Token> tokens, int at, string wanted) =>
         at < tokens.Count ? tokens[at] : throw new FormatException($"The filter ends where {wanted} was expected.");
 
-    private static List<Token> Tokenize(ReadOnlySpan<char> text)
+    private static List<Token> Tokenize(ReadOnlySpan<char> text, IReadOnlyList<FilterLiteral>? parameters)
     {
         List<Token> tokens = [];
         int i = 0;
@@ -453,6 +458,18 @@ internal static class ExprText
             }
 
             int start = i;
+            if (c == '?' && parameters is not null && i + 1 < text.Length && char.IsDigit(text[i + 1]))
+            {
+                i++;
+                while (i < text.Length && char.IsDigit(text[i]))
+                {
+                    i++;
+                }
+
+                int index = int.Parse(text[(start + 1)..i], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture);
+                tokens.Add(new Token(TokenKind.Parameter, text[start..i].ToString(), start, index < parameters.Count ? parameters[index] : default));
+                continue;
+            }
             if (c is '\'' or '"')
             {
                 (string value, int end) = Quoted(text, i, c);
@@ -561,7 +578,50 @@ internal static class ExprText
         Hex,
         Number,
         Symbol,
+        Parameter,
     }
 
-    private readonly record struct Token(TokenKind Kind, string Text, int Position);
+    private readonly record struct Token(TokenKind Kind, string Text, int Position, FilterLiteral Value = default);
+
+    /// <summary>The column path the last predicate of <paramref name="text"/> names, for the hole that follows it.</summary>
+    internal static string[]? LastField(string text)
+    {
+        List<Token> tokens;
+        try
+        {
+            tokens = Tokenize(text, []);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+
+        // Back over the values already given to an `in` list, to the operator, then to the field.
+        int at = tokens.Count - 1;
+        while (at >= 0 && (tokens[at].Kind is TokenKind.Parameter or TokenKind.Text or TokenKind.Number or TokenKind.Hex
+            || (tokens[at].Kind == TokenKind.Symbol && tokens[at].Text is "(" or ",")))
+        {
+            at--;
+        }
+
+        while (at >= 0 && (tokens[at].Kind == TokenKind.Symbol && tokens[at].Text is "=" or "==" or "!=" or "<>" or "<" or "<=" or ">" or ">="
+            || (tokens[at].Kind == TokenKind.Name && IsKeyword(tokens[at].Text))))
+        {
+            at--;
+        }
+
+        if (at < 0 || tokens[at].Kind is not (TokenKind.Name or TokenKind.QuotedName))
+        {
+            return null;
+        }
+
+        List<string> names = [tokens[at].Text];
+        while (at >= 2 && tokens[at - 1].Kind == TokenKind.Symbol && tokens[at - 1].Text == "." && tokens[at - 2].Kind is TokenKind.Name or TokenKind.QuotedName)
+        {
+            names.Insert(0, tokens[at - 2].Text);
+            at -= 2;
+        }
+
+        return [.. names];
+    }
 }

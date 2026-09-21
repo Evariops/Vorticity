@@ -44,7 +44,7 @@ public sealed class ScanExplainTests
             counting, new VortexOpenOptions { LeaveSourceOpen = true }, CancellationToken.None);
 
         counting.ResetCounters();
-        ScanPlan plan = await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync();
+        ScanExplanation plan = await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync();
         int askedToExplain = counting.Requested.Count;
 
         // Nothing but the zone map of the one filtered column, and the plan says what that cost.
@@ -99,7 +99,7 @@ public sealed class ScanExplainTests
         Decoders.EnsureRegistered();
 
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
-        ScanPlan plan = await file.ScanBuilder().Project("monotone").ExplainAsync();
+        ScanExplanation plan = await file.ScanBuilder().Project("monotone").ExplainAsync();
 
         Assert.Equal(plan.Blocks, plan.LiveBlocks);
         Assert.Equal(plan.Splits, plan.LiveSplits);
@@ -108,7 +108,7 @@ public sealed class ScanExplainTests
         Assert.True(plan.BytesToRead > 0 && plan.BytesToRead <= plan.FileBytes);
 
         // Narrowed to a range, the plan narrows with it.
-        ScanPlan half = await file.ScanBuilder().Project("monotone").Rows(new RowRange(0, 32_768)).ExplainAsync();
+        ScanExplanation half = await file.ScanBuilder().Project("monotone").Rows(new RowRange(0, 32_768)).ExplainAsync();
         Assert.Equal(32_768, half.RowCount);
         Assert.True(half.LiveSplits < plan.LiveSplits);
         Assert.True(half.BytesToRead < plan.BytesToRead);

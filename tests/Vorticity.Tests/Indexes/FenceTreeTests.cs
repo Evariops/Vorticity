@@ -654,7 +654,7 @@ public sealed class FenceTreeTests
 
     private static async Task<int> SegmentsReadAsync(VortexFile file, VortexExpr filter)
     {
-        ScanPlan plan = await file.ScanBuilder().Where(filter).ExplainAsync();
+        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync();
         return Assert.Single(plan.Pruning, step => step.Structure == "locating index").SegmentsRead;
     }
 

@@ -195,6 +195,46 @@ internal readonly struct Projection
         }
     }
 
+    /// <summary>
+    /// Resolves a column reference by its name segments and adds it to <paramref name="builder"/>:
+    /// a name that holds a dot resolves, since the segments were never split from a path.
+    /// </summary>
+    internal static void IncludeField(DType schema, Expressions.FieldExpr field, FieldMaskBuilder builder, string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(field, parameterName);
+        if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
+        {
+            ScanThrow.NonStructRoot(parameterName);
+        }
+
+        byte[][] segments = field.SegmentsUtf8;
+        Span<int> indices = segments.Length <= VortexLimits.MaxDTypeDepth ? stackalloc int[segments.Length] : new int[segments.Length];
+        DType current = schema;
+        for (int i = 0; i < segments.Length; i++)
+        {
+            while (!current.IsDefault && current.Kind == DTypeKind.Extension)
+            {
+                current = current.StorageType;
+            }
+
+            if (current.IsDefault || current.Kind != DTypeKind.Struct)
+            {
+                ScanThrow.PathThroughLeaf(field.Path, Encoding.UTF8.GetString(segments[i]), parameterName);
+            }
+
+            int index = current.IndexOfField(segments[i]);
+            if (index < 0)
+            {
+                ScanThrow.UnknownPath(field.Path, parameterName);
+            }
+
+            indices[i] = index;
+            current = current.GetField(index);
+        }
+
+        builder.Include(indices);
+    }
+
     private static int CountLeaves(in FieldMask mask, int depth)
     {
         if (mask.IsAll)

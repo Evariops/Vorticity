@@ -106,7 +106,7 @@ public sealed class DatasetIndexingTests
 
             // And the fragment's filter prunes inside the object: a tag no row holds.
             VortexExpr noTag = Expr.Eq(Expr.Field("tag"), Expr.Literal(FilterLiteral.From(1L)));
-            ScanPlan plan = await lease.File.ScanBuilder().Where(noTag).ExplainAsync();
+            ScanExplanation plan = await lease.File.ScanBuilder().Where(noTag).ExplainAsync();
             Assert.Equal(0, plan.LiveBlocks);
         }
 

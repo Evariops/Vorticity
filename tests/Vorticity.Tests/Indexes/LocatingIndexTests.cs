@@ -208,7 +208,7 @@ public sealed class LocatingIndexTests
         string value = present.ToString(CultureInfo.InvariantCulture);
         string text = column == "key" ? "key = " + value : "name = u" + value;
 
-        ScanPlan plan = await written.File.ScanBuilder().Where(Parse(text)).ExplainAsync();
+        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse(text)).ExplainAsync();
         PruningStep zones = Assert.Single(plan.Pruning, step => step.Structure == "zone map");
         PruningStep locating = Assert.Single(plan.Pruning, step => step.Structure == "locating index");
         Assert.Equal(0, zones.BlocksPruned);
@@ -226,15 +226,15 @@ public sealed class LocatingIndexTests
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
 
-        ScanPlan everywhere = await written.File.ScanBuilder().Where(Parse("status = held")).ExplainAsync();
+        ScanExplanation everywhere = await written.File.ScanBuilder().Where(Parse("status = held")).ExplainAsync();
         Assert.Equal(HoldingBlocks(row => Status(row) == "held"), everywhere.LiveBlocks);
 
-        ScanPlan nowhere = await written.File.ScanBuilder().Where(Parse("status = nope")).ExplainAsync();
+        ScanExplanation nowhere = await written.File.ScanBuilder().Where(Parse("status = nope")).ExplainAsync();
         Assert.Equal(0, nowhere.LiveBlocks);
 
         // A key past every block's maximum is the zone map's to kill, and the index is never asked:
         // cheapest first, and the chain stops at an empty mask.
-        ScanPlan outOfRange = await written.File.ScanBuilder().Where(Parse("opt = 5000")).ExplainAsync();
+        ScanExplanation outOfRange = await written.File.ScanBuilder().Where(Parse("opt = 5000")).ExplainAsync();
         Assert.Equal(0, outOfRange.LiveBlocks);
         Assert.DoesNotContain(outOfRange.Pruning, step => step.Structure == "locating index");
     }
@@ -248,7 +248,7 @@ public sealed class LocatingIndexTests
         // Row 5·1024+3 holds -0.0, row 9·1024+7 holds +0.0, and many rows hold key % 5000 == 0.
         foreach (string text in new[] { "price = 0.0f", "price = -0.0f" })
         {
-            ScanPlan plan = await written.File.ScanBuilder().Where(Parse(text)).ExplainAsync();
+            ScanExplanation plan = await written.File.ScanBuilder().Where(Parse(text)).ExplainAsync();
             Assert.Equal(HoldingBlocks(row => Price(row) == 0.0), plan.LiveBlocks);
             Assert.True(plan.LiveBlocks < Blocks);
         }

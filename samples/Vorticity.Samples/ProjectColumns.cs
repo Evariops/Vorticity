@@ -24,8 +24,8 @@ internal static class ProjectColumns
             }
         }
 
-        ScanPlan whole = await file.ScanBuilder().ExplainAsync();
-        ScanPlan projected = await file.ScanBuilder().Project(["c"]).ExplainAsync();
+        ScanExplanation whole = await file.ScanBuilder().ExplainAsync();
+        ScanExplanation projected = await file.ScanBuilder().Project(["c"]).ExplainAsync();
         Console.WriteLine($"six columns: {whole.SegmentsToRead} segments, {whole.BytesToRead} bytes");
         Console.WriteLine($"one column:  {projected.SegmentsToRead} segments, {projected.BytesToRead} bytes");
 

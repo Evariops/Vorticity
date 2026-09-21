@@ -116,7 +116,7 @@ public sealed class NestedIndexTests
 
         // The index kills every block that does not hold the value: the Bloom filter may keep a
         // false positive, the locating indexes may not; and a ghost is in no index.
-        ScanPlan plan = await written.File.ScanBuilder().Where(filter).ExplainAsync();
+        ScanExplanation plan = await written.File.ScanBuilder().Where(filter).ExplainAsync();
         if (path == "person.age")
         {
             Assert.InRange(plan.LiveBlocks, holding.Count, holding.Count + 1);
@@ -182,7 +182,7 @@ public sealed class NestedIndexTests
             await using VortexFile file = await VortexFile.OpenAsync(path);
             await AssertWalksAsync(file);
             VortexExpr filter = Expr.Eq(Expr.Field("person.name"), Expr.Literal(FilterLiteral.From("n7")));
-            ScanPlan plan = await file.ScanBuilder().Where(filter).ExplainAsync();
+            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync();
             Assert.Equal(1, plan.LiveBlocks);
         }
         finally

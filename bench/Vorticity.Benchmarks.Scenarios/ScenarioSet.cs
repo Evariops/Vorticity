@@ -105,7 +105,7 @@ public static class ScenarioSet
 
         await using VortexFile file = await VortexFile.OpenAsync(
             new Vorticity.IO.MemorySegmentSource(prepared.Bytes), new VortexOpenOptions(), CancellationToken.None);
-        ScanPlan plan = await file.ScanBuilder()
+        ScanExplanation plan = await file.ScanBuilder()
             .Where(Expr.In(Expr.Field(prepared.Column), prepared.Probes))
             .ExplainAsync(CancellationToken.None);
         return plan.LiveBlocks;

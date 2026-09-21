@@ -121,4 +121,17 @@ internal sealed class ScanMetrics
         Interlocked.Increment(ref _batches);
         Interlocked.Add(ref _rows, rows);
     }
+
+    /// <summary>Blocks decoded: every split read and executed counts its blocks.</summary>
+    public long BlocksDecoded => Interlocked.Read(ref _blocksDecoded);
+
+    /// <summary>Blocks skipped because a structure proved them empty.</summary>
+    public long BlocksPruned => Interlocked.Read(ref _blocksPruned);
+
+    private long _blocksDecoded;
+    private long _blocksPruned;
+
+    internal void AddBlocksDecoded(long blocks) => Interlocked.Add(ref _blocksDecoded, blocks);
+
+    internal void AddBlocksPruned(long blocks) => Interlocked.Add(ref _blocksPruned, blocks);
 }

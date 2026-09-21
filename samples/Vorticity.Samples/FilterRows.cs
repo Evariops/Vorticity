@@ -68,7 +68,7 @@ internal static class FilterRows
 
         async Task Explain(string what, VortexExpr predicate)
         {
-            ScanPlan plan = await file.ScanBuilder().Where(predicate).ExplainAsync();
+            ScanExplanation plan = await file.ScanBuilder().Where(predicate).ExplainAsync();
             Console.WriteLine($"{what}: {plan.LiveBlocks} of {plan.Blocks} blocks survive, " +
                 $"count exact: {plan.Count?.ExactCover}");
             foreach (PruningStep step in plan.Pruning)
