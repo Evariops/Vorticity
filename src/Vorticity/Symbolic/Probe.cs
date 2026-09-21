@@ -11,12 +11,21 @@ namespace Vorticity;
 /// <remarks>The generator adds one property per member; <see cref="Column{T}(int)"/> is what they call.</remarks>
 public readonly struct Probe<TRecord>
 {
-    internal Probe(RecordBinding binding)
+    private readonly string[]? _path;
+
+    internal Probe(RecordBinding binding, string[]? path = null)
     {
         Binding = binding;
+        _path = path;
     }
 
     internal RecordBinding Binding { get; }
+
+    /// <summary>The rows where this nested record is null; none for the scan's own record, which is never null.</summary>
+    public Predicate IsNull => _path is null ? Predicate.None : new Predicate(new NullCheckExpr(new FieldExpr(_path), isNull: true));
+
+    /// <summary>The rows where this nested record is present; all of them for the scan's own record.</summary>
+    public Predicate IsNotNull => _path is null ? Predicate.All : new Predicate(new NullCheckExpr(new FieldExpr(_path), isNull: false));
 
     /// <summary>The column of member <paramref name="index"/>.</summary>
     /// <typeparam name="T">The member's .NET type.</typeparam>
@@ -42,8 +51,11 @@ public readonly struct Probe<TRecord>
     /// <param name="index">The member's position in the record.</param>
     /// <returns>The nested probe.</returns>
     public Probe<TNested> Struct<TNested>(int index)
-        where TNested : IVortexRecord<TNested> =>
-        new Probe<TNested>(Bound().NestedFor<TNested>(index));
+        where TNested : IVortexRecord<TNested>
+    {
+        RecordBinding binding = Bound();
+        return new Probe<TNested>(binding.NestedFor<TNested>(index), binding.Paths[index]);
+    }
 
     private RecordBinding Bound() =>
         Binding ?? throw new InvalidOperationException("A probe exists only inside the lambda a scan runs; default(Probe) has no columns.");
