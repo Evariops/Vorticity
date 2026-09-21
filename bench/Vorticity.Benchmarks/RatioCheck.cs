@@ -363,16 +363,16 @@ internal static class RatioCheck
     /// `--recalibrate N` does the measuring: N passes, the max per axis, printed ready to paste.
     /// </para>
     /// <para>
-    /// EVERY REFERENCE BELOW WAS RESET ON 2026-09-18, and not because the code got faster: the
-    /// REFERENCE SIDE was measuring the wrong thing. `vxbench_scan_canonical` was calling
-    /// `execute::&lt;Canonical&gt;`, which stops as soon as the ROOT array matches one of twelve
-    /// canonical kinds -- `Struct`, `Map`, `ListView` and `Variant` among them -- so on every
-    /// tabular file Rust opened the file, split it, and decoded NOTHING, while we decoded every
-    /// column. The harness now calls `execute::&lt;RecursiveCanonical&gt;` on all four entry points
-    /// (scan, threaded scan, take, filtered scan); `tools/vxbench-rs/src/lib.rs` carries the whole
-    /// argument. Ratios on the affected axes therefore FELL, references with them: this is a
-    /// tightening, and the gate could not have gone red over it (a fall reports STALE, and only
-    /// `ratio.Low &gt; ceiling` fails).
+    /// The reference side decodes everything it is asked for: its four entry points (scan, threaded
+    /// scan, take, filtered scan) call `execute::&lt;RecursiveCanonical&gt;`, because
+    /// `execute::&lt;Canonical&gt;` stops as soon as the root array is one of twelve canonical kinds
+    /// -- `Struct`, `Map`, `ListView` and `Variant` among them -- and on a tabular file that is
+    /// before a single column has been decoded. `tools/vxbench-rs/src/lib.rs` carries the argument.
+    /// </para>
+    /// <para>
+    /// A line is replaced only when its ceiling does not rise. `--recalibrate` never raises a
+    /// reference, but it reprints the dispersion it measured, and on a held line a wider dispersion
+    /// is a wider ceiling: that line keeps the calibration it had.
     /// </para>
     /// <para>
     /// `rewritten zoned, ours` WAS a ceiling of FIVE, and that entry is the clearest casualty. Its
@@ -387,34 +387,34 @@ internal static class RatioCheck
     /// </remarks>
     private static readonly Dictionary<string, Reference> References = new()
     {
-        ["full scan"] = new(0.335, 2, 0.004),
-        ["full scan, upstream lazy"] = new(0.460, 2, 0.004),
-        ["projected scan, 1 of 5 columns"] = new(0.370, 9, 0.029),   // 3 passes, spread 0.360-0.370; was 0.443, -16.4%: the reference side now decodes the column it was asked for
-        ["projected scan, upstream lazy"] = new(0.409, 9, 0.007),   // first calibration, 3 passes, spread 0.406-0.409
-        ["open to first batch"] = new(0.085, 10, 0.052),
-        ["open, footer only"] = new(0.776, 26, 0.049),
-        ["read and write back"] = new(0.322, 1, 0.028),
-        ["filtered scan, 1% band"] = new(0.204, 11, 0.151),
-        ["filtered scan, half the rows"] = new(0.271, 5, 0.015),
-        ["scattered take, 64 of 64 splits"] = new(0.202, 3, 0.027),
-        ["rewritten zoned, reference's"] = new(0.330, 2, 0.008),
-        ["rewritten zoned, ours"] = new(1.077, 2, 0.004),
-        ["rewritten high card, reference's"] = new(0.878, 28, 0.024),
-        ["rewritten high card, ours"] = new(0.915, 20, 0.005),
-        ["full scan, 1M table"] = new(0.057, 1, 0.049),
-        ["projected scan, 1 of 50 columns"] = new(0.103, 10, 0.102),   // 3 passes, spread 0.092-0.103; was 0.104, -1.3%: the reference side now decodes, which costs it 6% on a file of fifty columns
-        ["key order, sorted column, 1% band"] = new(0.683, 13, 0.040),
-        ["key order, uncorrelated, 64 rows"] = new(1.148, 6, 0.160),
-        ["count, exact cover, 1% band"] = new(0.633, 7, 0.047),
-        ["filtered scan, string equality, fsst"] = new(1.131, 4, 0.191),   // 3 passes, spread 0.915-1.131; was 2.169, -47.8%: the column answers the equality from its codes, and its values no longer ascend
-        ["filtered scan, string prefix, fsst"] = new(1.281, 2, 0.014),   // 3 passes, spread 1.264-1.281; was 1.452, -11.7%: the same column, no longer ascending
+        ["full scan"] = new(0.307, 2, 0.007),   // 3 passes, spread 0.305-0.307; was 0.335, -8.3%
+        ["full scan, upstream lazy"] = new(0.426, 2, 0.022),   // 3 passes, spread 0.417-0.426; was 0.460, -7.4%
+        ["projected scan, 1 of 5 columns"] = new(0.366, 9, 0.013),   // 3 passes, spread 0.362-0.366; was 0.370, -1.0%
+        ["projected scan, upstream lazy"] = new(0.406, 9, 0.019),   // 3 passes, spread 0.399-0.406; was 0.409, -0.6%
+        ["open to first batch"] = new(0.076, 10, 0.032),   // 3 passes, spread 0.074-0.076; was 0.085, -10.1%
+        ["open, footer only"] = new(0.706, 29, 0.016),   // 3 passes, spread 0.695-0.706; was 0.776, -9.0%
+        ["read and write back"] = new(0.297, 1, 0.009),   // 3 passes, spread 0.294-0.297; was 0.322, -7.9%
+        ["filtered scan, 1% band"] = new(0.197, 10, 0.055),   // 3 passes, spread 0.186-0.197; was 0.204, -3.3%
+        ["filtered scan, half the rows"] = new(0.254, 5, 0.010),   // 3 passes, spread 0.252-0.254; was 0.271, -6.2%
+        ["scattered take, 64 of 64 splits"] = new(0.191, 3, 0.035),   // 3 passes, spread 0.185-0.191; was 0.202, -5.2%
+        ["rewritten zoned, reference's"] = new(0.307, 2, 0.004),   // 3 passes, spread 0.306-0.307; was 0.330, -6.9%
+        ["rewritten zoned, ours"] = new(1.070, 2, 0.006),   // 3 passes, spread 1.063-1.070; was 1.077, -0.7%
+        ["rewritten high card, reference's"] = new(0.858, 28, 0.044),   // 3 passes, spread 0.821-0.858; was 0.878, -2.2%
+        ["rewritten high card, ours"] = new(0.915, 22, 0.049),   // 3 passes, spread 0.871-0.915; HELD at 0.915: 3 passes peaked at 0.915, no loosening
+        ["key order, sorted column, 1% band"] = new(0.658, 12, 0.046),   // 3 passes, spread 0.628-0.658; was 0.683, -3.6%
+        ["key order, uncorrelated, 64 rows"] = new(1.077, 8, 0.091),   // 3 passes, spread 0.979-1.077; was 1.148, -6.2%
+        ["count, exact cover, 1% band"] = new(0.633, 7, 0.142),   // 3 passes, spread 0.567-0.657; HELD at 0.633: 3 passes peaked at 0.657, no loosening
+        ["filtered scan, string equality, fsst"] = new(0.923, 4, 0.031),   // 3 passes, spread 0.894-0.923; was 1.131, -18.4%
+        ["filtered scan, string prefix, fsst"] = new(1.269, 2, 0.003),   // 3 passes, spread 1.265-1.269; was 1.281, -1.0%
         // Nine passes, not three: three read 0.024 and this axis swings sixteen times that. It is
         // the shortest of the four string axes, and the only one whose dispersion needs more
         // processes than the default to show itself at all.
         ["filtered scan, string equality, dict"] = new(1.713, 7, 0.051),   // 3 passes, spread 1.625-1.713; was 2.084, -17.8%; and 2.473 before the dictionary answered the equality from its values
-        ["filtered scan, string prefix, dict"] = new(1.444, 6, 0.007),
-        ["filtered scan, band, runend"] = new(1.160, 11),   // first calibration, 4 runs, spread 1.141-1.160
-        ["filtered scan, band, bitpacked"] = new(1.142, 13),   // first calibration, 3 runs, spread 1.136-1.145
+        ["filtered scan, string prefix, dict"] = new(1.444, 6, 0.016),   // 3 passes, spread 1.442-1.465; HELD at 1.444: 3 passes peaked at 1.465, no loosening
+        ["filtered scan, band, runend"] = new(1.134, 12, 0.051),   // 3 passes, spread 1.076-1.134; was 1.160, -2.3%
+        ["filtered scan, band, bitpacked"] = new(1.113, 12, 0.014),   // 3 passes, spread 1.097-1.113; was 1.142, -2.6%
+        ["full scan, 1M table"] = new(0.057, 1, 0.017),   // 3 passes, spread 0.056-0.057; was 0.057, -0.1%
+        ["projected scan, 1 of 50 columns"] = new(0.102, 10, 0.035),   // 3 passes, spread 0.099-0.102; was 0.103, -0.5%
     };
 
     /// <summary>

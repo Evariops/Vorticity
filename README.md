@@ -44,11 +44,11 @@ a `0.1.0` cut by CI.
 | `Vorticity.Dataset` | a versioned dataset over an object store: commit objects, a prolly tree, the store seam an S3 library implements | experimental, and the format is this repository's own |
 | `Vorticity.RowEncoding` | the byte-sortable row encoding | experimental: upstream reserves the right to change the layout between releases |
 
-Measured on 2026-09-20; every command is one line and re-runs on a clone.
+Measured on 2026-09-21; every command is one line and re-runs on a clone.
 
 | | |
 |---|---|
-| Tests | **6 636** passing, 1 skipped, over the two test projects — `dotnet test -c Release` |
+| Tests | **6 657** passing, 1 skipped, over the two test projects — `dotnet test -c Release` |
 | Conformance corpus | **856 of 856** in-scope files read back value for value against the Rust sidecars: 2 547 199 rows and 5 720 491 values and validity bits compared — the conformance project, in the same `dotnet test` |
 | **Cross-check** | **854** files written by Vorticity and **read by Vortex Rust**, 2 538 751 rows compared scalar by scalar against the reference's own file, and no file disagrees — `bench/crosscheck.sh`. Two corpus files are out, and both times it is the reference that cannot read: `types/no_dtype_segment` has no schema for the comparison example to open with, and `experimental_patched_array_editions_off` carries a `vortex.patched` belonging to no pinned edition |
 | Throughput | **47 of 57** scan axes faster than the Rust reference — `dotnet run -c Release --project bench/Vorticity.Benchmarks -- --throughput --check` |
