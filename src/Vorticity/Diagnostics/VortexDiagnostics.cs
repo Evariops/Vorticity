@@ -73,4 +73,26 @@ internal static class VortexTelemetry
     internal static void CacheMiss() => CacheMisses.Add(1);
 
     internal static void Written(long bytes) => WriteBytes.Add(bytes);
+
+    /// <summary>Starts the activity of one write, or returns null when nothing listens.</summary>
+    internal static Activity? StartWrite() => Source.StartActivity("vortex.write", ActivityKind.Internal);
+
+    /// <summary>Tags and ends the activity of a write that completed its file or gave it up.</summary>
+    internal static void WriteEnded(Activity? activity, long rows, long bytes, bool completed)
+    {
+        if (activity is null)
+        {
+            return;
+        }
+
+        activity.SetTag("vortex.rows", rows);
+        activity.SetTag("vortex.bytes", bytes);
+        activity.SetTag("vortex.completed", completed);
+        if (!completed)
+        {
+            activity.SetStatus(ActivityStatusCode.Error, "abandoned");
+        }
+
+        activity.Dispose();
+    }
 }

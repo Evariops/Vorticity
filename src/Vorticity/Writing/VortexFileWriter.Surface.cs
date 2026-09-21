@@ -278,7 +278,16 @@ public sealed partial class VortexFileWriter
         }
 
         await SealAsync(cancellationToken).ConfigureAwait(false);
+        await FlushSinkAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Flushes the sink and adds the bytes it took since the last flush to the write meter.</summary>
+    private async ValueTask FlushSinkAsync(CancellationToken cancellationToken)
+    {
         await _sink.FlushAsync(cancellationToken).ConfigureAwait(false);
+        long position = _sink.Position;
+        VortexTelemetry.Written(position - _meteredBytes);
+        _meteredBytes = position;
     }
 
     /// <summary>
@@ -316,6 +325,8 @@ public sealed partial class VortexFileWriter
         }
 
         _finished = true;
+        VortexTelemetry.WriteEnded(_activity, _acceptedRows, _sink.Position, completed: true);
+        _activity = null;
         ReleaseBuilders();
         if (_filePipe is { } file)
         {
@@ -346,6 +357,8 @@ public sealed partial class VortexFileWriter
 
         _completed = true;
         _abandoned = true;
+        VortexTelemetry.WriteEnded(_activity, _acceptedRows, _sink.Position, completed: false);
+        _activity = null;
         ReleaseBuilders();
         if (_filePipe is { } file)
         {

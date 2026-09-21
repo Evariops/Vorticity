@@ -206,6 +206,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     private readonly IndexWriter? _indexes;
     private WriteBytes _reportBytes;
 
+    /// <summary>The sink position the write meter has counted to; an append starts it at the file's length.</summary>
+    private long _meteredBytes;
+
+    /// <summary>The write's activity, or null when nothing listens.</summary>
+    private System.Diagnostics.Activity? _activity;
+
     private VortexFileWriter(
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
@@ -213,6 +219,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints)
     {
         _sink = sink;
+        _meteredBytes = sink.Position;
+        _activity = VortexTelemetry.StartWrite();
         _elementStatistics = elementStatistics;
         _schema = schema;
         _identity = identity;
@@ -1091,7 +1099,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             _metadata,
             cancellationToken).ConfigureAwait(false);
 
-        await _sink.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushSinkAsync(cancellationToken).ConfigureAwait(false);
 
         // Runs written between chunks sit inside `dataEnd`, and are moved to the index count.
         long data = dataEnd - interleaved;
