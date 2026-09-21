@@ -332,6 +332,24 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
             ? (TimeUnit)m[0]
             : null;
 
+    /// <summary>The zone of a timestamp, resolved once on this host; UTC for a naive one.</summary>
+    internal TimeZoneInfo ZoneInfo
+    {
+        get
+        {
+            TimeZoneInfo? zone = _zone;
+            if (zone is null)
+            {
+                zone = TimeZone is { } id && TimeZones.TryResolve(id, out TimeZoneInfo found) ? found : TimeZoneInfo.Utc;
+                _zone = zone;
+            }
+
+            return zone;
+        }
+    }
+
+    private TimeZoneInfo? _zone;
+
     /// <summary>The zone of a timestamp, or null for a naive one and any other type.</summary>
     internal string? TimeZone
     {

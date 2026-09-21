@@ -1494,6 +1494,12 @@ internal struct CanonicalRecord
     /// </summary>
     internal int Materialized;
 
+    /// <summary>
+    /// The node's validity, or a bool node's own bits, as 64-bit words from bit 0 with the bits past
+    /// the length cleared: computed on the first request and kept until the arena is reset.
+    /// </summary>
+    internal VortexBuffer Words;
+
     internal CanonicalKind Kind;
     internal PType PType;
     internal PType SizePType;

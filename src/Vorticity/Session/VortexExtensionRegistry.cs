@@ -145,6 +145,12 @@ internal abstract class ExtensionRegistration
     internal abstract string Id { get; }
 
     internal abstract VortexType StorageType { get; }
+
+    /// <summary>A value of the extension as a filter literal over its storage.</summary>
+    internal abstract Expressions.FilterLiteral ToLiteral(object value, ReadOnlySpan<byte> metadata);
+
+    /// <summary>One stored value read as the extension, boxed.</summary>
+    internal abstract object FromStorage(ReadOnlySpan<byte> storage, ReadOnlySpan<byte> metadata);
 }
 
 internal sealed class ExtensionRegistration<TExtension> : ExtensionRegistration
@@ -155,4 +161,22 @@ internal sealed class ExtensionRegistration<TExtension> : ExtensionRegistration
     internal override string Id => TExtension.Id;
 
     internal override VortexType StorageType => TExtension.StorageType;
+
+    internal override object FromStorage(ReadOnlySpan<byte> storage, ReadOnlySpan<byte> metadata) => TExtension.FromStorage(storage, metadata);
+
+    internal override Expressions.FilterLiteral ToLiteral(object value, ReadOnlySpan<byte> metadata)
+    {
+        VortexType storage = TExtension.StorageType.NonNullable;
+        if (storage.Kind != VortexTypeKind.Primitive)
+        {
+            throw new VortexUnsupportedException(TExtension.Id, ComponentKind.DType, "An extension is compared through a primitive storage; this one is stored otherwise.");
+        }
+
+        int width = Types.PTypeExtensions.ByteWidth(storage.PrimitiveType);
+        Span<byte> bytes = stackalloc byte[8];
+        bytes.Clear();
+        TExtension typed = (TExtension)value;
+        TExtension.ToStorage(in typed, bytes[..width], metadata);
+        return PrimitiveLiterals.Of(storage.PrimitiveType, bytes[..width]);
+    }
 }

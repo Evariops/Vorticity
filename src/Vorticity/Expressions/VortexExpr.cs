@@ -32,6 +32,9 @@ internal enum ExprKind : byte
 
     /// <summary>Whether a list holds an element equal to a literal.</summary>
     ListContains = 8,
+
+    /// <summary>A binary comparison of two columns of the same type.</summary>
+    ColumnComparison = 9,
 }
 
 /// <summary>The three byte-pattern predicates a filter can apply to a column.</summary>
@@ -75,21 +78,49 @@ internal enum ComparisonOp : byte
     GreaterOrEqual = 5,
 }
 
-/// <summary>A node of a filter expression.</summary>
+/// <summary>
+/// A filter for a file whose schema is not known when the program is compiled: parsed from text, or
+/// combined with <c>&amp;</c>, <c>|</c> and <c>!</c>. The typed scan builds its filters from
+/// <see cref="Predicate"/> instead.
+/// </summary>
 /// <remarks>
-/// The tree is an ordinary immutable object graph rather than an arena, because it is built once per
-/// scan and never per batch, where nothing may allocate. Three-valued logic lives in the evaluator,
-/// not here: these types are only the shape. A literal's type is checked against its column only
-/// when the filter runs, since the schema is out of scope while the tree is built.
+/// An immutable tree, built once per scan. Three-valued logic lives in the evaluator: a comparison
+/// with a null is unknown and a row is kept only when the filter is true. A literal is checked
+/// against its column when the scan is built, and a literal of a type the column cannot compare to
+/// throws <see cref="VortexSchemaException"/> there.
 /// </remarks>
-internal abstract class VortexExpr
+public abstract class VortexExpr
 {
     private protected VortexExpr()
     {
     }
 
+    /// <summary>
+    /// Parses the filter grammar: comparisons (<c>=</c>, <c>!=</c>, <c>&lt;</c>, <c>&lt;=</c>,
+    /// <c>&gt;</c>, <c>&gt;=</c>) of a column with a literal or another column, <c>and</c>, <c>or</c>,
+    /// <c>not</c>, parentheses, <c>in (…)</c>, <c>is [not] null</c>, <c>like</c>, <c>starts with</c>
+    /// and <c>contains</c>.
+    /// </summary>
+    /// <param name="text">The filter, e.g. <c>day &gt;= 900 and city = 'Paris'</c>.</param>
+    /// <returns>The filter.</returns>
+    /// <exception cref="FormatException">The text is not in the grammar.</exception>
+    public static VortexExpr Parse(ReadOnlySpan<char> text) => ExprText.Parse(text);
+
+    /// <summary>The rows both filters keep.</summary>
+    public static VortexExpr operator &(VortexExpr left, VortexExpr right) => Expr.And(left, right);
+
+    /// <summary>The rows either filter keeps.</summary>
+    public static VortexExpr operator |(VortexExpr left, VortexExpr right) => Expr.Or(left, right);
+
+    /// <summary>The rows the filter does not keep, under three-valued logic.</summary>
+    public static VortexExpr operator !(VortexExpr operand) => Expr.Not(operand);
+
+    /// <summary>The filter in the grammar <see cref="Parse"/> reads.</summary>
+    /// <returns>The text.</returns>
+    public override string ToString() => ExprText.Format(this);
+
     /// <summary>What this node is, so a consumer can switch without a type test.</summary>
-    public abstract ExprKind Kind { get; }
+    internal abstract ExprKind Kind { get; }
 
     /// <summary>Adds every field path this expression reads to <paramref name="paths"/>.</summary>
     /// <param name="paths">The set to add to.</param>
@@ -98,7 +129,7 @@ internal abstract class VortexExpr
     /// when the caller did not project it, then dropped again before the batch is handed out.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="paths"/> is null.</exception>
-    public abstract void CollectFields(ICollection<string> paths);
+    internal abstract void CollectFields(ICollection<string> paths);
 }
 
 /// <summary>A column reference, by dotted path.</summary>
@@ -125,6 +156,22 @@ internal sealed class FieldExpr : VortexExpr
         }
     }
 
+    /// <summary>A column reference by its field names, one per struct level: a name may hold a dot.</summary>
+    internal FieldExpr(string[] segments)
+    {
+        ArgumentNullException.ThrowIfNull(segments);
+        Path = string.Join('.', segments);
+        Segments = segments;
+        SegmentsUtf8 = new byte[segments.Length][];
+        for (int i = 0; i < segments.Length; i++)
+        {
+            SegmentsUtf8[i] = System.Text.Encoding.UTF8.GetBytes(segments[i]);
+        }
+    }
+
+    /// <summary>The names, one per struct level, when the reference was built from them; null for a parsed path.</summary>
+    internal string[]? Segments { get; }
+
     /// <summary>The dotted path, e.g. <c>payload.size</c>.</summary>
     public string Path { get; }
 
@@ -132,10 +179,10 @@ internal sealed class FieldExpr : VortexExpr
     internal byte[][] SegmentsUtf8 { get; }
 
     /// <inheritdoc/>
-    public override ExprKind Kind => ExprKind.Field;
+    internal override ExprKind Kind => ExprKind.Field;
 
     /// <inheritdoc/>
-    public override void CollectFields(ICollection<string> paths)
+    internal override void CollectFields(ICollection<string> paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
         paths.Add(Path);
@@ -151,10 +198,10 @@ internal sealed class LiteralExpr : VortexExpr
     public FilterLiteral Value { get; }
 
     /// <inheritdoc/>
-    public override ExprKind Kind => ExprKind.Literal;
+    internal override ExprKind Kind => ExprKind.Literal;
 
     /// <inheritdoc/>
-    public override void CollectFields(ICollection<string> paths) =>
+    internal override void CollectFields(ICollection<string> paths) =>
         ArgumentNullException.ThrowIfNull(paths);
 }
 
@@ -183,10 +230,10 @@ internal sealed class ComparisonExpr : VortexExpr
     public FilterLiteral Value { get; }
 
     /// <inheritdoc/>
-    public override ExprKind Kind => ExprKind.Comparison;
+    internal override ExprKind Kind => ExprKind.Comparison;
 
     /// <inheritdoc/>
-    public override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
+    internal override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
 }
 
 /// <summary><c>AND</c> or <c>OR</c> over two operands.</summary>
@@ -209,10 +256,10 @@ internal sealed class LogicalExpr : VortexExpr
     public VortexExpr Right { get; }
 
     /// <inheritdoc/>
-    public override ExprKind Kind => ExprKind.Logical;
+    internal override ExprKind Kind => ExprKind.Logical;
 
     /// <inheritdoc/>
-    public override void CollectFields(ICollection<string> paths)
+    internal override void CollectFields(ICollection<string> paths)
     {
         Left.CollectFields(paths);
         Right.CollectFields(paths);
@@ -228,10 +275,10 @@ internal sealed class NotExpr : VortexExpr
     public VortexExpr Operand { get; }
 
     /// <inheritdoc/>
-    public override ExprKind Kind => ExprKind.Not;
+    internal override ExprKind Kind => ExprKind.Not;
 
     /// <inheritdoc/>
-    public override void CollectFields(ICollection<string> paths) => Operand.CollectFields(paths);
+    internal override void CollectFields(ICollection<string> paths) => Operand.CollectFields(paths);
 }
 
 /// <summary><c>is null</c> or <c>is not null</c>.</summary>
@@ -254,10 +301,10 @@ internal sealed class NullCheckExpr : VortexExpr
     public bool IsNull { get; }
 
     /// <inheritdoc/>
-    public override ExprKind Kind => ExprKind.NullCheck;
+    internal override ExprKind Kind => ExprKind.NullCheck;
 
     /// <inheritdoc/>
-    public override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
+    internal override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
 }
 
 /// <summary><c>IN</c> over a set of literals.</summary>
@@ -279,10 +326,10 @@ internal sealed class InExpr : VortexExpr
     internal FilterLiteral[] Literals => (FilterLiteral[])Values;
 
     /// <inheritdoc/>
-    public override ExprKind Kind => ExprKind.In;
+    internal override ExprKind Kind => ExprKind.In;
 
     /// <inheritdoc/>
-    public override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
+    internal override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
 }
 
 /// <summary>A field matched against a byte pattern.</summary>
@@ -313,10 +360,10 @@ internal sealed class StringMatchExpr : VortexExpr
     public byte Escape { get; }
 
     /// <inheritdoc/>
-    public override ExprKind Kind => ExprKind.StringMatch;
+    internal override ExprKind Kind => ExprKind.StringMatch;
 
     /// <inheritdoc/>
-    public override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
+    internal override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
 }
 
 /// <summary>A list column tested for an element equal to a literal.</summary>
@@ -344,10 +391,40 @@ internal sealed class ListContainsExpr : VortexExpr
     public FilterLiteral Value { get; }
 
     /// <inheritdoc/>
-    public override ExprKind Kind => ExprKind.ListContains;
+    internal override ExprKind Kind => ExprKind.ListContains;
 
     /// <inheritdoc/>
-    public override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
+    internal override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
+}
+
+/// <summary>Two columns of the same type compared row by row; a null on either side is unknown.</summary>
+internal sealed class ColumnComparisonExpr : VortexExpr
+{
+    internal ColumnComparisonExpr(FieldExpr left, ComparisonOp op, FieldExpr right)
+    {
+        Left = left;
+        Op = op;
+        Right = right;
+    }
+
+    /// <summary>The column on the left of the operator.</summary>
+    public FieldExpr Left { get; }
+
+    /// <summary>The operator.</summary>
+    public ComparisonOp Op { get; }
+
+    /// <summary>The column on the right of the operator.</summary>
+    public FieldExpr Right { get; }
+
+    /// <inheritdoc/>
+    internal override ExprKind Kind => ExprKind.ColumnComparison;
+
+    /// <inheritdoc/>
+    internal override void CollectFields(ICollection<string> paths)
+    {
+        Left.CollectFields(paths);
+        Right.CollectFields(paths);
+    }
 }
 
 /// <summary>Builds filter expressions.</summary>

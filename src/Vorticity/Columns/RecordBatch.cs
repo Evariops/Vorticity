@@ -13,28 +13,18 @@ using Vorticity.Columns;
 namespace Vorticity;
 
 /// <summary>
-/// One decoded batch of rows: the root canonical array, plus the schema and row offset that place
-/// it in the file.
+/// A batch of rows the caller owns: its buffers come from the session's pool and go back when the
+/// batch is disposed. Both the typed and the tool paths hand one out.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <b>Lifetime.</b> Every span this batch hands out - a primitive's values, a bool bitmap, a
-/// string's UTF-8 bytes - points into memory the batch's scan owns. Disposing the batch releases
-/// that memory and every borrowed span becomes invalid. Callers who need a value to outlive the
-/// batch copy it explicitly (<see cref="BinaryColumn.GetString"/> is the one accessor that copies
-/// for you). The column views are <c>readonly ref struct</c>s, so the compiler rejects most of the
-/// ways a view could outlive its batch; the one it cannot catch, reaching through a stale view
-/// after <see cref="Dispose"/>, is caught by a flag every accessor tests, so the failure is an
-/// <see cref="ObjectDisposedException"/> and not a read of recycled pool memory.
-/// </para>
-/// <para>
-/// <b>Affinity.</b> A batch is affine to a single consumer and is not thread-safe. Disposing it
-/// resets the scan's arenas, so a batch cannot outlive its successor: a caller that wants two
-/// batches alive at once must copy.
-/// </para>
+/// <see cref="View"/> and <see cref="As{TRecord}"/> borrow from the batch, and everything they hand
+/// out is valid until <see cref="Dispose"/>. A batch is affine to one consumer and is not
+/// thread-safe; it may be handed to another thread, a channel for instance, and disposed there.
 /// </remarks>
 public sealed class RecordBatch : IDisposable
 {
+    private readonly bool _owns;
+    private VortexSchema? _publicSchema;
     private readonly ScanContext? _context;
     private readonly CanonicalArena _arena;
     private readonly int _root;
@@ -86,7 +76,7 @@ public sealed class RecordBatch : IDisposable
     {
     }
 
-    private RecordBatch(CanonicalArena arena, int rootCanonicalIndex, long startRow, ScanContext? context)
+    private RecordBatch(CanonicalArena arena, int rootCanonicalIndex, long startRow, ScanContext? context, bool owns = false)
     {
         ArgumentNullException.ThrowIfNull(arena);
         ArgumentOutOfRangeException.ThrowIfNegative(startRow);
@@ -94,6 +84,7 @@ public sealed class RecordBatch : IDisposable
         _arena = arena;
         _context = context;
         _root = rootCanonicalIndex;
+        _owns = owns;
 
         // GetNode bounds-checks and throws VortexFormatException for an index outside the arena.
         CanonicalNode root = arena.GetNode(rootCanonicalIndex);
@@ -112,6 +103,63 @@ public sealed class RecordBatch : IDisposable
                 $"The batch's root struct holds {root.FieldCount} decoded fields but its dtype " +
                 $"declares {_fieldCount}.");
         }
+    }
+
+    /// <summary>A batch that owns a copy of the rows of <paramref name="node"/>, in an arena of its own.</summary>
+    internal static RecordBatch Own(CanonicalArena source, int node, long startRow, VortexSchema? schema, VortexSession? session)
+    {
+        CanonicalArena owned = new CanonicalArena(64, (session ?? VortexSession.Default).Options.EnginePool);
+        try
+        {
+            int root = owned.CopyFrom(source, node);
+            return new RecordBatch(owned, root, startRow, null, owns: true) { _publicSchema = schema, Session = session };
+        }
+        catch
+        {
+            owned.Reset();
+            throw;
+        }
+    }
+
+    /// <summary>A batch that takes over <paramref name="context"/>: its arena and segments are released when the batch is disposed.</summary>
+    internal static RecordBatch Adopt(ScanContext context, int root, long startRow, VortexSchema? schema, VortexSession? session) =>
+        new RecordBatch(context.Canonical, root, startRow, context, owns: true) { _publicSchema = schema, Session = session };
+
+    /// <summary>The session whose pool the batch's buffers come from.</summary>
+    internal VortexSession? Session { get; private init; }
+
+    /// <summary>The columns of the batch; for a projected scan, the projection's.</summary>
+    /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
+    public VortexSchema Schema
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return _publicSchema ??= VortexTypes.SchemaOf(_schema);
+        }
+    }
+
+    /// <summary>The batch's columns by index or name, for a caller without a record type.</summary>
+    /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
+    public BatchView View
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return new BatchView(this, _arena, _root, Schema, _startRow, default, _rowCount);
+        }
+    }
+
+    /// <summary>The batch's columns as the members of <typeparamref name="TRecord"/>.</summary>
+    /// <typeparam name="TRecord">A record whose members the batch's columns bind to.</typeparam>
+    /// <returns>The columns, valid until the batch is disposed.</returns>
+    /// <exception cref="VortexSchemaException">A member has no column, or a type that does not fit it.</exception>
+    public Columns<TRecord> As<TRecord>()
+        where TRecord : IVortexRecord<TRecord>
+    {
+        ThrowIfDisposed();
+        RecordBinding binding = RecordBinding.For<TRecord>(Schema, Session?.Options.Extensions);
+        return new Columns<TRecord>(this, _arena, _root, binding, _startRow, default, _rowCount, projected: false);
     }
 
     /// <summary>
@@ -374,6 +422,17 @@ public sealed class RecordBatch : IDisposable
         _disposed = true;
         _nullCounts = null;
         _context?.ResetBatch();
+        if (_owns)
+        {
+            if (_context is not null)
+            {
+                _context.Dispose();
+            }
+            else
+            {
+                _arena.Reset();
+            }
+        }
     }
 
     /// <summary>The arena every column view indexes into.</summary>
