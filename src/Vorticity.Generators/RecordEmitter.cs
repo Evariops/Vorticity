@@ -260,15 +260,7 @@ internal static class RecordEmitter
         switch (value.Kind)
         {
             case ValueKind.Record:
-                string nested = value.CoreType;
-                w.Line($"{nested}[] nested = {Pool}{nested}>.Shared.Rent(count);");
-                w.Open("try");
-                w.Line($"ReadNested(columns.Struct<{nested}>({k}), new global::System.Span<{nested}>(nested, 0, count));");
-                Loop(w, $"{target} = nested[i];");
-                w.Close();
-                w.Open("finally");
-                w.Line($"{Pool}{nested}>.Shared.Return(nested, {ContainsReferences}{nested}>());");
-                w.Close();
+                EmitReadNested(w, value, k, target);
                 break;
             case ValueKind.List:
                 w.Line($"{Vortex}Column<{value.ColumnType}> column = columns.Column<{value.ColumnType}>({k});");
@@ -292,6 +284,44 @@ internal static class RecordEmitter
                 break;
         }
 
+        w.Close();
+    }
+
+    /// <summary>
+    /// Reads member <paramref name="k"/>'s nested record into a rented temporary, then copies it to
+    /// <paramref name="target"/>; a nullable one is null where the struct column is, and is copied
+    /// without a check when that column has no null.
+    /// </summary>
+    private static void EmitReadNested(SourceWriter w, ValueModel value, int k, string target)
+    {
+        string nested = value.CoreType;
+        if (value.IsNullable)
+        {
+            w.Line($"{Vortex}Columns<{nested}> nestedColumns = columns.Struct<{nested}>({k});");
+        }
+
+        w.Line($"{nested}[] nested = {Pool}{nested}>.Shared.Rent(count);");
+        w.Open("try");
+        if (!value.IsNullable)
+        {
+            w.Line($"ReadNested(columns.Struct<{nested}>({k}), new global::System.Span<{nested}>(nested, 0, count));");
+            Loop(w, $"{target} = nested[i];");
+        }
+        else
+        {
+            w.Line($"ReadNested(nestedColumns, new global::System.Span<{nested}>(nested, 0, count));");
+            w.Open("if (nestedColumns.IsAllValid)");
+            Loop(w, $"{target} = nested[i];");
+            w.Close();
+            w.Open("else");
+            w.Line("global::System.ReadOnlySpan<ulong> valid = nestedColumns.ValidityWords;");
+            Loop(w, $"{target} = ((valid[i >> 6] >> (i & 63)) & 1UL) != 0 ? nested[i] : default({value.MemberType});");
+            w.Close();
+        }
+
+        w.Close();
+        w.Open("finally");
+        w.Line($"{Pool}{nested}>.Shared.Return(nested, {ContainsReferences}{nested}>());");
         w.Close();
     }
 
