@@ -78,11 +78,13 @@ public sealed class SegmentCache
                 owner = node.Value.Owner.Retain();
                 buffer = node.Value.Buffer;
                 Interlocked.Increment(ref _hits);
+                VortexTelemetry.CacheHit();
                 return true;
             }
         }
 
         Interlocked.Increment(ref _misses);
+        VortexTelemetry.CacheMiss();
         owner = null!;
         buffer = default;
         return false;

@@ -246,9 +246,24 @@ public sealed partial class Scan<TRecord>
         }
 
         _cacheHitsAtStart = _source.Session.Options.SegmentCache?.Hits ?? 0;
+        _activity = VortexTelemetry.StartScan("typed");
     }
 
-    internal void End() => _cacheHitsAtEnd = _source.Session.Options.SegmentCache?.Hits ?? 0;
+    /// <summary>Closes the sink: its statistics, its activity and the process counters; a second call does nothing.</summary>
+    internal void End()
+    {
+        if (Interlocked.Exchange(ref _ended, 1) != 0)
+        {
+            return;
+        }
+
+        _cacheHitsAtEnd = _source.Session.Options.SegmentCache?.Hits ?? 0;
+        VortexTelemetry.ScanEnded(_metrics, _activity);
+        _activity = null;
+    }
+
+    private System.Diagnostics.Activity? _activity;
+    private int _ended;
 
     private async ValueTask<T?> ExtremeAsync<T>(Func<Probe<TRecord>, Sym<T>> column, bool min, CancellationToken cancellationToken)
     {
@@ -332,6 +347,10 @@ public sealed partial class Scan<TRecord>
 
         /// <summary>Releases the scan's buffers.</summary>
         /// <returns>A task that completes when every buffer is back.</returns>
-        public ValueTask DisposeAsync() => _inner.DisposeAsync();
+        public ValueTask DisposeAsync()
+        {
+            _scan.End();
+            return _inner.DisposeAsync();
+        }
     }
 }

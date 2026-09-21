@@ -116,7 +116,7 @@ public sealed class Scan
     public AsyncEnumerator GetAsyncEnumerator(CancellationToken cancellationToken = default)
     {
         Begin();
-        return new AsyncEnumerator(_source.BatchesAsync(Spec(), _metrics).GetAsyncEnumerator(cancellationToken), Schema, _source.Session);
+        return new AsyncEnumerator(this, _source.BatchesAsync(Spec(), _metrics).GetAsyncEnumerator(cancellationToken), Schema, _source.Session);
     }
 
     /// <summary>The batches, each owned by the caller, who disposes it.</summary>
@@ -129,24 +129,30 @@ public sealed class Scan
         {
             yield return RecordBatch.Own(batch.Arena, batch.RootIndex, batch.StartRow, Schema, _source.Session);
         }
+
+        End();
     }
 
     /// <summary>The number of rows the scan keeps.</summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The count.</returns>
-    public ValueTask<long> CountAsync(CancellationToken cancellationToken = default)
+    public async ValueTask<long> CountAsync(CancellationToken cancellationToken = default)
     {
         Begin();
-        return _source.CountAsync(Spec(), _metrics, cancellationToken);
+        long count = await _source.CountAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
+        End();
+        return count;
     }
 
     /// <summary>Whether the scan keeps at least one row.</summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>Whether a row matches.</returns>
-    public ValueTask<bool> AnyAsync(CancellationToken cancellationToken = default)
+    public async ValueTask<bool> AnyAsync(CancellationToken cancellationToken = default)
     {
         Begin();
-        return _source.AnyAsync(Spec(), _metrics, cancellationToken);
+        bool any = await _source.AnyAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
+        End();
+        return any;
     }
 
     /// <summary>What the scan will do, without reading a data segment.</summary>
@@ -169,17 +175,33 @@ public sealed class Scan
         {
             throw new InvalidOperationException("A scan is single-use: build another one for another sink.");
         }
+
+        _activity = VortexTelemetry.StartScan("tool");
     }
+
+    private void End()
+    {
+        if (Interlocked.Exchange(ref _ended, 1) == 0)
+        {
+            VortexTelemetry.ScanEnded(_metrics, _activity);
+            _activity = null;
+        }
+    }
+
+    private System.Diagnostics.Activity? _activity;
+    private int _ended;
 
     /// <summary>Enumerates the batches of a tool scan as borrowed <see cref="BatchView"/>s.</summary>
     public sealed class AsyncEnumerator : IAsyncDisposable
     {
+        private readonly Scan _scan;
         private readonly IAsyncEnumerator<RecordBatch> _inner;
         private readonly VortexSchema _schema;
         private readonly VortexSession _session;
 
-        internal AsyncEnumerator(IAsyncEnumerator<RecordBatch> inner, VortexSchema schema, VortexSession session)
+        internal AsyncEnumerator(Scan scan, IAsyncEnumerator<RecordBatch> inner, VortexSchema schema, VortexSession session)
         {
+            _scan = scan;
             _inner = inner;
             _schema = schema;
             _session = session;
@@ -203,7 +225,11 @@ public sealed class Scan
 
         /// <summary>Releases the scan's buffers.</summary>
         /// <returns>A task that completes when every buffer is back.</returns>
-        public ValueTask DisposeAsync() => _inner.DisposeAsync();
+        public ValueTask DisposeAsync()
+        {
+            _scan.End();
+            return _inner.DisposeAsync();
+        }
     }
 }
 
