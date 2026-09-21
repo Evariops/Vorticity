@@ -1,4 +1,4 @@
-// The dual of pruning - docs/12-index-reads.md §5.2: MustMatch, and the count the zone maps prove.
+// The dual of pruning: MustMatch, and the count the zone maps prove.
 //
 // Pruning's invariant is one-sided ("never drop a row") and its test is a subset check. The dual's
 // is exact: A WRONG PROOF IS A WRONG COUNT. So the property here is an equality, per filter and
@@ -204,7 +204,7 @@ public sealed class ZoneVerdictTests
     [Fact]
     public async Task ANegatedOrderingPredicateKeepsTheNaNRowsOfAPrunedZone()
     {
-        // NOT (nans > 1000) is TRUE on a NaN row (docs/08-semantics.md §2), where the pushed-down
+        // NOT (nans > 1000) is TRUE on a NaN row, where the pushed-down
         // nans <= 1000 is false: a zone whose every value is above 1000 still holds matches, its
         // NaN rows, and pruning it drops them. The nan_count says whether it may.
         Decoders.EnsureRegistered();

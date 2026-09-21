@@ -97,8 +97,7 @@ internal static class SyntheticLayoutWriter
     /// <summary>
     /// Serializes a tree whose nodes SHARE children: <paramref name="levels"/> chunked layouts, each
     /// pointing twice at the next, so the materialized tree is 2^levels nodes from a few hundred
-    /// bytes. FlatBuffers' forward-only uoffsets exclude cycles but not sharing
-    /// (docs/03-architecture.md §6).
+    /// bytes. FlatBuffers' forward-only uoffsets exclude cycles but not sharing.
     /// </summary>
     internal static byte[] SharedChildren(int levels, out string[] specIds)
     {

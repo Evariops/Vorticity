@@ -3,7 +3,7 @@
 // DISPOSITION IS COMPUTED, NEVER LISTED. Whether a file is in Phase 1 scope is decided by asking
 // the registries - ArrayDecoderTable.IsImplemented, LayoutReaderTable.IsImplemented,
 // ExtensionDTypeRegistry.Resolve - about the ids the manifest says the file actually contains. A
-// hand-maintained list rots the first time a decoder lands (contract §14.1), and it would let a
+// hand-maintained list rots the first time a decoder lands, and it would let a
 // missing registration hide as "out of scope".
 //
 // `array_ids` is the WALKED truth; `declared_array_ids` over-reports, because the writer
@@ -48,8 +48,8 @@ internal sealed class CorpusEntry
 
     /// <summary>
     /// <see langword="false"/> for a file written with <c>exclude_dtype()</c>. Opening one without
-    /// <see cref="Vorticity.File.VortexOpenOptions.DType"/> is a format error by design
-    /// (contract §7.4), so the scan tests skip it: it never reaches the scan at all.
+    /// <see cref="Vorticity.File.VortexOpenOptions.DType"/> is a format error by design, so the
+    /// scan tests skip it: it never reaches the scan at all.
     /// </summary>
     internal bool HasDTypeSegment { get; }
 

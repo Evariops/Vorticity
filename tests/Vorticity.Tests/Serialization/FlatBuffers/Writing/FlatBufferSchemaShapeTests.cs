@@ -1,9 +1,9 @@
-// Every table shape that appears in spec/flatbuffers/*.fbs, built once and read back once.
+// Every table shape in the format's FlatBuffers schemas, built once and read back once.
 //
-// Field ids are the 0-based DECLARATION ORDER in the vendored .fbs files - that is what a
+// Field ids are the 0-based DECLARATION ORDER in the vendored schemas - that is what a
 // FlatBuffers vtable slot means, and it is the only thing tying this hand-written runtime to the
 // upstream schemas. They are transcribed here from the schema text, never from memory, and each
-// block names its source file so a schema refresh has an obvious place to land.
+// block names the tables it covers so a schema refresh has an obvious place to land.
 //
 // A FlatBuffers UNION occupies TWO slots: id n is the ubyte type tag and id n + 1 is the value's
 // uoffset. `table DType { type: Type; }` therefore means field 0 = tag, field 1 = value.
@@ -16,7 +16,7 @@ namespace Vorticity.Tests.Serialization.FlatBuffers;
 
 public sealed class FlatBufferSchemaShapeTests
 {
-    // spec/flatbuffers/array.fbs
+    // Array, ArrayNode and ArrayStats
     private const int ArrayRoot = 0;
     private const int ArrayBuffers = 1;
 
@@ -38,14 +38,14 @@ public sealed class FlatBufferSchemaShapeTests
     private const int StatsUncompressedSize = 9;
     private const int StatsNanCount = 10;
 
-    // spec/flatbuffers/layout.fbs
+    // Layout
     private const int LayoutEncoding = 0;
     private const int LayoutRowCount = 1;
     private const int LayoutMetadata = 2;
     private const int LayoutChildren = 3;
     private const int LayoutSegments = 4;
 
-    // spec/flatbuffers/footer.fbs
+    // Postscript, its segments and metadata, Footer, its specs, and FileStatistics
     private const int PostscriptDType = 0;
     private const int PostscriptLayout = 1;
     private const int PostscriptStatistics = 2;
@@ -71,7 +71,7 @@ public sealed class FlatBufferSchemaShapeTests
     private const int CompressionScheme = 0;
     private const int FileStatisticsFieldStats = 0;
 
-    // spec/flatbuffers/dtype.fbs
+    // DType and the tables of its union arms
     private const int DTypeTag = 0;
     private const int DTypeValue = 1;
     private const int NullableOnly = 0;
@@ -386,7 +386,7 @@ public sealed class FlatBufferSchemaShapeTests
         int chunkVector = builder.CreateOffsetVector(new[] { chunkA, chunkB });
 
         // ChunkedLayout uses metadata[0] as a flag saying whether the first child is the stats
-        // table for the other chunks - spec/flatbuffers/layout.fbs.
+        // table for the other chunks.
         int root = WriteLayout(builder, encoding: 2, rowCount: 12288, metadata: [0x00],
             children: chunkVector, segments: default);
         byte[] bytes = builder.FinishToArray(root);
@@ -434,7 +434,7 @@ public sealed class FlatBufferSchemaShapeTests
         int primitiveDType = WriteDType(builder, TagPrimitive, primitiveType);
 
         // Decimal { precision: uint8; scale: int8; nullable: bool; } - a negative scale is legal
-        // (spec/METADATA.md), so it is the value used here.
+        // in the format, so it is the value used here.
         builder.StartTable();
         builder.AddUInt8(DecimalPrecision, 76);
         builder.AddInt8(DecimalScale, -4);
@@ -480,7 +480,7 @@ public sealed class FlatBufferSchemaShapeTests
         int structDType = WriteDType(builder, TagStruct, structType);
 
         // Union { names; dtypes; type_ids: [byte]; nullable; } - type_ids is a signed [byte] that
-        // spec/flatbuffers/dtype.fbs says to interpret as unsigned, so 200 must survive the trip.
+        // the format says to interpret as unsigned, so 200 must survive the trip.
         int unionTypeIds = builder.CreateScalarVector<sbyte>(new sbyte[] { 0, unchecked((sbyte)200) });
         builder.StartTable();
         builder.AddOffset(UnionNames, names);
@@ -564,10 +564,12 @@ public sealed class FlatBufferSchemaShapeTests
     }
 
     // ---------------------------------------------------------------------------------------
-    // Shape writers. Each names its .fbs source; the field ids above are the declaration order.
+    // Shape writers. Each names its table; the field ids above are the declaration order.
     // ---------------------------------------------------------------------------------------
 
-    /// <summary>spec/flatbuffers/footer.fbs <c>table CompressionSpec { scheme: CompressionScheme; }</c>.</summary>
+    /// <summary>
+    /// The format's <c>table CompressionSpec { scheme: CompressionScheme; }</c>.
+    /// </summary>
     private static int WriteCompressionSpec(FlatBufferBuilder builder, byte scheme)
     {
         builder.StartTable();
@@ -575,7 +577,7 @@ public sealed class FlatBufferSchemaShapeTests
         return builder.EndTable();
     }
 
-    /// <summary>spec/flatbuffers/footer.fbs <c>table EncryptionSpec {}</c>.</summary>
+    /// <summary>The format's <c>table EncryptionSpec {}</c>.</summary>
     private static int WriteEncryptionSpec(FlatBufferBuilder builder) => WriteEmptyTable(builder);
 
     private static int WriteEmptyTable(FlatBufferBuilder builder)
@@ -584,7 +586,7 @@ public sealed class FlatBufferSchemaShapeTests
         return builder.EndTable();
     }
 
-    /// <summary>Any dtype.fbs arm whose only field is <c>nullable: bool</c>.</summary>
+    /// <summary>Any DType union arm whose only field is <c>nullable: bool</c>.</summary>
     private static int WriteNullableOnly(FlatBufferBuilder builder, bool nullable)
     {
         builder.StartTable();
@@ -593,7 +595,7 @@ public sealed class FlatBufferSchemaShapeTests
     }
 
     /// <summary>
-    /// spec/flatbuffers/dtype.fbs <c>table DType { type: Type; }</c>. A FlatBuffers union takes two
+    /// The format's <c>table DType { type: Type; }</c>. A FlatBuffers union takes two
     /// slots: field 0 is the <c>ubyte</c> tag, field 1 the value's uoffset.
     /// </summary>
     private static int WriteDType(FlatBufferBuilder builder, byte tag, int valueTable)
@@ -604,7 +606,7 @@ public sealed class FlatBufferSchemaShapeTests
         return builder.EndTable();
     }
 
-    /// <summary>spec/flatbuffers/footer.fbs <c>table PostscriptSegment</c>.</summary>
+    /// <summary>The format's <c>table PostscriptSegment</c>.</summary>
     private static int WritePostscriptSegment(
         FlatBufferBuilder builder, ulong offset, uint length, byte alignmentExponent,
         int compressionSpec, int encryptionSpec)
@@ -618,7 +620,7 @@ public sealed class FlatBufferSchemaShapeTests
         return builder.EndTable();
     }
 
-    /// <summary>spec/flatbuffers/array.fbs <c>table ArrayNode</c>.</summary>
+    /// <summary>The format's <c>table ArrayNode</c>.</summary>
     private static int WriteArrayNode(
         FlatBufferBuilder builder, ushort encoding, ReadOnlySpan<byte> metadata, int children,
         ReadOnlySpan<ushort> bufferIndices, int stats)
@@ -636,7 +638,7 @@ public sealed class FlatBufferSchemaShapeTests
     }
 
     /// <summary>
-    /// spec/flatbuffers/array.fbs <c>table ArrayStats</c>, with each of the three tri-states in a
+    /// The format's <c>table ArrayStats</c>, with each of the three tri-states in a
     /// different state: known-true, known-false, and unknown.
     /// </summary>
     private static int WriteArrayStats(FlatBufferBuilder builder)
@@ -658,7 +660,7 @@ public sealed class FlatBufferSchemaShapeTests
         return builder.EndTable();
     }
 
-    /// <summary>spec/flatbuffers/layout.fbs <c>table Layout</c>.</summary>
+    /// <summary>The format's <c>table Layout</c>.</summary>
     private static int WriteLayout(
         FlatBufferBuilder builder, ushort encoding, ulong rowCount, ReadOnlySpan<byte> metadata,
         int children, ReadOnlySpan<uint> segments)

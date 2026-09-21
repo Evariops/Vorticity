@@ -1,8 +1,7 @@
-// docs/03-architecture.md §4 invariant 1 and contract §13.4: zero managed bytes per batch in
-// steady state.
+// The allocation invariant of a scan: zero managed bytes per batch in steady state.
 //
 // THE BOUND IS MEASURED, NOT GUESSED. The only per-batch allocation the design permits is the
-// RecordBatch object itself - §12.1 makes it a sealed class with readonly fields, so it cannot be
+// RecordBatch object itself - it is a sealed class with readonly fields, so it cannot be
 // recycled and the enumerator must make a new one per batch. So the test first measures exactly
 // what one RecordBatch costs, then asserts the scan's steady-state per-batch figure is not one byte
 // more. A round number like "under 200 bytes" would let a small per-batch List<T> or a boxed
@@ -68,7 +67,7 @@ public sealed class ScanAllocationTests
     [Fact]
     public async Task ACountAllocatesNothingPerBlock()
     {
-        // docs/12-index-reads.md §11: "a count at 0 B per block". The proof tier is off so that
+        // A count allocates nothing per block. The proof tier is off so that
         // every LIVE block is decoded and the filter evaluated, and the two filters differ only in
         // how many blocks the mask leaves live -- 17 against 64 -- over the same rows, the same
         // plan, the same zone map, the same context and evaluation window. So the two figures
@@ -208,8 +207,8 @@ public sealed class ScanAllocationTests
     /// </para>
     /// <para>
     /// Two and not one, because a reversal cannot make fewer. The scan underneath yields a batch
-    /// over the rows in file order, the reversed rows are a different root, and §12.1 makes a
-    /// <see cref="RecordBatch"/> a sealed class with readonly fields precisely so that neither is
+    /// over the rows in file order, the reversed rows are a different root, and a
+    /// <see cref="RecordBatch"/> is sealed, with readonly fields, precisely so that neither is
     /// recycled. Everything else the walk once rebuilt per batch is gone: it read 40 200 B while it
     /// built a plan, an enumerable and a filter for every split, a split being a batch.
     /// </para>
@@ -387,12 +386,10 @@ public sealed class ScanAllocationTests
     /// The figure the batches allocated in steady state: the floor, checked against the median.
     /// </summary>
     /// <remarks>
-    /// This used to be the MEAN over the whole window, and the mean is the wrong statistic for a
-    /// steady-state claim: a single one-off inside the window - tiered JIT promoting a method on
-    /// its call-count threshold is the usual one - is divided across every batch and lands as a
-    /// plausible-looking per-batch figure. 1.3 kB of rejit over fourteen batches reads as
-    /// "174 bytes per batch, not 80", which is a real-looking regression that reproduces on
-    /// roughly one run in twenty and on no particular commit.
+    /// Not the MEAN over the whole window, which is the wrong statistic for a steady-state claim:
+    /// a single one-off inside the window - tiered JIT promoting a method on its call-count
+    /// threshold is the usual one - is divided across every batch and lands as a real-looking
+    /// per-batch regression that reproduces on no particular commit.
     ///
     /// The floor is strictly stronger than the mean for what the test is FOR: anything allocated on
     /// EVERY batch raises the floor itself, which the caller's assertion then catches against the

@@ -1,13 +1,10 @@
-// Plan memory (docs/11-write-strategy.md §3.4.3) against the candidates that cost nothing to price.
+// Plan memory -- a column's last plan, kept while it still predicts its output -- against the
+// candidates that cost nothing to price.
 //
-// Found by the throughput axis, not by the corpus: after the R0-R7d refactor `chunked` measured
-// +70 % and six hypotheses about the time were refuted before anyone looked at the BYTES. The
-// 1M-row `chunked` file rewritten was 1 902 356 bytes against 890 004 before the refactor, and
-// `chunked_empty_chunks` 1 328 660 against 316 308. One chunk straddles a jump in the values and is
-// bit-packed, rightly; every chunk after it is a pure progression, and plan memory -- a bit-packing
-// that held to the byte -- re-priced the packing, found it held again, and returned it without
-// ever asking the statistics whether the chunk was a sequence. 295 KB per chunk where 32 bytes
-// were exact.
+// A chunk that straddles a jump in the values is bit-packed, rightly; every chunk after it can be
+// a pure progression. A plan memory that re-prices the held packing, finds it holds again, and
+// returns it without ever asking the statistics whether the chunk is a sequence writes a packed
+// chunk where 32 bytes are exact. The fault shows in the file's BYTES before it shows in time.
 //
 // NOTHING IN THE CORPUS HAS A BIT-PACKED CHUNK FOLLOWED BY A PROGRESSION, so the byte-identity
 // anchor (`WrittenSizeTests`) never moved and the differential (`ChooserDifferentialTests`) counted
@@ -48,13 +45,13 @@ public sealed class PlanMemoryTests
     [Fact]
     public async Task AHeldBitPackingDoesNotOutrankAProgressionOrAConstant()
     {
-        // One block per chunk: the file the writer wrote before plan memory existed is 18 932 bytes
-        // -- one packed chunk of 8 192 seventeen-bit values (17 408 bytes) plus framing. With the
-        // packing carried over the three chunks that follow it was 32 372.
+        // One block per chunk: one packed chunk of 8 192 seventeen-bit values (17 408 bytes), the
+        // three chunks after it as a sequence, a constant and a sequence, and framing. A packing
+        // carried over those three would pack them too.
         (long size, List<string> disagreements) = await Write(rowBlock: Rows);
-        // 19 148 since every postscript carries the file's identity (step 20, 13 §7: 16 bytes of
-        // value, the entry's key and segment in the postscript, and the padding they move);
-        // 19 052 since the file statistics segment (11a); 18 932 before it.
+        // The framing includes the file's identity, which every postscript carries (16 bytes of
+        // value, the entry's key and segment in the postscript, and the padding they move: 96
+        // bytes here), and the file statistics segment (120 bytes).
         Assert.Equal(19_148, size);
         Assert.True(
             disagreements.Count == 0,
@@ -71,9 +68,9 @@ public sealed class PlanMemoryTests
     /// Found by the test above: with eight blocks per chunk BOTH choosers packed every progression
     /// (48 532 bytes), because the block seeded from the previous chunk's last row broke the step,
     /// the merge took a broken block for a broken chunk, and the chooser trusted the merge without
-    /// the walk it makes when the steps are unknown. Older than plan memory: the fused pass had
-    /// stepped blocks from their predecessor since docs/11 §8's stage 2. The 672 bytes over the
-    /// one-block file are the zone map's: 32 blocks summarised instead of 4.
+    /// the walk it makes when the steps are unknown. Plan memory plays no part: the fused pass
+    /// steps every block from its predecessor. The 672 bytes over the one-block file are the zone
+    /// map's: 32 blocks summarised instead of 4.
     /// </remarks>
     [Fact]
     public async Task AProgressionThatStartsAChunkAfterAJumpIsStillAProgression()
@@ -94,10 +91,10 @@ public sealed class PlanMemoryTests
     /// reference chooser's on every chunk.
     /// </summary>
     /// <remarks>
-    /// Plan memory used to hold a dictionary to the bytes its SUBTREE produced -- the codes and the
-    /// values after their own schemes, 363 bytes on the 1M-row `dict_u8_codes` -- against a layer
-    /// priced at 66 738: it "broke" on every chunk, the table was never expected to serve, and each
-    /// chunk walked for a dictionary the table had already built. Held to its own layer, it holds.
+    /// Plan memory holds a dictionary to its own layer, not to the bytes its SUBTREE produces --
+    /// the codes and the values after their own schemes, far below the layer's price. Held to
+    /// those, it would "break" on every chunk, the table would never be expected to serve, and
+    /// each chunk would walk for a dictionary the table had already built.
     /// </remarks>
     [Fact]
     public async Task AHeldDictionaryLetsTheTableServeTheChunksThatFollow()
@@ -181,12 +178,10 @@ public sealed class PlanMemoryTests
     /// chunk that opens on a carried tail reads its widths like every chunk after it.
     /// </summary>
     /// <remarks>
-    /// The carried rows were ingested before the plan held, so the block they open had no
-    /// histogram, the chunk it opens walked all the same, and the count on that chunk's other
-    /// blocks served nobody -- one chunk in four of `fastlanes_bitpacked`, and the whole of the
-    /// +13 % the axis carried since widths were counted at ingest: switching them off measured
-    /// exactly it. `ColumnWriter.Reprobe` counts the carried rows now, when the table sees them
-    /// again, and the block is whole.
+    /// The carried rows are ingested before the plan holds, so the block they open has no
+    /// histogram of its own: uncounted, the chunk it opens walks all the same, and the count on
+    /// that chunk's other blocks serves nobody. `ColumnWriter.Reprobe` counts the carried rows
+    /// when the table sees them again, so the block is whole.
     /// </remarks>
     [Fact]
     public async Task ACarriedTailCompletesTheOpenBlockSoTheNextChunkReadsItsWidths()

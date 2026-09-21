@@ -50,7 +50,7 @@ public sealed class DTypeConstructionTests
     public void DecimalRejectsAPrecisionOutsideOneToSeventySix(byte precision)
     {
         // vortex-array/src/dtype/decimal/mod.rs: precision is NonZero and bounded by
-        // MAX_PRECISION, which is i256's 76 -- not i128's 38. See spec/METADATA.md.
+        // MAX_PRECISION, which is i256's 76 -- not i128's 38.
         DTypeArena arena = new();
         Assert.Throws<VortexFormatException>(
             () => { arena.Decimal(precision, 0, Nullability.NonNullable); });
@@ -137,7 +137,7 @@ public sealed class DTypeConstructionTests
     [Fact]
     public void UnionTypeIdCountMustMatchFieldCount()
     {
-        // spec/flatbuffers/dtype.fbs: "length must equal dtypes.len()".
+        // The schema requires a union's type_ids to be exactly as long as its dtypes.
         DTypeArena arena = new();
         DType i32 = arena.Primitive(PType.I32, Nullability.NonNullable);
         int a = arena.InternName("a"u8);
@@ -225,7 +225,7 @@ public sealed class DTypeConstructionTests
     [Fact]
     public void ListNestingIsAllowedUpToTheCap()
     {
-        // docs/08-semantics.md section 6: a 10 000-deep nested type blows the stack during schema
+        // Depth is capped because a 10 000-deep nested type blows the stack during schema
         // parsing, before any data is read. The leaf counts as depth 1.
         DTypeArena arena = new();
         DType d = arena.Primitive(PType.I32, Nullability.NonNullable);
@@ -304,8 +304,8 @@ public sealed class DTypeConstructionTests
     [Fact]
     public void NullIgnoresNullabilityBecauseTheWireHasNone()
     {
-        // spec/flatbuffers/dtype.fbs: `table Null {}` has no nullable field. Storing the argument
-        // would make a FlatBuffers round trip lossy.
+        // On the wire `table Null {}` has no nullable field, so storing the argument would make
+        // a FlatBuffers round trip lossy.
         DTypeArena arena = new();
         DType a = arena.Null(Nullability.NonNullable);
         DType b = arena.Null(Nullability.Nullable);

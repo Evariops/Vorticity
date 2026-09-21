@@ -1,4 +1,4 @@
-// WHY THIS FILE EXISTS: the shared-dictionary layout (§3a) was attempted twice, produced a file
+// WHY THIS FILE EXISTS: the shared-dictionary layout was attempted twice, produced a file
 // SMALLER than the reference's both times, and both times read back PERMUTED. Three causes were
 // eliminated one after another - the reader, the compressor, the code width - and the fourth was
 // never found, because it was not being looked for in the writer's data model.
@@ -18,10 +18,10 @@
 // Permuted values, with correct codes, a correct reader and a correct width - which is the exact
 // symptom, and the reason the three eliminations were all true and all beside the point.
 //
-// WHAT THIS COSTS ANYONE WHO SHARES STATE ACROSS BATCHES. §3c's coalescing needs the same thing
-// from the other direction: `CanonicalConcat` across arenas is blocked because batch arenas reset
-// on the next `MoveNextAsync`. A deep copy of the node's bytes at adoption time is mandatory for
-// both, and it is one requirement, not two.
+// WHAT THIS COSTS ANYONE WHO SHARES STATE ACROSS BATCHES. Coalescing small chunks needs the same
+// thing from the other direction: `CanonicalConcat` across arenas is blocked because batch
+// arenas reset on the next `MoveNextAsync`. A deep copy of the node's bytes at adoption time is
+// mandatory for both, and it is one requirement, not two.
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -43,34 +43,24 @@ public sealed class ArenaLifetimeTests
     private const string Entry = "types/i32_nonnull_r8193";
 
     /// <summary>
-    /// An index from an earlier batch no longer addresses the later batch's arena at all.
+    /// An index from an earlier batch names whatever the later batch put at that slot, never the
+    /// earlier batch's data.
     /// </summary>
     /// <remarks>
-    /// THIS TEST HAS ASSERTED THREE DIFFERENT THINGS, and the third is the durable one.
-    ///
-    /// It was written to show that a stale canonical index reads live, plausible, WRONG data rather
-    /// than failing -- the mechanism behind the shared-dictionary layout coming back permuted twice,
-    /// with three unrelated causes eliminated in between. When `FlatLayoutReader` started decoding
-    /// an oversized chunk once into a retained arena and copying the batch's window out of it, the
-    /// batch arena stopped holding the decoded tree, a batch-1 index fell out of range in batch 2,
-    /// and the test was changed to assert a `VortexFormatException`: silent had become loud.
-    ///
-    /// THAT LOUDNESS WAS AN ARTIFACT OF THE COPY, not a property of the model. The chunk is now
-    /// decoded straight into the arena that retains it -- the copy was a second full pass over
-    /// every byte, 26% of a 1M-row scan -- so the batch arena holds the same handful of window
-    /// records in both batches and a batch-1 index addresses a perfectly real batch-2 node again.
-    /// Nothing about the lifetime rule changed; what changed is that a violation of it is no longer
-    /// caught by accident. It never was in general: the arena had no generation and a raw index
+    /// A stale canonical index reads live, plausible, WRONG data rather than failing -- the
+    /// mechanism behind a shared dictionary reading back permuted. An oversized chunk is decoded
+    /// straight into the arena that retains it, so the batch arena holds the same handful of window
+    /// records in every batch and a batch-1 index addresses a perfectly real batch-2 node. A
+    /// violation of the lifetime rule is not caught: the arena has no generation and a raw index
     /// carries none, so there is no index for which the library could promise to notice.
     ///
-    /// So the assertion is back to the hazard itself, stated as strongly as the model permits: a
-    /// stale root index yields the CURRENT batch's data, never the batch it was captured from.
+    /// So the assertion is the hazard itself, stated as strongly as the model permits: a stale
+    /// root index yields the CURRENT batch's data, never the batch it was captured from.
     ///
-    /// WHAT IS UNCHANGED, and is what the hazard actually was: there is still ONE batch arena,
-    /// reset and refilled per batch. `Assert.Same` below is the part that still matters. Anything
-    /// wanting canonical data to outlive its batch must own its own arena --
+    /// There is ONE batch arena, reset and refilled per batch, and `Assert.Same` below is the part
+    /// that matters. Anything wanting canonical data to outlive its batch must own its own arena --
     /// `CanonicalArena.CopyFrom` for the bytes, `ReferenceFrom` when the source outlives the
-    /// borrower -- and that is as true now as when this file was written.
+    /// borrower.
     /// </remarks>
     [Fact]
     public async Task AnIndexFromAnEarlierBatchNoLongerAddressesTheLaterBatch()

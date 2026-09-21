@@ -6,7 +6,7 @@ namespace Vorticity.Tests.Serialization.Protobuf;
 
 /// <summary>
 /// ZigZag (<c>sint32</c>/<c>sint64</c>). <c>vortex.scalar.ScalarValue.int64_value</c> is a
-/// <c>sint64</c> (spec/proto/scalar.proto), so every integral scalar in a Vortex file passes
+/// <c>sint64</c>, so every integral scalar in a Vortex file passes
 /// through this transform - including the extremes, where the shift overflows by design.
 /// </summary>
 public sealed class ProtoZigZagTests

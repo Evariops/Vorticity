@@ -1,7 +1,7 @@
 // Malformed input, hostile callers, and the row counts the corpus was built around.
 //
 // The scan parses no wire structure of its own - it consumes a LayoutTree the layouts component
-// already validated - so "truncation at every structural boundary it parses" (contract §1.8) has
+// already validated - so a truncation test at every structural boundary it parses has
 // nothing to bite on here. What it does own is the boundary between a caller's mistake and a file's:
 // a bad projection path, a negative range or a disposed enumerator is Argument*/ObjectDisposed, and
 // a broken file is VortexFormatException. The truncation cases below assert the second half of that
@@ -187,7 +187,8 @@ public sealed class ScanRobustnessTests
     // from a non-async method, so its ValueTask is never created and MoveNextAsync's own
     // `catch { lane.Context.ResetBatch(); throw; }` runs. Every async ISegmentSource - including the
     // in-tree RandomAccessSegmentSource - instead returns a faulted ValueTask, and the failure
-    // surfaces inside OnReadCompleted, whose catch used to only publish the exception.
+    // surfaces inside OnReadCompleted, whose catch must reset the lane, not only publish the
+    // exception.
     //
     // What leaks is the SegmentRequestSet: AbandonPending releases the owners but deliberately
     // leaves the set "registered but unpopulated, ready to retry" (ISegmentSource), so a lane that

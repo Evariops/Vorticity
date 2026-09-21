@@ -1,11 +1,12 @@
-// Vtable deduplication. docs/01-scope.md §3: "Vtable dedup is not optional: without it,
-// wide-schema metadata inflates and the 105% size target starts with a self-inflicted handicap."
+// Vtable deduplication, which is not optional: without it, wide-schema metadata inflates and the
+// written file starts with a self-inflicted handicap against its size target of 105% of what the
+// reference implementation writes.
 //
 // These assertions are STRUCTURAL - they read the soffsets out of the finished bytes - because a
 // builder that emits one vtable per table still produces a buffer that reads back correctly. Only
 // the bytes can tell the two apart.
 //
-// A note that explains the shapes chosen below. `table_size` is measured from the table's start to
+// The shapes below follow from one rule. `table_size` is measured from the table's start to
 // its end INCLUDING the alignment padding a field forced, so two tables of identical shape share a
 // vtable only when they also start at the same alignment. That is what flatc does too, and it is
 // why every fixture here uses 4-byte fields and 4-byte-sized vtables: the head then stays 4-byte
@@ -68,8 +69,7 @@ public sealed class FlatBufferBuilderVTableTests
         // Both directions are legal and BOTH occur naturally: a fresh vtable is written just after
         // its table, so it PRECEDES it in the finished buffer and the soffset is positive; a
         // reused one was written earlier in build order, so it FOLLOWS its table and the soffset
-        // is negative. docs/03-architecture.md §6 requires the reader to bound soffsets in both
-        // directions - this is the writer-side reason it has to.
+        // is negative. That is why the reader must bound soffsets in both directions.
         using var builder = new FlatBufferBuilder();
         builder.StartTable();
         builder.AddInt32(0, 1);
@@ -184,8 +184,8 @@ public sealed class FlatBufferBuilderVTableTests
     [Fact]
     public void A_field_omitted_as_its_default_costs_no_vtable_slot()
     {
-        // A field id past the end of the vtable reads as absent (docs/03-architecture.md §6), so a
-        // table that mentions field 5 only to pass its default value must not pay for six slots.
+        // A field id past the end of the vtable reads as absent, so a table that mentions field 5
+        // only to pass its default value must not pay for six slots.
         using var builder = new FlatBufferBuilder();
         builder.StartTable();
         builder.AddInt32(0, 1);
@@ -227,7 +227,7 @@ public sealed class FlatBufferBuilderVTableTests
     [Fact]
     public void Every_empty_table_shares_one_vtable()
     {
-        // `table EncryptionSpec {}` in spec/flatbuffers/footer.fbs. A Footer may carry several.
+        // `table EncryptionSpec {}` in the footer schema. A Footer may carry several.
         using var builder = new FlatBufferBuilder();
         int[] specs = new int[8];
         for (int i = 0; i < specs.Length; i++)
@@ -262,7 +262,7 @@ public sealed class FlatBufferBuilderVTableTests
     [Fact]
     public void A_wide_uniform_schema_converges_on_one_vtable_per_shape()
     {
-        // This is the case docs/01-scope.md §3 is about: one metadata table per column of a wide
+        // This is the case vtable dedup exists for: one metadata table per column of a wide
         // struct. Without dedup that is one vtable per column and the metadata inflates.
         const int Columns = 2000;
 
@@ -305,7 +305,7 @@ public sealed class FlatBufferBuilderVTableTests
     public void Clear_forgets_vtables_from_the_previous_buffer()
     {
         // Vtable offsets are relative to the buffer being built. Carrying them across a Clear
-        // would point a table at bytes that no longer exist.
+        // would point a table at bytes the new buffer does not contain.
         using var builder = new FlatBufferBuilder();
         builder.StartTable();
         builder.AddInt32(0, 1);

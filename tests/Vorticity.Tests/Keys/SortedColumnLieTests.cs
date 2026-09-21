@@ -1,6 +1,6 @@
-// A column whose statistics say it is sorted when it is not - docs/12-index-reads.md §3: "a lying
-// is_sorted is caught because VerifyStatistics validates it", and §11 "Lying runs": without the
-// option a lie may give a wrong walk and must not fault; with it, the walk refuses to go on.
+// A column whose statistics say it is sorted when it is not. Without VerifyStatistics the lie may
+// give a wrong walk and must not fault; with it, is_sorted is validated and the walk refuses to
+// go on.
 //
 // THE LIE IS FORGED IN THE DATA, NOT IN THE STATISTICS. The writer computes is_sorted from what it
 // wrote, so the file is written sorted, with the column pinned to its canonical array so one value

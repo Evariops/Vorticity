@@ -124,7 +124,7 @@ public sealed class ProtoVarintTests
 
     /// <summary>
     /// Overlong encodings are legal on the wire. Refusing them would buy no safety and would break
-    /// the read-forever promise of docs/02-format.md §5.3 against a producer we do not control.
+    /// the promise to read any legal metadata, from a producer we do not control.
     /// </summary>
     [Fact]
     public void Varint_overlong_but_representable_encoding_is_accepted()

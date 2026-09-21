@@ -1,8 +1,8 @@
 // Vector alignment. Footer.segment_specs (16-byte SegmentSpec), Array.buffers (8-byte Buffer),
 // ArrayNode.buffers ([uint16]) and Layout.segments ([uint32]) are all read by REINTERPRETING the
-// element bytes in place, with no traversal and no copy (docs/02-format.md §3). That only works
-// when the writer put the first element on alignof(T), so this is the writer half of the same
-// contract FlatBufferStructVectorTests checks on the reader side.
+// element bytes in place, with no traversal and no copy. That only works when the writer put the
+// first element on alignof(T), so this is the writer half of the same contract
+// FlatBufferStructVectorTests checks on the reader side.
 using System;
 using System.Runtime.CompilerServices;
 using Vorticity.Serialization.FlatBuffers;
@@ -19,7 +19,7 @@ public sealed class FlatBufferBuilderVectorAlignmentTests
         // The builder writes back to front, so a position inside the finished buffer is
         // `length - backOffset`. Padding the head until the length is a multiple of 8 is therefore
         // exactly what makes every object land on its own boundary once the buffer sits at an
-        // 8-byte aligned address (docs/03-architecture.md §3.5).
+        // 8-byte aligned address.
         foreach (int width in new[] { 1, 2, 4, 8 })
         {
             using var builder = new FlatBufferBuilder();
@@ -109,7 +109,7 @@ public sealed class FlatBufferBuilderVectorAlignmentTests
     [Fact]
     public void SegmentSpec_vectors_are_eight_byte_aligned_and_reinterpret_in_place()
     {
-        // spec/flatbuffers/footer.fbs `struct SegmentSpec`: 16 bytes, 8-byte aligned.
+        // The footer schema's `struct SegmentSpec`: 16 bytes, 8-byte aligned.
         SegmentSpecLike[] specs = new SegmentSpecLike[3];
         for (int i = 0; i < specs.Length; i++)
         {
@@ -156,7 +156,7 @@ public sealed class FlatBufferBuilderVectorAlignmentTests
     [Fact]
     public void Buffer_vectors_are_four_byte_aligned_not_eight()
     {
-        // spec/flatbuffers/array.fbs `struct Buffer` is 8 bytes but only 4-byte aligned. Aligning
+        // The array schema's `struct Buffer` is 8 bytes but only 4-byte aligned. Aligning
         // it to sizeof(T) would produce a file that disagrees with every other writer, and the
         // reader deliberately checks alignof(T) so it would not even notice.
         BufferLike[] buffers =

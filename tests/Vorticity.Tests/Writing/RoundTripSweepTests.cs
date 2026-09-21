@@ -75,7 +75,7 @@ public sealed class RoundTripSweepTests
     [Fact]
     public async Task WritesTheCorpusOutForTheRustCrossCheck()
     {
-        // The .NET half of criterion 2 (docs/01-scope.md §4): produce the files, and let
+        // The .NET half of Rust reading what we write: produce the files, and let
         // `cargo run --example verify_written` decide whether the reference agrees with them. It is
         // env-gated because it costs a full corpus write and only the cross-check consumes the
         // output -- and it SKIPS rather than passes when the variable is absent, so a CI job that
@@ -114,9 +114,9 @@ public sealed class RoundTripSweepTests
 
             await using VortexFile source = await VortexFile.OpenAsync(
                 entry.Path, OpenOptionsFor(entry), CancellationToken.None);
-            // WITH INDEXES, so that the whole corpus crosses the rule of docs/10-indexes.md §3.1: a
-            // file with an index opens and scans in a strict Rust 0.86.1 reader, without error and
-            // without configuration. The files take four policies in turn, budget lifted: a Bloom
+            // WITH INDEXES, so that the whole corpus crosses the rule that a file with an index
+            // opens and scans in a strict Rust 0.86.1 reader, without error and without
+            // configuration. The files take four policies in turn, budget lifted: a Bloom
             // filter at all three resolutions on every column, postings on every column, sorted
             // runs cut into small segments on every column, and `Auto` with a Bloom on every other
             // field -- which puts payload regions BETWEEN the data chunks, where no layout
@@ -138,13 +138,13 @@ public sealed class RoundTripSweepTests
                 }
             }
 
-            // ONE TABLE IN THREE IS APPENDED, AND ONE IN THREE INDEXED AFTER THE FACT (docs/11 §5.2,
-            // "read back by Rust ... plus appended files"): the first half written, closed, and the
+            // ONE TABLE IN THREE IS APPENDED, AND ONE IN THREE INDEXED AFTER THE FACT, so that
+            // Rust reads appended files back too: the first half written, closed, and the
             // rest appended -- inside a block, so the last chunk is re-opened -- or the whole file
             // written without indexes and the runs appended with a new directory and footer.
             bool tabular = source.Schema.Kind == DTypeKind.Struct && source.Schema.FieldCount > 0 && source.RowCount > 1;
             int mode = tabular ? (tables++ % 3) switch { 1 => 1, 2 => 3, _ => 0 } : 0;
-            // STRING ZONE BOUNDS ON HALF THE FILES (docs/11 §3.2): the reference's 64 bytes on one in
+            // STRING ZONE BOUNDS ON HALF THE FILES: the reference's 64 bytes on one in
             // four, and 5 on another, so that values are cut, characters straddle the cut and some
             // maxima have no bound. The verifier prunes with them.
             int stringBounds = (written % 4) switch { 0 => 64, 2 => 5, _ => 0 };
@@ -158,8 +158,8 @@ public sealed class RoundTripSweepTests
             {
                 stringBounded++;
             }
-            // EVERY PLAIN TABLE OF THE WRITE-ONCE THIRD IS A COMPACTED DATASET OBJECT (13 §14: "the
-            // cross-check gains compacted files"), since the corpus holds few of them: the rows
+            // EVERY PLAIN TABLE OF THE WRITE-ONCE THIRD IS A COMPACTED DATASET OBJECT, so that
+            // the cross-check reads compacted files, which the corpus holds few of: the rows
             // appended as three objects of an unclustered dataset, which compacts tiered -- a
             // concatenation, so the rows keep the order the verifier compares them in -- and the one
             // object the compaction wrote is what Rust reads.
@@ -340,7 +340,7 @@ public sealed class RoundTripSweepTests
     /// <remarks>
     /// <c>types/no_dtype_segment</c> is the corpus's only such file, and it reached this sweep only
     /// when <c>vortex.map</c> gained a decoder and the file became in-scope. Opening it without a
-    /// DType is a <c>VortexFormatException</c> BY CONTRACT §7.4, so the failure was the sweep
+    /// DType is a <c>VortexFormatException</c> BY CONTRACT, so a failure on it would be the sweep
     /// calling the wrong overload rather than anything about the round trip. The donor is a real
     /// file with the identical schema, which is the same approach <c>Phase1CompositionTests</c>
     /// already takes.

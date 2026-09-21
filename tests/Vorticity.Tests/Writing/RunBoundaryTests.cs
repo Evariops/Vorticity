@@ -1,5 +1,4 @@
-// That the fused pass counts runs exactly as the scan it replaces did - docs/11-write-strategy.md
-// §8 stage 2b.
+// That the fused statistics pass counts runs exactly as a separate scan of the rows would.
 //
 // THE VERDICT TURNS ON ONE COMPARISON. `ColumnCompressor` keeps run-end only when a chunk has at
 // most `rows / 4` runs, so a count that is off by one changes the plan and therefore the file's
@@ -328,7 +327,7 @@ public sealed class RunBoundaryTests
 
     /// <summary>
     /// A varbinview with inline values AND out-of-line ones, plus the same long value written twice
-    /// at two different offsets — the case docs/11 §3.2.4 says must not split a run.
+    /// at two different offsets — equal values whose views differ, which must not split a run.
     /// </summary>
     private static int Strings(
         CanonicalArena arena, DTypeArena types, Pattern pattern, bool nullable)

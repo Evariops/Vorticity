@@ -5,7 +5,7 @@
 // scan returns for those rows - same values, same nulls, same order. That catches every off-by-one
 // a row count alone would miss: a chunk selected one too early, a flat array sliced from the wrong
 // offset, a batch whose StartRow lies. Comparing against the Rust sidecar is the conformance
-// component's job (contract §1.8), and it would not catch a consistent shift anyway.
+// component's job, and it would not catch a consistent shift anyway.
 using System;
 using System.Collections.Generic;
 using System.Globalization;

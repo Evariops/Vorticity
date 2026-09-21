@@ -1,5 +1,5 @@
-// The read budget on one file - docs/13-dataset.md §9.2 (invariant 1, on a file), docs/12 §8.1,
-// docs/11 §6.3, step 27 of IMPL-PLAN.md.
+// The read budget on one file: a point lookup costs at most a fixed number of requests and bytes,
+// the same whatever the file's length.
 //
 // WHAT IS HELD: the counting source counts rounds, ranges and bytes as a reader asks; a file's
 // indexes are described without a request once its directory is read, and preloading reads it at
@@ -90,7 +90,7 @@ public sealed class ReadBudgetTests
             Assert.Equal(atOpen, lazySource.Requests);
             Assert.Equal(read, lazy.Indexes);
 
-            // The merged run in fence pages, and the short last block's own run (13 §6.1).
+            // The merged run in fence pages, and the short last block's own run.
             VortexIndexInfo runs = Assert.Single(read, i => i.Kind == IndexKinds.SortedRuns);
             Assert.Equal(("k", VortexIndexLayout.FencePages, (long)Rows, 2), (runs.Column, runs.Layout, runs.Entries, runs.Runs));
             VortexIndexInfo bloom = Assert.Single(read, i => i.Kind == IndexKinds.BloomSbbf);

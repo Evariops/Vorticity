@@ -53,7 +53,7 @@ public sealed class BitPackPlanTests
         Assert.Equal(BitPackTransform.ZigZag, plan.Transform);
         Assert.Equal(2L, plan.Exceptions);
 
-        // The rows themselves are the pack's to find, since stage R5b-2: the plan carries the
+        // The rows themselves are the pack's to find: the plan carries the
         // count, the pack sizes its patch arrays from it and fills them as it transforms.
         (int[] indices, _) = ArrayBlobWriter.Patches(fixture.Arena, fixture.Arena.GetNode(node), plan);
         Assert.Equal([1, 2], indices);

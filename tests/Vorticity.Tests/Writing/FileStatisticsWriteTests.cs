@@ -1,7 +1,7 @@
-// The file statistics segment the writer emits at CompleteAsync (docs/11 §3.6): per top-level
+// The file statistics segment the writer emits at CompleteAsync: per top-level
 // field the exact min / max, the null count, and is_sorted / is_strict_sorted -- the two flags no
 // reference-written file carries, because vortex-layout-0.86.1's file-level aggregation drops
-// them, and the flags a key cursor's SortedColumn source (docs/12 §3) exists on.
+// them, and the flags a key cursor's SortedColumn source exists on.
 //
 // THE ORDER IS THE REFERENCE'S: nulls below every value (a sorted nullable column has its nulls
 // first), equal neighbours allowed by is_sorted and refused by is_strict_sorted, a NaN claiming
@@ -127,7 +127,8 @@ public sealed class FileStatisticsWriteTests
     [Fact]
     public async Task TheReaderAnswersAWholeFileExtremeFromTheSegment()
     {
-        // The first resolution of docs/12 §5.3, on a file this writer produced: no segment read.
+        // A whole-file min or max is answered from the file statistics, on a file this writer
+        // produced: no segment read.
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(new VortexWriteOptions { RowBlockSize = Block });
 
@@ -139,7 +140,7 @@ public sealed class FileStatisticsWriteTests
         Assert.Equal((ulong)((Rows - 1) / 7), max.UnsignedValue);
         Assert.Equal(0, metrics.SegmentRequests);
 
-        // And the file-level prune of docs/11 §6.3 sees the bounds.
+        // And the file-level prune sees the bounds.
         Assert.False(written.File.MayMatch(Expr.Gt(Expr.Field("desc_i64"), Expr.Literal(FilterLiteral.From(10_000L)))));
         Assert.True(written.File.MayMatch(Expr.Gt(Expr.Field("desc_i64"), Expr.Literal(FilterLiteral.From(9_999L)))));
     }

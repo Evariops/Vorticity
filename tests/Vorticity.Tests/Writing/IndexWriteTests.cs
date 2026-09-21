@@ -1,11 +1,11 @@
-// The writer side of docs/10-indexes.md §7: the policy, the directory, the report, and the first
+// The writer side of the indexes: the policy, the directory, the report, and the first
 // kind, `vorticity.dict.probe.v1`, which costs nothing because the writer already knows which
 // chunks it dictionary-encoded.
 //
-// THREE PROMISES, EACH A TEST. A file written without asking is byte for byte what it was (§7.3,
-// and `Profile = Fastest` whatever the policy says). Every index a policy asked for is in the
-// report, built or abandoned with its reason (§7.1). And the directory the writer emits is the one
-// the reader's own checks accept (§4.1).
+// THREE PROMISES, EACH A TEST. A file written without asking carries no index directory, and one
+// written at `Profile = Fastest` is byte for byte that file whatever the policy says. Every index
+// a policy asked for is in the report, built or abandoned with its reason. And the directory the
+// writer emits is the one the reader's own checks accept.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -51,7 +51,7 @@ public sealed class IndexWriteTests
     [Fact]
     public async Task FastestIsByteIdenticalToTheDefaultsWhateverThePolicySays()
     {
-        // UNDER ONE IDENTITY: every postscript carries its own (13 §7), so two writes of the same
+        // UNDER ONE IDENTITY: every postscript carries its own, so two writes of the same
         // rows differ in those sixteen bytes and in nothing else.
         Decoders.EnsureRegistered();
         Guid identity = Guid.NewGuid();
@@ -204,8 +204,8 @@ public sealed class IndexWriteTests
     public void TheProbeClaimsTheDictionaryChunksAndLeavesTheOthersLive()
     {
         // The branch no written fixture can force: dictionary and other chunks alternating, with a
-        // run of two dictionaries to merge and a dictionary last. A block no run covers is live
-        // (docs/10-indexes.md §4.1), which is the right answer for a chunk that has no dictionary.
+        // run of two dictionaries to merge and a dictionary last. A block no run covers is live,
+        // which is the right answer for a chunk that has no dictionary.
         ColumnWriter column = new ColumnWriter();
         for (int block = 0; block < 10; block++)
         {

@@ -147,7 +147,7 @@ public sealed class TakeSpecializationTests
     /// <remarks>
     /// A FLAG THAT DESCRIBES CODE MUST BE CHECKED AGAINST THE CODE. `FlatLayoutReader` routes a take
     /// through the retained-chunk cache for every encoding whose `DecodeSelected` is the fallback,
-    /// and straight through for every encoding that overrides it (v2 R23). Both halves are load-
+    /// and straight through for every encoding that overrides it. Both halves are load-
     /// bearing and in opposite directions: a false negative leaves an encoding decoding its node
     /// once per wanted row - 64.17 on `vortex.zstd` - and a false positive forces a full decode on
     /// an encoding that reaches one row without one, which would cost the `fsst` take its 0.21.
@@ -272,8 +272,8 @@ public sealed class TakeSpecializationTests
     /// <param name="path">The corpus file about to be opened.</param>
     /// <remarks>
     /// <c>types/no_dtype_segment</c> reached this sweep only when <c>vortex.map</c> gained a decoder
-    /// and the file became in-scope. Opening it without a DType is a <c>VortexFormatException</c> by
-    /// contract §7.4, so the donor is a real corpus file with the identical schema.
+    /// and the file became in-scope. Opening it without a DType is a <c>VortexFormatException</c>,
+    /// so the donor is a real corpus file with the identical schema.
     /// </remarks>
     private static VortexOpenOptions OpenOptionsFor(string path) =>
         path.Contains("no_dtype_segment", StringComparison.Ordinal)

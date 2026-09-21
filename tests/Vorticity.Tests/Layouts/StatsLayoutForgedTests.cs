@@ -1,4 +1,4 @@
-// The one test `vortex.stats` can have (PHASE1-CONTRACTS.md §2.7).
+// The one test `vortex.stats` can have.
 //
 // No 0.86.1 writer path constructs a vortex.stats layout, so the corpus has no fixture and never
 // will while the corpus records a single-version pin. But `vortex.zoned` and `vortex.stats` are
@@ -79,7 +79,7 @@ public sealed class StatsLayoutForgedTests
         Assert.True(zoneMapNode.TryGetZoneMap(out ZoneMap map));
         if (expectStats)
         {
-            // Structural only: the legacy zone map never enables pruning (contract §2.7).
+            // Structural only: the legacy zone map never enables pruning.
             Assert.False(map.IsPruningAvailable);
             Assert.Equal(0, map.AggregateCount);
         }

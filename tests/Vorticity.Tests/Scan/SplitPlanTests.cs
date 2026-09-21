@@ -159,8 +159,8 @@ public sealed class SplitPlanTests
     {
         LayoutTree tree = Tree(Node(Unknown, 500, segments: [0]), I64());
 
-        // The planner treats it as indivisible and does NOT throw: contract §2.3 puts the only
-        // "layout" VortexUnsupportedException in LayoutReaderTable.
+        // The planner treats it as indivisible and does NOT throw: the only "layout"
+        // VortexUnsupportedException belongs to LayoutReaderTable.
         Assert.Equal([new RowRange(0, 500)], Splits(tree, new RowRange(0, 500), 8192));
 
         Assert.Equal(LayoutEncodingId.Unknown, tree.Root.Encoding);

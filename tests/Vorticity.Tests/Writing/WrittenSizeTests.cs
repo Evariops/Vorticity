@@ -1,13 +1,12 @@
 // How big our output is, next to the reference's, over the whole corpus.
 //
-// docs/05-benchmarks.md §3 states the write target as "output size <= 105% of Rust's on the same
-// data, edition and configuration, with the delta reported per dataset", and explains why it is not
-// byte-parity: the compressor is a sampler, so two honest implementations diverge on borderline
-// data. We are nowhere near 105% yet, which is exactly why this needs to be a measurement rather
-// than a remembered figure - docs/90-registry.md quotes ratios that nothing reproduces.
+// The write target is an output no larger than 105% of Rust's on the same data, edition and
+// configuration, with the delta reported per dataset -- not byte-parity: the compressor is a
+// sampler, so two honest implementations diverge on borderline data. The ratio is measured here
+// rather than remembered: a remembered ratio is one that nothing reproduces.
 //
-// SO THIS IS A RATCHET, NOT A GATE. Asserting 105% today would be a permanently red test that
-// everyone learns to ignore; asserting nothing would let the ratio drift upward unnoticed. The
+// SO THIS IS A RATCHET, NOT A GATE. Asserting 105% would miss a regression that stays under the
+// target, and asserting nothing would let the ratio drift upward unnoticed. The
 // ceiling is set just above the measured value, so the test fails on a regression and passes on
 // every improvement - and the ceiling is lowered by hand when the improvement lands, which is the
 // only part a human should have to do.
@@ -34,36 +33,22 @@ public sealed class WrittenSizeTests
     /// The whole-corpus ceiling. Lower it when a compression improvement lands; never raise it
     /// without saying in the commit message what got bigger and why that is acceptable.
     ///
-    /// Now BELOW the 1.05 target rather than above it, so this has stopped being a ratchet on a
-    /// failing number and become a guard on a passing one: the target itself would no longer
-    /// notice a regression.
+    /// The ceiling sits BELOW the 1.05 target, so this is a guard on a passing number rather
+    /// than a ratchet on a failing one: the target itself would not notice a regression.
     /// </summary>
     /// <remarks>
-    /// 0.67 -> 0.65 on 2026-09-15 (BENCH-AUDIT.md B18). Measured that day: 856 files, 10 254 248
-    /// bytes against the reference's 15 984 453, ratio **0.641514**. At 0.67 that was **4,44 % of
-    /// slack** -- the improvements had landed and the hand had not followed, which is the same
-    /// species as B13 and B14: a reference that does not come down stops guarding.
+    /// A ceiling that stays put while improvements land stops guarding: the slack it leaves grows
+    /// until a regression fits inside it, so the ceiling comes down with every gain.
     /// <para>
     /// 0.65 leaves **1,32 %**, so a 1,5 % size regression is red. Not tighter on purpose: 0.645
     /// would leave 0,54 % and would trip on a corpus addition rather than on a regression, and
     /// 0.651 would sit exactly on the criterion with nothing in hand.
     /// </para>
     /// <para>
-    /// 0.65 -> **0.64 on 2026-09-15**, during stage 2b of docs/11-write-strategy.md §8. Measured that
-    /// day: 856 files, **10 084 008** bytes against 15 984 453, ratio **0,631**. The gain is not
-    /// stage 2b's — it was already there when the stage started, earned by W-31, W-33 and W-35 — and
-    /// that is exactly the complaint B18 makes: a reference that does not come down stops guarding.
-    /// 0.65 had grown back to **2,9 %** of slack. 0.64 leaves **1,43 %**, the same margin the
-    /// paragraph above argues for.
-    /// </para>
-    /// <para>
-    /// 0.64 -> **0.65 on 2026-09-17**, RAISED, and this is what grew: step 20 of IMPL-PLAN.md
-    /// writes the file's identity into every postscript (docs/13-dataset.md §7) -- sixteen bytes of
-    /// value, the entry's key and segment in the postscript, and the padding they move: 72 to 96
-    /// bytes a file. Measured that day: 856 files, **10 190 005** bytes before (ratio 0,6375) and
-    /// **10 269 757** after (0,6425), +79 752. It is accepted because it is what lets an index or a
-    /// dataset prove which bytes it describes without reading them, the design error the sidecar
-    /// made. 0.65 leaves **1,17 %**; no compression moved.
+    /// The file's identity in every postscript -- sixteen bytes of value, the entry's key and
+    /// segment in the postscript, and the padding they move: 72 to 96 bytes a file -- is growth
+    /// this ceiling accepts, because it is what lets an index or a dataset prove which bytes it
+    /// describes without reading them.
     /// </para>
     /// </remarks>
     private const double CorpusCeiling = 0.65;
@@ -72,7 +57,7 @@ public sealed class WrittenSizeTests
     private const int Worst = 12;
 
     /// <summary>
-    /// Rows per chunk for the multi-chunk axis. BENCH-AUDIT.md B17.
+    /// Rows per chunk for the multi-chunk axis.
     /// </summary>
     /// <remarks>
     /// THE CORPUS SWEEP ABOVE IS BLIND TO EVERYTHING THAT PLAYS BETWEEN THE CHUNKS OF A COLUMN.
@@ -80,9 +65,8 @@ public sealed class WrittenSizeTests
     /// so **2 files out of 856** write more than one chunk for any field -- eight (file, field)
     /// pairs in the whole corpus. An FSST table shared between chunks, a dictionary carried across
     /// them, a zone statistic amortized over them: none of it can show a gain or trip a regression
-    /// there, in either direction. That is not theoretical -- it is what made W-21 fall, its +4,3 %
-    /// having been measured in <c>aed1901</c>, before RowBlockSize existed and when one WriteAsync
-    /// was one chunk.
+    /// there, in either direction. That is not theoretical: a gain measured where one
+    /// WriteAsync is one chunk says nothing about a writer that cuts its own blocks.
     /// <para>
     /// 512 rows is set by the SMALLEST file on this axis, not by the largest: `encodings/fsst` and
     /// `encodings/dict` have 4 096 rows, so 1024 gave them four chunks and the axis would have been
@@ -103,14 +87,12 @@ public sealed class WrittenSizeTests
     /// it exists to remove.
     /// </remarks>
     /// <remarks>
-    /// THE FOUR NUMBERS ROSE ON 2026-09-15, by 128, 128, 56 and 56 bytes, and the cause is the one
-    /// thing on this axis that is supposed to grow: docs/11-write-strategy.md §8 stage 1 made a zone
-    /// a BLOCK of <c>RowBlockSize</c> rows counted from row 0 instead of a chunk. These four write
-    /// one chunk (the 1 MiB byte target is never reached at 512 rows a batch) and therefore carried
-    /// ONE zone for the whole file; they now carry 17, 17, 8 and 8, which is <c>ceil(rows / 512)</c>
-    /// -- the granularity the caller asked for when it set <c>RowBlockSize = 512</c> and did not get.
-    /// Eight bytes a zone per column for the two utf8 files (null count only, no bounds on a string
-    /// column) and seven bytes a zone for the other two.
+    /// A ZONE IS A BLOCK of <c>RowBlockSize</c> rows counted from row 0, not a chunk. These
+    /// four write one chunk (the 1 MiB byte target is never reached at 512 rows a batch) and
+    /// carry 17, 17, 8 and 8 zones, which is <c>ceil(rows / 512)</c> -- the granularity the
+    /// caller asks for when it sets <c>RowBlockSize = 512</c>. Eight bytes a zone per column for
+    /// the two utf8 files (null count only, no bounds on a string column) and seven bytes a zone
+    /// for the other two.
     /// <para>
     /// It is a size increase that buys pruning, which is the only kind this table accepts; the
     /// whole-corpus ratio above did not move, because the default 8192-row block leaves every corpus
@@ -119,20 +101,16 @@ public sealed class WrittenSizeTests
     /// </remarks>
     private static readonly (string Id, long Bytes)[] Chunked =
     [
-        // +138 B (12e) : Auto par défaut, et la colonne est encodée en dictionnaire -- son entrée
-        // dict.probe (10 §5.3), gratuite à l'écriture, et le répertoire d'index qui la porte avec
-        // son entrée de métadonnées au postscript. Un fichier dont Auto ne garde rien n'a pas de
-        // répertoire et ne bouge pas.
-        // +72 or +96 B (step 20) : l'identité du fichier dans chaque postscript (13 §7) -- 16 octets
-        // de valeur, la clé et le segment de l'entrée, et le rembourrage qu'ils déplacent.
-        // +8 B (step 21) : le trailer XXH3-64 du répertoire d'index, sur les fichiers qui en portent un.
+        // Besides the columns, these sizes carry: on a dictionary-encoded column, the dict.probe
+        // entry Auto writes by default, free at write time, with the index directory that holds it
+        // and its metadata entry in the postscript (138 B; a file where Auto keeps nothing has no
+        // directory); the file's identity in every postscript -- 16 bytes of value, the entry's
+        // key and segment, and the padding they move (72 or 96 B); and the index directory's
+        // XXH3-64 trailer, on the files that carry one (8 B).
         ("types/utf8_nonnull_r8193", 16_902),    // 17 chunks in, 17 zones; +96 B since the file statistics segment (11a); +138 B, the dictionary probe (12e); +72 B, the identity (20); +8 B, the directory checksum (21)
         ("types/utf8_nullable_r8193", 17_382),   // 17 chunks in, 17 zones; +96 B, same; +138 B, same; +72 B, same; +8 B, same
-        // 4 700 -> 3 756 (-20,1 %) le 2026-09-15, WRITE-AUDIT.md W-31 : la copie du reste reporte
-        // ne materialise plus que les octets que les vues nomment, donc le tas ecrit ne porte plus
-        // les chaines des blocs deja emis. Verifie par bench/crosscheck.sh : 854 fichiers relus par
-        // Vortex Rust, scalaire par scalaire. C'est le seul des quatre qui bouge -- les trois autres
-        // n'ont pas de VarBinView dans leur chemin d'ecriture.
+        // The copy of the carried remainder materializes only the bytes its views name, so the
+        // heap written for a chunk never carries the strings of blocks already emitted.
         ("encodings/fsst", 4_004),               // 8 chunks in, 8 zones; +96 B, same; +96 B, the identity (20)
         ("encodings/dict", 3_134),               // 8 chunks in, 8 zones; +96 B, same; +138 B, the dictionary probe (12e); +72 B, the identity (20); +8 B, the directory checksum (21)
     ];
@@ -208,8 +186,8 @@ public sealed class WrittenSizeTests
     /// Four files rewritten at <see cref="ChunkedRowBlock"/> rows per chunk, byte-exact.
     /// </summary>
     /// <remarks>
-    /// This is the axis BENCH-AUDIT.md B17 opened: the corpus sweep cannot see the multi-chunk
-    /// path, so a change confined to it is invisible to the only size oracle this repository has.
+    /// This axis exists because the corpus sweep cannot see the multi-chunk path, so a change
+    /// confined to it is invisible to the only size oracle this repository has.
     /// Here every column of every file is in nine chunks or more, and the assertion is equality.
     /// </remarks>
     [Fact]
@@ -321,7 +299,7 @@ public sealed class WrittenSizeTests
     /// <remarks>
     /// <c>types/no_dtype_segment</c> reached this sweep only when <c>vortex.map</c> gained a decoder
     /// and the file became in-scope. Opening it without a DType is a <c>VortexFormatException</c> by
-    /// contract §7.4, so the donor is a real corpus file with the identical schema.
+    /// contract, so the donor is a real corpus file with the identical schema.
     /// </remarks>
     private static VortexOpenOptions OpenOptionsFor(CorpusEntry entry) =>
         entry.HasDTypeSegment

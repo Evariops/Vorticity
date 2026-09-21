@@ -1,4 +1,4 @@
-// docs/04-conformance.md §7, first bullet: the randomized order property.
+// The randomized order property.
 //
 // "Generate random tuples over a random schema and random per-column RowSortField settings; assert
 // that sorting by memcmp of the encoded rows produces exactly the same permutation as sorting by

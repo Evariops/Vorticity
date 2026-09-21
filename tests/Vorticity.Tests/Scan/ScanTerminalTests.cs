@@ -1,4 +1,4 @@
-// The terminals - docs/12-index-reads.md §5.1 to §5.3: AnyAsync, CountAsync, MinAsync and MaxAsync,
+// The terminals: AnyAsync, CountAsync, MinAsync and MaxAsync,
 // computed without a RecordBatch. "A terminal is the scan with a different output, never a
 // different scan", so every number here is held against the materialized scan -- with pruning on
 // and off, and with each tier forced off in turn -- because the property that makes a terminal
@@ -340,7 +340,7 @@ public sealed class ScanTerminalTests
     public async Task NegativeZeroIsZeroAndNaNIsNeverAnExtreme()
     {
         // A file written here: a float column with NaN, 0.0 and -0.0; one that is all NaN; one
-        // that is all null. IEEE order for the extremes (docs/08-semantics.md §2): -0.0 equals
+        // that is all null. IEEE order for the extremes: -0.0 equals
         // 0.0, a NaN is skipped, and a column with no value is Null -- through every resolution,
         // the writer's own statistics included.
         Decoders.EnsureRegistered();

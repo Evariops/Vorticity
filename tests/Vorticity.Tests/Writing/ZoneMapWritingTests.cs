@@ -40,18 +40,17 @@ public sealed class ZoneMapWritingTests
     /// The zone map of a file written with the DEFAULT repartitioning: 8192-row blocks.
     /// </summary>
     /// <remarks>
-    /// THE ZONE LENGTH IS THE WRITER'S NOW, not the caller's, and that is the change
-    /// `VortexWriteOptions.RowBlockSize` makes. This file arrives as 64 batches of 1024 and used to
-    /// leave as 64 zones of 1024: a chunk carries about 26 kB of fixed cost, and paying it 64 times
-    /// for a 65 536-row file is the caller's batching leaking into the file.
+    /// THE ZONE LENGTH IS THE WRITER'S, not the caller's, and `VortexWriteOptions.RowBlockSize`
+    /// sets it. This file arrives as 64 batches of 1024: kept as 64 chunks, it would pay a
+    /// chunk's fixed cost, about 26 kB, 64 times for a 65 536-row file -- the caller's batching
+    /// leaking into the file.
     /// <para>
-    /// A ZONE IS A BLOCK, NOT A CHUNK, since docs/11-write-strategy.md §8 stage 1, and that is what
-    /// 8192 x 8 says here. It was 24 576 x 3 while the zone length was the chunk's, which is where
-    /// this file's five columns first reach the 1 MiB byte target -- a pruning granularity decided
-    /// by a byte threshold, for no reason anyone chose. The block is counted from row 0 of the file
-    /// and the chunks are free to be as large as the byte target wants them: pruning a block inside
-    /// a live segment saves decode rather than bytes read (§6.2), so the two quantities stop having
-    /// to agree.
+    /// A ZONE IS A BLOCK, NOT A CHUNK, and that is what 8192 x 8 says here. A zone the length of
+    /// the chunk would be 24 576 rows, where this file's five columns first reach the 1 MiB byte
+    /// target -- a pruning granularity decided by a byte threshold, for no reason anyone chose.
+    /// The block is counted from row 0 of the file and the chunks are free to be as large as the
+    /// byte target wants them: pruning a block inside a live segment saves decode rather than
+    /// bytes read, so the two quantities need not agree.
     /// </para>
     /// </remarks>
     [Fact]
@@ -78,8 +77,8 @@ public sealed class ZoneMapWritingTests
             // Usable, not merely present: an unresolvable aggregate would parse and prune nothing.
             Assert.True(map.IsPruningAvailable);
 
-            // 8192 is RowBlockSize, and 8 x 8192 = 65 536 is the file. The chunks are still cut at
-            // the 1 MiB byte target and are three times this size; the zone map no longer cares.
+            // 8192 is RowBlockSize, and 8 x 8192 = 65 536 is the file. The chunks are cut at the
+            // 1 MiB byte target and are three times this size; the zone map does not follow them.
             Assert.Equal(8192, map.ZoneLength);
             Assert.Equal(8, map.ZoneCount);
             zoned++;

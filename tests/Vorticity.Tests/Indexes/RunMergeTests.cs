@@ -1,4 +1,4 @@
-// One run per entry - docs/13-dataset.md §6.1, step 22 of IMPL-PLAN.md.
+// One run per entry, whatever the number of chunks a file is written in.
 //
 // WHAT IS HELD: a column written in hundreds of chunks carries one sorted run and one postings run,
 // not one per chunk; a lookup on a key uncorrelated with row order reads one segment of it; the last
@@ -71,7 +71,7 @@ public sealed class RunMergeTests
         await AssertDistinctAsync(file, rows);
 
         // A key that occurs once: the pruner reads one fence page -- the run has 77 segments, past
-        // the 64 kept inline (13 §6.3) -- then the one segment whose fences hold it, its keys and
+        // the 64 kept inline -- then the one segment whose fences hold it, its keys and
         // its rows, whatever the number of chunks.
         long probe = K(12_345);
         VortexExpr equal = Expr.Eq(Expr.Field("k"), Expr.Literal(FilterLiteral.From(probe)));
@@ -162,7 +162,7 @@ public sealed class RunMergeTests
     [Fact]
     public async Task AnEntryKeepsAtMostKRunsAcrossManyAppends()
     {
-        // 13 §6.1: an append that would pass K runs reads the old tail back and merges it into its
+        // An append that would pass K runs reads the old tail back and merges it into its
         // own run. Every piece ends inside a block, so every version has a last chunk of its own.
         Decoders.EnsureRegistered();
         string path = Path.Combine(Path.GetTempPath(), $"vorticity-kruns-{Guid.NewGuid():N}.vortex");

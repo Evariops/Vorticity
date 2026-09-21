@@ -1,4 +1,4 @@
-// The two I/O properties §13 claims and no value comparison can show.
+// The two I/O properties the scan promises and no value comparison can show.
 //
 // F4 - PROJECTION PRUNES I/O. Scanning one column of a wide file must never ask the source for the
 // other columns' segments. Without this test "projection" is a claim about the shape of the output,
@@ -6,7 +6,7 @@
 // value assertion in the suite.
 //
 // ONE ReadManyAsync PER BATCH. Register and Execute are separate so that a batch can coalesce its
-// whole split into a single read (docs/03-architecture.md §3.6). A layout reader that read a
+// whole split into a single read. A layout reader that read a
 // segment itself, or registered one during Execute, breaks that SILENTLY - the scan still returns
 // the right values and the I/O count doubles. This assertion is the only thing that catches it.
 using System;
@@ -51,7 +51,7 @@ public sealed class ScanIoTests
         HashSet<uint>[] perField = new HashSet<uint>[fieldCount];
 
         // The subset an unfiltered read actually needs: the zones child of a vortex.zoned layout is
-        // read only by pruning, which an unfiltered scan does not run (contract §11.3). Asserting
+        // read only by pruning, which an unfiltered scan does not run. Asserting
         // against the whole subtree would demand I/O the design deliberately skips.
         HashSet<uint>[] read = new HashSet<uint>[fieldCount];
         for (int k = 0; k < fieldCount; k++)

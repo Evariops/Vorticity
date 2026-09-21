@@ -7,8 +7,7 @@ namespace Vorticity.Tests.Serialization.Protobuf;
 
 /// <summary>
 /// Tag decoding, fixed-width reads and length-delimited framing under hostile input.
-/// Every rejection here must be a <see cref="VortexFormatException"/> and nothing else
-/// (docs/03-architecture.md §5).
+/// Every rejection here must be a <see cref="VortexFormatException"/> and nothing else.
 /// </summary>
 public sealed class ProtoReaderTests
 {
@@ -63,7 +62,7 @@ public sealed class ProtoReaderTests
     }
 
     /// <summary>
-    /// Groups (wire types 3 and 4) are the "reject" side of docs/02-format.md §5.3: proto3 never
+    /// Groups (wire types 3 and 4) are on the reject side of metadata parsing: proto3 never
     /// emits them, so their presence is malformed input, not a forward-compatible extension.
     /// They are refused at the tag, before a caller can dispatch on the field number.
     /// </summary>
@@ -290,8 +289,7 @@ public sealed class ProtoReaderTests
 
     /// <summary>
     /// The overflow case a 32-bit bounds check gets wrong: <c>position + length</c> wraps to a
-    /// negative number that compares as "inside the buffer". The check must be 64-bit
-    /// (docs/03-architecture.md §6).
+    /// negative number that compares as "inside the buffer". The check must be 64-bit.
     /// </summary>
     [Fact]
     public void ReadLengthDelimited_rejects_a_length_that_overflows_the_position_arithmetic()

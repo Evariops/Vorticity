@@ -2,10 +2,10 @@
 //
 // FlatBuffers stores a field only when it differs from the schema default; the reader then returns
 // the default from the absent slot. That is invisible for a plain `uint64 x`, but ArrayStats in
-// spec/flatbuffers/array.fbs declares `is_sorted: bool = null`, `null_count: uint64 = null` and
+// the array schema declares `is_sorted: bool = null`, `null_count: uint64 = null` and
 // `nan_count: uint64 = null`, where absent means "nobody computed it" and present-and-zero means
-// "computed, and it is zero". docs/08-semantics.md §5 classes those as II and III hints: a lying
-// one cannot corrupt memory, but conflating "unknown" with "zero" produces wrong answers.
+// "computed, and it is zero". Those are untrusted hints that results and fast paths rely on: a
+// lying one cannot corrupt memory, but conflating "unknown" with "zero" produces wrong answers.
 using System;
 using Vorticity.Serialization.FlatBuffers;
 using Xunit;
@@ -125,7 +125,7 @@ public sealed class FlatBufferBuilderDefaultsTests
     [Fact]
     public void The_Always_variants_distinguish_absent_from_present_and_zero()
     {
-        // ArrayStats field ids, spec/flatbuffers/array.fbs:
+        // ArrayStats field ids in the array schema:
         //   5 is_sorted (bool = null), 8 null_count (uint64 = null), 10 nan_count (uint64 = null).
         const int IsSorted = 5;
         const int NullCount = 8;

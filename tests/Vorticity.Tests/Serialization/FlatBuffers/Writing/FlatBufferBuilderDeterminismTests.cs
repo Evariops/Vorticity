@@ -1,6 +1,6 @@
 // Determinism and one end-to-end shape exercising every member kind at once.
 //
-// Byte-for-byte determinism is not cosmetic: docs/04-conformance.md compares our output against a
+// Byte-for-byte determinism is not cosmetic: the conformance tests compare our output against a
 // stored corpus, and the vtable cache is the one place where a non-deterministic choice could
 // creep in (a randomized hash seed would still deduplicate correctly but could pick a different
 // winner among equal candidates - it cannot here, because Find returns the FIRST match in a chain

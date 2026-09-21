@@ -1,4 +1,4 @@
-// The projection compiler, contract §13.2.
+// The projection compiler.
 //
 // The file these tests keep coming back to is types/struct_field_names, whose eleven i32 fields are
 // named "", "zones", "data", "codes", "values", "élan", "名前", "😀", "has space", "a.b", "A" and

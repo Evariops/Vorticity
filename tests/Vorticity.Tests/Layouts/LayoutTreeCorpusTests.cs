@@ -78,8 +78,7 @@ public sealed class LayoutTreeCorpusTests
         // a shared-children DAG from expanding a 3 KB buffer into a million records. The bound is
         // not a heuristic - every node but the root is reached through a distinct 4-byte child slot
         // unless a table is SHARED - but it is only useful if real files stay clear of it, so the
-        // margin is measured rather than assumed. Densest file in the 0.86.1 corpus, when this was
-        // written: types/struct_nested_deep_nonnull_r0 at 27% of the budget.
+        // margin is measured rather than assumed.
         double worst = 0;
         string worstId = string.Empty;
 
@@ -123,7 +122,7 @@ public sealed class LayoutTreeCorpusTests
             if (Array.IndexOf(entry.LayoutIds, "vortex.list") >= 0)
             {
                 // Two of this file's three zone maps sit UNDER the unknown vortex.list layout,
-                // whose children the tree deliberately does not materialize (contract §2.8).
+                // whose children the tree deliberately does not materialize.
                 continue;
             }
 

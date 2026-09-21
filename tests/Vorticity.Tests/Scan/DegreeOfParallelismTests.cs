@@ -74,7 +74,7 @@ public sealed class DegreeOfParallelismTests
         Report("process default 3", peak, batches);
         Assert.InRange(peak, 1, 3);
 
-        // The point of the setting: a scan that names no degree is no longer stuck at one.
+        // The point of the setting: a scan that names no degree is not stuck at one.
         Assert.True(peak > 1, $"a default of 3 left the scan sequential, peak {peak}");
     }
 

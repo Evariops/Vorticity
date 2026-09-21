@@ -1,7 +1,7 @@
 // The scan driven over the whole golden corpus, for the properties a value comparison cannot show:
 // that every in-scope file yields exactly manifest.row_count rows, in contiguous batches, under the
 // schema the projection promised. The value-by-value comparison against the sidecars belongs to the
-// conformance component (contract §1.8) and is not duplicated here.
+// conformance component and is not duplicated here.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -64,7 +64,7 @@ public sealed class ScanCorpusTests
     [Fact]
     public async Task EveryOutOfScopeFileFailsNamedOrNotAtAll()
     {
-        // Contract §14.1's second half, as a property of the scan rather than of the conformance
+        // How an unsupported file fails, as a property of the scan rather than of the conformance
         // suite: a file this build cannot read must say which component it is missing. What it must
         // never do is throw VortexFormatException - that would blame the file for our gap - or
         // return values.
@@ -115,12 +115,11 @@ public sealed class ScanCorpusTests
 
         Assert.Equal(string.Empty, wrong.ToString());
 
-        // ZERO OUT-OF-SCOPE FILES, which is what the loop above now finds and what makes the
-        // proportion assertion that used to live here meaningless. The property it protected --
-        // that a file this build cannot read says WHICH component it is missing, and never blames
-        // the file with a VortexFormatException -- is still asserted by the `catch` arms: they run
-        // for no file today, and the moment a corpus regeneration adds a component we do not have,
-        // they run again and still hold. The count is the finding.
+        // ZERO OUT-OF-SCOPE FILES is what the loop above finds. The property it guards -- that a
+        // file this build cannot read says WHICH component it is missing, and never blames the
+        // file with a VortexFormatException -- is asserted by the `catch` arms: they run for no
+        // file in this corpus, and the moment a corpus regeneration adds a component we do not
+        // have, they run again and still hold. The count is the finding.
         Assert.Equal(0, named + read);
     }
 
@@ -138,7 +137,7 @@ public sealed class ScanCorpusTests
             Assert.Equal(rows, batch.StartRow);
             Assert.True(batch.RowCount > 0, "a scan must not produce an empty batch");
 
-            // An unprojected scan reproduces the file's schema exactly (contract §13 traps).
+            // An unprojected scan reproduces the file's schema exactly.
             Assert.Equal(file.Schema, batch.Schema);
 
             rows += batch.RowCount;
@@ -219,9 +218,9 @@ public sealed class ScanCorpusTests
     [Fact]
     public async Task TheDefaultBatchSizeIsTheFilesZoneLength()
     {
-        // docs/03-architecture.md §3.4: "batch size derives from the file's zones (8192 by
-        // default)". WithMaxBatchRows only ever makes it smaller, which is asserted below by
-        // raising the cap far above the zone length and getting the same batching.
+        // The batch size derives from the file's zones, 8192 rows by default. WithMaxBatchRows
+        // only ever makes it smaller, which is asserted below by raising the cap far above the
+        // zone length and getting the same batching.
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path("distributions/high_cardinality_i64_r8193"), CancellationToken.None);
@@ -291,8 +290,8 @@ public sealed class ScanCorpusTests
     /// <param name="entry">The corpus entry about to be opened.</param>
     /// <remarks>
     /// <c>types/no_dtype_segment</c> reached this sweep only when <c>vortex.map</c> gained a decoder
-    /// and the file became in-scope. Opening it without a DType is a <c>VortexFormatException</c> by
-    /// contract §7.4, so the donor is a real corpus file with the identical schema.
+    /// and the file became in-scope. Opening it without a DType is a <c>VortexFormatException</c>,
+    /// so the donor is a real corpus file with the identical schema.
     /// </remarks>
     private static VortexOpenOptions OpenOptionsFor(CorpusEntry entry) =>
         entry.HasDTypeSegment

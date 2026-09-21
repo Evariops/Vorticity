@@ -74,7 +74,7 @@ internal static class ProtoTestHelpers
         return bytes;
     }
 
-    /// <summary>Independent re-implementation of the varint length, used to check the writer.</summary>
+    /// <summary>An independent varint length computation, for checking the writer.</summary>
     internal static int ExpectedVarintSize(ulong value)
     {
         int size = 1;

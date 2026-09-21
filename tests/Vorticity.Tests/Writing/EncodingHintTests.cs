@@ -1,8 +1,8 @@
-// The two things a caller who knows their data gets - docs/11-write-strategy.md §7.1:
+// The two things a caller who knows their data gets:
 // `PreferredBatchRows`, which says how to batch so nothing waits in transit, and `EncodingHint`,
 // which pins a column's scheme.
 //
-// A HINT IS PLAN MEMORY WITH THE TOLERANCE SET TO INFINITY (§3.4.3), so what it changes is what is
+// A HINT IS PLAN MEMORY WITH THE TOLERANCE SET TO INFINITY, so what it changes is what is
 // PRICED, never what is legal: the hinted scheme is re-priced on every chunk's own statistics and
 // written when it still applies; a chunk it cannot describe is priced in full and the next chunk is
 // offered the hint again. And what the statistics answer for nothing -- a progression, a run count
@@ -146,7 +146,7 @@ public sealed class EncodingHintTests
     [Fact]
     public async Task AProgressionIsWrittenAsOneWhateverTheHintSays()
     {
-        // §3.4.1: the statistics answer it for nothing, and nothing beats it.
+        // The statistics answer a progression for nothing, and nothing beats it.
         Decoders.EnsureRegistered();
         Fixture fixture = new Fixture(Rows);
         (WriteReport hinted, string path) = await WriteAsync(

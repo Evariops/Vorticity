@@ -1,7 +1,7 @@
 // The writer's acceptance test: read a real file, write it back, read what was written, and assert
 // the values are the same.
 //
-// This is worth saying plainly, because it is the trap docs/04-conformance.md opens with. A round
+// This is worth saying plainly, because it is the first trap of any conformance suite. A round
 // trip through our own writer and reader is SELF-CONSISTENT AND CAN BE UNIFORMLY WRONG: if the
 // writer and the reader agree on a mistake -- a swapped child order, a validity convention
 // misunderstood in the same direction twice -- this test passes and the file is unreadable by every
@@ -12,9 +12,8 @@
 // the left-hand side of every comparison is anchored, and the test asks a real question: does what
 // we wrote decode back to what Rust says those bytes mean?
 //
-// It is still not the same as Rust reading our output. That is criterion 2 of docs/01-scope.md §4
-// and it needs the Rust toolchain; this is the milestone that makes it possible, not a substitute
-// for it.
+// It is still not the same as Rust reading our output. That is the Rust cross-check, and it needs
+// the Rust toolchain; this test is a step toward it, not a substitute for it.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -102,9 +101,9 @@ public sealed class RoundTripTests
     /// A DIFFERENT CODE PATH, AND NOTHING REACHED IT. `VortexFileWriter` holds batches until it has
     /// a whole row block AND a whole byte block, so a corpus file handed over in one batch goes out
     /// as one chunk and `CanonicalConcat` never runs. Every test above, the conformance sweep and
-    /// the Rust cross-check are in exactly that position - which is how `vortex.variant` came to be
-    /// unwritable from more than one batch without a single test noticing (v2 W-22a). It took a
-    /// 1M-row benchmark file to see it, and a benchmark is not a guard.
+    /// the Rust cross-check are in exactly that position - so `vortex.variant` can turn
+    /// unwritable from more than one batch without a single test noticing, and only a large
+    /// benchmark file shows it; a benchmark is not a guard.
     /// </para>
     /// <para>
     /// The encodings here are the ones whose CANONICAL form has children the SCHEMA does not name:

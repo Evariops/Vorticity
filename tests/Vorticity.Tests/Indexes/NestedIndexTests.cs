@@ -1,5 +1,5 @@
-// Indexes on nested columns - docs/10-indexes.md §4.1 ("`column_path` resolves to a leaf column") and
-// §7.1 ("per column path an `IndexPolicy`"); `WritePolicy.For` documents "a.b" as a path.
+// Indexes on nested columns: an entry's `column_path` resolves to a leaf column, and a policy
+// holds one `IndexPolicy` per column path; `WritePolicy.For` documents "a.b" as a path.
 //
 // WHAT A NESTED COLUMN ADDS IS ITS PARENTS' NULLS. A struct that is null nulls every field below it,
 // whatever the field's own buffer holds; so the rows under a null `person` carry the value "ghost"

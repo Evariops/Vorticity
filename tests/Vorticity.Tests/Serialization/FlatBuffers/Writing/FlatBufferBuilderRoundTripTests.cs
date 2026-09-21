@@ -70,7 +70,7 @@ public sealed class FlatBufferBuilderRoundTripTests
     [Fact]
     public void Empty_table_round_trips_with_a_header_only_vtable()
     {
-        // `table EncryptionSpec {}` in spec/flatbuffers/footer.fbs really has no fields at all.
+        // `table EncryptionSpec {}` in the footer schema really has no fields at all.
         using var builder = new FlatBufferBuilder();
         builder.StartTable();
         int root = builder.EndTable();

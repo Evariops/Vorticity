@@ -1,5 +1,5 @@
 // Round trip, tri-state and adversarial tests for `table Array`, `table ArrayNode` and
-// `table ArrayStats` in spec/flatbuffers/array.fbs.
+// `table ArrayStats`.
 using System;
 using Vorticity;
 using Vorticity.Serialization.FlatBuffers;
@@ -270,7 +270,7 @@ public sealed class ArraySchemaTests
     {
         // 30 parents pointing at one child, 20 levels deep: 30^20 paths through 3 KB of bytes.
         // Every offset, depth and bounds rule is satisfied, so only the total-table budget can
-        // stop it (docs/03-architecture.md §6).
+        // stop it.
         byte[] bytes = BuildSharedChildDag(depth: 20, fanout: 30);
         Assert.True(bytes.Length < 8192, $"the DAG should be tiny, it is {bytes.Length} bytes");
 
@@ -312,8 +312,8 @@ public sealed class ArraySchemaTests
             }
         }
 
-        // Only trailing padding may be dropped; if a large suffix became droppable something is
-        // no longer being read.
+        // Only trailing padding may be dropped; if a large suffix became droppable, part of the
+        // blob is going unread.
         Assert.InRange(accepted, 0, 8);
     }
 

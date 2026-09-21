@@ -134,7 +134,7 @@ public sealed class DecimalStorageTests
     [Fact]
     public void WireEnumValuesAreFrozen()
     {
-        // spec/METADATA.md: "Enum DecimalType: I8=0, I16=1, I32=2, I64=3, I128=4, I256=5".
+        // The wire enum DecimalType is I8=0, I16=1, I32=2, I64=3, I128=4, I256=5.
         // These are protobuf values; renumbering them would silently misread every decimal column.
         Assert.Equal((byte)0, (byte)DecimalStorageType.I8);
         Assert.Equal((byte)1, (byte)DecimalStorageType.I16);

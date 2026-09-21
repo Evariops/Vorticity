@@ -5,7 +5,7 @@
 // chunked reader's binary search and its concatenation against a read that used none of them. The
 // split points are the corpus's own boundary row counts - 0, 1, 1023, 1024, 1025, 8191, 8192,
 // 8193 - because 1024 is the FastLanes block and 8192 the default row block, and that is where the
-// bugs are (contract §1.8).
+// bugs are.
 using System;
 using System.Collections.Generic;
 using System.Globalization;

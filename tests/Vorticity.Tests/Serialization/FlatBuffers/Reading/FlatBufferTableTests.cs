@@ -1,6 +1,5 @@
 // Scalar accessors, schema defaults and the two vtable rules that are easy to get wrong in the
-// "over-reject" direction: a vtable that follows its table, and a vtable shared by two tables
-// (docs/03-architecture.md §6).
+// "over-reject" direction: a vtable that follows its table, and a vtable shared by two tables.
 using System;
 using Vorticity;
 using Vorticity.Serialization.FlatBuffers;
@@ -79,7 +78,7 @@ public sealed class FlatBufferTableTests
     [Fact]
     public void Tristate_accessors_distinguish_absent_from_zero()
     {
-        // spec/flatbuffers/array.fbs: ArrayStats.is_sorted / null_count are `= null` fields, where
+        // The array schema declares ArrayStats.is_sorted / null_count as `= null` fields, where
         // "absent" means unknown and must not collapse into false / 0.
         FlatBufferTable table = FlatBufferTable.Root(Scalars);
 
@@ -120,7 +119,7 @@ public sealed class FlatBufferTableTests
     public void Two_tables_may_share_one_vtable()
     {
         // Vtable dedup is what every real builder does; rejecting a revisited position would
-        // reject perfectly valid files (docs/03-architecture.md §6).
+        // reject perfectly valid files.
         FlatBufferTable root = FlatBufferTable.Root(SharedVtable);
 
         FlatBufferTable a = root.GetTable(0);
@@ -188,7 +187,7 @@ public sealed class FlatBufferTableTests
     /// Forward-only uoffsets exclude cycles but not SHARING: two slots may resolve to the same
     /// table, so the graph is a DAG and a consumer that walks it per path is exponential in depth
     /// while every depth, offset and bounds rule is satisfied. The optional table budget is what
-    /// bounds total work — the reference verifiers' <c>max_tables</c> (docs/03-architecture.md §6).
+    /// bounds total work — the reference verifiers' <c>max_tables</c>.
     /// </summary>
     [Fact]
     public void A_table_budget_counts_every_table_the_traversal_visits()
@@ -260,9 +259,9 @@ public sealed class FlatBufferTableTests
     [Fact]
     public void A_table_with_no_fields_at_all_is_valid()
     {
-        // spec/flatbuffers/dtype.fbs `table Null {}` and spec/flatbuffers/footer.fbs
-        // `table EncryptionSpec {}` serialize to a 4-byte vtable and a 4-byte table. Rejecting
-        // that as "too short" would make every Null dtype unreadable.
+        // The dtype schema's `table Null {}` and the footer schema's `table EncryptionSpec {}`
+        // serialize to a 4-byte vtable and a 4-byte table. Rejecting that as "too short" would
+        // make every Null dtype unreadable.
         FlatBufferTable table = FlatBufferTable.Root(EmptyTable);
 
         Assert.False(table.IsNull);

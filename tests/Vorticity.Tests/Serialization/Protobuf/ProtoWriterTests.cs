@@ -7,9 +7,9 @@ namespace Vorticity.Tests.Serialization.Protobuf;
 
 /// <summary>
 /// proto3 presence rules and buffer management. Both presence behaviours are used by real
-/// messages: <c>Extension.metadata</c> in spec/proto/dtype.proto is <c>optional bytes</c> and
-/// every arm of <c>ScalarValue.kind</c> in spec/proto/scalar.proto is a <c>oneof</c> member, where
-/// "present and zero" must survive the round trip.
+/// messages: the DType message's <c>Extension.metadata</c> is <c>optional bytes</c> and every arm
+/// of <c>ScalarValue.kind</c> is a <c>oneof</c> member, where "present and zero" must survive the
+/// round trip.
 /// </summary>
 public sealed class ProtoWriterTests
 {
@@ -401,7 +401,7 @@ public sealed class ProtoWriterTests
 
     /// <summary>
     /// End-to-end shape check against a message the format actually defines: <c>DictMetadata</c>
-    /// from docs/02-format.md §5.3 - <c>uint32 values_len = 1; PType codes_ptype = 2;
+    /// - <c>uint32 values_len = 1; PType codes_ptype = 2;
     /// optional bool is_nullable_codes = 3;</c>. The optional field is written even when false.
     /// </summary>
     [Fact]

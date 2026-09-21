@@ -5,11 +5,9 @@
 // CHECKABLE, and these tests check it the only way that means anything: by reading the written
 // file's own encoding dictionaries back and asserting every id in them belongs to the target.
 //
-// The interesting case is the one that used to be a documented claim and a false one. docs/90 said
-// the default target was `core2025.05.0`; the writer meanwhile emitted `vortex.zoned`, introduced
-// in `core2026.08.0`, on every file whose chunking allowed a zone map. Nothing checked, so nothing
-// noticed. A Vortex 0.36.0 reader - the version the floor exists for - would have met an unknown
-// layout id.
+// The interesting case is the zone map: `vortex.zoned` arrived in `core2026.08.0`, and a writer
+// that emitted it wherever the chunking allowed one would hand a Vortex 0.36.0 reader, the
+// version the floor exists for, an unknown layout id. Only a check on the written file sees that.
 using System;
 using System.Collections.Generic;
 using System.IO;

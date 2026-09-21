@@ -168,8 +168,7 @@ public sealed class FooterSchemaTests
     public void An_out_of_domain_compression_scheme_is_returned_as_read()
     {
         // Classification of an unknown component belongs to the registry, not to the schema
-        // accessor: rejecting here would make a file unopenable for a scheme it never uses
-        // (Phase 1 contract §2.3).
+        // accessor: rejecting here would make a file unopenable for a scheme it never uses.
         using FlatBufferBuilder b = new();
         b.StartTable();
         b.AddUInt8(0, 200);

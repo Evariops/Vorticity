@@ -1,4 +1,4 @@
-// Contract §13.5 - lazy component resolution is REALIZED HERE, not merely permitted elsewhere.
+// Lazy component resolution is REALIZED HERE, not merely permitted elsewhere.
 //
 // Every other component refrains from throwing early. This one is what makes that pay off: steps 1
 // and 2 of the executor walk only the subtrees the FieldMask selects, so an unknown array encoding
@@ -33,7 +33,7 @@ public sealed class ScanLazyResolutionTests
     [Fact]
     public async Task OpeningAFileWithAnUnknownEncodingSucceeds()
     {
-        // An unknown id in array_specs is not itself an error (contract §2.3).
+        // An unknown id in array_specs is not itself an error.
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Forged(Forged), CancellationToken.None);
         Assert.Equal(4096, file.RowCount);
         Assert.Equal(2, file.Schema.FieldCount);

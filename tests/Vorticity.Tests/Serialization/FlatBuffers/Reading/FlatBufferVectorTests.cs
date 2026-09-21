@@ -111,8 +111,8 @@ public sealed class FlatBufferVectorTests
     [Fact]
     public void A_string_of_length_zero_is_not_absent()
     {
-        // [44] is the "hello" length prefix; zeroing it leaves an empty but present string, and
-        // the NUL that used to terminate "hello" now terminates the empty string.
+        // [44] is the "hello" length prefix; zeroing it leaves an empty but present string, whose
+        // terminating NUL is then [48], the first byte of "hello".
         byte[] bytes = With(StringsAndVectors, 44, 0x00, 0x00, 0x00, 0x00);
         bytes[48] = 0x00;
 

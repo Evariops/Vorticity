@@ -8,9 +8,8 @@ namespace Vorticity.Tests.Types;
 
 /// <summary>
 /// The scalar model. The load-bearing property is that <see cref="ScalarValueKind.Absent"/> and
-/// <see cref="ScalarValueKind.Null"/> never collapse into each other: docs/08-semantics.md
-/// section 1 says a statistic with no value licenses nothing, while a null one is an assertion
-/// about the data.
+/// <see cref="ScalarValueKind.Null"/> never collapse into each other: a statistic with no value
+/// licenses nothing, while a null one is an assertion about the data.
 /// </summary>
 public sealed class ScalarValueTests
 {
@@ -108,7 +107,7 @@ public sealed class ScalarValueTests
     [InlineData((ushort)0x7FFF)]
     public void F16KeepsItsExactBits(ushort bits)
     {
-        // f16_value is a uint64 varint carrying the raw binary16 bits (spec/proto/scalar.proto),
+        // The ScalarValue message's f16_value is a uint64 varint carrying the raw binary16 bits,
         // so a NaN payload must survive: converting through Half and back must not canonicalise.
         ScalarStore store = new();
         ScalarValue v = store.F16FromBits(bits);
@@ -122,7 +121,7 @@ public sealed class ScalarValueTests
     public void FloatsCompareByBitsNotByIeee()
     {
         // Value identity, deliberately: NaN equals itself and +0 does not equal -0. Filter
-        // evaluation uses IEEE 754 instead (docs/08-semantics.md section 2).
+        // evaluation uses IEEE 754 instead.
         ScalarStore a = new();
         ScalarStore b = new();
 
@@ -485,7 +484,7 @@ public sealed class ScalarValueTests
 
             // F16 is the kind most likely to lose its provider, since AsF16 has to go through
             // BitConverter.UInt16BitsToHalf first. Without CultureInfo.InvariantCulture this
-            // renders "!1,5" under the hostile culture above (docs/09-contracts.md section 7).
+            // renders "!1,5" under the hostile culture above.
             Assert.Equal("-1.5", store.F16((Half)(-1.5f)).ToString());
             Assert.Equal("\"hi\"", store.String("hi"u8).ToString());
             Assert.Equal("0x00ff10", store.Bytes([0x00, 0xFF, 0x10]).ToString());

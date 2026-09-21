@@ -6,7 +6,7 @@ using Xunit;
 namespace Vorticity.Tests.Serialization.Protobuf;
 
 /// <summary>
-/// docs/03-architecture.md §1 and §4: the parse path allocates nothing. Metadata messages are
+/// The parse path allocates nothing. Metadata messages are
 /// decoded once per array node per chunk, so a single boxed enum or a defensive copy here shows up
 /// as per-batch garbage on a wide scan.
 /// </summary>
@@ -74,7 +74,7 @@ public sealed class ProtoAllocationTests
             w.WriteUInt64Always(600, ulong.MaxValue);   // an unknown field, skipped
         });
 
-        // Warm up so the JIT has settled before the measured window.
+        // Warm up so the JIT has settled before allocations are counted.
         ulong warm = 0;
         for (int i = 0; i < 64; i++)
         {

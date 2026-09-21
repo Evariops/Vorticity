@@ -1,4 +1,4 @@
-// Zone-map pruning - F6, and the invariant docs/08-semantics.md §1 states as the whole point:
+// Zone-map pruning, and the invariant that is its whole point:
 //
 //     Pruning may never eliminate a row that full materialization would have returned.
 //
@@ -34,7 +34,7 @@ public sealed class ZonePruningTests
     [InlineData(ComparisonOp.NotEqual)]
     public async Task APrunedScanReturnsExactlyWhatAnUnprunedOneDoes(ComparisonOp op)
     {
-        // The property test docs/08-semantics.md §1 asks for, over a column whose zone maps are
+        // The invariant above as a property test, over a column whose zone maps are
         // informative: `monotone` is sorted, so most zones are excluded by most predicates.
         List<long> unpruned = await Read(Zoned, Predicate(op), prune: false);
         List<long> pruned = await Read(Zoned, Predicate(op), prune: true);

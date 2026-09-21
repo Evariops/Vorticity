@@ -1,4 +1,4 @@
-// The mask of live blocks - docs/11-write-strategy.md §6.1, the read contract's one operation.
+// The mask of live blocks, the read contract's one operation.
 //
 // Three things are held here and nowhere else. The arithmetic of a mask: a short last block, bits
 // past the end that stay clear, a range that straddles two blocks. The refinement: the zone pruner

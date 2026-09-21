@@ -1,7 +1,7 @@
 // The adversarial half: every arity, sum, depth and index rule the parser enforces, driven by
 // hand-built Layout FlatBuffers.
 //
-// The promise these tests exist to keep (docs/09-contracts.md §4.2): malformed input yields
+// The promise these tests exist to keep: malformed input yields
 // VortexFormatException and nothing else - never an out-of-bounds read, never an unbounded
 // allocation, never a hang, never a wrong value passed off as right.
 using System;
@@ -95,7 +95,7 @@ public sealed class LayoutTreeStructureTests
     public void ChunkedMetadataFlagExcludesTheFirstChildFromTheChunks()
     {
         // UNTESTED against a real file by construction: 0.86.1 rejects non-empty chunked metadata
-        // and no writer sets the flag. This pins OUR reading of it (contract §11.3).
+        // and no writer sets the flag. This pins OUR reading of it.
         SyntheticLayout root = new SyntheticLayout("vortex.chunked", 200)
             .WithMetadata([1])
             .With(

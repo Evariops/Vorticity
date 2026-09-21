@@ -1,10 +1,10 @@
-// The oracle for the fused pass - docs/11-write-strategy.md §5.2, first row of its table.
+// The oracle for the fused pass that summarizes every block the writer emits.
 //
 // `BlockStatsPass` is the one place in the writer where a value is READ rather than moved, and every
-// stage after this one hangs its verdicts off what it produces: the zone map today, the chooser's
-// exact formulas next, the Bloom filters after that. A wrong min is not a wrong file until something
-// prunes with it, at which point it is a row that a scan did not return -- the one failure
-// docs/08-semantics.md §1 forbids. So it is tested against a NAIVE per-row implementation, on
+// stage after this one hangs its verdicts off what it produces: the zone map, the chooser's exact
+// formulas, the Bloom filters. A wrong min is not a wrong file until something prunes with it, at
+// which point it is a row that a scan did not return -- the one failure pruning may never cause.
+// So it is tested against a NAIVE per-row implementation, on
 // generated data, over every physical type, every validity shape, and -- the part that matters most
 // -- every way of cutting the rows into batches.
 //
@@ -127,7 +127,7 @@ public sealed class BlockStatsTests
     /// </summary>
     /// <remarks>
     /// `-0.0 &lt; +0.0` is false, so a raw compare would keep whichever row arrived first and make
-    /// the bound depend on the batching. docs/07-dotnet-mapping.md counts them as distinct; Math.Min
+    /// the bound depend on the batching. The two zeros are distinct values; Math.Min
     /// and Math.Max are the functions that order them, and the pass uses their rule.
     /// </remarks>
     [Theory]
@@ -251,7 +251,7 @@ public sealed class BlockStatsTests
     /// <summary>
     /// The order flags against the scalar rule, with the one event -- a descent, a NaN, nothing --
     /// placed at every position of a sorted range: the lanes clear whole windows, and the window an
-    /// event falls in must be decided exactly as the row-by-row loop would (§4.1, sorted / strict).
+    /// event falls in must be decided exactly as the row-by-row loop would.
     /// </summary>
     [Theory]
     [InlineData(PType.I8)]
@@ -321,7 +321,7 @@ public sealed class BlockStatsTests
 
     /// <summary>
     /// The width histograms against a count by hand, raw and zigzag, over values of every width a
-    /// 32-bit lane can hold, with tails the lanes leave to the scalar loop (§4.1, bit-width row).
+    /// 32-bit lane can hold, with tails the lanes leave to the scalar loop.
     /// </summary>
     [Theory]
     [InlineData(PType.I32, 1)]

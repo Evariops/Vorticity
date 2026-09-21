@@ -8,9 +8,9 @@ using Xunit;
 namespace Vorticity.Tests.Types;
 
 /// <summary>
-/// "Structural equality and hashing, allocation-free" is a stated requirement of the type model
-/// (docs/03-architecture.md section 3.2), and the read paths a parser uses must not allocate once
-/// the arena has stopped growing. These assertions measure it rather than trusting the comment.
+/// "Structural equality and hashing, allocation-free" is a stated requirement of the type model,
+/// and the read paths a parser uses must not allocate once the arena has stopped growing. These
+/// assertions measure it rather than trusting the comment.
 /// </summary>
 public sealed class AllocationTests
 {
@@ -205,12 +205,11 @@ public sealed class AllocationTests
     }
 
     /// <summary>
-    /// docs/03-architecture.md section 4.1 ("no managed allocation per batch in steady state") is
-    /// about the decode path above all, and the three decoders are exactly where it is easy to
-    /// break: the FlatBuffers reader depends on two <c>ArrayPool</c> rentals plus interning names
-    /// straight from the file bytes, and both Protobuf readers depend on <c>ProtoScratchList</c>
-    /// staying a pooled rental. Every one of those regressions round-trips correctly, so nothing
-    /// else in the suite would notice.
+    /// No managed allocation per batch in steady state is a rule about the decode path above all,
+    /// and the three decoders are exactly where it is easy to break: the FlatBuffers reader
+    /// depends on two <c>ArrayPool</c> rentals plus interning names straight from the file bytes,
+    /// and both Protobuf readers depend on <c>ProtoScratchList</c> staying a pooled rental. Every
+    /// one of those regressions round-trips correctly, so nothing else in the suite would notice.
     /// </summary>
     [Fact]
     public void DTypeFlatBuffersReadAllocatesNothing()

@@ -1,6 +1,5 @@
-// VortexDecimal: the pinned ToString table from the Phase 1 contract §3, the System.Decimal
-// conversion boundaries (96-bit magnitude AND a scale limit of 28), numeric CompareTo across
-// scales, and structural Equals.
+// VortexDecimal: the pinned ToString table, the System.Decimal conversion boundaries (96-bit
+// magnitude AND a scale limit of 28), numeric CompareTo across scales, and structural Equals.
 using System;
 using System.Globalization;
 using System.Numerics;

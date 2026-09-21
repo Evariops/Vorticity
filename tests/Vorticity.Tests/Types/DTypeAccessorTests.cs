@@ -15,7 +15,7 @@ public sealed class DTypeAccessorTests
         DType utf8 = arena.Utf8(Nullability.NonNullable);
         DType i64 = arena.Primitive(PType.I64, Nullability.NonNullable);
 
-        // spec/flatbuffers/dtype.fbs declares Map as { key_type, value_type, ... }.
+        // The format declares Map as { key_type, value_type, ... }.
         DType map = arena.Map(utf8, i64, keysSorted: false, Nullability.NonNullable);
         Assert.Equal(2, map.ChildCount);
         Assert.Equal(utf8, map.GetChild(0));
@@ -114,7 +114,7 @@ public sealed class DTypeAccessorTests
         Assert.Equal(i32, u.GetField(0));
         Assert.Equal(utf8, u.GetField(1));
         Assert.Equal((byte)3, u.GetTypeId(0));
-        // `type_ids: [byte]` is "interpreted as unsigned" per the .fbs comment: 255, not -1.
+        // `type_ids: [byte]` is "interpreted as unsigned" per the format: 255, not -1.
         Assert.Equal((byte)255, u.GetTypeId(1));
     }
 

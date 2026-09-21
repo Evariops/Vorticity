@@ -1,8 +1,8 @@
-// docs/09-contracts.md §1: "VortexFile - Thread-safe. Concurrent scans on one open file are
-// supported and expected", and "Decoders / kernels: Pure functions over borrowed memory; no shared
-// mutable state". A DTypeArena is neither thread-safe nor immutable - asking it for a node it does
-// not hold grows three arrays, bumps a counter and may rehash the dedup table, all unsynchronized -
-// so the promise holds only while NOTHING on a scan path derives into the FILE's arena.
+// A VortexFile is thread-safe, concurrent scans on one open file are supported and expected, and
+// decoders are pure functions over borrowed memory with no shared mutable state. A DTypeArena is
+// neither thread-safe nor immutable - asking it for a node it does not hold grows three arrays,
+// bumps a counter and may rehash the dedup table, all unsynchronized - so the promise holds only
+// while NOTHING on a scan path derives into the FILE's arena.
 //
 // `DType.WithNullability` is the trap: on a non-leaf node it calls DTypeArena.CloneWithNullability,
 // which writes to the arena the handle came from. Layout nodes carry the file schema's own dtypes
@@ -27,7 +27,8 @@ namespace Vorticity.Tests.Scan;
 public sealed class ScanArenaIsolationTests
 {
     // encodings/masked.vortex: root dtype i32?, one vortex.flat layout, a vortex.masked array node.
-    // MaskedDecoder used to flip that i32? to i32 in the file's arena, once per masked flow.
+    // MaskedDecoder flips that i32? to i32 once per masked flow, and does it in the flow's own
+    // arena, never in the file's.
     [Theory]
     [InlineData("encodings/masked")]
     [InlineData("distributions/float_specials_f32_r8193")]

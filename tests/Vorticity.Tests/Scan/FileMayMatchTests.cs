@@ -1,6 +1,6 @@
-// File-level pruning - docs/11-write-strategy.md §6.3: `VortexFile.MayMatch(expr)` answers from
+// File-level pruning: `VortexFile.MayMatch(expr)` answers from
 // the footer's statistics without reading a data segment, and it is a SUPERSET test under the
-// invariant of docs/08-semantics.md §1: false only when no row can match.
+// pruning invariant: false only when no row can match.
 //
 // The oracle is the scan itself, unpruned: a file this says false for must scan to nothing, on
 // every corpus file that carries statistics, for every top-level field whose maximum is exact and

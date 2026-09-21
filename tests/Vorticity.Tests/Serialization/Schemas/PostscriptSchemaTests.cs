@@ -1,4 +1,4 @@
-// Round trip and rejection tests for the three postscript tables of spec/flatbuffers/footer.fbs.
+// Round trip and rejection tests for the format's three postscript tables.
 using System;
 using System.Text;
 using Vorticity;
@@ -191,8 +191,8 @@ public sealed class PostscriptSchemaTests
     [Fact]
     public void Duplicate_metadata_keys_are_rejected()
     {
-        // spec/flatbuffers/footer.fbs: "Keys must be unique ... readers reject postscripts that
-        // violate these limits", matching vortex-file-0.86.1/src/footer/postscript.rs.
+        // The format requires metadata keys to be unique and readers to reject a postscript that
+        // breaks the rule, as the reference implementation does.
         byte[] bytes = BuildWithKeys("same", "other", "same");
 
         Assert.Throws<VortexFormatException>(() =>

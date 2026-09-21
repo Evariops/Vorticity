@@ -1,9 +1,8 @@
-// What writing a file allocates. Nothing measured this before.
+// What writing a file allocates.
 //
-// docs/05-benchmarks.md reports the read paths and PathAllocationTests pins six of them. The write
-// path had neither: no benchmark axis, no ceiling, no figure anywhere in the repository. The one
-// write-side number that exists is WrittenSizeTests' output ratio, which is about the BYTES ON DISK
-// and says nothing about what producing them costs in managed memory.
+// PathAllocationTests pins what the read paths allocate. On the write side, WrittenSizeTests'
+// output ratio is about the BYTES ON DISK and says nothing about what producing them costs in
+// managed memory.
 //
 // WHAT "AUDITED" MEANS HERE, because a literal zero would be the wrong target and would be learned
 // as noise within a week. A writer builds buffers; that is its job. The target is **no
@@ -52,9 +51,8 @@ public sealed class WriteAllocationTests
     /// <remarks>
     /// Five rather than three, and the reason is the counter. This measures process-wide allocation
     /// (see <see cref="Rewrite"/>), so tiered JIT promoting a writer method on its call-count
-    /// threshold lands INSIDE a measured run rather than beside it. That tripped a ceiling once on
-    /// the first suite run after this file was added and never again in seven. Warming longer fixes
-    /// the cause; widening the ceiling would only have hidden it.
+    /// threshold lands INSIDE a measured run rather than beside it. Warming longer fixes the cause;
+    /// widening the ceiling would only hide it.
     /// </remarks>
     private const int Warmup = 5;
 
@@ -70,117 +68,56 @@ public sealed class WriteAllocationTests
     /// which ENCODER is expensive. Both questions are worth one axis each.
     /// </remarks>
     /// <remarks>
-    /// EIGHT OF THESE TEN CAME DOWN WITH W-1, by the exact bytes it saved, so the headroom is the
-    /// same and the ratchet is tighter: interning a component id no longer decodes the wire bytes
-    /// to a `string` on every node just to look one up. `encodings/fsst` and `encodings/zstd` did
-    /// not move at all, which is its own small fact -- their write is dominated by the compressor
-    /// rather than by the node count.
-    ///
-    /// FIVE CAME DOWN AGAIN WITH W-3, the same way: a metadata scalar store is now sized for the two
-    /// integers it holds instead of for a file's statistics. The files that moved are the ones whose
-    /// columns elect `fastlanes.for` or `vortex.sequence` -- `zoned_many_zones_nulls` -5 712 B,
-    /// `map` -2 304, `delta`, `pco` and `zstd` -576 each -- and the five that did not are the ones
-    /// that elect neither.
-    ///
-    /// AND W-4 MOVED ALL TWELVE, which none of the others did: the blob a column's chunk is
-    /// serialized into is rented rather than allocated. It was `new byte[total]` once per column per
-    /// chunk -- 20 arrays and 305 kio for the 65 536-row rewrite below, 950 and 5,1 Mio for a
-    /// million-row `varbinview` -- and none of it outlives the `WriteAsync` that consumes it.
-    /// `high_cardinality_i64_r8193` -32,8 %, `alprd` -20,5 %, `map` -14,8 %, `alp` -12,5 %,
-    /// `zoned_many_zones_nulls` -12,7 % (-305 560 B), then -0,5 to -2,2 % on the other seven. The
-    /// spread is the point's shape: a file moves in proportion to how many chunks x columns it
-    /// writes, not to how large each one is -- no blob in any corpus file reaches the 85 kio LOH
-    /// threshold the audit expected, and the win is Gen0 volume rather than LOH.
-    ///
-    /// AND FIVE WITH W-5, which is the largest of the three by an order of magnitude on the file it
-    /// touches: a zstd frame is no longer copied out of the buffer it was compressed into.
-    /// `zoned_many_zones_nulls` -35 600 B, `fsst` -2 784, `types/utf8_nullable_r1025` -2 224,
-    /// `onpair` -272, `zstd` -144.
-    ///
-    /// FIVE OTHERS WENT UP BY 32 TO 128 BYTES in the same change, and that is not noise: carrying
-    /// the rental costs `PendingBuffer` two more fields, and a file that elects zstd nowhere pays
-    /// for them without collecting anything. It is written here rather than absorbed silently
-    /// because a ratchet whose floors drift upward unremarked is how the next one gets excused.
-    ///
-    /// AND W-7a TOOK TEN OF THE TWELVE DOWN AGAIN, by more than everything before it put together:
-    /// the run scan no longer grows two `List<int>` to one entry per row on every column that has
-    /// no runs. `zoned_many_zones_nulls` -4 828 112 B (-67 %), `map` -74 %, `high_cardinality` -57 %,
-    /// `alp` -50 %. Only `delta` and `pco` do not move, and they are the two whose columns the
-    /// sequence detector claims before the run scan ever runs.
-    ///
-    /// W-6 TOOK 587 096 BYTES OFF `zoned_many_zones_nulls` ALONE -- 119,4 to 110,4 B/row, the
-    /// largest single move any of these has made -- by not encoding an ALP column into a `long[]`
-    /// only to copy it into the `byte[]` the plan carries, and by renting the patch buffers instead
-    /// of growing two `List`s. It is the only one of the original ten with an f64 column, which is
-    /// why `alp` and `alprd` are now axes of their own.
+    /// Each ceiling sits just above its measurement and comes down with every change that saves
+    /// bytes on its file, so the headroom stays the same and the ratchet tightens. A ceiling goes
+    /// up only with its cost written down beside what that cost buys, because a ratchet whose
+    /// floors drift upward unremarked is how the next one gets excused.
     /// <para>
-    /// STAGE 4 OF docs/11-write-strategy.md §8 TOOK FIVE MORE DOWN, on 2026-09-15, by not allocating
-    /// what is immediately overwritten and not copying what already exists: a canonical buffer is
-    /// recorded as a VIEW instead of a <c>ToArray()</c>, and the packed output, the varbin heap, its
-    /// offsets and the three arena index buffers are allocated uninitialized.
-    /// `high_cardinality_i64_r8193` **135 104 -&gt; 69 736 B** (-48 %), `alprd` 128 536 -&gt; 95 968
-    /// (-25 %), `onpair` 223 880 -&gt; 220 048, `utf8_nullable_r1025` 216 632 -&gt; 214 752,
-    /// `zoned_many_zones_nulls` 2 105 848 -&gt; 2 100 400.
+    /// The files do not all answer to the same costs: `encodings/fsst` and `encodings/zstd` are
+    /// dominated by their compressor rather than by the node count, and `delta` and `pco` are the
+    /// two whose columns the sequence detector claims before the run scan ever runs.
     /// </para>
     /// <para>
-    /// ONE CEILING WENT UP, and it is the only one in this file's history. `encodings/variant`
-    /// 63 600 -&gt; **64 700**, because the column writers became a TREE (§3.0): a variant's canonical
-    /// form is a two-field struct, so that file now keeps three summarizing nodes where it kept one,
-    /// at **+320 B** of fixed per-column state. What it buys is on the same file: `variant` **9,24
-    /// -&gt; 3,58** and `parquet_variant` **2,06 -&gt; 0,94** on the write axis, because the leaves
-    /// were the columns and nothing had ever measured them. The cost is per COLUMN and not per row —
-    /// 15,4 to 15,6 B/row — which is the distinction this file exists to make.
-    /// </para>
-    /// <para>
-    /// The same change took the others DOWN, by shrinking <c>BlockStats</c> from 88 bytes to 56: its
-    /// three bound domains are mutually exclusive, so they share two words. `zoned_many_zones_nulls`
-    /// 2 100 400 -&gt; 2 098 360, and every file a little.
+    /// `encodings/variant` pays for the column writers being a TREE: a variant's canonical form is
+    /// a two-field struct, so that file keeps three summarizing nodes where a flat column keeps
+    /// one, and in exchange its leaves are written as columns of their own. The cost is per COLUMN
+    /// and not per row, which is the distinction this file exists to make.
     /// </para>
     /// </remarks>
-    // 12e (2026-09-16) : `Auto` PAR DÉFAUT (10 §5.5), et les plafonds ci-dessous qui bougent le
-    // portent : l'écrivain d'index et ses tableaux par colonne, un constructeur Bloom par colonne
-    // qu'il indexe (deux ensembles de hachages dont les tables viennent du pool, une file, deux
-    // listes), la raison d'un abandon, les entrées du rapport, et pour un fichier à dictionnaire le
-    // répertoire. Par fichier et par colonne, jamais par ligne : le garde-fou par ligne ne bouge
-    // pas. Les filtres eux-mêmes ne sont plus construits pour une colonne qu'`Auto` va abandonner --
-    // l'abandon se décide au premier bloc, sur les octets bruts -- sans quoi high_cardinality
-    // prenait 17 kB.
+    // `Auto` is the default, and the ceilings below carry it: the index writer and its per-column
+    // arrays, a Bloom builder per column it indexes (two hash sets whose tables come from the
+    // pool, a queue, two lists), the reason for an abandon, the report entries, and for a
+    // dictionary file the directory. Per file and per column, never per row, so the per-row guard
+    // does not carry it. The filters themselves are not built for a column `Auto` will abandon --
+    // the abandon is decided at the first block, on the raw bytes -- or a high-cardinality column
+    // would pay for filters it then throws away.
     private static readonly (string Id, long Ceiling)[] Files =
     [
-        // LES SEPT AXES QUE LA LOCATION A FAIT BAISSER, le 2026-09-20 : les entiers ALP et les codes
-        // de dictionnaire étaient deux tableaux gérés par colonne -- la colonne elle-même, huit
-        // octets par ligne pour les premiers, quatre pour les seconds -- alloués pendant le TARIF,
-        // donc y compris par le candidat qui perd. Ils viennent du pool et y retournent, et les
-        // plafonds descendent d'autant. Le corpus se réécrit à 10 265 948 octets, inchangé.
+        // The ALP integers and the dictionary codes come from the pool and go back to it: each is
+        // a whole column's worth, eight bytes a row for the first and four for the second, and
+        // both are built while PRICING, so the candidate that loses would pay for them too.
         ("containers/zoned_many_zones_nulls", 709_800),   // 709 368 mesurés ; était 2 130 000 (1 233 728 mesurés, -42,5 %)
-        ("distributions/high_cardinality_i64_r8193", 73_700),   // 73 256 mesurés (12e) : +1,3 kB, Auto. Était 72 600 : 71 936 mesurés (11a, 2026-09-16) : +2,2 kB par fichier pour le segment de statistiques de fichier -- un FlatBufferBuilder, un ScalarStore, les bornes en protobuf -- par fichier, pas par ligne. Était 70 800 (69 736 mesurés, -48 %)
+        ("distributions/high_cardinality_i64_r8193", 73_700),   // 73 256 measured, including the `Auto` index and the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
         ("encodings/fsst", 235_800),   // 235 320 mesurés (12e) : Auto ; était 235 100
         ("encodings/onpair", 69_200),   // 68 768 mesurés ; était 224 400 (85 176 mesurés, -19,3 %)
         ("types/utf8_nullable_r1025", 215_000),   // 214 568 mesurés ; était 219 200 (218 696 mesurés, -1,9 %)
 
-        // THE LATE COMPONENTS, on the write side, for PERF-AUDIT-v2.md F2's reason: `fastlanes.delta`,
-        // `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant` were watched by no
-        // allocation ratchet on either side. Note that what is written here is the CANONICAL form
-        // of each file -- our compressor picks the encoding, it does not preserve the source's --
-        // so these axes measure "what does writing this SHAPE of data cost", which is the question
-        // a ratchet can answer. Whether our writer re-elects the same encoding is a different
-        // question and `bench/crosscheck.sh` is where it is asked.
+        // THE REMAINING COMPONENTS, on the write side, so that each has an allocation ratchet:
+        // `fastlanes.delta`, `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant`. Note
+        // that what is written here is the CANONICAL form of each file -- our compressor picks the
+        // encoding, it does not preserve the source's -- so these axes measure "what does writing
+        // this SHAPE of data cost", which is the question a ratchet can answer. Whether our writer
+        // re-elects the same encoding is a different question and `bench/crosscheck.sh` is where
+        // it is asked.
         ("encodings/fastlanes_delta", 66_100),   // 65 632 mesurés (12e) : +1,0 kB, Auto. Était 64 700 : 64 584 mesurés (11a) : +1,9 kB par fichier, le segment de statistiques ; était 62 900
-        ("encodings/pco", 67_600),   // 67 440 mesurés seul, et dans la suite sous DOTNET_TieredPGO=0 ; 67 512 dans la suite avec la PGO dynamique depuis le tri des runs par entiers (§1.21, 2026-09-17) : la mesure est globale au processus, et l'écart suit l'instrumentation, pas l'écrivain, dont le chemin par défaut n'a pas changé. Était 67 500 : 67 096 mesurés (12e) : Auto. Était 66 200 : 66 048 mesurés (11a) : idem ; était 64 400
-        // 225 000 -> 225 016 le 2026-09-19 : l'axe écrit le fichier après l'avoir lu, et la lecture
-        // tient désormais un `ZstandardDecoder` par nœud au lieu d'en construire un par trame. Seize
-        // octets une fois, pour 7,5 % sur les axes `zstd` et `zstd_nullable` en lecture ; rien du
-        // chemin d'écriture n'a bougé.
-        // 225 016 -> 225 032 le 2026-09-19 : huit octets de plus par contexte de scan, comptés deux
-        // fois parce que l'axe lit le fichier avant de le réécrire. Le contexte porte une référence
-        // vers le comparatif qu'un encodage peut répondre sans décoder ; ce qu'elle achète est en
-        // lecture — `filtered scan, string equality, dict` passe de 380,6 à 276,4 µs contre la
-        // référence, 2,856 à 1,83. Rien du chemin d'écriture n'a bougé.
+        ("encodings/pco", 67_600),   // 67 440 measured alone and in the suite under DOTNET_TieredPGO=0, 67 512 in the suite with dynamic PGO: the measurement is process-wide, so the gap follows the JIT's instrumentation, not the writer
+        // The read half of this axis keeps a `ZstandardDecoder` per node, so a change on the zstd
+        // read path can move this ceiling while the write path stays put.
         ("encodings/zstd", 209_100),   // 208 624 mesurés ; était 225 032 (225 032 mesurés, -7,3 %)
-        ("encodings/map", 89_100),   // 88 616 mesurés ; était 105 500 (105 024 mesurés, -15,6 %). Avant cela : 104 952 mesurés (28a, 2026-09-17) : +2 984 B, les trois nœuds que l'arbre des colonnes gagne sous une map -- les entrées, la clé, la valeur (11 §3.2.4) -- chacun avec ses listes de blocs, sa ligne précédente, et le curseur de fenêtre de la map ; par colonne, pas par ligne. Ce qu'ils achètent : l'écriture de `map` à 0,893 de HEAD sur l'axe 1M, `list` 0,901, `listview` 0,911, octets identiques. Les autres fichiers prennent +8 B, le compteur du rédacteur. Était 102 500 : 102 008 mesurés (12e) : Auto. Était 101 600 : 101 368 mesurés (11a) : +1,2 kB par fichier, le segment de statistiques ; était 100 200
-        ("encodings/variant", 68_200),   // 67 792 mesurés (12e) : Auto. Était 67 300 : 67 128 mesurés (11a, 2026-09-16) : +1,8 kB par fichier, le segment de statistiques de fichier. Était 65 400 : 65 336 mesurés (étape 8d, 2026-09-16) : +32 B pour deux champs de référence par ScanContext -- le masque de blocs vivants et le puits de métriques du contrat de lecture (8b, 8d) -- sur les deux contextes de transit que l'écrivain instancie ; par fichier, pas par ligne, pour un état qu'il n'utilise pas (un contexte réduit à l'arène est le correctif si ça compte un jour). Était 65 300 (65 232 mesurés, R5a : +32 B pour le champ PlanMemory? de trois ColumnWriter), 65 200 (R2 : +436 B pour trois DistinctTable), 64 700 (63 920 : +320 B pour deux ColumnWriter de plus)
+        ("encodings/map", 89_100),   // 88 616 measured, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
+        ("encodings/variant", 68_200),   // 67 792 measured, including the file statistics segment, the `Auto` index and the two transit ScanContexts the writer creates, whose read-side fields it never uses: per file, not per row (a context reduced to the arena is the fix if that ever matters)
 
-        // THE TWO ALP SHAPES, added with W-6 because that point moved them and nothing watched it:
+        // THE TWO ALP SHAPES, so that the ALP write path is watched on both of its cases:
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a
         // patch. The second is the case that made the patch buffers worth renting, and a ratchet
         // that only held the easy shape would have said nothing about it.
@@ -295,18 +232,18 @@ public sealed class WriteAllocationTests
 
     /// <summary>
     /// What one more column adds, in bytes: the ceiling that says the cost is a STATE and not a
-    /// scratch. The block scratch of 11 §3.7 is ~130 KiB and measured here is **19 484 B**, a
+    /// scratch. The writer's block scratch is ~130 KiB and measured here is **19 484 B**, a
     /// seventh of it, so the claim holds with room; the ceiling is set just above the measurement
     /// as a ratchet, not as a target.
     /// </summary>
     /// <remarks>
-    /// THE BREAKDOWN, measured the same way at 64 and at 512 rows a column (2026-09-17), because a
+    /// THE BREAKDOWN, measured the same way at 64 and at 512 rows a column, because a
     /// number this size deserves to be named rather than merely bounded:
     /// <list type="bullet">
     /// <item>13 366 B is the writer's own per-column state, and it does not move with the rows —
     /// identical at 64 and at 512, which is the shape claim this axis exists to make;</item>
     /// <item>+5 806 B when `Auto` is on: the index writer's per-column arrays and the Bloom builder
-    /// it abandons at the first block (10 §5.5);</item>
+    /// it abandons at the first block;</item>
     /// <item>+312 B for the compressor.</item>
     /// </list>
     /// A thousand columns therefore cost about 19 MB to write once, against 130 KiB of scratch.
@@ -317,8 +254,8 @@ public sealed class WriteAllocationTests
     private const long WideCeiling = 20_000_000;
 
     /// <summary>
-    /// The schema axis of 11 §3.7: "a schema of a thousand columns costs a thousand small states
-    /// and one scratch, not a thousand scratches".
+    /// The schema axis: a schema of a thousand columns costs a thousand small states and one
+    /// scratch, not a thousand scratches.
     /// </summary>
     /// <remarks>
     /// MARGINAL, NOT TOTAL, because the claim is about the shape of the cost rather than its size.
@@ -381,9 +318,9 @@ public sealed class WriteAllocationTests
     /// <summary>Writes one batch of a schema of <paramref name="columns"/> i64 columns.</summary>
     /// <param name="columns">The columns.</param>
     /// <remarks>
-    /// The arena and its buffers are built OUTSIDE the measured region for the previous file's
-    /// reason: this axis is about the writer, and materializing a thousand canonical columns is the
-    /// caller's cost. What is measured is the write of an already-built batch.
+    /// The arena and its buffers are built OUTSIDE the measured region: this axis is about the
+    /// writer, and materializing a thousand canonical columns is the caller's cost. What is
+    /// measured is the write of an already-built batch.
     /// </remarks>
     private static async Task WriteWide(int columns)
     {

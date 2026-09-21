@@ -1,7 +1,7 @@
 // A Vortex file is untrusted input and every accessor in the library goes through this reader, so
-// a missed bounds check here is an out-of-bounds read in production (docs/03-architecture.md §6,
-// docs/09-contracts.md §4). Each rule gets its own named test, and the sweeps at the bottom assert
-// the global property: nothing but VortexFormatException ever escapes.
+// a missed bounds check here is an out-of-bounds read in production. Each rule gets its own named
+// test, and the sweeps at the bottom assert the global property: nothing but
+// VortexFormatException ever escapes.
 using System;
 using Vorticity;
 using Vorticity.Serialization.FlatBuffers;
@@ -46,8 +46,8 @@ public sealed class FlatBufferMalformedTests
     [Fact]
     public void Root_rejects_a_zero_uoffset()
     {
-        // uoffsets are unsigned and point forward, so 0 is never a valid reference
-        // (docs/03-architecture.md §6). [0] is the root uoffset.
+        // uoffsets are unsigned and point forward, so 0 is never a valid reference. [0] is the
+        // root uoffset.
         byte[] bytes = With(Scalars, 0, 0x00, 0x00, 0x00, 0x00);
 
         Assert.Throws<VortexFormatException>(() =>
@@ -347,7 +347,7 @@ public sealed class FlatBufferMalformedTests
     /// <summary>
     /// Reads every accessor for the first few field ids. Anything the reader considers malformed
     /// is a <see cref="VortexFormatException"/>; any other exception type fails the test, which is
-    /// exactly the guarantee of docs/09-contracts.md §4.
+    /// exactly the guarantee the reader gives every caller.
     /// </summary>
     private static void ProbeEveryAccessor(byte[] bytes)
     {

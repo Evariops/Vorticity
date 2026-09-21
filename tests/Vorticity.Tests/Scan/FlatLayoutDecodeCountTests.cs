@@ -13,9 +13,8 @@
 //
 // THIS TEST NEEDS NO SUCH FILE. The quantity is exact and machine-independent -- values materialized
 // per scan -- so a few tens of thousands of rows show the shape that a timing would need millions to
-// show through the noise. It is a RATCHET ON A DEFECT, in the style of the allocation ceilings: it
-// pins today's number so the fix is visible as a drop and a regression as a rise. The target is in
-// `Ideal`, and it is not what the assertion uses, because a red suite is not a plan.
+// show through the noise. It is pinned at `Ideal`, each value once, so a return of the per-batch
+// decode shows as a rise.
 using System;
 using System.Collections.Generic;
 using System.Globalization;

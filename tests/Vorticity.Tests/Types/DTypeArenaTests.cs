@@ -113,7 +113,7 @@ public sealed class DTypeArenaTests
     [Fact]
     public void IdenticalNodesAreDeduplicated()
     {
-        // docs/03-architecture.md section 3.2: a wide schema must not produce thousands of nodes.
+        // A wide schema must not produce thousands of nodes.
         DTypeArena arena = new();
         DType a = BuildNested(arena);
         int afterFirst = arena.NodeCount;

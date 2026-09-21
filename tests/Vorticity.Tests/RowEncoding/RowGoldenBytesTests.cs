@@ -7,7 +7,7 @@
 // can compare against our keys. Byte-exactness with Rust IS the feature, so it needs assertions
 // that fail when a byte changes.
 //
-// Every expectation below is derived from docs/06-row-encoding.md §§2-4 and cross-read against
+// Every expectation below is derived from the row format's rules and cross-read against
 // vortex-row/src/codec.rs at 0.86.1.
 using System;
 using Vorticity.Types;

@@ -1,11 +1,11 @@
 // The Phase 1 integration seam, exercised once end to end on real corpus files:
 //
-//     VortexFile.OpenAsync            (wave B1, file-open)
-//   -> LayoutView walk of RootLayoutBytes                       (wave A2, fb-schemas)
+//     VortexFile.OpenAsync                                      (file-open)
+//   -> LayoutView walk of RootLayoutBytes                       (fb-schemas)
 //   -> SegmentSpec of a vortex.flat leaf
-//   -> ISegmentSource.ReadAsync / ReadManyAsync                 (wave A3, io)
-//   -> ArrayBlobReader.Load into an ArrayNodeArena              (wave B2, array-blob)
-//   -> the serialized node tree, with every node's metadata run through its codec (wave A4)
+//   -> ISegmentSource.ReadAsync / ReadManyAsync                 (io)
+//   -> ArrayBlobReader.Load into an ArrayNodeArena              (array-blob)
+//   -> the serialized node tree, with every node's metadata run through its codec
 //
 // It stops at the node tree on purpose: no decoder exists yet, and the point of this file is to
 // prove the six landed components COMPOSE rather than merely link. Everything else in the suite
@@ -113,7 +113,7 @@ public sealed class Phase1CompositionTests
             }
             finally
             {
-                // Exactly one release for the one reference ReadAsync handed us (contract §2.2/3).
+                // Exactly one release for the one reference ReadAsync handed us.
                 owner.Release();
             }
         }
@@ -123,7 +123,7 @@ public sealed class Phase1CompositionTests
     /// The same walk driven the way a scan will drive it: one <see cref="ScanContext"/>, every
     /// segment registered in its <see cref="SegmentRequestSet"/>, one coalesced
     /// <see cref="ISegmentSource.ReadManyAsync"/>, then the blobs parsed out of the populated set.
-    /// Proves the per-batch lifetime of contract §2.2 holds against a real source and a real file.
+    /// Proves that a batch's segments live until its reset, against a real source and a real file.
     /// </summary>
     [Theory]
     [MemberData(nameof(Entries))]
@@ -288,7 +288,7 @@ public sealed class Phase1CompositionTests
 
     /// <summary>
     /// Opening a file never throws for an encoding we do not implement, and the id text survives
-    /// open so the eventual <c>VortexUnsupportedException</c> can name it (contract §2.3).
+    /// open so the eventual <c>VortexUnsupportedException</c> can name it.
     /// </summary>
     [Fact]
     public async Task OpenClassifiesEveryDeclaredEncodingAndThrowsForNone()
@@ -391,7 +391,7 @@ public sealed class Phase1CompositionTests
 
     /// <summary>
     /// <c>types/no_dtype_segment</c> is the corpus's only out-of-band-schema file: with no dtype
-    /// segment and no supplied DType the open is a <c>VortexFormatException</c> by contract §7.4,
+    /// segment and no supplied DType the open is a <c>VortexFormatException</c>,
     /// so the sweep supplies the schema the way a caller would. The donor is a real file with the
     /// identical schema, not 33 hand-written arena calls.
     /// </summary>
@@ -497,8 +497,8 @@ public sealed class Phase1CompositionTests
     {
         switch (id)
         {
-            // spec/METADATA.md "Empty metadata" - contract §6.2. Note vortex.constant is NOT here:
-            // upstream ignores its metadata field entirely (contract §0a C1).
+            // The encodings whose metadata is empty. Note vortex.constant is NOT here: upstream
+            // ignores its metadata field entirely.
             case ArrayEncodingId.Null:
             case ArrayEncodingId.Primitive:
             case ArrayEncodingId.VarBinView:
@@ -576,7 +576,7 @@ public sealed class Phase1CompositionTests
             case ArrayEncodingId.Unknown:
             default:
                 // vortex.constant carries its scalar in buffer 0; an Unknown id is not an error
-                // until a projected column needs it (contract §2.3).
+                // until a projected column needs it.
                 break;
         }
     }

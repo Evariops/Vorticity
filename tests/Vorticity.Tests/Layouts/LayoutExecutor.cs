@@ -1,6 +1,6 @@
-// The two-phase execution of PHASE1-CONTRACTS.md §13.3, reduced to what a layout test needs: plan,
-// register, ONE ReadManyAsync, execute. The scan component (§13) owns the real one; this is the
-// harness that lets the layout readers be tested against real files before it exists.
+// The scan's two-phase execution, reduced to what a layout test needs: plan, register, ONE
+// ReadManyAsync, execute. The scan owns the real one; this harness tests the layout readers
+// against real files without it.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,10 +18,9 @@ internal static class LayoutExecutor
     private static int s_registered;
 
     /// <summary>
-    /// Makes sure every decoder is present. Since the §15.1 integration line landed,
-    /// <see cref="ArrayDecoderTable"/>'s static constructor has already installed all twenty-three,
-    /// so every call below is a no-op guarded by <c>IsImplemented</c> and this method only forces
-    /// that type initializer to run.
+    /// Makes sure every decoder is present. <see cref="ArrayDecoderTable"/>'s static constructor
+    /// already installs all of them, so every call below is a no-op guarded by
+    /// <c>IsImplemented</c> and this method only forces that type initializer to run.
     /// </summary>
     internal static void EnsureDecoders()
     {
@@ -42,9 +41,8 @@ internal static class LayoutExecutor
     }
 
     /// <summary>
-    /// Whether every array and layout encoding this file uses is one this build decodes. Files that
-    /// need vortex.alp, vortex.fsst, vortex.zstd and the rest are Phase 2's, and the deferred
-    /// vortex.patched / fastlanes.delta / vortex.list are contract §2.8's expected failures.
+    /// Whether every array and layout encoding this file uses is one this build decodes. A file
+    /// that needs any other encoding is left out of the layout tests rather than failed.
     /// </summary>
     internal static bool IsFullyDecodable(LayoutCorpusEntry entry)
     {

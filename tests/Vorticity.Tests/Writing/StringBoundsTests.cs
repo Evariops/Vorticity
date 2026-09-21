@@ -1,5 +1,5 @@
-// The bounded string extremes of docs/11-write-strategy.md §3.2 — `vortex.bounded_min(n)` and
-// `vortex.bounded_max(n)` in a string column's zones, written when `StringBoundBytes` asks.
+// The bounded string extremes — `vortex.bounded_min(n)` and `vortex.bounded_max(n)` in a string
+// column's zones, written when `StringBoundBytes` asks.
 //
 // TWO ORACLES. The cut itself is held to the reference's own test cases (vortex-array-0.86.1
 // scalar/truncation.rs and aggregate_fn/fns/bounded_max), plus the edges its rules imply and its

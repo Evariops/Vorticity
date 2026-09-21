@@ -1,5 +1,5 @@
 // Exact decimal rendering of a 256-bit two's-complement value, checked against BigInteger.
-// BigInteger is banned in src/ (docs/03-architecture.md §1: zero dependencies) and is exactly the
+// BigInteger is banned in src/ (the library takes no dependencies) and is exactly the
 // right oracle here, because it is an independent implementation of the same function.
 using System;
 using System.Globalization;
@@ -118,7 +118,7 @@ public sealed class Int256FormattingTests
     [Fact]
     public void RenderingMatchesBigIntegerOnRandomBitPatterns()
     {
-        // Deterministic: a fixed seed, per §1.8.
+        // Deterministic: a fixed seed, so a failure reproduces.
         Random random = new Random(0x5EED_1234);
         byte[] bytes = new byte[Int256.ByteCount];
         Span<byte> le = stackalloc byte[Int256.ByteCount];

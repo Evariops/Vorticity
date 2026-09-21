@@ -2,7 +2,7 @@
 //
 //   * REGISTER THEN EXECUTE. RegisterSegments must register exactly the segments Execute reads, and
 //     Execute must read only registered ones. Break it and either the scan throws "segment not
-//     populated" or it silently issues a second read and the I/O-count test of §14 fails.
+//     populated" or it silently issues a second read and the scan's I/O-count test fails.
 //   * The table holds six readers and each one's IdUtf8 resolves back to its own slot.
 //   * The tree is immutable after Parse, so concurrent scans over one file agree.
 using System;
@@ -108,7 +108,7 @@ public sealed class LayoutReaderContractTests
     public async Task TwoConcurrentScansOfOneFileAgree()
     {
         // VortexFile is thread-safe and so is a parsed LayoutTree; a ScanContext is not, so each
-        // scan gets its own (contract §2.2 rule 6). This is the test that the projected-struct
+        // scan gets its own. This is the test that the projected-struct
         // dtypes really are built in per-scan arenas.
         await using VortexFile file = await LayoutExecutor.OpenAsync("containers/uncompressed_canonical");
         LayoutTree tree = LayoutTree.Parse(file);

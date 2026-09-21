@@ -1,7 +1,6 @@
-// The DType has two parsers for one model -- dtype.fbs and dtype.proto -- and docs/02-format.md
-// section 4 asks for this test by name: "A property test asserting equivalence (generate a DType ->
-// serialize both ways -> re-parse -> structural equality) costs an hour and catches any tag
-// transcription divergence."
+// The DType has two parsers for one model -- FlatBuffers and Protobuf -- and a property test
+// asserting their equivalence (generate a DType -> serialize both ways -> re-parse -> structural
+// equality) catches any tag transcription divergence.
 //
 // Why it earns its keep: a tag written wrongly and read back wrongly by the SAME codec round-trips
 // perfectly. Only a second, independently transcribed codec disagrees. So for every generated
@@ -28,7 +27,7 @@ public sealed class DTypeEquivalenceTests
 
     private const int Iterations = 600;
 
-    /// <summary>All 13 union cases, in tag order (spec/flatbuffers/dtype.fbs).</summary>
+    /// <summary>All 13 union cases, in the schema's tag order.</summary>
     private static readonly DTypeKind[] AllKinds =
     [
         DTypeKind.Null, DTypeKind.Bool, DTypeKind.Primitive, DTypeKind.Decimal, DTypeKind.Utf8,
@@ -88,7 +87,7 @@ public sealed class DTypeEquivalenceTests
     // ------------------------------------------------------------------ the named cases
 
     /// <summary>
-    /// docs/02-format.md section 4: "a Vortex file's root DType is not required to be a Struct."
+    /// A Vortex file's root DType is not required to be a Struct.
     /// </summary>
     [Fact]
     public void BareNonStructRoots_AgreeAcrossBothCodecs()
@@ -115,7 +114,7 @@ public sealed class DTypeEquivalenceTests
             AssertBothCodecsAgree(arena.Primitive(ptype, Nullability.NonNullable), ptype.Name());
             AssertBothCodecsAgree(arena.Primitive(ptype, Nullability.Nullable), ptype.Name() + "?");
 
-            // Also inside a container, where the ptype byte no longer sits at a fixed offset.
+            // Also inside a container, where the ptype byte does not sit at a fixed offset.
             AssertBothCodecsAgree(
                 arena.FixedSizeList(arena.Primitive(ptype, Nullability.Nullable), 3, Nullability.NonNullable),
                 "fsl(" + ptype.Name() + ")");
@@ -190,8 +189,8 @@ public sealed class DTypeEquivalenceTests
     [Fact]
     public void NestingAtTheDepthCap_AgreesAcrossBothCodecs()
     {
-        // Depth 64 is the cap (docs/08-semantics.md section 6), so this is the deepest schema either
-        // codec is ever allowed to accept. Both must accept it, and neither may accept one deeper.
+        // Depth 64 is the cap, so this is the deepest schema either codec is ever allowed to
+        // accept. Both must accept it, and neither may accept one deeper.
         DTypeArena arena = new DTypeArena();
         DType structChain = arena.Primitive(PType.I32, Nullability.NonNullable);
         DType listChain = structChain;
@@ -344,8 +343,8 @@ public sealed class DTypeEquivalenceTests
                     names[i] = arena.InternName(NamePool[rng.Next(NamePool.Length)]);
                     fields[i] = Generate(ref rng, arena, childBudget, seen);
 
-                    // The full unsigned range: `type_ids: [byte]` is signed in the .fbs but the
-                    // schema comment says it is interpreted as unsigned.
+                    // The full unsigned range: `type_ids: [byte]` is signed in the FlatBuffers
+                    // schema, but a comment there says it is interpreted as unsigned.
                     typeIds[i] = (byte)rng.Next(256);
                 }
 
@@ -363,7 +362,7 @@ public sealed class DTypeEquivalenceTests
 
     private static DType GenerateDecimal(ref Rng rng, DTypeArena arena, Nullability nullability)
     {
-        // 1 <= precision <= 76 (MAX_PRECISION is i256's, spec/METADATA.md); scale <= precision only
+        // 1 <= precision <= 76 (MAX_PRECISION is i256's); scale <= precision only
         // when scale is positive, and a negative scale is bounded only by sbyte.
         byte precision = (byte)(1 + rng.Next(DTypeArena.MaxDecimalPrecision));
         int span = precision + 41;

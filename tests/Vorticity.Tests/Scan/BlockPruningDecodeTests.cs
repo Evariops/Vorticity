@@ -1,4 +1,4 @@
-// The decode saving of the read contract - docs/11-write-strategy.md §6.1, step 8b.
+// The decode saving of the read contract.
 //
 // Skipping a dead split was always the I/O saving; what did not exist was the DECODE saving. The
 // first live split of a chunk decoded the chunk whole and retained it, so a chunk of sixteen
@@ -124,11 +124,10 @@ public sealed class BlockPruningDecodeTests
     /// </para>
     /// <para>
     /// The batch cap is what puts the reader on a partial node: without it the file's 1 025 rows are
-    /// one batch and the node is covered whole. The reader used to carry a branch for exactly this
-    /// -- a partial batch of a masked flat node, read as a counted range -- and nothing ever reached
-    /// it, because a bare flat column and a zone map do not occur together here: this file has no
-    /// zone map, so its mask never holds a dead block. This test holds the shape that remains
-    /// readable now that the branch is gone.
+    /// one batch and the node is covered whole. The flat reader has no branch of its own for a
+    /// partial batch of a masked flat node, because a bare flat column and a zone map do not occur
+    /// together here: this file has no zone map, so its mask never holds a dead block. This test
+    /// keeps that shape readable without such a branch.
     /// </para>
     /// </remarks>
     [Fact]

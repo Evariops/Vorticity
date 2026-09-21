@@ -1,6 +1,6 @@
 // Zero-copy reinterpretation of struct and scalar vectors: Footer.segment_specs (16-byte
 // SegmentSpec), Array.buffers (8-byte Buffer), ArrayNode.buffers ([uint16]) and Layout.segments
-// ([uint32]) are all read this way with no traversal and no allocation (docs/02-format.md §3).
+// ([uint32]) are all read this way with no traversal and no allocation.
 using System;
 using System.Runtime.CompilerServices;
 using Vorticity;
@@ -15,8 +15,8 @@ public sealed class FlatBufferStructVectorTests
     [Fact]
     public void SegmentSpec_is_sixteen_bytes_with_eight_byte_alignment()
     {
-        // The whole zero-copy story for Footer.segment_specs rests on this layout matching
-        // spec/flatbuffers/footer.fbs, so assert it rather than assume it.
+        // The whole zero-copy story for Footer.segment_specs rests on this layout matching the
+        // SegmentSpec struct of the footer schema, so assert it rather than assume it.
         Assert.Equal(16, Unsafe.SizeOf<SegmentSpecLike>());
         Assert.Equal(8, FlatBufferAccess.AlignmentOf<SegmentSpecLike>());
         Assert.Equal(1, FlatBufferAccess.AlignmentOf<byte>());
@@ -61,7 +61,7 @@ public sealed class FlatBufferStructVectorTests
     [Fact]
     public void Reinterpretation_returns_the_buffer_bytes_themselves()
     {
-        // "Actual zero-copy" is performance invariant #2 (docs/03-architecture.md §4): the span
+        // "Actual zero-copy" is a performance invariant of the reader: the span
         // handed back must alias the source buffer, not a copy of it.
         using AlignedTestBuffer buffer = AlignedTestBuffer.Copy(StructVectors);
         FlatBufferTable table = FlatBufferTable.Root(buffer.Span);
@@ -194,7 +194,7 @@ public sealed class FlatBufferStructVectorTests
     [Fact]
     public void An_eight_byte_struct_with_four_byte_alignment_is_not_over_required()
     {
-        // spec/flatbuffers/array.fbs `struct Buffer` is 8 bytes but only 4-byte aligned. These are
+        // The array schema's `struct Buffer` is 8 bytes but only 4-byte aligned. These are
         // exactly the bytes that are misaligned for a 16-byte SegmentSpec: as a Buffer vector they
         // are perfectly legal, and demanding sizeof(T) instead of alignof(T) would reject them.
         Assert.Equal(8, Unsafe.SizeOf<BufferLike>());

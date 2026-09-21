@@ -48,7 +48,7 @@ public sealed class ProtoUsagePatternTests
     }
 
     /// <summary>
-    /// The shape §7 of the contract prescribes for the DType and Scalar codecs:
+    /// The shape the DType and Scalar codecs follow:
     /// <c>Write(ref ProtoWriter writer, ...)</c> writing into a caller-owned writer.
     /// </summary>
     /// <remarks>

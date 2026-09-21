@@ -1,10 +1,11 @@
 // The seam between two blocks, as the statistics pass records it and as a merge reads it.
 //
 // A block is stepped from the last row of the block before it, so that a chunk made of several
-// blocks can be told a progression without a walk. That step -- the SEAM -- used to be folded into
-// the block's own steps, which made the first block of a chunk carry the jump between it and the
-// chunk before as a break of its own; `PlanMemoryTests` has the file it cost 30 KB on. These are
-// the four seams that matter, on eight rows each, against `BlockStats` directly.
+// blocks can be told a progression without a walk. That step -- the SEAM -- is kept apart from the
+// block's own steps: folded into them, it would make the first block of a chunk carry the jump
+// between it and the chunk before as a break of its own; `PlanMemoryTests` has a file where that
+// packs every progression. These are the four seams that matter, on eight rows each, against
+// `BlockStats` directly.
 using System;
 
 using Vorticity.Arrays;

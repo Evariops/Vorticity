@@ -1,4 +1,4 @@
-// docs/11-write-strategy.md §3.8: "plan memory is seeded from the last chunk's encoding tree".
+// On append, plan memory is seeded from the last chunk's encoding tree.
 //
 // THE SEED IS A READING OF WHAT THE WRITER WROTE, so its oracle is the writer's own ledger. Every
 // in-scope corpus table is written again by this writer, and every chunk of every top-level column
@@ -76,7 +76,7 @@ public sealed class PlanSeedTests
         }
 
         Assert.True(failures.Length == 0, failures.ToString());
-        // 414 on 2026-09-17: the corpus's tables, one chunk or a few each.
+        // The corpus's tables, one chunk or a few each: the floor sits just under their total.
         Assert.True(chunks >= 400, $"only {chunks} chunks compared");
 
         // The corpus reaches every scheme the seed maps, so none of them is taken on faith.

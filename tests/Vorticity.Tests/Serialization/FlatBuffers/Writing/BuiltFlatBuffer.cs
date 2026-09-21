@@ -4,7 +4,7 @@
 // that both tables read the same values, which is exactly what a non-deduplicating builder also
 // achieves.
 //
-// Layout reminders (spec/flatbuffers/*.fbs, docs/02-format.md §2):
+// FlatBuffers layout reminders:
 //   buffer := [u32 root uoffset] ... objects ...
 //   table  := [i32 soffset to vtable][inline field data]
 //   vtable := [u16 vtable_size][u16 table_size][u16 slot per field id]

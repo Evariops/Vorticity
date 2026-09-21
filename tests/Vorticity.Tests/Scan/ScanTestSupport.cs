@@ -1,11 +1,11 @@
 // Shared plumbing for the scan tests: where the corpus lives, how to register the decoders this
 // build owns, and the instrumented segment sources the I/O assertions need.
 //
-// WHY THE TESTS STILL CALL A REGISTRATION HELPER. PHASE1-CONTRACTS.md §15.1 makes
-// ArrayDecoderTable's static constructor the one place every decoder is named, and it now names all
-// twenty-three, so `Decoders.EnsureRegistered()` finds every slot filled and installs nothing. It is
-// kept as the single call site the scan tests share, and because it is guarded by IsImplemented it
-// cannot mask a regression in that constructor - it would leave the table exactly as it found it.
+// WHY THE TESTS STILL CALL A REGISTRATION HELPER. ArrayDecoderTable's static constructor is the
+// one place every decoder is named, and it names every one, so `Decoders.EnsureRegistered()`
+// finds every slot filled and installs nothing. It is kept as the single call site the scan tests
+// share, and because it is guarded by IsImplemented it cannot mask a regression in that
+// constructor - it would leave the table exactly as it found it.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -101,7 +101,7 @@ internal static class Decoders
 
 /// <summary>
 /// An <see cref="ISegmentSource"/> decorator that counts calls and records every spec it was asked
-/// for. This is the only way to see the two properties §13 claims but a value comparison cannot
+/// for. This is the only way to see the two scan properties a value comparison cannot
 /// show: exactly one <c>ReadManyAsync</c> per batch, and no I/O at all for an unprojected column.
 /// </summary>
 internal sealed class RecordingSegmentSource : ISegmentSource

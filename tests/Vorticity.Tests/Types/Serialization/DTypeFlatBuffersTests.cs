@@ -1,14 +1,13 @@
-// Adversarial tests for the dtype.fbs codec. The happy path is covered by DTypeEquivalenceTests,
-// which cross-checks every kind against the independent Protobuf codec; what is here is the set of
-// things a round trip through our own writer CANNOT catch:
+// Adversarial tests for the FlatBuffers DType codec. The happy path is covered by
+// DTypeEquivalenceTests, which cross-checks every kind against the independent Protobuf codec;
+// what is here is the set of things a round trip through our own writer CANNOT catch:
 //
 //   * the union's two-slot layout (tag at field 0, value at field 1) -- asserted against exact,
 //     hand-computed bytes and against the raw vtable, not through our own reader;
 //   * every way a hostile buffer can be malformed: truncation, zero length, a zero or overflowing
 //     root uoffset, a NONE or undefined tag, a missing required child, mismatched parallel
 //     vectors, an undefined PType, nesting past the cap;
-//   * the rule that nothing but VortexFormatException ever escapes (docs/09-contracts.md, and
-//     the global rule in the Phase 0 contract section 1).
+//   * the rule that nothing but VortexFormatException ever escapes, whatever the bytes.
 using System;
 using System.Buffers.Binary;
 using Vorticity.Serialization.FlatBuffers;
@@ -24,7 +23,7 @@ public sealed class DTypeFlatBuffersTests
 
     /// <summary>
     /// The whole point of this file. <c>bool?</c> is the smallest dtype with a payload, and these
-    /// 40 bytes were computed by hand from spec/flatbuffers/dtype.fbs and the FlatBuffers layout
+    /// 40 bytes were computed by hand from the Vortex DType schema and the FlatBuffers layout
     /// rules, not captured from the implementation. If the union's two slots are ever swapped this
     /// is the assertion that fails; a round trip would not, because the writer would swap them too.
     /// </summary>
@@ -92,7 +91,7 @@ public sealed class DTypeFlatBuffersTests
         Assert.NotEqual(0, tagSlot);
         Assert.NotEqual(0, valueSlot);
 
-        // Field 0 holds the ubyte discriminant. Primitive = 3 in spec/flatbuffers/dtype.fbs.
+        // Field 0 holds the ubyte discriminant; the schema gives Primitive the tag 3.
         Assert.Equal(3, buffer[root + tagSlot]);
 
         // Field 1 holds the uoffset to the value table, whose own field 0 is the PType: I64 = 7.
@@ -135,7 +134,7 @@ public sealed class DTypeFlatBuffersTests
     }
 
     /// <summary>
-    /// The literal tag bytes, checked against spec/flatbuffers/dtype.fbs on the wire.
+    /// The literal tag bytes the schema assigns, checked on the wire.
     /// </summary>
     /// <remarks>
     /// This is the assertion the cross-codec equivalence property cannot make. Renumber two tags
@@ -168,8 +167,8 @@ public sealed class DTypeFlatBuffersTests
 
     /// <summary>
     /// The same pinning in the other direction: a hand-built buffer carrying literal tag <c>t</c>
-    /// must decode to the kind spec/flatbuffers/dtype.fbs assigns to <c>t</c>. Without this the
-    /// reader's tag table could be permuted in step with the writer's and nothing would notice.
+    /// must decode to the kind the schema assigns to <c>t</c>. Without this the reader's tag
+    /// table could be permuted in step with the writer's and nothing would notice.
     /// </summary>
     [Fact]
     public void EveryLiteralTag_DecodesToItsSchemaKind()
@@ -193,7 +192,7 @@ public sealed class DTypeFlatBuffersTests
 
     /// <summary>
     /// Pins the field id of every field of every case table, by decoding buffers whose fields are
-    /// placed at the literal slots spec/flatbuffers/dtype.fbs declares.
+    /// placed at the literal slots the schema declares.
     /// </summary>
     /// <remarks>
     /// The same blind spot as <see cref="EveryKind_EmitsItsSchemaTagByte"/>, one level down: swap
@@ -332,7 +331,7 @@ public sealed class DTypeFlatBuffersTests
         }
     }
 
-    /// <summary>The 13 model kinds and the 13 union tags are the same numbers (docs/02-format.md section 4).</summary>
+    /// <summary>The 13 model kinds and the 13 union tags are the same numbers.</summary>
     [Fact]
     public void DTypeKindValues_MatchTheUnionTags()
     {
@@ -365,7 +364,7 @@ public sealed class DTypeFlatBuffersTests
     [Fact]
     public void ZeroRootUOffset_IsRejected()
     {
-        // A uoffset of 0 is never a valid forward reference (docs/03-architecture.md section 6).
+        // A uoffset of 0 is never a valid forward reference.
         AssertRejected(new byte[16]);
     }
 
@@ -540,7 +539,7 @@ public sealed class DTypeFlatBuffersTests
 
     [Theory]
     [InlineData(0)]                  // precision 0 cannot represent a digit
-    [InlineData(77)]                 // above MAX_PRECISION (i256's, per spec/METADATA.md)
+    [InlineData(77)]                 // above MAX_PRECISION, which is i256's
     [InlineData(200)]
     [InlineData(255)]
     public void DecimalPrecisionOutOfRange_IsRejected(byte precision)
@@ -883,7 +882,7 @@ public sealed class DTypeFlatBuffersTests
     [Fact]
     public void UnionTypeIdsAreUnsigned()
     {
-        // `type_ids: [byte]` with the .fbs comment "interpreted as unsigned": 255 must come back
+        // The schema's `type_ids: [byte]` is to be interpreted as unsigned: 255 must come back
         // as 255, not as -1 sign-extended into something else.
         DTypeArena arena = new DTypeArena();
         DType i32 = arena.Primitive(PType.I32, Nullability.NonNullable);
@@ -988,9 +987,9 @@ public sealed class DTypeFlatBuffersTests
     [Fact]
     public void WideStruct_RoundTripsWithSharedVTables()
     {
-        // Vtable dedup is mandatory (docs/01-scope.md section 3) and it is the case most likely to
-        // break a reader: 300 identical child tables all soffset to one vtable, and the soffset is
-        // negative for every reused one.
+        // Vtable dedup is mandatory, or a wide schema's metadata inflates, and it is the case
+        // most likely to break a reader: 300 identical child tables all soffset to one vtable,
+        // and the soffset is negative for every reused one.
         const int Fields = 300;
         DTypeArena arena = new DTypeArena();
         DType i32 = arena.Primitive(PType.I32, Nullability.NonNullable);

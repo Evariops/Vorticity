@@ -1,4 +1,4 @@
-// A list's elements, summarized in the parent's blocks - docs/11-write-strategy.md §3.2.4, step 28.
+// A list's elements, summarized in the parent's blocks.
 //
 // Block i of a list's elements covers the elements of parent rows [8192·i, 8192·(i+1)), so the
 // chooser reads a list chunk's elements from their blocks the way it reads a struct field's. That
@@ -291,7 +291,7 @@ public sealed class ListElementStatisticsTests
     [InlineData("list_list_i32")]
     public async Task TheFirstAppendedChunkConsultsTheElementsPlan(string name)
     {
-        // docs/11 §3.8: the seed reaches a list's elements, which keep a memory since step 28. The
+        // The append's seed reaches a list's elements, which keep a plan memory of their own. The
         // append is one block, so without the seed its elements would have no plan to consult.
         const int Block = 8192;
         ListShape shape = ListShapes.Build(name, 2 * Block);

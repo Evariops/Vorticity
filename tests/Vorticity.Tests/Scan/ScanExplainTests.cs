@@ -1,6 +1,5 @@
-// Explain and ScanMetrics - docs/11-write-strategy.md §6.4: the plan without executing, and the
-// same quantities after execution, "without which nobody can tell whether an index earns its
-// bytes".
+// Explain and ScanMetrics: the plan without executing, and the same quantities after execution,
+// without which nobody can tell whether an index earns its bytes.
 //
 // Three things are held. `ExplainAsync` reads nothing but the zone maps a filter can use (the
 // counting source says how many segments it asked for). Its plan agrees with the mask: as many live
@@ -67,7 +66,7 @@ public sealed class ScanExplainTests
         Assert.True(plan.BytesToRead > 0 && plan.BytesToRead < plan.FileBytes, $"{plan.BytesToRead} of {plan.FileBytes} bytes");
         Assert.True(plan.FileMayMatch);
 
-        // The scan that follows, measured, against what a caller counts by hand.
+        // The scan that follows, with its metrics set against what a caller counts by hand.
         ScanMetrics metrics = new ScanMetrics();
         FlatLayoutReader.ValuesDecoded = 0;
         counting.ResetCounters();

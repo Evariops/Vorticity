@@ -1,4 +1,4 @@
-// docs/08-semantics.md §4, realized at the layout level: an unknown component is fatal ONLY when a
+// Lazy resolution, realized at the layout level: an unknown component is fatal ONLY when a
 // projection puts it on the path to data.
 //
 // The struct layout is where that happens. A field the FieldMask excludes is neither registered nor
@@ -205,7 +205,7 @@ public sealed class LazyResolutionTests
     [Fact]
     public async Task OpeningAndParsingAFileWithAnUnknownLayoutNeverThrows()
     {
-        // Contract §2.3: opening a file never throws for an unknown component, and parsing the
+        // Opening a file never throws for an unknown component, and parsing the
         // layout tree never throws for an unknown layout id.
         await using VortexFile file = await LayoutExecutor.OpenForgedAsync("negative/unknown_layout_id.vortex");
         LayoutTree tree = LayoutTree.Parse(file);

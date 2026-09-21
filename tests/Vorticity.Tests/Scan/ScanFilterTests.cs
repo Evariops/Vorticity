@@ -1,4 +1,4 @@
-// Filter pushdown, end to end over real files - docs/01-scope.md F7.
+// Filter pushdown, end to end over real files.
 //
 // THE SHAPE OF EVERY TEST HERE IS THE SAME, and it is the only shape worth using: read the file
 // twice, once unfiltered and once filtered, apply the predicate to the unfiltered result in plain
@@ -59,7 +59,7 @@ public sealed class ScanFilterTests
     [Fact]
     public async Task ANullRowMatchesNeitherAPredicateNorItsNegation()
     {
-        // The observable face of three-valued logic (docs/08-semantics.md §3): `x = k` and
+        // The observable face of three-valued logic: `x = k` and
         // `x != k` are not complements over a nullable column, and their results do not add up to
         // the row count.
         List<long?> all = await ReadInt64(Mixed, "nulls", filter: null);
@@ -150,8 +150,7 @@ public sealed class ScanFilterTests
     public async Task NaNIsFalseForEveryOrderingPredicateAndTrueForNotEqual()
     {
         // IEEE 754 exactly, not the folk version. The five ordering-and-equality predicates are
-        // false when an operand is NaN; `!=` is the negation of `==` and is therefore TRUE
-        // (docs/08-semantics.md §2, whose first draft said otherwise and cost this test a run).
+        // false when an operand is NaN; `!=` is the negation of `==` and is therefore TRUE.
         List<double?> all = await ReadDouble(Mixed, "nans", filter: null);
         int nans = 0;
         foreach (double? value in all)
@@ -198,8 +197,8 @@ public sealed class ScanFilterTests
     [Fact]
     public async Task AFilterColumnIsReadAndThenDroppedFromTheBatch()
     {
-        // docs/03-architecture.md §3.4: "the filter sees columns that are not projected; they are
-        // read for filtering and discarded before the batch is produced".
+        // The filter sees columns that are not projected; they are read for filtering and
+        // discarded before the batch is produced.
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Mixed), CancellationToken.None);
 
@@ -343,10 +342,10 @@ public sealed class ScanFilterTests
     /// A field a projection can name, a filter can name too.
     /// </summary>
     /// <remarks>
-    /// PERF-AUDIT-v2.md R18a. A Vortex field name may be empty, and `types/struct_field_names` has
-    /// one -- its first column is literally named "". `Projection` reaches it, because it splits on
-    /// dots and asks the schema what each segment names; `FieldExpr` used to refuse the same path in
-    /// its constructor, so the same file answered `Project("")` and threw on `Expr.Field("")`.
+    /// A Vortex field name may be empty, and `types/struct_field_names` has one -- its first
+    /// column is literally named "". `Projection` reaches it, because it splits on dots and asks
+    /// the schema what each segment names; `FieldExpr` must not refuse the same path in its
+    /// constructor, or the same file would answer `Project("")` and throw on `Expr.Field("")`.
     ///
     /// THE TEST IS THE PARITY, not the empty name: what matters is that one grammar does not accept
     /// what the other rejects, because a caller writes both against the same schema.

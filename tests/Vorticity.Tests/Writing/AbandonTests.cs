@@ -1,4 +1,4 @@
-// Giving up on a file - docs/11-write-strategy.md §3.8.
+// Giving up on a file that is being written or appended to.
 //
 // THE ORACLE IS WHAT SURVIVES ON DISK. Disposal completes an unfinished file, so a producer that
 // fails half way leaves one that exists, opens and reports no torn tail; the rows it managed to
@@ -159,17 +159,17 @@ public sealed class AbandonTests
     [Fact]
     public async Task AFailedResumeLeavesTheOriginalRowsRecoverable()
     {
-        // THE CASE THE REVIEW REASONED OUT AND COULD NOT REACH. `AppendAsync` re-emits the chunk it
-        // re-opened before it hands the writer back; a failure in there used to be caught by a
-        // dispose, which wrote a footer over the kept rows alone. The file then parsed, held fewer
-        // rows than it started with, and repair could not see it, because repair looks for a tail
-        // that does not parse.
+        // THE CASE A DISPOSE WOULD HIDE. `AppendAsync` re-emits the chunk it re-opened before it
+        // hands the writer back, and a failure in there must not be caught by a dispose, which
+        // would write a footer over the kept rows alone: the file would parse, hold fewer rows
+        // than it started with, and escape repair, because repair looks for a tail that does not
+        // parse.
         //
-        // A REFUSED WRITE, NOT A CANCELLATION, and that corrects the review: it expected the token
-        // passed to `AppendAsync` to be enough, but the writes that re-emit the chunk put rows into
-        // transit rather than on the sink, so nothing in them polls the token. What does reach the
-        // sink is a block spilling, which needs the re-opened chunk to be large and the append's
-        // own block target small -- hence one chunk written wide, continued narrow.
+        // A REFUSED WRITE, NOT A CANCELLATION: a token passed to `AppendAsync` is not enough, as
+        // the writes that re-emit the chunk put rows into transit rather than on the sink, so
+        // nothing in them polls the token. What does reach the sink is a block spilling, which
+        // needs the re-opened chunk to be large and the append's own block target small -- hence
+        // one chunk written wide, continued narrow.
         string path = TempPath();
         try
         {

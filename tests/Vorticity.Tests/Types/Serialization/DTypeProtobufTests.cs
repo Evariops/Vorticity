@@ -94,7 +94,7 @@ internal sealed class PbBuilder
 
 public sealed class DTypeProtobufTests
 {
-    // spec/proto/dtype.proto oneof case numbers, spelled out so a test never borrows the codec's
+    // The DType message's oneof case numbers, spelled out so a test never borrows the codec's
     // own constants (which is how a renumbering would pass unnoticed).
     private const int CaseNull = 1;
     private const int CaseBool = 2;
@@ -114,7 +114,7 @@ public sealed class DTypeProtobufTests
 
     /// <summary>
     /// The exact bytes for <c>primitive { type: I32, nullable: true }</c>, checked against
-    /// spec/proto/dtype.proto by hand: case 3 length-delimited, then <c>type = 1</c> varint 6 and
+    /// the Protobuf schema by hand: case 3 length-delimited, then <c>type = 1</c> varint 6 and
     /// <c>nullable = 2</c> varint 1. If the codec ever renumbers a field this is the test that
     /// notices, because it does not consult the codec for the expected bytes.
     /// </summary>
@@ -478,8 +478,8 @@ public sealed class DTypeProtobufTests
     // ------------------------------------------------------------------------ unknown fields
 
     /// <summary>
-    /// The read-forever promise (docs/02-format.md section 5.3): an unrecognized field number is
-    /// skipped whatever its wire type, and the fields around it still parse.
+    /// The read-forever promise: an unrecognized field number is skipped whatever its wire type,
+    /// and the fields around it still parse.
     /// </summary>
     [Fact]
     public void Unknown_fields_around_the_case_are_skipped()

@@ -1,5 +1,5 @@
-// The Parquet-compatible Bloom variant against Parquet's own filter, byte for byte
-// (docs/10-indexes.md §10, last clause of the false-positive row).
+// The Parquet-compatible Bloom variant against Parquet's own filter, byte for byte: its bits must
+// match a Parquet SBBF built from the same keys.
 //
 // `tools/conformance-gen/examples/gen_parquet_bloom_vectors.rs` builds each bitset with the
 // `parquet` crate's `Sbbf`, so the vectors carry Parquet's hash (xxHash64, seed 0), its block

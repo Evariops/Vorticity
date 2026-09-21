@@ -214,7 +214,8 @@ public sealed class SchemaAdversarialTests
     [Fact]
     public void Writers_reject_a_caller_error_with_Argument_and_never_with_VortexFormatException()
     {
-        // §1.4: file says it -> VortexFormatException; caller says it -> Argument*.
+        // A fault in the file is a VortexFormatException; a fault in the caller's arguments is
+        // an Argument*.
         using FlatBufferBuilder b = new();
         int segment = PostscriptWriter.WriteSegment(b, new SegmentSpec(1, 1, 0, 0, 0), CompressionScheme.None);
 

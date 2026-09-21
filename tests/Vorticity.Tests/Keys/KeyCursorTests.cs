@@ -1,11 +1,10 @@
-// The cursor - docs/12-index-reads.md §4, and the tests §11 asks for: the five seek operators
-// against an oracle, a full walk against the materialized column, the rank and select invariants,
-// and the refusal on a column with no source.
+// The cursor: the five seek operators against an oracle, a full walk against the materialized
+// column, the rank and select invariants, and the refusal on a column with no source.
 //
 // THE FIXTURE IS WRITTEN BY THIS WRITER, because no other writer produces what the source needs.
 // The reference drops `is_sorted` from its file-level aggregation, so a corpus file never carries
-// it (docs/12 §3, amended at step 11a); the columns below are written here, with their statistics,
-// and the oracle is the formula each column is generated from.
+// it; the columns below are written here, with their statistics, and the oracle is the formula
+// each column is generated from.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -50,7 +49,7 @@ public sealed class KeyCursorTests
     [InlineData("keys_utf8", true)]
     public async Task TheFiveOperatorsLandWhereTheOracleSaysAndTheWalkIsExactlyTheEntries(string column, bool verify)
     {
-        // Under VerifyStatistics every zone a seek decodes is checked (docs/12 §3): a truthful
+        // Under VerifyStatistics every zone a seek decodes is checked: a truthful
         // column must land exactly where it does without the check.
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(verify);
@@ -134,7 +133,7 @@ public sealed class KeyCursorTests
             long rank = await cursor.RankAsync(key);
             long count = await cursor.KeyCountAsync();
 
-            // The invariant docs/12 §4.5 states: select lands inside its key's own slice.
+            // The invariant of rank and select: select lands inside its key's own slice.
             Assert.True(rank <= i, $"{column}: rank {rank} above {i}");
             Assert.True(i < rank + count, $"{column}: {i} outside [{rank}, {rank + count})");
 
@@ -206,7 +205,7 @@ public sealed class KeyCursorTests
     [Fact]
     public async Task ASortedColumnPutsTheTwoZerosInOneKeyAndCompareSeparatesThem()
     {
-        // docs/12 §4.4 gives the cursor a TOTAL order, in which -0.0 sorts below +0.0. A sorted
+        // The cursor has a TOTAL order, in which -0.0 sorts below +0.0. A sorted
         // COLUMN is sorted in IEEE order, where they are equal, and `is_sorted` is computed that
         // way; so on this source they are one key, and `KeyCursor.Compare` still tells them apart.
         Decoders.EnsureRegistered();
@@ -324,7 +323,7 @@ public sealed class KeyCursorTests
     [Fact]
     public async Task AStepInsideALoadedZoneAllocatesNothing()
     {
-        // docs/12 §11: "a cursor step reading KeyBytes at 0 B". The zone is decoded by the seek;
+        // A cursor step reading KeyBytes allocates nothing. The zone is decoded by the seek;
         // the steps that follow inside it read a borrowed span and must cost nothing at all.
         ReleaseOnlyCeilings.Require();
         Decoders.EnsureRegistered();
@@ -406,9 +405,9 @@ public sealed class KeyCursorTests
     [Fact]
     public async Task AKeyOrderedWindowAllocatesItsBatchAndNothingElse()
     {
-        // docs/12-index-reads.md §11: "an InKeyOrder window at the filtered-batch figure plus its
-        // rented permutation" -- the permutation and the verdicts are rented, the selection is the
-        // scan's own, so a window in steady state costs its RecordBatch.
+        // An InKeyOrder window costs what a filtered batch costs plus its rented permutation: the
+        // permutation and the verdicts are rented, the selection is the scan's own, so a window
+        // in steady state costs its RecordBatch.
         ReleaseOnlyCeilings.Require();
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
@@ -431,8 +430,8 @@ public sealed class KeyCursorTests
     /// </summary>
     /// <remarks>
     /// The windows are aligned with the splits, so each reads one split whole. A window across two
-    /// splits takes each in part, and pays what the take push-down pays on this column's encoding
-    /// -- 144 B per partial split, measured -- which is the take's figure and not the window's.
+    /// splits takes each in part, and pays what the take push-down pays on this column's encoding,
+    /// which is the take's figure and not the window's.
     /// </remarks>
     private static async Task<long> PerWindow(ScanBuilder builder)
     {
@@ -495,7 +494,7 @@ public sealed class KeyCursorTests
     public async Task AKeyOrderedScanOfANullableColumnDeliversItsNullsLast()
     {
         // In both directions, as the row encoding's default null sentinel sorts them: a merge across
-        // files and one file's key-ordered scan must agree (docs/13-dataset.md §6.6).
+        // files and one file's key-ordered scan must agree.
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
         foreach (bool descending in (bool[])[true, false])

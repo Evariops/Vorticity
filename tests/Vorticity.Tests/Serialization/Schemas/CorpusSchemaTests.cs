@@ -209,7 +209,7 @@ public sealed class CorpusSchemaTests
             Assert.True(EndsInsideFile(spec, data.Length), $"{id}: segment {i} escapes the file");
             ReadOnlySpan<byte> segment = data.AsSpan((int)spec.Offset, (int)spec.Length);
 
-            // docs/02-format.md §5.1: the blob's last 4 bytes are the FlatBuffer's length.
+            // The format puts the FlatBuffer's length in the blob's last 4 bytes.
             Assert.True(segment.Length >= 4, $"{id}: segment {i} is too short for a blob");
             uint flatBufferLength = BinaryPrimitives.ReadUInt32LittleEndian(segment[^4..]);
             Assert.True(

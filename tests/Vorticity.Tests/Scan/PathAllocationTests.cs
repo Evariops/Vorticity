@@ -1,14 +1,15 @@
 // What a whole read path allocates, from open to disposal, held against a ratchet.
 //
-// ScanAllocationTests already pins the figure docs/03-architecture.md §4 invariant 1 makes a
-// contract: zero managed bytes per batch in steady state, beyond the one RecordBatch that §12.1
-// makes unrecyclable. That is the number the design promises. It is not the number a caller pays.
+// ScanAllocationTests already pins the figure the architecture makes a contract: zero managed
+// bytes per batch in steady state, beyond the one RecordBatch that a scan cannot recycle because
+// it is a sealed class with readonly fields. That is the number the design promises. It is not
+// the number a caller pays.
 //
 // A caller pays for the open as well - the footer, the layout tree, the segment map, the first
-// batch's arenas - and nothing guards that at all. docs/05-benchmarks.md reports it (190 397 B for
-// a full scan, 133 325 B of it before the first batch is handed over) and reporting is all it does.
-// A figure in a benchmark report is noticed when someone runs the benchmark and reads the column,
-// which is to say on the commit that introduces a regression roughly never.
+// batch's arenas - and the per-batch figure guards none of that. The benchmarks report it, and
+// reporting is all they do. A figure in a benchmark report is noticed when someone runs the
+// benchmark and reads the column, which is to say on the commit that introduces a regression
+// roughly never.
 //
 // WHY THIS IS A TEST RATHER THAN AN ASSERTION IN THE BENCHMARK. Allocations are the one performance
 // quantity that is deterministic: the same build allocates the same bytes on any machine, so it can
@@ -53,8 +54,8 @@ namespace Vorticity.Tests.Scan;
 /// Runs alone, because the figure it measures is not private to this thread after all.
 /// </summary>
 /// <remarks>
-/// This was written believing docs/05's premise that allocations are deterministic - same build,
-/// same bytes, any machine - and therefore lockable without margin. Measured alone the belief holds
+/// The ceilings rest on the premise that allocations are deterministic - same build, same bytes,
+/// any machine - and therefore lockable without margin. Measured alone the premise holds
 /// exactly: byte-for-byte identical over three runs of every axis. Measured inside the full suite
 /// it does not, and the six axes disagree in a way that names the cause. `open, footer only`,
 /// `projected scan` and `selective filter` do not move; `full scan` gains 2 880 B and
@@ -81,12 +82,10 @@ public sealed class AllocationCollection
 /// <remarks>
 /// EVERY CEILING IN THESE THREE FILES IS A RELEASE FIGURE, and a Debug build allocates more -- the
 /// JIT optimizer is off, so the escape analysis that keeps a decode path's transients off the heap
-/// does not run. The gap is not small and it is not uniform: measured on the same commit,
-/// `open, footer only` reads 14 936 B in Release and 15 456 in Debug, while `full scan` reads
-/// 190 600 against 215 264 and `take 64 rows from 64 splits` 191 888 against 223 848. It scales
-/// with how much code the axis runs, which is exactly what makes it look like a regression.
+/// does not run. The gap is not small and it is not uniform: it scales with how much code the
+/// axis runs, which is exactly what makes it look like a regression.
 /// <para>
-/// WHY THIS GUARD EXISTS AT ALL (BENCH-AUDIT.md B22). `dotnet test` with no argument builds Debug,
+/// WHY THIS GUARD EXISTS AT ALL. `dotnet test` with no argument builds Debug,
 /// so the plain, documented, obvious command turned all twelve axes red at once with numbers that
 /// were individually plausible. That cost a bisect over twenty commits before the configuration was
 /// suspected -- and the failure would have said nothing about the library even if every commit had
@@ -151,12 +150,12 @@ public sealed class PathAllocationTests
     /// the async state machine and the delegate call of the measuring wrapper are inside this
     /// measurement and outside that one. What matters for a ratchet is that the overhead is
     /// constant, which it is: the number moves when the path moves and at no other time. Compare a
-    /// run of this test with another run of this test, never with bench/BASELINE.md.
+    /// run of this test with another run of this test, never with the recorded benchmark figures.
     /// </remarks>
     /// <seealso cref="AllocationCollection"/>
     /// <remarks>
-    /// EACH AXIS NAMES ITS OWN FILE, which PERF-AUDIT-v2.md F2 is: six axes over one file left the
-    /// components that arrived last -- `fastlanes.delta`, `vortex.pco`, `vortex.zstd`, `vortex.map`,
+    /// EACH AXIS NAMES ITS OWN FILE, because axes over one file would leave every component that
+    /// file does not contain -- `fastlanes.delta`, `vortex.pco`, `vortex.zstd`, `vortex.map`,
     /// `vortex.variant` -- watched by no allocation ratchet at all, on either side. They are the
     /// decoders most likely to allocate per page or per chunk and the least exercised, which is the
     /// wrong pair of properties. One scan axis each is the cheapest thing that makes a regression
@@ -172,50 +171,19 @@ public sealed class PathAllocationTests
         // saving. The ratchet is here to make a change like that be noticed and argued, which is
         // what this comment is.
         //
-        // 133_640 -> 133_752 on 2026-09-18, and here is the argument. `VortexReadOptions.
-        // ConstantForm` is now ON by default: a column the file says is one repeated value decodes
-        // to that value and a row count, instead of a million copies of it. This axis opens the
-        // file and reads ONE batch, so it pays the extra record the form costs and collects none of
-        // what the form is for -- which is why it is the only one of the twelve that moved up. The
-        // same switch takes `full scan` DOWN 304 B on the same file, and it takes the 1M `variant`
-        // scan from 605 us to 104 and its write from 3.48 to 0.38 against Vortex Rust. 112 bytes,
-        // once per open, measured identical on three runs.
-        // +8 B on 2026-09-19, and the same eight bytes on the three axes below. A scan context now
-        // carries one reference to the comparison an encoding may answer instead of decoding, and a
-        // context is built once per lane of every scan, filtered or not. Held inline the three
-        // fields cost 32 B on every scan in the process to serve the few that push; behind the
-        // reference they cost 8, and the holder exists only for a scan that pushes. What the eight
-        // bytes buy: a dictionary column answers an equality from its values and expands through
-        // its codes, taking `filtered scan, string equality, dict` from 380,6 to 276,4 us against
-        // the reference implementation, 2,856 to 1,83 (--ratio-check, 21 rounds, two runs).
-        // +8 B ON FOUR AXES, le 2026-09-20 : une lane porte une référence de plus, le délégué qui
-        // lance son corps, lié une fois au premier split au lieu d'être reconstruit à chacun. Huit
-        // octets par scan contre quatre-vingts par split au degré 2 — 3 514 → 3 434 par lot, tous
-        // threads confondus — donc l'échange se rembourse au deuxième split d'un scan parallèle et
-        // coûte huit octets une fois à tous les autres.
+        // A scan context holds, behind one reference rather than inline, the comparison an
+        // encoding may answer instead of decoding, so that only a scan that pushes one pays for it.
         //
-        // +8 B per ScalarStore on 2026-09-20: +8 on the footer-only axis, which builds one store,
-        // +16 on the ten that build two, +24 on the pruned filter, which builds three. A DType and
-        // a ScalarValue now carry the generation of the arena or store that issued them, and
-        // reading a handle held across a Clear throws instead of answering about whatever node has
-        // since taken that index. Neither handle grew -- both are still 16 bytes, the generation
-        // sits in padding the reference and the index had already forced -- and DTypeArena did not
-        // grow either, 792 B before and after. ScalarStore did, 416 -> 424: its four int fields
-        // exactly filled their slot and a fifth rounds the object up. Eight bytes per store,
-        // against a class of silently wrong answers that no other test in the suite can catch.
+        // A lane holds the delegate that runs its body, bound once at its first split rather than
+        // rebuilt at each, which pays for itself from the second split of a parallel scan.
         //
-        // +16 B on seven axes on 2026-09-20, and here is what the sixteen bytes buy. A lane now
-        // keeps the segments its last batch read, so the next batch of the same chunk reuses them
-        // instead of asking the source again. A segment spans every block of its chunk, so the
-        // scan was asking for the same bytes once per block: a million rows in 123 blocks asked for
-        // 247 specifications, of which five were distinct, and for 184 725 367 bytes of a
-        // 1 523 369-byte file. It now asks 3 times for 1 581 703 bytes. The same scan goes from
-        // 5,6 ms to 0,9 over a positional read and from 9,5 to 1,3 over bytes in memory; over a
-        // memory mapping it was already 0,9 and stays there, because a segment is a view. The peak
-        // does not move -- the source rented the whole segment for one batch anyway, and an entry
-        // the next batch does not ask for is released before it reads. The sixteen bytes are the
-        // rented array's first rent; four arrays and an object cost 448 before this was a struct
-        // over one pooled array. Seven axes moved because they sat at their ceiling to the byte.
+        // A DType and a ScalarValue carry the generation of the arena or store that issued them,
+        // and ScalarStore a field for it, so that reading a handle held across a Clear throws
+        // instead of silently answering about whatever node has since taken that index.
+        //
+        // A lane keeps the segments its last batch read in one pooled array, and the next batch of
+        // the same chunk reuses them: a segment spans every block of its chunk, so without this the
+        // scan asks the source for the same bytes once per block.
         ("open, first batch", File, 133_800, FirstBatch),
         ("full scan", File, 190_976, FullScan),
         ("projected scan, 1 of 5 columns", File, 134_144, ProjectedScan),
@@ -228,32 +196,25 @@ public sealed class PathAllocationTests
         // The first thing the pair says is not what one would guess: on this file PRUNING ALLOCATES
         // MORE than not pruning while keeping ~100 rows of 65 536.
         //
-        // THE GAP, AND WHAT TOOK IT DOWN. 30 144 B when the pair was added. F-5 took 11 264 off by
-        // making `ZoneColumn.Zones` a range instead of an iterator, leaving 18 880. The F-9 probe
-        // then attributed those: `ZonePruner.MayMatch` allocates ZERO over 2 304 calls, and 97,3 %
-        // of the gap was one object -- the `ScanContext` the plan builds to read the zone map,
-        // whose arenas were sized for a batch. R30 sized them for what they hold, and the gap is
-        // now 6 496 B. What remains is the rest of that context plus the zone decode itself, and
-        // no part of it grows with the number of zones.
+        // WHAT THE GAP IS. `ZonePruner.MayMatch` allocates nothing; the gap is the `ScanContext`
+        // the plan builds to read the zone map, plus the zone decode itself, and no part of it
+        // grows with the number of zones. Keep `ZoneColumn.Zones` a range rather than an iterator,
+        // and that context's arenas sized for what they hold rather than for a batch: either one
+        // undone costs more than the whole gap that remains.
         ("selective filter, pruning off", File, 135_192, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here
         // rather than adding columns to the file above.
-        // 27 648 -> 27 712 at step 8 of docs/11 §8: the read contract carries per-scan state on the
-        // objects a plain scan allocates once -- the mask of live blocks and the metrics sink, a
-        // reference each on the enumerable, the enumerator and the lane's context, 32 B in all --
-        // and this axis had none of the headroom the others carry. Loosened by exactly that, plus
-        // the 32 B of headroom the neighbouring axes have.
+        // This ceiling also carries the read contract's per-scan state -- the mask of live blocks
+        // and the metrics sink, a reference each on the enumerable, the enumerator and the lane's
+        // context -- and the headroom the neighbouring axes have.
         ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_760, FullScan),
         ("scan, vortex.pco", "encodings/pco", 29_200, FullScan),
-        // 27 648 -> 27 712 on 2026-09-19, and here is the argument. Decompressing a node's frames
-        // used the one-shot `ZstandardDecoder.TryDecompress`, which builds and tears down a native
-        // decompression context per call -- 977 of them on a million-row column. One decoder per
-        // node, reset between frames, costs 64 B of managed object once per scan and takes the
-        // `zstd` axis from 7 476 to 6 844 us and `zstd_nullable` from 2 170 to 2 012 (bench/ab.sh,
-        // 21 rounds, intervals [0,913; 0,937] and [0,921; 0,936]). Sixty-four bytes once, against
-        // seven and a half per cent of both axes.
+        // A node's frames go through one decoder per node, reset between frames, rather than the
+        // one-shot `ZstandardDecoder.TryDecompress`, which builds and tears down a native
+        // decompression context per call: this ceiling pays for one managed decoder per scan so
+        // that the scan does not pay for a native context per frame.
         ("scan, vortex.zstd", "encodings/zstd", 27_760, FullScan),
         ("scan, vortex.map", "encodings/map", 28_160, FullScan),
         ("scan, vortex.variant", "encodings/variant", 27_672, FullScan),
@@ -314,11 +275,9 @@ public sealed class PathAllocationTests
     /// </para>
     /// <para>
     /// BOTH ENDS ARE FLOORS, for the reason the class comment gives about the other test: a tiered
-    /// promotion allocates, and a single measured run is whichever one happened to absorb it. This
-    /// compared two single samples, and it was a latent flake -- 224 bytes, the size of one
-    /// promotion -- that only started landing once F-5 took 11 kB off the filter path and moved
-    /// where the promotions fall. It surfaced on `full scan`, an axis that change does not touch,
-    /// which is how it was identified as the estimator's problem and not the path's.
+    /// promotion allocates, and a single measured run is whichever one happened to absorb it.
+    /// Comparing two single samples is a latent flake: one promotion landing in the last sample
+    /// reads as retention, on whichever axis it falls, whether or not that path changed.
     /// </para>
     /// <para>
     /// The assertion is unchanged and so is what it catches: a path that retains across opens
@@ -392,7 +351,7 @@ public sealed class PathAllocationTests
     /// <see cref="GC.GetAllocatedBytesForCurrentThread"/> counts THIS thread, so a continuation that
     /// resumed on the pool would have its allocations silently omitted and the ceiling would be
     /// guarding a fraction of the path. Over a memory-mapped file nothing here is truly
-    /// asynchronous, so the assertion holds today - and the day a read goes to the pool, this fails
+    /// asynchronous, so the assertion holds - and if a read ever goes to the pool, this fails
     /// loudly instead of quietly under-counting.
     /// </remarks>
     private static long Complete(ValueTask<long> work)

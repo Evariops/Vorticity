@@ -1,4 +1,4 @@
-// Adversarial tests for the Scalar Protobuf codec. The wire types in spec/proto/scalar.proto are
+// Adversarial tests for the Scalar Protobuf codec. The wire types in the schema are
 // the trap: int64_value is zigzag while uint64_value is not, and f16_value is a varint of raw bits
 // while f32/f64 are fixed-width. A codec that got any of those wrong would round-trip perfectly
 // against itself, so the decisive cases below are hand-assembled bytes.
@@ -13,7 +13,7 @@ namespace Vorticity.Tests.Types.Serialization;
 
 public sealed class ScalarProtobufTests
 {
-    // spec/proto/scalar.proto oneof case numbers, restated rather than imported.
+    // The ScalarValue message's oneof case numbers, restated rather than imported.
     private const int CaseNull = 1;
     private const int CaseBool = 2;
     private const int CaseInt64 = 3;
@@ -27,7 +27,7 @@ public sealed class ScalarProtobufTests
     private const int CaseVariant = 11;
     private const int CaseUnion = 12;
 
-    // spec/proto/dtype.proto: DType.primitive = 3.
+    // DType.primitive is case 3 of the DType message's oneof.
     private const int DTypeCasePrimitive = 3;
 
     // ------------------------------------------------------------------ hand-written wire vectors
@@ -154,9 +154,8 @@ public sealed class ScalarProtobufTests
     }
 
     /// <summary>
-    /// docs/04-conformance.md section 4.3 lists <c>-0.0</c> as a required adversarial case. The
-    /// proto3 <c>value != 0</c> presence test treats it as absent, so the codec has to use the
-    /// bit-preserving writer.
+    /// <c>-0.0</c> must survive, but the proto3 <c>value != 0</c> presence test treats it as
+    /// absent, so the codec has to use the bit-preserving writer.
     /// </summary>
     [Fact]
     public void Negative_zero_survives_for_both_float_widths()
@@ -404,8 +403,8 @@ public sealed class ScalarProtobufTests
     // ------------------------------------------------------------------------ unknown fields
 
     /// <summary>
-    /// An unrecognized field number is skipped whatever its wire type, and the case around it still
-    /// parses (docs/02-format.md section 5.3).
+    /// An unrecognized field number is skipped whatever its wire type, and the case around it
+    /// still parses.
     /// </summary>
     [Fact]
     public void Unknown_fields_inside_a_scalar_value_are_skipped()

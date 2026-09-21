@@ -1,12 +1,11 @@
 // That the chooser is actually handed the statistics the ingest pass computed - the one thing
 // `WrittenSizeTests` cannot see.
 //
-// Stage 2 of docs/11-write-strategy.md §8 replaces the passes `ColumnCompressor` ran over the rows
-// with a read of the chunk's `BlockStats`. The replacement is deliberately FAIL-SOFT: `Choose`
-// compares the summary's row count against the node it is given and measures the column itself when
-// they disagree, so a wrong block range can only ever cost a pass. That is the right failure mode
-// and it is also an invisible one -- every byte stays identical, every test stays green, and the
-// whole stage quietly does nothing.
+// `ColumnCompressor` reads the chunk's `BlockStats` instead of passing over the rows itself. The
+// read is deliberately FAIL-SOFT: `Choose` compares the summary's row count against the node it is
+// given and measures the column itself when they disagree, so a wrong block range can only ever
+// cost a pass. That is the right failure mode and it is also an invisible one -- every byte stays
+// identical, every test stays green, and the statistics quietly go unused.
 //
 // So the writer counts the chunks that fell back, and this holds the count at zero across the batch
 // shapes that make the arithmetic non-trivial: batches smaller than a block, larger than a block,
@@ -93,7 +92,7 @@ public sealed class ChunkStatisticsTests
                 $"{id} at batch {batchRows}, block {rowBlock?.ToString() ?? "null"}: {missing} " +
                 "column chunk(s) fell back to measuring themselves, so stage 2 did nothing for them");
 
-            // THE SAME RATCHET FOR THE DISTINCT TABLE (docs/11 §3.2.2, stage R2): the walk it
+            // THE SAME RATCHET FOR THE DISTINCT TABLE: the walk it
             // replaces is byte-identical to it by construction, so a table that quietly stopped
             // serving -- a chunk whose last block never recorded its count, a tail re-probed in the
             // wrong order -- would keep every byte-exact test green while the chooser walked every

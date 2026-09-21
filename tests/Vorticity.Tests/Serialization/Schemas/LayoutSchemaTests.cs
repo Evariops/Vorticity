@@ -1,4 +1,4 @@
-// Round trip and adversarial tests for `table Layout` in spec/flatbuffers/layout.fbs.
+// Round trip and adversarial tests for the format's `table Layout`.
 using System;
 using Vorticity;
 using Vorticity.Serialization.FlatBuffers;

@@ -4,7 +4,7 @@
 // vortex.zoned -> data: vortex.flat -> {id: "vortex.decimal", nbuffers: 1} with metadata
 // `values_type = 5`). This test locates that buffer by content and decodes it.
 //
-// Value-by-value comparison against the sidecar belongs to the conformance component (§1.8), so
+// Value-by-value comparison against the sidecar belongs to the conformance component, so
 // the golden values below are transcribed literals, not a sidecar parse.
 using System;
 using System.Globalization;

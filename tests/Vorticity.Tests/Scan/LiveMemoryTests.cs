@@ -5,10 +5,9 @@
 // handed out and never given back: an allocation ratchet is satisfied by a scan that allocates the
 // same amount every time and keeps all of it.
 //
-// bench/ALLOCATIONS.md says so in as many words - "every figure here is bytes allocated, not bytes
-// live... nothing in this repository measures the second" - and docs/05 §3 lists peak RSS as one of
-// the five missing axes for the same reason. This is that axis, as a test rather than a benchmark,
-// because "does it grow" is a yes-or-no question and a benchmark would answer it with a mean.
+// The allocation benchmarks count bytes allocated, not bytes live, so none of them measures what a
+// scan keeps. This is that axis, as a test rather than a benchmark, because "does it grow" is a
+// yes-or-no question and a benchmark would answer it with a mean.
 //
 // TWO THINGS ARE WATCHED, because the interesting one is not the managed heap. A scan's buffers come
 // from AlignedBufferPool, which allocates NATIVE memory the GC never sees, so a pool that retains
@@ -54,21 +53,17 @@ public sealed class LiveMemoryTests
     /// recompilation continues well past twenty scans. What the number has to be small enough to
     /// catch is ACCUMULATION - anything retained per scan would add megabytes over sixty passes.
     ///
-    /// LOWERED 256 KiB -> 64 KiB on 2026-09-14 (BENCH-AUDIT.md §3.3): three runs measured the
-    /// growth at 0 B, 32 B and 0 B, so the old ceiling was eight thousand times the observed value
-    /// and would have let a real leak of a kilobyte per scan through. 64 KiB is still two thousand
-    /// times the worst reading, which is the margin this needs rather than the margin it had: the
-    /// figures above come from ONE machine, and CI runs four operating systems where tiering
-    /// settles differently.
+    /// The ceiling keeps a wide margin over the growth a settled run shows, because CI runs
+    /// several operating systems where tiering settles differently, and no wider: a looser one
+    /// would let a small per-scan leak through.
     /// </remarks>
     private const long ManagedGrowthCeiling = 64 * 1024;
 
     /// <summary>Parked pool blocks the second reading may exceed the first by.</summary>
     /// <remarks>
-    /// LOWERED 64 -> 16 on the same day and by the same reasoning: the pool parked 15 blocks after
-    /// twenty scans and the same 15 after eighty, three runs out of three. Sixteen leaves room for
-    /// a later scan to touch size classes it had never seen, which is what the assertion below is
-    /// worded to allow; sixty-four was room for a leak.
+    /// A settled scan parks the same blocks pass after pass. The ceiling leaves room for a later
+    /// scan to touch size classes it had never seen, which is what the assertion below is worded
+    /// to allow, and no room for a leak.
     /// </remarks>
     private const int ParkedGrowthCeiling = 16;
 

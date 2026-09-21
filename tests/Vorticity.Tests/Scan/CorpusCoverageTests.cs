@@ -15,8 +15,8 @@
 //
 // AT ZERO THE CEILING IS AN EQUALITY, and that is deliberate. Every file the repository ships is
 // readable; a new corpus file carrying a component this build does not decode turns this red, which
-// is a decision to make rather than a number to relax. docs/01-scope.md §3 is where such a decision
-// is written down; raising the ceiling instead would hide it.
+// is a decision to make rather than a number to relax. Such a decision is written down as a change
+// of scope; raising the ceiling instead would hide it.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -34,10 +34,10 @@ public sealed class CorpusCoverageTests
     /// </summary>
     /// <remarks>
     /// LOWER THIS when a decoder or layout reader lands, in the same commit. Raising it means a file
-    /// that used to be readable no longer is, which is a regression the conformance sweep reports as
+    /// that was readable no longer is, which is a regression the conformance sweep reports as
     /// a clean 100% because the file simply leaves its denominator. It is at the floor: every shipped
-    /// file is readable, so the only move left is up, and up is a scope decision (docs/01-scope.md
-    /// §3) rather than a test adjustment.
+    /// file is readable, so the only move left is up, and up is a scope decision rather than a
+    /// test adjustment.
     /// </remarks>
     private const int OutOfScopeCeiling = 0;
 

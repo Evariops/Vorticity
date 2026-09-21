@@ -1,6 +1,6 @@
-// Composite keys - docs/12-index-reads.md §4.6, docs/10-indexes.md §6.5: a sorted-runs index keyed by
-// the row encoding of a tuple, written through `VortexWriteOptions.KeyEncoder`, walked bytewise, and
-// sought with `RowEncoder.EncodeKey`, whose encoding of the leading columns is a prefix of the key.
+// Composite keys: a sorted-runs index keyed by the row encoding of a tuple, written through
+// `VortexWriteOptions.KeyEncoder`, walked bytewise, and sought with `RowEncoder.EncodeKey`, whose
+// encoding of the leading columns is a prefix of the key.
 //
 // THE ORACLE IS THE ENCODER ITSELF, applied to one tuple at a time: every non-null tuple's
 // `EncodeKey` bytes, sorted bytewise with the row as tiebreak. That the one-tuple encoding equals the
@@ -196,10 +196,10 @@ public sealed class CompositeKeyTests
     [InlineData(true, 2, 100)]
     public async Task AScanInTheTuplesOrderDeliversTheWalk(bool descending, int degree, int window)
     {
-        // Debt 1 of the closing plan: `InKeyOrder(paths)`, the permuted read over the composite run
-        // that a composite clustering key's compaction and key-ordered reads need (12 §4.6, §6). The
-        // oracle is the walk's: every non-null tuple in encoded order, ties in row order, reversed
-        // descending; the filter, on a column the tuple does not hold, removes rows and nothing else.
+        // `InKeyOrder(paths)`, the permuted read over the composite run that a composite
+        // clustering key's compaction and key-ordered reads need. The oracle is the walk's: every
+        // non-null tuple in encoded order, ties in row order, reversed descending; the filter, on
+        // a column the tuple does not hold, removes rows and nothing else.
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(withEncoder: true);
         List<(byte[] Key, long Row)> oracle = Oracle(row => City(row) is string city && Number(row) > 0

@@ -1,5 +1,5 @@
-// Columns of lists, built straight into an arena, for the tests of docs/11-write-strategy.md §3.2.4
-// (a list's elements blocked by the parent's rows) and of the predicates that read them.
+// Columns of lists, built straight into an arena, for the tests of a list's elements blocked by
+// the parent's rows and of the predicates that read them.
 //
 // EVERY SHAPE HAS A TRAP IN IT. Empty rows whose offset is 0 rather than the running end (what the
 // chunk compactor writes), null rows that still name elements, elements whose minimum is far from

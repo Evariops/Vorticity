@@ -4,7 +4,7 @@ using Xunit;
 namespace Vorticity.Tests.Types;
 
 /// <summary>
-/// PType is a <c>uint8</c> on the wire (spec/flatbuffers/dtype.fbs), so 245 of its 256 possible
+/// PType is a <c>uint8</c> on the wire, so 245 of its 256 possible
 /// values are undefined and every one of them is reachable from a file.
 /// </summary>
 public sealed class PTypeTests
@@ -97,7 +97,7 @@ public sealed class PTypeTests
     [Fact]
     public void SignedAndUnsignedFamiliesMatchTheSchemaOrder()
     {
-        // dtype.fbs orders U8..U64 then I8..I64 then F16..F64.
+        // The schema orders the tags U8..U64, then I8..I64, then F16..F64.
         Assert.True(PType.U8.IsUnsignedInteger());
         Assert.True(PType.U64.IsUnsignedInteger());
         Assert.False(PType.I8.IsUnsignedInteger());

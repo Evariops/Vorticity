@@ -1,12 +1,11 @@
-// The `SortedRuns` source - docs/12-index-reads.md §3, §4, §9, and the tests §11 asks for over it:
-// the five operators and the walks against an oracle, direction flips, rank and select, the run
-// cache and its budget.
+// The `SortedRuns` key source and what it must answer: the five operators and the walks
+// against an oracle, direction flips, rank and select, the run cache and its budget.
 //
 // THE COLUMNS ARE NOT SORTED, so the sorted-column source cannot serve and every answer comes from
 // the runs. Blocks of 512 rows, one chunk per block and segments of 64 entries: a file of 6 000 rows
 // is twelve runs of eight segments, so a seek excludes runs, lands inside segments and crosses
 // them, and a walk merges twelve heads. The oracle is every non-null `(value, row)` of the column
-// sorted by the total order of §4.4, written out here rather than borrowed from the library.
+// sorted by the keys' total order, written out here rather than borrowed from the library.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -406,7 +405,7 @@ public sealed class SortedRunsCursorTests
         Assert.Equal(expected, on);
     }
 
-    // ------------------------------------------------------------------ explain and counters (§8.1)
+    // ------------------------------------------------------------------ explain and counters
 
     [Fact]
     public async Task ExplainSaysWhatTheIndexSelectsHowACountResolvesAndWhatAnOrderWalks()
@@ -436,7 +435,7 @@ public sealed class SortedRunsCursorTests
         Assert.Equal(KeySourceKind.SortedRuns, order.Source);
         Assert.Equal(oracle.Count, order.EntriesInRange);
         Assert.True(order.Descending);
-        // TWO RUNS (13 §6.1): the chunk runs merged, and the last chunk's own, since 6 000 rows are
+        // TWO RUNS: the chunk runs merged, and the last chunk's own, since 6 000 rows are
         // not a whole number of 512-row blocks and an append would re-open it.
         Assert.Equal(2, order.Runs);
         int tailStart = Rows / Block * Block;
@@ -494,7 +493,7 @@ public sealed class SortedRunsCursorTests
 
         Assert.True(log.KeyOrderWindows - windows >= Rows / 500);
 
-        // The counters are published under the names docs/12 §8.1 gives.
+        // The counters are published under stable names a listener can ask for.
         Assert.True(await listener.SawAsync("cursor-seeks"), "no cursor-seeks counter was published; saw " + listener.Describe());
     }
 
@@ -550,7 +549,7 @@ public sealed class SortedRunsCursorTests
         }
     }
 
-    // ------------------------------------------------------------------ distinct keys (§5.4)
+    // ------------------------------------------------------------------ distinct keys
 
     public static TheoryData<string, KeySourceKind> DistinctWalks()
     {
@@ -733,7 +732,7 @@ public sealed class SortedRunsCursorTests
         }
     }
 
-    // ------------------------------------------------------------------ key-ordered delivery (§6)
+    // ------------------------------------------------------------------ key-ordered delivery
 
     public static TheoryData<string, string, bool, int, int> OrderedScans() => new()
     {
@@ -789,8 +788,8 @@ public sealed class SortedRunsCursorTests
             oracle.Reverse();
         }
 
-        // A null key comes last in both directions, in row order ascending and reversed descending
-        // (12 §6 as amended by the closing of debt 2). No filter here is true on a null.
+        // A null key comes last in both directions, in row order ascending and reversed
+        // descending. No filter here is true on a null.
         List<long> expected = oracle.ConvertAll(e => e.Row);
         if (column == "nullable" && text.Length == 0)
         {
@@ -1108,7 +1107,7 @@ public sealed class SortedRunsCursorTests
         return i;
     }
 
-    /// <summary>The total order of docs/12 §4.4, written out: sign, then magnitude, NaN outermost.</summary>
+    /// <summary>The keys' total order, written out: sign, then magnitude, NaN outermost.</summary>
     private static int Order(FilterLiteral a, FilterLiteral b) => a.Kind switch
     {
         FilterLiteralKind.Signed => a.SignedValue.CompareTo(b.SignedValue),

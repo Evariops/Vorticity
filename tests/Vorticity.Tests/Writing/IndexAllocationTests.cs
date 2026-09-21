@@ -1,22 +1,21 @@
-// docs/10-indexes.md §7.3: "WriteAllocationTests gets one row per index kind, so a builder that
-// allocates per row is caught."
+// One row per index kind, so that a builder that allocates per row is caught.
 //
 // THE FIGURE IS THE SLOPE ABOVE THE WRITER'S OWN. Each kind writes the same two-column file at N
 // and at 2N rows; what is held is the allocation that grows with the rows between the two, minus
 // what the same write grows without an index -- a per-file cost cancels out, a per-row one does
-// not. Measured on 2026-09-16 (12e), the writer's own slope is 4,85 B/row, and above it:
+// not. The writer's own slope is 4,85 B/row, and above it:
 //
 //   auto            0,0    the default: nothing per row
 //   bloom           0,5    each generation's block filters copied once, payloads in a pooled arena
 //   ngram-bloom     0,25   the same, over trigrams
 //   postings        2,5    the payloads' compression; the chunk's table and arrays are kept or rented
 //   ngram-postings  2,4    the same, over trigrams
-//   sorted-runs     6,6    the same over one entry per row -- 10 §6.2's "one chunk in memory, in
-//                          flux" is held in buffers that grow once per file, to the largest chunk
+//   sorted-runs     6,6    the same over one entry per row -- the one chunk in memory, in flux,
+//                          is held in buffers that grow once per file, to the largest chunk
 //
-// The locating slopes were 16,6, 9,4 and 141 until 2026-09-17: the key table, its log, the sort's
-// arrays and the payload copies were reallocated at every chunk. A kind whose slope passes its
-// ceiling allocates per row something the paragraph above does not account for.
+// The locating kinds keep the key table, its log, the sort's arrays and the payload copies from
+// one chunk to the next: reallocated per chunk, they would pass their ceilings. A kind whose
+// slope passes its ceiling allocates per row something the paragraph above does not account for.
 using System;
 using System.Globalization;
 using System.Runtime.InteropServices;

@@ -1,6 +1,6 @@
 // The two FlatBuffers `struct`s are read by reinterpretation, so their size and their field
-// offsets ARE the wire format. docs/09-contracts.md §7 requires a static size assert; these tests
-// pin the offsets too, because a reordered field would keep the size and silently swap two values.
+// offsets ARE the wire format. A size check alone is not enough: these tests pin the offsets
+// too, because a reordered field would keep the size and silently swap two values.
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -28,7 +28,7 @@ public sealed class InlineStructTests
     public void SegmentSpec_field_bytes_match_the_wire_layout()
     {
         // offset 0..8, length 8..12, alignment_exponent 12..13, _compression 13..14,
-        // _encryption 14..16 - spec/flatbuffers/footer.fbs.
+        // _encryption 14..16.
         SegmentSpec spec = new(0x0102030405060708UL, 0x11223344u, 0x55, 0x66, 0x7788);
         Span<byte> bytes = stackalloc byte[16];
         MemoryMarshal.Write(bytes, in spec);
@@ -43,7 +43,7 @@ public sealed class InlineStructTests
     [Fact]
     public void BufferSpec_field_bytes_match_the_wire_layout()
     {
-        // padding 0..2, alignment_exponent 2..3, compression 3..4, length 4..8 - array.fbs.
+        // padding 0..2, alignment_exponent 2..3, compression 3..4, length 4..8.
         BufferSpec spec = new(0x1234, 0x56, (byte)BufferCompression.LZ4, 0x778899AAu);
         Span<byte> bytes = stackalloc byte[8];
         MemoryMarshal.Write(bytes, in spec);

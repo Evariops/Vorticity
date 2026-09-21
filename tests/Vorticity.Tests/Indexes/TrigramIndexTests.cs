@@ -1,6 +1,5 @@
-// `vorticity.bloom.ngram3.v1` and `vorticity.postings.ngram3.v1` end to end (docs/10-indexes.md
-// §5.2, §6.4): every byte trigram of every value, and the string predicates of docs/12 §7 probing
-// them.
+// `vorticity.bloom.ngram3.v1` and `vorticity.postings.ngram3.v1` end to end: every byte
+// trigram of every value, and the string predicates that probe them.
 //
 // THE FIXTURE PUTS ONE WORD PER BLOCK in a column the zone map cannot prune -- every value starts
 // with the same host -- so whatever `Contains('zebra')` prunes is the trigram index's doing. And

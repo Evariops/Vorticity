@@ -165,8 +165,8 @@ public sealed class DTypeFormatTests
     /// Nothing caps the length of a struct field name: it is interned verbatim from the file
     /// bytes, so it is attacker-sized. The renderer's budget bounds the OUTPUT, and it must bound
     /// the work and the buffer too — decoding the whole name and clamping afterwards rents (and
-    /// decodes) the full length to produce 2051 characters, which is the pattern
-    /// docs/03-architecture.md section 6 forbids.
+    /// decodes) the full length to produce 2051 characters, an allocation sized by a value from
+    /// the file with no cap.
     /// </summary>
     [Fact]
     public void AHugeFieldNameIsRenderedWithoutAllocatingItsLength()

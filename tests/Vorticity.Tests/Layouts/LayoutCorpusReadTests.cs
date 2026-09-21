@@ -62,7 +62,7 @@ public sealed class LayoutCorpusReadTests
         Assert.True(rows > 100_000, $"Only {rows.ToString(CultureInfo.InvariantCulture)} rows were read.");
     }
 
-    /// <summary>The corpus's own boundary row counts, clamped into the file (contract §1.8).</summary>
+    /// <summary>The corpus's own boundary row counts, clamped into the file.</summary>
     private static IEnumerable<long> SplitPoints(long rowCount)
     {
         HashSet<long> points = new HashSet<long>();

@@ -1,6 +1,6 @@
-// Stage R3's oracle (IMPL-PLAN.md §1.2): the chooser by formulas of docs/11-write-strategy.md §3.4.1
-// is built BESIDE the chooser it replaces, and the two are compared plan against plan on every
-// column chunk of every in-scope corpus file, through the probe `ColumnCompressor.Differential`.
+// The oracle for the chooser by cost formulas: it is built BESIDE the chooser it replaces, and the
+// two are compared plan against plan on every column chunk of every in-scope corpus file, through
+// the probe `ColumnCompressor.Differential`.
 //
 // WHY PLANS AND NOT BYTES. `WrittenSizeTests` is byte-exact and it is the anchor of the whole
 // refactor, but a byte total cannot see two divergences that compensate, and a byte-identical file
@@ -8,13 +8,13 @@
 // chooser DECIDED -- scheme, width, transform, reference, entry count, a fingerprint of the arrays
 // -- and two choosers that agree on every description agree on every byte and on why.
 //
-// TWO QUESTIONS, TWO TESTS. Under today's run-end rule the formula chooser must agree with today's
-// chooser on every chunk: that is the test of the harness itself, and a disagreement there is a bug
-// in the formulas. Under the spec's rule -- run-end priced in bytes and made to compete -- every
-// disagreement is a chunk the spec would encode differently, and the test asserts the only thing it
-// can without writing the file twice: that run-end competing is the ONLY source of disagreement.
-// What those chunks cost on the wire is the question stage R4 answers by letting the formula chooser
-// decide and reading `WrittenSizeTests`.
+// TWO QUESTIONS, TWO TESTS. Under the reference's run-end rule the formula chooser must agree with
+// the reference chooser on every chunk: that is the test of the harness itself, and a disagreement
+// there is a bug in the formulas. Under the spec's rule -- run-end priced in bytes and made to
+// compete -- every disagreement is a chunk the spec would encode differently, and the test asserts
+// the only thing it can without writing the file twice: that run-end competing is the ONLY source
+// of disagreement. What those chunks cost on the wire is not asked here: the formula chooser is the
+// one that decides, and `WrittenSizeTests` holds its bytes.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -39,10 +39,10 @@ public sealed class ChooserDifferentialTests
     {
         List<string> disagreements = await Sweep(runEndCompetes: false);
 
-        // SINCE R5a-2, PLAN MEMORY IS A THIRD PARTY TO THIS COMPARISON: the chooser that decides may
+        // PLAN MEMORY IS A THIRD PARTY TO THIS COMPARISON: the chooser that decides may
         // reuse a column's last plan without pricing the field, while the reference prices every
-        // candidate on every chunk. Where the two then differ, that is docs/11 §3.4.3 doing what it
-        // says ("bytes identical on stable columns", not on every column) and not a wrong formula;
+        // candidate on every chunk. Where the two then differ, that is memory doing what it
+        // says (bytes identical on stable columns, not on every column) and not a wrong formula;
         // the chooser marks such plans, they are counted here and reported, and only the rest is
         // held to zero. What memory costs on the wire is `WrittenSizeTests`' question.
         //
@@ -68,7 +68,7 @@ public sealed class ChooserDifferentialTests
     {
         List<string> disagreements = await Sweep(runEndCompetes: true);
 
-        // The report, for the decision R4 takes: which chunks, from what, to what.
+        // The report: which chunks the spec's rule would change, from what, to what.
         StringBuilder report = new StringBuilder();
         report.Append("CHOOSER DIFFERENTIAL: ")
             .Append(disagreements.Count.ToString(CultureInfo.InvariantCulture))
@@ -80,7 +80,7 @@ public sealed class ChooserDifferentialTests
 
         Console.Out.Write(report.ToString());
 
-        // Since stage R4 the chooser by formulas is the one that decides and today's is the
+        // The chooser by formulas is the one that decides and the one it replaced is the
         // reference, so a line reads `chosen => reference`, and run-end competing shows as a
         // reference plan that was run-end: the marker is on the right-hand side.
         List<string> foreign = disagreements.FindAll(static line => !line.Contains("=> runend ", StringComparison.Ordinal));

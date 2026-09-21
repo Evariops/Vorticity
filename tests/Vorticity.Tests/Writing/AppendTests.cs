@@ -1,6 +1,5 @@
-// Appending - docs/11-write-strategy.md §3.8 and §5.2's row: "write-then-append equals one write in
-// rows returned, zone map content and index answers; a torn append is repaired by `vxdump --repair`
-// and reads as the pre-append file".
+// Appending. Write-then-append equals one write in rows returned, zone map content and index
+// answers; a torn append is repaired by `vxdump --repair` and reads as the pre-append file.
 //
 // THE ORACLE IS THE SAME ROWS WRITTEN ONCE. Each case writes the rows in one file and, in another,
 // in pieces -- the first written, the others appended one at a time -- at boundaries that fall on a
@@ -155,7 +154,7 @@ public sealed class AppendTests
     [Fact]
     public async Task TheFirstAppendedChunkConsultsTheLastChunksPlan()
     {
-        // §3.8: "plan memory is seeded from the last chunk's encoding tree". The cut falls on a
+        // Plan memory is seeded from the last chunk's encoding tree. The cut falls on a
         // block, so nothing is re-opened and re-priced, and the append is one block -- one chunk,
         // the first -- which without the seed has no memory to consult and no distinct table.
         Decoders.EnsureRegistered();
@@ -237,7 +236,7 @@ public sealed class AppendTests
                 stream.SetLength(after - 37);
             }
 
-            // The torn file opens at the version before the append and says so (13 §12); refusing
+            // The torn file opens at the version before the append and says so; refusing
             // is an option, and nothing is written behind the tear.
             await using (VortexFile torn = await VortexFile.OpenAsync(path))
             {

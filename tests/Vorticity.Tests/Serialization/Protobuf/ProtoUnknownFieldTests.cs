@@ -6,7 +6,7 @@ using Xunit;
 namespace Vorticity.Tests.Serialization.Protobuf;
 
 /// <summary>
-/// The read-forever guarantee of docs/02-format.md §5.3: a per-encoding metadata message may grow
+/// The read-forever guarantee for metadata: a per-encoding metadata message may grow
 /// an <c>optional</c> field upstream without minting a new encoding id, so a reader that rejected
 /// an unknown field number would fail on a perfectly legal file. Unknown numbers are skipped by
 /// wire type; only values outside the wire format's own domain are refused.
@@ -16,7 +16,7 @@ public sealed class ProtoUnknownFieldTests
     /// <summary>
     /// A stand-in for one of the real metadata messages - shaped like
     /// <c>fastlanes.bitpacked</c>'s <c>BitPackedMetadata { uint32 bit_width = 1; uint32 offset = 2; }</c>
-    /// (docs/02-format.md §5.3) - parsed the way every metadata decoder will parse: known numbers
+    /// - parsed the way every metadata decoder will parse: known numbers
     /// handled, everything else skipped.
     /// </summary>
     private static (uint BitWidth, uint Offset, int SkippedFields) Parse(ReadOnlySpan<byte> body)

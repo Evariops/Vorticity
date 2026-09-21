@@ -1,8 +1,7 @@
-// Lying indexes — docs/10-indexes.md §10, docs/11-write-strategy.md §5.1 item 5 and
-// docs/12-index-reads.md §13: "forged runs that are unsorted, keys outside their stated min/max,
-// rows at or beyond RowCount, overlapping runs. Class I fields throw VortexFormatException before
-// any read out of bounds; Class II lies produce a wrong order and never a fault, and
-// VerifyStatistics catches them."
+// Lying indexes: forged runs that are unsorted, keys outside their stated min/max, rows at or
+// beyond RowCount, overlapping runs. Class I fields throw VortexFormatException before any read
+// out of bounds; Class II lies produce a wrong order and never a fault, and VerifyStatistics
+// catches them.
 //
 // THE DIRECTORY'S OWN LIES — overlapping or out-of-order runs, rows past the file, payloads past
 // the data — are refused at parse, and IndexDirectoryTests holds each one. What is left is the
@@ -18,11 +17,11 @@
 //     order across the seam — and a run's rows are replaced by another run's. The walk without
 //     VerifyStatistics may be wrong and must not fault; with it, it must refuse.
 //
-// SINCE STEP 21 THE DIRECTORY CARRIES A CHECKSUM PER REGION (13 §7), so a region whose bytes are
-// not the ones written claims nothing, and a key source refuses it: a zeroed Bloom filter no longer
-// drops a row. What no reader can catch is a liar who forges the checksums too; the structured lies
-// above do exactly that, and hold such a file to "no fault", or to a refusal under
-// VerifyStatistics, which is all anyone can promise.
+// THE DIRECTORY CARRIES A CHECKSUM PER REGION, so a region whose bytes are not the ones written
+// claims nothing, and a key source refuses it: a zeroed Bloom filter never drops a row. What no
+// reader can catch is a liar who forges the checksums too; the structured lies above do exactly
+// that, and hold such a file to "no fault", or to a refusal under VerifyStatistics, which is all
+// anyone can promise.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -109,7 +108,7 @@ public sealed class LyingIndexTests
         (IndexSegment a, IndexSegment b) = await SwappablePairAsync(original, keys: true);
         byte[] swapped = Swap(original, a, b);
 
-        // The checksums of the directory catch the swap, whatever the option (13 §7): the regions'
+        // The checksums of the directory catch the swap, whatever the option: the regions'
         // bytes are not the ones written.
         await Assert.ThrowsAsync<VortexFormatException>(() => WalkAsync(swapped, "id", verify: false));
         await Assert.ThrowsAsync<VortexFormatException>(() => WalkAsync(swapped, "id", verify: true));
@@ -131,9 +130,9 @@ public sealed class LyingIndexTests
     [Fact]
     public async Task AZeroedFilterIsCaughtByItsChecksumAndCostsNoRow()
     {
-        // 10 §5.1: "a zeroed filter would drop rows", and no structural check can see it. The bits
+        // A zeroed filter would drop rows, and no structural check can see it. The bits
         // of the root filter of `f` are zeroed, the array framing and the node's header kept: a
-        // well-formed tree whose root says every value is absent (13 §6.2).
+        // well-formed tree whose root says every value is absent.
         Decoders.EnsureRegistered();
         byte[] original = await WriteAsync(0);
         List<IndexSegment> filters = await FiltersAsync(original, column: 3);
@@ -421,7 +420,7 @@ public sealed class LyingIndexTests
 
     /// <summary>
     /// Zeroes the filter words of the root node an array blob holds, and keeps everything else: the
-    /// node's header and child sizes, and the blob's framing. The u32 buffer starts the blob (02 §5.1).
+    /// node's header and child sizes, and the blob's framing. The u32 buffer starts the blob.
     /// </summary>
     private static void ZeroRootFilter(byte[] bytes, IndexSegment blob)
     {

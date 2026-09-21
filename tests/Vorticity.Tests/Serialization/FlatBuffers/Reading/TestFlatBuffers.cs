@@ -2,7 +2,7 @@
 // with its offsets in the comments: the reader under test must be checked against the layout the
 // FORMAT defines, not against whatever our own builder happens to emit.
 //
-// Layout reminders (docs/02-format.md §2, §3, §5.2; spec/flatbuffers/*.fbs):
+// FlatBuffers layout reminders:
 //   buffer   := [u32 root uoffset] ... objects ...
 //   table    := [i32 soffset to vtable][inline field data]
 //   vtable   := [u16 vtable_size][u16 table_size][u16 slot per field id]
@@ -55,7 +55,7 @@ internal static class TestFlatBuffers
 
     /// <summary>
     /// A table whose vtable follows it, i.e. a negative soffset. Legal: soffsets are
-    /// signed and must be bounded in BOTH directions (docs/03-architecture.md §6).
+    /// signed and must be bounded in BOTH directions.
     /// </summary>
     internal static readonly byte[] VtableAfterTable =
     [
@@ -70,7 +70,7 @@ internal static class TestFlatBuffers
 
     /// <summary>
     /// Two sub-tables sharing one vtable - the routine builder optimization a naive
-    /// "never revisit a position" verifier would reject (docs/03-architecture.md §6).
+    /// "never revisit a position" verifier would reject.
     /// </summary>
     internal static readonly byte[] SharedVtable =
     [
@@ -141,7 +141,7 @@ internal static class TestFlatBuffers
 
     /// <summary>
     /// Vectors reinterpreted in place with no traversal: a 16-byte SegmentSpec vector,
-    /// a [uint16] and a [uint32] (docs/02-format.md §3).
+    /// a [uint16] and a [uint32].
     /// </summary>
     internal static readonly byte[] StructVectors =
     [
@@ -221,8 +221,8 @@ internal static class TestFlatBuffers
 
     /// <summary>
     /// A table with no fields at all: vtable_size == 4 (header only), table_size == 4 (the soffset
-    /// only). This is exactly what spec/flatbuffers/dtype.fbs `table Null {}` and
-    /// spec/flatbuffers/footer.fbs `table EncryptionSpec {}` serialize to, so it must be accepted.
+    /// only). This is exactly what the dtype schema's `table Null {}` and the footer schema's
+    /// `table EncryptionSpec {}` serialize to, so it must be accepted.
     /// </summary>
     internal static readonly byte[] EmptyTable =
     [
@@ -233,8 +233,8 @@ internal static class TestFlatBuffers
     ];   // 12 bytes
 
     /// <summary>
-    /// Mirrors <c>struct SegmentSpec</c> from spec/flatbuffers/footer.fbs: 16 bytes, 8-byte
-    /// alignment, read as a reinterpreted span (docs/02-format.md §3).
+    /// Mirrors <c>struct SegmentSpec</c> from the footer schema: 16 bytes, 8-byte
+    /// alignment, read as a reinterpreted span.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     internal struct SegmentSpecLike
@@ -247,7 +247,7 @@ internal static class TestFlatBuffers
     }
 
     /// <summary>
-    /// Mirrors <c>struct Buffer</c> from spec/flatbuffers/array.fbs: 8 bytes, but only 4-byte
+    /// Mirrors <c>struct Buffer</c> from the array schema: 8 bytes, but only 4-byte
     /// alignment. Requiring <c>sizeof(T)</c> instead of <c>alignof(T)</c> would reject a perfectly
     /// legal file whose Buffer vector sits at a 4 mod 8 address.
     /// </summary>
@@ -262,7 +262,7 @@ internal static class TestFlatBuffers
 
     /// <summary>
     /// A chain of <paramref name="count"/> nested tables, each one's field 0 pointing forward to
-    /// the next, used to drive the <see cref="Vorticity.VortexLimits.MaxFlatBufferDepth"/> cap.
+    /// the next, to exercise the <see cref="Vorticity.VortexLimits.MaxFlatBufferDepth"/> cap.
     /// Too long to write out by hand, so it is assembled here with the same explicit offsets.
     /// </summary>
     internal static byte[] TableChain(int count)
