@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Globalization;
 using System.IO.Hashing;
 using System.Threading;
@@ -23,27 +24,35 @@ internal sealed record VerifyOptions
     public ulong? Since { get; init; }
 }
 
-/// <summary>What <see cref="DatasetVerifier.VerifyAsync"/> found.</summary>
-/// <param name="Version">The version verified.</param>
-/// <param name="Since">The version it was verified against, or 0 for a full verify.</param>
-/// <param name="Pages">The pages read and checked.</param>
-/// <param name="Objects">The data objects hashed and opened.</param>
-/// <param name="Fragments">The index fragments read and checked.</param>
-/// <param name="Commits">The commit objects read whole and checked against their own checksum.</param>
-/// <param name="Unhashed">Objects whose entry records no content hash, as imported ones do not.</param>
-/// <param name="Problems">Each thing that does not hold, named.</param>
-internal sealed record DatasetVerification(
-    ulong Version,
-    ulong Since,
-    long Pages,
-    long Objects,
-    long Fragments,
-    long Commits,
-    long Unhashed,
-    IReadOnlyList<string> Problems)
+/// <summary>What a verification checked and found.</summary>
+public sealed record DatasetVerification
 {
+    /// <summary>The version verified.</summary>
+    public ulong Version { get; init; }
+
+    /// <summary>The version it was verified against, or 0 for a full verification.</summary>
+    public ulong Since { get; init; }
+
+    /// <summary>The tree pages read from the store and checked against their references.</summary>
+    public long Pages { get; init; }
+
+    /// <summary>The data objects hashed and opened.</summary>
+    public long Objects { get; init; }
+
+    /// <summary>The index fragments read and checked.</summary>
+    public long Fragments { get; init; }
+
+    /// <summary>The commit objects read whole and checked against their own checksum.</summary>
+    public long Commits { get; init; }
+
+    /// <summary>The objects whose entry records no content hash, as an imported one does not; their length is checked instead.</summary>
+    public long Unhashed { get; init; }
+
+    /// <summary>Each thing that does not hold, named.</summary>
+    public ImmutableArray<string> Problems { get; init; } = [];
+
     /// <summary>Whether everything checked holds.</summary>
-    public bool Holds => Problems.Count == 0;
+    public bool Holds => Problems.IsDefaultOrEmpty;
 }
 
 /// <summary>
@@ -81,8 +90,13 @@ internal static class DatasetVerifier
         catch (CommitFormatException torn)
         {
             // A header that does not open names no page: that is the whole report.
-            return new DatasetVerification(
-                version, options.Since ?? 0, 0, 0, 0, 1, 0, [$"'{CommitKey.For(version)}' does not open: {torn.Message}"]);
+            return new DatasetVerification
+            {
+                Version = version,
+                Since = options.Since ?? 0,
+                Commits = 1,
+                Problems = [$"'{CommitKey.For(version)}' does not open: {torn.Message}"],
+            };
         }
 
         run.CheckInlined(target);
@@ -100,8 +114,17 @@ internal static class DatasetVerifier
 
         await run.CheckEntriesAsync().ConfigureAwait(false);
         await run.CheckCommitsAsync(version).ConfigureAwait(false);
-        return new DatasetVerification(
-            version, options.Since ?? 0, run.Pages, run.Objects, run.Fragments, run.Commits, run.Unhashed, run.Problems);
+        return new DatasetVerification
+        {
+            Version = version,
+            Since = options.Since ?? 0,
+            Pages = run.Pages,
+            Objects = run.Objects,
+            Fragments = run.Fragments,
+            Commits = run.Commits,
+            Unhashed = run.Unhashed,
+            Problems = [.. run.Problems],
+        };
     }
 
     private sealed class Verification(IObjectStore store, CancellationToken cancellationToken)

@@ -12,7 +12,7 @@ namespace Vorticity.Dataset;
 /// An <see cref="IObjectStore"/> in memory, with injectable latency and faults. Thread-safe: one
 /// lock over a sorted map, never held across an await.
 /// </summary>
-internal sealed class MemoryObjectStore : IObjectStore
+public sealed class MemoryObjectStore : IObjectStore
 {
     private const int ListPage = 1_000;
 
@@ -275,7 +275,7 @@ internal sealed class MemoryObjectStore : IObjectStore
 }
 
 /// <summary>The five operations of <see cref="IObjectStore"/>, for fault injection and counting.</summary>
-internal enum ObjectOperation
+public enum ObjectOperation
 {
     /// <summary><see cref="IObjectStore.GetRangeAsync"/>.</summary>
     GetRange = 0,

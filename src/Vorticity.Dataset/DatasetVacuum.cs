@@ -1,12 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace Vorticity.Dataset;
 
 /// <summary>How a vacuum runs.</summary>
-internal sealed record VacuumOptions
+public sealed record VacuumOptions
 {
     /// <summary>
     /// The clock the window counts against; the system's by default. It must agree with the
@@ -21,29 +22,37 @@ internal sealed record VacuumOptions
     /// The share of a kept commit object that live pages and fragments must reach for it not to be
     /// reported <see cref="VacuumResult.Sparse"/>: 0.25 by default.
     /// </summary>
-    public double RepackBelow { get; init; } = 0.25;
+    internal double RepackBelow { get; init; } = 0.25;
 }
 
 /// <summary>What a vacuum found and did.</summary>
-/// <param name="Latest">The version it marked from, which it always keeps.</param>
-/// <param name="Retained">The versions inside the window, newest first.</param>
-/// <param name="Window">The window it applied: the dataset's retention, or seven days when unset.</param>
-/// <param name="PagesRead">The distinct pages the marking read.</param>
-/// <param name="Deleted">The objects it deleted, or would have, on a dry run: commits first.</param>
-/// <param name="Young">The unmarked objects it kept because they are younger than the window.</param>
-/// <param name="Sparse">
-/// The commit objects kept alive only by references into them, whose live pages and fragments are
-/// under <see cref="VacuumOptions.RepackBelow"/> of their bytes: what
-/// <see cref="VortexDataset.RepackAsync"/> would free at the next vacuum past the window.
-/// </param>
-internal sealed record VacuumResult(
-    ulong Latest,
-    IReadOnlyList<ulong> Retained,
-    TimeSpan Window,
-    long PagesRead,
-    IReadOnlyList<string> Deleted,
-    IReadOnlyList<string> Young,
-    IReadOnlyList<ulong> Sparse);
+public sealed record VacuumResult
+{
+    /// <summary>The version it marked from, which it always keeps; 0 when the store holds no dataset.</summary>
+    public ulong Latest { get; init; }
+
+    /// <summary>The versions inside the window, newest first.</summary>
+    public ImmutableArray<ulong> Retained { get; init; } = [];
+
+    /// <summary>The window it applied: the dataset's retention, or seven days when it sets none.</summary>
+    public TimeSpan Window { get; init; }
+
+    /// <summary>The distinct tree pages the marking read.</summary>
+    public long PagesRead { get; init; }
+
+    /// <summary>The objects it deleted, or would have on a dry run: commit objects first.</summary>
+    public ImmutableArray<string> Deleted { get; init; } = [];
+
+    /// <summary>The unreferenced objects it kept because they are younger than the window: writers in flight.</summary>
+    public ImmutableArray<string> Young { get; init; } = [];
+
+    /// <summary>
+    /// The commit objects kept alive only by references into them, whose live pages and fragments are
+    /// under <see cref="VacuumOptions.RepackBelow"/> of their body: what a repack would free at the
+    /// next vacuum past the window.
+    /// </summary>
+    internal IReadOnlyList<ulong> Sparse { get; init; } = [];
+}
 
 /// <summary>
 /// Deletes what no version inside the retention window references, and never runs by itself. Ages
@@ -69,7 +78,7 @@ internal static class DatasetVacuum
         (ulong latest, CommitObject? head) = await DatasetCommitter.LatestAsync(store, cancellationToken).ConfigureAwait(false);
         if (head is null)
         {
-            return new VacuumResult(0, [], DefaultWindow, 0, [], [], []);
+            return new VacuumResult { Window = DefaultWindow };
         }
 
         RetentionSettings retention = head.Header.Retention;
@@ -162,7 +171,16 @@ internal static class DatasetVacuum
         }
 
         sparse.Sort();
-        return new VacuumResult(latest, retained, window, seen.Count, deleted, young, sparse);
+        return new VacuumResult
+        {
+            Latest = latest,
+            Retained = [.. retained],
+            Window = window,
+            PagesRead = seen.Count,
+            Deleted = [.. deleted],
+            Young = [.. young],
+            Sparse = sparse,
+        };
 
         async ValueTask MarkAsync(PageReference reference, int depth)
         {

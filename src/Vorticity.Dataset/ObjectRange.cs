@@ -16,7 +16,7 @@ namespace Vorticity.Dataset;
 /// The bytes are a <see cref="SegmentLease"/>, so a store hands out a pooled buffer, memory it keeps,
 /// or a response that arrived in pieces, and gets it back when the range is disposed.
 /// </remarks>
-internal struct ObjectRange : IDisposable
+public struct ObjectRange : IDisposable
 {
     private SegmentLease _bytes;
 

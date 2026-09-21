@@ -13,7 +13,7 @@ namespace Vorticity.Dataset;
 /// half-written. An object is never overwritten, and its token changes whenever the bytes under the
 /// key change. Retries, pooling and credentials belong to the implementation, not to this seam.
 /// </remarks>
-internal interface IObjectStore : IAsyncDisposable
+public interface IObjectStore : IAsyncDisposable
 {
     /// <summary>
     /// Reads a byte range of an object, and the object's token in the same answer. The length is
@@ -80,10 +80,10 @@ internal interface IObjectStore : IAsyncDisposable
 /// When the store created it, by the store's clock: two writers' clocks need not agree, and vacuum
 /// dates an object's age against the shared one.
 /// </param>
-internal readonly record struct ObjectHead(long Length, string Token, DateTimeOffset LastModified);
+public readonly record struct ObjectHead(long Length, string Token, DateTimeOffset LastModified);
 
 /// <summary>What <see cref="IObjectStore.PutIfAbsentAsync"/> did.</summary>
-internal enum PutOutcome
+public enum PutOutcome
 {
     /// <summary>The key was free and now holds the caller's bytes.</summary>
     Created = 0,
@@ -93,7 +93,7 @@ internal enum PutOutcome
 }
 
 /// <summary>No object has that key.</summary>
-internal sealed class ObjectNotFoundException : VortexException
+public sealed class ObjectNotFoundException : VortexException
 {
     /// <summary>Creates the exception; prefer <see cref="For"/>, which names the key.</summary>
     public ObjectNotFoundException()
@@ -144,8 +144,8 @@ internal sealed class ObjectNotFoundException : VortexException
         };
 }
 
-/// <summary>A store refused or failed an operation.</summary>
-internal sealed class ObjectStoreException : VortexException
+/// <summary>A store refused or failed an operation, or a dataset operation the store's answers refused.</summary>
+public sealed class ObjectStoreException : VortexException
 {
     /// <summary>Creates the exception with a default message.</summary>
     public ObjectStoreException()
