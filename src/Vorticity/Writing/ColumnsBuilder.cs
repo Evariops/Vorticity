@@ -286,31 +286,6 @@ public static class ColumnBuilderExtensions
         public void AppendNull() => Bits(b.Store).AppendNull();
     }
 
-    extension(ColumnBuilder<string> b)
-    {
-        /// <summary>Appends UTF-8 bytes, without transcoding.</summary>
-        public void Append(ReadOnlySpan<byte> utf8) => Text(b.Store).Append(utf8);
-
-        /// <summary>Appends text, transcoded to UTF-8.</summary>
-        public void Append(ReadOnlySpan<char> text) => Text(b.Store).Append(text);
-
-        /// <summary>Appends a value formatted as UTF-8 straight into the column: a number, a date, a Guid.</summary>
-        public void Append<TValue>(TValue value)
-            where TValue : IUtf8SpanFormattable => Text(b.Store).Append(value);
-
-        /// <summary>A span to write one value's UTF-8 bytes into, of exactly <paramref name="sizeHint"/> bytes when it is positive; <c>Commit</c> appends it.</summary>
-        public Span<byte> GetSpan(int sizeHint = 0) => Text(b.Store).GetSpan(sizeHint);
-
-        /// <summary>Appends the value of <paramref name="length"/> bytes written into the last span.</summary>
-        public void Commit(int length) => Text(b.Store).Commit(length);
-
-        /// <summary>Appends a null, to a nullable column.</summary>
-        public void AppendNull() => Text(b.Store).AppendNulls(1);
-
-        /// <summary>Appends <paramref name="count"/> nulls, to a nullable column.</summary>
-        public void AppendNulls(int count) => Text(b.Store).AppendNulls(count);
-    }
-
     extension(ColumnBuilder<ReadOnlyMemory<byte>> b)
     {
         /// <summary>Appends one value's bytes.</summary>
@@ -660,7 +635,7 @@ public static class ColumnBuilderExtensions
 
     private static BoolStore Bits(ColumnStore store) => (BoolStore)store;
 
-    private static VarBinStore Text(ColumnStore store) => (VarBinStore)store;
+    internal static VarBinStore Text(ColumnStore store) => (VarBinStore)store;
 
     private static FixedListStore Uuids(ColumnStore store) => (FixedListStore)store;
 

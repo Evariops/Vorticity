@@ -46,14 +46,6 @@ internal sealed record ValueModel(
         _ => MemberType,
     };
 
-    /// <summary>
-    /// The <c>T</c> of the builders <c>WriteRows</c> appends to: <see cref="ColumnType"/> with text
-    /// unannotated, because the text appends extend <c>ColumnBuilder&lt;string&gt;</c> and a
-    /// <c>ColumnBuilder&lt;string?&gt;</c> receiver is a nullability mismatch; a list keeps its
-    /// elements' annotations, which its generic appends infer from the span they take.
-    /// </summary>
-    public string WriteColumnType => Kind == ValueKind.Scalar && Scalar == ScalarKind.Utf8 ? CoreType : ColumnType;
-
     /// <summary>The <c>T</c> of <c>Sym&lt;T&gt;</c>: the member's own type, a list without its nullability.</summary>
     public string SymbolType => Kind == ValueKind.List ? "global::System.ReadOnlyMemory<" + Element!.MemberType + ">" : MemberType;
 

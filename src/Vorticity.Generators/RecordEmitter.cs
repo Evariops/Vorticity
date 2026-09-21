@@ -438,7 +438,7 @@ internal static class RecordEmitter
             }
             else
             {
-                w.Line($"{Vortex}ColumnBuilder<{value.WriteColumnType}> column = builder.Column<{value.WriteColumnType}>({k});");
+                w.Line($"{Vortex}ColumnBuilder<{value.ColumnType}> column = builder.Column<{value.ColumnType}>({k});");
                 w.Open("for (int i = 0; i < count; i++)");
                 EmitWriteValue(w, value, "column", source, ref unique);
                 w.Close();
