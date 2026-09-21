@@ -4,7 +4,7 @@
     <OutputType>Exe</OutputType>
     <RootNamespace>Vorticity.Samples</RootNamespace>
     <AssemblyName>vortex-samples</AssemblyName>
-    <Description>The programs the user guide quotes: one per page, compiled by the build.</Description>
+    <Description>The programs the user guide quotes: one per case, compiled by the build.</Description>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
@@ -12,6 +12,7 @@
     <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
     <ProjectReference Include="../../src/Vorticity.Dataset/Vorticity.Dataset.csproj" />
     <ProjectReference Include="../../src/Vorticity.RowEncoding/Vorticity.RowEncoding.csproj" />
+    <ProjectReference Include="../../src/Vorticity.Generators/Vorticity.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>
