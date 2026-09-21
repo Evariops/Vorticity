@@ -28,7 +28,11 @@ public enum CompressionProfile : byte
     /// <summary>The cheapest encodings to write, and no index.</summary>
     Fastest,
 
-    /// <summary>Size over decode speed.</summary>
+    /// <summary>
+    /// Size over decode speed: every column chunk is priced by its bytes alone, run-end among the
+    /// other candidates, and zstd, FSST and ALP are tried under the best exact plan's bytes rather
+    /// than only where no exact plan applies. The write costs more, and a read may decode slower.
+    /// </summary>
     Smallest,
 
     /// <summary>Every column canonical: no encoding at all.</summary>

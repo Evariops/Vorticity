@@ -672,9 +672,10 @@ internal static class ColumnCompressor
         // the other candidates changes a handful of chunks and is weighed on its own before it is
         // taken.
         DifferentialProbe? probe = Differential.Value;
+        bool sizeFirst = chunk.SizeFirst;
         ColumnPlan plan = ChooseByFormula(
             arena, nodeIndex, target, in stats, cascade, chunk,
-            runEndCompetes: probe is not null && probe.RunEndCompetes);
+            runEndCompetes: sizeFirst || (probe is not null && probe.RunEndCompetes), sizeFirst);
 
         // The oracle: when a test has installed a probe, the other chooser runs on the same chunk
         // with the same inputs and the two decisions are compared plan against plan, with the
@@ -1264,9 +1265,14 @@ internal static class ColumnCompressor
     /// <param name="cascade">What the parent knows about this child.</param>
     /// <param name="chunk">The cursor the statistics came from.</param>
     /// <param name="runEndCompetes">Whether run-end is priced against the others or wins outright.</param>
+    /// <param name="sizeFirst">
+    /// Whether the column goes to its smallest encoding whatever it costs to decode: no remembered
+    /// plan stands in for the pricing, and the trials are offered the column under the best exact
+    /// plan's bytes instead of only when no exact plan took it.
+    /// </param>
     private static ColumnPlan ChooseByFormula(
         CanonicalArena arena, int nodeIndex, VortexEdition target, in BlockStats stats,
-        Cascade cascade, ChunkStats chunk, bool runEndCompetes)
+        Cascade cascade, ChunkStats chunk, bool runEndCompetes, bool sizeFirst = false)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         int length = node.Length;
@@ -1325,7 +1331,7 @@ internal static class ColumnCompressor
         // and a chunk the pass did not measure is not trusted with one. What memory skips is
         // exactly what costs: the walks below and the trials at the end, never a candidate the
         // statistics have already answered above.
-        if (measured && chunk.Memory is { WithinTolerance: true } memory)
+        if (!sizeFirst && measured && chunk.Memory is { WithinTolerance: true } memory)
         {
             ColumnPlan remembered = Reprice(
                 memory.Scheme, arena, nodeIndex, node, target, in stats, cascade, chunk, plain);
@@ -1399,6 +1405,13 @@ internal static class ColumnCompressor
                 : Dictionary(arena, node, comparer, length, best);
             if (dictionary.Scheme != ColumnScheme.None)
             {
+                if (sizeFirst && dictionary.PredictedBytes > 0
+                    && Trials(arena, nodeIndex, node, target, dictionary.PredictedBytes, cascade.IsValuesChild) is { Scheme: not ColumnScheme.None } smaller)
+                {
+                    dictionary.ReleaseCodes();
+                    return smaller;
+                }
+
                 return dictionary;
             }
         }
@@ -1407,7 +1420,14 @@ internal static class ColumnCompressor
         // trials under the best cost in hand instead would let a zstd frame take a column a
         // bit-packing already holds -- smaller on disk, slower to decode, and different bytes -- so
         // a trial is offered only the columns no exactly priced scheme took, under the plain
-        // column's bytes as its ceiling.
+        // column's bytes as its ceiling. Size first is the one profile that wants exactly that.
+        if (sizeFirst && bestScheme != ColumnScheme.None
+            && Trials(arena, nodeIndex, node, target, best, cascade.IsValuesChild) is { Scheme: not ColumnScheme.None } trial)
+        {
+            walkedRuns.ReleaseCodes();
+            return trial;
+        }
+
         switch (bestScheme)
         {
             case ColumnScheme.RunEnd:

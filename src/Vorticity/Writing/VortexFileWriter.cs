@@ -93,6 +93,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
     void IChunkLedger.ElementsUnserved() => _elementChunksWithoutStatistics++;
 
+    /// <summary>Whether the chooser prices each column by its bytes alone, as <see cref="CompressionProfile.Smallest"/> asks.</summary>
+    private bool _sizeFirst;
+
+    bool IChunkLedger.SizeFirst => _sizeFirst;
+
     /// <summary>
     /// (Column chunk, field) pairs of a comparable kind whose distinct table could not answer, so the
     /// chooser walked the chunk to build the dictionary it would otherwise have read off the table.
@@ -400,7 +405,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
-            options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints);
+            options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints)
+        {
+            _sizeFirst = options.Compression == CompressionProfile.Smallest,
+        };
     }
 
     /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
