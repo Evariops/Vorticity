@@ -1463,7 +1463,11 @@ internal sealed class CanonicalArena
         // for a third one nobody has written yet; it costs one store, and no caller commits a
         // record with a live memo anyway, since the memo is written through `RecordRefMutable`
         // after the commit that issued the index.
+        //
+        // The word memo goes for the same reason and a worse outcome: it is a view onto a block the
+        // issuing arena rented, so a copy that kept it would read that arena's next batch.
         record.Materialized = -1;
+        record.Words = default;
 
         int index = _recordCount;
         _records[index] = record;
