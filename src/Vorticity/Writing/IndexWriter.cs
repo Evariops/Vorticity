@@ -1054,7 +1054,11 @@ internal sealed class IndexWriter : IDisposable
 
     private bool OverBudget(long dataBytes) => LivingBytes * 1000 > dataBytes * _budgetPerMille;
 
-    /// <summary>Abandons every index the caller did not mark required.</summary>
+    /// <summary>
+    /// Abandons every index the caller did not mark required and that has not yet written a byte.
+    /// One that has is kept: dropping it would leave its payloads in the file as dead weight, and
+    /// the verdict that let them out was the budget's own, reached before they were written.
+    /// </summary>
     private void AbandonForBudget(long dataBytes)
     {
         long living = LivingBytes;
@@ -1067,9 +1071,14 @@ internal sealed class IndexWriter : IDisposable
 
             foreach (IndexBuilder builder in _builders[field])
             {
+                if (builder.WrittenBytes > 0)
+                {
+                    continue;
+                }
+
                 builder.Abandon(
                     $"the file's indexes reached {living} bytes against {dataBytes} bytes of data, " +
-                    $"over the budget of {_budgetPerMille}‰ (VortexWriteOptions.IndexBudgetPerMille)");
+                    $"over the budget of {_budgetPerMille}‰ (IndexPolicy.WithBudgetPerMille)");
             }
         }
     }
