@@ -10,15 +10,21 @@ namespace Vorticity;
 /// </remarks>
 public class VortexException : Exception
 {
+    /// <summary>An exception with the default message.</summary>
     public VortexException()
     {
     }
 
+    /// <summary>An exception with <paramref name="message"/>.</summary>
+    /// <param name="message">What went wrong.</param>
     public VortexException(string message)
         : base(message)
     {
     }
 
+    /// <summary>An exception with <paramref name="message"/>, caused by <paramref name="innerException"/>.</summary>
+    /// <param name="message">What went wrong.</param>
+    /// <param name="innerException">The cause.</param>
     public VortexException(string message, Exception innerException)
         : base(message, innerException)
     {
@@ -36,11 +42,16 @@ public class VortexException : Exception
 /// </remarks>
 public sealed class VortexFormatException : VortexException
 {
+    /// <summary>A format violation described by <paramref name="message"/>.</summary>
+    /// <param name="message">What the bytes say that the format does not allow.</param>
     public VortexFormatException(string message)
         : base(message)
     {
     }
 
+    /// <summary>A format violation described by <paramref name="message"/>, found through <paramref name="innerException"/>.</summary>
+    /// <param name="message">What the bytes say that the format does not allow.</param>
+    /// <param name="innerException">The cause.</param>
     public VortexFormatException(string message, Exception innerException)
         : base(message, innerException)
     {
@@ -58,6 +69,9 @@ public sealed class VortexFormatException : VortexException
 /// </remarks>
 public sealed class VortexUnsupportedException : VortexException
 {
+    /// <summary>A refusal of <paramref name="componentId"/>, which this library does not implement.</summary>
+    /// <param name="componentId">The component's id, as the file names it.</param>
+    /// <param name="kind">What kind of component it is.</param>
     public VortexUnsupportedException(string componentId, ComponentKind kind)
         : base($"Unsupported Vortex component: {Describe(kind)} '{componentId}'. " +
                "This id is not implemented by Vorticity; check the edition that introduced it " +
@@ -67,6 +81,10 @@ public sealed class VortexUnsupportedException : VortexException
         Kind = kind;
     }
 
+    /// <summary>A refusal of <paramref name="componentId"/>, with what the input lacks or what to do instead.</summary>
+    /// <param name="componentId">The component's id, as the file or the request names it.</param>
+    /// <param name="kind">What kind of component it is.</param>
+    /// <param name="detail">Why, and what would work.</param>
     public VortexUnsupportedException(string componentId, ComponentKind kind, string detail)
         : base($"Unsupported Vortex component: {Describe(kind)} '{componentId}'. {detail}")
     {
@@ -101,11 +119,16 @@ public sealed class VortexUnsupportedException : VortexException
 /// </summary>
 public sealed class VortexSchemaException : VortexException
 {
+    /// <summary>A mismatch described by <paramref name="message"/>, naming the member or column and both types.</summary>
+    /// <param name="message">What does not fit, and why.</param>
     public VortexSchemaException(string message)
         : base(message)
     {
     }
 
+    /// <summary>A mismatch described by <paramref name="message"/>, found through <paramref name="innerException"/>.</summary>
+    /// <param name="message">What does not fit, and why.</param>
+    /// <param name="innerException">The cause.</param>
     public VortexSchemaException(string message, Exception innerException)
         : base(message, innerException)
     {
