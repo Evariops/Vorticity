@@ -271,8 +271,8 @@ internal static class RecordEmitter
                 w.Close();
                 break;
             case ValueKind.List:
-                w.Line($"{Vortex}Column<{value.ReadColumnType}> column = columns.Column<{value.ReadColumnType}>({k});");
-                w.Line($"{Vortex}Column<{value.Element!.ReadColumnType}> elements = column.Elements;");
+                w.Line($"{Vortex}Column<{value.ColumnType}> column = columns.Column<{value.ColumnType}>({k});");
+                w.Line($"{Vortex}Column<{value.Element!.ColumnType}> elements = column.Elements;");
                 Loop(w, value.IsNullable
                     ? $"{target} = column.IsValid(i) ? new global::System.ReadOnlyMemory<{value.Element.MemberType}>(ReadList{k}(column, elements, i)) : default({value.MemberType});"
                     : $"{target} = ReadList{k}(column, elements, i);");
@@ -285,7 +285,7 @@ internal static class RecordEmitter
                 }
                 else
                 {
-                    w.Line($"{Vortex}Column<{value.ReadColumnType}> column = columns.Column<{value.ReadColumnType}>({k});");
+                    w.Line($"{Vortex}Column<{value.ColumnType}> column = columns.Column<{value.ColumnType}>({k});");
                     Loop(w, $"{target} = {ScalarRead(value, "column", "i")};");
                 }
 
@@ -324,7 +324,7 @@ internal static class RecordEmitter
     private static void EmitReadList(SourceWriter w, ValueModel list, string name)
     {
         ValueModel element = list.Element!;
-        w.Open($"static {element.MemberType}[] {name}({Vortex}Column<{list.ReadColumnType}> column, {Vortex}Column<{element.ReadColumnType}> elements, int row)");
+        w.Open($"static {element.MemberType}[] {name}({Vortex}Column<{list.ColumnType}> column, {Vortex}Column<{element.ColumnType}> elements, int row)");
         w.Line("(int offset, int length) = column[row].GetOffsetAndLength(elements.Length);");
         if (element.IsNumber && !element.IsNullable && element.Kind == ValueKind.Scalar)
         {
@@ -346,7 +346,7 @@ internal static class RecordEmitter
         }
         else if (element.Kind == ValueKind.List)
         {
-            w.Line($"{Vortex}Column<{element.Element!.ReadColumnType}> inner = elements.Elements;");
+            w.Line($"{Vortex}Column<{element.Element!.ColumnType}> inner = elements.Elements;");
             string call = $"{name}_(elements, inner, offset + j)";
             read = element.IsNullable
                 ? $"elements.IsValid(offset + j) ? new global::System.ReadOnlyMemory<{element.Element.MemberType}>({call}) : default({element.MemberType})"
