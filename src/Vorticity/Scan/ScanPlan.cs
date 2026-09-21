@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// One pruning structure's contribution to a scan's mask of live blocks, and what consulting it

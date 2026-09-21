@@ -3,7 +3,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// The throw sites of the scan, each one non-inlineable so that the batch loop and the split walk

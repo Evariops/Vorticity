@@ -1,6 +1,6 @@
 using Vorticity.Expressions;
 using Vorticity.Keys;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Types;
 
 namespace Vorticity.Dataset;

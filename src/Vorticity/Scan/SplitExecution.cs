@@ -4,7 +4,7 @@ using Vorticity.Arrays;
 using Vorticity.File;
 using Vorticity.Layouts;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// Registers and executes one split of a scan — the two halves of a batch's read, shared by every

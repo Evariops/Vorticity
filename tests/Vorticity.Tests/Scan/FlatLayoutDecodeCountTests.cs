@@ -26,7 +26,7 @@ using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.Layouts;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Editions;
 using Vorticity.Tests.Writing;

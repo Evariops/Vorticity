@@ -20,7 +20,7 @@ using BenchmarkDotNet.Attributes;
 using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 
 namespace Vorticity.Benchmarks;
 

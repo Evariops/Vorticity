@@ -32,7 +32,7 @@ using BenchmarkDotNet.Attributes;
 using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.File;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;
 

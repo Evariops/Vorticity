@@ -289,7 +289,7 @@ public sealed class ScanContext : IDisposable
     /// scan like <see cref="LiveBlocks"/>: set once per lane, never by <see cref="ResetBatch"/>,
     /// and the readers add to it what they materialize.
     /// </summary>
-    internal Scan.ScanMetrics? Metrics { get; set; }
+    internal Scanning.ScanMetrics? Metrics { get; set; }
 
     /// <summary>
     /// Replaces the selection and returns what was there, for a reader that re-bases it per child.

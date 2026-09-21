@@ -15,7 +15,7 @@ using System.Globalization;
 
 using Vorticity.Arrays;
 using Vorticity.Layouts;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;

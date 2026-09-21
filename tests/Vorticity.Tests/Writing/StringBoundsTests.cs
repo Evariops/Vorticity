@@ -20,7 +20,7 @@ using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;

@@ -13,7 +13,7 @@ using System.Threading.Tasks;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 using Xunit;

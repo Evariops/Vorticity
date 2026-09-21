@@ -4,7 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Columns;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Writing;
 
 namespace Vorticity.Dataset;

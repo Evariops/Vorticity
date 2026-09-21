@@ -11,7 +11,7 @@ using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.IO;
 using Vorticity.Layouts;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;

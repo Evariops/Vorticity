@@ -4,7 +4,7 @@ using Vorticity.Arrays;
 using Vorticity.Layouts;
 using Vorticity.Types;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// The natural split boundaries of one scan, in root-layout row coordinates; a split is the unit

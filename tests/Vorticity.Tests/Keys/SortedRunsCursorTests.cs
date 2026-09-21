@@ -21,7 +21,7 @@ using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.IO;
 using Vorticity.Keys;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
@@ -767,7 +767,7 @@ public sealed class SortedRunsCursorTests
         await using Written written = await Written.CreateAsync();
         List<Entry> oracle = Oracle(column);
         ScanMetrics metrics = new ScanMetrics();
-        Vorticity.Scan.ScanBuilder scan = written.File.Scan()
+        Vorticity.Scanning.ScanBuilder scan = written.File.Scan()
             .InKeyOrder(column, descending)
             .WithDegreeOfParallelism(degree)
             .WithMetrics(metrics);
@@ -909,7 +909,7 @@ public sealed class SortedRunsCursorTests
     }
 
     /// <summary>The rows a key-ordered scan delivers in its order, its largest batch, and how many were empty.</summary>
-    private static async Task<(List<long> Rows, int Largest, int Empty)> OrderedRowsOf(Vorticity.Scan.ScanBuilder scan)
+    private static async Task<(List<long> Rows, int Largest, int Empty)> OrderedRowsOf(Vorticity.Scanning.ScanBuilder scan)
     {
         List<long> rows = [];
         int largest = 0;
@@ -936,7 +936,7 @@ public sealed class SortedRunsCursorTests
                 : Order(expected, actual) == 0));
 
     /// <summary>The file rows a scan returns, read from the fixture's row-number column.</summary>
-    private static async Task<List<long>> RowsOf(Vorticity.Scan.ScanBuilder scan)
+    private static async Task<List<long>> RowsOf(Vorticity.Scanning.ScanBuilder scan)
     {
         List<long> rows = [];
         await foreach (RecordBatch batch in scan.Project("row").ExecuteAsync())

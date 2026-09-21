@@ -15,7 +15,7 @@ using Vorticity.IO;
 using Vorticity.Layouts;
 using Vorticity.Types;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>The batches of one compiled scan.</summary>
 /// <remarks>

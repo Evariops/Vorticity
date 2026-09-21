@@ -21,7 +21,7 @@ using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.IO;
 using Vorticity.Keys;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;

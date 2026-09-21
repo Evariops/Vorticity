@@ -6,7 +6,7 @@ using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Layouts;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Types;
 
 namespace Vorticity.Keys;

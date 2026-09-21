@@ -24,7 +24,7 @@ using BenchmarkDotNet.Attributes;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.RowEncoding;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 
 namespace Vorticity.Benchmarks;
 

@@ -20,7 +20,7 @@ using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.File;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;

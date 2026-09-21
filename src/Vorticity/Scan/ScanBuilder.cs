@@ -10,7 +10,7 @@ using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Types;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>Builds and launches one scan over an open <see cref="VortexFile"/>.</summary>
 /// <remarks>

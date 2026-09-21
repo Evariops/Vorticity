@@ -15,7 +15,7 @@ using System.Threading.Tasks;
 using Vorticity.Columns;
 using Vorticity.Conformance.Corpus;
 using Vorticity.File;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Xunit;
 
 namespace Vorticity.Conformance;

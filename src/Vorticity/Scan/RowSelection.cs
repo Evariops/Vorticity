@@ -2,7 +2,7 @@ using System;
 
 using Vorticity.File;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// The row indices a take asks for, sorted and deduplicated once when the scan is built so that

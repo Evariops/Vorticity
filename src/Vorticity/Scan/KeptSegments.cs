@@ -4,7 +4,7 @@ using Vorticity.Buffers;
 using Vorticity.IO;
 using Vorticity.Serialization.Schemas;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// The segments one lane's last batch read, held for its next one.

@@ -12,7 +12,7 @@ using System;
 using System.Diagnostics;
 
 using Vorticity.Arrays;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Types;
 using Xunit;
 

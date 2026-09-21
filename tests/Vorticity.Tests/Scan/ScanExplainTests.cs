@@ -17,7 +17,7 @@ using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Layouts;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Xunit;
 
 namespace Vorticity.Tests.Scan;

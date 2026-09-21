@@ -133,7 +133,7 @@ internal sealed class BloomPruner
     internal static async ValueTask<bool> FileMayMatchAsync(
         VortexFile file, VortexExpr filter, CancellationToken cancellationToken)
     {
-        long blockRows = Scan.SplitPlan.NaturalBatchRows(file.LayoutTree);
+        long blockRows = Scanning.SplitPlan.NaturalBatchRows(file.LayoutTree);
         if (file.RowCount <= 0 || blockRows <= 0)
         {
             return true;

@@ -3,7 +3,7 @@ using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>File-level pruning, before a scan is even built.</summary>
 /// <remarks>

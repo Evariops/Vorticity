@@ -1,6 +1,6 @@
 using System.Threading;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// Counters a scan adds to as it runs, reporting after execution what <c>Explain</c> planned, so

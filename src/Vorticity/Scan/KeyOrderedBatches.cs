@@ -13,7 +13,7 @@ using Vorticity.Indexes;
 using Vorticity.Keys;
 using Vorticity.Layouts;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>A scan whose batches come in the key order of one column.</summary>
 /// <remarks>

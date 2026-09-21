@@ -38,7 +38,7 @@ using Vorticity.Expressions;
 using Vorticity.Conformance.Corpus;
 using Vorticity.File;
 using Vorticity.Layouts;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Types;
 using Xunit;
 

@@ -26,7 +26,7 @@ using Vorticity.IO;
 using Vorticity.Layouts;
 using Vorticity.RowEncoding;
 using Vorticity.Serialization.Schemas;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Types;
 
 namespace Vorticity.Tools.VxDump;

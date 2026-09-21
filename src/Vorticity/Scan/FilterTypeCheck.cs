@@ -3,7 +3,7 @@ using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Types;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// Refuses a filter whose constants name a comparison the schema cannot make, before anything is

@@ -7,7 +7,7 @@ using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.Keys;
 using Vorticity.RowEncoding;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;
 

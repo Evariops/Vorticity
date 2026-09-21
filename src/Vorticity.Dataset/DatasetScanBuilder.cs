@@ -7,7 +7,7 @@ using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Keys;
 using Vorticity.RowEncoding;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Types;
 
 namespace Vorticity.Dataset;

@@ -4,7 +4,7 @@ using System.Threading.Tasks;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Indexes;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Writing;
 
 namespace Vorticity.Samples;

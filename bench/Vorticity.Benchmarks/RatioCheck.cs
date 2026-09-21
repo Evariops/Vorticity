@@ -37,7 +37,7 @@ using Vorticity.Columns;
 using Vorticity.Editions;
 using Vorticity.Expressions;
 using Vorticity.File;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 
 namespace Vorticity.Benchmarks;
 

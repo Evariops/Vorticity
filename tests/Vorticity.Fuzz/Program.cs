@@ -33,7 +33,7 @@ using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.IO;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 
 namespace Vorticity.Fuzz;
 

@@ -22,7 +22,7 @@ using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Layouts;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;
 using Xunit;

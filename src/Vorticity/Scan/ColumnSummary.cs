@@ -6,7 +6,7 @@ using Vorticity.File;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// What one column says about a whole file: a lower bound, an upper bound, and nulls. A caller that

@@ -6,7 +6,7 @@ using Vorticity.Arrays;
 using Vorticity.Layouts;
 using Vorticity.Types;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// A compiled projection: the set of leaf paths a scan will materialize, as a

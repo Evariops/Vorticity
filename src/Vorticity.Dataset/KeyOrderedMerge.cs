@@ -5,7 +5,7 @@ using System.Threading.Tasks;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.RowEncoding;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Types;
 
 namespace Vorticity.Dataset;

@@ -12,7 +12,7 @@ using Vorticity.Layouts;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// The terminals of one scan - any, count, smallest, largest - answered without ever building a

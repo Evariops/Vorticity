@@ -14,7 +14,7 @@ using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.Layouts;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Tests.Columns;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;

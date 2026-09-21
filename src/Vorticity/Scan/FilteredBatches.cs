@@ -9,7 +9,7 @@ using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Keys;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// A filtered scan: zone-pruned before reading, empty batches skipped after, so that no consumer has

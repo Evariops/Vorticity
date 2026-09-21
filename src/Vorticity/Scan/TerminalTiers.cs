@@ -1,6 +1,6 @@
 using System;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// Which proofs a terminal may take before decoding. The tiers are switches because a wrong proof

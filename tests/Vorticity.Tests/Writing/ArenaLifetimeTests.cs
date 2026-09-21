@@ -23,7 +23,7 @@ using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Xunit;
 

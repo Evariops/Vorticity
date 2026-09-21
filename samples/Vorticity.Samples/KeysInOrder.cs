@@ -4,7 +4,7 @@ using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Keys;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 
 namespace Vorticity.Samples;
 

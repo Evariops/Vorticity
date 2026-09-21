@@ -2,7 +2,7 @@ using System;
 
 using Vorticity.Layouts;
 
-namespace Vorticity.Scan;
+namespace Vorticity.Scanning;
 
 /// <summary>
 /// The immutable description of one batch, threaded through both phases of the executor. Segment

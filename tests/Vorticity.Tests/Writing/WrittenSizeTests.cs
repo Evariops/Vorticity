@@ -21,7 +21,7 @@ using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.Layouts;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Writing;
 using Xunit;

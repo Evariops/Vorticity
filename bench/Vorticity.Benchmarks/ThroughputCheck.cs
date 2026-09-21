@@ -47,7 +47,7 @@ using System.Threading.Tasks;
 using Vorticity;
 using Vorticity.Columns;
 using Vorticity.File;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 
 namespace Vorticity.Benchmarks;
 

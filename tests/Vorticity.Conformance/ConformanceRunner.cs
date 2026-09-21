@@ -20,7 +20,7 @@ using Vorticity.Conformance.Corpus;
 using Vorticity.Conformance.Sidecar;
 using Vorticity.Types;
 using Vorticity.File;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 
 namespace Vorticity.Conformance;
 

@@ -6,7 +6,7 @@ using System.Runtime.CompilerServices;
 using Vorticity.Arrays;
 using Vorticity.Compute;
 using Vorticity.Layouts;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Vorticity.Types;
 
 namespace Vorticity.Columns;

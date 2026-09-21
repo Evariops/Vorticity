@@ -24,7 +24,7 @@ using Vorticity.Columns;
 using Vorticity.Conformance.Corpus;
 using Vorticity.File;
 using Vorticity.IO;
-using Vorticity.Scan;
+using Vorticity.Scanning;
 using Xunit;
 
 namespace Vorticity.Conformance;
