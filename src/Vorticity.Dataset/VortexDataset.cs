@@ -685,18 +685,24 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         draft.Take();
-        try
-        {
-            // Disposing completes the file unless the caller already did; the rows it holds are
-            // known once the last chunk is out.
-            await draft.Writer.DisposeAsync().ConfigureAwait(false);
-            return await SealAsync(draft, draft.Writer.RowCount, firstRow, cancellationToken).ConfigureAwait(false);
-        }
-        catch (VortexFormatException torn) when (!draft.Sink.IsCommitted)
+        if (draft.Writer.IsAbandoned)
         {
             draft.Sink.Discard();
             throw new InvalidOperationException(
-                $"The writer of '{draft.Key}' did not complete a file, having been abandoned; nothing was put.", torn);
+                $"The writer of '{draft.Key}' did not complete a file, having been abandoned; nothing was put.");
+        }
+
+        try
+        {
+            // Completed here unless the caller already did; the rows it holds are known once the
+            // last chunk is out.
+            if (!draft.Writer.IsFinished)
+            {
+                await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await draft.Writer.DisposeAsync().ConfigureAwait(false);
+            return await SealAsync(draft, draft.Writer.RowCount, firstRow, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
