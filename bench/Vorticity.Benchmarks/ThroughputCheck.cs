@@ -623,9 +623,11 @@ internal static class ThroughputCheck
     /// </para>
     /// <para>
     /// And a lowered line is taken only when its new ceiling clears every `--check` reading made
-    /// alongside the calibration. The passes run in child processes, and on the string-writing axes
-    /// a child has read a fifth under the process the gate runs in: a reference set from the passes
-    /// alone would sit where the gate itself never measures.
+    /// alongside the calibration. The reference implementation's writes of dictionary, onpair and
+    /// zstd columns sometimes run a quarter slower, for a whole process or part of one, ours
+    /// unchanged; a `--recalibrate` pass is in that state far more often than a `--check` run, and
+    /// the cause is not known. A reference set from the passes alone would sit where the gate
+    /// itself rarely measures.
     /// </para>
     /// </remarks>
     private static readonly Reference[] References =
@@ -879,7 +881,7 @@ internal static class ThroughputCheck
         new("masked_all_invalid", 0.37, 0.018),   // 3 passes, spread 0.36-0.37; was 0.38, -2.3%
         new("masked_all_valid", 0.083, 0.171),   // 3 passes, spread 0.069-0.083; was 0.086, -3.4%
         new("null", 0.23, 0.049),   // 3 passes, spread 0.21-0.23; was 0.23, -1.9%
-        new("onpair", 1.13, 0.025),   // raised deliberately: three processes never measured under it
+        new("onpair", 0.94, 0.215),   // 3 passes, spread 0.74-0.94; was 1.13, -16.8%
         new("parquet_variant", 0.99, 0.019),   // 3 passes, spread 0.97-0.99; was 1.05, -6.1%
         new("pco", 0.13, 0.030),   // 3 passes, spread 0.12-0.13; was 0.13, -2.0%
         new("primitive", 0.14, 0.079),   // 3 passes, spread 0.13-0.14; HELD at 0.14: 1 of 3 passes above, peak 0.14, no loosening
@@ -893,7 +895,7 @@ internal static class ThroughputCheck
         new("varbinview", 0.19, 0.013),   // 3 passes, spread 0.18-0.19; was 0.22, -15.1%
         new("variant", 0.081, 0.181),   // 3 passes, spread 0.066-0.081; was 0.093, -12.9%
         new("zigzag", 0.28, 0.056),   // 3 passes, spread 0.27-0.28; was 0.33, -14.0%
-        new("zstd", 0.91, 0.005),   // raised deliberately: three processes never measured under it
+        new("zstd", 0.76, 0.151),   // 3 passes, spread 0.64-0.76; was 0.91, -16.5%
         new("zstd_buffers", 0.051, 0.010),   // 3 passes, spread 0.051-0.051; was 0.060, -14.6%
         new("list", 0.81, 0.009),   // 3 passes, spread 0.80-0.81; was 0.97, -16.8%
         new("listview", 0.50, 0.003),   // 3 passes, spread 0.50-0.50; was 0.58, -13.2%
@@ -939,7 +941,7 @@ internal static class ThroughputCheck
         new("masked_all_valid", 0.46, 0.129),   // 3 passes, spread 0.43-0.49; HELD at 0.46: 2 of 3 passes above, peak 0.49, no loosening
         new("null", 0.83, 0.026),   // 3 passes, spread 0.81-0.83; HELD at 0.83: 1 of 3 passes above, peak 0.83, no loosening
         new("onpair", 0.50, 0.056),   // 3 passes, spread 0.47-0.50; was 0.55, -8.5%
-        new("parquet_variant", 1.08, 0.040),   // 3 passes, spread 0.86-1.08; was 6.71, -84.0% (PERF-GAPS V2 : DecodeSelected sur parquet.variant ET VarBin ; plus le harnais corrige)
+        new("parquet_variant", 1.00, 0.166),   // 3 passes, spread 0.83-1.00; was 1.08, -7.3%
         new("pco", 0.83, 0.030),   // 3 passes, spread 0.81-0.84; HELD at 0.83: 1 of 3 passes above, peak 0.84, no loosening
         new("primitive", 0.32, 0.058),   // 3 passes, spread 0.32-0.34; HELD at 0.32: 2 of 3 passes above, peak 0.34, no loosening
         new("runend", 0.96, 0.064),   // 3 passes, spread 0.90-0.96; was 1.00, -3.9%
