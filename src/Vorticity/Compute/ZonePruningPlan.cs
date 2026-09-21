@@ -355,6 +355,9 @@ internal static class ZonePruningPlan
             return new ZoneColumn(candidate.Field, 0, rowCount, []);
         }
 
+        // A decimal's bounds are read as the unscaled values a decimal filter carries, and the
+        // column says so, because those bytes order as numbers and not as strings.
+        bool isDecimal = IsDecimal(candidate.Node.DType);
         int count = zones.Length;
         ZoneBounds[] bounds = new ZoneBounds[count];
         for (int z = 0; z < count; z++)
@@ -362,9 +365,9 @@ internal static class ZonePruningPlan
             FilterLiteral min = default;
             FilterLiteral max = default;
             bool hasMin = minColumn >= 0 &&
-                TryReadBound(context.Canonical, zones.GetFieldIndex(minColumn), z, out min);
+                TryReadBound(context.Canonical, zones.GetFieldIndex(minColumn), z, isDecimal, out min);
             bool hasMax = maxColumn >= 0 &&
-                TryReadBound(context.Canonical, zones.GetFieldIndex(maxColumn), z, out max);
+                TryReadBound(context.Canonical, zones.GetFieldIndex(maxColumn), z, isDecimal, out max);
 
             long nulls = 0;
             bool hasNulls = false;
@@ -394,7 +397,18 @@ internal static class ZonePruningPlan
                 hasNans);
         }
 
-        return new ZoneColumn(candidate.Field, map.ZoneLength, rowCount, bounds);
+        return new ZoneColumn(candidate.Field, map.ZoneLength, rowCount, bounds, isDecimal);
+    }
+
+    /// <summary>Whether a column's dtype is a decimal, through any extension over one.</summary>
+    private static bool IsDecimal(DType dtype)
+    {
+        for (int i = 0; i < VortexLimits.MaxDTypeDepth && !dtype.IsDefault && dtype.Kind == DTypeKind.Extension; i++)
+        {
+            dtype = dtype.StorageType;
+        }
+
+        return !dtype.IsDefault && dtype.Kind == DTypeKind.Decimal;
     }
 
     /// <summary>
@@ -409,12 +423,13 @@ internal static class ZonePruningPlan
     /// bound; one whose flag is clear has it in <c>bound</c>. A reader that does not know this
     /// shape sees no maximum at all on a string column and prunes from the minimum alone.
     /// </remarks>
-    private static bool TryReadBound(CanonicalArena arena, int nodeIndex, int zone, out FilterLiteral literal)
+    private static bool TryReadBound(
+        CanonicalArena arena, int nodeIndex, int zone, bool isDecimal, out FilterLiteral literal)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         if (node.Kind != CanonicalKind.Struct)
         {
-            return LiteralReader.TryRead(arena, nodeIndex, zone, out literal);
+            return Read(arena, nodeIndex, zone, isDecimal, out literal);
         }
 
         literal = default;
@@ -431,8 +446,13 @@ internal static class ZonePruningPlan
             return false;
         }
 
-        return LiteralReader.TryRead(arena, node.GetFieldIndex(bound), zone, out literal);
+        return Read(arena, node.GetFieldIndex(bound), zone, isDecimal, out literal);
     }
+
+    private static bool Read(CanonicalArena arena, int nodeIndex, int zone, bool isDecimal, out FilterLiteral literal) =>
+        isDecimal
+            ? LiteralReader.TryReadDecimal(arena, nodeIndex, zone, out literal)
+            : LiteralReader.TryRead(arena, nodeIndex, zone, out literal);
 
     private static bool TryCount(FilterLiteral literal, out long count)
     {

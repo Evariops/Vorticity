@@ -5,6 +5,7 @@ using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
+using Vorticity.Types.Numerics;
 
 namespace Vorticity.Scanning;
 
@@ -77,7 +78,8 @@ internal static class ColumnSummaries
         List<ColumnSummary> summaries = new List<ColumnSummary>(count);
         for (int index = 0; index < count; index++)
         {
-            ColumnSummary summary = Read(schema.GetFieldName(index), statistics.GetField(index));
+            ColumnSummary summary = Read(
+                schema.GetFieldName(index), statistics.GetField(index), schema.GetField(index));
             if (!summary.IsEmpty)
             {
                 summaries.Add(summary);
@@ -119,7 +121,7 @@ internal static class ColumnSummaries
                 continue;
             }
 
-            ColumnSummary summary = Read(path, statistics.GetField(index));
+            ColumnSummary summary = Read(path, statistics.GetField(index), schema.GetField(index));
             if (!summary.IsEmpty)
             {
                 summaries.Add(summary);
@@ -147,17 +149,59 @@ internal static class ColumnSummaries
     /// <summary>One field's statistics as a summary, or an empty one when it records nothing usable.</summary>
     /// <param name="path">The column's path.</param>
     /// <param name="field">Its file-level statistics.</param>
-    internal static ColumnSummary Read(string path, FieldStatistics field)
+    /// <param name="type">Its dtype, which says how its bounds order.</param>
+    /// <remarks>
+    /// A decimal's statistic is its unscaled value as little-endian bytes, which order as a number
+    /// and not bytewise, and a summary does not say which of the two its bytes are. So a decimal
+    /// bound is kept only as the signed integer it is when it fits one, where every comparison
+    /// orders it numerically, and dropped otherwise, which prunes less and never wrongly.
+    /// </remarks>
+    internal static ColumnSummary Read(string path, FieldStatistics field, DType type)
     {
         FilterLiteral min = default;
         FilterLiteral max = default;
-        bool hasMin = field.HasMin && FileStatisticsPruner.TryLiteral(field.Min, out min);
-        bool hasMax = field.HasMax && FileStatisticsPruner.TryLiteral(field.Max, out max);
+        bool isDecimal = IsDecimal(type);
+        bool hasMin = field.HasMin && TryBound(field.Min, isDecimal, out min);
+        bool hasMax = field.HasMax && TryBound(field.Max, isDecimal, out max);
         bool exact = (!field.HasMin || field.MinPrecision == StatPrecision.Exact)
             && (!field.HasMax || field.MaxPrecision == StatPrecision.Exact);
         bool hasNulls = field.TryGetStoredNullCount(out ulong nulls) && nulls <= long.MaxValue;
         return new ColumnSummary(
             path, min, hasMin, max, hasMax, exact, hasNulls ? (long)nulls : 0, hasNulls);
+    }
+
+    private static bool TryBound(ScalarValue value, bool isDecimal, out FilterLiteral literal)
+    {
+        if (!isDecimal)
+        {
+            return FileStatisticsPruner.TryLiteral(value, out literal);
+        }
+
+        literal = default;
+        if (value.Kind != ScalarValueKind.Bytes)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<byte> bytes = value.AsBytes;
+        if (bytes.Length is not (1 or 2 or 4 or 8 or 16 or Int256.ByteCount) ||
+            !ComparisonKernels.Widen(bytes, bytes.Length, 0).TryToInt64(out long unscaled))
+        {
+            return false;
+        }
+
+        literal = FilterLiteral.From(unscaled);
+        return true;
+    }
+
+    private static bool IsDecimal(DType type)
+    {
+        for (int i = 0; i < VortexLimits.MaxDTypeDepth && !type.IsDefault && type.Kind == DTypeKind.Extension; i++)
+        {
+            type = type.StorageType;
+        }
+
+        return !type.IsDefault && type.Kind == DTypeKind.Decimal;
     }
 
     /// <summary>A summary as the zone pruner's bounds over a zone of <paramref name="rows"/> rows.</summary>

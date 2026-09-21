@@ -1,6 +1,7 @@
 using System;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.Types.Numerics;
 
 namespace Vorticity.Compute;
 
@@ -154,6 +155,16 @@ internal sealed class ZonePruner : IBlockPruner
                 return MayMatchComparison(comparison.Field, op, comparison.Value, rows, nanMatches);
             }
 
+            case ExprKind.ColumnComparison:
+            {
+                // The same push-down as a comparison with a constant, NaN rule included: the
+                // negation of an ordering holds on a NaN row, and so does !=.
+                ColumnComparisonExpr columns = (ColumnComparisonExpr)expr;
+                ComparisonOp op = negated ? Negate(columns.Op) : columns.Op;
+                bool nanMatches = (negated && IsOrdering(columns.Op)) || op == ComparisonOp.NotEqual;
+                return MayMatchColumns(columns, op, rows, nanMatches);
+            }
+
             case ExprKind.NullCheck:
             {
                 NullCheckExpr check = (NullCheckExpr)expr;
@@ -295,6 +306,12 @@ internal sealed class ZonePruner : IBlockPruner
     /// </summary>
     private bool PrefixMayMatch(FieldExpr field, ReadOnlySpan<byte> prefix, RowRange rows)
     {
+        // A decimal's bounds are numbers, and a byte prefix is no range over them.
+        if (Find(field) is { IsDecimal: true })
+        {
+            return true;
+        }
+
         if (!MayMatchComparison(
                 field, ComparisonOp.GreaterOrEqual, FilterLiteral.From(prefix), rows))
         {
@@ -402,6 +419,20 @@ internal sealed class ZonePruner : IBlockPruner
     private static FilterLiteralKind? BoundsKind(ZoneBounds bounds) =>
         bounds.HasMin ? bounds.Min.Kind : bounds.HasMax ? bounds.Max.Kind : null;
 
+    /// <summary>
+    /// How many of the zone's rows are NaN: <c>nan_count</c> when the zone has one, none when
+    /// its bounds are of a type that has none, undecided otherwise.
+    /// </summary>
+    private static long? NaNs(ZoneBounds bounds, long rows)
+    {
+        if (bounds.HasNanCount)
+        {
+            return Math.Min(bounds.NanCount, rows);
+        }
+
+        return BoundsKind(bounds) is FilterLiteralKind kind && kind != FilterLiteralKind.Float ? 0 : null;
+    }
+
     private static bool IsOrdering(ComparisonOp op) =>
         op is ComparisonOp.Less or ComparisonOp.LessOrEqual
             or ComparisonOp.Greater or ComparisonOp.GreaterOrEqual;
@@ -436,6 +467,9 @@ internal sealed class ZonePruner : IBlockPruner
 
                 return Decide(comparison.Field, rows, ZoneQuestion.Compare(comparison.Op, comparison.Value));
             }
+
+            case ExprKind.ColumnComparison:
+                return ColumnsVerdict((ColumnComparisonExpr)expr, rows);
 
             case ExprKind.NullCheck:
             {
@@ -602,12 +636,12 @@ internal sealed class ZonePruner : IBlockPruner
     /// minimum is at or above the stated one and <c>min ≥ v</c> therefore proves <c>x ≥ v</c>;
     /// equality is proven only from exact bounds.
     /// </summary>
-    private static Proof Prove(ZoneBounds bounds, ComparisonOp op, FilterLiteral value)
+    private static Proof Prove(ZoneColumn column, ZoneBounds bounds, ComparisonOp op, FilterLiteral value)
     {
         int low = 0;
         int high = 0;
-        bool hasLow = bounds.HasMin && TryCompare(bounds.Min, value, out low);
-        bool hasHigh = bounds.HasMax && TryCompare(bounds.Max, value, out high);
+        bool hasLow = bounds.HasMin && TryOrder(column, bounds.Min, value, out low);
+        bool hasHigh = bounds.HasMax && TryOrder(column, bounds.Max, value, out high);
         switch (op)
         {
             case ComparisonOp.GreaterOrEqual:
@@ -748,23 +782,9 @@ internal sealed class ZonePruner : IBlockPruner
             }
         }
 
-        /// <summary>
-        /// How many of the zone's rows are NaN: <c>nan_count</c> when the zone has one, none when
-        /// its bounds are of a type that has none, undecided otherwise.
-        /// </summary>
-        private static long? NaNs(ZoneBounds bounds, long rows)
-        {
-            if (bounds.HasNanCount)
-            {
-                return Math.Min(bounds.NanCount, rows);
-            }
-
-            return BoundsKind(bounds) is FilterLiteralKind kind && kind != FilterLiteralKind.Float ? 0 : null;
-        }
-
         private RangeVerdict Comparison(ZoneColumn column, ZoneBounds bounds, long rows, long? nulls)
         {
-            Proof proof = Prove(bounds, _op, _value);
+            Proof proof = Prove(column, bounds, _op, _value);
             long? nans = NaNs(bounds, rows);
             if (_op == ComparisonOp.NotEqual)
             {
@@ -822,7 +842,7 @@ internal sealed class ZonePruner : IBlockPruner
                         continue;
                     }
 
-                    Proof proof = Prove(bounds, ComparisonOp.Equal, literals[i]);
+                    Proof proof = Prove(column, bounds, ComparisonOp.Equal, literals[i]);
                     anyAll |= proof == Proof.All;
                     allNone &= proof == Proof.None;
                 }
@@ -847,7 +867,7 @@ internal sealed class ZonePruner : IBlockPruner
         /// </summary>
         private RangeVerdict PrefixRange(ZoneColumn column, ZoneBounds bounds, long rows, long? nulls)
         {
-            if (BoundsKind(bounds) != FilterLiteralKind.Bytes)
+            if (column.IsDecimal || BoundsKind(bounds) != FilterLiteralKind.Bytes)
             {
                 return RangeVerdict.Of(rows, null, null, nulls, column);
             }
@@ -929,24 +949,24 @@ internal sealed class ZonePruner : IBlockPruner
                 // ordered against k settles nothing, and reading the 0 that says so as "equal"
                 // would rule the zone out -- every zone, for a constant of another kind, which is
                 // an empty answer where an error is owed.
-                return !bounds.HasMax || !TryCompare(bounds.Max, value, out int over) ||
+                return !bounds.HasMax || !TryOrder(column, bounds.Max, value, out int over) ||
                        Satisfiable(op, over, upper: true);
 
             case ComparisonOp.Less:
             case ComparisonOp.LessOrEqual:
-                return !bounds.HasMin || !TryCompare(bounds.Min, value, out int under) ||
+                return !bounds.HasMin || !TryOrder(column, bounds.Min, value, out int under) ||
                        Satisfiable(op, under, upper: false);
 
             case ComparisonOp.Equal:
                 // k has to sit inside [min, max]. Inexact bounds only widen that interval, so the
                 // containment test stays sound; what they forbid is the opposite shortcut,
                 // "min == max means the zone is constant", which is not used here.
-                if (bounds.HasMin && Compare(bounds.Min, value) is int low && low > 0)
+                if (bounds.HasMin && TryOrder(column, bounds.Min, value, out int low) && low > 0)
                 {
                     return false;
                 }
 
-                if (bounds.HasMax && Compare(bounds.Max, value) is int high && high < 0)
+                if (bounds.HasMax && TryOrder(column, bounds.Max, value, out int high) && high < 0)
                 {
                     return false;
                 }
@@ -981,14 +1001,28 @@ internal sealed class ZonePruner : IBlockPruner
     };
 
     /// <summary>
-    /// Orders a bound against a constant, in the comparison kernels' own domain.
+    /// Orders a bound of <paramref name="column"/> against a constant the way the kernels order
+    /// that column's values: numerically for a decimal, whose bounds and constants are unscaled
+    /// integers at one scale, and by <see cref="TryCompare"/> otherwise.
     /// </summary>
-    /// <returns>
-    /// The sign of <c>bound - value</c>, or <c>0</c> when the two are not comparable -- which makes
-    /// every caller fall back to "may match" rather than guessing an order.
-    /// </returns>
-    private static int Compare(FilterLiteral bound, FilterLiteral value) =>
-        TryCompare(bound, value, out int order) ? order : 0;
+    /// <returns>Whether the two are comparable; a caller that cannot order them claims nothing.</returns>
+    private static bool TryOrder(ZoneColumn column, FilterLiteral bound, FilterLiteral value, out int order)
+    {
+        if (!column.IsDecimal)
+        {
+            return TryCompare(bound, value, out order);
+        }
+
+        if (ComparisonKernels.TryDecimal(bound, out Int256 left) &&
+            ComparisonKernels.TryDecimal(value, out Int256 right))
+        {
+            order = left.CompareTo(right);
+            return true;
+        }
+
+        order = 0;
+        return false;
+    }
 
     /// <summary>
     /// Orders a bound against a constant the way the comparison kernels order a value against
@@ -1087,6 +1121,337 @@ internal sealed class ZonePruner : IBlockPruner
         return true;
     }
 
+    // ------------------------------------------------------------------------- two columns
+
+    /// <summary>
+    /// Whether a row of <paramref name="rows"/> may satisfy <c>left op right</c>, from the bounds
+    /// of the two columns.
+    /// </summary>
+    /// <param name="columns">The comparison.</param>
+    /// <param name="op">Its operator, negation already pushed in.</param>
+    /// <param name="rows">The candidate range.</param>
+    /// <param name="nanMatches">Whether a NaN on either side satisfies the pushed-down predicate.</param>
+    /// <remarks>
+    /// A null on either side is unknown, so a range where one column holds nothing but nulls holds
+    /// no match, and the two intervals settle the rest: <c>a &gt; b</c> is impossible where
+    /// <c>max(a) &lt;= min(b)</c>. Two maps cut into the same zones are asked zone by zone, which is
+    /// what a block is; two maps cut differently are asked once over the range, each side's bounds
+    /// widened over every zone it touches.
+    /// </remarks>
+    private bool MayMatchColumns(ColumnComparisonExpr columns, ComparisonOp op, RowRange rows, bool nanMatches)
+    {
+        ZoneColumn? left = Usable(columns.Left);
+        ZoneColumn? right = Usable(columns.Right);
+        if (HoldsNoValue(left, rows) || HoldsNoValue(right, rows))
+        {
+            return false;
+        }
+
+        if (left is null || right is null || !Covers(left, rows) || !Covers(right, rows))
+        {
+            return true;
+        }
+
+        if (Aligned(left, right))
+        {
+            ZoneRange zones = left.Zones(rows);
+            for (int zone = zones.Start; zone < zones.End; zone++)
+            {
+                ZoneBounds a = left.Bounds(zone);
+                ZoneBounds b = right.Bounds(zone);
+                if (AllNull(left, a, zone) || AllNull(right, b, zone))
+                {
+                    continue;
+                }
+
+                if (ProvePair(left, a, op, right, b) != Proof.None ||
+                    (nanMatches && (ZoneMayHoldNaN(left, zone) || ZoneMayHoldNaN(right, zone))))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        ZoneBounds widenedLeft = Widen(left, rows, out bool leftNaN);
+        ZoneBounds widenedRight = Widen(right, rows, out bool rightNaN);
+        return ProvePair(left, widenedLeft, op, right, widenedRight) != Proof.None ||
+               (nanMatches && (leftNaN || rightNaN));
+    }
+
+    /// <summary>
+    /// The verdict of <c>left op right</c> over <paramref name="rows"/>, in three-valued logic with
+    /// counts.
+    /// </summary>
+    /// <remarks>
+    /// The unknown rows are the union of the two columns' nulls, and the counts give that union
+    /// only when one side has none, so the other counts are decided per zone as far as that goes:
+    /// nothing true where the bounds rule the comparison out, everything decided true where they
+    /// prove it and one side holds no null. Maps cut differently prove only that nothing is true.
+    /// </remarks>
+    private RangeVerdict ColumnsVerdict(ColumnComparisonExpr columns, RowRange rows)
+    {
+        ZoneColumn? left = Usable(columns.Left);
+        ZoneColumn? right = Usable(columns.Right);
+
+        // A column null on every row of the range makes every row unknown, whatever the other holds.
+        RangeVerdict leftNulls = Decide(columns.Left, rows, ZoneQuestion.Open);
+        if (leftNulls.IsAllUnknown)
+        {
+            return leftNulls;
+        }
+
+        RangeVerdict rightNulls = Decide(columns.Right, rows, ZoneQuestion.Open);
+        if (rightNulls.IsAllUnknown)
+        {
+            return rightNulls;
+        }
+
+        if (left is null || right is null || rows.IsEmpty)
+        {
+            return RangeVerdict.Undecided(rows.Length);
+        }
+
+        if (Aligned(left, right))
+        {
+            return DecideColumns(left, columns.Op, right, rows);
+        }
+
+        if (!Covers(left, rows) || !Covers(right, rows) || columns.Op == ComparisonOp.NotEqual)
+        {
+            return RangeVerdict.Undecided(rows.Length);
+        }
+
+        ZoneBounds widenedLeft = Widen(left, rows, out _);
+        ZoneBounds widenedRight = Widen(right, rows, out _);
+        return ProvePair(left, widenedLeft, columns.Op, right, widenedRight) == Proof.None
+            ? RangeVerdict.Of(rows.Length, 0, null, null)
+            : RangeVerdict.Undecided(rows.Length);
+    }
+
+    /// <summary>
+    /// <see cref="Decide"/> for two maps cut into the same zones: each zone pair answered, a zone
+    /// the range covers in part keeping only what is uniform over it, the answers summed.
+    /// </summary>
+    private static RangeVerdict DecideColumns(ZoneColumn left, ComparisonOp op, ZoneColumn right, RowRange rows)
+    {
+        if (!Covers(left, rows))
+        {
+            return RangeVerdict.Undecided(rows.Length);
+        }
+
+        ZoneRange zones = left.Zones(rows);
+        RangeVerdict total = default;
+        for (int zone = zones.Start; zone < zones.End; zone++)
+        {
+            long zoneRows = left.RowsInZone(zone);
+            RowRange whole = RowRange.FromLength((long)zone * left.ZoneLength, zoneRows);
+            RowRange part = whole.Intersect(rows);
+            RangeVerdict answer = PairOfZone(left, left.Bounds(zone), op, right, right.Bounds(zone), zoneRows);
+            if (part.Length < zoneRows)
+            {
+                answer = answer.Restrict(part.Length);
+            }
+
+            total = zone == zones.Start ? answer : RangeVerdict.Concat(total, answer);
+            if (!total.TrueKnown && !total.FalseKnown && !total.UnknownKnown)
+            {
+                return RangeVerdict.Undecided(rows.Length);
+            }
+        }
+
+        return total;
+    }
+
+    /// <summary>What one pair of zones, of <paramref name="rows"/> rows each, proves of <c>a op b</c>.</summary>
+    private static RangeVerdict PairOfZone(
+        ZoneColumn left, ZoneBounds a, ComparisonOp op, ZoneColumn right, ZoneBounds b, long rows)
+    {
+        long? leftNulls = a.HasNullCount ? Math.Min(a.NullCount, rows) : null;
+        long? rightNulls = b.HasNullCount ? Math.Min(b.NullCount, rows) : null;
+        if (leftNulls == rows)
+        {
+            return RangeVerdict.AllUnknown(rows, left);
+        }
+
+        if (rightNulls == rows)
+        {
+            return RangeVerdict.AllUnknown(rows, right);
+        }
+
+        long? unknown = null;
+        ZoneColumn? nullsOf = null;
+        if (leftNulls == 0 && rightNulls is long onlyRight)
+        {
+            unknown = onlyRight;
+            nullsOf = right;
+        }
+        else if (rightNulls == 0 && leftNulls is long onlyLeft)
+        {
+            unknown = onlyLeft;
+            nullsOf = left;
+        }
+
+        // A NaN row is false for every operator but !=, where it is true, and the bounds say
+        // nothing of it: a proof over the values holds of the whole zone only where the zone
+        // holds no NaN, or where the NaN rows fall on the proof's side.
+        Proof proof = ProvePair(left, a, op, right, b);
+        bool noNaN = NaNs(a, rows) == 0 && NaNs(b, rows) == 0;
+        bool notEqual = op == ComparisonOp.NotEqual;
+        if (proof == Proof.None && (!notEqual || noNaN))
+        {
+            return RangeVerdict.Of(rows, 0, rows - unknown, unknown, nullsOf);
+        }
+
+        if (proof == Proof.All && (notEqual || noNaN))
+        {
+            return RangeVerdict.Of(rows, rows - unknown, 0, unknown, nullsOf);
+        }
+
+        return RangeVerdict.Of(rows, null, null, unknown, nullsOf);
+    }
+
+    /// <summary>
+    /// What the bounds of two zones prove of <c>a op b</c> over their non-null, non-NaN values.
+    /// </summary>
+    /// <remarks>
+    /// Every ordering is settled by <c>min(a)</c> against <c>max(b)</c> and <c>max(a)</c> against
+    /// <c>min(b)</c>, and an inexact bound only widens its interval, so these proofs hold on it
+    /// too. An equality proven whole, or an inequality proven impossible, needs both zones to hold
+    /// one and the same value, which only exact bounds can say.
+    /// </remarks>
+    private static Proof ProvePair(ZoneColumn left, ZoneBounds a, ComparisonOp op, ZoneColumn right, ZoneBounds b)
+    {
+        if (left.IsDecimal != right.IsDecimal)
+        {
+            return Proof.Open;
+        }
+
+        int minMax = 0;
+        int maxMin = 0;
+        bool hasMinMax = a.HasMin && b.HasMax && TryOrder(left, a.Min, b.Max, out minMax);
+        bool hasMaxMin = a.HasMax && b.HasMin && TryOrder(left, a.Max, b.Min, out maxMin);
+        bool disjoint = (hasMaxMin && maxMin < 0) || (hasMinMax && minMax > 0);
+        switch (op)
+        {
+            case ComparisonOp.Greater:
+                return hasMinMax && minMax > 0 ? Proof.All : hasMaxMin && maxMin <= 0 ? Proof.None : Proof.Open;
+            case ComparisonOp.GreaterOrEqual:
+                return hasMinMax && minMax >= 0 ? Proof.All : hasMaxMin && maxMin < 0 ? Proof.None : Proof.Open;
+            case ComparisonOp.Less:
+                return hasMaxMin && maxMin < 0 ? Proof.All : hasMinMax && minMax >= 0 ? Proof.None : Proof.Open;
+            case ComparisonOp.LessOrEqual:
+                return hasMaxMin && maxMin <= 0 ? Proof.All : hasMinMax && minMax > 0 ? Proof.None : Proof.Open;
+            case ComparisonOp.Equal:
+                return disjoint ? Proof.None : OneValue(left, a, right, b) ? Proof.All : Proof.Open;
+            default:
+                return disjoint ? Proof.All : OneValue(left, a, right, b) ? Proof.None : Proof.Open;
+        }
+    }
+
+    /// <summary>Whether both zones hold one value, the same, by exact bounds.</summary>
+    private static bool OneValue(ZoneColumn left, ZoneBounds a, ZoneColumn right, ZoneBounds b) =>
+        a.IsExact && b.IsExact && a.HasMin && a.HasMax && b.HasMin && b.HasMax &&
+        TryOrder(left, a.Min, a.Max, out int ownLeft) && ownLeft == 0 &&
+        TryOrder(right, b.Min, b.Max, out int ownRight) && ownRight == 0 &&
+        TryOrder(left, a.Min, b.Min, out int across) && across == 0;
+
+    /// <summary>
+    /// The bounds of the values <paramref name="column"/> holds in <paramref name="rows"/>: the
+    /// widest of the bounds of every zone it touches that is not all null, and none as soon as one
+    /// such zone has none or two bounds do not order.
+    /// </summary>
+    /// <param name="column">The column's map.</param>
+    /// <param name="rows">The range.</param>
+    /// <param name="mayHoldNaN">Whether one of those zones may hold a NaN.</param>
+    private static ZoneBounds Widen(ZoneColumn column, RowRange rows, out bool mayHoldNaN)
+    {
+        FilterLiteral min = default;
+        FilterLiteral max = default;
+        bool hasMin = true;
+        bool hasMax = true;
+        bool any = false;
+        mayHoldNaN = false;
+        ZoneRange zones = column.Zones(rows);
+        for (int zone = zones.Start; zone < zones.End; zone++)
+        {
+            ZoneBounds bounds = column.Bounds(zone);
+            if (AllNull(column, bounds, zone))
+            {
+                continue;
+            }
+
+            mayHoldNaN |= ZoneMayHoldNaN(column, zone);
+            if (!any)
+            {
+                any = true;
+                min = bounds.Min;
+                hasMin = bounds.HasMin;
+                max = bounds.Max;
+                hasMax = bounds.HasMax;
+                continue;
+            }
+
+            int order = 0;
+            hasMin = hasMin && bounds.HasMin && TryOrder(column, bounds.Min, min, out order);
+            if (hasMin && order < 0)
+            {
+                min = bounds.Min;
+            }
+
+            hasMax = hasMax && bounds.HasMax && TryOrder(column, bounds.Max, max, out order);
+            if (hasMax && order > 0)
+            {
+                max = bounds.Max;
+            }
+        }
+
+        return ZoneBounds.Create(min, any && hasMin, max, any && hasMax, exact: false, 0, hasNullCount: false);
+    }
+
+    /// <summary>The column's map, when it has one it can prune with.</summary>
+    private ZoneColumn? Usable(FieldExpr field) => Find(field) is { HasStatistics: true } column ? column : null;
+
+    /// <summary>Whether two maps cut the rows into the same zones, so that zone <c>z</c> of one is zone <c>z</c> of the other.</summary>
+    private static bool Aligned(ZoneColumn left, ZoneColumn right) =>
+        left.ZoneLength == right.ZoneLength && left.RowCount == right.RowCount;
+
+    /// <summary>Whether the map describes every row of <paramref name="rows"/>.</summary>
+    private static bool Covers(ZoneColumn column, RowRange rows)
+    {
+        ZoneRange zones = column.Zones(rows);
+        long covered = Math.Min((long)zones.End * column.ZoneLength, column.RowCount);
+        return zones.End > zones.Start && rows.Start >= (long)zones.Start * column.ZoneLength && rows.End <= covered;
+    }
+
+    /// <summary>Whether a zone's null count fills it.</summary>
+    private static bool AllNull(ZoneColumn column, ZoneBounds bounds, int zone) =>
+        bounds.HasNullCount && bounds.NullCount >= column.RowsInZone(zone);
+
+    /// <summary>
+    /// Whether <paramref name="column"/> is null on every row of <paramref name="rows"/>; false
+    /// when there is no map or it does not describe every row of the range.
+    /// </summary>
+    private static bool HoldsNoValue(ZoneColumn? column, RowRange rows)
+    {
+        if (column is null || !Covers(column, rows))
+        {
+            return false;
+        }
+
+        ZoneRange zones = column.Zones(rows);
+        for (int zone = zones.Start; zone < zones.End; zone++)
+        {
+            if (!AllNull(column, column.Bounds(zone), zone))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private ZoneColumn? Find(FieldExpr field)
     {
         for (int i = 0; i < _columns.Length; i++)
@@ -1113,10 +1478,17 @@ internal sealed class ZonePruner : IBlockPruner
 
     /// <summary>
     /// The ordered candidates of <paramref name="membership"/>, built on first use and kept for
-    /// the pruner's life, or <see langword="null"/> when they do not order.
+    /// the pruner's life, or <see langword="null"/> when they do not order or the column is a
+    /// decimal.
     /// </summary>
     private OrderedCandidates? OrderedFor(InExpr membership)
     {
+        // The candidates are sorted in the generic order, bytes bytewise, which is not a decimal's.
+        if (Find(membership.Field) is { IsDecimal: true })
+        {
+            return null;
+        }
+
         Ordered[]? known = _ordered;
         if (known is not null)
         {

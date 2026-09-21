@@ -155,6 +155,15 @@ internal sealed class FilterEvaluator
                 return;
             }
 
+            case ExprKind.ColumnComparison:
+            {
+                ColumnComparisonExpr columns = (ColumnComparisonExpr)filter;
+                int left = Resolve(arena, rootIndex, columns.Left, rows);
+                int right = Resolve(arena, rootIndex, columns.Right, rows);
+                ComparisonKernels.CompareColumns(arena, left, columns.Op, right, destination);
+                return;
+            }
+
             case ExprKind.StringMatch:
             {
                 StringMatchExpr match = (StringMatchExpr)filter;
