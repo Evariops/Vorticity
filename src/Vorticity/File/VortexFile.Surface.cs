@@ -42,7 +42,10 @@ public sealed partial class VortexFile
         where TRecord : IVortexRecord<TRecord> => new Scan<TRecord>(ScanSource);
 
     /// <summary>A scan of the file for a caller without a record type: columns by name, filters as text.</summary>
-    /// <param name="columns">The columns to read, by top-level name or <c>.</c>-separated path; none reads every column.</param>
+    /// <param name="columns">
+    /// The columns to read, by top-level name or <c>.</c>-separated path; none reads every column. A
+    /// batch holds them in the file's order, not in this one: read them by name.
+    /// </param>
     /// <returns>A fresh scan.</returns>
     public Scan Scan(params ReadOnlySpan<string> columns) => new Scan(ScanSource, columns);
 
