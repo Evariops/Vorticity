@@ -7,6 +7,7 @@ using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.Types;
+using Vorticity.Writing;
 
 namespace Vorticity.RowEncoding;
 
@@ -53,6 +54,44 @@ public sealed class RowKeyEncoder : IKeyEncoder
 /// <summary>The single-tuple overloads.</summary>
 public static partial class RowEncoder
 {
+    /// <summary>
+    /// The row encoding of one tuple, given as a record whose members are the key's columns in key
+    /// order: the seek key of a composite index, or its prefix when the record names fewer columns.
+    /// </summary>
+    /// <typeparam name="TKey">A record of the key columns; its schema gives the widths and nullability the bytes depend on.</typeparam>
+    /// <param name="key">The tuple.</param>
+    /// <param name="fields">One sort field per member, one for every member, or none for ascending with nulls first.</param>
+    /// <returns>The key's bytes.</returns>
+    /// <exception cref="VortexUnsupportedException">A member's type has no order the format defines.</exception>
+    public static byte[] EncodeKey<TKey>(in TKey key, params ReadOnlySpan<RowSortField> fields)
+        where TKey : IVortexRecord<TKey>
+    {
+        VortexSessionOptions options = VortexSession.Default.Options;
+        DType dtype = VortexTypes.ToDType(TKey.Schema, new DTypeArena());
+        StructStore store = (StructStore)ColumnStores.Create(dtype, options.EnginePool, options.Extensions);
+        CanonicalArena arena = new CanonicalArena(8, options.EnginePool);
+        try
+        {
+            ColumnsBuilder<TKey> builder = new ColumnsBuilder<TKey>(store, WriteBinding.Map(typeof(TKey), TKey.Schema, store.Type.Fields), null);
+            TKey.WriteRows(builder, new ReadOnlySpan<TKey>(in key));
+            CanonicalNode root = arena.GetNode(store.Build(arena, 1));
+            int count = root.FieldCount;
+            Span<int> columns = count <= 32 ? stackalloc int[count] : new int[count];
+            for (int i = 0; i < count; i++)
+            {
+                columns[i] = Storage(arena, root.GetFieldIndex(i));
+            }
+
+            using RowKeys keys = Encode(arena, columns, PerColumn(fields, count));
+            return keys.Row(0).ToArray();
+        }
+        finally
+        {
+            arena.Reset();
+            store.Release();
+        }
+    }
+
     /// <summary>
     /// The row encoding of one tuple: the seek key of a composite cursor, or its prefix when fewer
     /// values than key columns are given.
