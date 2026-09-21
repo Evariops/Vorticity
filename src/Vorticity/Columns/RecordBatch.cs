@@ -201,7 +201,10 @@ public sealed class RecordBatch : IDisposable
         }
     }
 
-    /// <summary>The absolute row index, within the file, of row 0 of this batch.</summary>
+    /// <summary>
+    /// The file row of the block's first row: row <c>i</c> is file row <c>StartRow + i</c> unless a
+    /// filter compacted the batch, which keeps the kept rows only.
+    /// </summary>
     public long StartRow
     {
         get

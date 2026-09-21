@@ -45,7 +45,11 @@ public readonly ref struct BatchView
     /// <summary>The number of rows.</summary>
     public int RowCount => Arena.RecordRef(Node).Length;
 
-    /// <summary>The file row of row 0.</summary>
+    /// <summary>
+    /// The file row of the block's first row: row <c>i</c> is file row <c>StartRow + i</c> unless a
+    /// filter compacted the batch, which keeps the kept rows only; with
+    /// <c>ScanOptions.Compact = false</c> the positions hold and <see cref="Selection"/> says which passed.
+    /// </summary>
     public long StartRow { get; }
 
     /// <summary>Which rows passed the filter.</summary>
