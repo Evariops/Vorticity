@@ -14,6 +14,7 @@ internal static class Program
     {
         Dictionary<string, Func<Task>> samples = new(StringComparer.Ordinal);
         ReadCases.Register(samples);
+        AccessCases.Register(samples);
         WriteCases.Register(samples);
         MoreCases.Register(samples);
 
