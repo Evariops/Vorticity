@@ -395,13 +395,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <param name="sink">Where the bytes go.</param>
     /// <param name="schema">The file's dtype.</param>
     /// <param name="options">Write-time policy.</param>
+    /// <param name="session">The session whose registered extensions the schema may name beyond the target edition; none when null.</param>
     /// <returns>The writer. The caller completes and disposes it.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="sink"/> or <paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="schema"/> has not been set.</exception>
-    internal static VortexFileWriter Create(ISegmentSink sink, DType schema, VortexWriteOptions options)
+    internal static VortexFileWriter Create(ISegmentSink sink, DType schema, VortexWriteOptions options, VortexSession? session = null)
     {
         ArgumentNullException.ThrowIfNull(sink);
-        Validate(schema, options);
+        Validate(schema, options, session?.Options.Extensions);
 
         int rowBlock = options.RowBlockSize ?? 0;
         if (rowBlock < 0)
@@ -439,7 +440,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// opened or written: a component the target edition lacks, a hint or an index naming no
     /// column, metadata the postscript cannot carry.
     /// </summary>
-    internal static void Validate(DType schema, VortexWriteOptions options)
+    internal static void Validate(DType schema, VortexWriteOptions options, VortexExtensionRegistry? extensions = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         if (schema.IsDefault)
@@ -447,7 +448,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             throw new ArgumentException("The schema has not been set.", nameof(schema));
         }
 
-        RequireSchemaInTarget(schema, options.TargetEdition);
+        RequireSchemaInTarget(schema, options.TargetEdition, extensions);
         bool tabular = schema.Kind == DTypeKind.Struct;
         foreach (string path in options.Hints.Keys)
         {
@@ -472,13 +473,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     private static bool Names(DType schema, bool tabular, string path) =>
         tabular ? IndexWriter.TryResolve(schema, tabular, path, out _, out _, out _) : path.Length == 0;
 
-    /// <summary>Rejects a schema naming an extension dtype the target edition does not carry.</summary>
-    private static void RequireSchemaInTarget(DType dtype, VortexEdition target)
+    /// <summary>
+    /// Rejects a schema naming an extension dtype the target edition does not carry, unless the
+    /// writer's session registers it: a registered extension lies outside every edition by design,
+    /// and a reader needs the same registration to read it as more than its storage.
+    /// </summary>
+    private static void RequireSchemaInTarget(DType dtype, VortexEdition target, VortexExtensionRegistry? extensions)
     {
         if (dtype.Kind == DTypeKind.Extension)
         {
             string id = dtype.ExtensionId;
-            if (!EditionRegistry.Contains(target, ComponentKind.DType, id))
+            if (!EditionRegistry.Contains(target, ComponentKind.DType, id) && extensions?.IsRegistered(dtype.ExtensionIdUtf8) != true)
             {
                 VortexEdition? introduced = EditionRegistry.IntroducedIn(ComponentKind.DType, id);
                 throw new VortexUnsupportedException(
@@ -493,16 +498,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
         for (int i = 0; i < dtype.FieldCount; i++)
         {
-            RequireSchemaInTarget(dtype.GetField(i), target);
+            RequireSchemaInTarget(dtype.GetField(i), target, extensions);
         }
 
         if (dtype.Kind is DTypeKind.List or DTypeKind.FixedSizeList)
         {
-            RequireSchemaInTarget(dtype.ElementType, target);
+            RequireSchemaInTarget(dtype.ElementType, target, extensions);
         }
         else if (dtype.Kind == DTypeKind.Extension)
         {
-            RequireSchemaInTarget(dtype.StorageType, target);
+            RequireSchemaInTarget(dtype.StorageType, target, extensions);
         }
     }
 
@@ -528,11 +533,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     internal static VortexFileWriter Create(string path, DType schema, VortexWriteOptions options, VortexSession session)
     {
         ArgumentNullException.ThrowIfNull(path);
-        Validate(schema, options);
+        Validate(schema, options, session.Options.Extensions);
         FilePipeWriter pipe = FilePipeWriter.Create(path, session.Options.MemoryPool);
         try
         {
-            VortexFileWriter writer = Create(new PipeSegmentSink(pipe), schema, options);
+            VortexFileWriter writer = Create(new PipeSegmentSink(pipe), schema, options, session);
             writer._createdPath = path;
             writer._filePipe = pipe;
             writer.Session = session;
@@ -549,7 +554,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <summary>A writer over <paramref name="sink"/>, in <paramref name="session"/>; the writer completes the pipe.</summary>
     internal static VortexFileWriter Create(System.IO.Pipelines.PipeWriter sink, DType schema, VortexWriteOptions options, VortexSession session)
     {
-        VortexFileWriter writer = Create(new PipeSegmentSink(sink), schema, options);
+        VortexFileWriter writer = Create(new PipeSegmentSink(sink), schema, options, session);
         writer._callerPipe = sink;
         writer.Session = session;
         return writer;
