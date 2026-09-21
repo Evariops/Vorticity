@@ -85,7 +85,7 @@ internal sealed class KeyIndexPruner
             int stride = KeyRunOptions.StrideOf(entry.Kind);
             bool trigrams = entry.Kind == IndexKinds.PostingsNgram3;
             if (stride == 0 || entry.BlockLength != (ulong)blockRows
-                || !TryResolve(file.Schema, entry.ColumnPath, out string path, out DType dtype)
+                || !TryResolve(file.DType, entry.ColumnPath, out string path, out DType dtype)
                 || !KeyRunOptions.TryParseEntry(entry.Options, out _, out bool fold))
             {
                 continue;
@@ -160,7 +160,7 @@ internal sealed class KeyIndexPruner
         foreach (IndexEntry entry in directory.Entries)
         {
             if (entry.Kind != IndexKinds.DictProbe || entry.Runs.Count == 0
-                || !TryResolve(file.Schema, entry.ColumnPath, out string path, out DType dtype)
+                || !TryResolve(file.DType, entry.ColumnPath, out string path, out DType dtype)
                 || columns.ContainsKey(path)
                 || !equalities.TryGetValue(path, out List<FilterLiteral>? literals) || literals.Count == 0
                 || !KeyLayout.TryOf(dtype, out KeyLayout layout))

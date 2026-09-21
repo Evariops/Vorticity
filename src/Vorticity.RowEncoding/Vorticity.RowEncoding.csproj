@@ -20,6 +20,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Vorticity.Dataset" />
     <InternalsVisibleTo Include="Vorticity.Tests" />
     <InternalsVisibleTo Include="Vorticity.Benchmarks" />
   </ItemGroup>

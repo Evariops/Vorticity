@@ -35,7 +35,7 @@ internal static class Limits
                 });
 
                 long rows = 0;
-                await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+                await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
                 {
                     using (batch)
                     {

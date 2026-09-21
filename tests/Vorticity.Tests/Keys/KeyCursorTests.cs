@@ -367,7 +367,7 @@ public sealed class KeyCursorTests
         await using Written written = await Written.CreateAsync();
         ScanMetrics metrics = new ScanMetrics();
         List<long> values = [];
-        await foreach (RecordBatch batch in written.File.Scan()
+        await foreach (RecordBatch batch in written.File.ScanBuilder()
             .InKeyOrder("strict_i64", descending)
             .WithDegreeOfParallelism(degree)
             .Where(Expr.And(
@@ -417,12 +417,12 @@ public sealed class KeyCursorTests
         VortexExpr filter = Expr.Ge(Expr.Field("strict_i64"), Expr.Literal(FilterLiteral.From(2_500L)));
         for (int warm = 0; warm < 2; warm++)
         {
-            await PerWindow(written.File.Scan().InKeyOrder("strict_i64").Where(filter).WithMaxBatchRows(500));
-            await PerWindow(written.File.Scan().InKeyOrder("strict_i64").WithMaxBatchRows(100));
+            await PerWindow(written.File.ScanBuilder().InKeyOrder("strict_i64").Where(filter).WithMaxBatchRows(500));
+            await PerWindow(written.File.ScanBuilder().InKeyOrder("strict_i64").WithMaxBatchRows(100));
         }
 
-        Assert.Equal(batchObject, await PerWindow(written.File.Scan().InKeyOrder("strict_i64").WithMaxBatchRows(100)));
-        Assert.Equal(batchObject, await PerWindow(written.File.Scan().InKeyOrder("strict_i64").Where(filter).WithMaxBatchRows(500)));
+        Assert.Equal(batchObject, await PerWindow(written.File.ScanBuilder().InKeyOrder("strict_i64").WithMaxBatchRows(100)));
+        Assert.Equal(batchObject, await PerWindow(written.File.ScanBuilder().InKeyOrder("strict_i64").Where(filter).WithMaxBatchRows(500)));
     }
 
     /// <summary>
@@ -500,7 +500,7 @@ public sealed class KeyCursorTests
         foreach (bool descending in (bool[])[true, false])
         {
             List<int?> values = [];
-            await foreach (RecordBatch batch in written.File.Scan().InKeyOrder("nulls_i32", descending).Project("nulls_i32").ExecuteAsync())
+            await foreach (RecordBatch batch in written.File.ScanBuilder().InKeyOrder("nulls_i32", descending).Project("nulls_i32").ExecuteAsync())
             {
                 VortexColumn column = batch.Column(0);
                 ReadOnlySpan<int> ints = column.AsPrimitive<int>().Values;

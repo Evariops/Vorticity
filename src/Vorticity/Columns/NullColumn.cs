@@ -2,7 +2,7 @@ namespace Vorticity.Columns;
 
 /// <summary>A column of the <c>Null</c> dtype: every row is null and there are no buffers.</summary>
 /// <remarks>Valid only until the owning <see cref="RecordBatch"/> is disposed.</remarks>
-public readonly ref struct NullColumn
+internal readonly ref struct NullColumn
 {
     private readonly RecordBatch _batch;
     private readonly int _node;

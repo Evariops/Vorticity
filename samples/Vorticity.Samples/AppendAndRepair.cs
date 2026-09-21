@@ -124,6 +124,6 @@ internal static class AppendAndRepair
     private static async ValueTask<Guid?> IdentityOf(string path)
     {
         await using VortexFile file = await VortexFile.OpenAsync(path);
-        return file.Identity;
+        return file.StoredIdentity;
     }
 }

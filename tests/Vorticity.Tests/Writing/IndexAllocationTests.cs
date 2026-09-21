@@ -126,7 +126,7 @@ public sealed class IndexAllocationTests
         long before = GC.GetAllocatedBytesForCurrentThread();
         await using (VortexFileWriter writer = VortexFileWriter.Create(
             new StreamSegmentSink(System.IO.Stream.Null), schema,
-            new VortexWriteOptions { Indexes = policy, IndexBudgetPerMille = 1_000_000 }))
+            new VortexWriteOptions { WritePolicy = policy, IndexBudgetPerMille = 1_000_000 }))
         {
             long offset = 0;
             foreach ((int root, int count) in batches)

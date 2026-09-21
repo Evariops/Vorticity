@@ -154,12 +154,12 @@ public sealed class BloomIndexTests
         VortexExpr filter = Parse(text);
 
         long expected = Oracle(text);
-        Assert.Equal(expected, await written.File.Scan().Where(filter).CountAsync());
-        Assert.Equal(expected, await written.File.Scan().Where(filter).WithIndexes(false).CountAsync());
-        Assert.Equal(expected, await written.File.Scan().Where(filter).WithPruning(false).CountAsync());
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).CountAsync());
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).WithIndexes(false).CountAsync());
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).WithPruning(false).CountAsync());
 
-        List<string> on = await Materialize(written.File.Scan().Where(filter));
-        List<string> off = await Materialize(written.File.Scan().Where(filter).WithIndexes(false));
+        List<string> on = await Materialize(written.File.ScanBuilder().Where(filter));
+        List<string> off = await Materialize(written.File.ScanBuilder().Where(filter).WithIndexes(false));
         Assert.Equal(off, on);
         Assert.Equal(expected, on.Count);
     }
@@ -171,7 +171,7 @@ public sealed class BloomIndexTests
         await using Written written = await Written.CreateAsync(Policy());
         int present = Key(40_000);
 
-        ScanPlan plan = await written.File.Scan().Where(Parse($"key = {present}")).ExplainAsync();
+        ScanPlan plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync();
         Assert.Equal(Blocks, plan.Blocks);
         PruningStep zones = Assert.Single(plan.Pruning, step => step.Structure == "zone map");
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
@@ -183,7 +183,7 @@ public sealed class BloomIndexTests
         Assert.Equal(Blocks - bloom.BlocksPruned, plan.LiveBlocks);
         Assert.True(bloom.SegmentsRead > 0);
 
-        ScanPlan off = await written.File.Scan().Where(Parse($"key = {present}")).WithIndexes(false).ExplainAsync();
+        ScanPlan off = await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithIndexes(false).ExplainAsync();
         Assert.Equal(Blocks, off.LiveBlocks);
         Assert.DoesNotContain(off.Pruning, step => step.Structure == "bloom filter");
     }
@@ -193,7 +193,7 @@ public sealed class BloomIndexTests
     {
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
-        ScanPlan plan = await written.File.Scan().Where(Parse("name = nope")).ExplainAsync();
+        ScanPlan plan = await written.File.ScanBuilder().Where(Parse("name = nope")).ExplainAsync();
 
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
         Assert.True(plan.LiveBlocks == 0, string.Join("; ", plan.Pruning));
@@ -245,7 +245,7 @@ public sealed class BloomIndexTests
         IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
         Assert.Equal(3, directory.Entries.Count);
 
-        ScanPlan plan = await written.File.Scan().Where(Parse($"key = {present}")).ExplainAsync();
+        ScanPlan plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync();
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
 
         // The root; the four generation nodes, one region; then the leaves of each generation still
@@ -285,9 +285,9 @@ public sealed class BloomIndexTests
             await using VortexFile file = await VortexFile.OpenAsync(path);
             int present = Key(40_000);
             VortexExpr filter = Parse($"key = {present}");
-            Assert.Equal(Oracle($"key = {present}"), await file.Scan().Where(filter).CountAsync());
+            Assert.Equal(Oracle($"key = {present}"), await file.ScanBuilder().Where(filter).CountAsync());
 
-            ScanPlan plan = await file.Scan().Where(filter).ExplainAsync();
+            ScanPlan plan = await file.ScanBuilder().Where(filter).ExplainAsync();
             PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
             Assert.Equal(0, bloom.BlocksPruned);
         }
@@ -310,7 +310,7 @@ public sealed class BloomIndexTests
         Assert.Empty(directory.Entries);
 
         int present = Key(40_000);
-        Assert.Equal(Oracle($"key = {present}"), await written.File.Scan().Where(Parse($"key = {present}")).CountAsync());
+        Assert.Equal(Oracle($"key = {present}"), await written.File.ScanBuilder().Where(Parse($"key = {present}")).CountAsync());
     }
 
     /// <summary>
@@ -380,7 +380,7 @@ public sealed class BloomIndexTests
 
         // And the answer is the answer either way, which is the only thing an index may not change.
         int present = Key(40_000);
-        Assert.Equal(Oracle($"key = {present}"), await written.File.Scan().Where(Parse($"key = {present}")).CountAsync());
+        Assert.Equal(Oracle($"key = {present}"), await written.File.ScanBuilder().Where(Parse($"key = {present}")).CountAsync());
     }
 
     [Fact]
@@ -432,8 +432,8 @@ public sealed class BloomIndexTests
         ScanMetrics on = new ScanMetrics();
         ScanMetrics off = new ScanMetrics();
         Assert.Equal(
-            await written.File.Scan().Where(Parse($"key = {present}")).WithMetrics(on).CountAsync(),
-            await written.File.Scan().Where(Parse($"key = {present}")).WithMetrics(off).WithIndexes(false).CountAsync());
+            await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithMetrics(on).CountAsync(),
+            await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithMetrics(off).WithIndexes(false).CountAsync());
 
         // With the filters, a handful of filter segments against a full decode of every block.
         Assert.True(on.ValuesDecoded < off.ValuesDecoded / 8, $"{on.ValuesDecoded} decoded against {off.ValuesDecoded}");
@@ -642,7 +642,7 @@ public sealed class BloomIndexTests
             {
                 RowBlockSize = Block,
                 DataBlockTargetBytes = null,
-                Indexes = policy,
+                WritePolicy = policy,
                 IndexBudgetPerMille = budgetPerMille,
             });
             long length = new System.IO.FileInfo(path).Length;

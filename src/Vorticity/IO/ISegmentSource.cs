@@ -45,7 +45,7 @@ namespace Vorticity.IO;
 /// <see cref="OperationCanceledException"/> — after releasing what you acquired.
 /// </para>
 /// </remarks>
-public interface ISegmentSource : IAsyncDisposable
+internal interface ISegmentSource : IAsyncDisposable
 {
     /// <summary>The total size of the underlying file in bytes, if known without I/O.</summary>
     /// <param name="cancellationToken">Cancels the lookup.</param>

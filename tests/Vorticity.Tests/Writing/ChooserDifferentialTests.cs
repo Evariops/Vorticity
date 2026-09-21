@@ -127,8 +127,8 @@ public sealed class ChooserDifferentialTests
                 {
                     await using VortexFile source = await VortexFile.OpenAsync(
                         entry.Path, VortexOpenOptions.Default, CancellationToken.None);
-                    await using VortexFileWriter writer = VortexFileWriter.Create(destination, source.Schema);
-                    await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+                    await using VortexFileWriter writer = VortexFileWriter.Create(destination, source.DType);
+                    await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
                         .WithCancellation(CancellationToken.None))
                     {
                         await writer.WriteAsync(batch, CancellationToken.None);

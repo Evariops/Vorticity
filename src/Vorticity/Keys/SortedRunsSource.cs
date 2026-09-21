@@ -150,7 +150,7 @@ internal sealed partial class SortedRunsSource : KeySource
         foreach (IndexEntry entry in directory.Entries)
         {
             if (entry.Kind != kind
-                || !KeyIndexPruner.TryResolve(file.Schema, entry.ColumnPath, out string resolved, out DType dtype)
+                || !KeyIndexPruner.TryResolve(file.DType, entry.ColumnPath, out string resolved, out DType dtype)
                 || !string.Equals(resolved, path, StringComparison.Ordinal))
             {
                 continue;
@@ -244,7 +244,7 @@ internal sealed partial class SortedRunsSource : KeySource
             return (null, $"the file's index directory was refused: {file.IndexDirectoryRefusal}");
         }
 
-        DType schema = file.Schema;
+        DType schema = file.DType;
         string? reason = null;
         foreach (IndexEntry entry in directory.Entries)
         {

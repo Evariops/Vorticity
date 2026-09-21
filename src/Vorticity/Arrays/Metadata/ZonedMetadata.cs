@@ -17,7 +17,7 @@ namespace Vorticity.Arrays.Metadata;
 /// a reference to that list: see the warning on <see cref="AggregateSpecList"/> about reusing one
 /// list for two zone maps.
 /// </remarks>
-public readonly struct ZonedMetadata
+internal readonly struct ZonedMetadata
 {
     private const string MessageName = "ZonedMetadataProto";
 

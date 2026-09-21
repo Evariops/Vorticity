@@ -11,7 +11,7 @@ namespace Vorticity.Arrays;
 /// Vortex's own <c>TimeUnit</c> discriminants, ordered finest to coarsest. They are
 /// <b>not</b> Arrow's.
 /// </summary>
-public enum VortexTimeUnit : byte
+internal enum VortexTimeUnit : byte
 {
     /// <summary>Nanoseconds.</summary>
     Nanoseconds = 0,
@@ -30,7 +30,7 @@ public enum VortexTimeUnit : byte
 }
 
 /// <summary>The core extension dtypes this build understands.</summary>
-public enum ExtensionKind : byte
+internal enum ExtensionKind : byte
 {
     /// <summary>An extension id we do not implement. Fatal only when the field is read.</summary>
     Unknown = 0,
@@ -49,7 +49,7 @@ public enum ExtensionKind : byte
 }
 
 /// <summary>A parsed <c>vortex.timestamp</c> metadata block.</summary>
-public readonly ref struct TimestampOptions
+internal readonly ref struct TimestampOptions
 {
     internal TimestampOptions(VortexTimeUnit unit, bool hasTimeZone, ReadOnlySpan<byte> timeZoneUtf8)
     {
@@ -72,7 +72,7 @@ public readonly ref struct TimestampOptions
 }
 
 /// <summary>A parsed <c>vortex.uuid</c> metadata block.</summary>
-public readonly struct UuidOptions
+internal readonly struct UuidOptions
 {
     internal UuidOptions(bool hasVersion, byte version)
     {
@@ -96,7 +96,7 @@ public readonly struct UuidOptions
 /// Protobuf, and a dtype is validated the first time the field carrying it is read rather than when
 /// it is parsed, so the <c>vortex.ext</c> decoder and the column accessor each validate once.
 /// </summary>
-public static class ExtensionDTypeRegistry
+internal static class ExtensionDTypeRegistry
 {
     /// <summary>The normalized discriminant for the <c>Max</c> UUID version.</summary>
     public const byte UuidVersionMax = 0xFF;

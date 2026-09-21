@@ -15,7 +15,7 @@ namespace Vorticity.Serialization.Schemas;
 /// 4-mod-8 offset.
 /// </remarks>
 [StructLayout(LayoutKind.Sequential, Pack = 1, Size = 8)]
-public readonly struct BufferSpec
+internal readonly struct BufferSpec
 {
     /// <summary>Byte 0..2. Padding bytes written immediately before this buffer.</summary>
     public readonly ushort Padding;
@@ -44,7 +44,7 @@ public readonly struct BufferSpec
 }
 
 /// <summary>Per-buffer compression, the format's <c>enum Compression : uint8</c>.</summary>
-public enum BufferCompression : byte
+internal enum BufferCompression : byte
 {
     /// <summary>The buffer is stored verbatim.</summary>
     None = 0,
@@ -66,7 +66,7 @@ public enum BufferCompression : byte
 /// unknown component must never be an open-time error. No known file uses this field —
 /// <c>compression_specs</c> is empty throughout the golden corpus.
 /// </remarks>
-public enum CompressionScheme : byte
+internal enum CompressionScheme : byte
 {
     /// <summary>The segment is stored verbatim.</summary>
     None = 0,
@@ -89,7 +89,7 @@ public enum CompressionScheme : byte
 /// rejected: statistics are advisory, and a value nobody understands must never make a file
 /// unreadable.
 /// </remarks>
-public enum StatPrecision : byte
+internal enum StatPrecision : byte
 {
     /// <summary>The statistic bounds the true value but may not equal it.</summary>
     Inexact = 0,

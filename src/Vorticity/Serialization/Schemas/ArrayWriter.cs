@@ -12,7 +12,7 @@ namespace Vorticity.Serialization.Schemas;
 /// exposes them only through <c>TryGet</c>: <see langword="null"/> means "unknown" and is a
 /// different wire shape from a present <see langword="false"/> or a present 0.
 /// </remarks>
-public struct ArrayStatsValues
+internal struct ArrayStatsValues
 {
     /// <summary>The minimum as a Protobuf-serialized <c>ScalarValue</c>, or null to omit it.</summary>
     public byte[]? Min;

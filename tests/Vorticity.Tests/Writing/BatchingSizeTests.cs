@@ -72,9 +72,9 @@ public sealed class BatchingSizeTests
         {
             int batches = 0;
             await using (VortexFile source = await VortexFile.OpenAsync(Corpus.Path(Entry), CancellationToken.None))
-            await using (VortexFileWriter writer = VortexFileWriter.Create(written, source.Schema))
+            await using (VortexFileWriter writer = VortexFileWriter.Create(written, source.DType))
             {
-                ScanBuilder scan = source.Scan();
+                ScanBuilder scan = source.ScanBuilder();
                 if (cap > 0)
                 {
                     scan = scan.WithMaxBatchRows(cap);

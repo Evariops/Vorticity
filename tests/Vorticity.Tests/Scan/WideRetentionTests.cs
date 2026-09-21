@@ -38,7 +38,7 @@ public class WideRetentionTests
 
             await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
             long seen = 0;
-            await foreach (RecordBatch batch in file.Scan()
+            await foreach (RecordBatch batch in file.ScanBuilder()
                 .WithMaxBatchRows(BatchRows).ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {

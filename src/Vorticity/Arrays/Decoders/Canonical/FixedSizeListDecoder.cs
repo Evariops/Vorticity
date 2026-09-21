@@ -10,7 +10,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// <c>u32</c>, so the product is checked for overflow; a list size of zero is legal, so nothing
 /// here divides by it.
 /// </summary>
-public sealed class FixedSizeListDecoder : ArrayDecoder
+internal sealed class FixedSizeListDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.fixed_size_list";

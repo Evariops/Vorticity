@@ -21,7 +21,7 @@ namespace Vorticity.Dataset;
 /// Its bounded summaries: per summarised column, <c>min</c>, <c>max</c> and <c>null_count</c>, over
 /// a bounded number of columns so that the entry has a bounded size whatever the schema.
 /// </param>
-public sealed record ObjectEntry(
+internal sealed record ObjectEntry(
     string Key,
     UInt128 Uid,
     long Rows,

@@ -22,7 +22,7 @@ namespace Vorticity.Buffers;
 /// no finalizer because there is nothing native to leak.
 /// </para>
 /// </remarks>
-public sealed class PinnedArraySegmentOwner : SegmentOwner
+internal sealed class PinnedArraySegmentOwner : SegmentOwner
 {
     private byte[]? _array;
     private readonly int _offset;

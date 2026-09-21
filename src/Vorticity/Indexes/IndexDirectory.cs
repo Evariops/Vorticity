@@ -14,7 +14,7 @@ namespace Vorticity.Indexes;
 /// <param name="Checksum">
 /// The XXH3-64 of the region's bytes, or null when the directory listed the region without one.
 /// </param>
-public readonly record struct IndexSegment(ulong Offset, uint Length, byte AlignmentExponent, ulong? Checksum = null)
+internal readonly record struct IndexSegment(ulong Offset, uint Length, byte AlignmentExponent, ulong? Checksum = null)
 {
     /// <summary>A region of <paramref name="bytes"/>, checksummed.</summary>
     /// <param name="offset">Where the bytes were written.</param>
@@ -50,7 +50,7 @@ public readonly record struct IndexSegment(ulong Offset, uint Length, byte Align
 /// Kind-defined bytes for this run alone: the per-segment bounds of a locating run's blocked
 /// payload; empty otherwise.
 /// </param>
-public sealed record IndexRun(
+internal sealed record IndexRun(
     ulong FirstBlock,
     uint BlockCount,
     IReadOnlyList<IndexSegment> Payload,
@@ -83,7 +83,7 @@ public sealed record IndexRun(
 /// <param name="BlockLength">Rows per block: the zone length.</param>
 /// <param name="Options">Kind-defined, self-versioned bytes.</param>
 /// <param name="Runs">In block order, disjoint.</param>
-public sealed record IndexEntry(
+internal sealed record IndexEntry(
     string Kind,
     IReadOnlyList<uint> ColumnPath,
     ulong BlockLength,
@@ -109,7 +109,7 @@ public sealed record IndexEntry(
 /// <param name="PreviousEof">The file length before the append that wrote it; 0 for a first write.</param>
 /// <param name="Policy">The policy the file was written under, so an append needs no options.</param>
 /// <param name="Entries">The indexes that survived their reader-side checks.</param>
-public sealed record IndexDirectory(
+internal sealed record IndexDirectory(
     ulong RowCount,
     ulong PreviousEof,
     WritePolicy Policy,

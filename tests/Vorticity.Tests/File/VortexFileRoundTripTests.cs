@@ -57,7 +57,7 @@ public sealed class VortexFileRoundTripTests
             source, VortexOpenOptions.Default, CancellationToken.None);
 
         Assert.Equal(8193, file.RowCount);
-        Assert.Equal("{ints=i64, strs=utf8?}", ManifestDTypeFormatter.Format(file.Schema));
+        Assert.Equal("{ints=i64, strs=utf8?}", ManifestDTypeFormatter.Format(file.DType));
         Assert.Equal(1, source.LengthProbes);
         Assert.Equal(2, source.TotalReads);
         Assert.Equal(2, source.RangeReads);

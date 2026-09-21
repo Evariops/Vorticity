@@ -8,7 +8,7 @@ namespace Vorticity.Arrays;
 /// <summary>
 /// The four validity states an array can be in. <c>true</c> means <em>valid</em>.
 /// </summary>
-public enum ValidityKind : byte
+internal enum ValidityKind : byte
 {
     /// <summary>The dtype forbids nulls; there is no validity information and none is needed.</summary>
     NonNullable = 0,
@@ -31,7 +31,7 @@ public enum ValidityKind : byte
 /// <remarks>
 /// A <see cref="Validity"/> carries no length of its own: the parent array's length is the length.
 /// </remarks>
-public readonly struct Validity : IEquatable<Validity>
+internal readonly struct Validity : IEquatable<Validity>
 {
     private readonly int _canonicalNodeIndex;
     private readonly ValidityKind _kind;

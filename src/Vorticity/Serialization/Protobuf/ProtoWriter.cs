@@ -40,7 +40,7 @@ namespace Vorticity.Serialization.Protobuf;
 /// in a <c>try</c>/<c>finally</c>.
 /// </para>
 /// </remarks>
-public struct ProtoWriter : IDisposable
+internal struct ProtoWriter : IDisposable
 {
     private const int DefaultCapacity = 256;
     private const int MinimumCapacity = 64;

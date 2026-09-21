@@ -60,7 +60,7 @@ public sealed class FuzzSmokeTests
                     source, new VortexOpenOptions { LeaveSourceOpen = true }, CancellationToken.None);
                 opened = true;
 
-                await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+                await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     for (int field = 0; field < batch.FieldCount; field++)

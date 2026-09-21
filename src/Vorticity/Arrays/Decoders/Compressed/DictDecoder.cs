@@ -13,7 +13,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// against the dictionary length before it indexes anything, and dictionary keys are matched by
 /// bit pattern, never canonicalized, so that the special float values stay distinct.
 /// </summary>
-public sealed class DictDecoder : ArrayDecoder
+internal sealed class DictDecoder : ArrayDecoder
 {
     private const string Id = "vortex.dict";
 

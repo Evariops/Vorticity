@@ -164,13 +164,13 @@ public sealed class ScanTerminalTests
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
 
         ScanMetrics metrics = new ScanMetrics();
-        Assert.Equal(Rows, await file.Scan().WithMetrics(metrics).CountAsync());
-        Assert.True(await file.Scan().WithMetrics(metrics).AnyAsync());
-        Assert.Equal(5_000, await file.Scan().Rows(RowRange.FromLength(1_000, 5_000)).WithMetrics(metrics).CountAsync());
-        Assert.Equal(0, await file.Scan().Rows(RowRange.FromLength(Rows + 10, 5)).WithMetrics(metrics).CountAsync());
-        Assert.False(await file.Scan().Rows(RowRange.FromLength(Rows + 10, 5)).WithMetrics(metrics).AnyAsync());
-        Assert.Equal(2, await file.Scan().Take([1L, 1L, 7L]).WithMetrics(metrics).CountAsync());
-        Assert.True(await file.Scan().Take([7L]).WithMetrics(metrics).AnyAsync());
+        Assert.Equal(Rows, await file.ScanBuilder().WithMetrics(metrics).CountAsync());
+        Assert.True(await file.ScanBuilder().WithMetrics(metrics).AnyAsync());
+        Assert.Equal(5_000, await file.ScanBuilder().Rows(RowRange.FromLength(1_000, 5_000)).WithMetrics(metrics).CountAsync());
+        Assert.Equal(0, await file.ScanBuilder().Rows(RowRange.FromLength(Rows + 10, 5)).WithMetrics(metrics).CountAsync());
+        Assert.False(await file.ScanBuilder().Rows(RowRange.FromLength(Rows + 10, 5)).WithMetrics(metrics).AnyAsync());
+        Assert.Equal(2, await file.ScanBuilder().Take([1L, 1L, 7L]).WithMetrics(metrics).CountAsync());
+        Assert.True(await file.ScanBuilder().Take([7L]).WithMetrics(metrics).AnyAsync());
 
         Assert.Equal(0, metrics.SegmentRequests);
         Assert.Equal(0, metrics.ValuesDecoded);
@@ -185,14 +185,14 @@ public sealed class ScanTerminalTests
         VortexExpr filter = Filter("banded = 5");
 
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
-        ScanPlan plan = await file.Scan().Where(filter).ExplainAsync();
+        ScanPlan plan = await file.ScanBuilder().Where(filter).ExplainAsync();
         Assert.Equal(1, plan.LiveBlocks);
         long zoneMaps = plan.Pruning[0].SegmentsRead;
 
         ScanMetrics proven = new ScanMetrics();
         ScanMetrics decoded = new ScanMetrics();
-        Assert.Equal(Block, await file.Scan().Where(filter).WithMetrics(proven).CountAsync());
-        Assert.Equal(Block, await file.Scan().Where(filter).WithMetrics(decoded)
+        Assert.Equal(Block, await file.ScanBuilder().Where(filter).WithMetrics(proven).CountAsync());
+        Assert.Equal(Block, await file.ScanBuilder().Where(filter).WithMetrics(decoded)
             .WithTiers(TerminalTiers.All & ~TerminalTiers.FullBlock).CountAsync());
 
         // The proof asked the source for the zone maps and nothing else; the decode asked for the
@@ -203,7 +203,7 @@ public sealed class ScanTerminalTests
 
         // Under a take the same proof serves, whole: every taken row of a block proven whole.
         ScanMetrics taken = new ScanMetrics();
-        Assert.Equal(2, await file.Scan().Where(filter).Take([5_200L, 5_300L, 20_000L]).WithMetrics(taken).CountAsync());
+        Assert.Equal(2, await file.ScanBuilder().Where(filter).Take([5_200L, 5_300L, 20_000L]).WithMetrics(taken).CountAsync());
         Assert.Equal(zoneMaps, taken.SegmentRequests);
     }
 
@@ -214,12 +214,12 @@ public sealed class ScanTerminalTests
         VortexExpr filter = Filter("monotone < 0");
 
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
-        ScanPlan plan = await file.Scan().Where(filter).ExplainAsync();
+        ScanPlan plan = await file.ScanBuilder().Where(filter).ExplainAsync();
         Assert.Equal(0, plan.LiveBlocks);
 
         ScanMetrics metrics = new ScanMetrics();
-        Assert.False(await file.Scan().Where(filter).WithMetrics(metrics).AnyAsync());
-        Assert.Equal(0, await file.Scan().Where(filter).WithMetrics(metrics).CountAsync());
+        Assert.False(await file.ScanBuilder().Where(filter).WithMetrics(metrics).AnyAsync());
+        Assert.Equal(0, await file.ScanBuilder().Where(filter).WithMetrics(metrics).CountAsync());
 
         // Two terminals, the zone maps each time, nothing else.
         Assert.Equal(2 * plan.Pruning[0].SegmentsRead, metrics.SegmentRequests);
@@ -238,8 +238,8 @@ public sealed class ScanTerminalTests
         ScanMetrics any = new ScanMetrics();
         ScanMetrics count = new ScanMetrics();
         TerminalTiers decodeOnly = TerminalTiers.All & ~TerminalTiers.FullBlock;
-        Assert.True(await file.Scan().Where(filter).WithMetrics(any).WithTiers(decodeOnly).AnyAsync());
-        Assert.True(await file.Scan().Where(filter).WithMetrics(count).WithTiers(decodeOnly).CountAsync() > 0);
+        Assert.True(await file.ScanBuilder().Where(filter).WithMetrics(any).WithTiers(decodeOnly).AnyAsync());
+        Assert.True(await file.ScanBuilder().Where(filter).WithMetrics(count).WithTiers(decodeOnly).CountAsync() > 0);
 
         Assert.True(any.ValuesDecoded > 0, "Any had to decode the one open block");
         Assert.True(any.ValuesDecoded * 4 < count.ValuesDecoded, "Any should stop long before Count is done");
@@ -255,9 +255,9 @@ public sealed class ScanTerminalTests
         Assert.True(file.HasFileStatistics);
 
         ScanMetrics metrics = new ScanMetrics();
-        FilterLiteral min = await file.Scan().WithMetrics(metrics).MinAsync("monotone");
-        FilterLiteral max = await file.Scan().WithMetrics(metrics).MaxAsync("monotone");
-        FilterLiteral last = await file.Scan().WithMetrics(metrics).MaxAsync("strs");
+        FilterLiteral min = await file.ScanBuilder().WithMetrics(metrics).MinAsync("monotone");
+        FilterLiteral max = await file.ScanBuilder().WithMetrics(metrics).MaxAsync("monotone");
+        FilterLiteral last = await file.ScanBuilder().WithMetrics(metrics).MaxAsync("strs");
 
         Assert.Equal(1_000_000L, min.SignedValue);
         Assert.Equal(1_000_000L + (3 * (Rows - 1)), max.SignedValue);
@@ -278,8 +278,8 @@ public sealed class ScanTerminalTests
 
         ScanMetrics bounds = new ScanMetrics();
         ScanMetrics decode = new ScanMetrics();
-        FilterLiteral fromBounds = await file.Scan().Rows(whole).WithMetrics(bounds).MinAsync("monotone");
-        FilterLiteral fromDecode = await file.Scan().Rows(whole).WithMetrics(decode)
+        FilterLiteral fromBounds = await file.ScanBuilder().Rows(whole).WithMetrics(bounds).MinAsync("monotone");
+        FilterLiteral fromDecode = await file.ScanBuilder().Rows(whole).WithMetrics(decode)
             .WithTiers(TerminalTiers.All & ~TerminalTiers.ZoneBounds).MinAsync("monotone");
 
         Assert.Equal(1_000_000L, fromBounds.SignedValue);
@@ -300,10 +300,10 @@ public sealed class ScanTerminalTests
 
         ScanMetrics bounded = new ScanMetrics();
         ScanMetrics decoded = new ScanMetrics();
-        FilterLiteral min = await file.Scan().Rows(whole).WithMetrics(bounded).MinAsync("strs");
-        FilterLiteral max = await file.Scan().Rows(whole).WithMetrics(bounded).MaxAsync("strs");
-        FilterLiteral minDecoded = await file.Scan().Rows(whole).WithMetrics(decoded).WithTiers(TerminalTiers.None).MinAsync("strs");
-        FilterLiteral maxDecoded = await file.Scan().Rows(whole).WithMetrics(decoded).WithTiers(TerminalTiers.None).MaxAsync("strs");
+        FilterLiteral min = await file.ScanBuilder().Rows(whole).WithMetrics(bounded).MinAsync("strs");
+        FilterLiteral max = await file.ScanBuilder().Rows(whole).WithMetrics(bounded).MaxAsync("strs");
+        FilterLiteral minDecoded = await file.ScanBuilder().Rows(whole).WithMetrics(decoded).WithTiers(TerminalTiers.None).MinAsync("strs");
+        FilterLiteral maxDecoded = await file.ScanBuilder().Rows(whole).WithMetrics(decoded).WithTiers(TerminalTiers.None).MaxAsync("strs");
 
         Assert.Equal("z0000-0000", Encoding.UTF8.GetString(min.BytesValue));
         Assert.Equal("z0063-1023", Encoding.UTF8.GetString(max.BytesValue));
@@ -328,12 +328,12 @@ public sealed class ScanTerminalTests
         // Zone 63 of `nulls` is entirely null; a filter no row satisfies; a range past the end.
         foreach (TerminalTiers tiers in ExtremeTiers)
         {
-            Assert.Equal(FilterLiteralKind.Null, (await file.Scan().Rows(RowRange.FromLength(63 * Block, Block)).WithTiers(tiers).MinAsync("nulls")).Kind);
-            Assert.Equal(FilterLiteralKind.Null, (await file.Scan().Where(Filter("monotone < 0")).WithTiers(tiers).MaxAsync("monotone")).Kind);
-            Assert.Equal(FilterLiteralKind.Null, (await file.Scan().Rows(RowRange.FromLength(Rows + 10, 5)).WithTiers(tiers).MinAsync("monotone")).Kind);
+            Assert.Equal(FilterLiteralKind.Null, (await file.ScanBuilder().Rows(RowRange.FromLength(63 * Block, Block)).WithTiers(tiers).MinAsync("nulls")).Kind);
+            Assert.Equal(FilterLiteralKind.Null, (await file.ScanBuilder().Where(Filter("monotone < 0")).WithTiers(tiers).MaxAsync("monotone")).Kind);
+            Assert.Equal(FilterLiteralKind.Null, (await file.ScanBuilder().Rows(RowRange.FromLength(Rows + 10, 5)).WithTiers(tiers).MinAsync("monotone")).Kind);
         }
 
-        Assert.Throws<ArgumentException>(() => file.Scan().MinAsync("no_such_column"));
+        Assert.Throws<ArgumentException>(() => file.ScanBuilder().MinAsync("no_such_column"));
     }
 
     [Fact]
@@ -350,21 +350,21 @@ public sealed class ScanTerminalTests
             await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
             foreach (TerminalTiers tiers in ExtremeTiers)
             {
-                FilterLiteral min = await file.Scan().WithTiers(tiers).MinAsync("mixed");
-                FilterLiteral max = await file.Scan().WithTiers(tiers).MaxAsync("mixed");
+                FilterLiteral min = await file.ScanBuilder().WithTiers(tiers).MinAsync("mixed");
+                FilterLiteral max = await file.ScanBuilder().WithTiers(tiers).MaxAsync("mixed");
                 Assert.Equal(FilterLiteralKind.Float, min.Kind);
                 Assert.Equal(0.0, min.FloatValue);
                 Assert.Equal(2.5, max.FloatValue);
 
-                Assert.Equal(FilterLiteralKind.Null, (await file.Scan().WithTiers(tiers).MinAsync("nans")).Kind);
-                Assert.Equal(FilterLiteralKind.Null, (await file.Scan().WithTiers(tiers).MaxAsync("nans")).Kind);
-                Assert.Equal(FilterLiteralKind.Null, (await file.Scan().WithTiers(tiers).MinAsync("nulls")).Kind);
+                Assert.Equal(FilterLiteralKind.Null, (await file.ScanBuilder().WithTiers(tiers).MinAsync("nans")).Kind);
+                Assert.Equal(FilterLiteralKind.Null, (await file.ScanBuilder().WithTiers(tiers).MaxAsync("nans")).Kind);
+                Assert.Equal(FilterLiteralKind.Null, (await file.ScanBuilder().WithTiers(tiers).MinAsync("nulls")).Kind);
             }
 
             // And under a filter that keeps the NaN rows only, there is no extreme at all.
             VortexExpr nanRows = Expr.Not(Expr.Ge(Expr.Field("mixed"), Expr.Literal(FilterLiteral.From(-1.0))));
-            Assert.Equal(2, await file.Scan().Where(nanRows).CountAsync());
-            Assert.Equal(FilterLiteralKind.Null, (await file.Scan().Where(nanRows).MinAsync("mixed")).Kind);
+            Assert.Equal(2, await file.ScanBuilder().Where(nanRows).CountAsync());
+            Assert.Equal(FilterLiteralKind.Null, (await file.ScanBuilder().Where(nanRows).MinAsync("mixed")).Kind);
         }
         finally
         {
@@ -380,21 +380,21 @@ public sealed class ScanTerminalTests
         long[] take = TakenRows();
 
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
-        List<long> filtered = await Selected(file.Scan().Where(filter));
+        List<long> filtered = await Selected(file.ScanBuilder().Where(filter));
         Assert.True(filtered.Count > 0 && filtered.Count < Rows);
-        Assert.Equal(filtered, await Selected(file.Scan().Where(filter).WithDegreeOfParallelism(3)));
+        Assert.Equal(filtered, await Selected(file.ScanBuilder().Where(filter).WithDegreeOfParallelism(3)));
 
-        List<long> taken = await Selected(file.Scan().Take(take));
+        List<long> taken = await Selected(file.ScanBuilder().Take(take));
         Assert.Equal(take.Length, taken.Count);
-        Assert.Equal(taken, await Selected(file.Scan().Take(take).WithDegreeOfParallelism(3)));
+        Assert.Equal(taken, await Selected(file.ScanBuilder().Take(take).WithDegreeOfParallelism(3)));
 
-        List<long> both = await Selected(file.Scan().Where(filter).Take(take));
+        List<long> both = await Selected(file.ScanBuilder().Where(filter).Take(take));
         Assert.True(both.Count > 0 && both.Count < taken.Count);
-        Assert.Equal(both, await Selected(file.Scan().Where(filter).Take(take).WithDegreeOfParallelism(3)));
+        Assert.Equal(both, await Selected(file.ScanBuilder().Where(filter).Take(take).WithDegreeOfParallelism(3)));
     }
 
     private static ScanBuilder Scan(VortexFile file, VortexExpr? filter) =>
-        filter is null ? file.Scan() : file.Scan().Where(filter);
+        filter is null ? file.ScanBuilder() : file.ScanBuilder().Where(filter);
 
     /// <summary>
     /// The scan with the filter and one of the selections; nothing else set. "rows" is a wide
@@ -404,7 +404,7 @@ public sealed class ScanTerminalTests
     /// </summary>
     private static ScanBuilder Build(VortexFile file, VortexExpr filter, string selection)
     {
-        ScanBuilder scan = file.Scan().Where(filter);
+        ScanBuilder scan = file.ScanBuilder().Where(filter);
         return selection switch
         {
             "none" => scan,

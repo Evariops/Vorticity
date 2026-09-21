@@ -180,8 +180,8 @@ public sealed class CompositeKeyTests
         }
 
         VortexExpr filter = Expr.Eq(Expr.Field("country"), Expr.Literal(FilterLiteral.From("DE")));
-        Assert.Equal(expected, await file.Scan().Where(filter).CountAsync());
-        Assert.Equal(expected, await file.Scan().Where(filter).WithIndexes(false).CountAsync());
+        Assert.Equal(expected, await file.ScanBuilder().Where(filter).CountAsync());
+        Assert.Equal(expected, await file.ScanBuilder().Where(filter).WithIndexes(false).CountAsync());
 
         // The composite entry does not pose as a single column's source.
         KeyPlan single = await file.Keys("country").ExplainAsync();
@@ -210,7 +210,7 @@ public sealed class CompositeKeyTests
             oracle.Reverse();
         }
 
-        ScanBuilder scan = written.File.Scan()
+        ScanBuilder scan = written.File.ScanBuilder()
             .InKeyOrder(["country", "city"], descending)
             .Where(Expr.Gt(Expr.Field("n"), Expr.Literal(FilterLiteral.From(0))))
             .Project("country", "city", "n")
@@ -235,14 +235,14 @@ public sealed class CompositeKeyTests
 
         Assert.Equal(oracle.ConvertAll(e => $"{Country((int)e.Row)}|{City((int)e.Row)}|{Number((int)e.Row)}"), delivered);
 
-        ScanPlan plan = await written.File.Scan().InKeyOrder(["country", "city"], descending).ExplainAsync();
+        ScanPlan plan = await written.File.ScanBuilder().InKeyOrder(["country", "city"], descending).ExplainAsync();
         Assert.Equal("(country, city)", plan.Order!.Path);
         Assert.Equal(KeySourceKind.SortedRuns, plan.Order.Source);
 
         // A tuple the file has no run for is refused, with the policy that would have served.
         VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(async () =>
         {
-            await foreach (RecordBatch batch in written.File.Scan().InKeyOrder(["city", "n"]).ExecuteAsync())
+            await foreach (RecordBatch batch in written.File.ScanBuilder().InKeyOrder(["city", "n"]).ExecuteAsync())
             {
                 batch.Dispose();
             }
@@ -307,7 +307,7 @@ public sealed class CompositeKeyTests
                 RowBlockSize = Block,
                 DataBlockTargetBytes = null,
                 IndexBudgetPerMille = 1_000_000,
-                Indexes = WritePolicy.None.ForKey(["country", "city"], runs).ForKey(["n", "country"], runs),
+                WritePolicy = WritePolicy.None.ForKey(["country", "city"], runs).ForKey(["n", "country"], runs),
                 KeyEncoder = withEncoder ? new RowKeyEncoder(RowSortField.Ascending) : null,
             };
 

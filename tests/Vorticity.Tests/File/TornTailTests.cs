@@ -43,7 +43,7 @@ public sealed class TornTailTests
     {
         RowBlockSize = Block,
         DataBlockTargetBytes = null,
-        Indexes = WritePolicy.None.For("id", IndexPolicy.Bloom()),
+        WritePolicy = WritePolicy.None.For("id", IndexPolicy.Bloom()),
     };
 
     [Fact]
@@ -73,7 +73,7 @@ public sealed class TornTailTests
 
                 // Its indexes are the version's own.
                 VortexExpr present = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(Id(1_234))));
-                Assert.Equal(1, await file.Scan().Where(present).CountAsync());
+                Assert.Equal(1, await file.ScanBuilder().Where(present).CountAsync());
                 Assert.True(await file.MayMatchAsync(present));
             }
 
@@ -243,7 +243,7 @@ public sealed class TornTailTests
     private static async Task<List<long>> ReadAsync(VortexFile file)
     {
         List<long> ids = [];
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
         {
             CanonicalNode root = batch.Arena.GetNode(batch.RootIndex);
             CanonicalNode column = batch.Arena.GetNode(root.GetFieldIndex(0));

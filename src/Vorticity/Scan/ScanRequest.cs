@@ -13,7 +13,7 @@ namespace Vorticity.Scanning;
 /// <see cref="Rows"/> is in the root layout's coordinates, which for a Vortex file are the file's
 /// own row indices. Layout readers translate them for their children.
 /// </remarks>
-public readonly struct ScanRequest
+internal readonly struct ScanRequest
 {
     /// <summary>Creates a request.</summary>
     /// <param name="rows">The rows this batch covers, in root coordinates.</param>

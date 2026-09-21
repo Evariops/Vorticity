@@ -10,7 +10,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// value of the first run whose offset-adjusted end is above r. That the ends strictly increase is
 /// a hard check here rather than an assumption, because the search a take does relies on it.
 /// </summary>
-public sealed class RunEndDecoder : ArrayDecoder
+internal sealed class RunEndDecoder : ArrayDecoder
 {
     private const string Id = "vortex.runend";
 

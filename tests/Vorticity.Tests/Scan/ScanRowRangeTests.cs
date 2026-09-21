@@ -69,7 +69,7 @@ public sealed class ScanRowRangeTests
 
         long expected = start;
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Rows(new RowRange(start, end))
             .WithMaxBatchRows(700)
             .ExecuteAsync())
@@ -93,7 +93,7 @@ public sealed class ScanRowRangeTests
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Wide), CancellationToken.None);
 
         List<long> starts = new List<long>();
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Rows(new RowRange(500, 3500))
             .WithMaxBatchRows(1024)
             .ExecuteAsync())
@@ -112,7 +112,7 @@ public sealed class ScanRowRangeTests
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Wide), CancellationToken.None);
 
         int batches = 0;
-        await foreach (RecordBatch batch in file.Scan().Rows(new RowRange(17, 17)).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Rows(new RowRange(17, 17)).ExecuteAsync())
         {
             batches++;
         }
@@ -127,7 +127,7 @@ public sealed class ScanRowRangeTests
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Wide), CancellationToken.None);
 
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Rows(RowRange.FromLength(0, 1_000_000))
             .ExecuteAsync())
         {
@@ -137,7 +137,7 @@ public sealed class ScanRowRangeTests
         Assert.Equal(file.RowCount, rows);
 
         int batches = 0;
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Rows(new RowRange(file.RowCount + 10, file.RowCount + 20))
             .ExecuteAsync())
         {
@@ -158,10 +158,10 @@ public sealed class ScanRowRangeTests
     public async Task TheCapMustBePositive()
     {
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Wide), CancellationToken.None);
-        Assert.Throws<ArgumentOutOfRangeException>(() => file.Scan().WithMaxBatchRows(0));
-        Assert.Throws<ArgumentOutOfRangeException>(() => file.Scan().WithMaxBatchRows(-1));
-        Assert.Throws<ArgumentOutOfRangeException>(() => file.Scan().WithDegreeOfParallelism(0));
-        Assert.Throws<ArgumentOutOfRangeException>(() => file.Scan().WithDegreeOfParallelism(-4));
+        Assert.Throws<ArgumentOutOfRangeException>(() => file.ScanBuilder().WithMaxBatchRows(0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => file.ScanBuilder().WithMaxBatchRows(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => file.ScanBuilder().WithDegreeOfParallelism(0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => file.ScanBuilder().WithDegreeOfParallelism(-4));
     }
 
     [Fact]
@@ -174,7 +174,7 @@ public sealed class ScanRowRangeTests
 
         long rows = 0;
         long expected = 0;
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Project("A")
             .Rows(new RowRange(0, 40))
             .WithMaxBatchRows(1)
@@ -194,7 +194,7 @@ public sealed class ScanRowRangeTests
     private static async Task<long[]> ReadRange(string entry, RowRange? range)
     {
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(entry), CancellationToken.None);
-        ScanBuilder builder = file.Scan();
+        ScanBuilder builder = file.ScanBuilder();
         if (range is RowRange rows)
         {
             builder = builder.Rows(rows);

@@ -10,7 +10,7 @@ namespace Vorticity.Arrays.Metadata;
 /// No core edition declares this layout, so a reader that meets it resolves an unknown layout
 /// encoding; the codec exists so that such a file can still be described.
 /// </summary>
-public readonly struct ListLayoutMetadata : IEquatable<ListLayoutMetadata>
+internal readonly struct ListLayoutMetadata : IEquatable<ListLayoutMetadata>
 {
     private const string MessageName = "ListLayoutMetadata";
 

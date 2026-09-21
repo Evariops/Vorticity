@@ -25,7 +25,7 @@ public sealed class DisposedFileTests
         VortexFile file = await VortexFile.OpenAsync(Corpus.Path("containers/zoned_many_zones_nulls"));
         await file.DisposeAsync();
 
-        Assert.Throws<ObjectDisposedException>(() => file.Identity);
+        Assert.Throws<ObjectDisposedException>(() => file.StoredIdentity);
         Assert.Throws<ObjectDisposedException>(() => file.Indexes);
         Assert.Throws<ObjectDisposedException>(() => _ = file.SegmentSpecs.Length);
         Assert.Throws<ObjectDisposedException>(() => file.GetArrayEncodingId(0));
@@ -40,7 +40,7 @@ public sealed class DisposedFileTests
     public async Task AMemberThatAnswersFromTheOpenGoesOnAnswering()
     {
         VortexFile file = await VortexFile.OpenAsync(Corpus.Path("containers/zoned_many_zones_nulls"));
-        DType schema = file.Schema;
+        DType schema = file.DType;
         long rows = file.RowCount;
         long bytes = file.FileLength;
         int metadata = file.MetadataCount;
@@ -48,7 +48,7 @@ public sealed class DisposedFileTests
         await file.DisposeAsync();
 
         // The answer is still true: none of these reads a buffer that was released.
-        Assert.Equal(schema, file.Schema);
+        Assert.Equal(schema, file.DType);
         Assert.Equal(rows, file.RowCount);
         Assert.Equal(bytes, file.FileLength);
         Assert.Equal(metadata, file.MetadataCount);
@@ -72,7 +72,7 @@ public sealed class DisposedFileTests
 
         // Building it is allowed: the builder reads nothing. Enumerating it reaches the source,
         // which the file disposed with itself.
-        ScanBuilder builder = file.Scan();
+        ScanBuilder builder = file.ScanBuilder();
         await Assert.ThrowsAnyAsync<ObjectDisposedException>(async () =>
         {
             await foreach (RecordBatch batch in builder.ExecuteAsync())

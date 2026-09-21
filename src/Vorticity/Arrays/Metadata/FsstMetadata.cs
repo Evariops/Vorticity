@@ -8,7 +8,7 @@ namespace Vorticity.Arrays.Metadata;
 /// <c>vortex.fsst</c> metadata:
 /// <c>message FSSTMetadata { PType uncompressed_lengths_ptype = 1; PType codes_offsets_ptype = 2; }</c>.
 /// </summary>
-public readonly struct FsstMetadata : IEquatable<FsstMetadata>
+internal readonly struct FsstMetadata : IEquatable<FsstMetadata>
 {
     private const string MessageName = "FSSTMetadata";
 

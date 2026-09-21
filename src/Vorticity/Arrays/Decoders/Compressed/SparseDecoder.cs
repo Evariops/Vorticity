@@ -13,7 +13,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// scalar. The node always carries exactly two children, the patch indices and the patch values,
 /// even when the patch descriptor declares chunk offsets, so a third child would be a bug.
 /// </summary>
-public sealed class SparseDecoder : ArrayDecoder
+internal sealed class SparseDecoder : ArrayDecoder
 {
     private const string Id = "vortex.sparse";
 

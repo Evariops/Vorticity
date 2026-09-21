@@ -71,7 +71,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     internal static async ValueTask<(SortedColumnSource? Source, string? Reason)> OpenAsync(
         VortexFile file, string path, CancellationToken cancellationToken)
     {
-        DType schema = file.Schema;
+        DType schema = file.DType;
         if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
         {
             return (null, "the file's root is not a struct, so it has no named columns");
@@ -93,7 +93,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
             return (null, "the file carries no statistics segment, so nothing says the column is sorted");
         }
 
-        FileStatistics statistics = file.Statistics;
+        FileStatistics statistics = file.FileStatistics;
         if (index >= statistics.FieldCount)
         {
             return (null, "the statistics segment has no entry for this column");
@@ -122,7 +122,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         long firstRow = 0;
         if (column.IsNullable)
         {
-            if (!stats.TryGetNullCount(out ulong nulls))
+            if (!stats.TryGetStoredNullCount(out ulong nulls))
             {
                 return (null, "the column is nullable and its null count is not recorded, so where its entries begin is unknown");
             }

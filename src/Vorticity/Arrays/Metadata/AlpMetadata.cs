@@ -11,7 +11,7 @@ namespace Vorticity.Arrays.Metadata;
 /// As with <see cref="BitPackedMetadata"/>, the patch shape is the child count: no patches, patches
 /// without chunk offsets, patches with them. The corpus spells all three under the same encoding id.
 /// </remarks>
-public readonly struct AlpMetadata : IEquatable<AlpMetadata>
+internal readonly struct AlpMetadata : IEquatable<AlpMetadata>
 {
     private const string MessageName = "ALPMetadata";
 

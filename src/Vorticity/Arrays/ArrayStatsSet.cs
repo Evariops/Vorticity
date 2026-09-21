@@ -13,7 +13,7 @@ namespace Vorticity.Arrays;
 /// <c>VortexReadOptions.VerifyStatistics</c> is on. A statistic that the file omits is unknown, not
 /// false or zero, which is why those are reachable only through a <c>TryGet</c>.
 /// </remarks>
-public readonly ref struct ArrayStatsSet
+internal readonly ref struct ArrayStatsSet
 {
     private readonly ArrayNodeArena? _arena;
     private readonly int _index;

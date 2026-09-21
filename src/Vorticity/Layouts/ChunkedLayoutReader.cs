@@ -14,7 +14,7 @@ namespace Vorticity.Layouts;
 /// at all is legal and then covers zero rows. Chunk offsets are derived rather than stored, and the
 /// parser has already checked that they sum to the parent's row count.
 /// </summary>
-public sealed class ChunkedLayoutReader : LayoutReader
+internal sealed class ChunkedLayoutReader : LayoutReader
 {
     private const int StackChunks = 16;
 

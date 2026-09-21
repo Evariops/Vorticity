@@ -97,7 +97,7 @@ public sealed class IndexWriteTests
 
         IndexEntry entry = Assert.Single(directory.Entries);
         Assert.Equal(IndexKinds.DictProbe, entry.Kind);
-        Assert.Equal(new uint[] { (uint)file.Schema.IndexOfField("status") }, entry.ColumnPath);
+        Assert.Equal(new uint[] { (uint)file.DType.IndexOfField("status") }, entry.ColumnPath);
         Assert.Equal((ulong)Block, entry.BlockLength);
         List<(ulong First, ulong End)> actual = [];
         foreach (IndexRun run in entry.Runs)
@@ -123,8 +123,8 @@ public sealed class IndexWriteTests
         Assert.Equal(await Dump(a), await Dump(b));
 
         VortexExpr closed = Expr.Eq(Expr.Field("status"), Expr.Literal(FilterLiteral.From("closed")));
-        Assert.Equal(await a.Scan().Where(closed).CountAsync(), await b.Scan().Where(closed).CountAsync());
-        Assert.Equal(Rows / Statuses.Length, await b.Scan().Where(closed).CountAsync());
+        Assert.Equal(await a.ScanBuilder().Where(closed).CountAsync(), await b.ScanBuilder().Where(closed).CountAsync());
+        Assert.Equal(Rows / Statuses.Length, await b.ScanBuilder().Where(closed).CountAsync());
     }
 
     [Fact]
@@ -304,7 +304,7 @@ public sealed class IndexWriteTests
         {
             RowBlockSize = Block,
             DataBlockTargetBytes = null,
-            Indexes = indexes ?? WritePolicy.None,
+            WritePolicy = indexes ?? WritePolicy.None,
             Profile = profile,
             Identity = identity,
         };
@@ -312,7 +312,7 @@ public sealed class IndexWriteTests
     private static async Task<string> Dump(VortexFile file)
     {
         List<string> values = [];
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
         {
             Values.DescribeRows(batch, values);
         }

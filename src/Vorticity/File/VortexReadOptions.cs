@@ -7,7 +7,7 @@ namespace Vorticity.File;
 /// Read-time policy, carried on the open file and copied into every scan context. It is immutable
 /// and shared because one open file may serve several concurrent scans.
 /// </summary>
-public sealed class VortexReadOptions
+internal sealed class VortexReadOptions
 {
     private readonly long _maxDecompressedSize = VortexLimits.DefaultMaxDecompressedSize;
     private readonly long _indexCacheBytes = DefaultIndexCacheBytes;

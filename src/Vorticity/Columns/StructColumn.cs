@@ -11,7 +11,7 @@ namespace Vorticity.Columns;
 /// be empty or contain a '.', so lookup here is exact and never splits a path; a field that cannot
 /// be addressed by name is reached through <see cref="GetField(int)"/>.
 /// </remarks>
-public readonly ref struct StructColumn
+internal readonly ref struct StructColumn
 {
     private readonly RecordBatch _batch;
     private readonly int _node;

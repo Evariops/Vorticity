@@ -19,7 +19,7 @@ namespace Vorticity.Columns;
 /// <c>T?</c> would allocate and break the span contract; nulls live in
 /// <see cref="ValidityKind"/> and <see cref="IsValid"/> alone.
 /// </remarks>
-public readonly ref struct VortexColumn
+internal readonly ref struct VortexColumn
 {
     private readonly RecordBatch _batch;
     private readonly int _node;

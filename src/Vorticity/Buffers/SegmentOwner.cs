@@ -37,7 +37,7 @@ namespace Vorticity.Buffers;
 /// to give back a reference obtained from <see cref="Retain"/>.
 /// </para>
 /// </remarks>
-public abstract class SegmentOwner : IDisposable
+internal abstract class SegmentOwner : IDisposable
 {
     private int _refCount = 1;
     private int _disposeGuard;

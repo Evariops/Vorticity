@@ -39,9 +39,9 @@ public sealed class FileIdentityTests
 
         await using VortexFile a = await VortexFile.OpenAsync(new MemorySegmentSource(first), VortexOpenOptions.Default);
         await using VortexFile b = await VortexFile.OpenAsync(new MemorySegmentSource(second), VortexOpenOptions.Default);
-        Assert.NotNull(a.Identity);
-        Assert.NotNull(b.Identity);
-        Assert.NotEqual(a.Identity, b.Identity);
+        Assert.NotNull(a.StoredIdentity);
+        Assert.NotNull(b.StoredIdentity);
+        Assert.NotEqual(a.StoredIdentity, b.StoredIdentity);
 
         // The same rows, the same length: the two files differ in the identity's sixteen bytes only.
         Assert.Equal(first.Length, second.Length);
@@ -64,7 +64,7 @@ public sealed class FileIdentityTests
 
         Assert.Equal(first, second);
         await using VortexFile file = await VortexFile.OpenAsync(new MemorySegmentSource(first), VortexOpenOptions.Default);
-        Assert.Equal(pinned, file.Identity);
+        Assert.Equal(pinned, file.StoredIdentity);
     }
 
     [Fact]
@@ -77,8 +77,8 @@ public sealed class FileIdentityTests
         await using VortexFile file = await VortexFile.OpenAsync(source, VortexOpenOptions.Default);
 
         int reads = source.TotalReads;
-        Assert.Equal(pinned, file.Identity);
-        Assert.Equal(pinned, file.Identity);
+        Assert.Equal(pinned, file.StoredIdentity);
+        Assert.Equal(pinned, file.StoredIdentity);
         Assert.Equal(reads, source.TotalReads);
 
         Assert.True(file.TryGetMetadataIndex(FileIdentity.MetadataKeyUtf8, out int index));
@@ -151,7 +151,7 @@ public sealed class FileIdentityTests
 
         // Written by the reference: no entry at all.
         await using VortexFile reference = await VortexFile.OpenAsync(Corpus.Path("containers/zoned_many_zones_nulls"));
-        Assert.Null(reference.Identity);
+        Assert.Null(reference.StoredIdentity);
 
         // An entry of the wrong length is no identity, and the file still opens.
         byte[] bytes = await WriteAsync(0, 1_000, Guid.NewGuid());
@@ -179,7 +179,7 @@ public sealed class FileIdentityTests
         byte[] bytes = await WriteAsync(0, 100);
         VortexFile file = await VortexFile.OpenAsync(new MemorySegmentSource(bytes), VortexOpenOptions.Default);
         await file.DisposeAsync();
-        Assert.Throws<ObjectDisposedException>(() => file.Identity);
+        Assert.Throws<ObjectDisposedException>(() => file.StoredIdentity);
     }
 
     // ------------------------------------------------------------------------------ helpers
@@ -187,7 +187,7 @@ public sealed class FileIdentityTests
     private static async Task<Guid?> IdentityOf(string path)
     {
         await using VortexFile file = await VortexFile.OpenAsync(path);
-        return file.Identity;
+        return file.StoredIdentity;
     }
 
     private static string TempPath() =>
@@ -200,7 +200,7 @@ public sealed class FileIdentityTests
         {
             RowBlockSize = 1_024,
             Identity = identity,
-            Indexes = policy ?? WritePolicy.Auto,
+            WritePolicy = policy ?? WritePolicy.Auto,
         };
         await using (VortexFileWriter writer = VortexFileWriter.Create(
             new StreamSegmentSink(stream, ownsStream: false), Schema, options))

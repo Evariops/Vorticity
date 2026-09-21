@@ -21,7 +21,7 @@ namespace Vorticity.Types;
 /// value identity, not the IEEE-754 comparison that filter evaluation uses.
 /// </para>
 /// </remarks>
-public readonly struct ScalarValue : IEquatable<ScalarValue>
+internal readonly struct ScalarValue : IEquatable<ScalarValue>
 {
     private readonly ScalarStore? _store;
 

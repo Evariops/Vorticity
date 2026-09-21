@@ -7,7 +7,7 @@ namespace Vorticity.Types;
 /// A typed scalar: a <see cref="Types.DType"/> paired with a <see cref="ScalarValue"/>. Both halves
 /// are handles into their own arena, so the pair is small and copies freely.
 /// </summary>
-public readonly struct Scalar : IEquatable<Scalar>
+internal readonly struct Scalar : IEquatable<Scalar>
 {
     /// <summary>Pairs a dtype with a value. Neither is validated against the other.</summary>
     /// <remarks>

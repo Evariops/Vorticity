@@ -13,7 +13,7 @@ namespace Vorticity.Dataset;
 /// </param>
 /// <param name="Length">Its bytes.</param>
 /// <param name="Hash">XXH3-128 of its bytes.</param>
-public readonly record struct PageReference(ulong Version, long Offset, int Length, UInt128 Hash)
+internal readonly record struct PageReference(ulong Version, long Offset, int Length, UInt128 Hash)
 {
     /// <summary>The reference that names no page.</summary>
     public static PageReference None => default;

@@ -39,7 +39,7 @@ internal static class WriteAFile
 
         await using (VortexFile file = await VortexFile.OpenAsync(path))
         {
-            await foreach (RecordBatch batch in file.Scan().Rows(new RowRange(0, 2)).ExecuteAsync())
+            await foreach (RecordBatch batch in file.ScanBuilder().Rows(new RowRange(0, 2)).ExecuteAsync())
             {
                 using (batch)
                 {

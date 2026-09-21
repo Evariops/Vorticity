@@ -147,7 +147,7 @@ internal static class Program
                 source, new VortexOpenOptions { LeaveSourceOpen = true }, CancellationToken.None);
 
             reach = Reach.RejectedWhileDecoding;
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {
                 // Touch the rows: a decoder that produced a buffer too short for its declared

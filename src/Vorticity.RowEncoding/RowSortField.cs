@@ -7,7 +7,7 @@ namespace Vorticity.RowEncoding;
 /// were produced from the same schema with the same <see cref="RowSortField"/> per column: the
 /// bytes carry no type tags, no field names and no sort options of their own.
 /// </summary>
-public readonly struct RowSortField : IEquatable<RowSortField>
+internal readonly struct RowSortField : IEquatable<RowSortField>
 {
     /// <summary>Creates a field with explicit options.</summary>
     public RowSortField(bool descending, bool nullsFirst)

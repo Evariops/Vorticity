@@ -4,7 +4,7 @@ using System.Collections.Generic;
 namespace Vorticity.Expressions;
 
 /// <summary>What an <see cref="VortexExpr"/> node is.</summary>
-public enum ExprKind : byte
+internal enum ExprKind : byte
 {
     /// <summary>A named column, possibly a nested path.</summary>
     Field = 0,
@@ -41,7 +41,7 @@ public enum ExprKind : byte
 /// matches one byte rather than one code point. Case folding would need a definition of "case" for
 /// UTF-8 that the library does not carry, so every operator here is case-sensitive.
 /// </remarks>
-public enum StringMatchOp : byte
+internal enum StringMatchOp : byte
 {
     /// <summary>The value's bytes begin with the pattern; every value begins with an empty one.</summary>
     StartsWith = 0,
@@ -54,7 +54,7 @@ public enum StringMatchOp : byte
 }
 
 /// <summary>The comparison operators a filter admits.</summary>
-public enum ComparisonOp : byte
+internal enum ComparisonOp : byte
 {
     /// <summary><c>=</c>.</summary>
     Equal = 0,
@@ -82,7 +82,7 @@ public enum ComparisonOp : byte
 /// not here: these types are only the shape. A literal's type is checked against its column only
 /// when the filter runs, since the schema is out of scope while the tree is built.
 /// </remarks>
-public abstract class VortexExpr
+internal abstract class VortexExpr
 {
     private protected VortexExpr()
     {
@@ -102,7 +102,7 @@ public abstract class VortexExpr
 }
 
 /// <summary>A column reference, by dotted path.</summary>
-public sealed class FieldExpr : VortexExpr
+internal sealed class FieldExpr : VortexExpr
 {
     // An empty segment is the schema's business, not this constructor's: a field name may be
     // empty, so nothing is refused here and a path that names nothing fails at the scan, which
@@ -143,7 +143,7 @@ public sealed class FieldExpr : VortexExpr
 }
 
 /// <summary>A constant operand.</summary>
-public sealed class LiteralExpr : VortexExpr
+internal sealed class LiteralExpr : VortexExpr
 {
     internal LiteralExpr(FilterLiteral value) => Value = value;
 
@@ -164,7 +164,7 @@ public sealed class LiteralExpr : VortexExpr
 /// wrote it: <c>Expr.Lt(Expr.Literal(3), Expr.Field("x"))</c> becomes <c>x &gt; 3</c>. Normalizing
 /// at construction is what keeps the evaluator and the pruner from each having to handle both.
 /// </remarks>
-public sealed class ComparisonExpr : VortexExpr
+internal sealed class ComparisonExpr : VortexExpr
 {
     internal ComparisonExpr(FieldExpr field, ComparisonOp op, FilterLiteral value)
     {
@@ -190,7 +190,7 @@ public sealed class ComparisonExpr : VortexExpr
 }
 
 /// <summary><c>AND</c> or <c>OR</c> over two operands.</summary>
-public sealed class LogicalExpr : VortexExpr
+internal sealed class LogicalExpr : VortexExpr
 {
     internal LogicalExpr(bool isAnd, VortexExpr left, VortexExpr right)
     {
@@ -220,7 +220,7 @@ public sealed class LogicalExpr : VortexExpr
 }
 
 /// <summary><c>NOT</c> over one operand.</summary>
-public sealed class NotExpr : VortexExpr
+internal sealed class NotExpr : VortexExpr
 {
     internal NotExpr(VortexExpr operand) => Operand = operand;
 
@@ -239,7 +239,7 @@ public sealed class NotExpr : VortexExpr
 /// Never yields <c>unknown</c>, which is what makes it the one predicate a zone of nothing but
 /// nulls can still satisfy.
 /// </remarks>
-public sealed class NullCheckExpr : VortexExpr
+internal sealed class NullCheckExpr : VortexExpr
 {
     internal NullCheckExpr(FieldExpr field, bool isNull)
     {
@@ -261,7 +261,7 @@ public sealed class NullCheckExpr : VortexExpr
 }
 
 /// <summary><c>IN</c> over a set of literals.</summary>
-public sealed class InExpr : VortexExpr
+internal sealed class InExpr : VortexExpr
 {
     internal InExpr(FieldExpr field, FilterLiteral[] values)
     {
@@ -290,7 +290,7 @@ public sealed class InExpr : VortexExpr
 /// A null value yields <c>unknown</c>, as a comparison does, so a null row never satisfies one of
 /// these and never satisfies its negation either.
 /// </remarks>
-public sealed class StringMatchExpr : VortexExpr
+internal sealed class StringMatchExpr : VortexExpr
 {
     internal StringMatchExpr(FieldExpr field, StringMatchOp op, FilterLiteral pattern, byte escape)
     {
@@ -329,7 +329,7 @@ public sealed class StringMatchExpr : VortexExpr
 /// none does. A null element matches nothing and leaves the row <c>false</c> rather than unknown,
 /// because the result takes the list's validity alone. An empty list is <c>false</c>.
 /// </remarks>
-public sealed class ListContainsExpr : VortexExpr
+internal sealed class ListContainsExpr : VortexExpr
 {
     internal ListContainsExpr(FieldExpr field, FilterLiteral value)
     {
@@ -351,7 +351,7 @@ public sealed class ListContainsExpr : VortexExpr
 }
 
 /// <summary>Builds filter expressions.</summary>
-public static class Expr
+internal static class Expr
 {
     /// <summary>A column, by dotted path.</summary>
     /// <param name="path">e.g. <c>payload.size</c>.</param>

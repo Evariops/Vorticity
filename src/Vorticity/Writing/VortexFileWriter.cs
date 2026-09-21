@@ -237,7 +237,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// pays no transit copy. Any other batch waits in transit for the rows completing its last
     /// block.
     /// </summary>
-    public int PreferredBatchRows => _rowBlock > 0 ? _rowBlock : 1;
+    internal int PreferredBatchRows => _rowBlock > 0 ? _rowBlock : 1;
 
     /// <summary>
     /// Whether any batch has waited in the transit arena, which is what
@@ -345,7 +345,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     }
 
     /// <summary>The schema every batch must match.</summary>
-    public DType Schema => _schema;
+    internal DType DType => _schema;
 
     /// <summary>Starts a file over <paramref name="sink"/>.</summary>
     /// <param name="sink">Where the bytes go.</param>
@@ -353,7 +353,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <returns>The writer. The caller completes and disposes it.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="sink"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="schema"/> has not been set.</exception>
-    public static VortexFileWriter Create(ISegmentSink sink, DType schema) =>
+    internal static VortexFileWriter Create(ISegmentSink sink, DType schema) =>
         Create(sink, schema, VortexWriteOptions.Default);
 
     /// <summary>Starts a file over <paramref name="sink"/> with explicit options.</summary>
@@ -363,7 +363,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <returns>The writer. The caller completes and disposes it.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="sink"/> or <paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="schema"/> has not been set.</exception>
-    public static VortexFileWriter Create(ISegmentSink sink, DType schema, VortexWriteOptions options)
+    internal static VortexFileWriter Create(ISegmentSink sink, DType schema, VortexWriteOptions options)
     {
         ArgumentNullException.ThrowIfNull(sink);
         ArgumentNullException.ThrowIfNull(options);
@@ -392,8 +392,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
                 nameof(options));
         }
 
-        ArgumentNullException.ThrowIfNull(options.Indexes, nameof(options));
-        WritePolicy indexes = options.Profile == WriteProfile.Fastest ? WritePolicy.None : options.Indexes;
+        ArgumentNullException.ThrowIfNull(options.WritePolicy, nameof(options));
+        WritePolicy indexes = options.Profile == WriteProfile.Fastest ? WritePolicy.None : options.WritePolicy;
         ArgumentOutOfRangeException.ThrowIfNegative(options.IndexBudgetPerMille, nameof(options));
         ArgumentOutOfRangeException.ThrowIfNegative(options.StringBoundBytes, nameof(options));
         return new VortexFileWriter(
@@ -442,7 +442,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <param name="schema">The file's dtype.</param>
     /// <returns>The writer, which owns the underlying stream.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
-    public static VortexFileWriter Create(string path, DType schema) =>
+    internal static VortexFileWriter Create(string path, DType schema) =>
         Create(path, schema, VortexWriteOptions.Default);
 
     /// <summary>Creates a file at <paramref name="path"/> with explicit options.</summary>
@@ -451,7 +451,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <param name="options">Write-time policy.</param>
     /// <returns>The writer, which owns the underlying stream.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
-    public static VortexFileWriter Create(string path, DType schema, VortexWriteOptions options)
+    internal static VortexFileWriter Create(string path, DType schema, VortexWriteOptions options)
     {
         ArgumentNullException.ThrowIfNull(path);
         System.IO.FileStream stream = new System.IO.FileStream(
@@ -476,13 +476,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     }
 
     /// <summary>Appends <paramref name="batch"/> as one chunk of every column.</summary>
-    /// <param name="batch">The rows. Its schema must equal <see cref="Schema"/>.</param>
+    /// <param name="batch">The rows. Its schema must equal <see cref="DType"/>.</param>
     /// <param name="cancellationToken">Cancels the writes.</param>
     /// <returns>A task that completes when the batch's segments are with the sink.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="batch"/> is null.</exception>
     /// <exception cref="ArgumentException">The batch's schema does not match the file's.</exception>
     /// <exception cref="InvalidOperationException">The file has already been completed.</exception>
-    public async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken = default)
+    internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(batch);
         ObjectDisposedException.ThrowIf(_completed, this);
@@ -1485,7 +1485,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
     private void RequireMatchingSchema(RecordBatch batch)
     {
-        DType batchSchema = batch.Schema;
+        DType batchSchema = batch.DType;
         int fields = batchSchema.Kind == DTypeKind.Struct ? batchSchema.FieldCount : 1;
         if ((batchSchema.Kind == DTypeKind.Struct) != _isTabular || fields != _fieldCount)
         {

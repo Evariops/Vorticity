@@ -17,7 +17,7 @@ internal static class GettingStarted
         await using VortexFile file = await VortexFile.OpenAsync(path);
         double total = 0;
         long seen = 0;
-        await foreach (RecordBatch batch in file.Scan().Project(["celsius"]).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Project(["celsius"]).ExecuteAsync())
         {
             using (batch)
             {

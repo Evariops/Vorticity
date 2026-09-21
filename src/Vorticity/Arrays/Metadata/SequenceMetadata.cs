@@ -17,7 +17,7 @@ namespace Vorticity.Arrays.Metadata;
 /// be interpreted against the node's inherited dtype, which this codec does not have; giving the
 /// values a type is the caller's job.
 /// </remarks>
-public readonly struct SequenceMetadata : IEquatable<SequenceMetadata>
+internal readonly struct SequenceMetadata : IEquatable<SequenceMetadata>
 {
     private const string MessageName = "SequenceMetadata";
 

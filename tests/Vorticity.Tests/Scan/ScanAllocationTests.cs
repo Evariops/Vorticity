@@ -133,7 +133,7 @@ public sealed class ScanAllocationTests
     }
 
     private static ValueTask<long> Count(VortexFile file, VortexExpr filter) =>
-        file.Scan()
+        file.ScanBuilder()
             .Where(filter)
             .WithTiers(TerminalTiers.All & ~TerminalTiers.FullBlock)
             .CountAsync();
@@ -254,7 +254,7 @@ public sealed class ScanAllocationTests
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Multi), CancellationToken.None);
 
         IAsyncEnumerator<RecordBatch> enumerator =
-            file.Scan().WithMaxBatchRows(500).ExecuteAsync().GetAsyncEnumerator();
+            file.ScanBuilder().WithMaxBatchRows(500).ExecuteAsync().GetAsyncEnumerator();
 
         // Next asserts IsCompletedSuccessfully on every step, which is the property under test.
         int batches = 0;
@@ -312,7 +312,7 @@ public sealed class ScanAllocationTests
     private static async Task<int> DrainAt(VortexFile file, int cap, int degree)
     {
         int batches = 0;
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .WithMaxBatchRows(cap)
             .WithDegreeOfParallelism(degree)
             .ExecuteAsync())
@@ -338,7 +338,7 @@ public sealed class ScanAllocationTests
             await Drain(file, cap);
         }
 
-        IAsyncEnumerator<RecordBatch> enumerator = file.Scan()
+        IAsyncEnumerator<RecordBatch> enumerator = file.ScanBuilder()
             .WithMaxBatchRows(cap)
             .WithDegreeOfParallelism(degree)
             .ExecuteAsync()
@@ -423,14 +423,14 @@ public sealed class ScanAllocationTests
 
     private static async Task Drain(VortexFile file, int cap)
     {
-        await foreach (RecordBatch batch in file.Scan().WithMaxBatchRows(cap).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().WithMaxBatchRows(cap).ExecuteAsync())
         {
             Assert.True(batch.RowCount > 0);
         }
     }
 
     private static IAsyncEnumerable<RecordBatch> Descending(VortexFile file, int cap) =>
-        file.Scan().InKeyOrder(NullKeyField, descending: true).WithMaxBatchRows(cap).ExecuteAsync();
+        file.ScanBuilder().InKeyOrder(NullKeyField, descending: true).WithMaxBatchRows(cap).ExecuteAsync();
 
     private static async Task<long> MeasureDescendingPerBatch(string path, int cap)
     {

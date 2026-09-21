@@ -13,7 +13,7 @@ namespace Vorticity.Arrays.Metadata;
 /// this codec rejects the value instead. An <em>absent</em> field is still a legal <c>I8</c>, and
 /// real files do carry zero metadata bytes for a decimal array.
 /// </remarks>
-public readonly struct DecimalMetadata : IEquatable<DecimalMetadata>
+internal readonly struct DecimalMetadata : IEquatable<DecimalMetadata>
 {
     private const string MessageName = "DecimalMetadata";
 

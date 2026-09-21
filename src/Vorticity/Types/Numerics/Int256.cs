@@ -18,7 +18,7 @@ namespace Vorticity.Types.Numerics;
 /// need the opposite order, such as <c>vortex.uuid</c>-style storage and the row encoder; reading
 /// an i256 out of a file never goes through them.
 /// </remarks>
-public readonly struct Int256 : IEquatable<Int256>, IComparable<Int256>
+internal readonly struct Int256 : IEquatable<Int256>, IComparable<Int256>
 {
     /// <summary>Number of bytes in the two's-complement representation. Always 32.</summary>
     public const int ByteCount = 32;

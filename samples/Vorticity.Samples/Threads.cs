@@ -38,7 +38,7 @@ internal static class Threads
         static async Task Degrees(string what, string path)
         {
             await using VortexFile file = await VortexFile.OpenAsync(path);
-            ScanPlan plan = await file.Scan().ExplainAsync();
+            ScanPlan plan = await file.ScanBuilder().ExplainAsync();
             Console.WriteLine($"  {what}: {plan.Splits} splits, {plan.Blocks} blocks, " +
                 $"{plan.SegmentsToRead} segments to read");
             foreach (int degree in new[] { 1, 2, 4, 8 })
@@ -52,7 +52,7 @@ internal static class Threads
                 {
                     Stopwatch watch = Stopwatch.StartNew();
                     rows = 0;
-                    await foreach (RecordBatch batch in file.Scan().WithDegreeOfParallelism(degree).ExecuteAsync())
+                    await foreach (RecordBatch batch in file.ScanBuilder().WithDegreeOfParallelism(degree).ExecuteAsync())
                     {
                         using (batch)
                         {
@@ -76,7 +76,7 @@ internal static class Threads
         static async Task<long> Count(VortexFile file)
         {
             long rows = 0;
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
             {
                 using (batch)
                 {

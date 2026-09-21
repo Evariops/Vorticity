@@ -31,7 +31,7 @@ namespace Vorticity.Scanning;
 /// which one is column zero.
 /// </para>
 /// </remarks>
-public readonly struct Projection
+internal readonly struct Projection
 {
     private readonly FieldMask _mask;
     private readonly int _leafCount;
@@ -48,7 +48,7 @@ public readonly struct Projection
     /// <summary>
     /// Compiles <paramref name="paths"/> against <paramref name="schema"/>.
     /// </summary>
-    /// <param name="schema">The file's schema, normally <see cref="VortexFile.Schema"/>.</param>
+    /// <param name="schema">The file's schema, normally <see cref="VortexFile.DType"/>.</param>
     /// <param name="paths">
     /// <c>.</c>-separated field names, matching the sidecar's <c>null_counts</c> paths - <c>"id"</c>,
     /// <c>"payload.size"</c>. An empty list is <see cref="All"/>: naming nothing narrows nothing.

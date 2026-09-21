@@ -86,7 +86,7 @@ public sealed class ScanCorpusTests
             {
                 await using VortexFile file = await VortexFile.OpenAsync(
                     entry.Path, OpenOptionsFor(entry), CancellationToken.None);
-                await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+                await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
                 {
                     Assert.True(batch.RowCount > 0);
                 }
@@ -129,14 +129,14 @@ public sealed class ScanCorpusTests
 
         long rows = 0;
         long batches = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync().WithCancellation(CancellationToken.None))
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync().WithCancellation(CancellationToken.None))
         {
             // Batches are contiguous and in order: row 0 of this batch is the row after the last.
             Assert.Equal(rows, batch.StartRow);
             Assert.True(batch.RowCount > 0, "a scan must not produce an empty batch");
 
             // An unprojected scan reproduces the file's schema exactly.
-            Assert.Equal(file.Schema, batch.Schema);
+            Assert.Equal(file.DType, batch.DType);
 
             rows += batch.RowCount;
             batches++;
@@ -158,7 +158,7 @@ public sealed class ScanCorpusTests
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
 
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
         {
             rows += batch.RowCount;
         }
@@ -174,7 +174,7 @@ public sealed class ScanCorpusTests
             Corpus.Path("encodings/null_r0"), CancellationToken.None);
 
         int batches = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
         {
             batches++;
             batch.Dispose();
@@ -190,7 +190,7 @@ public sealed class ScanCorpusTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path("containers/uncompressed_canonical"), CancellationToken.None);
 
-        System.Collections.Generic.IAsyncEnumerable<RecordBatch> scan = file.Scan().ExecuteAsync();
+        System.Collections.Generic.IAsyncEnumerable<RecordBatch> scan = file.ScanBuilder().ExecuteAsync();
         long first = await CountRows(scan);
         long second = await CountRows(scan);
 
@@ -198,7 +198,7 @@ public sealed class ScanCorpusTests
         Assert.Equal(file.RowCount, first);
 
         BatchAsyncEnumerable typed = Assert.IsType<BatchAsyncEnumerable>(scan);
-        Assert.Equal(file.Schema, typed.Schema);
+        Assert.Equal(file.DType, typed.Schema);
         Assert.True(typed.Projection.IsAll);
     }
 
@@ -247,7 +247,7 @@ public sealed class ScanCorpusTests
 
     private static async Task<List<int>> BatchSizes(VortexFile file, int cap)
     {
-        ScanBuilder builder = file.Scan();
+        ScanBuilder builder = file.ScanBuilder();
         if (cap > 0)
         {
             builder = builder.WithMaxBatchRows(cap);
@@ -271,7 +271,7 @@ public sealed class ScanCorpusTests
 
         long rows = 0;
         int batches = 0;
-        await foreach (RecordBatch batch in file.Scan().WithMaxBatchRows(1000).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().WithMaxBatchRows(1000).ExecuteAsync())
         {
             Assert.True(
                 batch.RowCount <= 1000,
@@ -307,6 +307,6 @@ public sealed class ScanCorpusTests
                 .AsTask()
                 .GetAwaiter()
                 .GetResult();
-            return donor.Schema;
+            return donor.DType;
         });
 }

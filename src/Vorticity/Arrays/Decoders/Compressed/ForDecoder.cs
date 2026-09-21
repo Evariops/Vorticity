@@ -10,7 +10,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// is not empty; it is a bare protobuf scalar carrying the reference without its dtype, so an empty
 /// metadata means a null reference and is a format error rather than a zero reference.
 /// </summary>
-public sealed class ForDecoder : ArrayDecoder
+internal sealed class ForDecoder : ArrayDecoder
 {
     private const string Id = "fastlanes.for";
 

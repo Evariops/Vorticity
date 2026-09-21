@@ -101,7 +101,7 @@ public sealed class RoundTripCountTests
         {
             if (readBatch)
             {
-                await foreach (RecordBatch b in file.Scan().ExecuteAsync()
+                await foreach (RecordBatch b in file.ScanBuilder().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     _ = b.RowCount;

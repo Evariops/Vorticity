@@ -65,7 +65,7 @@ public sealed class EncodingHintTests
                 RowBlockSize = 2_048,
                 DataBlockTargetBytes = null,
                 Identity = Pinned,
-                Indexes = WritePolicy.None,
+                WritePolicy = WritePolicy.None,
             };
 
             List<string> read;
@@ -262,7 +262,7 @@ public sealed class EncodingHintTests
             RowBlockSize = 2_048,
             DataBlockTargetBytes = 1 << 14,
             Identity = Pinned,
-            Indexes = WritePolicy.None,
+            WritePolicy = WritePolicy.None,
             EncodingHints = hints,
         };
 
@@ -279,7 +279,7 @@ public sealed class EncodingHintTests
     {
         List<string> rows = [];
         await using VortexFile file = await VortexFile.OpenAsync(path);
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
         {
             for (int row = 0; row < batch.RowCount; row++)
             {

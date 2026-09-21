@@ -67,7 +67,7 @@ public sealed class TakeTests
 
         int batches = 0;
         long[] wanted = [10, 20, 30];
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Project("monotone")
             .Take(wanted)
             .ExecuteAsync()
@@ -126,8 +126,8 @@ public sealed class TakeTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path(Zoned), CancellationToken.None);
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => file.Scan().Take([file.RowCount]));
-        Assert.Throws<ArgumentOutOfRangeException>(() => file.Scan().Take([-1L]));
+        Assert.Throws<ArgumentOutOfRangeException>(() => file.ScanBuilder().Take([file.RowCount]));
+        Assert.Throws<ArgumentOutOfRangeException>(() => file.ScanBuilder().Take([-1L]));
     }
 
     [Fact]
@@ -138,9 +138,9 @@ public sealed class TakeTests
             Corpus.Path(Zoned), CancellationToken.None);
 
         Assert.Throws<InvalidOperationException>(
-            () => file.Scan().Rows(RowRange.FromLength(0, 10)).Take([1L]));
+            () => file.ScanBuilder().Rows(RowRange.FromLength(0, 10)).Take([1L]));
         Assert.Throws<InvalidOperationException>(
-            () => file.Scan().Take([1L]).Rows(RowRange.FromLength(0, 10)));
+            () => file.ScanBuilder().Take([1L]).Rows(RowRange.FromLength(0, 10)));
     }
 
     [Fact]
@@ -150,7 +150,7 @@ public sealed class TakeTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path(Zoned), CancellationToken.None);
 
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Project("monotone")
             .Take([])
             .ExecuteAsync()
@@ -169,7 +169,7 @@ public sealed class TakeTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path(Zoned), CancellationToken.None);
 
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Project("monotone")
             .ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -193,7 +193,7 @@ public sealed class TakeTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path(Zoned), CancellationToken.None);
 
-        ScanBuilder builder = file.Scan().Project("monotone").Take(rows);
+        ScanBuilder builder = file.ScanBuilder().Project("monotone").Take(rows);
         if (filter is not null)
         {
             builder = builder.Where(filter);
@@ -224,7 +224,7 @@ public sealed class TakeTests
 
         counting.ResetCounters();
 
-        ScanBuilder builder = file.Scan().Project("monotone");
+        ScanBuilder builder = file.ScanBuilder().Project("monotone");
         if (take is not null)
         {
             builder = builder.Take(take);

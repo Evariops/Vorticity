@@ -10,7 +10,7 @@ namespace Vorticity.Dataset;
 /// it has been shown since the last reset — no clock, no randomness that is not seeded from the
 /// dataset — or the tree stops being a function of its content.
 /// </remarks>
-public interface IBoundaryRule
+internal interface IBoundaryRule
 {
     /// <summary>Starts a new page.</summary>
     void Reset();
@@ -26,7 +26,7 @@ public interface IBoundaryRule
 }
 
 /// <summary>The prolly rule: a hash of the key, normalised by the bytes accumulated.</summary>
-public sealed class ProllyBoundaryRule : IBoundaryRule
+internal sealed class ProllyBoundaryRule : IBoundaryRule
 {
     /// <summary>No boundary before this many bytes of entries.</summary>
     public const int DefaultMinBytes = 64 << 10;
@@ -121,7 +121,7 @@ public sealed class ProllyBoundaryRule : IBoundaryRule
 /// A page ends when it is full. Deterministic, no hash, no seed — and therefore no history
 /// independence: the same key set reached by two orders of operations gives two shapes.
 /// </remarks>
-public sealed class FillBoundaryRule : IBoundaryRule
+internal sealed class FillBoundaryRule : IBoundaryRule
 {
     private readonly int _fill;
     private long _bytes;

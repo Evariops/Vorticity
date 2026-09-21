@@ -18,7 +18,7 @@ namespace Vorticity.Arrays.Metadata;
 /// The tag numbers differ from the <em>array</em> <see cref="DictMetadata"/>, which starts with
 /// <c>values_len</c> at tag 1: the two messages are not interchangeable.
 /// </remarks>
-public readonly struct DictLayoutMetadata : IEquatable<DictLayoutMetadata>
+internal readonly struct DictLayoutMetadata : IEquatable<DictLayoutMetadata>
 {
     private const string MessageName = "DictLayoutMetadata";
 

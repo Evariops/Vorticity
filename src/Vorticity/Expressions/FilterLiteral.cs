@@ -3,7 +3,7 @@ using System;
 namespace Vorticity.Expressions;
 
 /// <summary>What a <see cref="FilterLiteral"/> holds.</summary>
-public enum FilterLiteralKind : byte
+internal enum FilterLiteralKind : byte
 {
     /// <summary>SQL <c>null</c>: every comparison against it is <c>unknown</c>.</summary>
     Null = 0,
@@ -33,7 +33,7 @@ public enum FilterLiteralKind : byte
 /// folding them together would settle <c>x &gt; -1</c> on an unsigned column by the direction of the
 /// fold rather than by the value.
 /// </summary>
-public readonly struct FilterLiteral : IEquatable<FilterLiteral>
+internal readonly struct FilterLiteral : IEquatable<FilterLiteral>
 {
     private readonly ulong _bits;
     private readonly byte[]? _bytes;

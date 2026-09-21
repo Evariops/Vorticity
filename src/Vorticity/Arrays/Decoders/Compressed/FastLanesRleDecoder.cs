@@ -14,7 +14,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// windowed rather than used as is; an index at a null position may hold anything and its row takes
 /// the chunk's first value, as does every row of a chunk that has only one value.
 /// </summary>
-public sealed class FastLanesRleDecoder : ArrayDecoder
+internal sealed class FastLanesRleDecoder : ArrayDecoder
 {
     private const string Id = "fastlanes.rle";
 

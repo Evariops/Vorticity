@@ -23,7 +23,7 @@ namespace Vorticity.Types;
 /// same nested struct compare equal and hash equal, with no allocation on either path.
 /// </para>
 /// </remarks>
-public readonly struct DType : IEquatable<DType>
+internal readonly struct DType : IEquatable<DType>
 {
     private readonly DTypeArena? _arena;
     private readonly int _index;

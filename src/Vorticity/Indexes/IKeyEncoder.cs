@@ -10,7 +10,7 @@ namespace Vorticity;
 /// shape, so that it depends on no encoder, and a writer offered a composite key without one
 /// abandons that index and says why.
 /// </summary>
-public interface IKeyEncoder
+internal interface IKeyEncoder
 {
     /// <summary>
     /// What the bytes follow, e.g. <c>vortex-row 0.86.1 asc-nf,asc-nf</c>: the directory records it
@@ -27,7 +27,7 @@ public interface IKeyEncoder
 }
 
 /// <summary>The keys an <see cref="IKeyEncoder"/> produced.</summary>
-public interface IEncodedKeys : IDisposable
+internal interface IEncodedKeys : IDisposable
 {
     /// <summary>How many keys.</summary>
     int RowCount { get; }

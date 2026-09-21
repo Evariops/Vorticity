@@ -19,7 +19,7 @@ namespace Vorticity.IO;
 /// segments are read and discarded. That is the cost of one round trip instead of several.
 /// </para>
 /// </remarks>
-public readonly struct CoalescedRun : IEquatable<CoalescedRun>
+internal readonly struct CoalescedRun : IEquatable<CoalescedRun>
 {
     /// <summary>Creates a run. Used by <see cref="SegmentCoalescer"/> and by external sources.</summary>
     /// <param name="start">The file offset to read from; must be a multiple of 64.</param>

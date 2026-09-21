@@ -49,7 +49,7 @@ public sealed class PlanSeedTests
             try
             {
                 await using VortexFile source = await VortexFile.OpenAsync(entry.Path);
-                if (source.Schema.Kind != DTypeKind.Struct || source.Schema.FieldCount == 0)
+                if (source.DType.Kind != DTypeKind.Struct || source.DType.FieldCount == 0)
                 {
                     continue;
                 }
@@ -97,8 +97,8 @@ public sealed class PlanSeedTests
     private static async Task<WriteReport> RewriteAsync(VortexFile source, string path)
     {
         await using VortexFileWriter writer = VortexFileWriter.Create(
-            path, source.Schema, new VortexWriteOptions { Indexes = WritePolicy.None });
-        await foreach (RecordBatch batch in source.Scan().ExecuteAsync())
+            path, source.DType, new VortexWriteOptions { WritePolicy = WritePolicy.None });
+        await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync())
         {
             await writer.WriteAsync(batch);
         }
@@ -142,7 +142,7 @@ public sealed class PlanSeedTests
         int column = arena.AddVarBinView(utf8, Rows, Validity.NonNullable, views, [heap]);
         int root = arena.AddStruct(schema, Rows, Validity.NonNullable, [column]);
         await using VortexFileWriter writer = VortexFileWriter.Create(
-            path, schema, new VortexWriteOptions { Indexes = WritePolicy.None });
+            path, schema, new VortexWriteOptions { WritePolicy = WritePolicy.None });
         await writer.WriteAsync(new RecordBatch(arena, root, 0));
         return await writer.CompleteAsync();
     }
@@ -152,7 +152,7 @@ public sealed class PlanSeedTests
     {
         int compared = 0;
         await using VortexFile written = await VortexFile.OpenAsync(path);
-        DType schema = written.Schema;
+        DType schema = written.DType;
         for (int field = 0; field < schema.FieldCount; field++)
         {
             (List<(LayoutNode Flat, long Start)> flats, _) =

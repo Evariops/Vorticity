@@ -335,7 +335,7 @@ public sealed class DatasetBudgetTests
             Write = new VortexWriteOptions
             {
                 RowBlockSize = 128,
-                Indexes = WritePolicy.None
+                WritePolicy = WritePolicy.None
                     .For("key", IndexPolicy.SortedRuns.AsRequired())
                     .For("measure", IndexPolicy.Bloom(falsePositivePpm: 100)),
             },

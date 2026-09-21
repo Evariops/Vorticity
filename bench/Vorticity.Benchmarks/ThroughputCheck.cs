@@ -1776,7 +1776,7 @@ internal static class ThroughputCheck
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long batches = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             batches++;

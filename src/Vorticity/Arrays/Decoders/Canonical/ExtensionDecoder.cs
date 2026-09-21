@@ -9,7 +9,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// child. There is no validity child, because an extension's validity is its storage's, which is
 /// why the canonical extension node carries no validity of its own.
 /// </summary>
-public sealed class ExtensionDecoder : ArrayDecoder
+internal sealed class ExtensionDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.ext";

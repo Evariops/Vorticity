@@ -5,7 +5,7 @@ namespace Vorticity.Dataset;
 
 /// <summary>What a commit intends. A writer keeps its intentions rather than a finished tree, so a
 /// rebase re-applies them to the winner's trees instead of merging two trees.</summary>
-public abstract record DatasetOperation
+internal abstract record DatasetOperation
 {
     /// <summary>The level it acts on; 0, where appends land, unless it says otherwise. A compaction
     /// ignores this and says a level per input and per output instead.</summary>
@@ -63,7 +63,7 @@ public abstract record DatasetOperation
 }
 
 /// <summary>What re-applying one operation decided.</summary>
-public enum OperationOutcome
+internal enum OperationOutcome
 {
     /// <summary>It changed the tree.</summary>
     Applied = 0,

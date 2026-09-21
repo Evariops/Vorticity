@@ -13,7 +13,7 @@ namespace Vorticity.Dataset;
 /// the bytes is bounded against them first, so a truncated object raises
 /// <see cref="CommitFormatException"/> rather than answering wrongly.
 /// </summary>
-public sealed class CommitObject
+internal sealed class CommitObject
 {
     private CommitObject(CommitHeader header, CommitTable table, CommitTrailer? trailer, long length, long headerEnd)
     {

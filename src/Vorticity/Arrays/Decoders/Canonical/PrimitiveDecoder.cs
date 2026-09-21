@@ -10,7 +10,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// an optional validity child. Both the buffer's exact byte length and its alignment are checked
 /// before it is ever reinterpreted as the physical type.
 /// </summary>
-public sealed class PrimitiveDecoder : ArrayDecoder
+internal sealed class PrimitiveDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.primitive";

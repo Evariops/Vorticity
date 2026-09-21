@@ -22,7 +22,7 @@ namespace Vorticity.Arrays.Metadata;
 /// rather than as a verified shape.
 /// </para>
 /// </remarks>
-public readonly struct ChunkedLayoutMetadata : IEquatable<ChunkedLayoutMetadata>
+internal readonly struct ChunkedLayoutMetadata : IEquatable<ChunkedLayoutMetadata>
 {
     /// <summary>Creates chunked layout metadata.</summary>
     /// <param name="hasStatsTable">Whether child 0 is the statistics table for the other chunks.</param>

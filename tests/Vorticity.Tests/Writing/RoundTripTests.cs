@@ -55,11 +55,11 @@ public sealed class RoundTripTests
             await using (VortexFile source = await VortexFile.OpenAsync(
                 Corpus.Path(id), CancellationToken.None))
             {
-                schema = source.Schema;
+                schema = source.DType;
                 await using VortexFileWriter writer = VortexFileWriter.Create(written, schema);
 
                 original = [];
-                await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+                await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     Describe(batch, original);
@@ -72,9 +72,9 @@ public sealed class RoundTripTests
             List<string> readBack = [];
             await using (VortexFile target = await VortexFile.OpenAsync(written, CancellationToken.None))
             {
-                Assert.Equal(schema.ToString(), target.Schema.ToString());
+                Assert.Equal(schema.ToString(), target.DType.ToString());
 
-                await foreach (RecordBatch batch in target.Scan().ExecuteAsync()
+                await foreach (RecordBatch batch in target.ScanBuilder().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     Describe(batch, readBack);
@@ -138,10 +138,10 @@ public sealed class RoundTripTests
             await using (VortexFile source = await VortexFile.OpenAsync(
                 Corpus.Path(id), CancellationToken.None))
             {
-                schema = source.Schema;
+                schema = source.DType;
                 await using VortexFileWriter writer = VortexFileWriter.Create(written, schema);
 
-                await foreach (RecordBatch batch in source.Scan().WithMaxBatchRows(BatchRows)
+                await foreach (RecordBatch batch in source.ScanBuilder().WithMaxBatchRows(BatchRows)
                     .ExecuteAsync().WithCancellation(CancellationToken.None))
                 {
                     batches++;
@@ -157,9 +157,9 @@ public sealed class RoundTripTests
             List<string> readBack = [];
             await using (VortexFile target = await VortexFile.OpenAsync(written, CancellationToken.None))
             {
-                Assert.Equal(schema.ToString(), target.Schema.ToString());
+                Assert.Equal(schema.ToString(), target.DType.ToString());
 
-                await foreach (RecordBatch batch in target.Scan().ExecuteAsync()
+                await foreach (RecordBatch batch in target.ScanBuilder().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     Describe(batch, readBack);
@@ -192,8 +192,8 @@ public sealed class RoundTripTests
                 Corpus.Path(Source), CancellationToken.None))
             {
                 expected = source.RowCount;
-                await using VortexFileWriter writer = VortexFileWriter.Create(written, source.Schema);
-                await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+                await using VortexFileWriter writer = VortexFileWriter.Create(written, source.DType);
+                await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     await writer.WriteAsync(batch, CancellationToken.None);
@@ -227,7 +227,7 @@ public sealed class RoundTripTests
             await using (VortexFile source = await VortexFile.OpenAsync(
                 Corpus.Path("containers/uncompressed_canonical"), CancellationToken.None))
             {
-                await using VortexFileWriter writer = VortexFileWriter.Create(written, source.Schema);
+                await using VortexFileWriter writer = VortexFileWriter.Create(written, source.DType);
                 await writer.CompleteAsync(CancellationToken.None);
             }
 

@@ -18,7 +18,7 @@ namespace Vorticity.Keys;
 /// synchronously and allocates nothing.
 /// </para>
 /// </remarks>
-public sealed class KeyCursor : IAsyncDisposable
+internal sealed class KeyCursor : IAsyncDisposable
 {
     private readonly KeySource _source;
     private readonly bool _distinct;

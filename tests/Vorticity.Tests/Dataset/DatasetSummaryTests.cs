@@ -63,7 +63,7 @@ public sealed class DatasetSummaryTests
         byte[] single = await OneFileAsync(types, schema, objects * Rows);
         await using MemorySegmentSource source = new MemorySegmentSource(single);
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
-        List<long> expected = await KeysAsync(file.Scan().Where(filter));
+        List<long> expected = await KeysAsync(file.ScanBuilder().Where(filter));
         Assert.Equal(100, expected.Count);
         Assert.Equal(expected, withSummaries);
         Assert.Equal(expected, without);
@@ -172,7 +172,7 @@ public sealed class DatasetSummaryTests
         foreach ((long from, long to) in ranges)
         {
             Assert.Equal(
-                await KeysAsync(file.Scan().Rows(new RowRange(from, Math.Min(to, file.RowCount)))),
+                await KeysAsync(file.ScanBuilder().Rows(new RowRange(from, Math.Min(to, file.RowCount)))),
                 await KeysAsync(dataset.Rows(from, to)));
         }
 

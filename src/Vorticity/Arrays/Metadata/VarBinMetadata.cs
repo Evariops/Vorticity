@@ -7,7 +7,7 @@ namespace Vorticity.Arrays.Metadata;
 /// <summary>
 /// <c>vortex.varbin</c> metadata: <c>message VarBinMetadata { PType offsets_ptype = 1; }</c>.
 /// </summary>
-public readonly struct VarBinMetadata : IEquatable<VarBinMetadata>
+internal readonly struct VarBinMetadata : IEquatable<VarBinMetadata>
 {
     private const string MessageName = "VarBinMetadata";
 

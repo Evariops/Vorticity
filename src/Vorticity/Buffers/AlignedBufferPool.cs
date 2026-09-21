@@ -31,7 +31,7 @@ namespace Vorticity.Buffers;
 /// between callers that asked for different segment alignments.
 /// </para>
 /// </remarks>
-public sealed class AlignedBufferPool
+internal sealed class AlignedBufferPool
 {
     /// <summary>Smallest size class. Below this, pooling costs more than it saves.</summary>
     private const int MinBlockSize = 4096;

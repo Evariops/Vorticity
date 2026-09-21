@@ -13,7 +13,7 @@ namespace Vorticity.Arrays;
 /// an unsupported-component error of kind "dtype". List and varbin encodings have no form of their
 /// own either, because their decoders produce <c>ListView</c> and <c>VarBinView</c>.
 /// </remarks>
-public enum CanonicalKind : byte
+internal enum CanonicalKind : byte
 {
     /// <summary>All rows null; no buffers.</summary>
     Null = 0,
@@ -80,7 +80,7 @@ public enum CanonicalKind : byte
 /// its arena is <see cref="CanonicalArena.Reset"/>, and every buffer it names belongs to the
 /// batch's segments rather than to the node.
 /// </remarks>
-public readonly ref struct CanonicalNode
+internal readonly ref struct CanonicalNode
 {
     private readonly CanonicalArena _arena;
     private readonly int _index;
@@ -373,7 +373,7 @@ public readonly ref struct CanonicalNode
 /// The pooled store behind <see cref="CanonicalNode"/>. Owned by a <see cref="ScanContext"/>;
 /// <see cref="Reset"/> per batch.
 /// </summary>
-public sealed class CanonicalArena
+internal sealed class CanonicalArena
 {
     private CanonicalRecord[] _records;
     private int _recordCount;

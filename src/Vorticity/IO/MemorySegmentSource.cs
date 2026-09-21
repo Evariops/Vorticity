@@ -16,7 +16,7 @@ namespace Vorticity.IO;
 /// of it legal, and a managed array gives no such guarantee at an arbitrary offset. The copy lands
 /// in a block that does — zero-copy given up for bytes that were going to be copied anyway.
 /// </remarks>
-public sealed class MemorySegmentSource : ISegmentSource
+internal sealed class MemorySegmentSource : ISegmentSource
 {
     private readonly ReadOnlyMemory<byte> _bytes;
 

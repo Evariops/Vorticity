@@ -22,31 +22,31 @@ internal static class Indexes
 
         // Asked for by name. The budget is what decides, so raise it or the filters do not fit.
         await Written("sessions, a Bloom asked for by name",
-            new VortexWriteOptions { Indexes = WritePolicy.None.For("session", IndexPolicy.Bloom()) },
+            new VortexWriteOptions { WritePolicy = WritePolicy.None.For("session", IndexPolicy.Bloom()) },
             sessions: true);
         await Written("sessions, the same with the budget raised",
             new VortexWriteOptions
             {
-                Indexes = WritePolicy.None.For("session", IndexPolicy.Bloom()),
+                WritePolicy = WritePolicy.None.For("session", IndexPolicy.Bloom()),
                 IndexBudgetPerMille = Budget,
             },
             sessions: true);
         await Written("sessions, at one false positive in a million",
             new VortexWriteOptions
             {
-                Indexes = WritePolicy.None.For("session", IndexPolicy.Bloom(falsePositivePpm: 1)),
+                WritePolicy = WritePolicy.None.For("session", IndexPolicy.Bloom(falsePositivePpm: 1)),
                 IndexBudgetPerMille = Budget,
             },
             sessions: true);
         await Written("cities, a Bloom made required",
-            new VortexWriteOptions { Indexes = WritePolicy.None.For("city", IndexPolicy.Bloom().AsRequired()) },
+            new VortexWriteOptions { WritePolicy = WritePolicy.None.For("city", IndexPolicy.Bloom().AsRequired()) },
             sessions: false);
 
         // What a file says about the indexes it carries, and whether they still describe its bytes.
         string path = Demo.Path("indexed.vortex");
         await Demo.WriteSessionsAsync(path, new VortexWriteOptions
         {
-            Indexes = WritePolicy.Auto.For("session", IndexPolicy.Bloom()),
+            WritePolicy = WritePolicy.Auto.For("session", IndexPolicy.Bloom()),
             IndexBudgetPerMille = Budget,
         });
 
@@ -62,7 +62,7 @@ internal static class Indexes
             $"(held {verification.Held}, torn {verification.Torn.Count}, bare {verification.Bare})");
 
         string unindexed = Demo.Path("unindexed.vortex");
-        await Demo.WriteSessionsAsync(unindexed, new VortexWriteOptions { Indexes = WritePolicy.None });
+        await Demo.WriteSessionsAsync(unindexed, new VortexWriteOptions { WritePolicy = WritePolicy.None });
 
         await Cost("a session that exists", Demo.Session(123_456));
         await Cost("a session that does not", "zzzzzzzzzzzz");
@@ -71,9 +71,9 @@ internal static class Indexes
         {
             VortexExpr equals = Expr.Eq(Expr.Field("session"), Expr.Literal(FilterLiteral.From(session)));
             (long indexed, long indexedBytes, long rows) =
-                await Demo.MeasureAsync(path, f => f.Scan().Where(equals));
+                await Demo.MeasureAsync(path, f => f.ScanBuilder().Where(equals));
             (long plain, long plainBytes, long plainRows) =
-                await Demo.MeasureAsync(unindexed, f => f.Scan().Where(equals));
+                await Demo.MeasureAsync(unindexed, f => f.ScanBuilder().Where(equals));
             Console.WriteLine($"{what}: indexed {indexed} rounds and {indexedBytes} bytes for {rows} rows; " +
                 $"unindexed {plain} rounds and {plainBytes} bytes for {plainRows}");
         }
@@ -88,7 +88,7 @@ internal static class Indexes
         async Task AppendTo(string what, WritePolicy policy, VortexWriteOptions options)
         {
             string bare = Demo.Path("bare.vortex");
-            await Demo.WriteSessionsAsync(bare, new VortexWriteOptions { Indexes = WritePolicy.None });
+            await Demo.WriteSessionsAsync(bare, new VortexWriteOptions { WritePolicy = WritePolicy.None });
             long before = new FileInfo(bare).Length;
             foreach (IndexWriteReport report in await VortexFileIndexer.AppendIndexesAsync(bare, policy, options))
             {

@@ -12,7 +12,7 @@ namespace Vorticity.Arrays.Metadata;
 /// both fields are spans borrowed from the metadata buffer. Copying them would allocate per zone
 /// map; <see cref="AggregateSpecList"/> is the durable form.
 /// </remarks>
-public readonly ref struct AggregateSpec
+internal readonly ref struct AggregateSpec
 {
     private const string MessageName = "AggregateSpecProto";
 

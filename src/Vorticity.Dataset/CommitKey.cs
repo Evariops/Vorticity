@@ -8,7 +8,7 @@ namespace Vorticity.Dataset;
 /// zero-padded to a fixed width, so that ordinal order over keys puts the newest commit first and
 /// one listing of one key finds it without a mutable pointer anywhere in the layout.
 /// </summary>
-public static class CommitKey
+internal static class CommitKey
 {
     /// <summary>The prefix every commit object's key starts with.</summary>
     public const string Prefix = "commit/";

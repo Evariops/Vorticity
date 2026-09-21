@@ -26,7 +26,7 @@ namespace Vorticity.Arrays;
 /// <see cref="ResetBatch"/>. Never store one in a field or across a batch boundary.
 /// </para>
 /// </remarks>
-public sealed class ScanContext : IDisposable
+internal sealed class ScanContext : IDisposable
 {
     private readonly VortexFile? _file;
     private readonly ArrayEncodingId[] _arrayEncodings;

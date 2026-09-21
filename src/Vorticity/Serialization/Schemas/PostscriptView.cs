@@ -10,7 +10,7 @@ namespace Vorticity.Serialization.Schemas;
 /// validated eagerly in <see cref="Root"/>: the count is capped, and reading every key there also
 /// enforces that each one is present, non-empty, short enough and distinct from the others.
 /// </remarks>
-public readonly ref struct PostscriptView
+internal readonly ref struct PostscriptView
 {
     private readonly FlatBufferTable _table;
     private readonly int _metadataCount;
@@ -111,7 +111,7 @@ public readonly ref struct PostscriptView
 }
 
 /// <summary>Reader for the format's <c>table PostscriptMetadata</c>.</summary>
-public readonly ref struct PostscriptMetadataView
+internal readonly ref struct PostscriptMetadataView
 {
     private readonly FlatBufferTable _table;
 
@@ -171,7 +171,7 @@ public readonly ref struct PostscriptMetadataView
 /// carry the same five field names. The postscript spells compression and encryption out inline so
 /// a reader can decrypt without first fetching the footer.
 /// </remarks>
-public readonly ref struct PostscriptSegmentView
+internal readonly ref struct PostscriptSegmentView
 {
     private readonly FlatBufferTable _table;
 

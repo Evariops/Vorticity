@@ -5,7 +5,7 @@ using System.Globalization;
 namespace Vorticity.Indexes;
 
 /// <summary>Which index a column gets.</summary>
-public enum IndexPolicyKind
+internal enum IndexPolicyKind
 {
     /// <summary>Nothing beyond the zone map.</summary>
     None = 0,
@@ -30,7 +30,7 @@ public enum IndexPolicyKind
 }
 
 /// <summary>Which hash a Bloom filter uses.</summary>
-public enum BloomHash
+internal enum BloomHash
 {
     /// <summary>
     /// XxHash3-64, the default and the hash the reference split-block filter uses, so a filter
@@ -55,7 +55,7 @@ public enum BloomHash
 /// append reuses it without being told — which is why its options are plain integers with fixed
 /// meanings rather than a callback.
 /// </remarks>
-public readonly struct IndexPolicy : IEquatable<IndexPolicy>
+internal readonly struct IndexPolicy : IEquatable<IndexPolicy>
 {
     /// <summary>1 %, as parts per million: the default false-positive rate of a Bloom filter.</summary>
     public const int DefaultFalsePositivePpm = 10_000;
@@ -331,7 +331,7 @@ public readonly struct IndexPolicy : IEquatable<IndexPolicy>
 /// and survives into the directory -- it simply never matches, and the report says the column was
 /// never seen.
 /// </remarks>
-public sealed class WritePolicy
+internal sealed class WritePolicy
 {
     private readonly Dictionary<string, IndexPolicy> _columns;
     private readonly List<CompositeKeyPolicy> _keys;
@@ -440,4 +440,4 @@ public sealed class WritePolicy
 /// <summary>A locating index over the tuple of several columns.</summary>
 /// <param name="Paths">The columns, in key order.</param>
 /// <param name="Policy">The index: sorted runs.</param>
-public sealed record CompositeKeyPolicy(IReadOnlyList<string> Paths, IndexPolicy Policy);
+internal sealed record CompositeKeyPolicy(IReadOnlyList<string> Paths, IndexPolicy Policy);

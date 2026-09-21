@@ -67,7 +67,7 @@ public sealed class ArenaLifetimeTests
         List<int> second = [];
         bool checkedStale = false;
 
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             if (captured is null)

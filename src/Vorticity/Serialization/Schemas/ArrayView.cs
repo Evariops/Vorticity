@@ -10,7 +10,7 @@ namespace Vorticity.Serialization.Schemas;
 /// uoffsets exclude cycles, but two parents may legally share one child table — so depth alone
 /// cannot bound a walk of it and <see cref="Root"/> carries a table budget instead.
 /// </remarks>
-public readonly ref struct ArrayView
+internal readonly ref struct ArrayView
 {
     private readonly ReadOnlySpan<byte> _buffer;
     private readonly FlatBufferTable _table;
@@ -89,7 +89,7 @@ public readonly ref struct ArrayView
 /// An <c>ArrayNode</c> carries neither its DType nor its length; both are supplied top-down by the
 /// parent.
 /// </remarks>
-public readonly ref struct ArrayNodeView
+internal readonly ref struct ArrayNodeView
 {
     private readonly FlatBufferTable _table;
 
@@ -144,7 +144,7 @@ public readonly ref struct ArrayNodeView
 /// <see langword="false"/> or 0</em>. They are exposed only through the <c>TryGet</c> accessors so
 /// a defaulting read is not expressible.
 /// </remarks>
-public readonly ref struct ArrayStatsView
+internal readonly ref struct ArrayStatsView
 {
     private readonly FlatBufferTable _table;
 

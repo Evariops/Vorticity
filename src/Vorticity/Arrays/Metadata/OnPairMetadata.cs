@@ -22,7 +22,7 @@ namespace Vorticity.Arrays.Metadata;
 /// Tag 2 is skipped by the ordinary unknown-field path, which is exactly right: a future reuse of
 /// the number must not fail the read.
 /// </remarks>
-public readonly struct OnPairMetadata : IEquatable<OnPairMetadata>
+internal readonly struct OnPairMetadata : IEquatable<OnPairMetadata>
 {
     private const string MessageName = "OnPairMetadata";
 

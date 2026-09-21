@@ -71,9 +71,9 @@ public sealed class ChunkStatisticsTests
                 Corpus.Path(id), CancellationToken.None))
             {
                 await using VortexFileWriter writer =
-                    VortexFileWriter.Create(path, source.Schema, options);
+                    VortexFileWriter.Create(path, source.DType, options);
 
-                await foreach (RecordBatch batch in source.Scan()
+                await foreach (RecordBatch batch in source.ScanBuilder()
                     .WithMaxBatchRows(batchRows).ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {

@@ -21,7 +21,7 @@ namespace Vorticity.Arrays.Metadata;
 /// nullability", which can yield a different child DType from an explicit <c>false</c>. Files
 /// carry both spellings, so neither may be normalised into the other on the read path.
 /// </remarks>
-public readonly struct DictMetadata : IEquatable<DictMetadata>
+internal readonly struct DictMetadata : IEquatable<DictMetadata>
 {
     private const string MessageName = "DictMetadata";
 

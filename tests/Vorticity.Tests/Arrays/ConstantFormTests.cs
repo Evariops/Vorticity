@@ -56,7 +56,7 @@ public sealed class ConstantFormTests
         await using VortexFile file = await VortexFile.OpenAsync(
             CorpusManifest.Get("encodings/constant").Path, CancellationToken.None);
         int batches = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             Assert.Equal(CanonicalKind.Primitive, batch.Root.Kind);
@@ -120,7 +120,7 @@ public sealed class ConstantFormTests
     {
         await using VortexFile file = await VortexFile.OpenAsync(
             CorpusManifest.Get(entry).Path, CancellationToken.None);
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             return (batch.Node(batch.RootIndex).Kind, batch.RowCount);
@@ -133,7 +133,7 @@ public sealed class ConstantFormTests
     {
         List<string> values = [];
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             VortexColumn column = batch.Root;
@@ -152,8 +152,8 @@ public sealed class ConstantFormTests
     {
         await using VortexFile file = await VortexFile.OpenAsync(source, CancellationToken.None);
         await using Vorticity.Writing.VortexFileWriter writer =
-            Vorticity.Writing.VortexFileWriter.Create(destination, file.Schema);
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            Vorticity.Writing.VortexFileWriter.Create(destination, file.DType);
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             await writer.WriteAsync(batch, CancellationToken.None);

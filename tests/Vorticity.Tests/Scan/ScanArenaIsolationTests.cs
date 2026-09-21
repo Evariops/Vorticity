@@ -42,7 +42,7 @@ public sealed class ScanArenaIsolationTests
         int atOpen = file.Types.NodeCount;
 
         // Planning: LayoutTree.Parse runs per scan, and the zone-map schema is derived there.
-        IAsyncEnumerable<RecordBatch> batches = file.Scan().WithMaxBatchRows(1024).ExecuteAsync();
+        IAsyncEnumerable<RecordBatch> batches = file.ScanBuilder().WithMaxBatchRows(1024).ExecuteAsync();
         int afterPlan = file.Types.NodeCount;
 
         long rows = 0;
@@ -77,7 +77,7 @@ public sealed class ScanArenaIsolationTests
             flows[i] = Task.Run(async () =>
             {
                 long rows = 0;
-                await foreach (RecordBatch batch in file.Scan().WithMaxBatchRows(512).ExecuteAsync())
+                await foreach (RecordBatch batch in file.ScanBuilder().WithMaxBatchRows(512).ExecuteAsync())
                 {
                     rows += batch.RowCount;
                     batch.Dispose();

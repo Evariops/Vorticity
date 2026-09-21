@@ -7,7 +7,7 @@ namespace Vorticity.Dataset;
 
 /// <summary>Wraps a store and records what passes through it, including a lower bound on how many
 /// round trips the caller waited for one after another.</summary>
-public sealed class CountingObjectStore : IObjectStore
+internal sealed class CountingObjectStore : IObjectStore
 {
     private readonly IObjectStore _inner;
     private readonly bool _ownsInner;

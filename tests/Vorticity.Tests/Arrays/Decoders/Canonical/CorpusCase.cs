@@ -172,7 +172,7 @@ internal sealed class DecodedCorpusFile : IAsyncDisposable
 
     internal int RowCount { get; }
 
-    internal DType Schema => _file.Schema;
+    internal DType Schema => _file.DType;
 
     internal static async ValueTask<DecodedCorpusFile> OpenAsync(string entry, Sidecar sidecar)
     {
@@ -192,7 +192,7 @@ internal sealed class DecodedCorpusFile : IAsyncDisposable
             ArrayBlobReader.Load(scan.Nodes, owner.Buffer, scan.ArrayEncodings);
 
             int rowCount = checked((int)file.RowCount);
-            int root = scan.Decode.Decode(scan.Nodes.Root, file.Schema, rowCount);
+            int root = scan.Decode.Decode(scan.Nodes.Root, file.DType, rowCount);
             return new DecodedCorpusFile(file, owner, scan, root, rowCount);
         }
         catch

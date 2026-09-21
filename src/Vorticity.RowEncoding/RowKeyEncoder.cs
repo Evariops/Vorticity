@@ -16,7 +16,7 @@ namespace Vorticity.RowEncoding;
 /// outlive the process, so <see cref="Format"/> names the layout they follow and lets a reader see
 /// that its seek keys do not compare with an index written under another one.
 /// </summary>
-public sealed class RowKeyEncoder : IKeyEncoder
+internal sealed class RowKeyEncoder : IKeyEncoder
 {
     private readonly RowSortField[] _fields;
 
@@ -65,7 +65,7 @@ public sealed class RowKeyEncoder : IKeyEncoder
 }
 
 /// <summary>The single-tuple overloads.</summary>
-public static partial class RowEncoder
+internal static partial class RowEncoder
 {
     /// <summary>
     /// The row encoding of one tuple: the seek key of a composite cursor, or its prefix when fewer

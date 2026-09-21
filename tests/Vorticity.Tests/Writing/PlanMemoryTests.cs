@@ -323,7 +323,7 @@ public sealed class PlanMemoryTests
             long[] actual = new long[Rows * chunks.Length];
             int seen = 0;
             await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {
                 PrimitiveColumn<long> column = batch.Root.AsPrimitive<long>();

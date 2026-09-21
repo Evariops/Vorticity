@@ -27,7 +27,7 @@ namespace Vorticity.IO;
 /// <see cref="GetBuffer"/> are invalid the moment <see cref="Release"/> runs.
 /// </para>
 /// </remarks>
-public sealed class SegmentRequestSet : IDisposable
+internal sealed class SegmentRequestSet : IDisposable
 {
     private static readonly ulong s_hashSeed = DrawHashSeed();
 

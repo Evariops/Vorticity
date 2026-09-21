@@ -43,7 +43,7 @@ public sealed class FilterConstantTypeTests
         await using VortexFile file = await Open(Flat);
         VortexExpr wrong = Compare(op, Expr.Field("a"), FilterLiteral.From("900"));
 
-        ArgumentException error = Assert.Throws<ArgumentException>(() => file.Scan().Where(wrong));
+        ArgumentException error = Assert.Throws<ArgumentException>(() => file.ScanBuilder().Where(wrong));
         Assert.Contains("'a'", error.Message, StringComparison.Ordinal);
         Assert.Contains("i32", error.Message, StringComparison.Ordinal);
         Assert.Contains("text or binary", error.Message, StringComparison.Ordinal);
@@ -54,10 +54,10 @@ public sealed class FilterConstantTypeTests
     {
         // The whole point: the rows are there, so an empty answer would have been believable.
         await using VortexFile file = await Open(Flat);
-        Assert.Equal(1024, await file.Scan().Where(Expr.IsNotNull(Expr.Field("a"))).CountAsync());
+        Assert.Equal(1024, await file.ScanBuilder().Where(Expr.IsNotNull(Expr.Field("a"))).CountAsync());
 
         VortexExpr wrong = Expr.Gt(Expr.Field("a"), Expr.Literal(FilterLiteral.From("900")));
-        Assert.Throws<ArgumentException>(() => file.Scan().Where(wrong));
+        Assert.Throws<ArgumentException>(() => file.ScanBuilder().Where(wrong));
         Assert.Throws<ArgumentException>(() => file.MayMatch(wrong));
         await Assert.ThrowsAsync<ArgumentException>(
             async () => await file.MayMatchAsync(wrong, CancellationToken.None));
@@ -69,7 +69,7 @@ public sealed class FilterConstantTypeTests
         await using VortexFile file = await Open(Flat);
         VortexExpr wrong = Expr.Gt(Expr.Field("b"), Expr.Literal(FilterLiteral.From(900)));
 
-        ArgumentException error = Assert.Throws<ArgumentException>(() => file.Scan().Where(wrong));
+        ArgumentException error = Assert.Throws<ArgumentException>(() => file.ScanBuilder().Where(wrong));
         Assert.Contains("signed integer", error.Message, StringComparison.Ordinal);
     }
 
@@ -78,10 +78,10 @@ public sealed class FilterConstantTypeTests
     {
         await using VortexFile file = await Open(Flat);
         Assert.Throws<ArgumentException>(
-            () => file.Scan().Where(Expr.Eq(Expr.Field("c"), Expr.Literal(FilterLiteral.From(1)))));
+            () => file.ScanBuilder().Where(Expr.Eq(Expr.Field("c"), Expr.Literal(FilterLiteral.From(1)))));
 
         VortexExpr right = Expr.Eq(Expr.Field("c"), Expr.Literal(FilterLiteral.From(true)));
-        Assert.Equal(512, await file.Scan().Where(right).CountAsync());
+        Assert.Equal(512, await file.ScanBuilder().Where(right).CountAsync());
     }
 
     [Fact]
@@ -91,7 +91,7 @@ public sealed class FilterConstantTypeTests
         VortexExpr wrong = Expr.In(
             Expr.Field("a"), FilterLiteral.From(1), FilterLiteral.From(2), FilterLiteral.From("3"));
 
-        Assert.Throws<ArgumentException>(() => file.Scan().Where(wrong));
+        Assert.Throws<ArgumentException>(() => file.ScanBuilder().Where(wrong));
     }
 
     [Fact]
@@ -99,7 +99,7 @@ public sealed class FilterConstantTypeTests
     {
         await using VortexFile file = await Open(Flat);
         ArgumentException error = Assert.Throws<ArgumentException>(
-            () => file.Scan().Where(Expr.StartsWith(Expr.Field("a"), FilterLiteral.From("9"))));
+            () => file.ScanBuilder().Where(Expr.StartsWith(Expr.Field("a"), FilterLiteral.From("9"))));
 
         Assert.Contains("StartsWith", error.Message, StringComparison.Ordinal);
     }
@@ -111,22 +111,22 @@ public sealed class FilterConstantTypeTests
         VortexExpr wrong = Expr.Gt(Expr.Field("a"), Expr.Literal(FilterLiteral.From("900")));
         VortexExpr right = Expr.IsNotNull(Expr.Field("a"));
 
-        Assert.Throws<ArgumentException>(() => file.Scan().Where(Expr.And(right, wrong)));
-        Assert.Throws<ArgumentException>(() => file.Scan().Where(Expr.Or(wrong, right)));
-        Assert.Throws<ArgumentException>(() => file.Scan().Where(Expr.Not(wrong)));
+        Assert.Throws<ArgumentException>(() => file.ScanBuilder().Where(Expr.And(right, wrong)));
+        Assert.Throws<ArgumentException>(() => file.ScanBuilder().Where(Expr.Or(wrong, right)));
+        Assert.Throws<ArgumentException>(() => file.ScanBuilder().Where(Expr.Not(wrong)));
     }
 
     [Fact]
     public async Task AnExtensionColumnTakesWhatItsStorageTakes()
     {
         await using VortexFile file = await Open(Mixed);
-        long rows = await file.Scan()
+        long rows = await file.ScanBuilder()
             .Where(Expr.Ge(Expr.Field("stamp"), Expr.Literal(FilterLiteral.From(0L))))
             .CountAsync();
         Assert.True(rows > 0);
 
         Assert.Throws<ArgumentException>(
-            () => file.Scan().Where(
+            () => file.ScanBuilder().Where(
                 Expr.Ge(Expr.Field("stamp"), Expr.Literal(FilterLiteral.From("0")))));
     }
 
@@ -152,7 +152,7 @@ public sealed class FilterConstantTypeTests
         // documented answer rather than a mistyped comparison.
         await using VortexFile file = await Open(Flat);
         VortexExpr nothing = Expr.Eq(Expr.Field("a"), Expr.Literal(FilterLiteral.Null));
-        Assert.Equal(0, await file.Scan().Where(nothing).CountAsync());
+        Assert.Equal(0, await file.ScanBuilder().Where(nothing).CountAsync());
         Assert.True(file.MayMatch(nothing));
     }
 
@@ -161,14 +161,14 @@ public sealed class FilterConstantTypeTests
     {
         await using VortexFile file = await Open(Flat);
         ArgumentException error = Assert.Throws<ArgumentException>(
-            () => file.Scan().Where(
+            () => file.ScanBuilder().Where(
                 Expr.Gt(Expr.Field("absent"), Expr.Literal(FilterLiteral.From("900")))));
 
         Assert.Contains("does not name a field", error.Message, StringComparison.Ordinal);
     }
 
     private static async Task<long> Count(VortexFile file, FieldExpr field, FilterLiteral value) =>
-        await file.Scan().Where(Expr.Gt(field, Expr.Literal(value))).CountAsync();
+        await file.ScanBuilder().Where(Expr.Gt(field, Expr.Literal(value))).CountAsync();
 
     private static async Task<VortexFile> Open(string id)
     {

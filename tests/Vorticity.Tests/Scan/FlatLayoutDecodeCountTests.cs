@@ -58,7 +58,7 @@ public sealed class FlatLayoutDecodeCountTests
         long rows = 0;
         await using (VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None))
         {
-            await foreach (RecordBatch batch in opened.Scan().ExecuteAsync()
+            await foreach (RecordBatch batch in opened.ScanBuilder().ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {
                 batches++;
@@ -125,7 +125,7 @@ public sealed class FlatLayoutDecodeCountTests
             long rows = 0;
             await using (VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None))
             {
-                await foreach (RecordBatch batch in opened.Scan().ExecuteAsync()
+                await foreach (RecordBatch batch in opened.ScanBuilder().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     batches++;
@@ -189,7 +189,7 @@ public sealed class FlatLayoutDecodeCountTests
             List<string> all = [];
             await using (VortexFile scanned = await VortexFile.OpenAsync(path, CancellationToken.None))
             {
-                await foreach (RecordBatch batch in scanned.Scan().ExecuteAsync()
+                await foreach (RecordBatch batch in scanned.ScanBuilder().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     Values.DescribeRows(batch, all);
@@ -206,7 +206,7 @@ public sealed class FlatLayoutDecodeCountTests
             List<string> taken = [];
             await using (VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None))
             {
-                await foreach (RecordBatch batch in opened.Scan().Take(wanted).ExecuteAsync()
+                await foreach (RecordBatch batch in opened.ScanBuilder().Take(wanted).ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     Values.DescribeRows(batch, taken);

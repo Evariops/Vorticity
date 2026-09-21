@@ -21,7 +21,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// The packed buffer must hold exactly one whole block for every block the rows span; that check is
 /// what lets the unpack kernel run without a per-element bounds check.
 /// </remarks>
-public sealed class BitPackedDecoder : ArrayDecoder
+internal sealed class BitPackedDecoder : ArrayDecoder
 {
     private const string Id = "fastlanes.bitpacked";
 

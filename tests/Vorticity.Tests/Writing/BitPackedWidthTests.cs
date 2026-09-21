@@ -81,7 +81,7 @@ public sealed class BitPackedWidthTests
             long[] actual = new long[Rows];
             int seen = 0;
             await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {
                 seen += Read(batch, ptype, actual.AsSpan(seen));
@@ -229,7 +229,7 @@ public sealed class BitPackedWidthTests
             int seen = 0;
             long[] actual = new long[Rows];
             await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {
                 seen += Read(batch, ptype, actual.AsSpan(seen));

@@ -95,7 +95,7 @@ internal struct DTypeNameEntry
 /// retaining across construction calls.
 /// </para>
 /// </remarks>
-public sealed class DTypeArena
+internal sealed class DTypeArena
 {
     /// <summary>
     /// Maximum decimal precision the format admits. Precision 39 to 76 selects 256-bit storage,

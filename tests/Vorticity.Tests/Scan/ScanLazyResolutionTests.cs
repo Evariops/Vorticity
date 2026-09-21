@@ -36,7 +36,7 @@ public sealed class ScanLazyResolutionTests
         // An unknown id in array_specs is not itself an error.
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Forged(Forged), CancellationToken.None);
         Assert.Equal(4096, file.RowCount);
-        Assert.Equal(2, file.Schema.FieldCount);
+        Assert.Equal(2, file.DType.FieldCount);
 
         bool sawUnknown = false;
         for (int i = 0; i < file.ArrayEncodingCount; i++)
@@ -59,7 +59,7 @@ public sealed class ScanLazyResolutionTests
 
         VortexUnsupportedException error = await Assert.ThrowsAsync<VortexUnsupportedException>(async () =>
         {
-            await foreach (RecordBatch batch in file.Scan().Project("ints").ExecuteAsync())
+            await foreach (RecordBatch batch in file.ScanBuilder().Project("ints").ExecuteAsync())
             {
                 Assert.NotNull(batch);
             }
@@ -79,7 +79,7 @@ public sealed class ScanLazyResolutionTests
 
         await Assert.ThrowsAsync<VortexUnsupportedException>(async () =>
         {
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
             {
                 Assert.NotNull(batch);
             }
@@ -113,7 +113,7 @@ public sealed class ScanLazyResolutionTests
         await using VortexFile file = await VortexFile.OpenAsync(
             source, new VortexOpenOptions(), CancellationToken.None);
 
-        IAsyncEnumerator<RecordBatch> enumerator = file.Scan().Project("ints").ExecuteAsync().GetAsyncEnumerator();
+        IAsyncEnumerator<RecordBatch> enumerator = file.ScanBuilder().Project("ints").ExecuteAsync().GetAsyncEnumerator();
         await Assert.ThrowsAsync<VortexUnsupportedException>(async () => await enumerator.MoveNextAsync());
 
         // DisposeAsync after a failure must not throw and must not double-release.
@@ -125,7 +125,7 @@ public sealed class ScanLazyResolutionTests
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         List<string?> values = new List<string?>();
-        await foreach (RecordBatch batch in file.Scan().Project("strs").ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Project("strs").ExecuteAsync())
         {
             BinaryColumn column = batch.Column(0).AsBinary();
             for (int i = 0; i < column.Length; i++)

@@ -23,7 +23,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// children unchanged. The encoding belongs to a draft edition, which carries no promise that such
 /// a file stays readable; that is a reason to watch it, not to refuse it.
 /// </remarks>
-public sealed class ZstdBuffersDecoder : ArrayDecoder
+internal sealed class ZstdBuffersDecoder : ArrayDecoder
 {
     private const string Id = "vortex.zstd_buffers";
 

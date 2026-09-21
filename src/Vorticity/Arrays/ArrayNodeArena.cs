@@ -9,7 +9,7 @@ namespace Vorticity.Arrays;
 /// One serialized array node, flattened out of the FlatBuffer so the decode traversal never
 /// re-walks vtables. 32 bytes.
 /// </summary>
-public readonly struct ArrayNodeRecord
+internal readonly struct ArrayNodeRecord
 {
     private readonly ushort _encodingSpecIndex;
     private readonly ArrayEncodingId _encoding;
@@ -80,7 +80,7 @@ public readonly struct ArrayNodeRecord
 /// unstorable turns "never outlive the arena" into a compile error in most of the cases where
 /// someone would break it.
 /// </remarks>
-public readonly ref struct ArrayNode
+internal readonly ref struct ArrayNode
 {
     private readonly ArrayNodeArena _arena;
     private readonly int _index;
@@ -191,7 +191,7 @@ public readonly ref struct ArrayNode
 /// Single-threaded by construction: a <see cref="ScanContext"/> is affine to one decode flow.
 /// </para>
 /// </remarks>
-public sealed class ArrayNodeArena
+internal sealed class ArrayNodeArena
 {
     private ArrayNodeRecord[] _records;
     private int _recordCount;

@@ -68,23 +68,23 @@ public sealed class VortexDatasetTests
             new MemorySegmentSource(single), new VortexOpenOptions(), default);
 
         Assert.Equal(file.RowCount, dataset.RowCount);
-        Assert.Equal(await KeysAsync(file.Scan()), await KeysAsync(dataset.Scan()));
+        Assert.Equal(await KeysAsync(file.ScanBuilder()), await KeysAsync(dataset.Scan()));
 
         // And under a filter, which each object's own scan applies with its own indexes.
         VortexExpr filter = Expr.And(
             Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(7_000L))),
             Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(12_345L))));
         Assert.Equal(
-            await KeysAsync(file.Scan().Where(filter)),
+            await KeysAsync(file.ScanBuilder().Where(filter)),
             await KeysAsync(dataset.Scan().Where(filter)));
         Assert.Equal(
-            await file.Scan().Where(filter).CountAsync(),
+            await file.ScanBuilder().Where(filter).CountAsync(),
             await dataset.Scan().Where(filter).CountAsync());
 
         // With the per-file index chain off, which must not change the answer: an index only
         // skips work.
         Assert.Equal(
-            await KeysAsync(file.Scan().Where(filter).WithIndexes(false)),
+            await KeysAsync(file.ScanBuilder().Where(filter).WithIndexes(false)),
             await KeysAsync(dataset.Scan().Where(filter).WithIndexes(false)));
     }
 
@@ -131,7 +131,7 @@ public sealed class VortexDatasetTests
 
         await using VortexFile file = await VortexFile.OpenAsync(
             new MemorySegmentSource(single), new VortexOpenOptions(), default);
-        Assert.Equal(await KeysAsync(file.Scan()), await KeysAsync(dataset.Scan()));
+        Assert.Equal(await KeysAsync(file.ScanBuilder()), await KeysAsync(dataset.Scan()));
     }
 
     [Fact]
@@ -186,7 +186,7 @@ public sealed class VortexDatasetTests
         // The uid in the entry is the one the file's postscript carries.
         await using ObjectSegmentSource source = new ObjectSegmentSource(store, entry.Key);
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
-        Assert.NotNull(file.Identity);
+        Assert.NotNull(file.StoredIdentity);
     }
 
     [Fact]

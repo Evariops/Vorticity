@@ -16,7 +16,7 @@ namespace Vorticity.Columns;
 /// Spans returned here point into the owning <see cref="RecordBatch"/>'s buffers and are invalid
 /// once that batch is disposed. <see cref="GetString"/> is the one accessor that copies.
 /// </remarks>
-public readonly ref struct BinaryColumn
+internal readonly ref struct BinaryColumn
 {
     private const int ViewSize = 16;
     private const int MaxInlineLength = 12;

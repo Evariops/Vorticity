@@ -9,7 +9,7 @@ namespace Vorticity.Dataset;
 /// <param name="Key">Its sort key: the row-encoded clustering key, or its first row position.</param>
 /// <param name="Value">Everything else about the object, opaque to the tree.</param>
 /// <param name="Rows">The object's rows, summed up the tree.</param>
-public readonly record struct TreeEntry(ReadOnlyMemory<byte> Key, ReadOnlyMemory<byte> Value, long Rows)
+internal readonly record struct TreeEntry(ReadOnlyMemory<byte> Key, ReadOnlyMemory<byte> Value, long Rows)
 {
     /// <summary>The bytes this entry takes in a leaf page, its length prefixes included.</summary>
     internal int Bytes =>
@@ -22,7 +22,7 @@ public readonly record struct TreeEntry(ReadOnlyMemory<byte> Key, ReadOnlyMemory
 /// One entry and the position of its first row among all the level's rows, which is what answers a
 /// row-range query without opening any object.
 /// </summary>
-public readonly record struct PositionedEntry(TreeEntry Entry, long FirstRow);
+internal readonly record struct PositionedEntry(TreeEntry Entry, long FirstRow);
 
 /// <summary>One child page, as an internal page carries it.</summary>
 /// <param name="MinKey">The smallest key of the subtree.</param>
@@ -33,7 +33,7 @@ public readonly record struct PositionedEntry(TreeEntry Entry, long FirstRow);
 /// The union of the subtree's summaries, folded by an <see cref="ISummaryFold"/>. Empty when the
 /// tree summarises nothing, which makes every predicate over it answer "may match".
 /// </param>
-public readonly record struct InternalEntry(
+internal readonly record struct InternalEntry(
     ReadOnlyMemory<byte> MinKey,
     ReadOnlyMemory<byte> MaxKey,
     long Rows,

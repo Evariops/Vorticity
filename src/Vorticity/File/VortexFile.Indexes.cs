@@ -132,14 +132,14 @@ public sealed partial class VortexFile
     /// Whether the postscript names an index directory at all, or the read options name fragments
     /// to add (<see cref="VortexReadOptions.IndexFragments"/>).
     /// </summary>
-    public bool HasIndexDirectory =>
+    internal bool HasIndexDirectory =>
         TryGetMetadataIndex(IndexDirectory.MetadataKeyUtf8, out _) || ReadOptions.IndexFragments.Count > 0;
 
     /// <summary>
     /// Why the file's index directory was not used, when it was present and refused; otherwise
     /// <see langword="null"/>. Meaningful after <see cref="ReadIndexDirectoryAsync"/>.
     /// </summary>
-    public string? IndexDirectoryRefusal => _indexState?.Refusal;
+    internal string? IndexDirectoryRefusal => _indexState?.Refusal;
 
     /// <summary>
     /// Why each fragment of <see cref="VortexReadOptions.IndexFragments"/> was not used, in the
@@ -147,7 +147,7 @@ public sealed partial class VortexFile
     /// the reason it was refused whole or the entries that were left out. Empty before
     /// <see cref="ReadIndexDirectoryAsync"/>, and when no fragment was given.
     /// </summary>
-    public IReadOnlyList<string?> IndexFragmentRefusals => _indexState?.FragmentRefusals ?? [];
+    internal IReadOnlyList<string?> IndexFragmentRefusals => _indexState?.FragmentRefusals ?? [];
 
     /// <summary>
     /// What the file's indexes are, once its directory has been read -- by a scan, by
@@ -155,7 +155,7 @@ public sealed partial class VortexFile
     /// <see langword="null"/> before, and empty for a file with none. Reading it costs no request.
     /// </summary>
     /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>
-    public IReadOnlyList<VortexIndexInfo>? Indexes
+    internal IReadOnlyList<VortexIndexInfo>? Indexes
     {
         get
         {
@@ -168,7 +168,7 @@ public sealed partial class VortexFile
     /// <param name="cancellationToken">Cancels the read.</param>
     /// <returns>One description per index the reader kept; empty for a file with none.</returns>
     /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>
-    public async ValueTask<IReadOnlyList<VortexIndexInfo>> ReadIndexesAsync(CancellationToken cancellationToken = default) =>
+    internal async ValueTask<IReadOnlyList<VortexIndexInfo>> ReadIndexesAsync(CancellationToken cancellationToken = default) =>
         Describe(await ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false));
 
     private IReadOnlyList<VortexIndexInfo> Describe(IndexDirectory? directory)
@@ -261,7 +261,7 @@ public sealed partial class VortexFile
     /// reason kept for tooling, and the only exceptions that escape are the caller's cancellation
     /// and a disposed file.
     /// </remarks>
-    public async ValueTask<IndexDirectory?> ReadIndexDirectoryAsync(CancellationToken cancellationToken = default)
+    internal async ValueTask<IndexDirectory?> ReadIndexDirectoryAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         if (_indexState is { } known)

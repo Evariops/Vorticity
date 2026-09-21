@@ -77,7 +77,7 @@ public class CompressorBenchmarks
         // arm. Disposal is in `Cleanup`, in the reverse order.
         _file = VortexFile.OpenAsync(Corpus.Path(Files[Column]), CancellationToken.None)
             .AsTask().GetAwaiter().GetResult();
-        _batches = _file.Scan().ExecuteAsync().GetAsyncEnumerator(CancellationToken.None);
+        _batches = _file.ScanBuilder().ExecuteAsync().GetAsyncEnumerator(CancellationToken.None);
         if (!_batches.MoveNextAsync().AsTask().GetAwaiter().GetResult())
         {
             throw new InvalidOperationException($"{Files[Column]} produced no batch.");

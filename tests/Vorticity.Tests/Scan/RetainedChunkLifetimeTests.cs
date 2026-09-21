@@ -58,7 +58,7 @@ public sealed class RetainedChunkLifetimeTests
 
         List<(long Value, string Name)> read = [];
         int windows = 0;
-        ScanBuilder scan = file.Scan().InKeyOrder("value").WithMaxBatchRows(BatchRows);
+        ScanBuilder scan = file.ScanBuilder().InKeyOrder("value").WithMaxBatchRows(BatchRows);
         await foreach (RecordBatch batch in scan.ExecuteAsync())
         {
             windows++;
@@ -95,7 +95,7 @@ public sealed class RetainedChunkLifetimeTests
         List<long> values = [];
         List<string> names = [];
         int batches = 0;
-        await foreach (RecordBatch batch in file.Scan().WithMaxBatchRows(BatchRows).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().WithMaxBatchRows(BatchRows).ExecuteAsync())
         {
             batches++;
             ReadOnlySpan<long> column = batch.Column(0).AsPrimitive<long>().Values;
@@ -173,7 +173,7 @@ public sealed class RetainedChunkLifetimeTests
             VortexWriteOptions options = new VortexWriteOptions
             {
                 Compress = false,
-                Indexes = WritePolicy.None.For("value", IndexPolicy.SortedRuns.AsRequired()),
+                WritePolicy = WritePolicy.None.For("value", IndexPolicy.SortedRuns.AsRequired()),
             };
             await using (VortexFileWriter writer = VortexFileWriter.Create(
                 new StreamSegmentSink(stream, ownsStream: false), Schema, options))

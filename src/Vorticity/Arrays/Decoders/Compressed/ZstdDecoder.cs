@@ -24,7 +24,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// can never exceed <c>int.MaxValue</c> bytes here, so the values always fit one buffer and every
 /// view carries buffer index 0, whatever the file declares.
 /// </remarks>
-public sealed class ZstdDecoder : ArrayDecoder
+internal sealed class ZstdDecoder : ArrayDecoder
 {
     /// <summary>The wire id.</summary>
     public const string Id = "vortex.zstd";

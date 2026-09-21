@@ -30,7 +30,7 @@ namespace Vorticity.IO;
 /// offset does not satisfy, and it copies in exactly that case.
 /// </para>
 /// </remarks>
-public sealed class MemoryMappedSegmentSource : ISegmentSource
+internal sealed class MemoryMappedSegmentSource : ISegmentSource
 {
     private readonly MappedFileOwner? _mapping;
     private readonly SafeFileHandle? _emptyFileHandle;

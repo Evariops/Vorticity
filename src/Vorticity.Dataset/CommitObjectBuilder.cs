@@ -13,7 +13,7 @@ namespace Vorticity.Dataset;
 /// final as soon as it is returned — it has to be, since a reference may already be hashed into a
 /// page this same commit writes later.
 /// </summary>
-public sealed class CommitObjectBuilder : IPageSink
+internal sealed class CommitObjectBuilder : IPageSink
 {
     private readonly ulong _version;
     private readonly List<byte[]> _pages = [];
@@ -183,7 +183,7 @@ public sealed class CommitObjectBuilder : IPageSink
 }
 
 /// <summary>The commit object's table: what it holds, for verification and for repack.</summary>
-public sealed record CommitTable(IReadOnlyList<PageReference> Pages, IReadOnlyList<PageReference> Fragments)
+internal sealed record CommitTable(IReadOnlyList<PageReference> Pages, IReadOnlyList<PageReference> Fragments)
 {
     /// <summary>An empty table.</summary>
     public static CommitTable Empty { get; } = new CommitTable([], []);

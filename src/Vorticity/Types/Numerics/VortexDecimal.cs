@@ -37,7 +37,7 @@ public readonly struct VortexDecimal : IEquatable<VortexDecimal>, IComparable<Vo
     /// the DType is parsed, not here.
     /// </param>
     /// <exception cref="VortexFormatException"><paramref name="precision"/> is outside 1..76.</exception>
-    public VortexDecimal(Int256 unscaled, byte precision, sbyte scale)
+    internal VortexDecimal(Int256 unscaled, byte precision, sbyte scale)
     {
         // Validating precision here keeps Storage total for every constructed value; the only way
         // to obtain an out-of-range precision is `default(VortexDecimal)`.
@@ -66,7 +66,7 @@ public readonly struct VortexDecimal : IEquatable<VortexDecimal>, IComparable<Vo
         new VortexDecimal(new Int256(unscaled), precision, scale);
 
     /// <summary>The unscaled integer.</summary>
-    public Int256 Unscaled => _unscaled;
+    internal Int256 Unscaled => _unscaled;
 
     /// <summary>The DType's precision, 1..76.</summary>
     public byte Precision => _precision;
@@ -81,7 +81,7 @@ public readonly struct VortexDecimal : IEquatable<VortexDecimal>, IComparable<Vo
     /// <exception cref="VortexFormatException">
     /// The precision is outside 1..76, which is only reachable through <c>default</c>.
     /// </exception>
-    public DecimalStorageType Storage => DecimalStorage.ForPrecision(_precision);
+    internal DecimalStorageType Storage => DecimalStorage.ForPrecision(_precision);
 
     /// <summary><see langword="true"/> when the unscaled value is negative.</summary>
     public bool IsNegative => _unscaled.IsNegative;

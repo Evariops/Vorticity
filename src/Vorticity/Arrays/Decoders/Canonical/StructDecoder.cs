@@ -10,7 +10,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// around a trailing validity child, cannot be used here and the collapse of a constant validity
 /// to an all-valid or all-invalid kind is repeated explicitly instead of inherited.
 /// </summary>
-public sealed class StructDecoder : ArrayDecoder
+internal sealed class StructDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.struct";

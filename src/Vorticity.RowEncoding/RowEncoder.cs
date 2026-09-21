@@ -22,7 +22,7 @@ namespace Vorticity.RowEncoding;
 /// ordering for them, which also means a timestamp or date column must be normalized to its
 /// storage type first. NaNs are not canonicalized, so two NaNs with different payloads differ.
 /// </remarks>
-public static partial class RowEncoder
+internal static partial class RowEncoder
 {
     /// <summary>
     /// The Vortex release whose byte layout this encoder reproduces; with the package version, it

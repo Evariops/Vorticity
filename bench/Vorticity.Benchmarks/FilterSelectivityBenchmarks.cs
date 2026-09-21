@@ -78,7 +78,7 @@ public class FilterSelectivityBenchmarks
 
         await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Project(Field)
             .Where(filter)
             .WithPruning(Prune)

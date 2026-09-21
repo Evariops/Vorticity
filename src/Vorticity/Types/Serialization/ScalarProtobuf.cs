@@ -27,7 +27,7 @@ namespace Vorticity.Types.Serialization;
 /// they are interpreted against a dtype one layer up.
 /// </para>
 /// </remarks>
-public static class ScalarProtobuf
+internal static class ScalarProtobuf
 {
     // --- ScalarValue.kind oneof case numbers. Identical to ScalarValueKind by construction. ---
     private const int CaseNull = 1;

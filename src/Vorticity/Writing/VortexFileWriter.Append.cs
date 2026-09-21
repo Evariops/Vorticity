@@ -58,7 +58,7 @@ public sealed partial class VortexFileWriter
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
     /// <exception cref="VortexUnsupportedException">The file's layout is not one this writer can continue.</exception>
     /// <exception cref="VortexFormatException">The file is malformed.</exception>
-    public static async ValueTask<VortexFileWriter> AppendAsync(
+    internal static async ValueTask<VortexFileWriter> AppendAsync(
         string path, VortexWriteOptions? options = null, CancellationToken cancellationToken = default) =>
         await AppendAsync(path, options, null, cancellationToken).ConfigureAwait(false);
 
@@ -83,7 +83,7 @@ public sealed partial class VortexFileWriter
 
         VortexWriteOptions effective = (options ?? VortexWriteOptions.Default).ForAppend(
             plan.BlockRows,
-            options is null ? plan.Policy ?? WritePolicy.Auto : options.Indexes,
+            options is null ? plan.Policy ?? WritePolicy.Auto : options.WritePolicy,
             plan.Statistics is not null && (options?.FileStatistics ?? true),
             options?.IndexBudgetPerMille ?? plan.BudgetPerMille);
 
@@ -383,7 +383,7 @@ public sealed partial class VortexFileWriter
         internal static async ValueTask<AppendPlan> ReadAsync(
             VortexFile file, VortexWriteOptions? options, CancellationToken cancellationToken)
         {
-            DType schema = file.Schema;
+            DType schema = file.DType;
             if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
             {
                 throw Refused("its root is not a struct of columns");
@@ -460,7 +460,7 @@ public sealed partial class VortexFileWriter
                 zones = (await ZonePruningPlan.PlanAsync(file, tree, every, cancellationToken).ConfigureAwait(false)).Zones;
             }
 
-            FileStatistics? statistics = file.HasFileStatistics ? file.Statistics : null;
+            FileStatistics? statistics = file.HasFileStatistics ? file.FileStatistics : null;
             for (int field = 0; field < fields; field++)
             {
                 DType dtype = schema.GetField(field);
@@ -506,7 +506,7 @@ public sealed partial class VortexFileWriter
             List<RecordBatch> reopened = [];
             if (reopen)
             {
-                await foreach (RecordBatch batch in file.Scan()
+                await foreach (RecordBatch batch in file.ScanBuilder()
                     .Rows(new RowRange(keptRows, rows))
                     .WithPruning(false)
                     .WithIndexes(false)
@@ -777,7 +777,7 @@ public sealed partial class VortexFileWriter
             if (statistics is not null && field < statistics.FieldCount)
             {
                 FieldStatistics stats = statistics.GetField(field);
-                if (stats.TryGetNullCount(out ulong n))
+                if (stats.TryGetStoredNullCount(out ulong n))
                 {
                     nulls = (long)Math.Min(n, (ulong)rows);
                 }

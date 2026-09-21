@@ -8,7 +8,7 @@ namespace Vorticity.Arrays.Metadata;
 /// <c>vortex.runend</c> metadata:
 /// <c>message RunEndMetadata { PType ends_ptype = 1; uint64 num_runs = 2; uint64 offset = 3; }</c>.
 /// </summary>
-public readonly struct RunEndMetadata : IEquatable<RunEndMetadata>
+internal readonly struct RunEndMetadata : IEquatable<RunEndMetadata>
 {
     private const string MessageName = "RunEndMetadata";
 

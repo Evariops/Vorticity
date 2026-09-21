@@ -68,7 +68,7 @@ public static class VortexLimits
     public const int MaxFlatBufferTables = 1_000_000;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int CheckAlignmentExponent(byte exponent)
+    internal static int CheckAlignmentExponent(byte exponent)
     {
         if (exponent > MaxAlignmentExponent)
         {

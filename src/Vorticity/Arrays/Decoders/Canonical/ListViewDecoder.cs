@@ -11,7 +11,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// list's offsets these are not ordered, so nothing can be inferred from monotonicity and every
 /// row is range-checked, the null ones included.
 /// </summary>
-public sealed class ListViewDecoder : ArrayDecoder
+internal sealed class ListViewDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.listview";

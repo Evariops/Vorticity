@@ -14,7 +14,7 @@ namespace Vorticity.Layouts;
 /// its metadata is parsed best-effort. No current writer emits one, but the layout sits on the path
 /// to the data in older files, so skipping it would make every one of them unreadable.
 /// </remarks>
-public sealed class StatsLayoutReader : LayoutReader
+internal sealed class StatsLayoutReader : LayoutReader
 {
     /// <summary>The shared, stateless instance.</summary>
     public static readonly StatsLayoutReader Instance = new StatsLayoutReader();

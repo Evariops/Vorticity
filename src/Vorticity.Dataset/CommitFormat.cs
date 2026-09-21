@@ -62,10 +62,10 @@ internal static class CommitFormat
 /// A commit object's trailer, as read back. <c>ObjectLength</c> is what the writer intended, so a
 /// truncated object reports its shortfall instead of reading its tail as offsets.
 /// </summary>
-public readonly record struct CommitTrailer(long TableOffset, int TableLength, long ObjectLength, ulong Checksum);
+internal readonly record struct CommitTrailer(long TableOffset, int TableLength, long ObjectLength, ulong Checksum);
 
 /// <summary>A commit object is not what it claims to be.</summary>
-public sealed class CommitFormatException : Exception
+internal sealed class CommitFormatException : Exception
 {
     /// <summary>Creates the exception with a default message.</summary>
     public CommitFormatException()

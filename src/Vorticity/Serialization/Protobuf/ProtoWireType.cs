@@ -15,7 +15,7 @@ namespace Vorticity.Serialization.Protobuf;
 /// Values 6 and 7 have never been assigned and have no name: a tag carrying one is malformed.
 /// </para>
 /// </remarks>
-public enum ProtoWireType : byte
+internal enum ProtoWireType : byte
 {
     /// <summary>Base-128 varint: <c>int32</c>, <c>int64</c>, <c>uint32</c>, <c>uint64</c>,
     /// <c>sint32</c>, <c>sint64</c>, <c>bool</c>, and enums.</summary>

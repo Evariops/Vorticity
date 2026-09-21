@@ -390,9 +390,9 @@ public sealed class WriteAllocationTests
     {
         long rows = 0;
         await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await using VortexFileWriter writer = VortexFileWriter.Create(new NullSink(), source.Schema);
+        await using VortexFileWriter writer = VortexFileWriter.Create(new NullSink(), source.DType);
 
-        await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;

@@ -10,7 +10,7 @@ namespace Vorticity.Arrays.Metadata;
 /// Metadata shapes shared across encodings: the empty-metadata validator and the bare
 /// <c>ScalarValue</c> that <c>fastlanes.for</c> carries.
 /// </summary>
-public static class EncodingMetadata
+internal static class EncodingMetadata
 {
     /// <summary>
     /// Rejects a non-empty metadata payload for an encoding whose metadata must be empty.

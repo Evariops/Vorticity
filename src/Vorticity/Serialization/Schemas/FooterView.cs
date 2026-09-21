@@ -8,7 +8,7 @@ namespace Vorticity.Serialization.Schemas;
 /// The footer is a dictionary, not a tree: five flat vectors. Only <c>segment_specs</c> is
 /// reinterpreted in place; the others are walked one element at a time and never allocate.
 /// </remarks>
-public readonly ref struct FooterView
+internal readonly ref struct FooterView
 {
     private readonly ReadOnlySpan<byte> _buffer;
     private readonly FlatBufferTable _table;
@@ -145,7 +145,7 @@ public readonly ref struct FooterView
 }
 
 /// <summary>Reader for the format's <c>table FileStatistics</c>.</summary>
-public readonly ref struct FileStatisticsView
+internal readonly ref struct FileStatisticsView
 {
     private readonly FlatBufferTable _table;
 

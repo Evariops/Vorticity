@@ -17,7 +17,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// indices and the patch values, and last the per-chunk index offsets when those are declared too.
 /// There is no validity child: the array's nullability rides on its encoded integers.
 /// </remarks>
-public sealed class AlpDecoder : ArrayDecoder
+internal sealed class AlpDecoder : ArrayDecoder
 {
     /// <summary>The wire id.</summary>
     public const string Id = "vortex.alp";

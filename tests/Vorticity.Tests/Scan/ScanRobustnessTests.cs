@@ -50,7 +50,7 @@ public sealed class ScanRobustnessTests
 
             long seen = 0;
             long expectedStart = 0;
-            await foreach (RecordBatch batch in file.Scan().WithMaxBatchRows(caps[c]).ExecuteAsync())
+            await foreach (RecordBatch batch in file.ScanBuilder().WithMaxBatchRows(caps[c]).ExecuteAsync())
             {
                 Assert.Equal(expectedStart, batch.StartRow);
                 expectedStart += batch.RowCount;
@@ -101,7 +101,7 @@ public sealed class ScanRobustnessTests
             await Assert.ThrowsAsync<VortexFormatException>(async () =>
             {
                 await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-                await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+                await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
                 {
                     Assert.NotNull(batch);
                 }
@@ -116,7 +116,7 @@ public sealed class ScanRobustnessTests
     [Fact]
     public void ScanRejectsANullFile()
     {
-        Assert.Throws<ArgumentNullException>(() => VortexFileScanExtensions.Scan(null!));
+        Assert.Throws<ArgumentNullException>(() => VortexFileScanExtensions.ScanBuilder(null!));
     }
 
     [Fact]
@@ -125,8 +125,8 @@ public sealed class ScanRobustnessTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path("containers/uncompressed_canonical"), CancellationToken.None);
 
-        Assert.Throws<ArgumentNullException>(() => file.Scan().Project((string[])null!));
-        Assert.Throws<ArgumentNullException>(() => file.Scan().Project((string)null!));
+        Assert.Throws<ArgumentNullException>(() => file.ScanBuilder().Project((string[])null!));
+        Assert.Throws<ArgumentNullException>(() => file.ScanBuilder().Project((string)null!));
     }
 
     [Fact]
@@ -136,11 +136,11 @@ public sealed class ScanRobustnessTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path("containers/uncompressed_canonical"), CancellationToken.None);
 
-        BatchAsyncEnumerable scan = Assert.IsType<BatchAsyncEnumerable>(file.Scan().Project().ExecuteAsync());
+        BatchAsyncEnumerable scan = Assert.IsType<BatchAsyncEnumerable>(file.ScanBuilder().Project().ExecuteAsync());
         Assert.True(scan.Projection.IsAll);
 
         BatchAsyncEnumerable byIndex =
-            Assert.IsType<BatchAsyncEnumerable>(file.Scan().ProjectFields(ReadOnlySpan<int>.Empty).ExecuteAsync());
+            Assert.IsType<BatchAsyncEnumerable>(file.ScanBuilder().ProjectFields(ReadOnlySpan<int>.Empty).ExecuteAsync());
         Assert.True(byIndex.Projection.IsAll);
     }
 
@@ -151,7 +151,7 @@ public sealed class ScanRobustnessTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path("containers/uncompressed_canonical"), CancellationToken.None);
 
-        ScanBuilder builder = file.Scan();
+        ScanBuilder builder = file.ScanBuilder();
         IAsyncEnumerable<RecordBatch> first = builder.ExecuteAsync();
 
         // Mutating the builder afterwards must not reach the enumerable already handed out.
@@ -172,7 +172,7 @@ public sealed class ScanRobustnessTests
             source, new VortexOpenOptions(), CancellationToken.None);
 
         IAsyncEnumerator<RecordBatch> enumerator =
-            file.Scan().WithMaxBatchRows(1000).ExecuteAsync().GetAsyncEnumerator();
+            file.ScanBuilder().WithMaxBatchRows(1000).ExecuteAsync().GetAsyncEnumerator();
 
         Assert.True(await enumerator.MoveNextAsync());
         Assert.True(await enumerator.MoveNextAsync());
@@ -209,7 +209,7 @@ public sealed class ScanRobustnessTests
             source, new VortexOpenOptions(), CancellationToken.None);
 
         IAsyncEnumerator<RecordBatch> enumerator =
-            file.Scan().WithMaxBatchRows(100).ExecuteAsync().GetAsyncEnumerator();
+            file.ScanBuilder().WithMaxBatchRows(100).ExecuteAsync().GetAsyncEnumerator();
 
         Assert.True(await enumerator.MoveNextAsync());
         await Assert.ThrowsAsync<IOException>(async () => await enumerator.MoveNextAsync());

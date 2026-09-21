@@ -10,7 +10,7 @@ namespace Vorticity.Layouts;
 /// child 0 holds the data, child 1 one row of aggregates per zone. Only the data child is read here;
 /// the zone map is consumed separately, when pruning decides which splits are worth reading at all.
 /// </summary>
-public sealed class ZonedLayoutReader : LayoutReader
+internal sealed class ZonedLayoutReader : LayoutReader
 {
     /// <summary>The shared, stateless instance.</summary>
     public static readonly ZonedLayoutReader Instance = new ZonedLayoutReader();

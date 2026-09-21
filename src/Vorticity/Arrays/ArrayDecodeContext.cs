@@ -17,7 +17,7 @@ namespace Vorticity.Arrays;
 /// charged only on the child-recursion path, and the validity rule, which every decoder that can
 /// carry validity calls instead of re-implementing it.
 /// </remarks>
-public sealed class ArrayDecodeContext
+internal sealed class ArrayDecodeContext
 {
     private readonly ScanContext _scan;
     private int _depth;

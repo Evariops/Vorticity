@@ -10,7 +10,7 @@ namespace Vorticity.Arrays.Metadata;
 /// The offset is a <b>bit</b> offset into buffer 0 and is the only thing that distinguishes two
 /// otherwise identical bool arrays.
 /// </remarks>
-public readonly struct BoolMetadata : IEquatable<BoolMetadata>
+internal readonly struct BoolMetadata : IEquatable<BoolMetadata>
 {
     private const string MessageName = "BoolMetadata";
 

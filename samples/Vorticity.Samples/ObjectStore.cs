@@ -35,7 +35,7 @@ internal static class ObjectStore
         Console.WriteLine($"opened from the store: {file.RowCount} rows, {file.FileLength} bytes");
 
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Project(["celsius"]).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Project(["celsius"]).ExecuteAsync())
         {
             using (batch)
             {
@@ -48,7 +48,7 @@ internal static class ObjectStore
         // What an operation costs, counted at the seam.
         await using CountingObjectStore counting = new CountingObjectStore(new MemoryObjectStore());
         await using (VortexDataset dataset = await VortexDataset.CreateAsync(
-            counting, (await VortexFile.OpenAsync(await Demo.ReadingsAsync())).Schema))
+            counting, (await VortexFile.OpenAsync(await Demo.ReadingsAsync())).DType))
         {
             Console.WriteLine($"creating a dataset: {counting.Requests} requests -- " +
                 $"{counting.CountOf(ObjectOperation.GetRange)} get, " +

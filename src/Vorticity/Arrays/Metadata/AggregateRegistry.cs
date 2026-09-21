@@ -10,7 +10,7 @@ namespace Vorticity.Arrays.Metadata;
 /// An id outside this set disables that aggregate's pruning and is <b>never</b> an error: an
 /// aggregate nobody understands simply contributes nothing, and the read still succeeds.
 /// </remarks>
-public enum AggregateId : byte
+internal enum AggregateId : byte
 {
     /// <summary>An id this library does not know. Pruning with it is disabled; the read succeeds.</summary>
     Unknown = 0,
@@ -35,7 +35,7 @@ public enum AggregateId : byte
 }
 
 /// <summary>Resolves zone-map aggregate ids and decodes their options payloads.</summary>
-public static class AggregateRegistry
+internal static class AggregateRegistry
 {
     private static ReadOnlySpan<byte> IdMin => "vortex.min"u8;
     private static ReadOnlySpan<byte> IdMax => "vortex.max"u8;

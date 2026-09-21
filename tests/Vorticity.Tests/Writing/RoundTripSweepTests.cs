@@ -129,11 +129,11 @@ public sealed class RoundTripSweepTests
                 5 => WritePolicy.None.WithDefault(IndexPolicy.NgramPostings(caseInsensitive: true).WithSegmentEntries(500)),
                 _ => WritePolicy.Auto,
             };
-            if (written % 6 == 3 && source.Schema.Kind == DTypeKind.Struct)
+            if (written % 6 == 3 && source.DType.Kind == DTypeKind.Struct)
             {
-                for (int field = 1; field < source.Schema.FieldCount; field += 2)
+                for (int field = 1; field < source.DType.FieldCount; field += 2)
                 {
-                    policy = policy.For(source.Schema.GetFieldName(field), IndexPolicy.Bloom(resolutions: 3));
+                    policy = policy.For(source.DType.GetFieldName(field), IndexPolicy.Bloom(resolutions: 3));
                 }
             }
 
@@ -141,7 +141,7 @@ public sealed class RoundTripSweepTests
             // Rust reads appended files back too: the first half written, closed, and the
             // rest appended -- inside a block, so the last chunk is re-opened -- or the whole file
             // written without indexes and the runs appended with a new directory and footer.
-            bool tabular = source.Schema.Kind == DTypeKind.Struct && source.Schema.FieldCount > 0 && source.RowCount > 1;
+            bool tabular = source.DType.Kind == DTypeKind.Struct && source.DType.FieldCount > 0 && source.RowCount > 1;
             int mode = tabular ? (tables++ % 3) switch { 1 => 1, 2 => 3, _ => 0 } : 0;
             // STRING ZONE BOUNDS ON HALF THE FILES: the reference's 64 bytes on one in
             // four, and 5 on another, so that values are cut, characters straddle the cut and some
@@ -149,11 +149,11 @@ public sealed class RoundTripSweepTests
             int stringBounds = (written % 4) switch { 0 => 64, 2 => 5, _ => 0 };
             VortexWriteOptions options = new VortexWriteOptions
             {
-                Indexes = mode == 3 ? WritePolicy.None : policy,
+                WritePolicy = mode == 3 ? WritePolicy.None : policy,
                 IndexBudgetPerMille = 1_000_000,
                 StringBoundBytes = stringBounds,
             };
-            if (stringBounds > 0 && HasStringField(source.Schema))
+            if (stringBounds > 0 && HasStringField(source.DType))
             {
                 stringBounded++;
             }
@@ -162,7 +162,7 @@ public sealed class RoundTripSweepTests
             // appended as three objects of an unclustered dataset, which compacts tiered -- a
             // concatenation, so the rows keep the order the verifier compares them in -- and the one
             // object the compaction wrote is what Rust reads.
-            if (mode == 0 && source.RowCount >= 3 && PlainColumns(source.Schema))
+            if (mode == 0 && source.RowCount >= 3 && PlainColumns(source.DType))
             {
                 await System.IO.File.WriteAllBytesAsync(destination, await CompactedAsync(source, options));
                 compacted++;
@@ -174,11 +174,11 @@ public sealed class RoundTripSweepTests
             IReadOnlyList<IndexWriteReport> indexes;
             int columns;
             long split = mode == 1 ? (source.RowCount / 2) + 1 : long.MaxValue;
-            VortexFileWriter writer = VortexFileWriter.Create(destination, source.Schema, options);
+            VortexFileWriter writer = VortexFileWriter.Create(destination, source.DType, options);
             try
             {
                 long rows = 0;
-                await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+                await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     if (rows >= split && split != long.MaxValue)
@@ -277,9 +277,9 @@ public sealed class RoundTripSweepTests
             await using (VortexFile source = await VortexFile.OpenAsync(
                 entry.Path, OpenOptionsFor(entry), CancellationToken.None))
             {
-                schema = source.Schema;
+                schema = source.DType;
                 await using VortexFileWriter writer = VortexFileWriter.Create(written, schema);
-                await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+                await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     Values.DescribeRows(batch, original);
@@ -298,7 +298,7 @@ public sealed class RoundTripSweepTests
                         $"wrote {entry.RowCount} rows and read back {target.RowCount}");
                 }
 
-                await foreach (RecordBatch batch in target.Scan().ExecuteAsync()
+                await foreach (RecordBatch batch in target.ScanBuilder().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     Values.DescribeRows(batch, readBack);
@@ -375,11 +375,11 @@ public sealed class RoundTripSweepTests
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, source.Schema, new DatasetOptions { Seed = 0xC0_55C4EC, Write = write });
+            store, source.DType, new DatasetOptions { Seed = 0xC0_55C4EC, Write = write });
         long third = source.RowCount / 3;
         foreach ((long from, long to) in ((long, long)[])[(0, third), (third, 2 * third), (2 * third, source.RowCount)])
         {
-            await dataset.AppendAsync(source.Scan().Rows(new RowRange(from, to)).ExecuteAsync());
+            await dataset.AppendAsync(source.ScanBuilder().Rows(new RowRange(from, to)).ExecuteAsync());
         }
 
         CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(
@@ -431,6 +431,6 @@ public sealed class RoundTripSweepTests
             .AsTask()
             .GetAwaiter()
             .GetResult();
-        return donor.Schema;
+        return donor.DType;
     });
 }

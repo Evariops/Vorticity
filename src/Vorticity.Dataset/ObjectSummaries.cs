@@ -12,7 +12,7 @@ namespace Vorticity.Dataset;
 /// sorted by path, no field writable two ways, a literal written by its comparison kind rather than
 /// its dtype -- because these bytes sit inside a content-addressed page.
 /// </summary>
-public sealed class ObjectSummaries : IEquatable<ObjectSummaries>
+internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
 {
     private static readonly ObjectSummaries None = new ObjectSummaries([]);
     private readonly ColumnSummary[] _columns;

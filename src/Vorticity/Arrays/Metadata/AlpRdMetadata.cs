@@ -22,7 +22,7 @@ namespace Vorticity.Arrays.Metadata;
 /// <see cref="CountDictionaryEntries"/>, or with <see cref="TypicalDictionaryLength"/> when reading
 /// a file a conformant writer produced.
 /// </remarks>
-public readonly struct AlpRdMetadata : IEquatable<AlpRdMetadata>
+internal readonly struct AlpRdMetadata : IEquatable<AlpRdMetadata>
 {
     private const string MessageName = "ALPRDMetadata";
 

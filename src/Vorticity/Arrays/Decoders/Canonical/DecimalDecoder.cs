@@ -12,7 +12,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// precision, and the two have to agree closely enough to be safe: a storage narrower than the
 /// precision needs would truncate every value, so it is refused here.
 /// </remarks>
-public sealed class DecimalDecoder : ArrayDecoder
+internal sealed class DecimalDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.decimal";

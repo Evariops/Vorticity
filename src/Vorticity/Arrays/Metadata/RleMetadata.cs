@@ -21,7 +21,7 @@ namespace Vorticity.Arrays.Metadata;
 /// <c>offset</c> has a declared default of zero, so absent and present-zero are the same state —
 /// unlike the <c>optional bool</c>s elsewhere in this namespace, no tri-state is needed.
 /// </remarks>
-public readonly struct RleMetadata : IEquatable<RleMetadata>
+internal readonly struct RleMetadata : IEquatable<RleMetadata>
 {
     private const string MessageName = "RLEMetadata";
 

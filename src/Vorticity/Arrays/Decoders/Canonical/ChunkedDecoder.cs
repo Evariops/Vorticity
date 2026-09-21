@@ -10,7 +10,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// materialized and validated before any chunk is decoded, since the chunks' lengths are the
 /// differences between its entries. A zero-length chunk is legal, wherever it sits.
 /// </remarks>
-public sealed class ChunkedDecoder : ArrayDecoder
+internal sealed class ChunkedDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.chunked";

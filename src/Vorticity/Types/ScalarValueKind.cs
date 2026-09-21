@@ -11,7 +11,7 @@ namespace Vorticity.Types;
 /// value in little-endian two's complement, its length selecting the storage width from 1 to 32
 /// bytes. Interpreting it needs the dtype, which a value does not carry.
 /// </remarks>
-public enum ScalarValueKind : byte
+internal enum ScalarValueKind : byte
 {
     /// <summary>
     /// No value at all: an empty <c>ScalarValue</c> message, or a statistic the file does not

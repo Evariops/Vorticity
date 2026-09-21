@@ -9,7 +9,7 @@ namespace Vorticity.Arrays.Metadata;
 /// <c>message DateTimePartsMetadata { PType days_ptype = 1; PType seconds_ptype = 2; PType subseconds_ptype = 3; }</c>.
 /// </summary>
 /// <remarks>Validity lives in the days array, not in the parent node.</remarks>
-public readonly struct DateTimePartsMetadata : IEquatable<DateTimePartsMetadata>
+internal readonly struct DateTimePartsMetadata : IEquatable<DateTimePartsMetadata>
 {
     private const string MessageName = "DateTimePartsMetadata";
 

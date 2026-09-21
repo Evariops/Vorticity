@@ -16,7 +16,7 @@ namespace Vorticity.Arrays;
 /// wrote, and the leading zero-length buffer they emit for maximum alignment contributes neither
 /// bytes nor an entry to find.
 /// </remarks>
-public static class ArrayBlobReader
+internal static class ArrayBlobReader
 {
     /// <summary>
     /// The normal case: <paramref name="segment"/> is

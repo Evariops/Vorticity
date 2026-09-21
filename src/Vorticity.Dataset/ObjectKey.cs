@@ -7,7 +7,7 @@ namespace Vorticity.Dataset;
 /// this repository. They are the narrower file-system rules, so that a key can never reach outside
 /// a dataset's own prefix and every store refuses exactly the same keys.
 /// </summary>
-public static class ObjectKey
+internal static class ObjectKey
 {
     /// <summary>
     /// The longest key a store accepts, in UTF-16 units: under what object stores and file systems

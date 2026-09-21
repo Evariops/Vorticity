@@ -11,7 +11,7 @@ namespace Vorticity.Scanning;
 /// not depend on the scan and pruning machinery, and a caller that holds a
 /// <see cref="VortexFile"/> gets the method by importing this namespace.
 /// </remarks>
-public static class VortexFilePruningExtensions
+internal static class VortexFilePruningExtensions
 {
     /// <summary>
     /// Whether <paramref name="file"/> may contain a row <paramref name="filter"/> selects,
@@ -38,7 +38,7 @@ public static class VortexFilePruningExtensions
     {
         ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(filter);
-        FilterTypeCheck.Check(file.Schema, filter, nameof(filter));
+        FilterTypeCheck.Check(file.DType, filter, nameof(filter));
         return FileStatisticsPruner.MayMatch(file, filter);
     }
 
@@ -66,7 +66,7 @@ public static class VortexFilePruningExtensions
     {
         ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(filter);
-        FilterTypeCheck.Check(file.Schema, filter, nameof(filter));
+        FilterTypeCheck.Check(file.DType, filter, nameof(filter));
         return FileStatisticsPruner.MayMatch(file, filter)
             && await Indexes.BloomPruner.FileMayMatchAsync(file, filter, cancellationToken).ConfigureAwait(false);
     }

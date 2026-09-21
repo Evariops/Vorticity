@@ -16,7 +16,7 @@ namespace Vorticity.Layouts;
 /// This is where projection stays lazy: a field the mask excludes is neither registered nor
 /// executed, so an unknown layout or array encoding buried in an unprojected column never throws.
 /// </remarks>
-public sealed class StructLayoutReader : LayoutReader
+internal sealed class StructLayoutReader : LayoutReader
 {
     private const string Id = "vortex.struct";
     private const int StackFields = 16;

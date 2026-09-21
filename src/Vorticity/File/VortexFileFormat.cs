@@ -6,7 +6,7 @@ namespace Vorticity.File;
 /// Frozen constants of the Vortex file container. They are part of the format, not tuning knobs:
 /// changing one makes this reader disagree with every conformant writer.
 /// </summary>
-public static class VortexFileFormat
+internal static class VortexFileFormat
 {
     /// <summary>The 4-byte magic, <c>VTXF</c>, written at file offset 0 and again in the EOF marker.</summary>
     public static ReadOnlySpan<byte> MagicBytes => "VTXF"u8;

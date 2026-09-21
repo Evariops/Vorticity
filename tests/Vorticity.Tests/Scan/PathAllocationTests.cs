@@ -369,7 +369,7 @@ public sealed class PathAllocationTests
     private static async ValueTask<long> FirstBatch(string id)
     {
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             return batch.RowCount;
@@ -382,7 +382,7 @@ public sealed class PathAllocationTests
     {
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -395,7 +395,7 @@ public sealed class PathAllocationTests
     {
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Project("monotone").ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Project("monotone").ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -415,7 +415,7 @@ public sealed class PathAllocationTests
 
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Take(indices).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Take(indices).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -442,7 +442,7 @@ public sealed class PathAllocationTests
         await using VortexFile opened = await VortexFile.OpenAsync(
             Corpus.Path(path), CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in opened.Scan()
+        await foreach (RecordBatch batch in opened.ScanBuilder()
             .Project("monotone")
             .Where(filter)
             .WithPruning(pruning)

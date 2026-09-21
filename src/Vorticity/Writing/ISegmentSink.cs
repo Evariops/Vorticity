@@ -8,7 +8,7 @@ namespace Vorticity.Writing;
 /// Where a writer puts its bytes. Strictly sequential and forward-only: nothing already written can
 /// be revisited to fix an offset, so offsets and padding must be settled before each write.
 /// </summary>
-public interface ISegmentSink
+internal interface ISegmentSink
 {
     /// <summary>How many bytes have been written so far, which is the next write's file offset.</summary>
     long Position { get; }

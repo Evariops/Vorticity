@@ -14,7 +14,7 @@ namespace Vorticity.Serialization.Schemas;
 /// explicit packing and size pin that layout and are asserted when the assembly loads.
 /// </remarks>
 [StructLayout(LayoutKind.Sequential, Pack = 1, Size = 16)]
-public readonly struct SegmentSpec
+internal readonly struct SegmentSpec
 {
     /// <summary>Byte 0..8. Offset relative to the start of the file.</summary>
     public readonly ulong Offset;

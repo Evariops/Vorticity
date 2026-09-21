@@ -106,7 +106,7 @@ public sealed class DatasetIndexingTests
 
             // And the fragment's filter prunes inside the object: a tag no row holds.
             VortexExpr noTag = Expr.Eq(Expr.Field("tag"), Expr.Literal(FilterLiteral.From(1L)));
-            ScanPlan plan = await lease.File.Scan().Where(noTag).ExplainAsync();
+            ScanPlan plan = await lease.File.ScanBuilder().Where(noTag).ExplainAsync();
             Assert.Equal(0, plan.LiveBlocks);
         }
 
@@ -408,7 +408,7 @@ public sealed class DatasetIndexingTests
     private static DatasetOptions Unclustered() => new DatasetOptions
     {
         Seed = 0x1D_E7E5,
-        Write = new VortexWriteOptions { RowBlockSize = BlockRows, Indexes = WritePolicy.None },
+        Write = new VortexWriteOptions { RowBlockSize = BlockRows, WritePolicy = WritePolicy.None },
     };
 
     /// <summary>Object <paramref name="i"/>: keys <c>[i · 2048, (i + 1) · 2048)</c>, in one batch.</summary>

@@ -18,7 +18,7 @@ namespace Vorticity.Arrays.Metadata;
 /// child. The dtype itself is not decoded here: this build refuses a shredded variant, so the
 /// bytes are counted and skipped rather than parsed into a type nothing will use.
 /// </remarks>
-public readonly struct VariantMetadata : IEquatable<VariantMetadata>
+internal readonly struct VariantMetadata : IEquatable<VariantMetadata>
 {
     private const string MessageName = "VariantMetadata";
 
@@ -102,7 +102,7 @@ public readonly struct VariantMetadata : IEquatable<VariantMetadata>
 /// than that: an explicit validity child comes first when the array is nullable and its validity is
 /// not the dtype's. That extra child is part of the format, not a tolerance invented here.
 /// </remarks>
-public readonly struct ParquetVariantMetadata : IEquatable<ParquetVariantMetadata>
+internal readonly struct ParquetVariantMetadata : IEquatable<ParquetVariantMetadata>
 {
     private const string MessageName = "ParquetVariantMetadata";
 

@@ -89,7 +89,7 @@ internal static class Corpus
         IAsyncEnumerable<RecordBatch> batches;
         try
         {
-            batches = file.Scan().Project(field).ExecuteAsync();
+            batches = file.ScanBuilder().Project(field).ExecuteAsync();
         }
         catch (ArgumentException e)
         {

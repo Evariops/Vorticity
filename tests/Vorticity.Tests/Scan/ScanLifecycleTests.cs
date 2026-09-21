@@ -31,7 +31,7 @@ public sealed class ScanLifecycleTests
         await cts.CancelAsync();
 
         IAsyncEnumerator<RecordBatch> enumerator =
-            file.Scan().ExecuteAsync().GetAsyncEnumerator(cts.Token);
+            file.ScanBuilder().ExecuteAsync().GetAsyncEnumerator(cts.Token);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await enumerator.MoveNextAsync());
         await enumerator.DisposeAsync();
     }
@@ -44,7 +44,7 @@ public sealed class ScanLifecycleTests
 
         using CancellationTokenSource cts = new CancellationTokenSource();
         IAsyncEnumerator<RecordBatch> enumerator =
-            file.Scan().WithMaxBatchRows(1000).ExecuteAsync().GetAsyncEnumerator(cts.Token);
+            file.ScanBuilder().WithMaxBatchRows(1000).ExecuteAsync().GetAsyncEnumerator(cts.Token);
 
         Assert.True(await enumerator.MoveNextAsync());
 
@@ -68,7 +68,7 @@ public sealed class ScanLifecycleTests
 
         using CancellationTokenSource cts = new CancellationTokenSource();
         IAsyncEnumerator<RecordBatch> enumerator =
-            file.Scan().ExecuteAsync().GetAsyncEnumerator(cts.Token);
+            file.ScanBuilder().ExecuteAsync().GetAsyncEnumerator(cts.Token);
 
         ValueTask<bool> pending = enumerator.MoveNextAsync();
         Assert.False(pending.IsCompleted, "a gated source must park the read");
@@ -90,7 +90,7 @@ public sealed class ScanLifecycleTests
             source, new VortexOpenOptions(), CancellationToken.None);
 
         IAsyncEnumerator<RecordBatch> enumerator =
-            file.Scan().WithMaxBatchRows(2000).ExecuteAsync().GetAsyncEnumerator();
+            file.ScanBuilder().WithMaxBatchRows(2000).ExecuteAsync().GetAsyncEnumerator();
 
         long rows = 0;
         while (true)
@@ -124,7 +124,7 @@ public sealed class ScanLifecycleTests
             source, new VortexOpenOptions(), CancellationToken.None);
 
         IAsyncEnumerator<RecordBatch> enumerator =
-            file.Scan().WithMaxBatchRows(1000).ExecuteAsync().GetAsyncEnumerator();
+            file.ScanBuilder().WithMaxBatchRows(1000).ExecuteAsync().GetAsyncEnumerator();
 
         Assert.True(await enumerator.MoveNextAsync());
         Assert.True(source.OwnerCount > 0, "the first batch must have read something");
@@ -147,7 +147,7 @@ public sealed class ScanLifecycleTests
             source, new VortexOpenOptions(), CancellationToken.None);
 
         IAsyncEnumerator<RecordBatch> enumerator =
-            file.Scan().WithMaxBatchRows(1000).ExecuteAsync().GetAsyncEnumerator();
+            file.ScanBuilder().WithMaxBatchRows(1000).ExecuteAsync().GetAsyncEnumerator();
         while (await enumerator.MoveNextAsync())
         {
             Assert.True(enumerator.Current.RowCount > 0);
@@ -179,7 +179,7 @@ public sealed class ScanLifecycleTests
         await using (VortexFile file = await VortexFile.OpenAsync(
             source, new VortexOpenOptions(), CancellationToken.None))
         {
-            await foreach (RecordBatch batch in file.Scan().WithMaxBatchRows(1000).ExecuteAsync())
+            await foreach (RecordBatch batch in file.ScanBuilder().WithMaxBatchRows(1000).ExecuteAsync())
             {
                 using (batch)
                 {
@@ -204,7 +204,7 @@ public sealed class ScanLifecycleTests
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Multi), CancellationToken.None);
 
-        IAsyncEnumerator<RecordBatch> enumerator = file.Scan().ExecuteAsync().GetAsyncEnumerator();
+        IAsyncEnumerator<RecordBatch> enumerator = file.ScanBuilder().ExecuteAsync().GetAsyncEnumerator();
         Assert.True(await enumerator.MoveNextAsync());
 
         await enumerator.DisposeAsync();
@@ -219,7 +219,7 @@ public sealed class ScanLifecycleTests
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Multi), CancellationToken.None);
 
-        IAsyncEnumerator<RecordBatch> enumerator = file.Scan().ExecuteAsync().GetAsyncEnumerator();
+        IAsyncEnumerator<RecordBatch> enumerator = file.ScanBuilder().ExecuteAsync().GetAsyncEnumerator();
         Assert.Throws<InvalidOperationException>(() => enumerator.Current);
         await enumerator.DisposeAsync();
     }
@@ -231,7 +231,7 @@ public sealed class ScanLifecycleTests
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Multi), CancellationToken.None);
 
         IAsyncEnumerator<RecordBatch> enumerator =
-            file.Scan().WithMaxBatchRows(1000).ExecuteAsync().GetAsyncEnumerator();
+            file.ScanBuilder().WithMaxBatchRows(1000).ExecuteAsync().GetAsyncEnumerator();
 
         Assert.True(await enumerator.MoveNextAsync());
         RecordBatch first = enumerator.Current;
@@ -288,7 +288,7 @@ public sealed class ScanLifecycleTests
         await using VortexFile file = await VortexFile.OpenAsync(
             source, new VortexOpenOptions(), CancellationToken.None);
 
-        IAsyncEnumerator<RecordBatch> enumerator = file.Scan()
+        IAsyncEnumerator<RecordBatch> enumerator = file.ScanBuilder()
             .WithMaxBatchRows(500)
             .WithDegreeOfParallelism(4)
             .ExecuteAsync()
@@ -312,7 +312,7 @@ public sealed class ScanLifecycleTests
 
         VortexUnsupportedException error = await Assert.ThrowsAsync<VortexUnsupportedException>(async () =>
         {
-            await foreach (RecordBatch batch in file.Scan()
+            await foreach (RecordBatch batch in file.ScanBuilder()
                 .WithDegreeOfParallelism(4)
                 .WithMaxBatchRows(512)
                 .ExecuteAsync())
@@ -329,7 +329,7 @@ public sealed class ScanLifecycleTests
     private static async Task<long[]> Read(VortexFile file, int degree, int cap)
     {
         List<long> values = new List<long>();
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .WithDegreeOfParallelism(degree)
             .WithMaxBatchRows(cap)
             .ExecuteAsync())

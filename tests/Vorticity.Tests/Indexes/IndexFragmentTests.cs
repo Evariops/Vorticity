@@ -79,11 +79,11 @@ public sealed class IndexFragmentTests
 
         // A key no row holds: the eight blocks of the range are proven empty, and only them.
         VortexExpr absent = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(AbsentId())));
-        ScanPlan plan = await file.Scan().Where(absent).ExplainAsync();
+        ScanPlan plan = await file.ScanBuilder().Where(absent).ExplainAsync();
         Assert.Equal(0, Pruned(plan, "zone map"));
         Assert.Equal(8, Pruned(plan, "locating index"));
         Assert.Equal(Blocks - 8, plan.LiveBlocks);
-        Assert.Equal(0, await file.Scan().Where(absent).CountAsync());
+        Assert.Equal(0, await file.ScanBuilder().Where(absent).CountAsync());
 
         // Keys the range holds, found where they are: builders fed a range without its first block
         // would have filed them under the wrong blocks, and these lookups would come back empty.
@@ -91,10 +91,10 @@ public sealed class IndexFragmentTests
         for (int row = (int)Middle.Start; row < Middle.End; row += 509)
         {
             VortexExpr present = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(Id(row))));
-            Assert.Equal(1, await file.Scan().Where(present).CountAsync());
+            Assert.Equal(1, await file.ScanBuilder().Where(present).CountAsync());
             Assert.Equal(
-                await CountAsync(plain.Scan().Where(present).WithIndexes(false)),
-                await CountAsync(file.Scan().Where(present)));
+                await CountAsync(plain.ScanBuilder().Where(present).WithIndexes(false)),
+                await CountAsync(file.ScanBuilder().Where(present)));
         }
     }
 
@@ -115,11 +115,11 @@ public sealed class IndexFragmentTests
         for (int row = (int)Middle.Start; row < Middle.End; row += 97)
         {
             VortexExpr present = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(Id(row))));
-            Assert.Equal(1, await file.Scan().Where(present).CountAsync());
+            Assert.Equal(1, await file.ScanBuilder().Where(present).CountAsync());
         }
 
         VortexExpr absent = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(AbsentId())));
-        Assert.Equal(8, Pruned(await file.Scan().Where(absent).ExplainAsync(), "bloom filter"));
+        Assert.Equal(8, Pruned(await file.ScanBuilder().Where(absent).ExplainAsync(), "bloom filter"));
     }
 
     [Fact]
@@ -143,11 +143,11 @@ public sealed class IndexFragmentTests
         // not: the last block's tags start at 1 368, so the zone map takes it first, and the filter
         // takes the nineteen others.
         VortexExpr noTag = Expr.Eq(Expr.Field("tag"), Expr.Literal(FilterLiteral.From(1L)));
-        ScanPlan plan = await file.Scan().Where(noTag).ExplainAsync();
+        ScanPlan plan = await file.ScanBuilder().Where(noTag).ExplainAsync();
         Assert.Equal(1, Pruned(plan, "zone map"));
         Assert.Equal(Blocks - 1, Pruned(plan, "bloom filter"));
         Assert.Equal(0, plan.LiveBlocks);
-        Assert.Equal(0, await file.Scan().Where(noTag).CountAsync());
+        Assert.Equal(0, await file.ScanBuilder().Where(noTag).CountAsync());
 
         // The file's own run still walks every key, in order.
         List<long> expected = [];
@@ -165,8 +165,8 @@ public sealed class IndexFragmentTests
             Expr.Eq(Expr.Field("tag"), Expr.Literal(FilterLiteral.From(Tag(17)))),
             Expr.Eq(Expr.Field("tag"), Expr.Literal(FilterLiteral.From(1L))));
         Assert.Equal(
-            await CountAsync(plain.Scan().Where(someTags).WithIndexes(false)),
-            await CountAsync(file.Scan().Where(someTags)));
+            await CountAsync(plain.ScanBuilder().Where(someTags).WithIndexes(false)),
+            await CountAsync(file.ScanBuilder().Where(someTags)));
     }
 
     [Fact]
@@ -209,7 +209,7 @@ public sealed class IndexFragmentTests
         Assert.Equal(expected, await KeysAsync(file, "id"));
 
         List<long> ordered = [];
-        await foreach (RecordBatch batch in file.Scan().InKeyOrder("id").ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().InKeyOrder("id").ExecuteAsync())
         {
             ordered.AddRange(batch.Column("id"u8).AsPrimitive<long>().Values.ToArray());
         }
@@ -235,7 +235,7 @@ public sealed class IndexFragmentTests
 
         // A hint refused is a scan without the hint.
         VortexExpr present = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(Id(7))));
-        Assert.Equal(1, await file.Scan().Where(present).CountAsync());
+        Assert.Equal(1, await file.ScanBuilder().Where(present).CountAsync());
     }
 
     [Fact]
@@ -295,7 +295,7 @@ public sealed class IndexFragmentTests
         Assert.True(key > 0);
         anonymous[key + FileIdentity.MetadataKeyUtf8.Length - 1] = (byte)'Y';
         await using VortexFile unbound = await OpenAsync(anonymous);
-        Assert.Null(unbound.Identity);
+        Assert.Null(unbound.StoredIdentity);
         await Assert.ThrowsAsync<InvalidOperationException>(
             async () => await VortexFileIndexer.BuildFragmentAsync(unbound, Runs("id"), new RowRange(0, Rows)));
 
@@ -392,7 +392,7 @@ public sealed class IndexFragmentTests
         VortexWriteOptions options = new VortexWriteOptions
         {
             RowBlockSize = BlockRows,
-            Indexes = indexes,
+            WritePolicy = indexes,
             Identity = identity,
             IndexBudgetPerMille = 1_000,
         };

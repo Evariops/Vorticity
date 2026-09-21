@@ -30,17 +30,17 @@ public sealed class VortexFileStatisticsTests
         await using VortexFile file = await Open(CorpusManifest.Bytes(entry.Id));
 
         Assert.True(file.HasFileStatistics);
-        Assert.Equal(33, file.Schema.FieldCount);
-        Assert.Equal(33, file.Statistics.FieldCount);
+        Assert.Equal(33, file.DType.FieldCount);
+        Assert.Equal(33, file.FileStatistics.FieldCount);
 
-        for (int i = 0; i < file.Statistics.FieldCount; i++)
+        for (int i = 0; i < file.FileStatistics.FieldCount; i++)
         {
-            Assert.Equal(file.Schema.GetField(i), file.Statistics.GetFieldDType(i));
+            Assert.Equal(file.DType.GetField(i), file.FileStatistics.GetFieldDType(i));
         }
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => file.Statistics.GetField(33));
-        Assert.Throws<ArgumentOutOfRangeException>(() => file.Statistics.GetFieldDType(-1));
-        Assert.Throws<ArgumentOutOfRangeException>(() => file.Statistics.GetSumDType(33));
+        Assert.Throws<ArgumentOutOfRangeException>(() => file.FileStatistics.GetField(33));
+        Assert.Throws<ArgumentOutOfRangeException>(() => file.FileStatistics.GetFieldDType(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => file.FileStatistics.GetSumDType(33));
     }
 
     [Fact]
@@ -50,18 +50,18 @@ public sealed class VortexFileStatisticsTests
         await using VortexFile file = await Open(CorpusManifest.Bytes(entry.Id));
 
         Assert.False(file.IsTabular);
-        Assert.Equal(1, file.Statistics.FieldCount);
-        Assert.Equal(file.Schema, file.Statistics.GetFieldDType(0));
+        Assert.Equal(1, file.FileStatistics.FieldCount);
+        Assert.Equal(file.DType, file.FileStatistics.GetFieldDType(0));
 
         // A constant i64 column: min and max are recorded and exact, and the sum widens to i64?.
-        FieldStatistics stats = file.Statistics.GetField(0);
+        FieldStatistics stats = file.FileStatistics.GetField(0);
         Assert.True(stats.HasMin);
         Assert.True(stats.HasMax);
         Assert.Equal(StatPrecision.Exact, stats.MinPrecision);
         Assert.Equal(StatPrecision.Exact, stats.MaxPrecision);
         Assert.Equal(stats.Min, stats.Max);
 
-        DType sumDType = file.Statistics.GetSumDType(0);
+        DType sumDType = file.FileStatistics.GetSumDType(0);
         Assert.Equal(DTypeKind.Primitive, sumDType.Kind);
         Assert.Equal(PType.I64, sumDType.PType);
         Assert.Equal(Nullability.Nullable, sumDType.Nullability);
@@ -75,10 +75,10 @@ public sealed class VortexFileStatisticsTests
         CorpusEntry entry = CorpusManifest.Find("types/user_metadata_segments");
         await using VortexFile file = await Open(CorpusManifest.Bytes(entry.Id));
 
-        for (int i = 0; i < file.Statistics.FieldCount; i++)
+        for (int i = 0; i < file.FileStatistics.FieldCount; i++)
         {
-            DType field = file.Statistics.GetFieldDType(i);
-            DType sum = file.Statistics.GetSumDType(i);
+            DType field = file.FileStatistics.GetFieldDType(i);
+            DType sum = file.FileStatistics.GetSumDType(i);
 
             switch (field.Kind)
             {
@@ -105,7 +105,7 @@ public sealed class VortexFileStatisticsTests
                 default:
                     // Everything else has no summable dtype, so no sum statistic can be recorded.
                     Assert.True(sum.IsDefault);
-                    Assert.False(file.Statistics.GetField(i).HasSum);
+                    Assert.False(file.FileStatistics.GetField(i).HasSum);
                     break;
             }
         }
@@ -118,13 +118,13 @@ public sealed class VortexFileStatisticsTests
         CorpusEntry entry = CorpusManifest.Find("types/null_nullable_r1024");
         await using VortexFile file = await Open(CorpusManifest.Bytes(entry.Id));
 
-        Assert.Equal(DTypeKind.Null, file.Schema.Kind);
+        Assert.Equal(DTypeKind.Null, file.DType.Kind);
         Assert.True(file.HasFileStatistics);
-        FieldStatistics stats = file.Statistics.GetField(0);
+        FieldStatistics stats = file.FileStatistics.GetField(0);
         Assert.False(stats.HasMin);
         Assert.False(stats.HasMax);
         Assert.False(stats.HasSum);
-        Assert.True(file.Statistics.GetSumDType(0).IsDefault);
+        Assert.True(file.FileStatistics.GetSumDType(0).IsDefault);
     }
 
     [Fact]
@@ -137,9 +137,9 @@ public sealed class VortexFileStatisticsTests
         await using VortexFile file = await Open(CorpusManifest.Bytes(entry.Id));
 
         bool sawInexact = false;
-        for (int i = 0; i < file.Statistics.FieldCount; i++)
+        for (int i = 0; i < file.FileStatistics.FieldCount; i++)
         {
-            FieldStatistics stats = file.Statistics.GetField(i);
+            FieldStatistics stats = file.FileStatistics.GetField(i);
             if (stats.HasMin && stats.MinPrecision == StatPrecision.Inexact)
             {
                 sawInexact = true;
@@ -169,8 +169,8 @@ public sealed class VortexFileStatisticsTests
 
         await using (VortexFile file = await Open(withStats))
         {
-            FieldStatistics stats = file.Statistics.GetField(0);
-            Assert.True(stats.TryGetNullCount(out ulong nulls));
+            FieldStatistics stats = file.FileStatistics.GetField(0);
+            Assert.True(stats.TryGetStoredNullCount(out ulong nulls));
             Assert.Equal(0ul, nulls);
             Assert.True(stats.TryGetIsSorted(out bool sorted));
             Assert.False(sorted);
@@ -191,8 +191,8 @@ public sealed class VortexFileStatisticsTests
 
         await using (VortexFile file = await Open(withoutStats))
         {
-            FieldStatistics stats = file.Statistics.GetField(0);
-            Assert.False(stats.TryGetNullCount(out _));
+            FieldStatistics stats = file.FileStatistics.GetField(0);
+            Assert.False(stats.TryGetStoredNullCount(out _));
             Assert.False(stats.TryGetIsSorted(out _));
             Assert.False(stats.TryGetNanCount(out _));
         }
@@ -277,7 +277,7 @@ public sealed class VortexFileStatisticsTests
 
         await using VortexFile file = await Open(bytes);
         Assert.True(file.HasFileStatistics);
-        Assert.Equal(0, file.Statistics.FieldCount);
+        Assert.Equal(0, file.FileStatistics.FieldCount);
     }
 
     [Fact]
@@ -291,6 +291,6 @@ public sealed class VortexFileStatisticsTests
 
         await using VortexFile file = await Open(bytes);
         Assert.False(file.HasFileStatistics);
-        Assert.Throws<InvalidOperationException>(() => file.Statistics);
+        Assert.Throws<InvalidOperationException>(() => file.FileStatistics);
     }
 }

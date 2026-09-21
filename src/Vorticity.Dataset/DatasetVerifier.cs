@@ -10,7 +10,7 @@ using Vorticity.File;
 namespace Vorticity.Dataset;
 
 /// <summary>What to verify.</summary>
-public sealed record VerifyOptions
+internal sealed record VerifyOptions
 {
     /// <summary>The version to verify, or null for the latest.</summary>
     public ulong? Version { get; init; }
@@ -31,7 +31,7 @@ public sealed record VerifyOptions
 /// <param name="Commits">The commit objects read whole and checked against their own checksum.</param>
 /// <param name="Unhashed">Objects whose entry records no content hash, as imported ones do not.</param>
 /// <param name="Problems">Each thing that does not hold, named.</param>
-public sealed record DatasetVerification(
+internal sealed record DatasetVerification(
     ulong Version,
     ulong Since,
     long Pages,
@@ -51,7 +51,7 @@ public sealed record DatasetVerification(
 /// hiding under a sound inlined twin is found; each problem is reported rather than thrown, so one
 /// torn page stops only the walk below it.
 /// </summary>
-public static class DatasetVerifier
+internal static class DatasetVerifier
 {
     private const int HashChunk = 1 << 20;
 

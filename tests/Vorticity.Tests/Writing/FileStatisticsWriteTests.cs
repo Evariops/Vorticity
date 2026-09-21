@@ -59,7 +59,7 @@ public sealed class FileStatisticsWriteTests
         Assert.Equal(sorted, isSorted);
         Assert.True(stats.TryGetIsStrictSorted(out bool isStrict), column + " should state is_strict_sorted");
         Assert.Equal(strict, isStrict);
-        Assert.True(stats.TryGetNullCount(out ulong nullCount));
+        Assert.True(stats.TryGetStoredNullCount(out ulong nullCount));
         Assert.Equal(nulls, nullCount);
 
         Assert.True(stats.HasMin && stats.HasMax, column + " should carry exact bounds");
@@ -103,13 +103,13 @@ public sealed class FileStatisticsWriteTests
         FieldStatistics keys = written.Field("keys_utf8");
         Assert.True(keys.TryGetIsSorted(out bool sorted) && sorted);
         Assert.True(keys.TryGetIsStrictSorted(out bool strict) && !strict);
-        Assert.True(keys.TryGetNullCount(out ulong nulls) && nulls == 0);
+        Assert.True(keys.TryGetStoredNullCount(out ulong nulls) && nulls == 0);
         Assert.False(keys.HasMin, "a string column has no bound in the file statistics yet (docs/11 §3.2: a policy)");
 
         FieldStatistics flags = written.Field("flag_bool");
         Assert.False(flags.TryGetIsSorted(out _));
         Assert.False(flags.HasMin);
-        Assert.True(flags.TryGetNullCount(out ulong boolNulls) && boolNulls == 0);
+        Assert.True(flags.TryGetStoredNullCount(out ulong boolNulls) && boolNulls == 0);
     }
 
     [Fact]
@@ -121,7 +121,7 @@ public sealed class FileStatisticsWriteTests
 
         Assert.True(on.File.HasFileStatistics);
         Assert.False(off.File.HasFileStatistics);
-        Assert.Equal(Columns.Length, on.File.Statistics.FieldCount);
+        Assert.Equal(Columns.Length, on.File.FileStatistics.FieldCount);
     }
 
     [Fact]
@@ -133,8 +133,8 @@ public sealed class FileStatisticsWriteTests
         await using Written written = await Written.CreateAsync(new VortexWriteOptions { RowBlockSize = Block });
 
         ScanMetrics metrics = new ScanMetrics();
-        FilterLiteral min = await written.File.Scan().WithMetrics(metrics).MinAsync("strict_i64");
-        FilterLiteral max = await written.File.Scan().WithMetrics(metrics).MaxAsync("dups_u32");
+        FilterLiteral min = await written.File.ScanBuilder().WithMetrics(metrics).MinAsync("strict_i64");
+        FilterLiteral max = await written.File.ScanBuilder().WithMetrics(metrics).MaxAsync("dups_u32");
 
         Assert.Equal(1_000L, min.SignedValue);
         Assert.Equal((ulong)((Rows - 1) / 7), max.UnsignedValue);
@@ -164,9 +164,9 @@ public sealed class FileStatisticsWriteTests
         internal FieldStatistics Field(string name)
         {
             Assert.True(File.HasFileStatistics, "the file should carry statistics");
-            int index = File.Schema.IndexOfField(name);
+            int index = File.DType.IndexOfField(name);
             Assert.True(index >= 0, "no column " + name);
-            return File.Statistics.GetField(index);
+            return File.FileStatistics.GetField(index);
         }
 
         internal static async Task<Written> CreateAsync(VortexWriteOptions options)

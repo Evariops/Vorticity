@@ -16,7 +16,7 @@ internal static class StatisticsAndPruning
         await using VortexFile file = await VortexFile.OpenAsync(path);
 
         VortexExpr recent = Expr.Ge(Expr.Field("day"), Expr.Literal(FilterLiteral.From(900)));
-        ScanPlan plan = await file.Scan().Where(recent).ExplainAsync();
+        ScanPlan plan = await file.ScanBuilder().Where(recent).ExplainAsync();
 
         Console.WriteLine($"the file: {plan.FileBytes} bytes, {plan.RowCount} rows, " +
             $"{plan.Blocks} blocks of {plan.BlockRows} rows, {plan.Splits} splits");
@@ -55,8 +55,8 @@ internal static class StatisticsAndPruning
             string sized = Demo.Path($"blocks-{blockRows}.vortex");
             await Demo.WriteReadingsAsync(sized, new VortexWriteOptions { RowBlockSize = blockRows });
             await using VortexFile smaller = await VortexFile.OpenAsync(sized);
-            ScanPlan sizedPlan = await smaller.Scan().Where(recent).ExplainAsync();
-            (long requests, long bytes, long rows) = await Demo.MeasureAsync(sized, f => f.Scan().Where(recent));
+            ScanPlan sizedPlan = await smaller.ScanBuilder().Where(recent).ExplainAsync();
+            (long requests, long bytes, long rows) = await Demo.MeasureAsync(sized, f => f.ScanBuilder().Where(recent));
             Console.WriteLine($"  blocks of {blockRows}: {sizedPlan.LiveBlocks} of {sizedPlan.Blocks} live, " +
                 $"{rows} rows read in {requests} rounds and {bytes} bytes, file {sizedPlan.FileBytes} bytes");
         }
@@ -72,10 +72,10 @@ internal static class StatisticsAndPruning
                     text, new VortexWriteOptions { StringBoundBytes = bound }, clusteredByCity: clustered);
                 await using VortexFile cities = await VortexFile.OpenAsync(text);
                 VortexExpr paris = Expr.Eq(Expr.Field("city"), Expr.Literal(FilterLiteral.From("Paris")));
-                ScanPlan textPlan = await cities.Scan().Where(paris).WithIndexes(false).ExplainAsync();
+                ScanPlan textPlan = await cities.ScanBuilder().Where(paris).WithIndexes(false).ExplainAsync();
                 Console.WriteLine($"  clustered {clustered}, StringBoundBytes {bound}: " +
                     $"{textPlan.LiveBlocks} of {textPlan.Blocks} blocks live for city = Paris, " +
-                    $"{await cities.Scan().Where(paris).CountAsync()} rows");
+                    $"{await cities.ScanBuilder().Where(paris).CountAsync()} rows");
             }
         }
     }

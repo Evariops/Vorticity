@@ -411,7 +411,7 @@ public sealed class Phase1CompositionTests
 
         // The arena the DType handle points into outlives the file object, so the schema stays
         // usable after the donor is closed.
-        DType schema = donor.Schema;
+        DType schema = donor.DType;
         donor.DisposeAsync().AsTask().GetAwaiter().GetResult();
         return schema;
     });

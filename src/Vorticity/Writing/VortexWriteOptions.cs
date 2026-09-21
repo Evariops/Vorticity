@@ -7,13 +7,13 @@ using Vorticity.Writing;
 namespace Vorticity;
 
 /// <summary>How much the writer does beyond the data.</summary>
-public enum WriteProfile
+internal enum WriteProfile
 {
     /// <summary>Everything the options ask for.</summary>
     Default = 0,
 
     /// <summary>
-    /// No index, whatever <see cref="VortexWriteOptions.Indexes"/> says: byte for byte a write under
+    /// No index, whatever <see cref="VortexWriteOptions.WritePolicy"/> says: byte for byte a write under
     /// <see cref="WritePolicy.None"/> with the same <see cref="VortexWriteOptions.Identity"/>.
     /// </summary>
     Fastest = 1,
@@ -23,7 +23,7 @@ public enum WriteProfile
 public sealed class VortexWriteOptions
 {
     /// <summary>The defaults: compression on.</summary>
-    public VortexWriteOptions()
+    internal VortexWriteOptions()
     {
     }
 
@@ -34,7 +34,7 @@ public sealed class VortexWriteOptions
     private VortexWriteOptions(VortexWriteOptions other)
     {
         ArgumentNullException.ThrowIfNull(other);
-        Indexes = other.Indexes;
+        WritePolicy = other.WritePolicy;
         Profile = other.Profile;
         EncodingHints = other.EncodingHints;
         IndexBudgetPerMille = other.IndexBudgetPerMille;
@@ -54,17 +54,17 @@ public sealed class VortexWriteOptions
     }
 
     /// <summary>The defaults: compression on.</summary>
-    public static VortexWriteOptions Default { get; } = new VortexWriteOptions();
+    internal static VortexWriteOptions Default { get; } = new VortexWriteOptions();
 
     /// <summary>
     /// The index policy: per column path an <see cref="IndexPolicy"/>. Default
     /// <see cref="WritePolicy.Auto"/>, which keeps an index only where it pays. The policy is
     /// serialized into the index directory, so an append reuses it without being told.
     /// </summary>
-    public WritePolicy Indexes { get; init; } = WritePolicy.Auto;
+    internal WritePolicy WritePolicy { get; init; } = WritePolicy.Auto;
 
     /// <summary>How much the writer does beyond the data. Default <see cref="WriteProfile.Default"/>.</summary>
-    public WriteProfile Profile { get; init; } = WriteProfile.Default;
+    internal WriteProfile Profile { get; init; } = WriteProfile.Default;
 
     /// <summary>
     /// The scheme to write a column with, by column path, for callers who know. The hint is priced
@@ -74,21 +74,21 @@ public sealed class VortexWriteOptions
     /// <see cref="VortexFileWriter.Create(ISegmentSink, Types.DType, VortexWriteOptions)"/>, because
     /// a hint that silently did nothing would have no channel to say so.
     /// </summary>
-    public IReadOnlyDictionary<string, VortexEncodingHint>? EncodingHints { get; init; }
+    internal IReadOnlyDictionary<string, VortexEncodingHint>? EncodingHints { get; init; }
 
     /// <summary>
     /// The bytes the file's indexes may occupy together, as a share of the data bytes, in parts per
     /// thousand. Default 100 (10 %). A builder that would take the file past this is abandoned
     /// whole, with the reason in the <see cref="WriteReport"/>.
     /// </summary>
-    public int IndexBudgetPerMille { get; init; } = 100;
+    internal int IndexBudgetPerMille { get; init; } = 100;
 
     /// <summary>
     /// The encoder of the composite keys <see cref="WritePolicy.ForKey"/> asks for; null by default.
     /// The core does not row-encode, so a composite key asked for without an encoder is abandoned,
     /// with that reason in the <see cref="WriteReport"/>.
     /// </summary>
-    public IKeyEncoder? KeyEncoder { get; init; }
+    internal IKeyEncoder? KeyEncoder { get; init; }
 
     /// <summary>
     /// The identity the file's postscript carries, or null -- the default -- for a fresh random
@@ -100,24 +100,24 @@ public sealed class VortexWriteOptions
     /// <summary>These options with <see cref="Identity"/> pinned to <paramref name="identity"/>.</summary>
     /// <param name="identity">The sixteen bytes the postscript will carry.</param>
     /// <returns>A copy; these options are unchanged.</returns>
-    public VortexWriteOptions WithIdentity(Guid identity) =>
+    internal VortexWriteOptions WithIdentity(Guid identity) =>
         new VortexWriteOptions(this) { Identity = identity };
 
     /// <summary>These options with a different index policy.</summary>
     /// <param name="indexes">The policy to write under.</param>
     /// <returns>A copy; these options are unchanged.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="indexes"/> is null.</exception>
-    public VortexWriteOptions WithIndexes(WritePolicy indexes)
+    internal VortexWriteOptions WithIndexes(WritePolicy indexes)
     {
         ArgumentNullException.ThrowIfNull(indexes);
-        return new VortexWriteOptions(this) { Indexes = indexes };
+        return new VortexWriteOptions(this) { WritePolicy = indexes };
     }
 
     /// <summary>These options with a composite-key encoder.</summary>
     /// <param name="keyEncoder">The encoder, from the <c>Vorticity.RowEncoding</c> package.</param>
     /// <returns>A copy; these options are unchanged.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="keyEncoder"/> is null.</exception>
-    public VortexWriteOptions WithKeyEncoder(IKeyEncoder keyEncoder)
+    internal VortexWriteOptions WithKeyEncoder(IKeyEncoder keyEncoder)
     {
         ArgumentNullException.ThrowIfNull(keyEncoder);
         return new VortexWriteOptions(this) { KeyEncoder = keyEncoder };
@@ -128,7 +128,7 @@ public sealed class VortexWriteOptions
     /// or null -- the default -- for the system's temporary directory. The files are deleted when
     /// the writer is disposed.
     /// </summary>
-    public string? ScratchDirectory { get; init; }
+    internal string? ScratchDirectory { get; init; }
 
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
     internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;
@@ -147,7 +147,7 @@ public sealed class VortexWriteOptions
         int rowBlockSize, WritePolicy indexes, bool fileStatistics, int budgetPerMille) =>
         new VortexWriteOptions(this)
         {
-            Indexes = indexes,
+            WritePolicy = indexes,
             IndexBudgetPerMille = budgetPerMille,
             FileStatistics = fileStatistics,
             RowBlockSize = rowBlockSize,
@@ -157,14 +157,14 @@ public sealed class VortexWriteOptions
     /// Whether the writer may pick an encoding per column chunk. Default <see langword="true"/>;
     /// off writes every column canonically.
     /// </summary>
-    public bool Compress { get; init; } = true;
+    internal bool Compress { get; init; } = true;
 
     /// <summary>
     /// Whether the file carries a statistics segment: per top-level field its exact
     /// <c>min</c> / <c>max</c>, <c>null_count</c>, and <c>is_sorted</c> /
     /// <c>is_strict_sorted</c> when the pass tracked the column's order. Default on.
     /// </summary>
-    public bool FileStatistics { get; init; } = true;
+    internal bool FileStatistics { get; init; } = true;
 
     /// <summary>
     /// The byte limit of the string bounds a utf8 or binary column's zones carry, or 0 — the
@@ -199,7 +199,7 @@ public sealed class VortexWriteOptions
     /// <c>WriteAsync</c> is not guaranteed to have reached the sink when the call returns, and rows
     /// are held until a block fills or <c>CompleteAsync</c> runs.
     /// </remarks>
-    public int? RowBlockSize { get; init; } = 8192;
+    internal int? RowBlockSize { get; init; } = 8192;
 
     /// <summary>
     /// Uncompressed bytes to accumulate before a chunk is emitted. Default 1 MiB; <c>null</c>
@@ -213,5 +213,5 @@ public sealed class VortexWriteOptions
     /// size available when the decision is made, and over the whole batch, since the zones here are
     /// shared across columns.
     /// </remarks>
-    public long? DataBlockTargetBytes { get; init; } = 1L << 20;
+    internal long? DataBlockTargetBytes { get; init; } = 1L << 20;
 }

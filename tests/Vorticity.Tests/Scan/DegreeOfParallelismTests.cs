@@ -133,7 +133,7 @@ public sealed class DegreeOfParallelismTests
             source, VortexOpenOptions.Default, CancellationToken.None);
 
         int batches = 0;
-        await foreach (RecordBatch batch in configure(file.Scan().WithMaxBatchRows(BatchRows))
+        await foreach (RecordBatch batch in configure(file.ScanBuilder().WithMaxBatchRows(BatchRows))
                            .ExecuteAsync())
         {
             batches++;

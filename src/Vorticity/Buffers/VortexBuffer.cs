@@ -30,7 +30,7 @@ namespace Vorticity.Buffers;
 /// <see cref="Slice(int)"/> can legitimately break.
 /// </para>
 /// </remarks>
-public readonly unsafe struct VortexBuffer
+internal readonly unsafe struct VortexBuffer
 {
     private readonly byte* _pointer;
     private readonly int _length;

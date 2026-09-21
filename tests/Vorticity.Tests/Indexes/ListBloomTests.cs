@@ -157,17 +157,17 @@ public sealed class ListBloomTests
             await using VortexFile without = await VortexFile.OpenAsync(plain);
             Assert.Equal(expected, await RowsAsync(withFilters, filter));
             Assert.Equal(expected, await RowsAsync(without, filter));
-            Assert.Equal(expected.Count, await withFilters.Scan().Where(filter).CountAsync());
+            Assert.Equal(expected.Count, await withFilters.ScanBuilder().Where(filter).CountAsync());
 
             // What the filters proved: every block but those that hold the value.
-            ScanPlan plan = await withFilters.Scan().Where(filter).ExplainAsync();
+            ScanPlan plan = await withFilters.ScanBuilder().Where(filter).ExplainAsync();
             int holding = BlocksHolding(shape, value);
             Assert.True(plan.LiveBlocks <= Math.Max(holding, 0) + FalsePositives(plan.Blocks), $"{what}: {plan.LiveBlocks} live of {plan.Blocks}, {holding} holding");
             PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
             Assert.True(bloom.BlocksPruned > 0, what);
 
             // An equality on the list column is not the same question, and the filter claims nothing.
-            ScanPlan equality = await withFilters.Scan().Where(Expr.Eq(Expr.Field("items"), Expr.Literal(FilterLiteral.From(value)))).ExplainAsync();
+            ScanPlan equality = await withFilters.ScanBuilder().Where(Expr.Eq(Expr.Field("items"), Expr.Literal(FilterLiteral.From(value)))).ExplainAsync();
             Assert.DoesNotContain(equality.Pruning, step => step.Structure == "bloom filter" && step.BlocksPruned > 0);
 
             // The file-level filter answers for the whole file.
@@ -220,7 +220,7 @@ public sealed class ListBloomTests
             {
                 RowBlockSize = Block,
                 Identity = Pinned,
-                Indexes = WritePolicy.None.For("person.tags", IndexPolicy.Bloom(minDistinct: 1)),
+                WritePolicy = WritePolicy.None.For("person.tags", IndexPolicy.Bloom(minDistinct: 1)),
                 IndexBudgetPerMille = Unbounded,
             };
 
@@ -235,14 +235,14 @@ public sealed class ListBloomTests
 
             await using VortexFile file = await VortexFile.OpenAsync(path);
             VortexExpr ghost = Expr.ListContains(Expr.Field("person.tags"), FilterLiteral.From("ghost"));
-            Assert.Equal(0, await file.Scan().Where(ghost).CountAsync());
-            ScanPlan plan = await file.Scan().Where(ghost).ExplainAsync();
+            Assert.Equal(0, await file.ScanBuilder().Where(ghost).CountAsync());
+            ScanPlan plan = await file.ScanBuilder().Where(ghost).ExplainAsync();
             Assert.Equal(0, plan.LiveBlocks);
 
             VortexExpr tag = Expr.ListContains(Expr.Field("person.tags"), FilterLiteral.From("tag-5"));
             Assert.Equal(
                 Enumerable.Range(0, rows).Count(row => valid[row] && row % 97 == 5),
-                await file.Scan().Where(tag).CountAsync());
+                await file.ScanBuilder().Where(tag).CountAsync());
         }
         finally
         {
@@ -306,8 +306,8 @@ public sealed class ListBloomTests
             VortexExpr filter = Expr.ListContains(Expr.Field("items"), FilterLiteral.From(Element(12_345)));
             await using VortexFile a = await VortexFile.OpenAsync(later);
             await using VortexFile b = await VortexFile.OpenAsync(written);
-            ScanPlan planA = await a.Scan().Where(filter).ExplainAsync();
-            ScanPlan planB = await b.Scan().Where(filter).ExplainAsync();
+            ScanPlan planA = await a.ScanBuilder().Where(filter).ExplainAsync();
+            ScanPlan planB = await b.ScanBuilder().Where(filter).ExplainAsync();
             Assert.Equal(planB.LiveBlocks, planA.LiveBlocks);
             Assert.Equal(await RowsAsync(b, filter), await RowsAsync(a, filter));
         }
@@ -335,7 +335,7 @@ public sealed class ListBloomTests
         try
         {
             await using (VortexFileWriter writer = VortexFileWriter.Create(
-                path, batch.Schema, new VortexWriteOptions { RowBlockSize = Block, Identity = Pinned, Indexes = WritePolicy.None }))
+                path, batch.Schema, new VortexWriteOptions { RowBlockSize = Block, Identity = Pinned, WritePolicy = WritePolicy.None }))
             {
                 using RecordBatch record = new RecordBatch(batch.Arena, batch.Root, 0);
                 await writer.WriteAsync(record);
@@ -346,14 +346,14 @@ public sealed class ListBloomTests
             VortexExpr contains = Expr.ListContains(Expr.Field("items"), FilterLiteral.From(Block + 5L));
             foreach (VortexExpr filter in new[] { contains, Expr.Not(contains) })
             {
-                ScanPlan plan = await file.Scan().Where(filter).ExplainAsync();
+                ScanPlan plan = await file.ScanBuilder().Where(filter).ExplainAsync();
                 PruningStep zones = Assert.Single(plan.Pruning, step => step.Structure == "zone map");
                 Assert.Equal(1, zones.BlocksPruned);
             }
 
             // Rows 516 and 517 hold 517; the null lists are neither.
-            Assert.Equal(2, await file.Scan().Where(contains).CountAsync());
-            Assert.Equal((2 * Block) - 2, await file.Scan().Where(Expr.Not(contains)).CountAsync());
+            Assert.Equal(2, await file.ScanBuilder().Where(contains).CountAsync());
+            Assert.Equal((2 * Block) - 2, await file.ScanBuilder().Where(Expr.Not(contains)).CountAsync());
         }
         finally
         {
@@ -428,7 +428,7 @@ public sealed class ListBloomTests
             RowBlockSize = Block,
             DataBlockTargetBytes = 1 << 15,
             Identity = Pinned,
-            Indexes = policy,
+            WritePolicy = policy,
             IndexBudgetPerMille = Unbounded,
         };
 
@@ -451,7 +451,7 @@ public sealed class ListBloomTests
         try
         {
             await using VortexFileWriter writer = VortexFileWriter.Create(
-                path, shape.Schema, new VortexWriteOptions { Indexes = WritePolicy.None.For("items", policy) });
+                path, shape.Schema, new VortexWriteOptions { WritePolicy = WritePolicy.None.For("items", policy) });
             using (RecordBatch batch = new RecordBatch(shape.Arena, shape.Root, 0))
             {
                 await writer.WriteAsync(batch);
@@ -492,7 +492,7 @@ public sealed class ListBloomTests
     private static async Task<List<string>> RowsAsync(VortexFile file, VortexExpr filter)
     {
         List<string> rows = [];
-        await foreach (RecordBatch batch in file.Scan().Where(filter).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(filter).ExecuteAsync())
         {
             ListShapes.Describe(batch, rows);
         }

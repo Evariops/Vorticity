@@ -51,7 +51,7 @@ public sealed class VortexFileCorpusTests
             {
                 await using VortexFile embedded = await VortexFile.OpenAsync(
                     new TestSegmentSource(bytes), VortexOpenOptions.Default, CancellationToken.None);
-                Check(failures, entry, "embedded dtype", entry.DType, ManifestDTypeFormatter.Format(embedded.Schema));
+                Check(failures, entry, "embedded dtype", entry.DType, ManifestDTypeFormatter.Format(embedded.DType));
             }
 
             try
@@ -75,7 +75,7 @@ public sealed class VortexFileCorpusTests
                         entry.MetadataKeys.Length,
                         file.MetadataCount);
 
-                    string rendered = ManifestDTypeFormatter.Format(file.Schema);
+                    string rendered = ManifestDTypeFormatter.Format(file.DType);
                     if (!string.Equals(rendered, entry.DType, StringComparison.Ordinal))
                     {
                         failures.Add($"{entry.Id}: dtype\n  expected {entry.DType}\n  actual   {rendered}");
@@ -118,8 +118,8 @@ public sealed class VortexFileCorpusTests
                     if (file.HasFileStatistics)
                     {
                         filesWithStatistics++;
-                        int expected = file.Schema.Kind == DTypeKind.Struct ? file.Schema.FieldCount : 1;
-                        Check(failures, entry, "statistics.field_count", expected, file.Statistics.FieldCount);
+                        int expected = file.DType.Kind == DTypeKind.Struct ? file.DType.FieldCount : 1;
+                        Check(failures, entry, "statistics.field_count", expected, file.FileStatistics.FieldCount);
                     }
 
                     if (file.MetadataCount > 0)
@@ -204,7 +204,7 @@ public sealed class VortexFileCorpusTests
             VortexOpenOptions.Default,
             CancellationToken.None))
         {
-            schema = donor.Schema;
+            schema = donor.DType;
         }
 
         Assert.Equal(entry.DType, ManifestDTypeFormatter.Format(schema));
@@ -214,7 +214,7 @@ public sealed class VortexFileCorpusTests
             source, new VortexOpenOptions { DType = schema }, CancellationToken.None);
 
         Assert.Equal(entry.RowCount, file.RowCount);
-        Assert.Equal(entry.DType, ManifestDTypeFormatter.Format(file.Schema));
+        Assert.Equal(entry.DType, ManifestDTypeFormatter.Format(file.DType));
         Assert.True(file.IsTabular);
         Assert.Same(schema.Arena, file.Types);
         Assert.Equal(1, source.TotalReads);
@@ -317,7 +317,7 @@ public sealed class VortexFileCorpusTests
             CorpusEntry entry = CorpusManifest.Find(id);
             await using VortexFile file = await VortexFile.OpenAsync(CorpusManifest.FullPath(entry));
             Assert.Equal(entry.RowCount, file.RowCount);
-            Assert.Equal(entry.DType, ManifestDTypeFormatter.Format(file.Schema));
+            Assert.Equal(entry.DType, ManifestDTypeFormatter.Format(file.DType));
             Assert.Equal(entry.SizeBytes, file.FileLength);
         }
     }
@@ -418,7 +418,7 @@ public sealed class VortexFileCorpusTests
             .AsTask()
             .GetAwaiter()
             .GetResult();
-        DType schema = donor.Schema;
+        DType schema = donor.DType;
         donor.DisposeAsync().AsTask().GetAwaiter().GetResult();
         return schema;
     });

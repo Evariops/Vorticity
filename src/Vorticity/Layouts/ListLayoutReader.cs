@@ -22,7 +22,7 @@ namespace Vorticity.Layouts;
 /// keeps a scan at one round trip to open and two to the first batch, and it costs extra bytes only
 /// for a narrow batch.
 /// </remarks>
-public sealed class ListLayoutReader : LayoutReader
+internal sealed class ListLayoutReader : LayoutReader
 {
     private const string Id = "vortex.list";
 

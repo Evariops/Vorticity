@@ -7,7 +7,7 @@ namespace Vorticity.Dataset;
 /// Folds the summaries an <see cref="ObjectEntry"/> carries up the tree. A child that summarises
 /// nothing may hold anything, so one empty part makes the whole union empty.
 /// </summary>
-public sealed class ObjectSummaryFold : ISummaryFold
+internal sealed class ObjectSummaryFold : ISummaryFold
 {
     /// <summary>The one instance.</summary>
     public static ObjectSummaryFold Instance { get; } = new ObjectSummaryFold();

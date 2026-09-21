@@ -17,7 +17,7 @@ namespace Vorticity.IO;
 /// below applies — along with every range and byte asked for. Wrapping a source in this one is how
 /// a caller sees what a query costs.
 /// </remarks>
-public sealed class CountingSegmentSource(ISegmentSource inner, bool ownsInner = true) : ISegmentSource
+internal sealed class CountingSegmentSource(ISegmentSource inner, bool ownsInner = true) : ISegmentSource
 {
     private readonly ISegmentSource _inner = inner ?? throw new ArgumentNullException(nameof(inner));
     private long _requests;

@@ -4,7 +4,7 @@ using System.Collections.Generic;
 namespace Vorticity.Dataset;
 
 /// <summary>How a dataset merges its levels.</summary>
-public enum CompactionStyle
+internal enum CompactionStyle
 {
     /// <summary>Leveled when the dataset declares a clustering key, tiered otherwise.</summary>
     Auto = 0,
@@ -23,7 +23,7 @@ public enum CompactionStyle
 }
 
 /// <summary>Why a compaction was planned.</summary>
-public enum CompactionTrigger
+internal enum CompactionTrigger
 {
     /// <summary>Nothing is over its bound.</summary>
     None = 0,
@@ -44,7 +44,7 @@ public enum CompactionTrigger
 /// <see cref="From"/> reads them back from there, so that two writers of one dataset compact it to
 /// the same shape.
 /// </summary>
-public sealed record CompactionOptions
+internal sealed record CompactionOptions
 {
     public const int DefaultFanout = 10;
 
@@ -166,14 +166,14 @@ public sealed record CompactionOptions
 /// One object a compaction reads. <c>Key</c> is its key in that level's tree, which the replacement
 /// removes.
 /// </summary>
-public readonly record struct CompactionInput(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry);
+internal readonly record struct CompactionInput(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry);
 
 /// <summary>
 /// One compaction: what it reads, where it writes, and why. <c>Inputs</c> lists the source level's
 /// objects first, and <c>FirstRow</c> is where their rows start in the dataset, which is what an
 /// unclustered output's leaf key is derived from.
 /// </summary>
-public sealed record CompactionJob(
+internal sealed record CompactionJob(
     int FromLevel,
     int ToLevel,
     CompactionStyle Style,
@@ -219,7 +219,7 @@ public sealed record CompactionJob(
 /// counts objects carrying more than <see cref="CompactionOptions.MaxFragments"/> index fragments;
 /// compacting those reads index bytes only and is planned once no trigger that moves data is due.
 /// </summary>
-public sealed record CompactionPlan(
+internal sealed record CompactionPlan(
     ulong Version,
     IReadOnlyList<long> ObjectsByLevel,
     IReadOnlyList<long> BytesByLevel,

@@ -152,7 +152,7 @@ public sealed class CompressionTests
         {
             List<string> values = [];
             await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {
                 Values.Describe(batch, values);
@@ -187,9 +187,9 @@ public sealed class CompressionTests
         await using VortexFile source = await VortexFile.OpenAsync(
             Corpus.Path(id), CancellationToken.None);
         await using VortexFileWriter writer = VortexFileWriter.Create(
-            path, source.Schema, new VortexWriteOptions { Compress = compress });
+            path, source.DType, new VortexWriteOptions { Compress = compress });
 
-        await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             await writer.WriteAsync(batch, CancellationToken.None);

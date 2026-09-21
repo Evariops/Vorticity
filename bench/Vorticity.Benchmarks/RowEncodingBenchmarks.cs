@@ -79,7 +79,7 @@ public class RowEncodingBenchmarks
         // RecordBatch is valid only until the next MoveNextAsync resets the arenas behind it.
         _file = VortexFile.OpenAsync(Corpus.Path(Entry), CancellationToken.None)
             .AsTask().GetAwaiter().GetResult();
-        _batches = _file.Scan().ExecuteAsync().GetAsyncEnumerator();
+        _batches = _file.ScanBuilder().ExecuteAsync().GetAsyncEnumerator();
         if (!_batches.MoveNextAsync().AsTask().GetAwaiter().GetResult())
         {
             throw new InvalidOperationException($"{Entry} produced no batches.");
@@ -117,7 +117,7 @@ public class RowEncodingBenchmarks
             .AsTask().GetAwaiter().GetResult();
         try
         {
-            IAsyncEnumerator<RecordBatch> batches = file.Scan().ExecuteAsync().GetAsyncEnumerator();
+            IAsyncEnumerator<RecordBatch> batches = file.ScanBuilder().ExecuteAsync().GetAsyncEnumerator();
             try
             {
                 if (!batches.MoveNextAsync().AsTask().GetAwaiter().GetResult())

@@ -126,9 +126,9 @@ internal static class IndexContainer
 
         if (directory.FileIdentity is { } identity)
         {
-            return file.Identity == identity
+            return file.StoredIdentity == identity
                 ? null
-                : $"the fragment indexes the version {identity:N} of the file, and this is {(file.Identity is { } other ? other.ToString("N") : "a file without an identity")}: it is stale";
+                : $"the fragment indexes the version {identity:N} of the file, and this is {(file.StoredIdentity is { } other ? other.ToString("N") : "a file without an identity")}: it is stale";
         }
 
         if (directory.FileToken is { } token)

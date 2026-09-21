@@ -170,7 +170,7 @@ internal static class Program
             .Append("bytes     ").Append(Text(file.FileLength)).Append('\n')
             .Append("rows      ").Append(Text(file.RowCount)).Append('\n')
             .Append("tabular   ").Append(file.IsTabular ? "yes" : "no").Append('\n')
-            .Append("identity  ").Append(file.Identity is { } identity ? identity.ToString("N") : "none").Append('\n');
+            .Append("identity  ").Append(file.StoredIdentity is { } identity ? identity.ToString("N") : "none").Append('\n');
         if (file.TornTail is { } torn)
         {
             // The version read is the last whole one: say how much follows it, and why it did not open.
@@ -183,7 +183,7 @@ internal static class Program
     private static void Schema(StringBuilder output, VortexFile file)
     {
         output.Append("\nschema\n");
-        DType schema = file.Schema;
+        DType schema = file.DType;
         if (schema.Kind != DTypeKind.Struct)
         {
             output.Append("  ").Append(schema.ToString()).Append('\n');
@@ -449,13 +449,13 @@ internal static class Program
             return;
         }
 
-        FileStatistics stats = file.Statistics;
+        FileStatistics stats = file.FileStatistics;
 
         for (int i = 0; i < stats.FieldCount; i++)
         {
             FieldStatistics field = stats.GetField(i);
             output.Append("  field ").Append(Text(i))
-                .Append(field.TryGetNullCount(out ulong nulls) ? "  nulls=" + Text(nulls) : string.Empty)
+                .Append(field.TryGetStoredNullCount(out ulong nulls) ? "  nulls=" + Text(nulls) : string.Empty)
                 .Append(field.HasMin ? "  min=set" : string.Empty)
                 .Append(field.HasMax ? "  max=set" : string.Empty)
                 .Append('\n');
@@ -466,7 +466,7 @@ internal static class Program
     {
         long rows = 0;
         long batches = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -497,7 +497,7 @@ internal static class Program
         long batches = 0;
         string? refusal = null;
 
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             using (batch)
@@ -684,7 +684,7 @@ internal static class Program
     private static async Task Explain(StringBuilder output, VortexFile file, string expression)
     {
         Vorticity.Expressions.VortexExpr filter = FilterText.Parse(expression);
-        ScanPlan plan = await file.Scan().Where(filter).ExplainAsync().ConfigureAwait(false);
+        ScanPlan plan = await file.ScanBuilder().Where(filter).ExplainAsync().ConfigureAwait(false);
         output.Append("\nexplain   ").Append(expression).Append('\n')
             .Append("  file may match   ").Append(plan.FileMayMatch ? "yes" : "no").Append('\n')
             .Append("  rows             ").Append(Text(plan.RowCount)).Append('\n')
@@ -714,7 +714,7 @@ internal static class Program
                 .Append(Text(tiers.SplitsDecoded)).Append(" decoded\n");
         }
 
-        long count = await file.Scan().Where(filter).CountAsync().ConfigureAwait(false);
+        long count = await file.ScanBuilder().Where(filter).CountAsync().ConfigureAwait(false);
         output.Append("  count            ").Append(Text(count)).Append('\n');
     }
 

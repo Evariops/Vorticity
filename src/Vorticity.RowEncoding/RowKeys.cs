@@ -16,7 +16,7 @@ namespace Vorticity.RowEncoding;
 /// buffers come from <see cref="ArrayPool{T}"/>, and <see cref="Dispose"/> returns them and
 /// invalidates every span handed out.
 /// </remarks>
-public sealed class RowKeys : IEncodedKeys
+internal sealed class RowKeys : IEncodedKeys
 {
     private byte[]? _elements;
     private int[]? _offsets;

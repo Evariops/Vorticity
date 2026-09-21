@@ -9,7 +9,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// required to be empty: writers leave bytes there, and refusing them would refuse files that are
 /// otherwise readable. This is the one encoding whose metadata is not checked.
 /// </remarks>
-public sealed class ConstantDecoder : ArrayDecoder
+internal sealed class ConstantDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.constant";

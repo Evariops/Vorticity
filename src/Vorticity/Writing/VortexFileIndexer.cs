@@ -37,7 +37,7 @@ public static class VortexFileIndexer
     /// <param name="options">The budget, the key encoder and the block length when the file has no zone map; null for the defaults.</param>
     /// <param name="cancellationToken">Cancels the read and the writes.</param>
     /// <exception cref="VortexUnsupportedException">The file's layout is not one this can index.</exception>
-    public static async ValueTask<IReadOnlyList<IndexWriteReport>> AppendIndexesAsync(
+    internal static async ValueTask<IReadOnlyList<IndexWriteReport>> AppendIndexesAsync(
         string path, WritePolicy policy, VortexWriteOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
@@ -133,7 +133,7 @@ public static class VortexFileIndexer
     /// <exception cref="ArgumentOutOfRangeException">The range is empty, past the file, or not whole blocks.</exception>
     /// <exception cref="InvalidOperationException">The file has no identity and no store token was given.</exception>
     /// <exception cref="VortexUnsupportedException">The file's layout is not one this can index.</exception>
-    public static async ValueTask<IndexFragment> BuildFragmentAsync(
+    internal static async ValueTask<IndexFragment> BuildFragmentAsync(
         VortexFile file,
         WritePolicy policy,
         RowRange rows,
@@ -145,7 +145,7 @@ public static class VortexFileIndexer
         ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(policy);
         VortexFileRepair.ThrowIfTorn("The file", file, "A fragment");
-        if (file.Identity is null && storeToken is null)
+        if (file.StoredIdentity is null && storeToken is null)
         {
             throw new InvalidOperationException(
                 "A fragment is bound to its file by the file's identity, or by the store's token for a file " +
@@ -172,7 +172,7 @@ public static class VortexFileIndexer
             ComponentKind.Array, options?.TargetEdition ?? EditionRegistry.Newest);
         using IndexWriter indexes = await BuildAsync(
             file, sink, policy, options, encodings, [], 0, rows, cancellationToken).ConfigureAwait(false);
-        FragmentBinding binding = new FragmentBinding(file.FileLength, file.Identity, token, hash, [.. encodings.Ids]);
+        FragmentBinding binding = new FragmentBinding(file.FileLength, file.StoredIdentity, token, hash, [.. encodings.Ids]);
         long offset = sink.Position;
         byte[] directory = indexes.Directory(file.RowCount, binding)!;
         await sink.WriteAsync(directory, cancellationToken).ConfigureAwait(false);
@@ -187,7 +187,7 @@ public static class VortexFileIndexer
         EncodingDictionary encodings, IReadOnlyList<IndexEntry> previous, long previousEof, RowRange range,
         CancellationToken cancellationToken)
     {
-        DType schema = file.Schema;
+        DType schema = file.DType;
         if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
         {
             throw VortexFileWriter.AppendPlan.Refused("its root is not a struct of columns");
@@ -304,7 +304,7 @@ public static class VortexFileIndexer
                     continue;
                 }
 
-                await foreach (RecordBatch batch in file.Scan()
+                await foreach (RecordBatch batch in file.ScanBuilder()
                     .Rows(new RowRange(from, to))
                     .WithPruning(false)
                     .WithIndexes(false)
@@ -462,7 +462,7 @@ public static class VortexFileIndexer
         }
 
         long dtypeOffset = sink.Position;
-        byte[] dtype = DTypeFlatBuffers.Serialize(file.Schema);
+        byte[] dtype = DTypeFlatBuffers.Serialize(file.DType);
         await sink.WriteAsync(dtype, cancellationToken).ConfigureAwait(false);
 
         long layoutOffset = sink.Position;

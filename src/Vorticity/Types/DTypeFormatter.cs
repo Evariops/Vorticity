@@ -12,7 +12,7 @@ namespace Vorticity.Types;
 /// level, which a plain recursive renderer would turn into an output exponential in size for a
 /// file that is otherwise perfectly valid; the two constants below are the bounds that prevent it.
 /// </summary>
-public static class DTypeFormatter
+internal static class DTypeFormatter
 {
     /// <summary>
     /// A Struct or Union with more fields than this renders as <c>struct{...}</c> /

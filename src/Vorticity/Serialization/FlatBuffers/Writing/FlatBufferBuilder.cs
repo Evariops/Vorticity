@@ -62,7 +62,7 @@ namespace Vorticity.Serialization.FlatBuffers;
 /// only until <see cref="Clear"/> or <see cref="Dispose"/>.
 /// </para>
 /// </remarks>
-public sealed class FlatBufferBuilder : IDisposable
+internal sealed class FlatBufferBuilder : IDisposable
 {
     private const int DefaultCapacity = 1024;
     private const int MinimumCapacity = 64;

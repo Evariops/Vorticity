@@ -16,7 +16,7 @@ namespace Vorticity.Dataset;
 /// What a dataset scan skipped, and how: counters rather than timings, so that a caller can check
 /// how few objects were read instead of believing a speed.
 /// </summary>
-public sealed class DatasetScanMetrics
+internal sealed class DatasetScanMetrics
 {
     /// <summary>Leaf entries the walk reached.</summary>
     public long ObjectsConsidered { get; internal set; }
@@ -44,7 +44,7 @@ public sealed class DatasetScanMetrics
 }
 
 /// <summary>Builds a scan over every object of one version of a dataset.</summary>
-public sealed class DatasetScanBuilder
+internal sealed class DatasetScanBuilder
 {
     private readonly VortexDataset _dataset;
     private VortexExpr? _filter;
@@ -487,7 +487,7 @@ public sealed class DatasetScanBuilder
                         continue;
                     }
 
-                    kept ??= Projection.Parse(run.Schema, selected);
+                    kept ??= Projection.Parse(run.DType, selected);
                     RecordBatch projected = run.Project(kept.Value);
                     try
                     {
@@ -616,7 +616,7 @@ public sealed class DatasetScanBuilder
     /// <summary>One object's own key-ordered scan, carrying this builder's filter and projection.</summary>
     private ScanBuilder OrderedOf(VortexFile file, string[] paths, bool withKey)
     {
-        ScanBuilder scan = file.Scan();
+        ScanBuilder scan = file.ScanBuilder();
         if (_filter is { } filter)
         {
             scan = scan.Where(filter);
@@ -638,7 +638,7 @@ public sealed class DatasetScanBuilder
     /// <summary>The file's own scan, carrying this builder's filter, projection and row range.</summary>
     private ScanBuilder Of(VortexFile file, PositionedObject held)
     {
-        ScanBuilder scan = file.Scan();
+        ScanBuilder scan = file.ScanBuilder();
         if (_filter is { } filter)
         {
             scan = scan.Where(filter);
@@ -664,7 +664,7 @@ public sealed class DatasetScanBuilder
 /// <summary>One data object and where its rows start in the dataset.</summary>
 /// <param name="Entry">Its leaf entry, summaries included.</param>
 /// <param name="FirstRow">Its first row among the dataset's, in the tree's order.</param>
-public readonly record struct PositionedObject(ObjectEntry Entry, long FirstRow)
+internal readonly record struct PositionedObject(ObjectEntry Entry, long FirstRow)
 {
     /// <summary>The level whose tree holds it; level 0 is the one an append lands in.</summary>
     public int Level { get; init; }
@@ -694,7 +694,7 @@ public readonly record struct PositionedObject(ObjectEntry Entry, long FirstRow)
 /// clustering key, level 0's objects and one per level above it; on any other column, every object
 /// it would open.
 /// </param>
-public sealed record DatasetPlan(
+internal sealed record DatasetPlan(
     ulong Version,
     IReadOnlyList<long> ObjectsByLevel,
     long Lag,

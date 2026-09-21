@@ -8,7 +8,7 @@ namespace Vorticity.Arrays;
 /// <em>ours</em>: they are not the file's <c>u16</c> spec index and must never be persisted,
 /// compared against a wire value, or assumed stable across files.
 /// </summary>
-public enum ArrayEncodingId : ushort
+internal enum ArrayEncodingId : ushort
 {
     /// <summary>Not an encoding this build decodes. Legal at parse time; fatal only at use.</summary>
     Unknown = 0,
@@ -130,7 +130,7 @@ public enum ArrayEncodingId : ushort
 /// <summary>
 /// Every layout encoding this build can read, plus <see cref="Unknown"/>. Ours, not the file's.
 /// </summary>
-public enum LayoutEncodingId : ushort
+internal enum LayoutEncodingId : ushort
 {
     /// <summary>Not a layout this build reads. Fatal only when it is on the path to projected data.</summary>
     Unknown = 0,
@@ -162,7 +162,7 @@ public enum LayoutEncodingId : ushort
 /// matchers switch on length, then on one discriminating byte, then compare the whole span, so a
 /// lookup never allocates or hashes file-controlled bytes the way a string-keyed dictionary would.
 /// </summary>
-public static class EncodingRegistry
+internal static class EncodingRegistry
 {
     /// <summary>The highest defined <see cref="ArrayEncodingId"/>; the decoder table is sized by it.</summary>
     internal const int MaxArrayEncodingId = (int)ArrayEncodingId.ParquetVariant;

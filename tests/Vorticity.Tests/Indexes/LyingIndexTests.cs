@@ -221,8 +221,8 @@ public sealed class LyingIndexTests
 
         foreach (VortexExpr filter in filters)
         {
-            _ = await file.Scan().Where(filter).CountAsync(timeout.Token);
-            await foreach (RecordBatch batch in file.Scan().Where(filter).ExecuteAsync().WithCancellation(timeout.Token))
+            _ = await file.ScanBuilder().Where(filter).CountAsync(timeout.Token);
+            await foreach (RecordBatch batch in file.ScanBuilder().Where(filter).ExecuteAsync().WithCancellation(timeout.Token))
             {
                 Touch(batch);
             }
@@ -256,7 +256,7 @@ public sealed class LyingIndexTests
         }
 
         int ordered = 0;
-        await foreach (RecordBatch batch in file.Scan().InKeyOrder(orderColumn).ExecuteAsync().WithCancellation(timeout.Token))
+        await foreach (RecordBatch batch in file.ScanBuilder().InKeyOrder(orderColumn).ExecuteAsync().WithCancellation(timeout.Token))
         {
             Touch(batch);
             ordered += (int)batch.RowCount;
@@ -438,7 +438,7 @@ public sealed class LyingIndexTests
         await using MemorySegmentSource source = new MemorySegmentSource(bytes);
         await using VortexFile file = await VortexFile.OpenAsync(source, Options(false), CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Where(filter).WithIndexes(indexes).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(filter).WithIndexes(indexes).ExecuteAsync())
         {
             rows += batch.RowCount;
         }
@@ -574,7 +574,7 @@ public sealed class LyingIndexTests
                 RowBlockSize = Block,
                 DataBlockTargetBytes = 1L << 14,
                 IndexBudgetPerMille = 1_000_000,
-                Indexes = Policy(policy),
+                WritePolicy = Policy(policy),
             };
             await using (VortexFileWriter writer = VortexFileWriter.Create(path, Schema, options))
             {

@@ -29,7 +29,7 @@ internal static class Errors
         await Show("a column the file does not have", async () =>
         {
             await using VortexFile file = await VortexFile.OpenAsync(path);
-            await foreach (RecordBatch batch in file.Scan().Project(["nope"]).ExecuteAsync())
+            await foreach (RecordBatch batch in file.ScanBuilder().Project(["nope"]).ExecuteAsync())
             {
                 batch.Dispose();
             }
@@ -38,7 +38,7 @@ internal static class Errors
         await Show("a filter on a column the file does not have", async () =>
         {
             await using VortexFile file = await VortexFile.OpenAsync(path);
-            await file.Scan()
+            await file.ScanBuilder()
                 .Where(Expr.Gt(Expr.Field("nope"), Expr.Literal(FilterLiteral.From(1))))
                 .CountAsync();
         });
@@ -46,7 +46,7 @@ internal static class Errors
         await Show("a negative row index", async () =>
         {
             await using VortexFile file = await VortexFile.OpenAsync(path);
-            await foreach (RecordBatch batch in file.Scan().Take([-1L]).ExecuteAsync())
+            await foreach (RecordBatch batch in file.ScanBuilder().Take([-1L]).ExecuteAsync())
             {
                 batch.Dispose();
             }
@@ -56,7 +56,7 @@ internal static class Errors
         {
             await using VortexFile file = await VortexFile.OpenAsync(path);
             long rows = 0;
-            await foreach (RecordBatch batch in file.Scan()
+            await foreach (RecordBatch batch in file.ScanBuilder()
                 .Rows(new RowRange(0, Demo.ReadingRows + 10)).ExecuteAsync())
             {
                 using (batch)
@@ -71,7 +71,7 @@ internal static class Errors
         await Show("a batch read after it is disposed", async () =>
         {
             await using VortexFile file = await VortexFile.OpenAsync(path);
-            await foreach (RecordBatch batch in file.Scan().Rows(new RowRange(0, 2)).ExecuteAsync())
+            await foreach (RecordBatch batch in file.ScanBuilder().Rows(new RowRange(0, 2)).ExecuteAsync())
             {
                 batch.Dispose();
                 Console.WriteLine($"  {batch.RowCount} rows");
@@ -110,9 +110,9 @@ internal static class Errors
         VortexFile disposed = await VortexFile.OpenAsync(path);
         await disposed.DisposeAsync();
         Ask("RowCount", () => _ = disposed.RowCount);
-        Ask("Schema", () => _ = disposed.Schema);
-        Ask("Scan()", () => _ = disposed.Scan());
-        Ask("Identity", () => _ = disposed.Identity);
+        Ask("Schema", () => _ = disposed.DType);
+        Ask("Scan()", () => _ = disposed.ScanBuilder());
+        Ask("Identity", () => _ = disposed.StoredIdentity);
         Ask("SegmentSpecs", () => _ = disposed.SegmentSpecs.Length);
         Ask("GetArrayEncodingId(0)", () => _ = disposed.GetArrayEncodingId(0));
     }

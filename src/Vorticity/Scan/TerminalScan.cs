@@ -492,13 +492,13 @@ internal sealed class TerminalScan
         }
 
         // The statistics are shallow, one per top-level field of a struct root.
-        DType schema = _file.Schema;
+        DType schema = _file.DType;
         if (schema.IsDefault || schema.Kind != DTypeKind.Struct || path.Contains('.', StringComparison.Ordinal))
         {
             return false;
         }
 
-        FileStatistics statistics = _file.Statistics;
+        FileStatistics statistics = _file.FileStatistics;
         int index = schema.IndexOfField(path);
         if (index < 0 || index >= statistics.FieldCount)
         {

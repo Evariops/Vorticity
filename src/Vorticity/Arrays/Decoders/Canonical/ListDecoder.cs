@@ -13,7 +13,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// <c>n + 1</c> entries while a list view wants <c>n</c> offsets and <c>n</c> sizes, so the first
 /// <c>n</c> offsets are reused as they are and only the sizes are materialized.
 /// </summary>
-public sealed class ListDecoder : ArrayDecoder
+internal sealed class ListDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.list";

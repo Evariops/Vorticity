@@ -8,7 +8,7 @@ namespace Vorticity.Arrays.Metadata;
 /// Metadata of a <c>fastlanes.delta</c> node: the length of the deltas child, and the first row's
 /// offset within the same 1024-element block that bit-packing works in.
 /// </summary>
-public readonly struct DeltaMetadata : IEquatable<DeltaMetadata>
+internal readonly struct DeltaMetadata : IEquatable<DeltaMetadata>
 {
     private const string MessageName = "DeltaMetadata";
 

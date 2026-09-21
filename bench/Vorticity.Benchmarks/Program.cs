@@ -495,7 +495,7 @@ internal static class Program
             long ourBatches = 0;
             await using (VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None))
             {
-                await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+                await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     ours += batch.RowCount;

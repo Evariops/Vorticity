@@ -1153,7 +1153,7 @@ internal static class RatioCheck
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().InKeyOrder(field).Where(Band(field, low, width)).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().InKeyOrder(field).Where(Band(field, low, width)).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -1166,7 +1166,7 @@ internal static class RatioCheck
     private static async Task<long> CoveredCount(string path, string field, long low, long width)
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        return await file.Scan().Where(Band(field, low, width)).CountAsync().ConfigureAwait(false);
+        return await file.ScanBuilder().Where(Band(field, low, width)).CountAsync().ConfigureAwait(false);
     }
 
     /// <summary>The string-predicate group's axes, in the order they are reported.</summary>
@@ -1371,7 +1371,7 @@ internal static class RatioCheck
         long rows = 0;
         VortexExpr predicate = Expr.Eq(
             Expr.Field(StringField), Expr.Literal(FilterLiteral.From(needle)));
-        await foreach (RecordBatch batch in file.Scan().Where(predicate).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(predicate).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -1387,7 +1387,7 @@ internal static class RatioCheck
         long rows = 0;
         VortexExpr predicate = Expr.StartsWith(
             Expr.Field(StringField), FilterLiteral.From(prefix));
-        await foreach (RecordBatch batch in file.Scan().Where(predicate).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(predicate).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -1537,7 +1537,7 @@ internal static class RatioCheck
 
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Where(band).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(band).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -1610,8 +1610,8 @@ internal static class RatioCheck
 
         await using VortexFile file = await VortexFile.OpenAsync(source, CancellationToken.None);
         await using Vorticity.Writing.VortexFileWriter writer =
-            Vorticity.Writing.VortexFileWriter.Create(destination, file.Schema, options);
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            Vorticity.Writing.VortexFileWriter.Create(destination, file.DType, options);
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             await writer.WriteAsync(batch, CancellationToken.None);
@@ -1628,8 +1628,8 @@ internal static class RatioCheck
     {
         await using VortexFile file = await VortexFile.OpenAsync(source, CancellationToken.None);
         await using Vorticity.Writing.VortexFileWriter writer =
-            Vorticity.Writing.VortexFileWriter.Create(destination, file.Schema);
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            Vorticity.Writing.VortexFileWriter.Create(destination, file.DType);
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             await writer.WriteAsync(batch, CancellationToken.None);
@@ -1826,7 +1826,7 @@ internal static class RatioCheck
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Project(Field).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Project(Field).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -1838,7 +1838,7 @@ internal static class RatioCheck
     private static async Task<long> FirstBatch(string path)
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             return batch.RowCount;

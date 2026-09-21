@@ -14,7 +14,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// no unit. The arithmetic wraps rather than saturating: a file whose parts were built for another
 /// unit yields wrong timestamps instead of an error, which is what the format asks of a reader.
 /// </summary>
-public sealed class DateTimePartsDecoder : ArrayDecoder
+internal sealed class DateTimePartsDecoder : ArrayDecoder
 {
     /// <summary>The wire id.</summary>
     public const string Id = "vortex.datetimeparts";

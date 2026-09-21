@@ -12,7 +12,7 @@ internal static class ReadTheSchema
         string path = await Demo.ReadingsAsync();
 
         await using VortexFile file = await VortexFile.OpenAsync(path);
-        DType schema = file.Schema;
+        DType schema = file.DType;
         Console.WriteLine($"{schema.FieldCount} columns, {file.RowCount} rows, tabular: {file.IsTabular}");
         for (int i = 0; i < schema.FieldCount; i++)
         {
@@ -28,11 +28,11 @@ internal static class ReadTheSchema
 
         if (file.HasFileStatistics)
         {
-            FileStatistics statistics = file.Statistics;
+            FileStatistics statistics = file.FileStatistics;
             for (int i = 0; i < statistics.FieldCount; i++)
             {
                 FieldStatistics field = statistics.GetField(i);
-                string nulls = field.TryGetNullCount(out ulong count) ? count.ToString() : "unknown";
+                string nulls = field.TryGetStoredNullCount(out ulong count) ? count.ToString() : "unknown";
                 string sorted = field.TryGetIsSorted(out bool isSorted) ? isSorted.ToString() : "unknown";
                 Console.WriteLine($"  {schema.GetFieldName(i)}: nulls {nulls}, sorted {sorted}, " +
                     $"bounds known: {field.HasMin && field.HasMax}");

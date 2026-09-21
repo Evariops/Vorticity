@@ -16,7 +16,7 @@ namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 /// followed by the page bodies; zero or one validity child. Everything below that belongs to pco
 /// and lives in the sibling types here.
 /// </summary>
-public sealed class PcoDecoder : ArrayDecoder
+internal sealed class PcoDecoder : ArrayDecoder
 {
     private const string Id = "vortex.pco";
 

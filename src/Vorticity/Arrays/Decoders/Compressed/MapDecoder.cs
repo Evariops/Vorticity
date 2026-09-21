@@ -11,7 +11,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// <c>Struct{key, value}</c>; there is no canonical map node, so the result is a list view that
 /// keeps the map dtype, which reads as a list of entries while the schema still says map.
 /// </summary>
-public sealed class MapDecoder : ArrayDecoder
+internal sealed class MapDecoder : ArrayDecoder
 {
     private const string Id = "vortex.map";
 

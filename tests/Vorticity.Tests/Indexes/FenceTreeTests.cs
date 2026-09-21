@@ -654,14 +654,14 @@ public sealed class FenceTreeTests
 
     private static async Task<int> SegmentsReadAsync(VortexFile file, VortexExpr filter)
     {
-        ScanPlan plan = await file.Scan().Where(filter).ExplainAsync();
+        ScanPlan plan = await file.ScanBuilder().Where(filter).ExplainAsync();
         return Assert.Single(plan.Pruning, step => step.Structure == "locating index").SegmentsRead;
     }
 
     private static async Task<long> CountRowsAsync(VortexFile file, VortexExpr filter, bool indexes)
     {
         long count = 0;
-        await foreach (RecordBatch batch in file.Scan().Where(filter).WithIndexes(indexes).WithPruning(indexes).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(filter).WithIndexes(indexes).WithPruning(indexes).ExecuteAsync())
         {
             count += batch.RowCount;
         }
@@ -685,7 +685,7 @@ public sealed class FenceTreeTests
     {
         RowBlockSize = Block,
         DataBlockTargetBytes = null,
-        Indexes = Policy,
+        WritePolicy = Policy,
         IndexBudgetPerMille = 1_000_000,
         Identity = identity,
         Fences = shape,

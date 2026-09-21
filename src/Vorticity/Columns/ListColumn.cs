@@ -11,7 +11,7 @@ namespace Vorticity.Columns;
 /// <see cref="Elements"/> borrows from the owning <see cref="RecordBatch"/> and is invalid once
 /// that batch is disposed.
 /// </remarks>
-public readonly ref struct ListColumn
+internal readonly ref struct ListColumn
 {
     private readonly RecordBatch _batch;
     private readonly int _node;

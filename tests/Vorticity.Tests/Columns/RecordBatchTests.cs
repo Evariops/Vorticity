@@ -34,7 +34,7 @@ public sealed class RecordBatchTests
         Assert.Null(batch.GetFieldName(0));
         Assert.Equal(rows, batch.RowCount);
         Assert.Equal(4096L, batch.StartRow);
-        Assert.Equal(DTypeKind.Primitive, batch.Schema.Kind);
+        Assert.Equal(DTypeKind.Primitive, batch.DType.Kind);
 
         // Column(0) IS the root, not a synthetic wrapper.
         Assert.Equal(rows, batch.Column(0).Length);
@@ -132,7 +132,7 @@ public sealed class RecordBatchTests
         batch.Dispose();
         batch.Dispose();
 
-        Assert.Throws<ObjectDisposedException>(() => { _ = batch.Schema; });
+        Assert.Throws<ObjectDisposedException>(() => { _ = batch.DType; });
         Assert.Throws<ObjectDisposedException>(() => { _ = batch.RowCount; });
         Assert.Throws<ObjectDisposedException>(() => { _ = batch.StartRow; });
         Assert.Throws<ObjectDisposedException>(() => { _ = batch.IsTabular; });
@@ -279,7 +279,7 @@ public sealed class RecordBatchTests
         using RecordBatch window = batch.Window(1, 3);
         Assert.Equal(3, window.RowCount);
         Assert.Equal(401L, window.StartRow);
-        Assert.Equal(schema, window.Schema);
+        Assert.Equal(schema, window.DType);
         Assert.Equal([20L, 30L, 40L], window.Column(0).AsPrimitive<long>().Values.ToArray());
         Assert.Equal([false, true, false], Bits(window.Column(1)));
 
@@ -329,16 +329,16 @@ public sealed class RecordBatchTests
         RecordBatch batch = f.Batch(
             f.Arena.AddStruct(schema, 3, Validity.NonNullable, [keys, nested]), startRow: 70);
 
-        using RecordBatch dropped = batch.Project(Projection.Parse(batch.Schema, ["inner"]));
-        Assert.Equal(f.Types.Struct(["inner"], [inner], Nullability.NonNullable), dropped.Schema);
+        using RecordBatch dropped = batch.Project(Projection.Parse(batch.DType, ["inner"]));
+        Assert.Equal(f.Types.Struct(["inner"], [inner], Nullability.NonNullable), dropped.DType);
         Assert.Equal(3, dropped.RowCount);
         Assert.Equal(70L, dropped.StartRow);
         Assert.Equal([4, 5, 6], dropped.Column(0).AsStruct().GetField("d"u8).AsPrimitive<int>().Values.ToArray());
 
         // A nested leaf: the struct above it is rebuilt around that one field.
-        using RecordBatch leaf = batch.Project(Projection.Parse(batch.Schema, ["key", "inner.d"]));
+        using RecordBatch leaf = batch.Project(Projection.Parse(batch.DType, ["key", "inner.d"]));
         DType narrowed = f.Types.Struct(["d"], [i32], Nullability.NonNullable);
-        Assert.Equal(f.Types.Struct(["key", "inner"], [i64, narrowed], Nullability.NonNullable), leaf.Schema);
+        Assert.Equal(f.Types.Struct(["key", "inner"], [i64, narrowed], Nullability.NonNullable), leaf.DType);
         Assert.Equal([10L, 20L, 30L], leaf.Column(0).AsPrimitive<long>().Values.ToArray());
         Assert.Equal([4, 5, 6], leaf.Column(1).AsStruct().GetField(0).AsPrimitive<int>().Values.ToArray());
 
@@ -349,8 +349,8 @@ public sealed class RecordBatchTests
 
         // Everything is the batch itself, and the source is untouched by any of it.
         using RecordBatch all = batch.Project(Projection.All);
-        Assert.Equal(schema, all.Schema);
-        Assert.Equal(schema, batch.Schema);
+        Assert.Equal(schema, all.DType);
+        Assert.Equal(schema, batch.DType);
         Assert.Equal([10L, 20L, 30L], batch.Column(0).AsPrimitive<long>().Values.ToArray());
     }
 

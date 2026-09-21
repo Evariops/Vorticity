@@ -11,7 +11,7 @@ namespace Vorticity.Arrays.Metadata;
 /// The field is <c>#[prost(message, required, tag = "1")]</c>: absent is malformed, not a
 /// default-constructed descriptor.
 /// </remarks>
-public readonly struct SparseMetadata : IEquatable<SparseMetadata>
+internal readonly struct SparseMetadata : IEquatable<SparseMetadata>
 {
     private const string MessageName = "SparseMetadata";
 

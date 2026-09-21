@@ -12,7 +12,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// there may be none; reading the first buffer as views would read data as views and produce
 /// plausible garbage.
 /// </summary>
-public sealed class VarBinViewDecoder : ArrayDecoder
+internal sealed class VarBinViewDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.varbinview";

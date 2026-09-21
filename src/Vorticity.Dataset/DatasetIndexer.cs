@@ -16,13 +16,13 @@ namespace Vorticity.Dataset;
 /// </param>
 /// <param name="Bytes">The fragment's length.</param>
 /// <param name="Reports">What became of every index the policy asked for.</param>
-public sealed record IndexingResult(
+internal sealed record IndexingResult(
     ulong Version, OperationOutcome Outcome, long Bytes, IReadOnlyList<IndexWriteReport> Reports);
 
 /// <summary>Indexes a dataset's objects by fragments, one block range per commit. A fragment is
 /// bound to its object by that object's uid, so an object written by another writer cannot take
 /// one.</summary>
-public static class DatasetIndexer
+internal static class DatasetIndexer
 {
     /// <summary>
     /// Indexes blocks of one object into a fragment, and commits it. The target must come from the

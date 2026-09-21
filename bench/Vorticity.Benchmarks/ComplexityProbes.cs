@@ -323,7 +323,7 @@ public class ComplexityProbes
     private async Task<long> FilteredCountAsync(int literals)
     {
         await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None);
-        return await file.Scan()
+        return await file.ScanBuilder()
             .WithPruning(false)
             .WithIndexes(false)
             .Where(Expr.In(Expr.Field(Field), _needles[literals]))
@@ -366,7 +366,7 @@ public class ComplexityProbes
     {
         await using VortexFile file = await VortexFile.OpenAsync(_widePath, CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Project(_projections[columns])
             .WithMaxBatchRows(WideBatch)
             .ExecuteAsync()
@@ -384,7 +384,7 @@ public class ComplexityProbes
     {
         await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None);
         long taken = 0;
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Take(_takes[rows]).ExecuteAsync()
             .WithCancellation(CancellationToken.None)
             .ConfigureAwait(false))
@@ -399,7 +399,7 @@ public class ComplexityProbes
     private async Task<long> PrunedCountAsync(int literals)
     {
         await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None);
-        return await file.Scan()
+        return await file.ScanBuilder()
             .WithPruning(true)
             .WithIndexes(false)
             .Where(Expr.In(Expr.Field(Field), _needles[literals]))

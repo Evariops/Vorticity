@@ -369,7 +369,7 @@ public sealed class ZoneVerdictTests
     private static async Task<List<long>> Selected(VortexFile file, VortexExpr filter, bool prune = false)
     {
         List<long> rows = [];
-        IAsyncEnumerable<RecordBatch> scan = file.Scan()
+        IAsyncEnumerable<RecordBatch> scan = file.ScanBuilder()
             .Project("monotone")
             .Where(filter)
             .WithPruning(prune)

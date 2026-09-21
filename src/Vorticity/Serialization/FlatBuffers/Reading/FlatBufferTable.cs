@@ -33,7 +33,7 @@ namespace Vorticity.Serialization.FlatBuffers;
 /// never rejected.
 /// </para>
 /// </remarks>
-public readonly ref struct FlatBufferTable
+internal readonly ref struct FlatBufferTable
 {
     private readonly ReadOnlySpan<byte> _buffer;
 

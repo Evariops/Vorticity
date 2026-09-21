@@ -33,7 +33,7 @@ public sealed class VortexOpenOptions
     private readonly VortexReadOptions _read = VortexReadOptions.Default;
 
     /// <summary>The defaults: probe the length, read 65535 tail bytes, own the source.</summary>
-    public static VortexOpenOptions Default { get; } = new VortexOpenOptions();
+    internal static VortexOpenOptions Default { get; } = new VortexOpenOptions();
 
     /// <summary>
     /// The file's DType, supplied out of band.
@@ -45,14 +45,14 @@ public sealed class VortexOpenOptions
     /// check and no warning, since a check would cost the very read that supplying a DType exists
     /// to avoid. Leave it <c>default</c> to read the embedded one.
     /// </remarks>
-    public DType DType { get; init; }
+    internal DType DType { get; init; }
 
     /// <summary>
     /// The file length in bytes, when the caller already knows it. <c>-1</c> (the default) issues
     /// one length probe.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">The value is below <c>-1</c>.</exception>
-    public long FileLength
+    internal long FileLength
     {
         get => _fileLength;
         init
@@ -82,11 +82,11 @@ public sealed class VortexOpenOptions
     /// When <see langword="true"/>, disposing the file leaves the segment source open. Ignored by
     /// the path-based overloads, which always own the source they created.
     /// </summary>
-    public bool LeaveSourceOpen { get; init; }
+    internal bool LeaveSourceOpen { get; init; }
 
     /// <summary>Read-time policy for every scan of the opened file. Never <see langword="null"/>.</summary>
     /// <exception cref="ArgumentNullException">The value is null.</exception>
-    public VortexReadOptions Read
+    internal VortexReadOptions Read
     {
         get => _read;
         init
@@ -118,7 +118,7 @@ public sealed class VortexOpenOptions
     /// directory usually lies inside the tail the open reads anyway, and then preloading it costs no
     /// request at all; <see cref="VortexFile.Indexes"/> answers from it without one.
     /// </remarks>
-    public bool PreloadIndexes { get; init; }
+    internal bool PreloadIndexes { get; init; }
 
     /// <summary>These options for the first <paramref name="fileLength"/> bytes, refusing a torn tail there.</summary>
     /// <param name="fileLength">The prefix's length.</param>

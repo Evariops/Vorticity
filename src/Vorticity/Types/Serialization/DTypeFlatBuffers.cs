@@ -27,7 +27,7 @@ namespace Vorticity.Types.Serialization;
 /// vectors of a struct or a union, whose length is known only once the vector is resolved.
 /// </para>
 /// </remarks>
-public static class DTypeFlatBuffers
+internal static class DTypeFlatBuffers
 {
     // ---- union Type tags. Identical to DTypeKind by construction; asserted by the tests. ----
     private const byte TagNone = 0;

@@ -132,7 +132,7 @@ public sealed class ZonePruningTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path(Flat), CancellationToken.None);
 
-        string column = file.Schema.GetFieldName(0);
+        string column = file.DType.GetFieldName(0);
         VortexExpr filter = Expr.IsNotNull(Expr.Field(column));
 
         Assert.Equal(
@@ -165,7 +165,7 @@ public sealed class ZonePruningTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path(id), CancellationToken.None);
 
-        IAsyncEnumerable<RecordBatch> scan = file.Scan()
+        IAsyncEnumerable<RecordBatch> scan = file.ScanBuilder()
             .Project(column)
             .Where(filter)
             .WithPruning(prune)
@@ -196,7 +196,7 @@ public sealed class ZonePruningTests
 
         counting.ResetCounters();
 
-        IAsyncEnumerable<RecordBatch> scan = file.Scan()
+        IAsyncEnumerable<RecordBatch> scan = file.ScanBuilder()
             .Project("monotone")
             .Where(filter)
             .WithPruning(prune)

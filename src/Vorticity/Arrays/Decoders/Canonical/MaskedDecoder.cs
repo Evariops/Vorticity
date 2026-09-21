@@ -10,7 +10,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// the validity comes from that nullability and a non-nullable dtype would make the encoding a
 /// no-op.
 /// </summary>
-public sealed class MaskedDecoder : ArrayDecoder
+internal sealed class MaskedDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.masked";

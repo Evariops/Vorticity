@@ -5,7 +5,7 @@ using Vorticity.Types;
 namespace Vorticity.Arrays.Decoders.Canonical;
 
 /// <summary>Decodes <c>vortex.null</c>: an all-null column with no payload at all.</summary>
-public sealed class NullDecoder : ArrayDecoder
+internal sealed class NullDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.null";

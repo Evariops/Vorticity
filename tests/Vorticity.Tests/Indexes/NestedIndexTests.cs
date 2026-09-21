@@ -111,12 +111,12 @@ public sealed class NestedIndexTests
             }
         }
 
-        Assert.Equal(expected, await written.File.Scan().Where(filter).CountAsync());
-        Assert.Equal(expected, await written.File.Scan().Where(filter).WithIndexes(false).CountAsync());
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).CountAsync());
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).WithIndexes(false).CountAsync());
 
         // The index kills every block that does not hold the value: the Bloom filter may keep a
         // false positive, the locating indexes may not; and a ghost is in no index.
-        ScanPlan plan = await written.File.Scan().Where(filter).ExplainAsync();
+        ScanPlan plan = await written.File.ScanBuilder().Where(filter).ExplainAsync();
         if (path == "person.age")
         {
             Assert.InRange(plan.LiveBlocks, holding.Count, holding.Count + 1);
@@ -151,12 +151,12 @@ public sealed class NestedIndexTests
             }
         }
 
-        Assert.Equal(nullNames, await written.File.Scan().Where(Expr.IsNull(Expr.Field("person.name"))).CountAsync());
-        Assert.Equal(nullAges, await written.File.Scan().Where(Expr.IsNull(Expr.Field("person.age"))).CountAsync());
-        Assert.Equal(nullNames, await written.File.Scan().Where(Expr.IsNull(Expr.Field("person.address.city"))).CountAsync());
-        Assert.Equal(maxAge, (await written.File.Scan().MaxAsync("person.age")).SignedValue);
-        Assert.Equal("c210", Encoding.UTF8.GetString((await written.File.Scan().MaxAsync("person.address.city")).BytesValue));
-        Assert.Equal("n9", Encoding.UTF8.GetString((await written.File.Scan().MaxAsync("person.name")).BytesValue));
+        Assert.Equal(nullNames, await written.File.ScanBuilder().Where(Expr.IsNull(Expr.Field("person.name"))).CountAsync());
+        Assert.Equal(nullAges, await written.File.ScanBuilder().Where(Expr.IsNull(Expr.Field("person.age"))).CountAsync());
+        Assert.Equal(nullNames, await written.File.ScanBuilder().Where(Expr.IsNull(Expr.Field("person.address.city"))).CountAsync());
+        Assert.Equal(maxAge, (await written.File.ScanBuilder().MaxAsync("person.age")).SignedValue);
+        Assert.Equal("c210", Encoding.UTF8.GetString((await written.File.ScanBuilder().MaxAsync("person.address.city")).BytesValue));
+        Assert.Equal("n9", Encoding.UTF8.GetString((await written.File.ScanBuilder().MaxAsync("person.name")).BytesValue));
     }
 
     [Fact]
@@ -182,7 +182,7 @@ public sealed class NestedIndexTests
             await using VortexFile file = await VortexFile.OpenAsync(path);
             await AssertWalksAsync(file);
             VortexExpr filter = Expr.Eq(Expr.Field("person.name"), Expr.Literal(FilterLiteral.From("n7")));
-            ScanPlan plan = await file.Scan().Where(filter).ExplainAsync();
+            ScanPlan plan = await file.ScanBuilder().Where(filter).ExplainAsync();
             Assert.Equal(1, plan.LiveBlocks);
         }
         finally
@@ -308,7 +308,7 @@ public sealed class NestedIndexTests
                 RowBlockSize = Block,
                 DataBlockTargetBytes = 1L << 16,
                 IndexBudgetPerMille = 1_000_000,
-                Indexes = indexed ? Policy : WritePolicy.None,
+                WritePolicy = indexed ? Policy : WritePolicy.None,
                 KeyEncoder = new RowKeyEncoder(Asc),
             };
 

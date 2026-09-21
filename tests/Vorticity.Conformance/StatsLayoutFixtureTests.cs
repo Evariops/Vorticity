@@ -72,7 +72,7 @@ public sealed class StatsLayoutFixtureTests
         // Everything else about the two files is the same, which is what makes the value comparison
         // below an oracle rather than a second opinion.
         Assert.Equal(sourceIds.Count, forgedIds.Count);
-        Assert.Equal(source.Schema.ToString(), forged.Schema.ToString());
+        Assert.Equal(source.DType.ToString(), forged.DType.ToString());
     }
 
     /// <summary>A legacy zone map resolves to the stats reader rather than to an unknown id.</summary>
@@ -139,7 +139,7 @@ public sealed class StatsLayoutFixtureTests
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         List<string> rows = [];
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Project("monotone")
             .Where(filter)
             .ExecuteAsync()
@@ -170,7 +170,7 @@ public sealed class StatsLayoutFixtureTests
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         List<string> rows = [];
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             StructColumn root = batch.Root.AsStruct();

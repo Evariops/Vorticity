@@ -11,7 +11,7 @@ namespace Vorticity.Dataset;
 /// still in the builder's buffer costs no request, anything else is a ranged read of the commit
 /// object its reference names. Every page is checked against the reference that led here.
 /// </summary>
-public sealed class CommitPageSource : IPageSource
+internal sealed class CommitPageSource : IPageSource
 {
     private readonly IObjectStore _store;
     // Concurrent because a walk reads a window of siblings at once; two reads of one page race to

@@ -9,7 +9,7 @@ namespace Vorticity.Writing;
 /// An <see cref="ISegmentSink"/> over a <see cref="Stream"/>. The position is counted here, so the
 /// stream need not be seekable.
 /// </summary>
-public sealed class StreamSegmentSink : ISegmentSink, IAsyncDisposable
+internal sealed class StreamSegmentSink : ISegmentSink, IAsyncDisposable
 {
     private readonly Stream _stream;
     private readonly bool _ownsStream;

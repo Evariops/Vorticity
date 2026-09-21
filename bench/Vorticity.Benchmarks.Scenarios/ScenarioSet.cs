@@ -105,7 +105,7 @@ public static class ScenarioSet
 
         await using VortexFile file = await VortexFile.OpenAsync(
             new Vorticity.IO.MemorySegmentSource(prepared.Bytes), new VortexOpenOptions(), CancellationToken.None);
-        ScanPlan plan = await file.Scan()
+        ScanPlan plan = await file.ScanBuilder()
             .Where(Expr.In(Expr.Field(prepared.Column), prepared.Probes))
             .ExplainAsync(CancellationToken.None);
         return plan.LiveBlocks;
@@ -152,16 +152,16 @@ public static class ScenarioSet
     private static async Task<(byte[] Bytes, string Column, FilterLiteral[] Probes)> PrepareLookupAsync(string path)
     {
         await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
-        if (source.Schema.Kind != DTypeKind.Struct)
+        if (source.DType.Kind != DTypeKind.Struct)
         {
             throw new NotSupportedException(
-                $"lookup-sorted-runs keys a named column, and this file's root is {source.Schema.Kind}");
+                $"lookup-sorted-runs keys a named column, and this file's root is {source.DType.Kind}");
         }
 
         string column = string.Empty;
-        for (int i = 0; i < source.Schema.FieldCount && column.Length == 0; i++)
+        for (int i = 0; i < source.DType.FieldCount && column.Length == 0; i++)
         {
-            string name = source.Schema.GetFieldName(i);
+            string name = source.DType.GetFieldName(i);
             if (name == "measure" || name == Field)
             {
                 column = name;
@@ -170,19 +170,19 @@ public static class ScenarioSet
 
         if (column.Length == 0)
         {
-            column = source.Schema.GetFieldName(0);
+            column = source.DType.GetFieldName(0);
         }
 
         System.IO.MemoryStream written = new System.IO.MemoryStream();
         VortexWriteOptions options = new VortexWriteOptions
         {
-            Indexes = WritePolicy.None.For(column, IndexPolicy.SortedRuns),
+            WritePolicy = WritePolicy.None.For(column, IndexPolicy.SortedRuns),
             IndexBudgetPerMille = 1_000_000,
             DataBlockTargetBytes = 64 << 10,
         };
-        await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(written), source.Schema, options))
+        await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(written), source.DType, options))
         {
-            await foreach (RecordBatch batch in source.Scan().ExecuteAsync().WithCancellation(CancellationToken.None))
+            await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync().WithCancellation(CancellationToken.None))
             {
                 await writer.WriteAsync(batch, CancellationToken.None);
             }
@@ -213,7 +213,7 @@ public static class ScenarioSet
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -234,7 +234,7 @@ public static class ScenarioSet
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().WithDegreeOfParallelism(degree)
+        await foreach (RecordBatch batch in file.ScanBuilder().WithDegreeOfParallelism(degree)
             .ExecuteAsync().WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -249,7 +249,7 @@ public static class ScenarioSet
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Project(Field).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Project(Field).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -265,7 +265,7 @@ public static class ScenarioSet
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Project(field).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Project(field).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -308,7 +308,7 @@ public static class ScenarioSet
         }
 
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Take(indices.AsSpan(0, wanted).ToArray()).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
@@ -330,7 +330,7 @@ public static class ScenarioSet
 
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Where(band).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(band).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
@@ -376,7 +376,7 @@ public static class ScenarioSet
         await using VortexFile file = await VortexFile.OpenAsync(
             new Vorticity.IO.MemorySegmentSource(bytes), new VortexOpenOptions(), CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Where(Expr.In(Expr.Field(PrunedField), PrunedNeedles))
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(Expr.In(Expr.Field(PrunedField), PrunedNeedles))
             .WithPruning(true).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
@@ -509,17 +509,17 @@ public static class ScenarioSet
     public static Task<long> ReadAndWriteIndexed(string path, IndexPolicy index) =>
         ReadAndWrite(
             path,
-            new VortexWriteOptions { Indexes = WritePolicy.None.WithDefault(index), IndexBudgetPerMille = 1_000_000 });
+            new VortexWriteOptions { WritePolicy = WritePolicy.None.WithDefault(index), IndexBudgetPerMille = 1_000_000 });
 
     private static async Task<long> ReadAndWrite(string path, VortexWriteOptions? options)
     {
         await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
         await using VortexFileWriter writer = options is null
-            ? VortexFileWriter.Create(new DiscardSink(), source.Schema)
-            : VortexFileWriter.Create(new DiscardSink(), source.Schema, options);
+            ? VortexFileWriter.Create(new DiscardSink(), source.DType)
+            : VortexFileWriter.Create(new DiscardSink(), source.DType, options);
 
         long rows = 0;
-        await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;

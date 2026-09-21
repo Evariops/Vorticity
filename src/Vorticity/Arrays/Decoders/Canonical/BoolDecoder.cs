@@ -13,7 +13,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// a copy per batch; it travels into the canonical node instead, and every consumer of the bitmap
 /// has to apply it.
 /// </remarks>
-public sealed class BoolDecoder : ArrayDecoder
+internal sealed class BoolDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.bool";

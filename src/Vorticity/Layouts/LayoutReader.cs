@@ -15,7 +15,7 @@ namespace Vorticity.Layouts;
 /// single coalesced read; break it and the scan either fails on an unpopulated segment or silently
 /// issues a second read.
 /// </remarks>
-public abstract class LayoutReader
+internal abstract class LayoutReader
 {
     /// <summary>The registry slot this reader occupies.</summary>
     public abstract LayoutEncodingId EncodingId { get; }

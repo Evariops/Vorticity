@@ -122,7 +122,7 @@ public sealed class AppendTests
         {
             await WriteAsync(path, 0, 8_192);
             await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(
-                path, new VortexWriteOptions { IndexBudgetPerMille = 1, Indexes = Policy }))
+                path, new VortexWriteOptions { IndexBudgetPerMille = 1, WritePolicy = Policy }))
             {
                 await FeedAsync(writer, 8_192, Rows);
                 WriteReport report = await writer.CompleteAsync();
@@ -141,7 +141,7 @@ public sealed class AppendTests
                 expected += V(row) == 417 ? 1 : 0;
             }
 
-            Assert.Equal(expected, await file.Scan().Where(filter).CountAsync());
+            Assert.Equal(expected, await file.ScanBuilder().Where(filter).CountAsync());
             List<string> rows = await FilteredRows(file, filter);
             Assert.Equal(expected, rows.Count);
         }
@@ -373,7 +373,7 @@ public sealed class AppendTests
             // The file changes under the fragment -- an append that writes no directory of its own,
             // so the fragment is still the one looked at: refused as stale, and the scan still answers.
             await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(
-                plain, new VortexWriteOptions { Indexes = WritePolicy.None }))
+                plain, new VortexWriteOptions { WritePolicy = WritePolicy.None }))
             {
                 await FeedAsync(writer, Rows, Rows + 100);
                 await writer.CompleteAsync();
@@ -384,8 +384,8 @@ public sealed class AppendTests
             Assert.Contains("stale", Assert.Single(changed.IndexFragmentRefusals), StringComparison.Ordinal);
             VortexExpr filter = Expr.Eq(Expr.Field("v"), Expr.Literal(FilterLiteral.From(417L)));
             Assert.Equal(
-                await changed.Scan().Where(filter).WithIndexes(false).CountAsync(),
-                await changed.Scan().Where(filter).CountAsync());
+                await changed.ScanBuilder().Where(filter).WithIndexes(false).CountAsync(),
+                await changed.ScanBuilder().Where(filter).CountAsync());
         }
         finally
         {
@@ -399,7 +399,7 @@ public sealed class AppendTests
     private static async Task<List<string>> RowsOf(VortexFile file)
     {
         List<string> rows = [];
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
         {
             Values.DescribeRows(batch, rows);
         }
@@ -447,8 +447,8 @@ public sealed class AppendTests
         Assert.True(actual.HasFileStatistics);
         for (int field = 0; field < Names.Length; field++)
         {
-            FieldStatistics a = expected.Statistics.GetField(field);
-            FieldStatistics b = actual.Statistics.GetField(field);
+            FieldStatistics a = expected.FileStatistics.GetField(field);
+            FieldStatistics b = actual.FileStatistics.GetField(field);
             string name = Names[field];
             Assert.True(a.HasMin == b.HasMin && a.HasMax == b.HasMax, $"{name}: bounds present differ");
             if (a.HasMin)
@@ -457,7 +457,7 @@ public sealed class AppendTests
                 Assert.Equal(a.Max.ToString(), b.Max.ToString());
             }
 
-            Assert.Equal(a.TryGetNullCount(out ulong na) ? na : ulong.MaxValue, b.TryGetNullCount(out ulong nb) ? nb : ulong.MaxValue);
+            Assert.Equal(a.TryGetStoredNullCount(out ulong na) ? na : ulong.MaxValue, b.TryGetStoredNullCount(out ulong nb) ? nb : ulong.MaxValue);
             bool hasA = a.TryGetIsSorted(out bool sa);
             bool hasB = b.TryGetIsSorted(out bool sb);
             Assert.True(!hasB || (hasA && sa == sb), $"{name}: is_sorted {hasB}/{sb} against {hasA}/{sa}");
@@ -467,8 +467,8 @@ public sealed class AppendTests
         }
 
         // The id column is what an append must keep stating: sorted across every seam.
-        Assert.True(actual.Statistics.GetField(0).TryGetIsSorted(out bool sorted) && sorted);
-        Assert.True(actual.Statistics.GetField(0).TryGetIsStrictSorted(out bool strict) && strict);
+        Assert.True(actual.FileStatistics.GetField(0).TryGetIsSorted(out bool sorted) && sorted);
+        Assert.True(actual.FileStatistics.GetField(0).TryGetIsStrictSorted(out bool strict) && strict);
     }
 
     private static async Task AssertSameAnswers(VortexFile expected, VortexFile actual)
@@ -487,9 +487,9 @@ public sealed class AppendTests
 
         foreach (VortexExpr filter in filters)
         {
-            long count = await expected.Scan().Where(filter).WithIndexes(false).CountAsync();
-            Assert.Equal(count, await actual.Scan().Where(filter).CountAsync());
-            Assert.Equal(count, await actual.Scan().Where(filter).WithTiers(TerminalTiers.Decode).CountAsync());
+            long count = await expected.ScanBuilder().Where(filter).WithIndexes(false).CountAsync();
+            Assert.Equal(count, await actual.ScanBuilder().Where(filter).CountAsync());
+            Assert.Equal(count, await actual.ScanBuilder().Where(filter).WithTiers(TerminalTiers.Decode).CountAsync());
             if (count > 0)
             {
                 Assert.True(await actual.MayMatchAsync(filter), "a matching file said it cannot match");
@@ -529,7 +529,7 @@ public sealed class AppendTests
     private static async Task<List<string>> FilteredRows(VortexFile file, VortexExpr filter)
     {
         List<string> rows = [];
-        await foreach (RecordBatch batch in file.Scan().Where(filter).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(filter).ExecuteAsync())
         {
             Values.DescribeRows(batch, rows);
         }
@@ -561,7 +561,7 @@ public sealed class AppendTests
             RowBlockSize = Block,
             DataBlockTargetBytes = 1L << 14,
             IndexBudgetPerMille = 1_000_000,
-            Indexes = policy ?? Policy,
+            WritePolicy = policy ?? Policy,
         };
         await using VortexFileWriter writer = VortexFileWriter.Create(path, Schema, options);
         await FeedAsync(writer, start, end);

@@ -337,7 +337,7 @@ public sealed class StringMatchTests
 
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path(id), CancellationToken.None);
-        ScanBuilder builder = file.Scan().Project(column).WithPruning(prune);
+        ScanBuilder builder = file.ScanBuilder().Project(column).WithPruning(prune);
         if (filter is not null)
         {
             builder = builder.Where(filter);

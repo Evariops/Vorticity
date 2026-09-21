@@ -13,7 +13,7 @@ namespace Vorticity.Arrays.Metadata;
 /// non-zero value is a domain violation and is rejected rather than carried forward as a shape
 /// this codec cannot honour.
 /// </remarks>
-public readonly struct DecimalBytePartsMetadata : IEquatable<DecimalBytePartsMetadata>
+internal readonly struct DecimalBytePartsMetadata : IEquatable<DecimalBytePartsMetadata>
 {
     private const string MessageName = "DecimalBytesPartsMetadata";
 

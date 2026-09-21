@@ -21,7 +21,7 @@ internal static class CancelWork
         try
         {
             // ExecuteAsync takes no token: the loop carries it.
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync().WithCancellation(cts.Token))
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync().WithCancellation(cts.Token))
             {
                 using (batch)
                 {
@@ -45,15 +45,15 @@ internal static class CancelWork
         VortexExpr recent = Expr.Ge(Expr.Field("day"), Expr.Literal(FilterLiteral.From(900)));
 
         await Probe("OpenAsync", async () => await VortexFile.OpenAsync(path, VortexOpenOptions.Default, dead.Token));
-        await Probe("CountAsync", async () => await file.Scan().CountAsync(dead.Token));
-        await Probe("CountAsync with a filter", async () => await file.Scan().Where(recent).CountAsync(dead.Token));
-        await Probe("AnyAsync", async () => await file.Scan().AnyAsync(dead.Token));
-        await Probe("MinAsync", async () => await file.Scan().MinAsync("celsius", dead.Token));
-        await Probe("ExplainAsync", async () => await file.Scan().ExplainAsync(dead.Token));
+        await Probe("CountAsync", async () => await file.ScanBuilder().CountAsync(dead.Token));
+        await Probe("CountAsync with a filter", async () => await file.ScanBuilder().Where(recent).CountAsync(dead.Token));
+        await Probe("AnyAsync", async () => await file.ScanBuilder().AnyAsync(dead.Token));
+        await Probe("MinAsync", async () => await file.ScanBuilder().MinAsync("celsius", dead.Token));
+        await Probe("ExplainAsync", async () => await file.ScanBuilder().ExplainAsync(dead.Token));
         await Probe("ReadIndexesAsync", async () => await file.ReadIndexesAsync(dead.Token));
         await Probe("the scan itself", async () =>
         {
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync().WithCancellation(dead.Token))
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync().WithCancellation(dead.Token))
             {
                 batch.Dispose();
             }

@@ -153,7 +153,7 @@ public sealed class BlockMaskTests
         // pruner -- what makes NO mask is a file with no zone map to read.
         const string Flat = "containers/uncompressed_canonical";
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Flat), CancellationToken.None);
-        string column = file.Schema.GetFieldName(0);
+        string column = file.DType.GetFieldName(0);
         VortexExpr filter = Expr.IsNotNull(Expr.Field(column));
 
         BlockMask? refined = await ZonePruningPlan.RefineAsync(file, file.LayoutTree, filter, CancellationToken.None);

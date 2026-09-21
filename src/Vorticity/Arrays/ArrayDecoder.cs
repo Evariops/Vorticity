@@ -13,7 +13,7 @@ namespace Vorticity.Arrays;
 /// element, and a sealed override devirtualizes inside a loop that decodes many nodes of the same
 /// encoding.
 /// </remarks>
-public abstract class ArrayDecoder
+internal abstract class ArrayDecoder
 {
     /// <summary>
     /// The wire id, UTF-8, e.g. <c>"fastlanes.bitpacked"</c>. Must be a <c>u8</c> literal or a

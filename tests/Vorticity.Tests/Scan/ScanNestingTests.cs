@@ -112,7 +112,7 @@ public sealed class ScanNestingTests
         Assert.True(chunks > 1, "the fixture is a multi-chunk stream");
 
         List<int> sizes = new List<int>();
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
         {
             sizes.Add(batch.RowCount);
         }
@@ -133,7 +133,7 @@ public sealed class ScanNestingTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path("distributions/high_cardinality_i64_r8193"), CancellationToken.None);
 
-        IAsyncEnumerable<RecordBatch> scan = file.Scan().WithMaxBatchRows(700).ExecuteAsync();
+        IAsyncEnumerable<RecordBatch> scan = file.ScanBuilder().WithMaxBatchRows(700).ExecuteAsync();
         IAsyncEnumerator<RecordBatch> left = scan.GetAsyncEnumerator();
         IAsyncEnumerator<RecordBatch> right = scan.GetAsyncEnumerator();
 
@@ -159,7 +159,7 @@ public sealed class ScanNestingTests
 
     private static async Task<long[]> Read(VortexFile file, RowRange? range)
     {
-        ScanBuilder builder = file.Scan();
+        ScanBuilder builder = file.ScanBuilder();
         if (range is RowRange rows)
         {
             builder = builder.Rows(rows);

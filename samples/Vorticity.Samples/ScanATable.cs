@@ -17,7 +17,7 @@ internal static class ScanATable
         ScanMetrics metrics = new ScanMetrics();
         long rows = 0;
         int biggest = 0;
-        await foreach (RecordBatch batch in file.Scan().WithMetrics(metrics).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().WithMetrics(metrics).ExecuteAsync())
         {
             // The batch owns the decoded buffers; disposing it gives them back to the pool.
             using (batch)
@@ -31,7 +31,7 @@ internal static class ScanATable
             $"{metrics.ValuesDecoded} values decoded");
 
         int smaller = 0;
-        await foreach (RecordBatch batch in file.Scan().WithMaxBatchRows(4_096).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().WithMaxBatchRows(4_096).ExecuteAsync())
         {
             using (batch)
             {
@@ -41,10 +41,10 @@ internal static class ScanATable
 
         Console.WriteLine($"{smaller} batches of at most 4096 rows");
 
-        (long requests, long bytes, long scanned) = await Demo.MeasureAsync(path, f => f.Scan());
+        (long requests, long bytes, long scanned) = await Demo.MeasureAsync(path, f => f.ScanBuilder());
         Console.WriteLine($"reading {scanned} rows asked the file for {requests} rounds totalling {bytes} bytes, " +
             $"for a file of {new FileInfo(path).Length} bytes");
 
-        Console.WriteLine($"{await file.Scan().CountAsync()} rows, without decoding one");
+        Console.WriteLine($"{await file.ScanBuilder().CountAsync()} rows, without decoding one");
     }
 }

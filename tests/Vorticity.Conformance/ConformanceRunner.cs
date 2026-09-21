@@ -135,10 +135,10 @@ internal static class ConformanceRunner
                 .ConfigureAwait(false);
 
             CheckNumber(log, "row count", sidecar.RowCount, file.RowCount);
-            SchemaComparer.Compare(sidecar.DTypeTree, file.Schema, string.Empty, log);
+            SchemaComparer.Compare(sidecar.DTypeTree, file.DType, string.Empty, log);
             await CompareMetadataAsync(file, sidecar, log, cancellationToken).ConfigureAwait(false);
 
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
                 .WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 batches++;
@@ -306,7 +306,7 @@ internal static class ConformanceRunner
             .AsTask()
             .GetAwaiter()
             .GetResult();
-        return donor.Schema;
+        return donor.DType;
     });
 
     private static void CheckNumber(MismatchLog log, string what, long expected, long actual)

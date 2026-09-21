@@ -10,7 +10,7 @@ namespace Vorticity.Columns;
 /// <see cref="Bits"/> is borrowed from the owning <see cref="RecordBatch"/> and is invalid once
 /// that batch is disposed.
 /// </remarks>
-public readonly ref struct BoolColumn
+internal readonly ref struct BoolColumn
 {
     private readonly RecordBatch _batch;
     private readonly int _node;

@@ -12,7 +12,7 @@ namespace Vorticity.Arrays.Metadata;
 /// The offset type is <em>not</em> restricted to unsigned: Arrow-style list offsets are signed, so
 /// both signed and unsigned offsets occur here. Only patch indices are required to be unsigned.
 /// </remarks>
-public readonly struct ListMetadata : IEquatable<ListMetadata>
+internal readonly struct ListMetadata : IEquatable<ListMetadata>
 {
     private const string MessageName = "ListMetadata";
 

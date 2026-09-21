@@ -156,7 +156,7 @@ public sealed class BlockPruningDecodeTests
     private static async Task<int> FirstValue(string path)
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync().WithCancellation(CancellationToken.None))
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync().WithCancellation(CancellationToken.None))
         {
             if (batch.RowCount > 0)
             {
@@ -175,7 +175,7 @@ public sealed class BlockPruningDecodeTests
         List<int> values = [];
         byte[] name = System.Text.Encoding.UTF8.GetBytes(string.Empty);
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Where(filter).WithPruning(prune).WithMaxBatchRows(cap).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
@@ -221,7 +221,7 @@ public sealed class BlockPruningDecodeTests
         List<long> values = [];
         byte[] name = System.Text.Encoding.UTF8.GetBytes("v");
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await foreach (RecordBatch batch in file.Scan().Where(filter).WithPruning(prune).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(filter).WithPruning(prune).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             VortexColumn view = batch.Column(name);

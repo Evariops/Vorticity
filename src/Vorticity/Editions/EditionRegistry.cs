@@ -21,7 +21,7 @@ namespace Vorticity.Editions;
 /// single table would silently answer the wrong question for them.
 /// </para>
 /// </remarks>
-public static class EditionRegistry
+internal static class EditionRegistry
 {
     /// <summary>
     /// The newest edition this build knows about. Reading is not limited to it - an unknown id from

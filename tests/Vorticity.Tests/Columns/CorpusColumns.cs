@@ -44,7 +44,7 @@ internal sealed class CorpusColumns : IAsyncDisposable
     internal RecordBatch Batch { get; }
 
     /// <summary>The file's schema, straight off the dtype segment.</summary>
-    internal DType Schema => _file.Schema;
+    internal DType Schema => _file.DType;
 
     /// <summary>The corpus root, located from this source file's compile-time path.</summary>
     internal static string CorpusRoot { get; } = LocateCorpus();
@@ -112,7 +112,7 @@ internal sealed class CorpusColumns : IAsyncDisposable
     {
         int budget = VortexLimits.MaxFlatBufferTables;
         return Decode(
-            file, context, layoutIds, LayoutView.Root(layoutBytes.Buffer.Span, ref budget), file.Schema, 0);
+            file, context, layoutIds, LayoutView.Root(layoutBytes.Buffer.Span, ref budget), file.DType, 0);
     }
 
     private static void Register(

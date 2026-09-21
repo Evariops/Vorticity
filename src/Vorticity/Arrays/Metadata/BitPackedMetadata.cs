@@ -19,7 +19,7 @@ namespace Vorticity.Arrays.Metadata;
 /// offsets moves it to child 2, patches with them to child 3 — so presence is exposed explicitly
 /// and is never inferred from an all-zero descriptor.
 /// </remarks>
-public readonly struct BitPackedMetadata : IEquatable<BitPackedMetadata>
+internal readonly struct BitPackedMetadata : IEquatable<BitPackedMetadata>
 {
     private const string MessageName = "BitPackedMetadata";
 

@@ -40,16 +40,16 @@ public sealed class FileMayMatchTests
             // The file itself says whether it carries statistics: the authority, not a manifest.
             await using VortexFile file = await VortexFile.OpenAsync(
                 entry.Path, VortexOpenOptions.Default, CancellationToken.None);
-            if (!file.HasFileStatistics || file.Schema.Kind != DTypeKind.Struct || file.RowCount == 0)
+            if (!file.HasFileStatistics || file.DType.Kind != DTypeKind.Struct || file.RowCount == 0)
             {
                 continue;
             }
 
             files++;
-            FileStatistics statistics = file.Statistics;
-            for (int i = 0; i < statistics.FieldCount && i < file.Schema.FieldCount; i++)
+            FileStatistics statistics = file.FileStatistics;
+            for (int i = 0; i < statistics.FieldCount && i < file.DType.FieldCount; i++)
             {
-                DType dtype = file.Schema.GetField(i);
+                DType dtype = file.DType.GetField(i);
                 if (dtype.Kind is not (DTypeKind.Primitive or DTypeKind.Bool or DTypeKind.Utf8 or DTypeKind.Binary))
                 {
                     continue;
@@ -65,7 +65,7 @@ public sealed class FileMayMatchTests
                 // A field NAMED with a dot (`types/struct_field_names` has `a.b`) cannot be
                 // addressed by the path syntax, which splits on it: the projection, the zone
                 // pruner and this one all read `a.b` as `b` inside `a`, and answer "may match".
-                string name = file.Schema.GetFieldName(i);
+                string name = file.DType.GetFieldName(i);
                 if (name.Contains('.', StringComparison.Ordinal))
                 {
                     continue;
@@ -78,7 +78,7 @@ public sealed class FileMayMatchTests
                 VortexExpr above = Expr.Gt(field, Expr.Literal(max));
                 Assert.False(
                     file.MayMatch(above),
-                    $"{entry.Id}.{file.Schema.GetFieldName(i)}: the statistics prove x > max impossible");
+                    $"{entry.Id}.{file.DType.GetFieldName(i)}: the statistics prove x > max impossible");
                 Assert.Equal(0, await Count(file, above));
 
                 // At or below it the file may match, and saying otherwise would be the one error
@@ -86,7 +86,7 @@ public sealed class FileMayMatchTests
                 VortexExpr atMost = Expr.Le(field, Expr.Literal(max));
                 if (!file.MayMatch(atMost))
                 {
-                    refusedWrongly.Add(entry.Id + "." + file.Schema.GetFieldName(i));
+                    refusedWrongly.Add(entry.Id + "." + file.DType.GetFieldName(i));
                 }
             }
 
@@ -120,7 +120,7 @@ public sealed class FileMayMatchTests
 
             await using VortexFile file = await VortexFile.OpenAsync(
                 entry.Path, VortexOpenOptions.Default, CancellationToken.None);
-            if (file.HasFileStatistics || file.Schema.Kind != DTypeKind.Struct || file.Schema.FieldCount == 0)
+            if (file.HasFileStatistics || file.DType.Kind != DTypeKind.Struct || file.DType.FieldCount == 0)
             {
                 continue;
             }
@@ -128,13 +128,13 @@ public sealed class FileMayMatchTests
             // The constant is drawn from the column's own kind: a comparison across kinds is
             // refused before the statistics are consulted at all, which would say nothing about
             // what a file without them answers.
-            if (!TryExceedingConstant(file.Schema.GetField(0), out FilterLiteral above))
+            if (!TryExceedingConstant(file.DType.GetField(0), out FilterLiteral above))
             {
                 continue;
             }
 
             files++;
-            FieldExpr field = Expr.Field(file.Schema.GetFieldName(0));
+            FieldExpr field = Expr.Field(file.DType.GetFieldName(0));
             Assert.True(file.MayMatch(Expr.Gt(field, Expr.Literal(above))));
         }
 
@@ -172,7 +172,7 @@ public sealed class FileMayMatchTests
     private static async Task<long> Count(VortexFile file, VortexExpr filter)
     {
         long rows = 0;
-        await foreach (var batch in file.Scan().Where(filter).WithPruning(false).ExecuteAsync()
+        await foreach (var batch in file.ScanBuilder().Where(filter).WithPruning(false).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;

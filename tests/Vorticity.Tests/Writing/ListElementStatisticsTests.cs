@@ -431,8 +431,8 @@ public sealed class ListElementStatisticsTests
                 ElementStatistics = elementStatistics,
             };
 
-            await using VortexFileWriter writer = VortexFileWriter.Create(path, source.Schema, options);
-            await foreach (RecordBatch batch in source.Scan().WithMaxBatchRows(1024).ExecuteAsync())
+            await using VortexFileWriter writer = VortexFileWriter.Create(path, source.DType, options);
+            await foreach (RecordBatch batch in source.ScanBuilder().WithMaxBatchRows(1024).ExecuteAsync())
             {
                 await writer.WriteAsync(batch);
             }
@@ -597,7 +597,7 @@ public sealed class ListElementStatisticsTests
     {
         List<string> rows = [];
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
         {
             ListShapes.Describe(batch, rows);
         }

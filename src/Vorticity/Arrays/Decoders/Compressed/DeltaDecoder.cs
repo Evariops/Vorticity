@@ -19,7 +19,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// as the unsigned type of the same width, because a wrapping add inverts the encoder's wrapping
 /// subtract whatever the sign.
 /// </summary>
-public sealed class DeltaDecoder : ArrayDecoder
+internal sealed class DeltaDecoder : ArrayDecoder
 {
     private const string Id = "fastlanes.delta";
 

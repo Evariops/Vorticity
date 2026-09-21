@@ -9,7 +9,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// no buffers and one child, whose type is the unsigned counterpart of the array's own signed
 /// primitive type and carries the same nullability.
 /// </summary>
-public sealed class ZigZagDecoder : ArrayDecoder
+internal sealed class ZigZagDecoder : ArrayDecoder
 {
     private const string Id = "vortex.zigzag";
 

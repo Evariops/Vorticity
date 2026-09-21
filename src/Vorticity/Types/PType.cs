@@ -9,7 +9,7 @@ namespace Vorticity.Types;
 /// 0..3, signed 4..7, floats 8..10 — which is what the range tests in
 /// <see cref="PTypeExtensions"/> rely on.
 /// </summary>
-public enum PType : byte
+internal enum PType : byte
 {
     /// <summary>Unsigned 8-bit integer.</summary>
     U8 = 0,
@@ -46,7 +46,7 @@ public enum PType : byte
 }
 
 /// <summary>Classification and width helpers for <see cref="PType"/>.</summary>
-public static class PTypeExtensions
+internal static class PTypeExtensions
 {
     /// <summary>Highest defined <see cref="PType"/> tag. Anything above it is malformed.</summary>
     internal const byte MaxPType = (byte)PType.F64;

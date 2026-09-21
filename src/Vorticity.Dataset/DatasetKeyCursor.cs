@@ -12,7 +12,7 @@ namespace Vorticity.Dataset;
 /// only once it could hold the next key, which keeps the number of open cursors bounded. The merge
 /// picks the smallest key by a linear scan rather than a heap, since that count is a small constant.
 /// </summary>
-public sealed class DatasetKeyCursor : IAsyncDisposable
+internal sealed class DatasetKeyCursor : IAsyncDisposable
 {
     private readonly VortexDataset _dataset;
     private readonly ClusteringKey _key;

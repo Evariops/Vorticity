@@ -36,7 +36,7 @@ namespace Vorticity.IO;
 /// concurrent calls on one instance are safe. The source itself holds no mutable state.
 /// </para>
 /// </remarks>
-public sealed class RandomAccessSegmentSource : ISegmentSource
+internal sealed class RandomAccessSegmentSource : ISegmentSource
 {
     private readonly SafeFileHandle _handle;
     private readonly bool _ownsHandle;

@@ -9,7 +9,7 @@ namespace Vorticity.Dataset;
 /// touches at most eight plus the level count. Empty levels keep their place, since a level's
 /// number is its meaning.
 /// </summary>
-public sealed class DatasetLevels
+internal sealed class DatasetLevels
 {
     private static readonly DatasetLevels None = new DatasetLevels([]);
     private readonly DatasetTree[] _levels;

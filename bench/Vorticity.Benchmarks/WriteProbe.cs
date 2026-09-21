@@ -173,7 +173,7 @@ internal static class WriteProbe
         if (options is not { } write)
         {
             long rows = 0;
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync().WithCancellation(cancellationToken))
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync().WithCancellation(cancellationToken))
             {
                 rows += batch.RowCount;
             }
@@ -182,8 +182,8 @@ internal static class WriteProbe
             return watch.Elapsed.TotalMilliseconds;
         }
 
-        await using VortexFileWriter writer = VortexFileWriter.Create(new CountingSink(), file.Schema, write);
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync().WithCancellation(cancellationToken))
+        await using VortexFileWriter writer = VortexFileWriter.Create(new CountingSink(), file.DType, write);
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync().WithCancellation(cancellationToken))
         {
             await writer.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
         }

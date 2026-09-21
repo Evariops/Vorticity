@@ -9,7 +9,7 @@ namespace Vorticity.Scanning;
 /// same instance, so running a scan twice sums, and a fresh count means a fresh object. The
 /// additions are interlocked because a scan above degree one runs its lanes on the thread pool.
 /// </summary>
-public sealed class ScanMetrics
+internal sealed class ScanMetrics
 {
     private long _segmentRequests;
     private long _bytesRequested;

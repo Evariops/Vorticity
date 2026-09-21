@@ -8,7 +8,7 @@ namespace Vorticity.Serialization.Schemas;
 /// The layout tree comes from the file and two parents may legally share one child, so its depth
 /// bounds nothing: <see cref="Root"/> carries a table budget that the whole walk spends from.
 /// </remarks>
-public readonly ref struct LayoutView
+internal readonly ref struct LayoutView
 {
     private readonly FlatBufferTable _table;
 

@@ -47,7 +47,7 @@ public sealed class ObjectAdapterTests
 
         long sum = 0;
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
         {
             ReadOnlySpan<long> keys = batch.Column(0).AsPrimitive<long>().Values;
             for (int row = 0; row < batch.RowCount; row++)
@@ -75,7 +75,7 @@ public sealed class ObjectAdapterTests
         store.Reset();
 
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
         {
             rows += batch.RowCount;
         }

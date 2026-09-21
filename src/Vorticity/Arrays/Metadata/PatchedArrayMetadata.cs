@@ -5,7 +5,7 @@ using Vorticity.Serialization.Protobuf;
 namespace Vorticity.Arrays.Metadata;
 
 /// <summary>Metadata of a <c>vortex.patched</c> node.</summary>
-public readonly struct PatchedArrayMetadata : IEquatable<PatchedArrayMetadata>
+internal readonly struct PatchedArrayMetadata : IEquatable<PatchedArrayMetadata>
 {
     private const string MessageName = "PatchedMetadata";
 

@@ -19,7 +19,7 @@ internal static class FilterRows
 
         long rows = 0;
         int smallest = int.MaxValue;
-        await foreach (RecordBatch batch in file.Scan().Where(recent).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(recent).ExecuteAsync())
         {
             using (batch)
             {
@@ -35,16 +35,16 @@ internal static class FilterRows
         await Explain("celsius > 45", hot);
 
         (long clusteredRequests, long clusteredBytes, long kept) =
-            await Demo.MeasureAsync(path, f => f.Scan().Where(recent));
+            await Demo.MeasureAsync(path, f => f.ScanBuilder().Where(recent));
         (long scatteredRequests, long scatteredBytes, long hotRows) =
-            await Demo.MeasureAsync(path, f => f.Scan().Where(hot));
-        (long wholeRequests, long wholeBytes, long _) = await Demo.MeasureAsync(path, f => f.Scan());
+            await Demo.MeasureAsync(path, f => f.ScanBuilder().Where(hot));
+        (long wholeRequests, long wholeBytes, long _) = await Demo.MeasureAsync(path, f => f.ScanBuilder());
         Console.WriteLine($"measured whole:      {wholeRequests} rounds, {wholeBytes} bytes");
         Console.WriteLine($"measured day >= 900: {clusteredRequests} rounds, {clusteredBytes} bytes, {kept} rows");
         Console.WriteLine($"measured celsius:    {scatteredRequests} rounds, {scatteredBytes} bytes, {hotRows} rows");
 
-        Console.WriteLine($"any: {await file.Scan().Where(recent).AnyAsync()}");
-        Console.WriteLine($"count: {await file.Scan().Where(recent).CountAsync()}");
+        Console.WriteLine($"any: {await file.ScanBuilder().Where(recent).AnyAsync()}");
+        Console.WriteLine($"count: {await file.ScanBuilder().Where(recent).CountAsync()}");
         Console.WriteLine($"the file as a whole may match: {file.MayMatch(recent)}");
         Console.WriteLine("and for a day past its last: " +
             $"{file.MayMatch(Expr.Ge(Expr.Field("day"), Expr.Literal(FilterLiteral.From(5000))))}");
@@ -59,7 +59,7 @@ internal static class FilterRows
         // read, rather than yielding the empty result that reads like an empty file.
         try
         {
-            file.Scan().Where(Expr.Gt(Expr.Field("day"), Expr.Literal(FilterLiteral.From("900"))));
+            file.ScanBuilder().Where(Expr.Gt(Expr.Field("day"), Expr.Literal(FilterLiteral.From("900"))));
         }
         catch (ArgumentException error)
         {
@@ -68,7 +68,7 @@ internal static class FilterRows
 
         async Task Explain(string what, VortexExpr predicate)
         {
-            ScanPlan plan = await file.Scan().Where(predicate).ExplainAsync();
+            ScanPlan plan = await file.ScanBuilder().Where(predicate).ExplainAsync();
             Console.WriteLine($"{what}: {plan.LiveBlocks} of {plan.Blocks} blocks survive, " +
                 $"count exact: {plan.Count?.ExactCover}");
             foreach (PruningStep step in plan.Pruning)
@@ -79,7 +79,7 @@ internal static class FilterRows
         }
 
         async Task Count(string what, VortexExpr predicate) =>
-            Console.WriteLine($"{what}: {await file.Scan().Where(predicate).CountAsync()} rows");
+            Console.WriteLine($"{what}: {await file.ScanBuilder().Where(predicate).CountAsync()} rows");
     }
 
     private static int SmallestDay(RecordBatch batch)

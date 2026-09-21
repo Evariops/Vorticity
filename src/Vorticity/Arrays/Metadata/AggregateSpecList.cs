@@ -20,7 +20,7 @@ namespace Vorticity.Arrays.Metadata;
 /// to keep, or consume each before reading the next.
 /// </para>
 /// </remarks>
-public sealed class AggregateSpecList
+internal sealed class AggregateSpecList
 {
     private byte[] _bytes;
     private Entry[] _entries;

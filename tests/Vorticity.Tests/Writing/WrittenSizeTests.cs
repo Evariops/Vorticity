@@ -257,9 +257,9 @@ public sealed class WrittenSizeTests
             await using (VortexFile source = await VortexFile.OpenAsync(
                 entry.Path, OpenOptionsFor(entry), CancellationToken.None))
             await using (VortexFileWriter writer =
-                VortexFileWriter.Create(written, source.Schema, options))
+                VortexFileWriter.Create(written, source.DType, options))
             {
-                await foreach (RecordBatch batch in source.Scan()
+                await foreach (RecordBatch batch in source.ScanBuilder()
                     .WithMaxBatchRows(ChunkedRowBlock).ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
@@ -329,9 +329,9 @@ public sealed class WrittenSizeTests
         {
             await using (VortexFile source = await VortexFile.OpenAsync(
                 entry.Path, OpenOptionsFor(entry), CancellationToken.None))
-            await using (VortexFileWriter writer = VortexFileWriter.Create(written, source.Schema))
+            await using (VortexFileWriter writer = VortexFileWriter.Create(written, source.DType))
             {
-                await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+                await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     await writer.WriteAsync(batch, CancellationToken.None);
@@ -374,6 +374,6 @@ public sealed class WrittenSizeTests
                 .AsTask()
                 .GetAwaiter()
                 .GetResult();
-            return donor.Schema;
+            return donor.DType;
         });
 }

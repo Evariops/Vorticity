@@ -34,7 +34,7 @@ namespace Vorticity.Arrays;
 /// written to or cleared.
 /// </para>
 /// </remarks>
-public readonly ref struct TypedScalar
+internal readonly ref struct TypedScalar
 {
     private readonly ScalarValue _value;
     private readonly DType _dtype;
@@ -393,7 +393,7 @@ public readonly ref struct TypedScalar
 }
 
 /// <summary>Reads a wire <c>ScalarValue</c> against a <see cref="DType"/>.</summary>
-public static class TypedScalarReader
+internal static class TypedScalarReader
 {
     /// <summary>
     /// Reads a bare <c>vortex.scalar.ScalarValue</c> message body against

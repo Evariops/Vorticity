@@ -176,7 +176,7 @@ public sealed class ForgedFixtureTests
             await using VortexFile file = await VortexFile.OpenAsync(
                 new MemorySegmentSource(bytes), VortexOpenOptions.Default, TestContext.Current.CancellationToken);
 
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
                 .WithCancellation(TestContext.Current.CancellationToken))
             {
                 batch.Dispose();

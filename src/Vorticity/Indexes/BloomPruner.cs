@@ -74,7 +74,7 @@ internal sealed class BloomPruner
             return null;
         }
 
-        DType schema = file.Schema;
+        DType schema = file.DType;
         ulong blocks = (ulong)((file.RowCount + blockRows - 1) / blockRows);
         Dictionary<string, Column> columns = new Dictionary<string, Column>(StringComparer.Ordinal);
         foreach (IndexEntry entry in directory.Entries)

@@ -16,7 +16,7 @@ using Vorticity.Writing;
 namespace Vorticity.Dataset;
 
 /// <summary>What a dataset needs beyond its store.</summary>
-public sealed record DatasetOptions
+internal sealed record DatasetOptions
 {
     /// <summary>The chunking seed. Drawn once at creation and carried by every header.</summary>
     public ulong Seed { get; init; } = (ulong)Random.Shared.NextInt64();
@@ -81,7 +81,7 @@ internal sealed record ObjectDraft(
 internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<byte> Key);
 
 /// <summary>A versioned dataset over an object store.</summary>
-public sealed class VortexDataset : IAsyncDisposable
+internal sealed class VortexDataset : IAsyncDisposable
 {
     /// <summary>The bytes of the uid that ends every tree key.</summary>
     private const int UidBytes = 16;
@@ -258,7 +258,7 @@ public sealed class VortexDataset : IAsyncDisposable
             {
                 // Every object has the dataset's schema; one with another is refused here rather
                 // than failing the first scan.
-                if (!Schema.IsDefault && file.Schema != Schema)
+                if (!Schema.IsDefault && file.DType != Schema)
                 {
                     throw new ArgumentException(
                         $"The object '{objectKey}' has a schema other than the dataset's; a dataset " +
@@ -760,7 +760,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>A file's identity, or zero when it has none.</summary>
     internal static UInt128 Identity(VortexFile file) =>
-        file.Identity is { } identity ? Uid(identity) : UInt128.Zero;
+        file.StoredIdentity is { } identity ? Uid(identity) : UInt128.Zero;
 
     private static UInt128 Uid(Guid identity)
     {

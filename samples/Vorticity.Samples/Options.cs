@@ -50,7 +50,7 @@ internal static class Options
             {
                 Read = new VortexReadOptions { MaxDecompressedSize = 4_096 },
             });
-            await foreach (RecordBatch batch in tight.Scan().ExecuteAsync())
+            await foreach (RecordBatch batch in tight.ScanBuilder().ExecuteAsync())
             {
                 batch.Dispose();
             }

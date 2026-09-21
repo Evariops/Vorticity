@@ -15,7 +15,7 @@ namespace Vorticity.Dataset;
 /// trips instead of one per segment; each segment is then copied, since a buffer must sit at its
 /// declared alignment and a run's bytes arrive in a pooled array that guarantees nothing.
 /// </summary>
-public sealed class ObjectSegmentSource : ISegmentSource
+internal sealed class ObjectSegmentSource : ISegmentSource
 {
     private readonly IObjectStore _store;
     private readonly string _key;

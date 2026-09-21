@@ -151,7 +151,7 @@ public sealed class HarnessSelfTests
         await using VortexFile file = await VortexFile.OpenAsync(
             entry.FullPath, TestContext.Current.CancellationToken);
 
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(TestContext.Current.CancellationToken))
         {
             ulong bits = ReadBits(batch, row);
@@ -175,7 +175,7 @@ public sealed class HarnessSelfTests
         await using VortexFile file = await VortexFile.OpenAsync(
             entry.FullPath, TestContext.Current.CancellationToken);
 
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(TestContext.Current.CancellationToken))
         {
             CompareOne(batch, row, expected, log);

@@ -13,7 +13,7 @@ namespace Vorticity;
 /// field's, which is why the two are exposed separately here. The values are surfaced as the file
 /// records them, and no correctness decision is ever taken from them on the caller's behalf.
 /// </summary>
-public sealed class FileStatistics
+internal sealed class FileStatistics
 {
     private readonly DType[] _fieldDTypes;
     private readonly DType[] _sumDTypes;
@@ -152,29 +152,29 @@ public readonly struct FieldStatistics
     }
 
     /// <summary>True when a <c>min</c> statistic is recorded.</summary>
-    public bool HasMin => (_present & Present.Min) != 0;
+    internal bool HasMin => (_present & Present.Min) != 0;
 
     /// <summary>
     /// The <c>min</c> statistic, untyped. Interpret it against
     /// <see cref="FileStatistics.GetFieldDType"/>; <see cref="ScalarValue.IsAbsent"/> when
     /// <see cref="HasMin"/> is false.
     /// </summary>
-    public ScalarValue Min => _min;
+    internal ScalarValue Min => _min;
 
     /// <summary>Whether <see cref="Min"/> is the true minimum or only a lower bound.</summary>
-    public StatPrecision MinPrecision => _minPrecision;
+    internal StatPrecision MinPrecision => _minPrecision;
 
     /// <summary>True when a <c>max</c> statistic is recorded.</summary>
-    public bool HasMax => (_present & Present.Max) != 0;
+    internal bool HasMax => (_present & Present.Max) != 0;
 
     /// <summary>The <c>max</c> statistic, untyped. See <see cref="Min"/>.</summary>
-    public ScalarValue Max => _max;
+    internal ScalarValue Max => _max;
 
     /// <summary>Whether <see cref="Max"/> is the true maximum or only an upper bound.</summary>
-    public StatPrecision MaxPrecision => _maxPrecision;
+    internal StatPrecision MaxPrecision => _maxPrecision;
 
     /// <summary>True when a <c>sum</c> statistic is recorded. A sum is always exact when present.</summary>
-    public bool HasSum => (_present & Present.Sum) != 0;
+    internal bool HasSum => (_present & Present.Sum) != 0;
 
     /// <summary>
     /// The <c>sum</c> statistic, untyped. Interpret it against
@@ -182,7 +182,7 @@ public readonly struct FieldStatistics
     /// contains an infinity this is <em>not</em> the IEEE sum: the aggregate is bound with
     /// NaN-skipping semantics and the result is still marked exact.
     /// </summary>
-    public ScalarValue Sum => _sum;
+    internal ScalarValue Sum => _sum;
 
     /// <summary>Reads the <c>is_sorted</c> statistic.</summary>
     /// <param name="value">The value when present.</param>
@@ -196,7 +196,7 @@ public readonly struct FieldStatistics
     /// <summary>Reads the <c>is_strict_sorted</c> statistic.</summary>
     /// <param name="value">The value when present.</param>
     /// <returns>Whether the statistic was recorded.</returns>
-    public bool TryGetIsStrictSorted(out bool value)
+    internal bool TryGetIsStrictSorted(out bool value)
     {
         value = _isStrictSorted;
         return (_present & Present.IsStrictSorted) != 0;
@@ -214,7 +214,7 @@ public readonly struct FieldStatistics
     /// <summary>Reads the <c>null_count</c> statistic. Zero present is different from absent.</summary>
     /// <param name="value">The value when present.</param>
     /// <returns>Whether the statistic was recorded.</returns>
-    public bool TryGetNullCount(out ulong value)
+    internal bool TryGetStoredNullCount(out ulong value)
     {
         value = _nullCount;
         return (_present & Present.NullCount) != 0;
@@ -223,7 +223,7 @@ public readonly struct FieldStatistics
     /// <summary>Reads the <c>uncompressed_size_in_bytes</c> statistic.</summary>
     /// <param name="value">The value when present.</param>
     /// <returns>Whether the statistic was recorded.</returns>
-    public bool TryGetUncompressedSizeInBytes(out ulong value)
+    internal bool TryGetUncompressedSizeInBytes(out ulong value)
     {
         value = _uncompressedSizeInBytes;
         return (_present & Present.UncompressedSizeInBytes) != 0;
@@ -232,7 +232,7 @@ public readonly struct FieldStatistics
     /// <summary>Reads the <c>nan_count</c> statistic.</summary>
     /// <param name="value">The value when present.</param>
     /// <returns>Whether the statistic was recorded.</returns>
-    public bool TryGetNanCount(out ulong value)
+    internal bool TryGetNanCount(out ulong value)
     {
         value = _nanCount;
         return (_present & Present.NanCount) != 0;

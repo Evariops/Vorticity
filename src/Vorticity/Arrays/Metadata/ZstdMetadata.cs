@@ -7,7 +7,7 @@ namespace Vorticity.Arrays.Metadata;
 /// One frame of a <c>vortex.zstd</c> array:
 /// <c>message ZstdFrameMetadata { uint64 uncompressed_size = 1; uint64 n_values = 2; }</c>.
 /// </summary>
-public readonly struct ZstdFrameMetadata : IEquatable<ZstdFrameMetadata>
+internal readonly struct ZstdFrameMetadata : IEquatable<ZstdFrameMetadata>
 {
     private const string MessageName = "ZstdFrameMetadata";
 
@@ -99,7 +99,7 @@ public readonly struct ZstdFrameMetadata : IEquatable<ZstdFrameMetadata>
 /// invented here; size the destination with <see cref="CountFrames"/>, which is bounded by the
 /// metadata length because every frame costs at least two bytes on the wire.
 /// </remarks>
-public readonly struct ZstdMetadata : IEquatable<ZstdMetadata>
+internal readonly struct ZstdMetadata : IEquatable<ZstdMetadata>
 {
     private const string MessageName = "ZstdMetadata";
 

@@ -8,7 +8,7 @@ namespace Vorticity.IO;
 /// instance is safely shared by every concurrent read. Beyond the coalescing gap, the size
 /// thresholds are there to bound allocations whose size would otherwise come from file content.
 /// </summary>
-public sealed class SegmentReadOptions
+internal sealed class SegmentReadOptions
 {
     /// <summary>1 MiB.</summary>
     public const int DefaultCoalesceGapBytes = 1 << 20;

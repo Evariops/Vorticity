@@ -75,7 +75,7 @@ public sealed class DatasetCompactionTests
         await using MemorySegmentSource source = new MemorySegmentSource(sorted);
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
 
-        List<(long Key, double Measure)> expected = await RowsAsync(file.Scan());
+        List<(long Key, double Measure)> expected = await RowsAsync(file.ScanBuilder());
         List<(long Key, double Measure)> produced = await RowsAsync(dataset.Scan());
         Assert.Equal(expected, produced);
 
@@ -708,10 +708,10 @@ public sealed class DatasetCompactionTests
 
     private static bool IsSorted(VortexFile file, string path)
     {
-        int index = file.Schema.IndexOfField(path);
+        int index = file.DType.IndexOfField(path);
         return index >= 0
             && file.HasFileStatistics
-            && file.Statistics.GetField(index).TryGetIsSorted(out bool sorted)
+            && file.FileStatistics.GetField(index).TryGetIsSorted(out bool sorted)
             && sorted;
     }
 

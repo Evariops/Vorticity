@@ -13,7 +13,7 @@ namespace Vorticity.Dataset;
 /// <see cref="CommitAsync"/> creates the object afterwards, and <see cref="Discard"/> is what a
 /// caller that changed its mind calls instead.
 /// </summary>
-public sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
+internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
 {
     /// <summary>The most bytes this sink buffers before refusing, 1 GiB.</summary>
     public const long DefaultMaxBytes = 1L << 30;

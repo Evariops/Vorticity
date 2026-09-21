@@ -9,7 +9,7 @@ using Vorticity.Scanning;
 namespace Vorticity.Dataset;
 
 /// <summary>Decides what to compact. The planner reads leaf entries only, never rows.</summary>
-public static class CompactionPolicy
+internal static class CompactionPolicy
 {
     /// <summary>
     /// Plans the compaction due on a dataset's current version; the plan's job is null when nothing

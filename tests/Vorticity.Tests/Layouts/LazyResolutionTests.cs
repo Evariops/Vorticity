@@ -106,7 +106,7 @@ public sealed class LazyResolutionTests
         DType projected = node.DType;
         Assert.Equal(1, projected.FieldCount);
         Assert.Equal("ints", projected.GetFieldName(0));
-        Assert.Equal(file.Schema.GetField(0), projected.GetField(0));
+        Assert.Equal(file.DType.GetField(0), projected.GetField(0));
     }
 
     [Fact]
@@ -160,7 +160,7 @@ public sealed class LazyResolutionTests
 
                 Assert.Equal(1, node.FieldCount);
                 Assert.Equal(1, node.DType.FieldCount);
-                Assert.Equal(file.Schema.GetFieldName(field), node.DType.GetFieldName(0));
+                Assert.Equal(file.DType.GetFieldName(field), node.DType.GetFieldName(0));
 
                 byte[] projected = CanonicalDigest.Of(context, node.GetFieldIndex(0));
                 Assert.True(

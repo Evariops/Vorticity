@@ -193,11 +193,11 @@ public sealed class DatasetLevelTests
         byte[] single = await OneFileAsync(types, schema, objects * 200, options.Write);
         await using MemorySegmentSource source = new MemorySegmentSource(single);
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
-        Assert.Equal(await KeysAsync(file.Scan()), await KeysAsync(dataset.Scan()));
+        Assert.Equal(await KeysAsync(file.ScanBuilder()), await KeysAsync(dataset.Scan()));
 
         // And `Rows(a, b)` still addresses the dataset's order across the levels it now spans.
         Assert.Equal(
-            await KeysAsync(file.Scan().Rows(new RowRange(150, 450))),
+            await KeysAsync(file.ScanBuilder().Rows(new RowRange(150, 450))),
             await KeysAsync(dataset.Rows(150, 450)));
     }
 

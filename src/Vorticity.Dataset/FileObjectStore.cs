@@ -12,7 +12,7 @@ namespace Vorticity.Dataset;
 /// content is not: a process that dies mid-write leaves a short object under a taken key, which the
 /// format detects on read rather than the store preventing it.
 /// </summary>
-public sealed class FileObjectStore : IObjectStore
+internal sealed class FileObjectStore : IObjectStore
 {
     private readonly string _root;
     private bool _disposed;

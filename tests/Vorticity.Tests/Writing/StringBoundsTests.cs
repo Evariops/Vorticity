@@ -295,7 +295,7 @@ public sealed class StringBoundsTests
     private static async Task<List<string>> FilteredRows(VortexFile file, VortexExpr filter, bool pruning)
     {
         List<string> rows = [];
-        await foreach (RecordBatch batch in file.Scan().Where(filter).WithPruning(pruning).WithIndexes(false).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(filter).WithPruning(pruning).WithIndexes(false).ExecuteAsync())
         {
             Values.DescribeRows(batch, rows);
         }

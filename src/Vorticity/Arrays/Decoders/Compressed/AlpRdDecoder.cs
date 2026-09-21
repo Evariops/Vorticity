@@ -33,7 +33,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// something plausible is worse than refusing the file.
 /// </para>
 /// </remarks>
-public sealed class AlpRdDecoder : ArrayDecoder
+internal sealed class AlpRdDecoder : ArrayDecoder
 {
     /// <summary>The wire id.</summary>
     public const string Id = "vortex.alprd";

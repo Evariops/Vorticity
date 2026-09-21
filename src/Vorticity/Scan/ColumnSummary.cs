@@ -27,7 +27,7 @@ namespace Vorticity.Scanning;
 /// </param>
 /// <param name="NullCount">How many of the rows are null.</param>
 /// <param name="HasNullCount">Whether <paramref name="NullCount"/> was recorded.</param>
-public readonly record struct ColumnSummary(
+internal readonly record struct ColumnSummary(
     string Path,
     FilterLiteral Min,
     bool HasMin,
@@ -45,7 +45,7 @@ public readonly record struct ColumnSummary(
 }
 
 /// <summary>Reads a file's per-column summaries, and prunes with them.</summary>
-public static class ColumnSummaries
+internal static class ColumnSummaries
 {
     /// <summary>The summaries of a file's first <paramref name="limit"/> top-level columns.</summary>
     /// <param name="file">An open file; no data segment is read.</param>
@@ -66,13 +66,13 @@ public static class ColumnSummaries
     {
         ArgumentNullException.ThrowIfNull(file);
         ArgumentOutOfRangeException.ThrowIfNegative(limit);
-        DType schema = file.Schema;
+        DType schema = file.DType;
         if (!file.HasFileStatistics || schema.Kind != DTypeKind.Struct)
         {
             return [];
         }
 
-        FileStatistics statistics = file.Statistics;
+        FileStatistics statistics = file.FileStatistics;
         int count = Math.Min(Math.Min(limit, schema.FieldCount), statistics.FieldCount);
         List<ColumnSummary> summaries = new List<ColumnSummary>(count);
         for (int index = 0; index < count; index++)
@@ -96,13 +96,13 @@ public static class ColumnSummaries
     {
         ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(paths);
-        DType schema = file.Schema;
+        DType schema = file.DType;
         if (!file.HasFileStatistics || schema.Kind != DTypeKind.Struct)
         {
             return [];
         }
 
-        FileStatistics statistics = file.Statistics;
+        FileStatistics statistics = file.FileStatistics;
         List<ColumnSummary> summaries = new List<ColumnSummary>(paths.Count);
         HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
         for (int i = 0; i < paths.Count; i++)
@@ -155,7 +155,7 @@ public static class ColumnSummaries
         bool hasMax = field.HasMax && FileStatisticsPruner.TryLiteral(field.Max, out max);
         bool exact = (!field.HasMin || field.MinPrecision == StatPrecision.Exact)
             && (!field.HasMax || field.MaxPrecision == StatPrecision.Exact);
-        bool hasNulls = field.TryGetNullCount(out ulong nulls) && nulls <= long.MaxValue;
+        bool hasNulls = field.TryGetStoredNullCount(out ulong nulls) && nulls <= long.MaxValue;
         return new ColumnSummary(
             path, min, hasMin, max, hasMax, exact, hasNulls ? (long)nulls : 0, hasNulls);
     }
@@ -179,7 +179,7 @@ public static class ColumnSummaries
 /// refute, so the parts of the question that do not change -- which columns the predicate reads --
 /// are worked out once, here, instead of once per node.
 /// </remarks>
-public sealed class SummaryPruner
+internal sealed class SummaryPruner
 {
     private readonly VortexExpr _filter;
     private readonly List<string> _paths = [];

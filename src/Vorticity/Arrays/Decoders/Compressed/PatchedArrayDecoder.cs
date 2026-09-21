@@ -17,7 +17,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// No conformant writer emits this encoding, which the reference implementation only builds in
 /// memory; it is decoded anyway because doing so costs nothing.
 /// </remarks>
-public sealed class PatchedArrayDecoder : ArrayDecoder
+internal sealed class PatchedArrayDecoder : ArrayDecoder
 {
     private const string Id = "vortex.patched";
 

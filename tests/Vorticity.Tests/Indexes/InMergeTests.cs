@@ -68,7 +68,7 @@ public sealed class InMergeTests
             List<long> expected = [.. Enumerable.Range(0, Rows).Select(Key).Where(set.Contains)];
 
             await using VortexFile file = await VortexFile.OpenAsync(path);
-            Assert.Equal(expected.Count, await file.Scan().Where(filter).CountAsync());
+            Assert.Equal(expected.Count, await file.ScanBuilder().Where(filter).CountAsync());
             Assert.Equal(expected, await KeysAsync(file, filter));
 
             // The same answer with the indexes out of the way.
@@ -117,7 +117,7 @@ public sealed class InMergeTests
             VortexExpr zero = Expr.In(Expr.Field("key"), FilterLiteral.From(0.0), FilterLiteral.From(1.5));
             // Row 1 holds 1.5; rows 17 and 2 000 hold the two zeros, which one literal asks for.
             List<double> selected = [];
-            await foreach (RecordBatch batch in file.Scan().Where(zero).ExecuteAsync())
+            await foreach (RecordBatch batch in file.ScanBuilder().Where(zero).ExecuteAsync())
             {
                 for (int row = 0; row < batch.RowCount; row++)
                 {
@@ -143,7 +143,7 @@ public sealed class InMergeTests
         RowBlockSize = Block,
         IndexBudgetPerMille = 1_000_000,
         Identity = new Guid("32323232-3232-4232-8232-323232323232"),
-        Indexes = WritePolicy.None.For("key", IndexPolicy.SortedRuns),
+        WritePolicy = WritePolicy.None.For("key", IndexPolicy.SortedRuns),
     };
 
     private static async Task<string> WriteAsync()
@@ -176,7 +176,7 @@ public sealed class InMergeTests
     private static async Task<List<long>> KeysAsync(VortexFile file, VortexExpr filter, bool prune = true)
     {
         List<long> keys = [];
-        ScanBuilder scan = file.Scan().Where(filter);
+        ScanBuilder scan = file.ScanBuilder().Where(filter);
         if (!prune)
         {
             scan = scan.WithPruning(false);

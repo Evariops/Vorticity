@@ -446,7 +446,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
             int[] columns = new int[paths.Count];
             for (int i = 0; i < paths.Count; i++)
             {
-                DType at = batch.Schema;
+                DType at = batch.DType;
                 int node = batch.RootIndex;
                 foreach (string segment in paths[i].Split('.'))
                 {

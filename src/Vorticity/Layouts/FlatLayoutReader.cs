@@ -15,7 +15,7 @@ namespace Vorticity.Layouts;
 /// read from there instead, over byte-identical segment bytes, and the buffer walk simply never
 /// reaches the tail.
 /// </summary>
-public sealed class FlatLayoutReader : LayoutReader
+internal sealed class FlatLayoutReader : LayoutReader
 {
     /// <summary>The shared, stateless instance.</summary>
     public static readonly FlatLayoutReader Instance = new FlatLayoutReader();

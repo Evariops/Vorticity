@@ -66,12 +66,12 @@ internal static class KeysInOrder
         }
 
         // A scan delivered in key order rather than in file order.
-        OrderPlan? order = (await file.Scan().InKeyOrder("day").ExplainAsync()).Order;
+        OrderPlan? order = (await file.ScanBuilder().InKeyOrder("day").ExplainAsync()).Order;
         Console.WriteLine($"in key order: source {order?.Source}, {order?.Runs} runs, " +
             $"{order?.EntriesInRange} entries in range, descending {order?.Descending}");
 
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().InKeyOrder("day", true).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().InKeyOrder("day", true).ExecuteAsync())
         {
             using (batch)
             {
@@ -89,7 +89,7 @@ internal static class KeysInOrder
 
         try
         {
-            file.Scan().InKeyOrder("day").Rows(new RowRange(0, 20_000));
+            file.ScanBuilder().InKeyOrder("day").Rows(new RowRange(0, 20_000));
         }
         catch (InvalidOperationException e)
         {

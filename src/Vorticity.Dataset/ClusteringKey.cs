@@ -14,7 +14,7 @@ using Vorticity.Writing;
 namespace Vorticity.Dataset;
 
 /// <summary>The columns a dataset is ordered by, and what they impose on a data object.</summary>
-public sealed class ClusteringKey
+internal sealed class ClusteringKey
 {
     private readonly string[] _paths;
     private readonly DType[] _dtypes;
@@ -61,10 +61,10 @@ public sealed class ClusteringKey
         IndexPolicy run = IndexPolicy.SortedRuns.AsRequired();
         if (!IsComposite)
         {
-            return options.WithIndexes(options.Indexes.For(_paths[0], run));
+            return options.WithIndexes(options.WritePolicy.For(_paths[0], run));
         }
 
-        VortexWriteOptions composite = options.WithIndexes(options.Indexes.ForKey(_paths, run));
+        VortexWriteOptions composite = options.WithIndexes(options.WritePolicy.ForKey(_paths, run));
         return options.KeyEncoder is null
             ? composite.WithKeyEncoder(new RowKeyEncoder(_fields))
             : composite;

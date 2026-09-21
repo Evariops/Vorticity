@@ -16,7 +16,7 @@ namespace Vorticity.Columns;
 /// <see cref="Storage"/> and the spans here borrow from the owning <see cref="RecordBatch"/> and
 /// its dtype arena, and are invalid once that batch is disposed.
 /// </remarks>
-public readonly ref struct ExtensionColumn
+internal readonly ref struct ExtensionColumn
 {
     private readonly RecordBatch _batch;
     private readonly int _node;

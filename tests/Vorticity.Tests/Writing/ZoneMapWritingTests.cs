@@ -171,12 +171,12 @@ public sealed class ZoneMapWritingTests
                 // ONE CHUNK PER CALL: with repartitioning on, the writer would smooth the ragged
                 // batches into uniform blocks and there would be no raggedness left to test.
                 await using VortexFileWriter writer = VortexFileWriter.Create(
-                    path, source.Schema, OneChunkPerCall);
+                    path, source.DType, OneChunkPerCall);
 
                 // 700 then 1024: the first batch is not the file's natural split, so the chunk
                 // sizes differ in the middle rather than only at the end.
                 int batchIndex = 0;
-                await foreach (RecordBatch batch in source.Scan()
+                await foreach (RecordBatch batch in source.ScanBuilder()
                     .WithMaxBatchRows(batchIndex++ == 0 ? 700 : 1024)
                     .ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
@@ -185,7 +185,7 @@ public sealed class ZoneMapWritingTests
                     break;
                 }
 
-                await foreach (RecordBatch batch in source.Scan()
+                await foreach (RecordBatch batch in source.ScanBuilder()
                     .Rows(RowRange.FromLength(0, 2048))
                     .WithMaxBatchRows(1024)
                     .ExecuteAsync()
@@ -219,7 +219,7 @@ public sealed class ZoneMapWritingTests
         List<long> values = [];
 
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Project("monotone")
             .Where(filter)
             .WithPruning(prune)
@@ -245,7 +245,7 @@ public sealed class ZoneMapWritingTests
             counting, new VortexOpenOptions { LeaveSourceOpen = true }, CancellationToken.None);
 
         counting.ResetCounters();
-        await foreach (RecordBatch batch in file.Scan()
+        await foreach (RecordBatch batch in file.ScanBuilder()
             .Project("monotone")
             .Where(filter)
             .WithPruning(prune)
@@ -275,8 +275,8 @@ public sealed class ZoneMapWritingTests
 
             await using VortexFile source = await VortexFile.OpenAsync(
                 Corpus.Path(id), CancellationToken.None);
-            await using VortexFileWriter writer = VortexFileWriter.Create(path, source.Schema, options);
-            await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+            await using VortexFileWriter writer = VortexFileWriter.Create(path, source.DType, options);
+            await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {
                 await writer.WriteAsync(batch, CancellationToken.None);

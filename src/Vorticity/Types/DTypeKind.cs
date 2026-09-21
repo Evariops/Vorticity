@@ -6,7 +6,7 @@ namespace Vorticity.Types;
 /// them would break every existing file. Tag <c>0</c> is the FlatBuffers "no variant" marker and
 /// is never a valid dtype.
 /// </summary>
-public enum DTypeKind : byte
+internal enum DTypeKind : byte
 {
     /// <summary>The all-null type. Carries no payload: <c>table Null {}</c>.</summary>
     Null = 1,

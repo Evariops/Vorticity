@@ -22,7 +22,7 @@ namespace Vorticity.Buffers;
 /// pass a naive bounds check.
 /// </para>
 /// </remarks>
-public static class Alignment
+internal static class Alignment
 {
     /// <summary>
     /// Returns <see langword="true"/> when <paramref name="value"/> is a positive power of two.

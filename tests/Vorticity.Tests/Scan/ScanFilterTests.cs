@@ -202,7 +202,7 @@ public sealed class ScanFilterTests
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Mixed), CancellationToken.None);
 
-        IAsyncEnumerable<RecordBatch> scan = file.Scan()
+        IAsyncEnumerable<RecordBatch> scan = file.ScanBuilder()
             .Project("strs")
             .Where(Expr.Gt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(0L))))
             .ExecuteAsync();
@@ -211,8 +211,8 @@ public sealed class ScanFilterTests
         await foreach (RecordBatch batch in scan.WithCancellation(CancellationToken.None))
         {
             batches++;
-            Assert.Equal(1, batch.Schema.FieldCount);
-            Assert.Equal("strs", batch.Schema.GetFieldName(0));
+            Assert.Equal(1, batch.DType.FieldCount);
+            Assert.Equal("strs", batch.DType.GetFieldName(0));
             Assert.True(batch.RowCount > 0, "an emptied batch must not be produced");
         }
 
@@ -225,7 +225,7 @@ public sealed class ScanFilterTests
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Mixed), CancellationToken.None);
 
-        IAsyncEnumerable<RecordBatch> scan = file.Scan()
+        IAsyncEnumerable<RecordBatch> scan = file.ScanBuilder()
             .Where(Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(long.MinValue))))
             .ExecuteAsync();
 
@@ -272,7 +272,7 @@ public sealed class ScanFilterTests
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Mixed), CancellationToken.None);
 
         Assert.Throws<ArgumentException>(
-            () => file.Scan().Where(
+            () => file.ScanBuilder().Where(
                 Expr.Eq(Expr.Field("nosuchcolumn"), Expr.Literal(FilterLiteral.From(1L)))));
     }
 
@@ -358,7 +358,7 @@ public sealed class ScanFilterTests
             Corpus.Path("types/struct_field_names"), CancellationToken.None);
 
         long projected = 0;
-        await foreach (RecordBatch batch in file.Scan().Project("").ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Project("").ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             projected += batch.RowCount;
@@ -371,7 +371,7 @@ public sealed class ScanFilterTests
         VortexExpr everything = Expr.Ge(
             Expr.Field(string.Empty), Expr.Literal(FilterLiteral.From(long.MinValue)));
         long filtered = 0;
-        await foreach (RecordBatch batch in file.Scan().Where(everything).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(everything).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             filtered += batch.RowCount;
@@ -392,7 +392,7 @@ public sealed class ScanFilterTests
             Expr.Field("no.such.path"), Expr.Literal(FilterLiteral.From(0L)));
         await Assert.ThrowsAnyAsync<ArgumentException>(async () =>
         {
-            await foreach (RecordBatch batch in file.Scan().Where(unknown).ExecuteAsync()
+            await foreach (RecordBatch batch in file.ScanBuilder().Where(unknown).ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {
                 _ = batch.RowCount;
@@ -407,7 +407,7 @@ public sealed class ScanFilterTests
         byte[] name = System.Text.Encoding.UTF8.GetBytes(column);
 
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
-        ScanBuilder builder = file.Scan().Project(column);
+        ScanBuilder builder = file.ScanBuilder().Project(column);
         if (filter is not null)
         {
             builder = builder.Where(filter);

@@ -14,7 +14,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// wire tag names rather than the array's, so the step keeps its signedness but not its width, and
 /// the last value must fit the output type, which is checked before a single value is generated.
 /// </summary>
-public sealed class SequenceDecoder : ArrayDecoder
+internal sealed class SequenceDecoder : ArrayDecoder
 {
     private const string Id = "vortex.sequence";
 

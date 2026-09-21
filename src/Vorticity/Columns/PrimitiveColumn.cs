@@ -22,7 +22,7 @@ namespace Vorticity.Columns;
 /// <see cref="Values"/> is borrowed from the owning <see cref="RecordBatch"/> and is invalid once
 /// that batch is disposed.
 /// </remarks>
-public readonly ref struct PrimitiveColumn<T>
+internal readonly ref struct PrimitiveColumn<T>
     where T : unmanaged
 {
     private readonly RecordBatch _batch;

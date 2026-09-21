@@ -6,7 +6,7 @@ namespace Vorticity.Types;
 /// <c>true</c>. A two-valued enum rather than a bool, which keeps call sites self-describing at
 /// no cost: it is a byte and converts to and from the wire boolean with a cast.
 /// </summary>
-public enum Nullability : byte
+internal enum Nullability : byte
 {
     /// <summary>The dtype does not admit nulls (<c>nullable = false</c>).</summary>
     NonNullable = 0,

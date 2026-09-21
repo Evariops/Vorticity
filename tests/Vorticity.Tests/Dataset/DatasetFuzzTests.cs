@@ -276,7 +276,7 @@ public sealed class DatasetFuzzTests
             {
                 RowBlockSize = 128,
                 DataBlockTargetBytes = 8 << 10,
-                Indexes = WritePolicy.None,
+                WritePolicy = WritePolicy.None,
             },
         };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options);

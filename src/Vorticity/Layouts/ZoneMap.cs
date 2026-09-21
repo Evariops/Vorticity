@@ -22,7 +22,7 @@ namespace Vorticity.Layouts;
 /// own row count.
 /// </para>
 /// </remarks>
-public readonly struct ZoneMap
+internal readonly struct ZoneMap
 {
     private readonly AggregateId[]? _aggregates;
     private readonly int[]? _columnIndices;

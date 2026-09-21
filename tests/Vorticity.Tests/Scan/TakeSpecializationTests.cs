@@ -245,7 +245,7 @@ public sealed class TakeSpecializationTests
     {
         List<string> values = [];
         await using VortexFile file = await VortexFile.OpenAsync(path, OpenOptionsFor(path), CancellationToken.None);
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             Values.DescribeRows(batch, values);
@@ -258,7 +258,7 @@ public sealed class TakeSpecializationTests
     {
         List<string> values = [];
         await using VortexFile file = await VortexFile.OpenAsync(path, OpenOptionsFor(path), CancellationToken.None);
-        await foreach (RecordBatch batch in file.Scan().Take(wanted).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Take(wanted).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             Values.DescribeRows(batch, values);
@@ -289,6 +289,6 @@ public sealed class TakeSpecializationTests
             .AsTask()
             .GetAwaiter()
             .GetResult();
-        return donor.Schema;
+        return donor.DType;
     });
 }

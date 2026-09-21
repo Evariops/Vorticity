@@ -75,10 +75,10 @@ public sealed class RunMergeTests
         // its rows, whatever the number of chunks.
         long probe = K(12_345);
         VortexExpr equal = Expr.Eq(Expr.Field("k"), Expr.Literal(FilterLiteral.From(probe)));
-        ScanPlan plan = await file.Scan().Where(equal).ExplainAsync();
+        ScanPlan plan = await file.ScanBuilder().Where(equal).ExplainAsync();
         PruningStep locating = Assert.Single(plan.Pruning, step => step.Structure == "locating index");
         Assert.Equal(3, locating.SegmentsRead);
-        Assert.Equal(await OracleCountAsync(file, equal), await file.Scan().Where(equal).CountAsync());
+        Assert.Equal(await OracleCountAsync(file, equal), await file.ScanBuilder().Where(equal).CountAsync());
 
         VortexExpr text = Expr.Eq(Expr.Field("s"), Expr.Literal(FilterLiteral.From(S(4_242))));
         Assert.Equal(await OracleCountAsync(file, text), await CountRowsAsync(file, text, indexes: true));
@@ -154,7 +154,7 @@ public sealed class RunMergeTests
         VortexExpr range = Expr.And(
             Expr.Ge(Expr.Field("k"), Expr.Literal(FilterLiteral.From(20_000L))),
             Expr.Lt(Expr.Field("k"), Expr.Literal(FilterLiteral.From(20_400L))));
-        Assert.Equal(await OracleCountAsync(file, range), await file.Scan().Where(range).CountAsync());
+        Assert.Equal(await OracleCountAsync(file, range), await file.ScanBuilder().Where(range).CountAsync());
         VortexExpr equal = Expr.Eq(Expr.Field("k"), Expr.Literal(FilterLiteral.From(K(7_777))));
         Assert.Equal(await OracleCountAsync(file, equal), await CountRowsAsync(file, equal, indexes: true));
     }
@@ -182,7 +182,7 @@ public sealed class RunMergeTests
                 {
                     RowBlockSize = Block,
                     DataBlockTargetBytes = null,
-                    Indexes = Policy,
+                    WritePolicy = Policy,
                     IndexBudgetPerMille = 1_000_000,
                 };
                 await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, options))
@@ -313,7 +313,7 @@ public sealed class RunMergeTests
     private static async Task<long> CountRowsAsync(VortexFile file, VortexExpr filter, bool indexes)
     {
         long count = 0;
-        await foreach (RecordBatch batch in file.Scan().Where(filter).WithIndexes(indexes).WithPruning(indexes).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(filter).WithIndexes(indexes).WithPruning(indexes).ExecuteAsync())
         {
             count += batch.RowCount;
         }
@@ -335,7 +335,7 @@ public sealed class RunMergeTests
         {
             RowBlockSize = Block,
             DataBlockTargetBytes = null,
-            Indexes = Policy,
+            WritePolicy = Policy,
             IndexBudgetPerMille = 1_000_000,
             Identity = identity,
             ScratchDirectory = scratchDirectory,

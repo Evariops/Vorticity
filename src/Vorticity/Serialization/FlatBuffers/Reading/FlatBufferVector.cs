@@ -13,7 +13,7 @@ namespace Vorticity.Serialization.FlatBuffers;
 /// <see cref="Count"/> can never promise more elements than the buffer holds. Each element is a
 /// forward uoffset that is bounds-checked again when it is dereferenced.
 /// </remarks>
-public readonly ref struct FlatBufferVector
+internal readonly ref struct FlatBufferVector
 {
     private readonly ReadOnlySpan<byte> _buffer;
 

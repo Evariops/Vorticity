@@ -70,7 +70,7 @@ public class RandomAccessBenchmarks
     {
         await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Take(_rows).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Take(_rows).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;

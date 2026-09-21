@@ -17,7 +17,7 @@ namespace Vorticity.Columns;
 /// Every span here is borrowed from the owning <see cref="RecordBatch"/> and is invalid once that
 /// batch is disposed.
 /// </remarks>
-public readonly ref struct DecimalColumn
+internal readonly ref struct DecimalColumn
 {
     private readonly RecordBatch _batch;
     private readonly int _node;

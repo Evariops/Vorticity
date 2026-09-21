@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 namespace Vorticity.Dataset;
 
 /// <summary>How a vacuum runs.</summary>
-public sealed record VacuumOptions
+internal sealed record VacuumOptions
 {
     /// <summary>
     /// The clock the window counts against; the system's by default. It must be the store's, since
@@ -36,7 +36,7 @@ public sealed record VacuumOptions
 /// under <see cref="VacuumOptions.RepackBelow"/> of their bytes: what
 /// <see cref="VortexDataset.RepackAsync"/> would free at the next vacuum past the window.
 /// </param>
-public sealed record VacuumResult(
+internal sealed record VacuumResult(
     ulong Latest,
     IReadOnlyList<ulong> Retained,
     TimeSpan Window,
@@ -51,7 +51,7 @@ public sealed record VacuumResult(
 /// deleted until every retained version is marked, because a missed mark would delete a live
 /// object. A writer or reader that outlives the window loses its objects.
 /// </summary>
-public static class DatasetVacuum
+internal static class DatasetVacuum
 {
     /// <summary>The retention window applied when the dataset sets none.</summary>
     public static readonly TimeSpan DefaultWindow = TimeSpan.FromDays(7);

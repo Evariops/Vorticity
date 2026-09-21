@@ -9,7 +9,7 @@ namespace Vorticity.Dataset;
 /// An <see cref="IObjectStore"/> in memory, with injectable latency and faults. Thread-safe: one
 /// lock over a sorted map, never held across an await.
 /// </summary>
-public sealed class MemoryObjectStore : IObjectStore
+internal sealed class MemoryObjectStore : IObjectStore
 {
     private readonly object _gate = new object();
     private readonly SortedDictionary<string, Entry> _objects = new SortedDictionary<string, Entry>(StringComparer.Ordinal);
@@ -229,7 +229,7 @@ public sealed class MemoryObjectStore : IObjectStore
 }
 
 /// <summary>The five operations of <see cref="IObjectStore"/>, for fault injection and counting.</summary>
-public enum ObjectOperation
+internal enum ObjectOperation
 {
     GetRange = 0,
 

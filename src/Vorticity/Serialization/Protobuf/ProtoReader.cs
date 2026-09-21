@@ -28,7 +28,7 @@ namespace Vorticity.Serialization.Protobuf;
 /// hostile payload can never produce an out-of-range access.
 /// </para>
 /// </remarks>
-public ref struct ProtoReader
+internal ref struct ProtoReader
 {
     private readonly ReadOnlySpan<byte> _data;
     private int _position;

@@ -63,7 +63,7 @@ public sealed class RecordBatch : IDisposable
     /// The root index is not in the arena, or the root is a struct whose field count disagrees with
     /// its own dtype.
     /// </exception>
-    public RecordBatch(ScanContext context, int rootCanonicalIndex, long startRow)
+    internal RecordBatch(ScanContext context, int rootCanonicalIndex, long startRow)
         : this(ArenaOf(context), rootCanonicalIndex, startRow, context)
     {
     }
@@ -81,7 +81,7 @@ public sealed class RecordBatch : IDisposable
     /// The root index is not in the arena, or the root is a struct whose field count disagrees with
     /// its own dtype.
     /// </exception>
-    public RecordBatch(CanonicalArena arena, int rootCanonicalIndex, long startRow)
+    internal RecordBatch(CanonicalArena arena, int rootCanonicalIndex, long startRow)
         : this(arena, rootCanonicalIndex, startRow, null)
     {
     }
@@ -118,7 +118,7 @@ public sealed class RecordBatch : IDisposable
     /// The dtype of this batch's root. For a projected scan it is the projected schema, not the
     /// file's. May be any dtype, including a non-struct one.
     /// </summary>
-    public DType Schema
+    internal DType DType
     {
         get
         {
@@ -147,8 +147,8 @@ public sealed class RecordBatch : IDisposable
         }
     }
 
-    /// <summary><see langword="true"/> when <see cref="Schema"/> is a struct.</summary>
-    public bool IsTabular
+    /// <summary><see langword="true"/> when <see cref="DType"/> is a struct.</summary>
+    internal bool IsTabular
     {
         get
         {
@@ -160,7 +160,7 @@ public sealed class RecordBatch : IDisposable
     /// <summary>
     /// Number of columns: the struct root's field count, or 1 for a non-struct root.
     /// </summary>
-    public int FieldCount
+    internal int FieldCount
     {
         get
         {
@@ -174,7 +174,7 @@ public sealed class RecordBatch : IDisposable
     /// the single column the file holds.
     /// </summary>
     /// <remarks>Borrowed spans are invalid after <see cref="Dispose"/>.</remarks>
-    public VortexColumn Root
+    internal VortexColumn Root
     {
         get
         {
@@ -193,7 +193,7 @@ public sealed class RecordBatch : IDisposable
     /// <remarks>Allocates a string. <see cref="StructColumn.GetFieldNameUtf8"/> does not.</remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
     /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
-    public string? GetFieldName(int index)
+    internal string? GetFieldName(int index)
     {
         ThrowIfDisposed();
         if ((uint)index >= (uint)_fieldCount)
@@ -210,7 +210,7 @@ public sealed class RecordBatch : IDisposable
     /// <param name="index">The 0-based column index when found.</param>
     /// <returns><see langword="true"/> when the schema has a field with that exact name.</returns>
     /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
-    public bool TryGetFieldIndex(ReadOnlySpan<byte> nameUtf8, out int index)
+    internal bool TryGetFieldIndex(ReadOnlySpan<byte> nameUtf8, out int index)
     {
         ThrowIfDisposed();
         if (!_isTabular)
@@ -233,7 +233,7 @@ public sealed class RecordBatch : IDisposable
     /// <exception cref="VortexFormatException">The root's dtype says struct but its decoded form
     /// does not.</exception>
     /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
-    public VortexColumn Column(int index)
+    internal VortexColumn Column(int index)
     {
         ThrowIfDisposed();
         if ((uint)index >= (uint)_fieldCount)
@@ -257,7 +257,7 @@ public sealed class RecordBatch : IDisposable
     /// <remarks>Borrowed spans are invalid after <see cref="Dispose"/>.</remarks>
     /// <exception cref="ArgumentException">The schema has no field with that name.</exception>
     /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
-    public VortexColumn Column(ReadOnlySpan<byte> nameUtf8)
+    internal VortexColumn Column(ReadOnlySpan<byte> nameUtf8)
     {
         if (!TryGetFieldIndex(nameUtf8, out int index))
         {
@@ -294,7 +294,7 @@ public sealed class RecordBatch : IDisposable
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The window is not inside the batch.</exception>
     /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
-    public RecordBatch Window(int start, int length)
+    internal RecordBatch Window(int start, int length)
     {
         ThrowIfDisposed();
         ArgumentOutOfRangeException.ThrowIfNegative(start);
@@ -334,7 +334,7 @@ public sealed class RecordBatch : IDisposable
     /// </remarks>
     /// <exception cref="ArgumentException">The projection names fields and the batch's root is not a struct.</exception>
     /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
-    public RecordBatch Project(Projection projection)
+    internal RecordBatch Project(Projection projection)
     {
         ThrowIfDisposed();
         if (projection.IsAll)
@@ -384,7 +384,7 @@ public sealed class RecordBatch : IDisposable
     /// expose, but it is bound by the same lifetime as every other batch-borrowed view: the arena
     /// is reset when this batch is disposed.
     /// </remarks>
-    public CanonicalArena Arena
+    internal CanonicalArena Arena
     {
         get
         {
@@ -394,7 +394,7 @@ public sealed class RecordBatch : IDisposable
     }
 
     /// <summary>The root node's index in <see cref="Arena"/>.</summary>
-    public int RootIndex
+    internal int RootIndex
     {
         get
         {

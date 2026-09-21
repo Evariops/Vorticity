@@ -22,7 +22,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// and their lengths come from the metadata rather than from the wire, because slot children do
 /// not persist their own.
 /// </remarks>
-public sealed class OnPairDecoder : ArrayDecoder
+internal sealed class OnPairDecoder : ArrayDecoder
 {
     /// <summary>The wire id.</summary>
     public const string Id = "vortex.onpair";

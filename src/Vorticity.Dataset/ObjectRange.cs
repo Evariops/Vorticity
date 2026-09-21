@@ -8,7 +8,7 @@ namespace Vorticity.Dataset;
 /// fetched in another would be no proof that the two describe the same object. The buffer is
 /// rented, so a reader that disposes what it is given costs no allocation per request.
 /// </summary>
-public sealed class ObjectRange : IDisposable
+internal sealed class ObjectRange : IDisposable
 {
     private byte[]? _rented;
     private readonly int _length;

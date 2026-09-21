@@ -8,28 +8,28 @@ namespace Vorticity.Dataset;
 /// The chunker's boundary parameters: the smallest chunk it may cut, the size it aims for, and the
 /// size at which it cuts whatever the boundary rule says.
 /// </summary>
-public readonly record struct ChunkerSettings(int MinBytes, int TargetBytes, int MaxBytes);
+internal readonly record struct ChunkerSettings(int MinBytes, int TargetBytes, int MaxBytes);
 
 /// <summary>
 /// The compaction settings. <c>LevelTargetBytes</c> is level 1's target object size, which each
 /// level above multiplies.
 /// </summary>
-public readonly record struct CompactionSettings(int Levels, long LevelTargetBytes, int Fanout);
+internal readonly record struct CompactionSettings(int Levels, long LevelTargetBytes, int Fanout);
 
 /// <summary>
 /// The retention settings: how many versions to keep beyond the current one, and for how long, in
 /// seconds.
 /// </summary>
-public readonly record struct RetentionSettings(int Versions, long Seconds);
+internal readonly record struct RetentionSettings(int Versions, long Seconds);
 
 /// <summary>A page carried inside the header as well as at the offset its reference names.</summary>
-public readonly record struct InlinedPage(PageReference Reference, ReadOnlyMemory<byte> Bytes);
+internal readonly record struct InlinedPage(PageReference Reference, ReadOnlyMemory<byte> Bytes);
 
 /// <summary>
 /// One level of the dataset tree, as the header records it; level 0 is the newest and smallest.
 /// <c>Inlined</c> holds the pages carried in the header, top first.
 /// </summary>
-public sealed record CommitLevel(int Level, long Entries, PageReference Top, IReadOnlyList<InlinedPage> Inlined)
+internal sealed record CommitLevel(int Level, long Entries, PageReference Top, IReadOnlyList<InlinedPage> Inlined)
 {
     /// <summary>A level with no inlined page.</summary>
     public CommitLevel(int level, long entries, PageReference top)
@@ -49,7 +49,7 @@ public sealed record CommitLevel(int Level, long Entries, PageReference Top, IRe
 }
 
 /// <summary>A commit object's header.</summary>
-public sealed record CommitHeader
+internal sealed record CommitHeader
 {
     /// <summary>This commit's version, which is also the inverse of its key.</summary>
     public required ulong Version { get; init; }

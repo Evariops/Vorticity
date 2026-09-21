@@ -11,7 +11,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// form of its own, so the conversion happens in the decoder and nothing downstream ever sees an
 /// offsets-and-bytes array.
 /// </summary>
-public sealed class VarBinDecoder : ArrayDecoder
+internal sealed class VarBinDecoder : ArrayDecoder
 {
     /// <summary>The wire id, UTF-8.</summary>
     public const string Id = "vortex.varbin";

@@ -47,9 +47,9 @@ public sealed class LazyResolutionTests
         // array_specs is not itself an error" - forged/manifest.json.
         Assert.Equal(fixture.RowCount, file.RowCount);
         Assert.True(file.IsTabular);
-        Assert.Equal(2, file.Schema.FieldCount);
-        Assert.Equal("ints", file.Schema.GetFieldName(0));
-        Assert.Equal("strs", file.Schema.GetFieldName(1));
+        Assert.Equal(2, file.DType.FieldCount);
+        Assert.Equal("ints", file.DType.GetFieldName(0));
+        Assert.Equal("strs", file.DType.GetFieldName(1));
 
         bool sawForgedId = false;
         for (int i = 0; i < file.ArrayEncodingCount; i++)
@@ -75,7 +75,7 @@ public sealed class LazyResolutionTests
 
         VortexUnsupportedException error = await Assert.ThrowsAsync<VortexUnsupportedException>(async () =>
         {
-            await foreach (RecordBatch batch in file.Scan().Project("ints").ExecuteAsync()
+            await foreach (RecordBatch batch in file.ScanBuilder().Project("ints").ExecuteAsync()
                 .WithCancellation(TestContext.Current.CancellationToken))
             {
                 batch.Dispose();
@@ -108,7 +108,7 @@ public sealed class LazyResolutionTests
             fixture.FullPath, TestContext.Current.CancellationToken);
 
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().Project("strs").ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Project("strs").ExecuteAsync()
             .WithCancellation(TestContext.Current.CancellationToken))
         {
             rows += CompareProjectedColumn(batch, stream, log);
@@ -176,7 +176,7 @@ public sealed class LazyResolutionTests
 
         VortexUnsupportedException error = await Assert.ThrowsAsync<VortexUnsupportedException>(async () =>
         {
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
                 .WithCancellation(TestContext.Current.CancellationToken))
             {
                 batch.Dispose();

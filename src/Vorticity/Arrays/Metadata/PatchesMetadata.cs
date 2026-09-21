@@ -20,7 +20,7 @@ namespace Vorticity.Arrays.Metadata;
 /// }
 /// </code>
 /// </remarks>
-public readonly struct PatchesMetadata : IEquatable<PatchesMetadata>
+internal readonly struct PatchesMetadata : IEquatable<PatchesMetadata>
 {
     private const string MessageName = "PatchesMetadata";
 

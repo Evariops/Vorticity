@@ -220,7 +220,7 @@ public sealed class EditionTargetTests
         {
             List<string> values = [];
             await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {
                 Vorticity.Tests.Writing.Values.Describe(batch, values);
@@ -242,9 +242,9 @@ public sealed class EditionTargetTests
         await using VortexFile source = await VortexFile.OpenAsync(
             Corpus.Path(id), CancellationToken.None);
         await using VortexFileWriter writer = VortexFileWriter.Create(
-            path, source.Schema, new VortexWriteOptions { TargetEdition = target });
+            path, source.DType, new VortexWriteOptions { TargetEdition = target });
 
-        await foreach (RecordBatch batch in source.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             await writer.WriteAsync(batch, CancellationToken.None);

@@ -88,7 +88,7 @@ public sealed class IntegerAgainstFloatTests
         {
             await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
             List<long> kept = [];
-            await foreach (RecordBatch batch in file.Scan().Where(filter).ExecuteAsync()
+            await foreach (RecordBatch batch in file.ScanBuilder().Where(filter).ExecuteAsync()
                 .WithCancellation(CancellationToken.None))
             {
                 PrimitiveColumn<long> column = batch.Column(0).AsPrimitive<long>();
@@ -133,7 +133,7 @@ public sealed class IntegerAgainstFloatTests
         // kernel is what these three assert.
         VortexWriteOptions options = new VortexWriteOptions
         {
-            Indexes = Vorticity.Indexes.WritePolicy.None,
+            WritePolicy = Vorticity.Indexes.WritePolicy.None,
         };
 
         await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, options);

@@ -13,7 +13,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// Storage width therefore comes from the child, not from the precision, which is why no
 /// "storage wide enough for the precision" check applies here.
 /// </summary>
-public sealed class DecimalBytePartsDecoder : ArrayDecoder
+internal sealed class DecimalBytePartsDecoder : ArrayDecoder
 {
     /// <summary>The wire id.</summary>
     public const string Id = "vortex.decimal_byte_parts";

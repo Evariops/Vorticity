@@ -20,7 +20,7 @@ namespace Vorticity.Layouts;
 /// time. How a file splits into row groups and columns is the writer's choice, so a reader
 /// interprets whatever tree it is given rather than expecting a fixed nesting of layouts.
 /// </remarks>
-public sealed class LayoutTree
+internal sealed class LayoutTree
 {
     private readonly VortexFile? _file;
     private readonly string[]? _detachedEncodingIds;
@@ -53,7 +53,7 @@ public sealed class LayoutTree
     }
 
     /// <summary>
-    /// Parses <see cref="VortexFile.RootLayoutBytes"/> against <see cref="VortexFile.Schema"/>.
+    /// Parses <see cref="VortexFile.RootLayoutBytes"/> against <see cref="VortexFile.DType"/>.
     /// </summary>
     /// <param name="file">The open file.</param>
     /// <returns>The parsed tree.</returns>
@@ -73,7 +73,7 @@ public sealed class LayoutTree
             file,
             detachedEncodingIds: null,
             file.RootLayoutBytes.Span,
-            file.Schema,
+            file.DType,
             file.SegmentSpecs.Length);
 
         long rootRows = tree.GetNode(0).RowCount;
@@ -491,7 +491,7 @@ internal struct LayoutNodeRecord
 /// One node of a <see cref="LayoutTree"/>. A plain readonly struct, not a <c>ref struct</c>: the
 /// tree outlives every batch.
 /// </summary>
-public readonly struct LayoutNode
+internal readonly struct LayoutNode
 {
     private readonly LayoutTree _tree;
     private readonly int _index;

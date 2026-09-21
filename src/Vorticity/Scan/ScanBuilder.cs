@@ -26,7 +26,7 @@ namespace Vorticity.Scanning;
 /// enumerator trim back down once the filter has run.
 /// </para>
 /// </remarks>
-public sealed class ScanBuilder
+internal sealed class ScanBuilder
 {
     private static int s_defaultDegree = 1;
 
@@ -78,7 +78,7 @@ public sealed class ScanBuilder
     {
         for (int i = 0; i < paths.Length; i++)
         {
-            Projection.IncludePath(_file.Schema, paths[i], Fields(), nameof(paths));
+            Projection.IncludePath(_file.DType, paths[i], Fields(), nameof(paths));
         }
 
         return this;
@@ -96,7 +96,7 @@ public sealed class ScanBuilder
             return this;
         }
 
-        DType schema = _file.Schema;
+        DType schema = _file.DType;
         if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
         {
             ScanThrow.NonStructRoot(nameof(fieldIndices));
@@ -195,12 +195,12 @@ public sealed class ScanBuilder
         FieldMaskBuilder probe = new FieldMaskBuilder();
         for (int i = 0; i < paths.Count; i++)
         {
-            Projection.IncludePath(_file.Schema, paths[i], probe, nameof(filter));
+            Projection.IncludePath(_file.DType, paths[i], probe, nameof(filter));
         }
 
         // Same place, same reason, for the constants: a comparison the schema cannot make yields
         // no row, and an empty result reads like an empty file.
-        FilterTypeCheck.Check(_file.Schema, filter, nameof(filter));
+        FilterTypeCheck.Check(_file.DType, filter, nameof(filter));
 
         _filter = filter;
         _filterPaths = paths;
@@ -787,7 +787,7 @@ public sealed class ScanBuilder
     private string Resolved(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
-        Projection.IncludePath(_file.Schema, path, new FieldMaskBuilder(), nameof(path));
+        Projection.IncludePath(_file.DType, path, new FieldMaskBuilder(), nameof(path));
         return path;
     }
 
@@ -845,13 +845,13 @@ public sealed class ScanBuilder
         {
             for (int i = 0; i < filterPaths.Count; i++)
             {
-                Projection.IncludePath(_file.Schema, filterPaths[i], builder, "filter");
+                Projection.IncludePath(_file.DType, filterPaths[i], builder, "filter");
             }
         }
 
         if (extraPath is not null)
         {
-            Projection.IncludePath(_file.Schema, extraPath, builder, nameof(extraPath));
+            Projection.IncludePath(_file.DType, extraPath, builder, nameof(extraPath));
         }
 
         return Projection.Create(builder.Build());
@@ -860,7 +860,7 @@ public sealed class ScanBuilder
     /// <summary>Whether the key column, or a struct above it, is nullable: whether rows can have no key.</summary>
     private bool MayBeNull(string path)
     {
-        DType current = _file.Schema;
+        DType current = _file.DType;
         foreach (string segment in path.Split('.'))
         {
             int field = current.IndexOfField(System.Text.Encoding.UTF8.GetBytes(segment));
@@ -953,7 +953,7 @@ public sealed class ScanBuilder
         builder.Include(keep.RootMask);
         for (int i = 0; i < filterPaths.Count; i++)
         {
-            Projection.IncludePath(_file.Schema, filterPaths[i], builder, "filter");
+            Projection.IncludePath(_file.DType, filterPaths[i], builder, "filter");
         }
 
         return Projection.Create(builder.Build());
@@ -963,7 +963,7 @@ public sealed class ScanBuilder
 }
 
 /// <summary>The scan entry point.</summary>
-public static class VortexFileScanExtensions
+internal static class VortexFileScanExtensions
 {
     /// <summary>Starts building a scan over <paramref name="file"/>.</summary>
     /// <param name="file">An open file.</param>
@@ -973,5 +973,5 @@ public static class VortexFileScanExtensions
     /// depend on scan.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="file"/> is null.</exception>
-    public static ScanBuilder Scan(this VortexFile file) => new ScanBuilder(file);
+    public static ScanBuilder ScanBuilder(this VortexFile file) => new ScanBuilder(file);
 }

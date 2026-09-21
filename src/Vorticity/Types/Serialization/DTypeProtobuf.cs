@@ -28,7 +28,7 @@ namespace Vorticity.Types.Serialization;
 /// required and absent -- is rejected.
 /// </para>
 /// </remarks>
-public static class DTypeProtobuf
+internal static class DTypeProtobuf
 {
     // --- DType.dtype_type oneof case numbers. Identical to DTypeKind by construction. ---
     private const int CaseNull = 1;

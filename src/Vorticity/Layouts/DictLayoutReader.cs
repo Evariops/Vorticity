@@ -15,7 +15,7 @@ namespace Vorticity.Layouts;
 /// the kind of thing that gets "fixed" into a bug. The gather shares the array decoder's kernels
 /// rather than re-deriving the buffer remap and the validity collapse.
 /// </summary>
-public sealed class DictLayoutReader : LayoutReader
+internal sealed class DictLayoutReader : LayoutReader
 {
     private const string Id = "vortex.dict";
 

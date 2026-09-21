@@ -175,11 +175,11 @@ public sealed class ReadBudgetTests
         }
 
         VortexExpr key = Expr.Eq(Expr.Field("k"), Expr.Literal(FilterLiteral.From(K(row))));
-        Assert.Equal(1, await file.Scan().Where(key).CountAsync());
+        Assert.Equal(1, await file.ScanBuilder().Where(key).CountAsync());
 
         VortexExpr tenant = Expr.Eq(Expr.Field("s"), Expr.Literal(FilterLiteral.From(S(row))));
         long matches = 0;
-        await foreach (RecordBatch batch in file.Scan().Where(Expr.And(tenant, key)).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(Expr.And(tenant, key)).ExecuteAsync())
         {
             matches += batch.RowCount;
         }
@@ -236,7 +236,7 @@ public sealed class ReadBudgetTests
             {
                 RowBlockSize = Batch,
                 DataBlockTargetBytes = null,
-                Indexes = policy,
+                WritePolicy = policy,
                 IndexBudgetPerMille = 1_000_000,
                 Identity = Guid.NewGuid(),
             };

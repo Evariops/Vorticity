@@ -176,8 +176,8 @@ public sealed class AutoIndexTests
     public async Task AnAutoFileIsTheDefault()
     {
         Decoders.EnsureRegistered();
-        Assert.Equal(WritePolicy.Auto, new VortexWriteOptions().Indexes);
-        await using Written written = await Written.CreateAsync(new VortexWriteOptions().Indexes);
+        Assert.Equal(WritePolicy.Auto, new VortexWriteOptions().WritePolicy);
+        await using Written written = await Written.CreateAsync(new VortexWriteOptions().WritePolicy);
         Assert.True(written.File.HasIndexDirectory);
         Assert.True(Find(written.Report, "blob", IndexKinds.BloomSbbf).Outcome == IndexOutcome.Built);
     }
@@ -227,8 +227,8 @@ public sealed class AutoIndexTests
         await using Written written = await Written.CreateAsync(WritePolicy.Auto);
         VortexExpr filter = Parse(text);
         long expected = Oracle(text);
-        Assert.Equal(expected, await written.File.Scan().Where(filter).CountAsync());
-        Assert.Equal(expected, await written.File.Scan().Where(filter).WithIndexes(false).CountAsync());
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).CountAsync());
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).WithIndexes(false).CountAsync());
     }
 
     [Fact]
@@ -240,7 +240,7 @@ public sealed class AutoIndexTests
         // The tenant's generation filters keep the generations that hold it, sixteen blocks each, and
         // the zone map -- narrow here, two tenants a block -- cuts inside them.
         long tenant = Tenant(3 * Block);
-        ScanPlan byTenant = await written.File.Scan().Where(Parse(
+        ScanPlan byTenant = await written.File.ScanBuilder().Where(Parse(
             string.Create(CultureInfo.InvariantCulture, $"tenant = {tenant}"))).ExplainAsync();
         int generations = 0;
         for (int g = 0; g * 16 < Rows / Block; g++)
@@ -255,7 +255,7 @@ public sealed class AutoIndexTests
         Assert.InRange(byTenant.LiveBlocks, Holding(row => Tenant(row) == tenant), generations * 16);
         Assert.Contains(byTenant.Pruning, step => step.Structure == "bloom filter" && step.BlocksPruned > 0);
 
-        ScanPlan byBlob = await written.File.Scan().Where(Parse("blob = " + Convert.ToHexString(Blob(12_345)))).ExplainAsync();
+        ScanPlan byBlob = await written.File.ScanBuilder().Where(Parse("blob = " + Convert.ToHexString(Blob(12_345)))).ExplainAsync();
         Assert.InRange(byBlob.LiveBlocks, 1, 4);
     }
 
@@ -330,7 +330,7 @@ public sealed class AutoIndexTests
             {
                 RowBlockSize = Block,
                 DataBlockTargetBytes = null,
-                Indexes = policy,
+                WritePolicy = policy,
             });
             return new Written(path, await VortexFile.OpenAsync(path), report);
         }

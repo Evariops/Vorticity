@@ -267,19 +267,19 @@ public sealed class DatasetClusteringTests
         await using MemorySegmentSource source = new MemorySegmentSource(single);
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
 
-        Assert.Equal(await file.Scan().MinAsync("key"), await dataset.Scan().MinAsync("key"));
-        Assert.Equal(await file.Scan().MaxAsync("key"), await dataset.Scan().MaxAsync("key"));
-        Assert.Equal(await file.Scan().CountAsync(), await dataset.Scan().CountAsync());
+        Assert.Equal(await file.ScanBuilder().MinAsync("key"), await dataset.Scan().MinAsync("key"));
+        Assert.Equal(await file.ScanBuilder().MaxAsync("key"), await dataset.Scan().MaxAsync("key"));
+        Assert.Equal(await file.ScanBuilder().CountAsync(), await dataset.Scan().CountAsync());
         Assert.True(await dataset.Scan().AnyAsync());
 
         VortexExpr window = Expr.And(
             Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(500L))),
             Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(600L))));
         Assert.Equal(
-            await file.Scan().Where(window).MinAsync("key"),
+            await file.ScanBuilder().Where(window).MinAsync("key"),
             await dataset.Scan().Where(window).MinAsync("key"));
         Assert.Equal(
-            await file.Scan().Where(window).MaxAsync("key"),
+            await file.ScanBuilder().Where(window).MaxAsync("key"),
             await dataset.Scan().Where(window).MaxAsync("key"));
 
         // A value no object holds: `Any` refutes it from the summaries alone.
@@ -292,10 +292,10 @@ public sealed class DatasetClusteringTests
 
     private static bool IsSorted(VortexFile file, string path)
     {
-        int index = file.Schema.IndexOfField(path);
+        int index = file.DType.IndexOfField(path);
         return index >= 0
             && file.HasFileStatistics
-            && file.Statistics.GetField(index).TryGetIsSorted(out bool sorted)
+            && file.FileStatistics.GetField(index).TryGetIsSorted(out bool sorted)
             && sorted;
     }
 

@@ -119,7 +119,7 @@ public sealed class OutOfScopeTests
 
         VortexUnsupportedException error = await Assert.ThrowsAsync<VortexUnsupportedException>(async () =>
         {
-            await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
                 .WithCancellation(TestContext.Current.CancellationToken))
             {
                 batch.Dispose();

@@ -369,24 +369,24 @@ public sealed class SortedRunsCursorTests
 
         // The count and the membership, from the runs alone: no data segment is read.
         ScanMetrics metrics = new ScanMetrics();
-        Assert.Equal(oracle.Count, await file.Scan().Where(filter).WithMetrics(metrics).CountAsync());
+        Assert.Equal(oracle.Count, await file.ScanBuilder().Where(filter).WithMetrics(metrics).CountAsync());
         Assert.Equal(0, metrics.ValuesDecoded);
-        Assert.Equal(oracle.Count > 0, await file.Scan().Where(filter).AnyAsync());
+        Assert.Equal(oracle.Count > 0, await file.ScanBuilder().Where(filter).AnyAsync());
 
         // The same numbers through every other tier, and without the index.
-        Assert.Equal(oracle.Count, await file.Scan().Where(filter).WithTiers(TerminalTiers.All & ~TerminalTiers.ExactCover).CountAsync());
-        Assert.Equal(oracle.Count, await file.Scan().Where(filter).WithIndexes(false).CountAsync());
+        Assert.Equal(oracle.Count, await file.ScanBuilder().Where(filter).WithTiers(TerminalTiers.All & ~TerminalTiers.ExactCover).CountAsync());
+        Assert.Equal(oracle.Count, await file.ScanBuilder().Where(filter).WithIndexes(false).CountAsync());
 
         // Under a range, the slices' rows are walked and intersected.
         RowRange range = new RowRange(1_000, 4_500);
         long inRange = oracle.FindAll(e => e.Row >= range.Start && e.Row < range.End).Count;
-        Assert.Equal(inRange, await file.Scan().Where(filter).Rows(range).CountAsync());
+        Assert.Equal(inRange, await file.ScanBuilder().Where(filter).Rows(range).CountAsync());
 
         // The extremes of the covered column are the ends of the slices.
-        FilterLiteral min = await file.Scan().Where(filter).MinAsync(column);
-        FilterLiteral max = await file.Scan().Where(filter).MaxAsync(column);
-        FilterLiteral decodedMin = await file.Scan().Where(filter).WithTiers(TerminalTiers.Decode).MinAsync(column);
-        FilterLiteral decodedMax = await file.Scan().Where(filter).WithTiers(TerminalTiers.Decode).MaxAsync(column);
+        FilterLiteral min = await file.ScanBuilder().Where(filter).MinAsync(column);
+        FilterLiteral max = await file.ScanBuilder().Where(filter).MaxAsync(column);
+        FilterLiteral decodedMin = await file.ScanBuilder().Where(filter).WithTiers(TerminalTiers.Decode).MinAsync(column);
+        FilterLiteral decodedMax = await file.ScanBuilder().Where(filter).WithTiers(TerminalTiers.Decode).MaxAsync(column);
         Assert.True(SameExtreme(decodedMin, min), $"min {Describe(min)} against {Describe(decodedMin)}");
         Assert.True(SameExtreme(decodedMax, max), $"max {Describe(max)} against {Describe(decodedMax)}");
 
@@ -394,8 +394,8 @@ public sealed class SortedRunsCursorTests
         // worth of rows or fewer is a take, which decodes no more than the pruned scan does.
         ScanMetrics indexed = new ScanMetrics();
         ScanMetrics unindexed = new ScanMetrics();
-        List<long> on = await RowsOf(file.Scan().Where(filter).WithMetrics(indexed));
-        List<long> off = await RowsOf(file.Scan().Where(filter).WithIndexes(false).WithMetrics(unindexed));
+        List<long> on = await RowsOf(file.ScanBuilder().Where(filter).WithMetrics(indexed));
+        List<long> off = await RowsOf(file.ScanBuilder().Where(filter).WithIndexes(false).WithMetrics(unindexed));
         Assert.True(
             indexed.ValuesDecoded <= unindexed.ValuesDecoded,
             $"{indexed.ValuesDecoded} values decoded with the index, {unindexed.ValuesDecoded} without");
@@ -417,7 +417,7 @@ public sealed class SortedRunsCursorTests
         (_, VortexExpr filter, Func<FilterLiteral, bool> matches) = Parse("i64 >= 2400");
         List<Entry> oracle = Oracle("i64").FindAll(e => matches(e.Key));
 
-        ScanPlan plan = await file.Scan().Where(filter).ExplainAsync();
+        ScanPlan plan = await file.ScanBuilder().Where(filter).ExplainAsync();
         Assert.NotNull(plan.Count);
         Assert.True(plan.Count.ExactCover);
         Assert.Equal(oracle.Count, plan.Count.ExactCount);
@@ -426,11 +426,11 @@ public sealed class SortedRunsCursorTests
         Assert.Null(plan.Order);
 
         // Without the index, no cover; a take narrows it off too.
-        ScanPlan off = await file.Scan().Where(filter).WithIndexes(false).ExplainAsync();
+        ScanPlan off = await file.ScanBuilder().Where(filter).WithIndexes(false).ExplainAsync();
         Assert.False(off.Count!.ExactCover);
         Assert.Equal(0, off.RowsSelectedByIndex);
 
-        ScanPlan ordered = await file.Scan().Where(filter).InKeyOrder("i64", descending: true).ExplainAsync();
+        ScanPlan ordered = await file.ScanBuilder().Where(filter).InKeyOrder("i64", descending: true).ExplainAsync();
         OrderPlan order = Assert.IsType<OrderPlan>(ordered.Order);
         Assert.Equal(KeySourceKind.SortedRuns, order.Source);
         Assert.Equal(oracle.Count, order.EntriesInRange);
@@ -453,7 +453,7 @@ public sealed class SortedRunsCursorTests
 
         Assert.Equal(runsWithKeys, order.RunsInRange);
 
-        ScanPlan nothing = await file.Scan().InKeyOrder("i64").WithIndexes(false).ExplainAsync();
+        ScanPlan nothing = await file.ScanBuilder().InKeyOrder("i64").WithIndexes(false).ExplainAsync();
         Assert.Equal(KeySourceKind.None, nothing.Order!.Source);
     }
 
@@ -484,10 +484,10 @@ public sealed class SortedRunsCursorTests
         Assert.True(log.IndexRunsRead > runs);
 
         VortexExpr notIndexed = Expr.Ne(Expr.Field("f32"), Expr.Literal(FilterLiteral.From(0.0)));
-        await file.Scan().Where(notIndexed).CountAsync();
+        await file.ScanBuilder().Where(notIndexed).CountAsync();
         Assert.True(log.CountBlocksDecoded > decoded);
 
-        await foreach (RecordBatch batch in file.Scan().InKeyOrder("i64").WithMaxBatchRows(500).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().InKeyOrder("i64").WithMaxBatchRows(500).ExecuteAsync())
         {
         }
 
@@ -767,7 +767,7 @@ public sealed class SortedRunsCursorTests
         await using Written written = await Written.CreateAsync();
         List<Entry> oracle = Oracle(column);
         ScanMetrics metrics = new ScanMetrics();
-        Vorticity.Scanning.ScanBuilder scan = written.File.Scan()
+        Vorticity.Scanning.ScanBuilder scan = written.File.ScanBuilder()
             .InKeyOrder(column, descending)
             .WithDegreeOfParallelism(degree)
             .WithMetrics(metrics);
@@ -827,7 +827,7 @@ public sealed class SortedRunsCursorTests
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
         int batches = 0;
-        await foreach (RecordBatch batch in written.File.Scan()
+        await foreach (RecordBatch batch in written.File.ScanBuilder()
             .InKeyOrder("i64")
             .WithMaxBatchRows(200)
             .WithDegreeOfParallelism(degree)
@@ -868,14 +868,14 @@ public sealed class SortedRunsCursorTests
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
         ScanMetrics first = new ScanMetrics();
-        await foreach (RecordBatch batch in written.File.Scan().InKeyOrder("text").WithMaxBatchRows(10).WithMetrics(first).ExecuteAsync())
+        await foreach (RecordBatch batch in written.File.ScanBuilder().InKeyOrder("text").WithMaxBatchRows(10).WithMetrics(first).ExecuteAsync())
         {
             Assert.Equal(10, batch.RowCount);
             break;
         }
 
         ScanMetrics all = new ScanMetrics();
-        await foreach (RecordBatch batch in written.File.Scan().InKeyOrder("text").WithMaxBatchRows(10).WithMetrics(all).ExecuteAsync())
+        await foreach (RecordBatch batch in written.File.ScanBuilder().InKeyOrder("text").WithMaxBatchRows(10).WithMetrics(all).ExecuteAsync())
         {
             Assert.True(batch.RowCount <= 10);
         }
@@ -894,18 +894,18 @@ public sealed class SortedRunsCursorTests
 
         VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(async () =>
         {
-            await foreach (RecordBatch batch in file.Scan().InKeyOrder("i64").WithIndexes(false).ExecuteAsync())
+            await foreach (RecordBatch batch in file.ScanBuilder().InKeyOrder("i64").WithIndexes(false).ExecuteAsync())
             {
                 Assert.Fail("a batch without a key source");
             }
         });
         Assert.Contains("SortedRuns", refused.Message, StringComparison.Ordinal);
 
-        Assert.Throws<InvalidOperationException>(() => file.Scan().Rows(new RowRange(0, 10)).InKeyOrder("i64"));
-        Assert.Throws<InvalidOperationException>(() => file.Scan().Take([1, 2]).InKeyOrder("i64"));
-        Assert.Throws<InvalidOperationException>(() => file.Scan().InKeyOrder("i64").Rows(new RowRange(0, 10)));
-        Assert.Throws<InvalidOperationException>(() => file.Scan().InKeyOrder("i64").Take([1, 2]));
-        Assert.Throws<ArgumentException>(() => file.Scan().InKeyOrder("missing"));
+        Assert.Throws<InvalidOperationException>(() => file.ScanBuilder().Rows(new RowRange(0, 10)).InKeyOrder("i64"));
+        Assert.Throws<InvalidOperationException>(() => file.ScanBuilder().Take([1, 2]).InKeyOrder("i64"));
+        Assert.Throws<InvalidOperationException>(() => file.ScanBuilder().InKeyOrder("i64").Rows(new RowRange(0, 10)));
+        Assert.Throws<InvalidOperationException>(() => file.ScanBuilder().InKeyOrder("i64").Take([1, 2]));
+        Assert.Throws<ArgumentException>(() => file.ScanBuilder().InKeyOrder("missing"));
     }
 
     /// <summary>The rows a key-ordered scan delivers in its order, its largest batch, and how many were empty.</summary>
@@ -1219,7 +1219,7 @@ public sealed class SortedRunsCursorTests
                 RowBlockSize = Block,
                 DataBlockTargetBytes = null,
                 IndexBudgetPerMille = 1_000_000,
-                Indexes = WritePolicy.None
+                WritePolicy = WritePolicy.None
                     .WithDefault(policy)
                     .For("row", IndexPolicy.None),
             };

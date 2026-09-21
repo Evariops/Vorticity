@@ -155,9 +155,9 @@ public sealed class VortexFileResourceTests
                 for (int round = 0; round < 200; round++)
                 {
                     Assert.Equal(entry.RowCount, file.RowCount);
-                    Assert.Equal(entry.DType, ManifestDTypeFormatter.Format(file.Schema));
+                    Assert.Equal(entry.DType, ManifestDTypeFormatter.Format(file.DType));
                     Assert.Equal(3, file.MetadataCount);
-                    Assert.Equal(33, file.Statistics.FieldCount);
+                    Assert.Equal(33, file.FileStatistics.FieldCount);
                     Assert.False(file.SegmentSpecs.IsEmpty);
                     Assert.Equal("vortex.flat", file.GetLayoutEncodingId(0));
                 }

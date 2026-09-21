@@ -21,7 +21,7 @@ namespace Vorticity.Dataset;
 /// <param name="BytesIn">The bytes it read, the denominator of write amplification.</param>
 /// <param name="BytesOut">The bytes it wrote.</param>
 /// <param name="Outcome">What the commit made of it.</param>
-public sealed record CompactionResult(
+internal sealed record CompactionResult(
     ulong Version,
     int FromLevel,
     int ToLevel,
@@ -36,7 +36,7 @@ public sealed record CompactionResult(
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the clustering key when there is
 /// one, a concatenation otherwise.</summary>
-public static class DatasetCompactor
+internal static class DatasetCompactor
 {
     /// <summary>Reads the job's inputs and replaces them by the objects it writes; the dataset moves
     /// to the version the commit creates.</summary>
@@ -222,7 +222,7 @@ public static class DatasetCompactor
             ObjectLease lease = await dataset.RentAsync(input.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
-                await foreach (RecordBatch batch in lease.File.Scan()
+                await foreach (RecordBatch batch in lease.File.ScanBuilder()
                     .ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     await outputs.RollIfFullAsync(cancellationToken).ConfigureAwait(false);
@@ -261,7 +261,7 @@ public static class DatasetCompactor
             key.Paths,
             descending: false,
             rankedTies: false,
-            file => file.Scan().InKeyOrder(paths),
+            file => file.ScanBuilder().InKeyOrder(paths),
             opened: null,
             cancellationToken);
         long rows = 0;

@@ -10,7 +10,7 @@ namespace Vorticity.Dataset;
 /// An implementation must answer several reads in flight at once: a walk prefetches a window of
 /// sibling pages in parallel.
 /// </remarks>
-public interface IPageSource
+internal interface IPageSource
 {
     /// <summary>Reads one page and checks it against its reference.</summary>
     /// <exception cref="CommitFormatException">The page is not there or does not hash to its reference.</exception>
@@ -21,7 +21,7 @@ public interface IPageSource
 /// Takes the pages a commit writes. Writing is synchronous where reading is not: a commit object is
 /// assembled in memory, so writing a page is a copy into a buffer.
 /// </summary>
-public interface IPageSink
+internal interface IPageSink
 {
     /// <summary>
     /// Writes one page and returns the reference that names it, whose offset the commit object
@@ -34,7 +34,7 @@ public interface IPageSink
 /// A page source over pages already in memory, and the sink that fills it. Also serves the pages a
 /// commit header inlines, which arrived with the header and cost no request.
 /// </summary>
-public sealed class MemoryPageStore : IPageSource, IPageSink
+internal sealed class MemoryPageStore : IPageSource, IPageSink
 {
     private readonly Dictionary<PageReference, ReadOnlyMemory<byte>> _pages = [];
     private readonly ulong _version;

@@ -14,7 +14,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// codes in a nested <c>vortex.varbin</c> child, and canonicalizing that child inlines its short
 /// values into the views, leaving no contiguous code stream to decode from.
 /// </summary>
-public sealed class FsstDecoder : ArrayDecoder
+internal sealed class FsstDecoder : ArrayDecoder
 {
     /// <summary>The wire id.</summary>
     public const string Id = "vortex.fsst";

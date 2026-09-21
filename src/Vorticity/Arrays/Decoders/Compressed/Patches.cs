@@ -17,7 +17,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// A <c>ref struct</c> because it borrows the decoded indices out of the canonical arena: a
 /// <see cref="Patches"/> is meaningful only inside the decode call that built it.
 /// </remarks>
-public readonly ref struct Patches
+internal readonly ref struct Patches
 {
     /// <summary>
     /// One index offset is stored per chunk of this many rows, which is what makes patch lookup

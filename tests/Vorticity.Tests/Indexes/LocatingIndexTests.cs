@@ -90,7 +90,7 @@ public sealed class LocatingIndexTests
         Assert.Equal(5, directory.Entries.Count);
         foreach (IndexEntry entry in directory.Entries)
         {
-            string column = written.File.Schema.GetFieldName((int)entry.ColumnPath[0]);
+            string column = written.File.DType.GetFieldName((int)entry.ColumnPath[0]);
             ulong entries = 0;
             ulong block = 0;
             foreach (IndexRun run in entry.Runs)
@@ -128,7 +128,7 @@ public sealed class LocatingIndexTests
         }
 
         // The small segments really cut the runs.
-        IndexEntry name = Assert.Single(directory.Entries, e => written.File.Schema.GetFieldName((int)e.ColumnPath[0]) == "name");
+        IndexEntry name = Assert.Single(directory.Entries, e => written.File.DType.GetFieldName((int)e.ColumnPath[0]) == "name");
         Assert.True(Table(written.File, name, name.Runs[0]).SegmentCount > 5);
         Assert.Equal(written.Length, written.Report.Bytes.Total);
     }
@@ -136,7 +136,7 @@ public sealed class LocatingIndexTests
     /// <summary>A run's segment table, whether inline or in pages.</summary>
     private static FenceTable Table(VortexFile file, IndexEntry entry, IndexRun run)
     {
-        Assert.True(KeyLayout.TryOf(file.Schema.GetField((int)entry.ColumnPath[0]), out KeyLayout layout));
+        Assert.True(KeyLayout.TryOf(file.DType.GetField((int)entry.ColumnPath[0]), out KeyLayout layout));
         Assert.True(
             FenceTable.TryOpen(run, KeyRunOptions.StrideOf(entry.Kind), layout, out FenceTable? table, out string? reason),
             reason);
@@ -188,11 +188,11 @@ public sealed class LocatingIndexTests
         VortexExpr filter = Parse(text);
 
         long expected = Oracle(text);
-        Assert.Equal(expected, await written.File.Scan().Where(filter).CountAsync());
-        Assert.Equal(expected, await written.File.Scan().Where(filter).WithIndexes(false).CountAsync());
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).CountAsync());
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).WithIndexes(false).CountAsync());
 
-        List<string> on = await Materialize(written.File.Scan().Where(filter));
-        List<string> off = await Materialize(written.File.Scan().Where(filter).WithIndexes(false));
+        List<string> on = await Materialize(written.File.ScanBuilder().Where(filter));
+        List<string> off = await Materialize(written.File.ScanBuilder().Where(filter).WithIndexes(false));
         Assert.Equal(off, on);
         Assert.Equal(expected, on.Count);
     }
@@ -208,7 +208,7 @@ public sealed class LocatingIndexTests
         string value = present.ToString(CultureInfo.InvariantCulture);
         string text = column == "key" ? "key = " + value : "name = u" + value;
 
-        ScanPlan plan = await written.File.Scan().Where(Parse(text)).ExplainAsync();
+        ScanPlan plan = await written.File.ScanBuilder().Where(Parse(text)).ExplainAsync();
         PruningStep zones = Assert.Single(plan.Pruning, step => step.Structure == "zone map");
         PruningStep locating = Assert.Single(plan.Pruning, step => step.Structure == "locating index");
         Assert.Equal(0, zones.BlocksPruned);
@@ -226,15 +226,15 @@ public sealed class LocatingIndexTests
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
 
-        ScanPlan everywhere = await written.File.Scan().Where(Parse("status = held")).ExplainAsync();
+        ScanPlan everywhere = await written.File.ScanBuilder().Where(Parse("status = held")).ExplainAsync();
         Assert.Equal(HoldingBlocks(row => Status(row) == "held"), everywhere.LiveBlocks);
 
-        ScanPlan nowhere = await written.File.Scan().Where(Parse("status = nope")).ExplainAsync();
+        ScanPlan nowhere = await written.File.ScanBuilder().Where(Parse("status = nope")).ExplainAsync();
         Assert.Equal(0, nowhere.LiveBlocks);
 
         // A key past every block's maximum is the zone map's to kill, and the index is never asked:
         // cheapest first, and the chain stops at an empty mask.
-        ScanPlan outOfRange = await written.File.Scan().Where(Parse("opt = 5000")).ExplainAsync();
+        ScanPlan outOfRange = await written.File.ScanBuilder().Where(Parse("opt = 5000")).ExplainAsync();
         Assert.Equal(0, outOfRange.LiveBlocks);
         Assert.DoesNotContain(outOfRange.Pruning, step => step.Structure == "locating index");
     }
@@ -248,7 +248,7 @@ public sealed class LocatingIndexTests
         // Row 5·1024+3 holds -0.0, row 9·1024+7 holds +0.0, and many rows hold key % 5000 == 0.
         foreach (string text in new[] { "price = 0.0f", "price = -0.0f" })
         {
-            ScanPlan plan = await written.File.Scan().Where(Parse(text)).ExplainAsync();
+            ScanPlan plan = await written.File.ScanBuilder().Where(Parse(text)).ExplainAsync();
             Assert.Equal(HoldingBlocks(row => Price(row) == 0.0), plan.LiveBlocks);
             Assert.True(plan.LiveBlocks < Blocks);
         }
@@ -265,7 +265,7 @@ public sealed class LocatingIndexTests
 
         int present = Key(40_000);
         string text = string.Create(CultureInfo.InvariantCulture, $"name = u{present}");
-        Assert.Equal(Oracle(text), await written.File.Scan().Where(Parse(text)).CountAsync());
+        Assert.Equal(Oracle(text), await written.File.ScanBuilder().Where(Parse(text)).CountAsync());
     }
 
     [Fact]
@@ -301,7 +301,7 @@ public sealed class LocatingIndexTests
             await using VortexFile file = await VortexFile.OpenAsync(path);
             foreach (string text in FilterTexts())
             {
-                Assert.Equal(Oracle(text), await file.Scan().Where(Parse(text)).CountAsync());
+                Assert.Equal(Oracle(text), await file.ScanBuilder().Where(Parse(text)).CountAsync());
             }
         }
         finally
@@ -505,7 +505,7 @@ public sealed class LocatingIndexTests
             {
                 RowBlockSize = Block,
                 DataBlockTargetBytes = null,
-                Indexes = policy,
+                WritePolicy = policy,
                 IndexBudgetPerMille = budgetPerMille,
             });
             long length = new System.IO.FileInfo(path).Length;

@@ -104,7 +104,7 @@ public sealed class FilterPushDownTests
         FlatLayoutReader.ValuesDecoded = 0;
         List<string> values = [];
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        ScanBuilder scan = file.Scan();
+        ScanBuilder scan = file.ScanBuilder();
         if (filter is not null)
         {
             scan = scan.Where(filter);
@@ -193,7 +193,7 @@ public sealed class FilterPushDownTests
         VortexWriteOptions options = new VortexWriteOptions
         {
             EncodingHints = new Dictionary<string, VortexEncodingHint> { [Field] = hint },
-            Indexes = Vorticity.Indexes.WritePolicy.None,
+            WritePolicy = Vorticity.Indexes.WritePolicy.None,
         };
 
         await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, options);

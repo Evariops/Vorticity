@@ -57,7 +57,7 @@ internal static class Checksum
     {
         ulong hash = Offset;
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             for (int row = 0; row < batch.RowCount; row++)

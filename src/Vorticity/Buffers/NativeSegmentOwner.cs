@@ -25,7 +25,7 @@ namespace Vorticity.Buffers;
 /// reference count reaches zero, instead of freeing.
 /// </para>
 /// </remarks>
-public sealed class NativeSegmentOwner : SegmentOwner
+internal sealed class NativeSegmentOwner : SegmentOwner
 {
     // Held as nint rather than byte* so the free path can be a single Interlocked.Exchange: that
     // is what makes a finalizer racing an explicit Dispose incapable of double-freeing.

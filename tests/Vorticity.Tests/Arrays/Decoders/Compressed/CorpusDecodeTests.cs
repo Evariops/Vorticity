@@ -129,7 +129,7 @@ public sealed class CorpusDecodeTests
                 spec.AlignmentExponent);
             ArrayBlobReader.Load(scan.Nodes, segment, scan.ArrayEncodings);
 
-            int decoded = scan.Decode.DecodeRoot(scan.Nodes.Root, file.Schema, (int)rowCount);
+            int decoded = scan.Decode.DecodeRoot(scan.Nodes.Root, file.DType, (int)rowCount);
             CanonicalNode node = scan.Canonical.GetNode(decoded);
 
             Assert.Equal((int)rowCount, node.Length);

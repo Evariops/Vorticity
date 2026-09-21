@@ -138,7 +138,7 @@ public sealed class CorpusReportTests
             {
                 await using VortexFile file = await VortexFile.OpenAsync(
                     entry.FullPath, TestContext.Current.CancellationToken);
-                await foreach (RecordBatch batch in file.Scan().ExecuteAsync()
+                await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
                     .WithCancellation(TestContext.Current.CancellationToken))
                 {
                     batch.Dispose();

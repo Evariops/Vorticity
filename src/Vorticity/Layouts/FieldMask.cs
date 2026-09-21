@@ -20,7 +20,7 @@ namespace Vorticity.Layouts;
 /// default would silently drop columns.
 /// </para>
 /// </remarks>
-public readonly struct FieldMask
+internal readonly struct FieldMask
 {
     private const byte KindAll = 0;
     private const byte KindEmpty = 1;
@@ -180,7 +180,7 @@ internal sealed class FieldMaskNode
 /// projection. This builder is the missing piece; it allocates, is used once per scan, and is never
 /// touched on a decode path.
 /// </remarks>
-public sealed class FieldMaskBuilder
+internal sealed class FieldMaskBuilder
 {
     private readonly Level _root = new Level();
 

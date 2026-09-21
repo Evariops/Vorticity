@@ -10,7 +10,7 @@ namespace Vorticity.Dataset;
 /// <param name="Key">The entry's key.</param>
 /// <param name="Value">The entry's value, or null to remove the key.</param>
 /// <param name="Rows">The object's rows; ignored for a removal.</param>
-public readonly record struct TreeChange(ReadOnlyMemory<byte> Key, ReadOnlyMemory<byte>? Value, long Rows)
+internal readonly record struct TreeChange(ReadOnlyMemory<byte> Key, ReadOnlyMemory<byte>? Value, long Rows)
 {
     /// <summary>Adds or replaces an entry.</summary>
     public static TreeChange Put(ReadOnlyMemory<byte> key, ReadOnlyMemory<byte> value, long rows) =>
@@ -28,7 +28,7 @@ public readonly record struct TreeChange(ReadOnlyMemory<byte> Key, ReadOnlyMemor
 /// <param name="Depth">The levels; 0 for an empty tree, 1 when the root is a leaf.</param>
 /// <param name="Entries">The data objects it holds.</param>
 /// <param name="Rows">Their rows, summed.</param>
-public sealed record DatasetTree(PageReference Root, int Depth, long Entries, long Rows)
+internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, long Rows)
 {
     /// <summary>A tree with nothing in it.</summary>
     public static DatasetTree Empty { get; } = new DatasetTree(PageReference.None, 0, 0, 0);

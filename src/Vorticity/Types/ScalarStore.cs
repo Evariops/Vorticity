@@ -54,7 +54,7 @@ internal struct ScalarNode
 /// a later append that grows the byte array, and by <see cref="Clear"/>.
 /// </para>
 /// </remarks>
-public sealed class ScalarStore
+internal sealed class ScalarStore
 {
     /// <summary>
     /// Node pairs a comparison visits before it starts memoising. Same rationale, and same value,

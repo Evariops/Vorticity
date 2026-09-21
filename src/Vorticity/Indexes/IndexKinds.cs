@@ -8,7 +8,7 @@ namespace Vorticity.Indexes;
 /// version and a change of layout, hash or meaning takes a new name rather than editing an old one:
 /// rebuilding an index is cheap, migrating one is not.
 /// </summary>
-public static class IndexKinds
+internal static class IndexKinds
 {
     /// <summary>A split-block Bloom filter per block or generation.</summary>
     public const string BloomSbbf = "vorticity.bloom.sbbf.v1";

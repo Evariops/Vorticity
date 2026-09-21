@@ -102,7 +102,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 
     /// <summary>The schema every batch of this scan carries.</summary>
     /// <remarks>
-    /// It is what <see cref="RecordBatch.Schema"/> reports for every batch, and the two are
+    /// It is what <see cref="RecordBatch.DType"/> reports for every batch, and the two are
     /// asserted equal by the scan's tests: the batch's schema is what the layout reader built, and
     /// this is what the caller was promised.
     /// </remarks>

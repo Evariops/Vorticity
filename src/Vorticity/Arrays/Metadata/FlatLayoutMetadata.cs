@@ -13,7 +13,7 @@ namespace Vorticity.Arrays.Metadata;
 /// holds buffers only, which is a different offset-reconstruction path from the usual one — rare,
 /// since a default writer does not produce it, but legal and readable.
 /// </remarks>
-public readonly ref struct FlatLayoutMetadata
+internal readonly ref struct FlatLayoutMetadata
 {
     private const string MessageName = "FlatLayoutMetadata";
 

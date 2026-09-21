@@ -8,7 +8,7 @@ namespace Vorticity.Types.Numerics;
 /// (<c>message DecimalMetadata { DecimalType values_type = 1; }</c>), so the numeric values are
 /// wire values and must not be renumbered.
 /// </summary>
-public enum DecimalStorageType : byte
+internal enum DecimalStorageType : byte
 {
     /// <summary>8-bit storage, selected for precision 1..2.</summary>
     I8 = 0,
@@ -33,7 +33,7 @@ public enum DecimalStorageType : byte
 /// Helpers over <see cref="DecimalStorageType"/>: the precision-to-width mapping, the byte width of
 /// each storage type, and the guard a reader applies to a file-supplied value.
 /// </summary>
-public static class DecimalStorage
+internal static class DecimalStorage
 {
     /// <summary>Smallest legal decimal precision: a precision of zero represents no digit.</summary>
     public const byte MinPrecision = 1;

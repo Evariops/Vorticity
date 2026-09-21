@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 namespace Vorticity.Dataset;
 
 /// <summary>What a commit needs to know beyond its operations.</summary>
-public sealed record CommitOptions
+internal sealed record CommitOptions
 {
     /// <summary>The dataset's chunking seed, fixed at creation and carried by every header.</summary>
     public required ulong Seed { get; init; }
@@ -38,7 +38,7 @@ public sealed record CommitOptions
 /// <param name="Outcomes">What each operation decided, in the caller's order.</param>
 /// <param name="Attempts">How many times the writer had to rebase, 1 when it won first time.</param>
 /// <param name="Pages">A source that can read the new version's pages, new and old.</param>
-public sealed record CommitResult(
+internal sealed record CommitResult(
     ulong Version,
     string Key,
     DatasetLevels Levels,
@@ -55,7 +55,7 @@ public sealed record CommitResult(
 /// commits by itself, so there is no lease, no lock and no external service. A writer that loses
 /// re-reads the winner and re-applies its operations rather than merging two trees.
 /// </summary>
-public static class DatasetCommitter
+internal static class DatasetCommitter
 {
     /// <summary>Applies the operations to the dataset's latest version, rebasing until it wins.</summary>
     /// <exception cref="ObjectStoreException">The writer lost <see cref="CommitOptions.MaxAttempts"/> times.</exception>

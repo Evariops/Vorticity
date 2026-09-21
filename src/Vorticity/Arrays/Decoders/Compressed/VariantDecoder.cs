@@ -13,7 +13,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// merging one back is not implemented and such a file is refused by name rather than read
 /// partially.
 /// </summary>
-public sealed class VariantDecoder : ArrayDecoder
+internal sealed class VariantDecoder : ArrayDecoder
 {
     private const string Id = "vortex.variant";
 
@@ -94,7 +94,7 @@ public sealed class VariantDecoder : ArrayDecoder
 /// children holding each row's variant metadata and value. A file carrying shredded paths, or one
 /// whose rows are all shredded, is refused rather than read partially.
 /// </summary>
-public sealed class ParquetVariantDecoder : ArrayDecoder
+internal sealed class ParquetVariantDecoder : ArrayDecoder
 {
     private const string Id = "vortex.parquet.variant";
 

@@ -203,11 +203,11 @@ public sealed class ProjectionTests
             Corpus.Path("types/struct_field_names"), CancellationToken.None);
 
         // The file really does have a field called "a.b", and a field called "a" that is an i32.
-        Assert.True(file.Schema.IndexOfField("a.b") >= 0);
+        Assert.True(file.DType.IndexOfField("a.b") >= 0);
 
         // So the dotted grammar resolves "a.b" as a -> b and fails on the leaf. This is the
         // documented limitation, asserted rather than worked around.
-        Assert.Throws<ArgumentException>(() => file.Scan().Project("a.b"));
+        Assert.Throws<ArgumentException>(() => file.ScanBuilder().Project("a.b"));
     }
 
     [Fact]
@@ -217,14 +217,14 @@ public sealed class ProjectionTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path("types/struct_field_names"), CancellationToken.None);
 
-        int dotted = file.Schema.IndexOfField("a.b");
+        int dotted = file.DType.IndexOfField("a.b");
         Assert.True(dotted >= 0);
 
         Span<int> fields = stackalloc int[1];
         fields[0] = dotted;
 
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().ProjectFields(fields).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().ProjectFields(fields).ExecuteAsync())
         {
             Assert.Equal(1, batch.FieldCount);
             Assert.Equal("a.b", batch.GetFieldName(0));
@@ -241,11 +241,11 @@ public sealed class ProjectionTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path("types/struct_field_names"), CancellationToken.None);
 
-        int empty = file.Schema.IndexOfField(string.Empty);
+        int empty = file.DType.IndexOfField(string.Empty);
         Assert.True(empty >= 0);
 
         // The empty path happens to work, because "" splits into one empty segment.
-        await foreach (RecordBatch batch in file.Scan().Project(string.Empty).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Project(string.Empty).ExecuteAsync())
         {
             Assert.Equal(1, batch.FieldCount);
             Assert.Equal(string.Empty, batch.GetFieldName(0));
@@ -258,19 +258,19 @@ public sealed class ProjectionTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path("types/struct_field_names"), CancellationToken.None);
 
-        int count = file.Schema.FieldCount;
+        int count = file.DType.FieldCount;
         Assert.Throws<ArgumentOutOfRangeException>(() =>
         {
             Span<int> fields = stackalloc int[1];
             fields[0] = count;
-            file.Scan().ProjectFields(fields);
+            file.ScanBuilder().ProjectFields(fields);
         });
 
         Assert.Throws<ArgumentOutOfRangeException>(() =>
         {
             Span<int> fields = stackalloc int[1];
             fields[0] = -1;
-            file.Scan().ProjectFields(fields);
+            file.ScanBuilder().ProjectFields(fields);
         });
     }
 
@@ -281,13 +281,13 @@ public sealed class ProjectionTests
             Corpus.Path("containers/chunked_stream_3"), CancellationToken.None);
 
         Assert.False(file.IsTabular);
-        Assert.Throws<ArgumentException>(() => file.Scan().Project("anything"));
+        Assert.Throws<ArgumentException>(() => file.ScanBuilder().Project("anything"));
 
         Assert.Throws<ArgumentException>(() =>
         {
             Span<int> fields = stackalloc int[1];
             fields[0] = 0;
-            file.Scan().ProjectFields(fields);
+            file.ScanBuilder().ProjectFields(fields);
         });
     }
 
@@ -299,7 +299,7 @@ public sealed class ProjectionTests
             Corpus.Path("containers/uncompressed_canonical"), CancellationToken.None);
 
         System.Collections.Generic.IAsyncEnumerable<RecordBatch> scan =
-            file.Scan().Project("strs").ExecuteAsync();
+            file.ScanBuilder().Project("strs").ExecuteAsync();
         BatchAsyncEnumerable typed = Assert.IsType<BatchAsyncEnumerable>(scan);
 
         long rows = 0;
@@ -309,7 +309,7 @@ public sealed class ProjectionTests
             Assert.Equal("strs", batch.GetFieldName(0));
 
             // The promise the compiler made and the schema the layout produced must agree.
-            Assert.Equal(typed.Schema, batch.Schema);
+            Assert.Equal(typed.Schema, batch.DType);
             rows += batch.RowCount;
         }
 
@@ -323,7 +323,7 @@ public sealed class ProjectionTests
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path("containers/uncompressed_canonical"), CancellationToken.None);
 
-        await foreach (RecordBatch batch in file.Scan().Project("strs").Project("ints").ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().Project("strs").Project("ints").ExecuteAsync())
         {
             Assert.Equal(2, batch.FieldCount);
 

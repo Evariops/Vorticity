@@ -9,7 +9,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// Decodes <c>vortex.bytebool</c>: one byte per boolean, into a canonical bitmap. Any non-zero
 /// byte means true, not only one.
 /// </summary>
-public sealed class ByteBoolDecoder : ArrayDecoder
+internal sealed class ByteBoolDecoder : ArrayDecoder
 {
     private const string Id = "vortex.bytebool";
 

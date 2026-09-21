@@ -43,9 +43,9 @@ public sealed class ScanIoTests
         LayoutNode root = tree.Root;
         Assert.Equal(LayoutEncodingId.Struct, root.Encoding);
 
-        int fieldCount = file.Schema.FieldCount;
+        int fieldCount = file.DType.FieldCount;
         Assert.Equal(12, fieldCount);
-        Assert.False(file.Schema.IsNullable, "the fixture's root struct is non-nullable, so field k is child k");
+        Assert.False(file.DType.IsNullable, "the fixture's root struct is non-nullable, so field k is child k");
 
         // Every field's own segments, from the layout tree - not guessed from offsets.
         HashSet<uint>[] perField = new HashSet<uint>[fieldCount];
@@ -68,7 +68,7 @@ public sealed class ScanIoTests
         source.ResetCounters();
 
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().ProjectFields([Projected]).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().ProjectFields([Projected]).ExecuteAsync())
         {
             Assert.Equal(1, batch.FieldCount);
             rows += batch.RowCount;
@@ -137,7 +137,7 @@ public sealed class ScanIoTests
         source.ResetCounters();
 
         int batches = 0;
-        await foreach (RecordBatch batch in file.Scan().WithMaxBatchRows(1000).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().WithMaxBatchRows(1000).ExecuteAsync())
         {
             batches++;
             Assert.Equal(batches, source.ReadManyCalls);
@@ -170,7 +170,7 @@ public sealed class ScanIoTests
         source.ResetCounters();
 
         int batches = 0;
-        await foreach (RecordBatch batch in file.Scan().WithMaxBatchRows(512).ExecuteAsync())
+        await foreach (RecordBatch batch in file.ScanBuilder().WithMaxBatchRows(512).ExecuteAsync())
         {
             batches++;
         }
@@ -185,7 +185,7 @@ public sealed class ScanIoTests
         await using VortexFile file = await VortexFile.OpenAsync(
             source, new VortexOpenOptions(), CancellationToken.None);
 
-        ScanBuilder builder = file.Scan();
+        ScanBuilder builder = file.ScanBuilder();
         if (fields is not null)
         {
             builder = builder.ProjectFields(fields);

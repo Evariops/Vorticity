@@ -8,7 +8,7 @@ namespace Vorticity.Arrays.Metadata;
 /// <c>vortex.listview</c> metadata:
 /// <c>message ListViewMetadata { uint64 elements_len = 1; PType offset_ptype = 2; PType size_ptype = 3; }</c>.
 /// </summary>
-public readonly struct ListViewMetadata : IEquatable<ListViewMetadata>
+internal readonly struct ListViewMetadata : IEquatable<ListViewMetadata>
 {
     private const string MessageName = "ListViewMetadata";
 

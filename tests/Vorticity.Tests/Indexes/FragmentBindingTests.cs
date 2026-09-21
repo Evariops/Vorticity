@@ -54,7 +54,7 @@ public sealed class FragmentBindingTests
         await using (VortexFile file = await VortexFile.OpenAsync(temp.Path))
         {
             Assert.Equal((ulong)file.FileLength, recorded.FileLength);
-            Assert.Equal(file.Identity, recorded.FileIdentity);
+            Assert.Equal(file.StoredIdentity, recorded.FileIdentity);
         }
 
         Assert.StartsWith("fs:", recorded.FileToken, StringComparison.Ordinal);
@@ -70,7 +70,7 @@ public sealed class FragmentBindingTests
 
         // And it answers.
         VortexExpr equal = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(Id(4_321))));
-        Assert.Equal(1, await counted.Scan().Where(equal).CountAsync());
+        Assert.Equal(1, await counted.ScanBuilder().Where(equal).CountAsync());
     }
 
     [Fact]
@@ -97,7 +97,7 @@ public sealed class FragmentBindingTests
 
         // The scan answers without it.
         VortexExpr equal = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(Id(4_321))));
-        Assert.Equal(1, await file.Scan().Where(equal).CountAsync());
+        Assert.Equal(1, await file.ScanBuilder().Where(equal).CountAsync());
     }
 
     [Fact]
@@ -116,7 +116,7 @@ public sealed class FragmentBindingTests
         await System.IO.File.WriteAllBytesAsync(temp.Path, bytes);
         await using (VortexFile foreign = await VortexFile.OpenAsync(temp.Path))
         {
-            Assert.Null(foreign.Identity);
+            Assert.Null(foreign.StoredIdentity);
         }
 
         byte[] fragment = await FragmentAsync(temp.Path);
@@ -262,7 +262,7 @@ public sealed class FragmentBindingTests
         VortexWriteOptions options = new VortexWriteOptions
         {
             RowBlockSize = 1_024,
-            Indexes = WritePolicy.None,
+            WritePolicy = WritePolicy.None,
             Identity = identity,
         };
         await using VortexFileWriter writer = VortexFileWriter.Create(path, Schema, options);

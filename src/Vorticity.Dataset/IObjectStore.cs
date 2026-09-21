@@ -12,7 +12,7 @@ namespace Vorticity.Dataset;
 /// half-written. An object is never overwritten, and its token changes whenever the bytes under the
 /// key change. Retries, pooling and credentials belong to the implementation, not to this seam.
 /// </remarks>
-public interface IObjectStore : IAsyncDisposable
+internal interface IObjectStore : IAsyncDisposable
 {
     /// <summary>
     /// Reads a byte range of an object. The length is clamped to the object, which lets a reader
@@ -58,10 +58,10 @@ public interface IObjectStore : IAsyncDisposable
 /// When the store created it, by the store's clock: two writers' clocks need not agree, and vacuum
 /// dates an object's age against the shared one.
 /// </param>
-public readonly record struct ObjectHead(long Length, string Token, DateTimeOffset LastModified);
+internal readonly record struct ObjectHead(long Length, string Token, DateTimeOffset LastModified);
 
 /// <summary>What <see cref="IObjectStore.PutIfAbsentAsync"/> did.</summary>
-public enum PutOutcome
+internal enum PutOutcome
 {
     /// <summary>The key was free and now holds the caller's bytes.</summary>
     Created = 0,
@@ -71,7 +71,7 @@ public enum PutOutcome
 }
 
 /// <summary>No object has that key.</summary>
-public sealed class ObjectNotFoundException : Exception
+internal sealed class ObjectNotFoundException : Exception
 {
     /// <summary>Prefer <see cref="For"/>, which names the key.</summary>
     public ObjectNotFoundException()
@@ -118,7 +118,7 @@ public sealed class ObjectNotFoundException : Exception
 }
 
 /// <summary>A store refused or failed an operation.</summary>
-public sealed class ObjectStoreException : Exception
+internal sealed class ObjectStoreException : Exception
 {
     /// <summary>Carries a message.</summary>
     public ObjectStoreException(string message)

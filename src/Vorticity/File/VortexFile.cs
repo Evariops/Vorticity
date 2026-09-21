@@ -37,11 +37,11 @@ namespace Vorticity;
 /// <para>
 /// <b>After disposal</b>, a member throws <see cref="ObjectDisposedException"/> when, and only
 /// when, it reads the retained tail, whose buffer has gone back to the pool:
-/// <see cref="Identity"/>, <see cref="SegmentSpecs"/>, <see cref="Indexes"/>,
+/// <see cref="StoredIdentity"/>, <see cref="SegmentSpecs"/>, <see cref="Indexes"/>,
 /// <see cref="GetArrayEncodingId"/>, <see cref="GetLayoutEncodingId"/>,
 /// <see cref="ReadMetadataAsync"/> and <see cref="ReadIndexDirectoryAsync"/>. The others answer
-/// from state captured at the open -- <see cref="Schema"/>, <see cref="RowCount"/>,
-/// <see cref="FileLength"/>, <see cref="Statistics"/>, the metadata keys and specs -- and go on
+/// from state captured at the open -- <see cref="DType"/>, <see cref="RowCount"/>,
+/// <see cref="FileLength"/>, <see cref="FileStatistics"/>, the metadata keys and specs -- and go on
 /// answering, because the answer is still true and a guard on them would be a branch on a member
 /// a scan reads. A scan built from a disposed file fails at its first read instead: its source is
 /// gone. Treat a disposed file as gone regardless; the distinction is what protects memory, not a
@@ -125,7 +125,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="path"/> or <paramref name="options"/> is null.</exception>
     /// <exception cref="VortexFormatException">The file is not a well-formed Vortex file.</exception>
-    public static ValueTask<VortexFile> OpenAsync(
+    internal static ValueTask<VortexFile> OpenAsync(
         string path, VortexOpenOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
@@ -176,7 +176,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <returns>The open file. The caller disposes it.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="source"/> or <paramref name="options"/> is null.</exception>
     /// <exception cref="VortexFormatException">The file is not a well-formed Vortex file.</exception>
-    public static ValueTask<VortexFile> OpenAsync(
+    internal static ValueTask<VortexFile> OpenAsync(
         ISegmentSource source, VortexOpenOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -969,7 +969,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <summary>
     /// The file's root DType. It may be <em>any</em> DType, not necessarily a struct.
     /// </summary>
-    public DType Schema => _schema;
+    internal DType DType => _schema;
 
     /// <summary>
     /// The parsed root layout tree, parsed at most once per open file and shared by every scan.
@@ -1003,17 +1003,17 @@ public sealed partial class VortexFile : IAsyncDisposable
         }
     }
 
-    /// <summary>True when <see cref="Schema"/> is a struct and the file therefore reads as a table.</summary>
-    public bool IsTabular => _schema.Kind == DTypeKind.Struct;
+    /// <summary>True when <see cref="DType"/> is a struct and the file therefore reads as a table.</summary>
+    internal bool IsTabular => _schema.Kind == DTypeKind.Struct;
 
     /// <summary>Rows in the file: the root layout's <c>row_count</c>, narrowed once, here.</summary>
     public long RowCount { get; }
 
     /// <summary>The container format version. Always 1.</summary>
-    public int FormatVersion => VortexFileFormat.Version;
+    internal int FormatVersion => VortexFileFormat.Version;
 
     /// <summary>The file length in bytes.</summary>
-    public long FileLength { get; }
+    internal long FileLength { get; }
 
     /// <summary>
     /// The identity of this version of the file's bytes, or null when the file carries none.
@@ -1029,7 +1029,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// </para>
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>
-    public Guid? Identity
+    internal Guid? StoredIdentity
     {
         get
         {
@@ -1063,17 +1063,17 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<VortexFile, VortexTornTail> TornTails = [];
 
-    /// <summary>The arena that owns <see cref="Schema"/>'s nodes. Lives as long as the file.</summary>
-    public DTypeArena Types => _schema.Arena;
+    /// <summary>The arena that owns <see cref="DType"/>'s nodes. Lives as long as the file.</summary>
+    internal DTypeArena Types => _schema.Arena;
 
     /// <summary>The segment source this file reads through.</summary>
-    public ISegmentSource Segments => _source;
+    internal ISegmentSource Segments => _source;
 
     /// <summary>Read-time policy, copied into every scan context.</summary>
-    public VortexReadOptions ReadOptions { get; }
+    internal VortexReadOptions ReadOptions { get; }
 
     /// <summary>Number of entries in the footer's <c>array_specs</c> dictionary.</summary>
-    public int ArrayEncodingCount => _arrayEncodings.Length;
+    internal int ArrayEncodingCount => _arrayEncodings.Length;
 
     /// <summary>
     /// The resolved array encoding for a <c>u16</c> <c>ArrayNode.encoding</c> index.
@@ -1086,7 +1086,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// The index is outside the dictionary. It comes from the file, so it is a format error and not
     /// a caller error.
     /// </exception>
-    public ArrayEncodingId GetArrayEncoding(int specIndex)
+    internal ArrayEncodingId GetArrayEncoding(int specIndex)
     {
         if ((uint)specIndex >= (uint)_arrayEncodings.Length)
         {
@@ -1107,7 +1107,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// </remarks>
     /// <exception cref="VortexFormatException">The index is outside the dictionary.</exception>
     /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>
-    public string GetArrayEncodingId(int specIndex)
+    internal string GetArrayEncodingId(int specIndex)
     {
         ThrowIfDisposed();
         if ((uint)specIndex >= (uint)_arrayEncodingIds.Length)
@@ -1119,13 +1119,13 @@ public sealed partial class VortexFile : IAsyncDisposable
     }
 
     /// <summary>Number of entries in the footer's <c>layout_specs</c> dictionary.</summary>
-    public int LayoutEncodingCount => _layoutEncodings.Length;
+    internal int LayoutEncodingCount => _layoutEncodings.Length;
 
     /// <summary>The resolved layout encoding for a <c>u16</c> <c>Layout.encoding</c> index.</summary>
     /// <param name="specIndex">The index carried by the layout node.</param>
     /// <returns>The resolved id, or <see cref="LayoutEncodingId.Unknown"/>.</returns>
     /// <exception cref="VortexFormatException">The index is outside the dictionary.</exception>
-    public LayoutEncodingId GetLayoutEncoding(int specIndex)
+    internal LayoutEncodingId GetLayoutEncoding(int specIndex)
     {
         if ((uint)specIndex >= (uint)_layoutEncodings.Length)
         {
@@ -1141,7 +1141,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <remarks>Materialized on demand; see <see cref="GetArrayEncodingId"/>.</remarks>
     /// <exception cref="VortexFormatException">The index is outside the dictionary.</exception>
     /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>
-    public string GetLayoutEncodingId(int specIndex)
+    internal string GetLayoutEncodingId(int specIndex)
     {
         ThrowIfDisposed();
         if ((uint)specIndex >= (uint)_layoutEncodingIds.Length)
@@ -1158,7 +1158,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// exponent.
     /// </summary>
     /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>
-    public ReadOnlySpan<SegmentSpec> SegmentSpecs
+    internal ReadOnlySpan<SegmentSpec> SegmentSpecs
     {
         get
         {
@@ -1177,25 +1177,25 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// The root layout FlatBuffer bytes. Parsed by the layouts component; this component never
     /// interprets a layout.
     /// </summary>
-    public ReadOnlyMemory<byte> RootLayoutBytes => _rootLayoutBytes;
+    internal ReadOnlyMemory<byte> RootLayoutBytes => _rootLayoutBytes;
 
     /// <summary>True when the file carries a statistics segment.</summary>
-    public bool HasFileStatistics => _statistics is not null;
+    internal bool HasFileStatistics => _statistics is not null;
 
     /// <summary>The file-level statistics.</summary>
     /// <exception cref="InvalidOperationException">The file carries no statistics segment.</exception>
-    public FileStatistics Statistics =>
+    internal FileStatistics FileStatistics =>
         _statistics ?? throw new InvalidOperationException(
             "This Vortex file carries no statistics segment; check HasFileStatistics first.");
 
     /// <summary>Number of user metadata segments named by the postscript.</summary>
-    public int MetadataCount => _metadataKeys.Length;
+    internal int MetadataCount => _metadataKeys.Length;
 
     /// <summary>The key of one user metadata segment, in stored order.</summary>
     /// <param name="index">0-based index, below <see cref="MetadataCount"/>.</param>
     /// <returns>The key.</returns>
     /// <exception cref="ArgumentOutOfRangeException">The index is out of range.</exception>
-    public string GetMetadataKey(int index)
+    internal string GetMetadataKey(int index)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(index);
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, _metadataKeys.Length);
@@ -1206,7 +1206,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <param name="keyUtf8">The key as UTF-8 bytes.</param>
     /// <param name="index">The entry's index when found.</param>
     /// <returns>Whether the key is present.</returns>
-    public bool TryGetMetadataIndex(ReadOnlySpan<byte> keyUtf8, out int index)
+    internal bool TryGetMetadataIndex(ReadOnlySpan<byte> keyUtf8, out int index)
     {
         // Linear over at most VortexLimits.MaxMetadataSegments (16) entries: a dictionary keyed on
         // a string would allocate per lookup and hash file-controlled bytes for 16 comparisons.
@@ -1228,7 +1228,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <param name="index">0-based index, below <see cref="MetadataCount"/>.</param>
     /// <returns>The segment locator, already range- and alignment-checked.</returns>
     /// <exception cref="ArgumentOutOfRangeException">The index is out of range.</exception>
-    public SegmentSpec GetMetadataSegment(int index)
+    internal SegmentSpec GetMetadataSegment(int index)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(index);
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, _metadataSegments.Length);
@@ -1245,7 +1245,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <returns>An owner the caller releases exactly once.</returns>
     /// <exception cref="ArgumentOutOfRangeException">The index is out of range.</exception>
     /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>
-    public ValueTask<SegmentOwner> ReadMetadataAsync(int index, CancellationToken cancellationToken)
+    internal ValueTask<SegmentOwner> ReadMetadataAsync(int index, CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
         ArgumentOutOfRangeException.ThrowIfNegative(index);

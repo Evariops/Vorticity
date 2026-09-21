@@ -7,7 +7,7 @@ namespace Vorticity.Dataset;
 /// Turns what a page holds into the summary its parent carries. A parameter rather than something
 /// the tree knows, so that the chunker and the page format stay free of columns, dtypes and bounds.
 /// </summary>
-public interface ISummaryFold
+internal interface ISummaryFold
 {
     /// <summary>The summary of one leaf entry, read back out of its value, empty when it carries none.</summary>
     ReadOnlyMemory<byte> OfLeaf(TreeEntry entry);
@@ -20,7 +20,7 @@ public interface ISummaryFold
 }
 
 /// <summary>A fold that summarises nothing, for a tree whose entries carry no bounds.</summary>
-public sealed class NoSummary : ISummaryFold
+internal sealed class NoSummary : ISummaryFold
 {
     /// <summary>The one instance.</summary>
     public static NoSummary Instance { get; } = new NoSummary();

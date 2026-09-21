@@ -21,7 +21,7 @@ namespace Vorticity.IO;
 /// only through a file.
 /// </para>
 /// </remarks>
-public static class SegmentCoalescer
+internal static class SegmentCoalescer
 {
     /// <summary>
     /// Plans the reads for <paramref name="specs"/>.

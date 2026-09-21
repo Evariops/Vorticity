@@ -15,7 +15,7 @@ namespace Vorticity.Keys;
 /// than emulated, because sorting an unindexed column would hold the whole column in memory.
 /// </summary>
 /// <remarks>Not thread-safe, and meant to be used and discarded, like <c>ScanBuilder</c>.</remarks>
-public sealed class KeyCursorBuilder
+internal sealed class KeyCursorBuilder
 {
     private readonly VortexFile _file;
     private readonly string _path;
@@ -189,14 +189,14 @@ public sealed class KeyCursorBuilder
     /// <summary>Whether the file statistics say a top-level column is sorted, read without allocating.</summary>
     private static bool StatedSorted(VortexFile file, string path)
     {
-        DType schema = file.Schema;
+        DType schema = file.DType;
         if (!file.HasFileStatistics || schema.IsDefault || schema.Kind != DTypeKind.Struct)
         {
             return false;
         }
 
         int index = schema.IndexOfField(path);
-        FileStatistics statistics = file.Statistics;
+        FileStatistics statistics = file.FileStatistics;
         return index >= 0
             && index < statistics.FieldCount
             && statistics.GetField(index).TryGetIsSorted(out bool sorted)
@@ -291,7 +291,7 @@ public sealed class KeyCursorBuilder
 }
 
 /// <summary>The cursor entry point.</summary>
-public static class VortexFileKeyExtensions
+internal static class VortexFileKeyExtensions
 {
     /// <summary>Starts building a cursor over one column of <paramref name="file"/>.</summary>
     /// <param name="file">An open file.</param>
