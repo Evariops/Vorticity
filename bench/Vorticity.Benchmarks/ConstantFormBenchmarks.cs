@@ -1,28 +1,28 @@
-// The materialized form of a constant column against the form Z1b would introduce, on the three
-// arms the §3.7 entry conditions require: build, consume, take.
+// The materialized form of a constant column against the constant form that replaced it, on the
+// three arms a change of canonical form must measure: build, consume, take.
 //
-// WHAT Z1b PROPOSES. A canonical kind that is "one value and a length" instead of N copies of that
-// value. `ConstantCanonicalizer` tiles today (`:214-321`): it writes the element once and doubles
-// it over the whole column, which for a million rows of eight bytes is eight megabytes to say one
-// number. The constant form stores the element and the length, and every consumer resolves a row
-// by returning the same window.
+// THE TWO FORMS. A canonical kind that is "one value and a length" instead of N copies of that
+// value. The materialized form writes the element once and doubles it over the whole column,
+// which for a million rows of eight bytes is eight megabytes to say one number. The constant
+// form, which the library uses, stores the element and the length, and every consumer resolves a
+// row by returning the same window.
 //
 // WHY THE BENCH EXISTS AT ALL, and it is not to find out whether building is cheaper -- of course
-// it is, and R22 already measured that side: on the `constant` axis `Tile` is ENTIRELY bytes
+// it is, and that side is already measured: on the `constant` axis `Tile` is ENTIRELY bytes
 // (+44,6 % when the work is doubled, and nothing when only the calls are), so the materialized
 // build is exactly the bytes a constant form would not write. The question this class answers is
-// the OTHER two arms. §2.4 claims "coût consommateur : aucun", and §3.7 condition 3 refuses to take
-// that on trust: a form that saves on build and loses on every read is a bad trade, and the only
-// way to know is to run both.
+// the OTHER two arms. The proposal claims consumers pay nothing, and a change of canonical form
+// does not take that on trust before its consume and take arms agree over two runs: a form that
+// saves on build and loses on every read is a bad trade, and the only way to know is to run both.
 //
 // THE TWO WIDTHS ARE A PRIMITIVE AND A VIEW, not a sweep. Eight bytes is an `i64` constant, the
 // common `vortex.constant`; sixteen is an Arrow view, which is what a variant's `metadata` column
-// is made of and the case §2.4 says Z1b conditions Z2 for. The arms are expected to differ in
-// magnitude across them, not in sign.
+// is made of, and a variant can keep its encoded storage only once that column is a constant. The
+// arms are expected to differ in magnitude across them, not in sign.
 //
-// THE CONSTANT ARMS MODEL THE FORM, they do not call it. They were written before the form existed,
-// and it now exists only behind `VortexReadOptions.ConstantForm` (Z1b-c2b), so the model is still
-// what the bench prices. That is the same thing `VarBinFormBenchmarks` does for the offsets form, and
+// THE CONSTANT ARMS MODEL THE FORM, they do not call it, and the materialized arm keeps its own
+// copy of the tiling the library no longer has. That is the same thing `VarBinFormBenchmarks` does
+// for the offsets form, and
 // it is sound for the same reason: what is being priced is the memory traffic and the per-row work
 // each shape implies, and both are fully determined by the shape.
 using System;
@@ -191,12 +191,12 @@ public class ConstantFormBenchmarks
     /// length, so the rows are never gathered at all.
     /// </summary>
     /// <remarks>
-    /// THIS IS THE ARM THAT COULD HAVE GONE WRONG, and the reason §3.7 asks for it. §2.4's rule for
-    /// Z1a is that "a filter's or a take's output stays VarBinView whatever the input", because the
-    /// take and filter axes would regress otherwise. A constant has no such constraint -- taking N
-    /// rows of one value gives one value and a length -- so the take arm writes the element once
-    /// rather than gathering. If that turned out to be wrong the form would have to materialize on
-    /// take, and the arm would say so.
+    /// THIS IS THE ARM THAT COULD HAVE GONE WRONG, and the reason a take arm is required at all.
+    /// A string column's offsets form is held to "a filter's or a take's output stays VarBinView
+    /// whatever the input", because the take and filter axes would regress otherwise. A constant
+    /// has no such constraint -- taking N rows of one value gives one value and a length -- so the
+    /// take arm writes the element once rather than gathering. If that turned out to be wrong the
+    /// form would have to materialize on take, and the arm would say so.
     /// </remarks>
     [Benchmark(Description = "take 64 scattered, constant")]
     [BenchmarkCategory("take")]

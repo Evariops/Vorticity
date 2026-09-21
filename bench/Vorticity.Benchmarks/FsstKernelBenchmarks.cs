@@ -3,15 +3,14 @@
 // WHY THIS EXISTS RATHER THAN A SECOND WHOLE-FILE RUN. Measuring the kernel end to end put a ~35 us
 // open-and-walk cost in front of it and left the answer at the mercy of run-to-run drift: three
 // measurements of effectively identical code came back 135, 146 and 202 us, which is more spread
-// than any of the differences being argued about. docs/05-benchmarks.md §5 warns about exactly this
+// than any of the differences being argued about. The usual warning names exactly this
 // - "thermal drift over a long run systematically favors whoever goes first" - and the fix it
 // prescribes is to measure the two candidates against one clock.
 //
-// TWO ARMS, AND ONLY TWO (BENCH-AUDIT.md §3.1). The pair that carried the SHAPE question - an exact
-// copy of each symbol's real length against one unaligned 8-byte store per symbol, the shape fsst-rs
-// is built around - documented a 4.7x that was banked in `6ce4d2a` and cannot move again: the exact
-// copy is no longer anywhere in the library, so its arm was a museum piece the suite paid for on
-// every run. The figure stays in bench/BASELINE.md and in that commit.
+// TWO ARMS, AND ONLY TWO. The pair that carried the SHAPE question - an exact copy of each
+// symbol's real length against one unaligned 8-byte store per symbol, the shape fsst-rs is built
+// around - documented a 4.7x that was banked and cannot move again: the exact copy is no longer
+// anywhere in the library, so its arm was a museum piece the suite paid for on every run.
 //
 // What remains is the pair that can still move:
 //

@@ -1,6 +1,6 @@
 // ns/row and GB/s in the table, instead of a division left to the reader.
 //
-// BENCH-AUDIT.md C6: `RowEncodingBenchmarks` printed `rows=… keyBytes=…` to stderr in its
+// `RowEncodingBenchmarks` printed `rows=… keyBytes=…` to stderr in its
 // `GlobalSetup` and left the arithmetic to whoever read the table; every kernel class reported
 // microseconds for a quantity of work only its source says. A mean of 19.6 µs means nothing until
 // you know it moved 64 blocks of 1024 values, and nobody divides in their head twice a day.

@@ -5,7 +5,7 @@
 // trustworthy across runtimes. 0.15.x could not do that here -- it does not know the `net11.0`
 // moniker and throws `GetRuntimeVersion not implemented for NotRecognized` before a single benchmark
 // runs (reproduced on 0.15.8) -- so everything was in-process. **0.16.0-preview.1 runs net11.0 out of
-// process** (BENCH-AUDIT.md §6), so:
+// process**, so:
 //
 //   fast (the default)   in-process     three seconds of measurement does not pay ten of building a host
 //   --full               out of process process isolation per case, GC and runtime jobs, and `--disasm`
@@ -17,7 +17,7 @@
 //
 // THE PROFILE IS FAST BY DEFAULT, AND `--full` IS THE EXCEPTION. A class under `Job.Default` spends its
 // time in the job, not in the kernel: FsstKernelBenchmarks reads 102 s for four cases, of which the
-// kernel is microseconds. Measured the same evening on the same three classes (BENCH-AUDIT.md §4.2):
+// kernel is microseconds. Measured the same evening on the same three classes:
 //
 //     profile                                   Fsst (4)   Take (8)   FastLanes (4)   fidelity vs full
 //     full      Job.Default                       102 s      150 s        82 s          --
@@ -28,7 +28,7 @@
 // The last two rows are why the warm-up is left to BenchmarkDotNet: it warms until the measurements
 // stabilize, which is what a 600 us async path needs and what a fixed count does not give it. Only the
 // iteration time and count are shortened. A fast-profile figure is a DIRECTION; anything under about
-// 5 % on a kernel, or any number that goes into bench/BASELINE.md, is confirmed with `--full` on the
+// 5 % on a kernel, or any number recorded as a baseline, is confirmed with `--full` on the
 // one class concerned.
 using System;
 using System.Linq;
@@ -57,7 +57,7 @@ public sealed class BenchmarkConfig : ManualConfig
     /// <summary>
     /// Set the same way by <see cref="Program"/>: <c>--explore</c> on the command line. The
     /// <see cref="Explore"/> category holds the CURVES - a selectivity sweep, a take sweep - which
-    /// answered their question once and are not regression guards (BENCH-AUDIT.md §3.1). They stay
+    /// answered their question once and are not regression guards. They stay
     /// runnable and stay out of the run with no argument.
     /// </summary>
     internal static bool Exploring { get; set; }
@@ -68,7 +68,7 @@ public sealed class BenchmarkConfig : ManualConfig
     /// <remarks>
     /// The fast profile is in-process unconditionally -- three seconds of measurement does not pay
     /// ten seconds of generating and building a host. <c>--full</c> is the opposite trade and now
-    /// runs OUT of process by default (BENCH-AUDIT.md §6): process isolation per case, no JIT or
+    /// runs OUT of process by default: process isolation per case, no JIT or
     /// `ArrayPool.Shared` state carried from the previous class, GC and runtime jobs side by side,
     /// and `--disasm`, which the in-process toolchain cannot do at all. This flag is the escape
     /// hatch for the case where the generated host is the problem rather than the answer.
@@ -114,20 +114,20 @@ public sealed class BenchmarkConfig : ManualConfig
 
         // THE FULL JSON IS WHAT MAKES TWO RUNS COMPARABLE. The markdown table is for reading; it
         // carries a mean and a standard deviation, which is not enough to test whether two runs
-        // differ. `JsonExporter.Full` writes every measurement, and `--compare` (BENCH-AUDIT.md C2)
-        // reads two of those files and prints Faster / Same / Slower per case.
+        // differ. `JsonExporter.Full` writes every measurement, and `--compare` reads two of those
+        // files and prints Faster / Same / Slower per case.
         AddExporter(BenchmarkDotNet.Exporters.Json.JsonExporter.Full);
         AddLogger(BenchmarkDotNet.Loggers.ConsoleLogger.Default);
         AddColumnProvider(DefaultColumnProviders.Instance);
         AddDiagnoser(BenchmarkDotNet.Diagnosers.MemoryDiagnoser.Default);
-        // THE DECISION RULE, AS A COLUMN. PERF-AUDIT-v2.md §1.1 says a gain counts when `Ratio`
+        // THE DECISION RULE, AS A COLUMN. The project's rule is that a gain counts when `Ratio`
         // leaves [0.95; 1.05] and `Ratio +- 2*RatioSD` excludes 1 -- arithmetic done by hand on
         // every table, and therefore done wrong or not at all. This is the same question asked by
         // the library: a TOST against the baseline arm at the same threshold, printed as
-        // `Faster` / `Same` / `Slower`. BENCH-AUDIT.md C3 proposed 3%; the rule it automates says
+        // `Faster` / `Same` / `Slower`. A 3% threshold was proposed; the rule it automates says
         // 5%, so 5% is what the column carries -- a threshold that disagrees with the rule it
         // stands for would be worse than no column.
-        // ns/row and GB/s for the classes that declare what one invocation moves (C6).
+        // ns/row and GB/s for the classes that declare what one invocation moves.
         AddColumn(new PerRowColumn(), new ThroughputColumn());
         AddColumn(new StatisticalTestColumn(
             new PercentValue(5).ToThreshold()));

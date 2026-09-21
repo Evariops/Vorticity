@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Two benchmark runs, compared case by case (BENCH-AUDIT.md C2).
+# Two benchmark runs, compared case by case.
 #
 # A run is a directory of BenchmarkDotNet artifacts. Produce one per commit you want to judge,
 # named so you can tell them apart later:

@@ -1,10 +1,11 @@
 // Two BenchmarkDotNet runs, compared case by case instead of by eye.
 //
-// BENCH-AUDIT.md C2: the only exporter was the markdown table, which carries a mean and a standard
-// deviation. Deciding whether a change moved a number therefore meant reading two tables side by
-// side and doing arithmetic in your head -- the same failure C3 fixed inside one run, across runs.
+// The only exporter was the markdown table, which carries a mean and a standard deviation.
+// Deciding whether a change moved a number therefore meant reading two tables side by side and
+// doing arithmetic in your head -- the failure the `MannWhitney(5%)` column fixed inside one run,
+// here across runs.
 //
-// NOT `ResultsComparer` FROM dotnet/performance, which C2 proposed. That tool lives in another
+// NOT `ResultsComparer` FROM dotnet/performance, the usual tool for this. It lives in another
 // repository, is not on NuGet, and would have to be cloned and built to compare two files this
 // repository already knows how to produce. The test it runs -- Mann-Whitney on the raw
 // measurements, a relative threshold, a noise floor -- is thirty lines, and `Statistics.cs` is
@@ -16,10 +17,9 @@
 // a dynamic program over at most 21 x 21 ranks, so it is computed rather than approximated, and the
 // approximation is kept only for the larger samples `--full` produces.
 //
-// A THRESHOLD AS WELL AS A P-VALUE, for the reason PERF-AUDIT-v2.md §1.1 gives: a difference can be
-// real and irrelevant. A case is called Faster or Slower only when the median moves by more than
-// 5% AND the test rejects at 5% -- the same 5% as the `MannWhitney(5%)` column, so one run and two
-// runs answer with the same rule.
+// A THRESHOLD AS WELL AS A P-VALUE, because a difference can be real and irrelevant. A case is
+// called Faster or Slower only when the median moves by more than 5% AND the test rejects at 5% --
+// the same 5% as the `MannWhitney(5%)` column, so one run and two runs answer with the same rule.
 using System;
 using System.Collections.Generic;
 using System.Globalization;

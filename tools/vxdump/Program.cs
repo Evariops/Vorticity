@@ -1,8 +1,8 @@
-// vxdump - docs/01-scope.md F12: "Dump the layout/encoding tree (equivalent of `display_tree`) --
-// indispensable for debugging and cross-testing".
+// vxdump - dumps the layout and encoding tree, the equivalent of `display_tree`: indispensable for
+// debugging and cross-testing.
 //
 // It exists for three jobs, and the third is the one that shapes the project file rather than this
-// one: it is what docs/03-architecture.md §4 invariant 5 publishes as Native AOT and runs over the
+// one: it is the executable a test publishes as Native AOT and runs over the
 // corpus. A library cannot prove it is AOT-clean; an executable that actually opens a file and
 // walks its layout tree can, because every reflection-shaped mistake shows up as a trim warning at
 // publish or a failure at run.
@@ -54,7 +54,7 @@ internal static class Program
                   --indexes     the index directory: policy, entries, runs and their bytes
                   --explain E   the plan of a scan filtered by E, e.g. "id >= 10 and name = 'x'"
                   --fragment P  add the index fragment in file P to the file's own indexes
-                                (repeatable; a fragment of a dataset, 13-dataset.md §6.4)
+                                (repeatable; a fragment of a dataset, docs/design/13-dataset.md)
                   --verify      check every listed index region against its checksum, and a
                                 fragment's record of the file's XXH3-128 against the file
                   --repair      truncate a torn append back to the last valid file
@@ -227,10 +227,10 @@ internal static class Program
     /// </summary>
     /// <remarks>
     /// <para>
-    /// BENCH-AUDIT.md B10. `--encodings` prints the file's two dictionaries, and a dictionary
+    /// `--encodings` prints the file's two dictionaries, and a dictionary
     /// attributes nothing: our writer interns only what it actually posts (nine entries on
     /// `zoned_many_zones_nulls`) while the reference interns its whole registry (thirty-four), so
-    /// "who encoded this column how" could not be answered by comparing two files -- the A5
+    /// "who encoded this column how" could not be answered by comparing two files -- a cost
     /// attribution had to go around through a target edition instead. The layout tree names the
     /// LAYOUT encodings (`vortex.flat`, `vortex.chunked`), which is the shape of the file, not the
     /// shape of the data. What the data is encoded as lives one level down, in the array blob each
@@ -357,7 +357,7 @@ internal static class Program
         // THE METADATA IS COPIED OUT BEFORE THE AWAIT, because `node.Metadata` is a span over the
         // layout buffer and a span cannot cross one. The inlined-tree variant is the reason it is
         // needed at all: `vortex.flat` may carry the Array FlatBuffer in its own metadata, and then
-        // the segment is read from offset 0 as pure buffer region (contract §11.3).
+        // the segment is read from offset 0 as pure buffer region.
         byte[]? inlined = null;
         FlatLayoutMetadata metadata = FlatLayoutMetadata.Read(node.Metadata);
         if (metadata.HasArrayEncodingTree)
@@ -556,7 +556,7 @@ internal static class Program
 
     private static string Text(ulong value) => value.ToString(CultureInfo.InvariantCulture);
 
-    /// <summary>`--repair`: docs/11-write-strategy.md §3.8's tool for a torn append.</summary>
+    /// <summary>`--repair`: truncates a torn append back to the last valid file.</summary>
     private static async Task<int> Repair(string path)
     {
         try
@@ -582,7 +582,7 @@ internal static class Program
     /// <summary>
     /// `--verify`: every index region the directory lists against its checksum, wherever it is read
     /// -- the file or a fragment -- and the file's bytes against the XXH3-128 a fragment recorded:
-    /// the hash no reader computes (docs/13-dataset.md §7), computed here, offline.
+    /// the hash no reader computes, computed here, offline.
     /// </summary>
     /// <returns>Whether everything checked holds.</returns>
     private static async Task<bool> Verify(StringBuilder output, VortexFile file)
@@ -627,7 +627,7 @@ internal static class Program
         return verified.Holds;
     }
 
-    /// <summary>`--indexes`: the directory of docs/10-indexes.md §4.1, as the reader kept it.</summary>
+    /// <summary>`--indexes`: the file's index directory, as the reader kept it.</summary>
     private static async Task Indexes(StringBuilder output, VortexFile file)
     {
         output.Append("\nindexes\n");
@@ -661,7 +661,7 @@ internal static class Program
 
         output.Append('\n');
 
-        // What the file carries, as the library describes it (12 §8.1): the listed bytes are the
+        // What the file carries, as the library describes it: the listed bytes are the
         // directory's regions, and a paged or tree layout holds more below them.
         IReadOnlyList<VortexIndexInfo> infos = await file.ReadIndexesAsync().ConfigureAwait(false);
         for (int i = 0; i < infos.Count; i++)
@@ -680,7 +680,7 @@ internal static class Program
         }
     }
 
-    /// <summary>`--explain`: docs/11-write-strategy.md §7.3, the plan of a filtered scan.</summary>
+    /// <summary>`--explain`: the plan of a filtered scan.</summary>
     private static async Task Explain(StringBuilder output, VortexFile file, string expression)
     {
         Vorticity.Expressions.VortexExpr filter = FilterText.Parse(expression);
@@ -810,7 +810,7 @@ internal static class Program
                 }
             }
 
-            // No section asked for means the layout tree, which is what F12 names.
+            // No section asked for means the layout tree.
             return any
                 ? new Sections(schema, encodings, layout, segments, stats, scan, rowKeys, indexes, explain, fragments, verify)
                 : new Sections(false, false, true, false, false, false, false, false, null, fragments, false);

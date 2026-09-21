@@ -1,12 +1,12 @@
 // Deciding a gate on an interval instead of a point.
 //
-// THE PROBLEM THIS EXISTS FOR, in the numbers that produced it (BENCH-AUDIT.md B2). `--ratio-check`'s
+// THE PROBLEM THIS EXISTS FOR, in the numbers that produced it. `--ratio-check`'s
 // short axes moved +12 to +22 % run to run with no byte changed; `--throughput --check` failed two
 // invocations out of four, both falsely. The margin is +15 % everywhere. When the noise and the
 // margin are the same size a gate does two wrong things at once: it fails on changes nobody made,
 // and it passes a real 15 % regression on a short axis.
 //
-// Widening the margin is the wrong fix and the audit says so: it trades one blindness for another.
+// Widening the margin is the wrong fix: it trades one blindness for another.
 // The right one is to stop pretending a single number was measured. Each round times BOTH sides, so
 // the rounds are PAIRED and a per-round ratio is a legitimate sample: whatever slowed our side in
 // round 7 slowed theirs too. A sample has a distribution, and a distribution has an interval.

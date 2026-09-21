@@ -1,6 +1,4 @@
-// The decomposition probe of WRITE-ARCHITECTURE.md §1.2, which lived outside the repository until
-// now (§6: "to be put in bench/ at the first point that replays it"; WRITE-PLAN.md §5 asked for it
-// too).
+// The write decomposition probe, which lived outside the repository until now.
 //
 // WHAT IT IS FOR, and why it is not a BenchmarkDotNet class. The write axis measures one number per
 // file -- read, then write, through the public API -- and that number is a sum of three costs that
@@ -18,7 +16,7 @@
 // MEDIAN OF FIVE AFTER TWO WARM-UPS, on the public surface only (`VortexFile.OpenAsync`,
 // `Scan().ExecuteAsync()`, `VortexFileWriter.Create(sink, schema, options)` into a sink that counts
 // and throws the bytes away). It is deliberately a console rather than a gate: it explains, it does
-// not ratchet, and BENCH-AUDIT.md R10 asks for the explanation to be priced at the driver.
+// not ratchet: an explanation it suggests is still to be priced by a variant behind a switch.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -33,7 +31,7 @@ using Vorticity.Writing;
 
 namespace Vorticity.Benchmarks;
 
-/// <summary>The five-configuration write probe of WRITE-ARCHITECTURE.md §1.2.</summary>
+/// <summary>The five-configuration write probe.</summary>
 internal static class WriteProbe
 {
     /// <summary>The environment variable naming the input directory, as the throughput axis takes it.</summary>

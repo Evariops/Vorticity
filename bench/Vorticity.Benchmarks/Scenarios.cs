@@ -1,9 +1,9 @@
 // One definition of what a scan, a projection, a take and a write-back ARE, for every estimator.
 //
-// BENCH-AUDIT.md A2: `ScanAll` had been written out seven times across this project, `DiscardSink`
-// twice, and A1 is what that produces -- a correction applied to one copy. This file is the one
+// `ScanAll` had been written out seven times across this project, `DiscardSink`
+// twice, and what that produces is a correction applied to one copy. This file is the one
 // table; the scenarios THEMSELVES live in `Vorticity.Benchmarks.Scenarios`, a separate assembly,
-// because `--ab` (C1) loads two builds of them in one process and an assembly that referenced the
+// because `--ab` loads two builds of them in one process and an assembly that referenced the
 // FFI reader or BenchmarkDotNet could not be built inside a worktree of an arbitrary old commit.
 //
 // WHAT STAYS HERE is the pairing: an axis is a scenario plus the REFERENCE's answer to the same

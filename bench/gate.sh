@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Everything that can say no, before you push (BENCH-AUDIT.md C7).
+# Everything that can say no, before you push.
 #
-# v2 §1.6 is this ritual in prose, which means it is done from memory or not at all. Here it is a
-# command with an exit code, so a hook can run it:
+# A ritual kept in prose is done from memory or not at all. Here it is a command with an exit
+# code, so a hook can run it:
 #
 #   ln -s ../../bench/gate.sh .git/hooks/pre-push
 #
@@ -10,26 +10,26 @@
 # blown allocation ceiling costs four seconds rather than forty.
 #
 #   1. the nine ratchet tests    counts and ceilings, deterministic, ~10 s; the ninth is the
-#                                dataset's counting matrix (docs/design/13 §9.2), which step 40 promised
+#                                dataset's read budget, asserted through a counting store
 #   2. --ffi-check               ours and the reference agree on row counts, < 1 s
 #   3. --ratio-check             every ratio against the reference, key order included, ~45 s
 #
 # WHAT IT DOES NOT RUN, and these are decisions rather than omissions:
 #
-# * `--throughput <touched families>`, which C7 proposed. B8 measured that narrow form at +29% on
+# * `--throughput <touched families>`, the obvious candidate. That narrow form measures +29% on
 #   `fsst` against the full run -- a stable bias, not dispersion -- which puts it OVER its ceiling
 #   on a healthy repository. A gate that cries wolf gets disabled. `gate.sh --throughput` runs the
 #   FULL axis (54 s) for when the corpus is present and you want it.
-# * The BenchmarkDotNet classes. They are a direction, not a gate (§4.2), and 59 seconds of them
+# * The BenchmarkDotNet classes. They are a direction, not a gate, and 59 seconds of them
 #   would double this script for a number nobody can fail on.
-# * `--throughput --write --check`, about 90 s with its second-process confirmation (B19); its
-#   reference table exists since B14, and the exit chain of IMPL-PLAN.md §3 runs it apart.
+# * `--throughput --write --check`, about 90 s with its second-process confirmation; it has its
+#   own reference table, and the checks a change passes before it commits run it apart.
 # * The Rust cross-check, which needs cargo and a minute: `gate.sh --crosscheck` adds it, and
 #   `bench/crosscheck.sh` runs it alone.
 #
 # A RED RATIO IS NOT BELIEVED THE FIRST TIME while the axes are this close to their margins: the
 # script says so and tells you to replay. Two reds out of three is a regression; one is noise, and
-# either way it is data (B2).
+# either way it is data.
 set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -86,6 +86,6 @@ echo "gate: ${#failed[@]} red (${failed[*]}) in ${SECONDS}s."
 case " ${failed[*]} " in
     *--ratio-check*|*--throughput*)
         echo "A ratio gate is red. Replay it twice before believing it: two of three is a" \
-             "regression, one of three is noise -- and either way it is data for BENCH-AUDIT.md B2." ;;
+             "regression, one of three is noise." ;;
 esac
 exit 1

@@ -9,8 +9,6 @@
 // category -- `-- --anyCategories kernel` -- is BenchmarkDotNet's own, and works because every class
 // is labelled `kernel`, `path` or `explore`; this file refuses to run if one is not.
 //
-// bench/README.md is the one-page version of all of it.
-//
 // `-- --ffi-check` is not a benchmark: it verifies that the native comparison harness is present
 // and that both implementations AGREE on what they read. A ratio between two readers that return
 // different row counts is not a ratio, and BenchmarkDotNet would report it just as confidently.
@@ -128,8 +126,8 @@ internal static class Program
                     "--rewrite <in> <out> [edition] [--row-block N] [--data-block-bytes N|off]: " +
                     "reads a file with our reader and writes it back with our writer, keeping the " +
                     "bytes. An edition name (Core20250500 …) excludes the encodings that came " +
-                    "later (BENCH-AUDIT.md A5). The two block knobs decide the file's chunking, " +
-                    "and a zone is a chunk, so they decide what a selective scan costs (B12): " +
+                    "later. The two block knobs decide the file's chunking, and a zone is a " +
+                    "chunk, so they decide what a selective scan costs: " +
                     "`--data-block-bytes off` writes chunks of exactly one row block.");
                 return 2;
             }
@@ -169,7 +167,7 @@ internal static class Program
             {
                 Console.Error.WriteLine(
                     "--ab <before-directory> <file> [scenario…]: two builds of the library in one " +
-                    "process (BENCH-AUDIT.md C1). bench/ab.sh <commit> builds the other side.");
+                    "process, on one clock. bench/ab.sh <commit> builds the other side.");
                 return 2;
             }
 
@@ -191,7 +189,7 @@ internal static class Program
             {
                 Console.Error.WriteLine(
                     "--compare <base> <diff>: two *-report-full.json files, or two directories " +
-                    "holding them (BENCH-AUDIT.md C2).");
+                    "holding them.");
                 return 2;
             }
 
@@ -233,7 +231,7 @@ internal static class Program
 
         if (args.Length > 0 && args[0] == "--tree")
         {
-            // The shape of the two boundary rules of 13 §13.J, side by side.
+            // The shape of the dataset tree's two boundary rules, side by side.
             int[] sizes = [.. args[1..]
                 .Where(a => !a.StartsWith("--", StringComparison.Ordinal))
                 .Select(a => int.TryParse(a, CultureInfo.InvariantCulture, out int size) ? size : 0)
@@ -243,7 +241,7 @@ internal static class Program
 
         if (args.Length > 0 && args[0] == "--probe")
         {
-            // The decomposition of WRITE-ARCHITECTURE.md §1.2: one line per file, five columns.
+            // The write, decomposed into its separate costs: one line per file, five columns.
             string[] probed = [.. args[1..].Where(a => !a.StartsWith("--", StringComparison.Ordinal))];
             return await WriteProbe.RunAsync(probed, CancellationToken.None).ConfigureAwait(false);
         }
@@ -293,9 +291,9 @@ internal static class Program
     /// <para>
     /// And NO argument means every benchmark, not a prompt. Left alone, BenchmarkSwitcher asks which
     /// class to run and reads the answer from the console, which makes `dotnet run -c Release PROJ`
-    /// -- the command BENCH-AUDIT.md §4.3 calls the default run, and the one a script or a CI job
-    /// would use -- do nothing at all when stdin is not a terminal. The fast profile exists so that
-    /// running everything is the cheap thing to do; it should also be the thing that happens.
+    /// -- the default run, and the one a script or a CI job would use -- do nothing at all when
+    /// stdin is not a terminal. The fast profile exists so that running everything is the cheap
+    /// thing to do; it should also be the thing that happens.
     /// </para>
     /// </remarks>
     private static string[] BareWordsToFilters(string[] args)
@@ -392,7 +390,7 @@ internal static class Program
 
     /// <summary>Prints what this project can be asked to do.</summary>
     /// <remarks>
-    /// BENCH-AUDIT.md E4. `--help` reached BenchmarkDotNet's own help, which describes `--job` and
+    /// `--help` reached BenchmarkDotNet's own help, which describes `--job` and
     /// `--wasmEngine` and not one of the six modes this project actually has -- so a developer
     /// asking the obvious question was told about a tool they were not using. This answers first;
     /// BenchmarkDotNet's options are still forwarded and still work.
@@ -422,7 +420,7 @@ internal static class Program
           --throughput [family…]   57 encodings at a million rows, ~55 s
                                      --check           hold each ratio to its ceiling. Refused
                                                        with a family filter: a short run is +32%
-                                                       on our side (BENCH-AUDIT.md B8)
+                                                       on our side, the JIT unfinished
                                      --quick           23 s instead of 70; a direction
                                      --take            64 rows spread over each file
                                      --write           read back out to a discarding sink, ~8 min
@@ -446,10 +444,9 @@ internal static class Program
                                      on its own
           --probe [name…]          the write, decomposed: scan, serialize, transit, compress,
                                      five configurations a file, median of five
-                                     (WRITE-ARCHITECTURE.md §1.2)
           --tree [count…]          the dataset tree's shape under both boundary rules: fan-out,
                                      page bytes, pages written and read per commit
-                                     (docs/13-dataset.md §13.J, §14)
+                                     (docs/design/13-dataset.md)
           --profile <name> [secs]  one scenario in a bare loop, for dotnet-trace
           --ab <dir> <file> [name…] two builds of the library in one process
                                      --after <dir>     judge a commit against its parent, not HEAD
@@ -510,7 +507,7 @@ internal static class Program
             long footer = RustReader.OpenOnly(path);
             long theirBatches = RustReader.BatchCount(path);
 
-            // THE ROW COUNT IS NOT THE CHECK, it is the cheap half of it (BENCH-AUDIT.md A3). A
+            // THE ROW COUNT IS NOT THE CHECK, it is the cheap half of it. A
             // lazy scan answers `len()` from metadata without decoding a byte, which is how a
             // ratio came to compare a decode against an absence of one. The checksum folds every
             // decoded VALUE in file order on both sides, by one encoding written down in

@@ -1,11 +1,11 @@
 // Locating the benchmark inputs.
 //
-// The data is the conformance corpus, deliberately. docs/05-benchmarks.md §4 wants upstream's own
-// datasets so numbers are comparable with published Vortex figures, and those are gigabytes that do
-// not belong in a repository -- but the corpus is here, it was written by the Rust writer with real
-// distributions, and "read identical bytes with both implementations" is the property that makes a
-// comparison honest whatever the bytes are. When the TPC-H and ClickBench inputs are wired up, they
-// come through the same seam: a path, resolved once.
+// The data is the conformance corpus, deliberately. Upstream's own datasets would make numbers
+// comparable with published Vortex figures, and those are gigabytes that do not belong in a
+// repository -- but the corpus is here, it was written by the Rust writer with real distributions,
+// and "read identical bytes with both implementations" is the property that makes a comparison
+// honest whatever the bytes are. When the TPC-H and ClickBench inputs are wired up, they come
+// through the same seam: a path, resolved once.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -61,10 +61,10 @@ internal static class Corpus
     /// The column is missing, is not an integer, or the file has fewer than two rows.
     /// </exception>
     /// <remarks>
-    /// BENCH-AUDIT.md A4: seven classes honour `VORTICITY_BENCH_DATA` while hard-wiring
-    /// `Rows = 65_536`, a base of 1 000 000 and a step of 3 -- all of them properties of ONE file.
-    /// Pointing the variable elsewhere measured an empty band or asked for rows past the end, and
-    /// said nothing: the `[1 000, 1 100)` trap docs/05 §1b tells the story of. What can be derived
+    /// Seven classes honour `VORTICITY_BENCH_DATA` while hard-wiring `Rows = 65_536`, a base
+    /// of 1 000 000 and a step of 3 -- all of them properties of ONE file. Pointing the variable
+    /// elsewhere measured an empty band or asked for rows past the end, and said nothing: the
+    /// trap of a filter band, `[1 000, 1 100)`, that matched no row at all. What can be derived
     /// is derived here, from the file in front of us; what cannot is refused by name.
     /// </remarks>
     internal static ColumnShape RequireIntegerColumn(string path, string field, string variable)

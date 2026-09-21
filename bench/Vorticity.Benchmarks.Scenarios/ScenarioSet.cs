@@ -1,8 +1,8 @@
 // The scenarios themselves, in their own assembly so that two builds of them can meet.
 //
-// BENCH-AUDIT.md C1: the repository's rule is "one process, one clock", and its only realisation
-// was copying an old loop into the bench by hand -- impossible for a change that spans a layout
-// reader or the arena, so those were judged across two runs, which is what v2 §1.1 forbids.
+// The repository's rule is "one process, one clock", and its only realisation was copying an old
+// loop into the bench by hand -- impossible for a change that spans a layout reader or the arena,
+// so those were judged across two runs, which is exactly what the rule forbids.
 // The A/B mode loads THIS assembly twice: once from the build tree and once from a worktree of an older
 // commit, each bound to its own `Vorticity.dll` in its own `AssemblyLoadContext`.
 //
@@ -91,9 +91,9 @@ public static class ScenarioSet
     /// <returns>The blocks the plan leaves live.</returns>
     /// <remarks>
     /// THE QUESTION IS ASKED PER BLOCK, and there are as many literals as probes, so this is the
-    /// scenario that catches a per-block cost that grows with the filter -- step 33 found one worth
-    /// half the plan (docs/12-index-reads.md §13). The probes are keys the column holds, so the
-    /// index cannot prune them away and every block is asked about every literal.
+    /// scenario that catches a per-block cost that grows with the filter -- one was once found
+    /// worth half the plan. The probes are keys the column holds, so the index cannot prune them
+    /// away and every block is asked about every literal.
     /// </remarks>
     public static async Task<long> PruneIn(string path)
     {
@@ -226,7 +226,7 @@ public static class ScenarioSet
     /// <param name="path">The file.</param>
     /// <param name="degree">Lanes; 1 is the default scan.</param>
     /// <remarks>
-    /// `WithDegreeOfParallelism` existed and nothing measured it (BENCH-AUDIT.md D2). A lane is a
+    /// `WithDegreeOfParallelism` existed and nothing measured it. A lane is a
     /// split decoded on the thread pool while another is being consumed, so the interesting number
     /// is not the speed-up alone but where it stops.
     /// </remarks>
@@ -279,12 +279,12 @@ public static class ScenarioSet
     /// <param name="count">How many rows.</param>
     /// <param name="stride">The gap between them; the row taken is the middle of each gap.</param>
     /// <remarks>
-    /// THE INDICES PAST THE END ARE DROPPED, NOT SQUEEZED IN, and BENCH-AUDIT.md B16 is why. The
-    /// stride assumed every file in the 1M corpus had a million rows -- `table_wide` has 50 000, so
-    /// the fourth index landed at 54 687, `RowSelection.Create` threw, and an UNCAUGHT throw ends
-    /// the process: every encoding after it went unmeasured, and nothing said so.
+    /// THE INDICES PAST THE END ARE DROPPED, NOT SQUEEZED IN. The stride assumed every file in the
+    /// 1M corpus had a million rows -- `table_wide` has 50 000, so the fourth index landed at
+    /// 54 687, `RowSelection.Create` threw, and an UNCAUGHT throw ends the process: every encoding
+    /// after it went unmeasured, and nothing said so.
     /// <para>
-    /// B16 proposed clamping the stride to `rows / count`. That would have been wrong, and the
+    /// Clamping the stride to `rows / count` looks like the fix. It would have been wrong, and the
     /// reference says why: `vxbench_take` builds the SAME strided indices and filters
     /// `row &lt; rows_in_file` (tools/vxbench-rs/src/lib.rs). On `table_wide` it therefore takes
     /// THREE rows, not sixty-four. Clamping would have had this side take sixty-four spread over

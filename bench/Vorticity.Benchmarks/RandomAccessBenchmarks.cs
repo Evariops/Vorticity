@@ -1,10 +1,10 @@
 // What one row costs, and how that cost amortizes.
 //
-// docs/05-benchmarks.md §3 asks for "random access: the latency of row N alone", and the take axis
+// Random access is about the latency of row N alone, and the take axis
 // of `--ratio-check` measures 64 scattered rows, never one. The single row is the honest
-// statement of the F5 claim - a format that supports random access is one you can ask for a row
-// without paying for a scan - and it is also the number that exposes the FIXED cost of a take, which
-// an amortized figure hides by construction.
+// statement of the random-access claim - a format that supports random access is one you can ask
+// for a row without paying for a scan - and it is also the number that exposes the FIXED cost of a
+// take, which an amortized figure hides by construction.
 //
 // So the axis is a curve rather than a point. Between one row and four thousand, the per-row figure
 // falls from "the whole open path divided by one" to something close to the marginal decode cost,
@@ -43,7 +43,7 @@ public class RandomAccessBenchmarks
     /// <summary>
     /// How many rows the caller asks for. Three points rather than five: the curve has ANSWERED -
     /// the cost is per split, and one row costs the open - so what is left is its two ends and its
-    /// middle, kept so the shape can be re-read, not so it can guard (BENCH-AUDIT.md §3.1). The
+    /// middle, kept so the shape can be re-read, not so it can guard. The
     /// guard is the take axis of `--ratio-check`.
     /// </summary>
     [Params(1, 64, 4096)]
@@ -52,7 +52,7 @@ public class RandomAccessBenchmarks
     [GlobalSetup]
     public void Setup()
     {
-        // THE ROW COUNT COMES FROM THE FOOTER (BENCH-AUDIT.md A4). It was the constant 65 536 in a
+        // THE ROW COUNT COMES FROM THE FOOTER. It was the constant 65 536 in a
         // class that honours `VORTICITY_BENCH_DATA`, so a smaller file was asked for rows past
         // its end and a larger one had most of itself never touched.
         _path = Corpus.Dataset("VORTICITY_BENCH_DATA", "containers/zoned_many_zones_nulls");

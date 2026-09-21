@@ -1,10 +1,10 @@
 // The decoded VALUES of a file, as one 64-bit number both implementations can compute.
 //
-// BENCH-AUDIT.md A3: `--ffi-check` compared row counts, and this repository has already learned
-// that a row count is not evidence of a decode -- upstream's lazy scan answers `len()` from
-// metadata without materializing a byte, which is exactly how a "0.96x" ratio came to compare a
-// decode against an absence of one (the "CORRECTION" in bench/BASELINE.md). A checksum over the
-// values is the precondition that sentence needed: same rows, same order, same bytes.
+// `--ffi-check` compared row counts, and this repository has already learned that a row count is
+// not evidence of a decode -- upstream's lazy scan answers `len()` from metadata without
+// materializing a byte, which is exactly how a "0.96x" ratio came to compare a decode against an
+// absence of one. A checksum over the values is the precondition that sentence needed: same rows,
+// same order, same bytes.
 //
 // IT IS A CHECKSUM OF VALUES, NOT OF BUFFERS, and that is the only shape that can agree across two
 // implementations. An Arrow view carries a buffer index and an offset that are both legitimately
@@ -163,7 +163,7 @@ internal static class Checksum
     /// <remarks>
     /// ELEVEN ARMS AND NOT FOUR WIDTHS, because `AsPrimitive&lt;T&gt;` requires the exactly matching
     /// .NET type -- reinterpreting an i64 column as `ulong` to read its eight bytes is refused by
-    /// design (Phase 1 contract §12.3), and rightly: that refusal is the thing keeping a width
+    /// design, and rightly: that refusal is the thing keeping a width
     /// confusion from becoming a silent wrong answer somewhere less visible than here.
     /// </remarks>
     private static void Primitive(ref ulong hash, VortexColumn column, int row)

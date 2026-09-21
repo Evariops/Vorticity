@@ -1,6 +1,6 @@
 // What `ColumnCompressor.Choose` costs, and which candidate inside it costs it.
 //
-// BENCH-AUDIT.md D1: `Choose` is 77% of the write path (bench/PROFILE.md) and no benchmark measured
+// `Choose` is 77% of the write path when the writer is profiled, and no benchmark measured
 // a single candidate. The write side had an axis (`read and write back`), a profile scenario, and
 // two allocation ratchets -- all of them totals. A total says the writer is slow; it does not say
 // whether the cost is training an FSST symbol table, pricing zstd, scanning for runs, or building a

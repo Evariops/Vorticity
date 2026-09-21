@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every file we write, read back by Vortex Rust and compared scalar by scalar (BENCH-AUDIT.md B7).
+# Every file we write, read back by Vortex Rust and compared scalar by scalar.
 #
 #   bench/crosscheck.sh
 #

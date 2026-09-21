@@ -1,10 +1,10 @@
 // Two builds of the library, in one process, against one clock.
 //
-// BENCH-AUDIT.md C1: the repository's own rule -- "a perf change is a bench with its arms in the
-// same run" (PERF-AUDIT-v2.md §1.1) -- had exactly one realisation, which was copying the old loop
-// into the benchmark by hand. That works for a kernel and not for anything that spans a layout
-// reader, the arena or the scan, so those changes were judged across two separate runs: the method
-// §1.1 forbids, and the one that has already produced an unjustified revert in this repository.
+// The repository's own rule -- "a perf change is a bench with its arms in the same run" -- had
+// exactly one realisation, which was copying the old loop into the benchmark by hand. That works
+// for a kernel and not for anything that spans a layout reader, the arena or the scan, so those
+// changes were judged across two separate runs: the method that rule forbids, and the one that has
+// already produced an unjustified revert in this repository.
 //
 // HOW IT WORKS. `Vorticity.Benchmarks.Scenarios.dll` is built twice -- here, and inside a
 // worktree of the older commit (`bench/ab.sh`) -- and each copy is bound to the `Vorticity.dll`
@@ -78,7 +78,7 @@ internal static class AbCheck
     internal static async Task<int> RunAsync(
         string beforeDirectory, string? afterDirectory, string file, string[] names)
     {
-        // THIS AXIS REFUSES TO REPORT A RATIO IT CANNOT MEAN (BENCH-AUDIT.md B24), and the check
+        // THIS AXIS REFUSES TO REPORT A RATIO IT CANNOT MEAN, and the check
         // comes before the arguments because it is a precondition of the tool, not of a call. Two
         // sides of the SAME commit -- library identical to the byte -- read 3.177 one way round and
         // 0.294 the other, purely on which side the JIT had promoted: one at ~740 us, the other at
@@ -93,8 +93,7 @@ internal static class AbCheck
                 "--ab needs DOTNET_TieredCompilation=0: without it the ratio measures which side " +
                 "the JIT promoted, not the code. A null control -- the same commit on both sides " +
                 "-- reads 3.18 or 0.29 instead of 1.00.\n" +
-                "Run it through bench/ab.sh, which sets it, or set it yourself. See " +
-                "BENCH-AUDIT.md B24.");
+                "Run it through bench/ab.sh, which sets it, or set it yourself.");
             return 2;
         }
 

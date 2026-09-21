@@ -1,6 +1,6 @@
 // The Rust reader, in this process.
 //
-// docs/05-benchmarks.md §2: both implementations measured on the same bytes, with the same clock
+// Both implementations are measured on the same bytes, with the same clock
 // and the same page-cache state, because cross-process comparison is exactly the noise that makes
 // a 1.4x ratio unreadable. The native side is tools/vxbench-rs, a cdylib over the same
 // `vortex = "=0.86.1"` pin the corpus was generated with.
@@ -67,7 +67,7 @@ internal static partial class RustReader
     /// <param name="path">The file to round-trip, as a UTF-8 C string.</param>
     /// <returns>The row count, or negative on failure.</returns>
     /// <remarks>
-    /// The write axis had no reference at all: docs/05 compares reading on five axes and writing on
+    /// The write axis had no reference at all: reading was compared on five axes and writing on
     /// none, so every write-side change in this repository was measured against its own past rather
     /// than against the implementation it is a port of. The READ is inside the measurement on both
     /// sides -- same file, same reader -- so it is common-mode, and
@@ -128,8 +128,8 @@ internal static partial class RustReader
     /// <remarks>
     /// A STRIDE rather than a list, so the same call describes a scattered take of any density
     /// without marshalling an array across the ABI -- and the take axis of `--ratio-check` on the
-    /// .NET side uses exactly this shape. docs/05's take figure was "0.32x of a full scan", a ratio against
-    /// ourselves that says nothing about whether the path is fast.
+    /// .NET side uses exactly this shape. A take figure like "0.32x of a full scan" is a ratio
+    /// against ourselves that says nothing about whether the path is fast.
     /// </remarks>
     [LibraryImport(Library, EntryPoint = "vxbench_take", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long Take(string path, long count, long stride);
@@ -140,7 +140,7 @@ internal static partial class RustReader
     /// <param name="path">The file.</param>
     /// <returns>The checksum, or a negative error code.</returns>
     /// <remarks>
-    /// The precondition `--ffi-check` never had (BENCH-AUDIT.md A3): a row count is not evidence of
+    /// The precondition `--ffi-check` never had: a row count is not evidence of
     /// a decode. `Checksum.cs` computes the same number on our side, byte for byte by the same
     /// encoding, and the two must agree.
     /// </remarks>
@@ -155,7 +155,7 @@ internal static partial class RustReader
     /// <param name="threads">Worker threads; must be positive.</param>
     /// <returns>Rows, or a negative error code.</returns>
     /// <remarks>
-    /// The thread count is pinned on both sides (docs/05 §5): a ratio between an n-lane reader and
+    /// The thread count is pinned on both sides: a ratio between an n-lane reader and
     /// a reference free to use every core measures a threading model, not a decoder. At 1 this is
     /// NOT <see cref="ScanCanonical"/> -- it still pays the pool hand-off, which is the point.
     /// </remarks>

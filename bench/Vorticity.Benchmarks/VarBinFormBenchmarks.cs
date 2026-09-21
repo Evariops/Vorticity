@@ -1,28 +1,28 @@
-// The Z1a probe: Arrow VIEWS against an OFFSETS canonical form, on the three arms that decide it.
+// A probe of Arrow VIEWS against an OFFSETS canonical form, on the three arms that decide it.
 //
-// PERF-AUDIT-v2 §2.4 proposes replacing `CanonicalKind.VarBinView` with an offsets-plus-heap form
-// for Binary and Utf8, and sets the condition for doing it: "the consumer arm must not lose more
-// than the scan arm gains, AND the take arm must be neutral. Without both, Z1a is not done." That
-// is a comparison of three numbers, and none of the three existed.
+// The proposal is to replace `CanonicalKind.VarBinView` with an offsets-plus-heap form for Binary
+// and Utf8, under one condition: the consumer arm must not lose more than the scan arm gains, AND
+// the take arm must be neutral; without both, the change is not made. That is a comparison of
+// three numbers, and none of the three existed.
 //
-// WHY THE KERNEL AND NOT THE FILE. The document asks for an internal switch on `parquet_variant`
-// and `fsst`, which means writing the offsets form first -- that IS Z1a, not its probe. What the
-// decision actually turns on is per-row arithmetic over two memory layouts, and §1.6 is explicit
-// that such a thing is measured at the kernel and never end to end. The scan arm's END of the range
-// is already known from the file: short-circuiting view construction takes a 1M-row
-// `parquet_variant` scan from 4 262 us to 568 and an `fsst` one from 8 623 to 5 503, so the offsets
-// form can save at most 87% and 36% of those scans respectively. This class supplies what that
-// measurement cannot: what the other two arms COST.
+// WHY THE KERNEL AND NOT THE FILE. The proposal asks for an internal switch on `parquet_variant`
+// and `fsst`, which means writing the offsets form first -- that IS the change, not its probe.
+// What the decision actually turns on is per-row arithmetic over two memory layouts, and the
+// project's rule is that such a thing is measured at the kernel and never end to end. The scan
+// arm's END of the range is already known from the file: short-circuiting view construction takes
+// a 1M-row `parquet_variant` scan from 4 262 us to 568 and an `fsst` one from 8 623 to 5 503, so
+// the offsets form can save at most 87% and 36% of those scans respectively. This class supplies
+// what that measurement cannot: what the other two arms COST.
 //
 // THE TWO WIDTHS ARE THE WHOLE POINT, not a sweep. A view carries values of twelve bytes or fewer
 // INLINE, so a short-string consumer never touches the heap while an offsets consumer always does;
 // past twelve, both go to the heap and the view is pure overhead. Eight bytes and twenty-four
 // bracket that boundary, and the answer is expected to change sign across it.
 //
-// THE TAKE ARM OUTPUTS VIEWS FROM BOTH FORMS, because §2.4 fixes that as a constraint: "a filter's
-// or a take's output stays VarBinView whatever the input", or the take and filter axes (0.23 to
-// 0.32 against the reference) regress. So the offsets arm measures a gather THROUGH the heap into
-// freshly built views, which is the real cost the change would introduce.
+// THE TAKE ARM OUTPUTS VIEWS FROM BOTH FORMS, because the proposal fixes that as a constraint:
+// "a filter's or a take's output stays VarBinView whatever the input", or the take and filter
+// axes (0.23 to 0.32 against the reference) regress. So the offsets arm measures a gather THROUGH
+// the heap into freshly built views, which is the real cost the change would introduce.
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -233,7 +233,7 @@ public class VarBinFormBenchmarks
     }
 
     /// <summary>
-    /// A scattered take over offsets, producing VIEWS, which §2.4 makes a constraint rather than a
+    /// A scattered take over offsets, producing VIEWS, which is a constraint rather than a
     /// choice: a take's output stays a view array whatever its input was.
     /// </summary>
     [Benchmark(Description = "take 64 scattered, offsets")]

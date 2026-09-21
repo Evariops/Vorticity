@@ -1,11 +1,10 @@
 // What a lane buys, on both sides, at the same thread count.
 //
-// BENCH-AUDIT.md D2: `ScanBuilder.WithDegreeOfParallelism` existed and nothing measured it, and
-// `vxbench` was single-threaded by construction -- so the contention family of PERF-AUDIT-v2.md §7
-// had no number at all, and v2 says, rightly, to optimize nothing there before the bench exists.
-// This is the bench.
+// `ScanBuilder.WithDegreeOfParallelism` existed and nothing measured it, and `vxbench` was
+// single-threaded by construction -- so the family of contention questions had no number at
+// all, and nothing there should be optimized before the bench exists. This is the bench.
 //
-// THE THREAD COUNT IS PINNED ON BOTH SIDES, which docs/05 §5 requires and which is the only way the
+// THE THREAD COUNT IS PINNED ON BOTH SIDES, which is the only way the
 // pair means anything: a ratio between an n-lane reader and a reference free to use every core
 // measures a threading model, not a decoder. `vxbench_scan_canonical_threads` drives upstream's
 // worker pool with exactly n workers for the same reason we ask for exactly n lanes.

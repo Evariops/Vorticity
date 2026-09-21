@@ -1,16 +1,16 @@
 // The three row-movement kernels against the per-element switch they replaced, in ONE process.
 //
-// BENCH-AUDIT.md §3.2: `RowKernels` was written against the 1M throughput gate alone, and its own
+// `RowKernels` was written against the 1M throughput gate alone, and its own
 // header makes a claim that gate cannot check -- "in a gather the dispatch IS the loop body", where
-// bench/BRANCHING.md had measured the same switch at +0.9% inside `OnPairDecoder.Concatenate` and
-// called it refuted. Both can be true, and the only way to know is to measure the two loops
+// the same switch had been measured at +0.9% inside `OnPairDecoder.Concatenate` and
+// called refuted. Both can be true, and the only way to know is to measure the two loops
 // separately. This class does that: the scalar arm is the shape the header describes as the
 // previous state -- read a code through `switch (ptype)`, bounds-check it, then
 // `Slice(row * width, width).CopyTo(...)` -- and it reads the code through `RowKernels.CodeAt`,
 // which IS that switch, still in the library for the single-code callers.
 //
-// ALIGNMENT MEASURED, NOT ASSUMED: these buffers are plain GC arrays, and §4.4 asked whether that
-// changes the number against the library's aligned arena allocations. Answered on M4 Pro: eight
+// ALIGNMENT MEASURED, NOT ASSUMED: these buffers are plain GC arrays -- does that
+// change the number against the library's aligned arena allocations? Answered on M4 Pro: eight
 // bytes past a 64-byte boundary costs 0.3% to 1.8% over two runs, the same sign every time but
 // under the fast profile's own +-3% fidelity. Not re-measured on x64. The curve that answered it
 // is gone, the answer being wanted once.

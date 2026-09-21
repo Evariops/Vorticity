@@ -1,6 +1,6 @@
 // The scenarios the profiling session runs, as a plain loop rather than a benchmark.
 //
-// docs/05 and every table in bench/ report TOTALS. What none of them has is the distribution inside
+// Every benchmark table reports TOTALS. What none of them has is the distribution inside
 // one: the optimizations in this repository were found by reading code and deducing, and twice out
 // of three times the obvious target was the wrong one - vectorizing the bit-packing kernel was worth
 // 3.6x on the kernel and 1.10x end to end, because that was not where the time was.
@@ -11,8 +11,8 @@
 // library. The trade is that there is no statistical machinery here at all - which is correct,
 // because a profile is not a measurement of speed and must never be quoted as one.
 //
-// `[EventPipeProfiler]` would be the in-harness equivalent and is what the plan names; it is not
-// used because it inherits the in-process toolchain's problem of profiling the harness along with
+// `[EventPipeProfiler]` would be the in-harness equivalent; it is not used because it inherits
+// the in-process toolchain's problem of profiling the harness along with
 // the code. `dotnet-trace collect -- dotnet <this>.dll --profile <name>` has neither problem.
 using System;
 using System.Diagnostics;
@@ -31,10 +31,10 @@ internal static class ProfileScenarios
     internal static async Task<int> RunAsync(string name, double seconds)
     {
         string path = Corpus.Dataset("VORTICITY_BENCH_DATA", "containers/zoned_many_zones_nulls");
-        // THE SCENARIOS ARE `Scenarios.All`, not copies of them (BENCH-AUDIT.md A2). A profile is a
+        // THE SCENARIOS ARE `Scenarios.All`, not copies of them. A profile is a
         // statement about a gate's time only if the two run the same code with the same arguments,
-        // and two files that merely look alike do not guarantee that -- A1 is what happens when
-        // they drift.
+        // and two files that merely look alike do not guarantee that -- a correction applied to
+        // one copy and not the other is what happens when they drift.
         Scenarios.Scenario? found = Scenarios.ByName(name);
         if (found is null)
         {

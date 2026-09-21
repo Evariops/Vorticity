@@ -1,21 +1,21 @@
 // The four bitmap kernels against the loops they replaced, in ONE process.
 //
-// BENCH-AUDIT.md §3.2: `BitmapKernels` was vectorized while being measured only at the 1M
+// `BitmapKernels` was vectorized while being measured only at the 1M
 // throughput gate, where the run-to-run spread on the short files is +-20% and a 3% kernel is
 // invisible. The claims in its own header -- "36% of the scan on an all-invalid million-row
 // column", "two output bytes per iteration instead of a read-modify-write per value" -- had no
 // bench behind them. This is that bench: the ported scalar arm is the shape each kernel replaced,
 // spelled out here rather than in the library, so the two run against one clock.
 //
-// SIZED FOR CACHE, NOT FOR THE 100-500 us BAND §4.4 asks of a kernel class, and deliberately: the
+// SIZED FOR CACHE, NOT FOR THE 100-500 us BAND asked of a kernel class, and deliberately: the
 // two arms of each pair differ by one to two orders of magnitude, so no single input puts both in
 // that band. One mebibit is 128 KiB, which stays in L2 -- these kernels are meant to run on a
 // validity bitmap that the decode just produced and that is therefore hot -- and it leaves the
-// library arm at 5 to 40 us, far above BenchmarkDotNet's floor (§4.4: "un cas de 12 us n'est pas un
-// probleme"; the driver picks the invocation count).
+// library arm at 5 to 40 us, far above BenchmarkDotNet's floor (a 12 us case is not a problem;
+// the driver picks the invocation count).
 //
-// ALIGNMENT MEASURED, NOT ASSUMED: these buffers are plain GC arrays, and §4.4 asked whether that
-// changes the number against the library's aligned arena allocations. Answered on M4 Pro: eight
+// ALIGNMENT MEASURED, NOT ASSUMED: these buffers are plain GC arrays -- does that
+// change the number against the library's aligned arena allocations? Answered on M4 Pro: eight
 // bytes past a 64-byte boundary costs 0.3% to 1.8% over two runs, the same sign every time but
 // under the fast profile's own +-3% fidelity. Not re-measured on x64. The curve that answered it
 // is gone, the answer being wanted once.

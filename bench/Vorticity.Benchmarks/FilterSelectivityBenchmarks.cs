@@ -1,7 +1,7 @@
 // What zone-map pruning is worth as the filter gets less selective.
 //
-// docs/05-benchmarks.md §3 asks for filter pushdown at 1%, 10% and 50% selectivity and has never had
-// it. `PathAllocationTests` exercises exactly one band - about 100 rows of 65 536, roughly 0.15% -
+// Filter pushdown at 1%, 10% and 50% selectivity is a benchmark axis that nothing measured.
+// `PathAllocationTests` exercises exactly one band - about 100 rows of 65 536, roughly 0.15% -
 // and that band is the BEST CASE by construction: a
 // band narrow enough to live in one or two zones is the case pruning exists for, and quoting its
 // speedup as "what pruning is worth" says nothing about the predicate a user actually writes.
@@ -36,7 +36,7 @@ public class FilterSelectivityBenchmarks
     /// The file's own shape: rows, the column's first value, and its step.
     /// </summary>
     /// <remarks>
-    /// READ FROM THE FILE, NOT WRITTEN DOWN (BENCH-AUDIT.md A4). These were three constants --
+    /// READ FROM THE FILE, NOT WRITTEN DOWN. These were three constants --
     /// 65 536 rows, a base of 1 000 000, a step of 3 -- all properties of ONE corpus entry, in a
     /// class that honours `VORTICITY_BENCH_DATA`. Pointing that variable at another file kept the
     /// constants and measured a band with nothing in it, silently: a percentage of a row count that
@@ -49,7 +49,7 @@ public class FilterSelectivityBenchmarks
     /// <summary>
     /// Percent of rows the predicate matches. The two ends rather than four points: `--ratio-check`
     /// holds 1 % and 50 % against Rust, and the arm without pruning is flat by construction, so the
-    /// intermediate points are shape rather than guard (BENCH-AUDIT.md §3.1).
+    /// intermediate points are shape rather than guard.
     /// </summary>
     [Params(1, 50)]
     public int Percent { get; set; } = 1;

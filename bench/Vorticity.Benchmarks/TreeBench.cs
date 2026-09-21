@@ -1,15 +1,14 @@
-// The bench docs/13-dataset.md §14 asks for: "Both run for the prolly rule and, as invariants and
-// entry-set equality only, for the B+tree rule behind the same seam, whose fan-out and pages per
-// commit the bench records beside the prolly's."
+// The dataset tree under its two boundary rules, the prolly rule and the B+tree rule behind the
+// same seam: the fan-out and pages per commit of each, side by side.
 //
-// WHAT IT MEASURES, and why none of it is a clock. §13.J's table compares the two rules on shape
-// and on work, not on speed: mean fan-out, page bytes, pages written per commit, dependent page
+// WHAT IT MEASURES, and why none of it is a clock. The rules are compared on shape and on work,
+// not on speed: mean fan-out, page bytes, pages written per commit, dependent page
 // reads per lookup. Those are counts, they are deterministic given the seed, and a number that
 // moves means the rule moved -- which is exactly what a decision behind a seam needs watching.
 //
-// THE ENTRIES ARE §4.1's: "entries of about 200 bytes", so the fan-out this prints is the fan-out
-// that section predicts (~650 at a 128 KiB mean page). Whether the prediction holds is the first
-// thing the bench is for.
+// THE ENTRIES ARE ABOUT 200 BYTES, as the tree's sizing assumes, so the fan-out this prints is the
+// fan-out that sizing predicts (~650 at a 128 KiB mean page). Whether the prediction holds is the
+// first thing the bench is for.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -21,7 +20,7 @@ using Vorticity.Dataset;
 
 namespace Vorticity.Benchmarks;
 
-/// <summary>Shape and work of the two boundary rules of 13 §13.J.</summary>
+/// <summary>Shape and work of the dataset tree's two boundary rules.</summary>
 internal static class TreeBench
 {
     /// <summary>The dataset's seed, fixed so the numbers are comparable between runs.</summary>
@@ -92,7 +91,7 @@ internal static class TreeBench
             $"{leaves.Average(),-10:F0} {leaves.Min(),-7} {leaves.Max(),-11} {written,-15:F1} {read:F1}"));
     }
 
-    /// <summary>An entry of about 200 bytes, as §4.1 assumes.</summary>
+    /// <summary>An entry of about 200 bytes, as the tree's sizing assumes.</summary>
     private static TreeEntry Entry(int i) => new TreeEntry(Key(i), Value(i, 0), i + 1);
 
     /// <summary>A clustering key that sorts with `i`: a tenant, then a position inside it.</summary>
@@ -101,8 +100,8 @@ internal static class TreeBench
 
     private static ReadOnlyMemory<byte> Value(int i, int version)
     {
-        // A leaf entry of §4.2 without its schema: the object's key, its identity, a hash, a few
-        // summaries. About 170 bytes, so an entry lands near the 200 the section assumes.
+        // A dataset leaf entry without its schema: the object's key, its identity, a hash, a few
+        // summaries. About 170 bytes, so an entry lands near the 200 the sizing assumes.
         string text = string.Create(
             CultureInfo.InvariantCulture,
             $"data/{i:x8}-0000-4000-8000-{version:x12}.vortex|{i * 7919L}|{i * 104729L}|" +

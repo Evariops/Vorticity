@@ -1,6 +1,6 @@
 // The three view kernels against the per-row loops they replaced, in ONE process.
 //
-// BENCH-AUDIT.md §3.2: `ViewKernels` was written against the 1M throughput gate alone, and its
+// `ViewKernels` was written against the 1M throughput gate alone, and its
 // header carries the sharpest claim in the repository -- that calling `Utf8.IsValid` on a
 // five-byte span a million times is dominated by the call and by a vector loop's set-up, so
 // ONE pass over the whole heap plus one byte test per row is equivalent and much cheaper. That is
@@ -12,8 +12,8 @@
 // by BOTH arms -- the view's byte layout is not what is being compared, and rewriting it here would
 // only add a way to be wrong.
 //
-// ALIGNMENT MEASURED, NOT ASSUMED: these buffers are plain GC arrays, and §4.4 asked whether that
-// changes the number against the library's aligned arena allocations. Answered on M4 Pro: eight
+// ALIGNMENT MEASURED, NOT ASSUMED: these buffers are plain GC arrays -- does that
+// change the number against the library's aligned arena allocations? Answered on M4 Pro: eight
 // bytes past a 64-byte boundary costs 0.3% to 1.8% over two runs, the same sign every time but
 // under the fast profile's own +-3% fidelity. Not re-measured on x64. The curve that answered it
 // is gone, the answer being wanted once.

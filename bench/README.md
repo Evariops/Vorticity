@@ -22,12 +22,12 @@ dotnet run -c Release PROJ -- <arguments>
 | a string heap cut into views | `-- ViewKernel` | 9 s | `SumLengths`, `BuildFromLengths`, `RequireAscending` against the per-row loops |
 | the OnPair token concatenation | `-- OnPairKernel` | 6 s | 48% of an OnPair scan, against the per-code switch it replaced |
 | whether your change moved anything | `bench/compare.sh --record before <filter>`, then `--record after`, then `bench/compare.sh before after` | 2x the class | Mann-Whitney per case: Faster / Same / Slower |
-| a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust. **Reports, never gates**: a run of one file is +32% on our side (B8) |
+| a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust. **Reports, never gates**: a run of one file is +32% on our side, the JIT not finished with it |
 | the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 57 files |
 | a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 57 files, against Rust |
 | a lane, or the degree of parallelism | `-- LanesBench` (`--full` walks 1, 2, 4, 8) | 15 s | ours at n lanes against the reference's pool at n workers, threads pinned both sides |
 | the compressor's decision | `-- CompressorBench` | 12 s | `Choose` and one arm per candidate; `--full` adds the utf8 and f64 columns |
-| the writer, per encoding | `-- --throughput --write --check` | 9 min | each file read back out to a discarding sink, against Rust. **Gates since B14** — 56 references, median **0.290**, nothing above ×2 and the slowest axis `parquet_variant` at 1.01. Three are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`): re-run before believing a red. Only `zstd_nullable` produces no ratio, and that is **the reference** refusing to write it |
+| the writer, per encoding | `-- --throughput --write --check` | 9 min | each file read back out to a discarding sink, against Rust. **A gate** — 56 references, median **0.290**, nothing above ×2 and the slowest axis `parquet_variant` at 1.01. Three are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`): re-run before believing a red. Only `zstd_nullable` produces no ratio, and that is **the reference** refusing to write it |
 | every file we write, read by Rust | `bench/crosscheck.sh` | 80 s | 854 files compared scalar by scalar, 2 538 751 rows; needs cargo. `gate.sh --crosscheck` folds it in |
 | **anything, before you push** | `bench/gate.sh` | 68 s | the nine ratchets, `--ffi-check`, `--ratio-check`; exit 1 if one is red. `--throughput` adds the full axis (92 s) |
 | a change too big for a ported arm | `bench/ab.sh <commit> [--after <commit>] <file> [scenario…]` | 7 s | two builds of the library in one process, interleaved, ratio per round |
@@ -37,13 +37,12 @@ dotnet run -c Release PROJ -- <arguments>
 | a ratchet | `dotnet test Vorticity.slnx -c Release` | ~1 min | the suite plus the nine allocation, count and budget ratchets |
 
 **A fast-profile figure is a direction, not a number.** Anything under about 5 % on a kernel, and
-every figure that goes into `bench-BASELINE.md`, is confirmed with `--full` on the one class
-concerned. Why, and what the fast profile costs in fidelity: `BenchmarkConfig.cs`, and BENCH-AUDIT.md
-§4.2 for the measurements behind it.
+every figure that gets recorded, is confirmed with `--full` on the one class concerned. Why, and
+what the fast profile costs in fidelity: `BenchmarkConfig.cs`.
 
 **Never run the whole BDN suite to decide one change.** Run the class, before and after, on the same
-build. The gates are the other instrument: they are *commands*, deliberately not `dotnet test` cases
-(BENCH-AUDIT.md §8), so CI calls them and a red one never silently stops the suite from running.
+build. The gates are the other instrument: they are *commands*, deliberately not `dotnet test`
+cases, so CI calls them and a red one never silently stops the suite from running.
 
 ## Selecting
 
@@ -75,7 +74,7 @@ dotnet run -c Release --project bench/Vorticity.Benchmarks -- \
     /tmp/pair/ours.vortex
 
 # The two block knobs decide the file's chunking, and a zone IS a chunk, so they decide what a
-# selective scan costs and how much per-chunk fixed cost the file pays (B12). `off` disables the
+# selective scan costs and how much per-chunk fixed cost the file pays. `off` disables the
 # 1 MiB coalescing, which leaves chunks of exactly one row block.
 dotnet run -c Release --project bench/Vorticity.Benchmarks -- \
     --rewrite in.vortex out.vortex --row-block 8192 --data-block-bytes off
@@ -85,12 +84,12 @@ VORTICITY_THROUGHPUT_CORPUS=/tmp/pair \
     dotnet run -c Release --project bench/Vorticity.Benchmarks -- --throughput
 ```
 
-That pair is how BENCH-AUDIT.md A5 was attributed: our rewrite scans in 914 µs against 342 µs for
+That pair is how a slow read of our own rewrite was attributed: it scans in 914 µs against 342 µs for
 the same rewrite without zstd, while the reference reads both in 140 µs. Note that
 `vxdump --encodings` cannot answer the same question by itself — the reference interns all 37
 encodings of the registry whatever the file uses, so only OUR dictionary is informative. What does
 answer it is `vxdump --layout`, whose `encoding=` column names the array encoding of every terminal
-node (B10):
+node:
 
 ```sh
 dotnet run -c Release --project tools/vxdump -- /tmp/pair/ours.vortex --layout |
@@ -98,7 +97,7 @@ dotnet run -c Release --project tools/vxdump -- /tmp/pair/ours.vortex --layout |
 ```
 
 Three `vortex.zstd` nodes on our side and none on the reference's, all three on the `strs` column —
-which is A5's 63 % located to a column rather than inferred from a target edition.
+the slowdown located to a column rather than inferred from a target edition.
 
 ## Reading the assembly a kernel actually got
 
@@ -127,7 +126,7 @@ and there is one listing per generic instantiation.
 `BenchmarkDotNet.Diagnostics.Windows` and ETW; on this machine the run prints `Unable to resolve
 IHardwareCountersDiagnoser diagnoser using dynamic assembly loading` and then completes **without
 counters and without failing** — so a table that looks normal is simply missing the columns you
-asked for. Branch mispredictions and cache misses need a Windows machine (BENCH-AUDIT.md D5b).
+asked for. Branch mispredictions and cache misses need a Windows machine.
 
 **No argument means all of them**, not a prompt: without one, BenchmarkDotNet asks the console which
 class to run, which makes the default run do nothing under a script or in CI. `Program.cs` supplies
@@ -164,8 +163,8 @@ the default run: 49 cases become 71 with `--explore`.
 Classes have been deleted rather than demoted whenever another instrument measured the same thing
 with a better estimator, and the journals name the replacement for each. `RewrittenComparison` went
 that way, its unique question — our own bytes, read by both readers — being the four `rewritten`
-axes of `--ratio-check`. The numbers they produced are not lost: they are in `bench-BASELINE.md`
-and in the commits.
+axes of `--ratio-check`. The numbers they produced are not lost: they are in the maintainers'
+journals and in the commits.
 
 ## The gates, and their ceilings
 
@@ -199,15 +198,15 @@ and in the commits.
   **`--take`** asks the same fifty-seven files for 64 rows spread evenly over each (one every 15 625),
   against `vxbench_take`, with its own ratchet table — the two axes do not move together, and that
   is the point: a decoder without a `DecodeSelected` override decodes the whole split around each
-  taken row. Nine of them have none (PERF-AUDIT-v2.md R17), and the axis prices it: `zstd` 64×,
+  taken row. Nine of them have none, and the axis prices it: `zstd` 64×,
   `datetimeparts` 60×, `alprd` 95×, against `fsst` 0.22× and `onpair` 0.46× where the override
   exists. `--ratio-check`'s single `scattered take` axis reads 0.25× and says none of this, because
   it is one file whose encodings all have the override.
 
   **`--write`** reads each file back out into a sink that keeps nothing, against `vxbench_write`,
   which does the same into a `Vec<u8>`: the read is inside the measurement on both sides, so
-  subtract the scan axis before reading the quotient as a statement about writers. It has had its
-  own ratchet table of 56 references since B14, and it reports an encoding it cannot write rather
+  subtract the scan axis before reading the quotient as a statement about writers. It has its own
+  ratchet table of 56 references, and it reports an encoding it cannot write rather
   than dying on it — today that is `zstd_nullable` alone, and it is the reference that declines.
 
   `--quick` (23 s instead of 70) shortens the warm-up and the per-file budget: a direction, not a
@@ -216,7 +215,7 @@ and in the commits.
   **A bare family name narrows the report, and does not currently give the gate's ratio**:
   `fsst` reads 1.27 in the full run and 1.63–1.66 on its own, reproducibly, on the same bytes — over
   its ceiling on a healthy tree. Use the narrow form to see a direction; confirm with the full run
-  before believing a red. BENCH-AUDIT.md B8.
+  before believing a red.
 
 **A ceiling only ever comes down, and only behind a real improvement.** Raising one to make a run
 pass is the one thing this directory forbids outright.
@@ -231,7 +230,7 @@ timer's noise floor is repeated inside one timed round (the `k` column). The `md
 smallest change that axis can currently see.
 
 **An interval is within one run, and between-run variance is 2–3× larger.** Measured over twenty
-processes per axis (BENCH-AUDIT.md B2.5): a 95 % interval contains the grand median 11–12 times out
+processes per axis, a 95 % interval contains the grand median 11–12 times out
 of 20 rather than 19. So a ratio can read 1.30 [1.28; 1.31] in eight runs and 1.71 [1.65; 1.77] in
 the ninth — narrow and wrong. **Narrow does not mean reproducible**, which is why `--recalibrate`
 runs each pass in its own process, and why the replay rule below still stands for a single red.
@@ -256,11 +255,9 @@ an axis whose `k > 1`, because grouping calls into a round changes what is being
 in a row are a *warm* path where a single timed call was cache-cold. Use it when the harness changed,
 never when the number did, and say which change in the commit message.
 
-**A red gate is not believed on the first run, yet.** Measured run-to-run spread is +12 to +22 % on
-four of the nine axes the dataset then had (BENCH-AUDIT.md annexe A.1), and two invocations in four were red with
-no byte changed. Replay three times: two reds out of three is a regression, otherwise it is noise —
-and either way the observation is data for B2, the statistical gate that is meant to end this
-paragraph.
+**A red gate is not believed on the first run.** Measured run-to-run spread is +12 to +22 % on four
+of the nine axes the dataset then had, and two invocations in four were red with no byte changed.
+Replay three times: two reds out of three is a regression, otherwise it is noise.
 
 ## Where the rest lives
 

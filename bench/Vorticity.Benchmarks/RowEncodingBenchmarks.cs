@@ -1,14 +1,14 @@
 // Row encoding throughput, which nothing had measured at all.
 //
-// docs/05-benchmarks.md §3 lists it and calls it the cleanest signal on code-generation quality this
-// repository has: the encoder is eleven value types specialized through static abstract interface
-// members, so its throughput is almost entirely a statement about what the JIT did with that
-// specialization. Everything else here is dominated by I/O, layout walking or a compression kernel.
+// It is the cleanest signal on code-generation quality this repository has: the encoder is eleven
+// value types specialized through static abstract interface members, so its throughput is almost
+// entirely a statement about what the JIT did with that specialization. Everything else here is
+// dominated by I/O, layout walking or a compression kernel.
 //
 // NO CROSS-CHECK AGAINST `vortex-row`, and that is a real limit rather than an omission to fix
 // later: tools/vxbench-rs exposes `path in, rows out` entry points only, so there is no way to hand
 // the reference a batch and time its encoder. These are absolute figures with no reference beside
-// them - which is exactly the kind docs/05 §1 says not to treat as portable. The ratio-bearing
+// them - which is exactly the kind of figure not to treat as portable. The ratio-bearing
 // version needs an FFI surface that does not exist.
 //
 // What they ARE good for is a before-and-after on this machine, which is what a kernel change needs,
@@ -46,8 +46,7 @@ public class RowEncodingBenchmarks
     /// <remarks>
     /// A struct root is required - row encoding is about ordering tuples. The first two differ in
     /// width and nullability; neither has a decimal column or a nested field, so `EncodeDecimal` and
-    /// the per-nested-field `ArrayPool.Rent` made ZERO calls and nothing measured them
-    /// (BENCH-AUDIT.md B20).
+    /// the per-nested-field `ArrayPool.Rent` made ZERO calls and nothing measured them.
     /// <para>
     /// `chunked_decimal_r1025` is the third case, and ONE file covers both missing sites: four
     /// Decimal(18,4) chunks carried as a struct field, so `EncodeDecimal` runs 368 108 times and the
@@ -99,7 +98,7 @@ public class RowEncodingBenchmarks
     /// </summary>
     /// <param name="parameters">The case's parameters; <c>Entry</c> says which file.</param>
     /// <remarks>
-    /// THIS REPLACES A LINE ON STDERR (BENCH-AUDIT.md C6). The setup printed `rows=… keyBytes=…`
+    /// THIS REPLACES A LINE ON STDERR. The setup printed `rows=… keyBytes=…`
     /// and left the division to the reader, which meant it was not done. The figures are properties
     /// of the corpus entry, so they are measured here the same way -- one encode, once, while the
     /// report is being built -- and land in the table as `ns/row` and `GB/s`.
@@ -160,7 +159,7 @@ public class RowEncodingBenchmarks
     /// <summary>The same batch with every field descending, which is the only path that inverts.</summary>
     /// <remarks>
     /// A descending variable-length value is copied XORed with 0xFF, and that XOR is the one
-    /// operation docs/06-row-encoding.md §7 says is worth a vector. Ascending copies instead, so
+    /// operation in row encoding worth a vector. Ascending copies instead, so
     /// the arm above never reaches it and its distance from this one is what inverting costs.
     /// </remarks>
     [Benchmark(Description = "encode a batch to row keys, descending")]
@@ -173,8 +172,8 @@ public class RowEncodingBenchmarks
     /// <summary>Encode, then order the rows through <see cref="RowKeys.Compare"/>.</summary>
     /// <returns>The first row of the ordering, so the sort is not elided.</returns>
     /// <remarks>
-    /// THE ONLY CALLER OF `Compare` IN THE REPOSITORY, outside its own `IComparer` (BENCH-AUDIT.md
-    /// B20). Encoding to comparable bytes is worth exactly what comparing them is worth, and that
+    /// THE ONLY CALLER OF `Compare` IN THE REPOSITORY, outside its own `IComparer`. Encoding to
+    /// comparable bytes is worth exactly what comparing them is worth, and that
     /// half had never been timed.
     /// <para>
     /// The encode is INSIDE the arm rather than hoisted into setup, because `RowKeys` owns pooled

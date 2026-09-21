@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# One process, one clock, two builds of the library (BENCH-AUDIT.md C1).
+# One process, one clock, two builds of the library.
 #
 #   bench/ab.sh <before-commit> [--after <commit>] <file> [scenario…]
 #
 # Builds the OTHER side in a git worktree of <commit>, then runs both against one clock with the
 # rounds interleaved and the ratio taken per round, exactly as --ratio-check does against Rust.
 #
-#   bench/ab.sh 5baa92e --after 4a31e40 tests/.../utf8_nonnull_r8193.vortex fullscan
+#   bench/ab.sh HEAD~1 --after HEAD tests/.../utf8_nonnull_r8193.vortex fullscan
 #
 # Without --after the other side is the working build, which answers "how much faster are we now" --
 # every commit since, not the one being judged. A perf change is judged against its own parent, so
-# --after is what the criterion in BENCH-AUDIT.md's roadmap actually asks for.
+# --after, with that parent as <before-commit>, is the form that actually judges a change.
 #
 # THE SCENARIO PROJECT IS COPIED INTO THE WORKTREE, and that is the load-bearing trick: a commit
 # from before it existed has no such assembly, and asking every past commit to have carried one
@@ -61,7 +61,7 @@ build_side() {
     git -C "$root" worktree add --detach "$tree" "$sha" > /dev/null 2>&1 || {
         echo "could not create a worktree at $tree" >&2; return 1; }
     trees+=("$tree")
-    # THE DESTINATION IS CLEARED FIRST, and B15 is the whole reason. `cp -R src dst` copies INTO
+    # THE DESTINATION IS CLEARED FIRST. `cp -R src dst` copies INTO
     # dst when dst already exists, and every commit since the scenario project was created carries
     # one -- so the copy produced bench/Vorticity.Benchmarks.Scenarios/Vorticity.Benchmarks.
     # Scenarios/, both source trees compiled together, and the build died on 29 errors: five CS0579
@@ -91,10 +91,10 @@ fi
 
 # `"${after_args[@]}"` ON AN EMPTY ARRAY IS AN UNBOUND VARIABLE under `set -u` in bash 3.2, which is
 # what /bin/bash is on macOS -- so the form WITHOUT --after, the one the header documents first,
-# died on "after_args[@]: unbound variable" even once B15's copy was fixed. The `+` expansion is the
-# portable spelling: expand to nothing when unset, to the words when set. Same shape as the
+# died on "after_args[@]: unbound variable" even once the doubled copy was fixed. The `+` expansion
+# is the portable spelling: expand to nothing when unset, to the words when set. Same shape as the
 # `"${trees[@]:-}"` in cleanup, and for the same reason.
-# TIERING IS PINNED OFF, and B24 is why: without it this tool does not measure the code, it measures
+# TIERING IS PINNED OFF: without it this tool does not measure the code, it measures
 # which side the JIT happened to promote. Null controls -- the SAME commit on both sides, library
 # identical to the byte -- read 3.177 and 0.294 depending only on how the other side was loaded, one
 # side at ~740 us and the other at ~2450. The slow side was WORSE than the scalar fallback (980 us

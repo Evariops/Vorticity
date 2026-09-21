@@ -1,6 +1,6 @@
 // The FastLanes unpack kernel, scalar against vector, in ONE process.
 //
-// docs/90-registry.md calls `fastlanes.bitpacked` "the single most important kernel", and it was
+// `fastlanes.bitpacked` is the single most important kernel, and it was
 // scalar. The shape of the win was predictable from the layout rather than hoped for: `lane` IS the
 // SIMD lane, so for a fixed row the packed words are contiguous and - this is the part that decides
 // it - so are the output positions, because `index(row, lane) = base(row) + lane` at every element
@@ -8,19 +8,18 @@
 //
 // THE VECTOR ARMS CALL `UnpackBlocks`, WHICH IS WHAT SHIPS, and that is the whole difference
 // between a number and a number about nothing. They called `UnpackBlock` -- the single-block
-// entry point -- until 2026-09-14, and `71b18f0` moved the library off it: a node's blocks all
+// entry point -- after the library had moved off it: a node's blocks all
 // share one bit width, so the per-row shape table is built once for the run instead of once per
 // block. The singular form still exists for the partial first and last block of a window, and it
 // pays that table per call: measured here on the same 64 blocks into the same output, 26.53 us
-// per block against 19.92 us for the run, -25%. So the arm read +20% against BASELINE's 21.6 us
-// while the shipped path had got FASTER, and the bisect that cost (BENCH-AUDIT.md §4.4) found a
+// per block against 19.92 us for the run, -25%. So the arm read +20% against a recorded 21.6 us
+// while the shipped path had got FASTER, and the bisect that cost found a
 // benchmark, not a regression. An arm that does not call what ships measures nothing anyone runs.
 //
-// MEASURED AT THE KERNEL AND NOT END TO END, for the reason docs/05-benchmarks.md §1b now
-// states outright: an end-to-end run puts tens of microseconds of open-and-walk in front of the
-// kernel and leaves the answer inside the run-to-run spread. That mistake has already been made
-// once in this repository, on the FSST kernel, and it produced a confident negative result about a
-// change that was in fact 7.9x faster.
+// MEASURED AT THE KERNEL AND NOT END TO END, because an end-to-end run puts tens of microseconds
+// of open-and-walk in front of the kernel and leaves the answer inside the run-to-run spread.
+// That mistake has already been made once in this repository, on the FSST kernel, and it
+// produced a confident negative result about a change that was in fact 7.9x faster.
 //
 using System;
 using System.Collections.Generic;
@@ -88,7 +87,7 @@ public class FastLanesKernelBenchmarks
 
         // THE PACK SIDE HAS ITS OWN INPUT, and it is masked to the width: `PackBlock` requires
         // every value below 2^bitWidth, and reusing an unpack arm's output would make one arm
-        // depend on another having run. v2 W-14 asks for these arms -- `PackBlock` is the exact
+        // depend on another having run. These arms exist because `PackBlock` is the exact
         // mirror of `UnpackBlock`, which went 3.6x (i64) and 7x (i32) when it was vectorized, and
         // it is still the scalar loop through the index table.
         _values64 = new ulong[Blocks * FastLanes.BlockSize];

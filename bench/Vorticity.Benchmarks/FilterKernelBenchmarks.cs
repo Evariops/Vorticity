@@ -1,32 +1,32 @@
 // The filter's comparison kernel: what the library still pays over the best scalar loop.
 //
-// TWO ARMS, AND ONLY TWO (BENCH-AUDIT.md §3.1). This file was written to decompose three:
+// TWO ARMS, AND ONLY TWO. This file was written to decompose three:
 //
 //   * SWITCHED     - a per-element `PType` switch, operator switch and validity check, the shape the
-//                    library had. It priced the BRANCHING audit's remedy at 6x, that 6x was banked,
+//                    library had. It priced hoisting those branches at 6x, that 6x was banked,
 //                    and the library no longer has the shape - so the arm was history, not a control.
-//   * VECTORIZED   - the hoisted shape a `Vector128` at a time. A SETTLED NEGATIVE RESULT
-//                    (PERF-AUDIT-v2.md §9): slower than the scalar loop WITH NEON available, because
-//                    `Trilean` is one byte per row and each 64-bit lane's result has to be extracted
-//                    and stored on its own - the per-lane loop costs more than the comparison saves.
+//   * VECTORIZED   - the hoisted shape a `Vector128` at a time. A SETTLED NEGATIVE RESULT:
+//                    slower than the scalar loop WITH NEON available, because `Trilean` is one
+//                    byte per row and each 64-bit lane's result has to be extracted and stored
+//                    on its own - the per-lane loop costs more than the comparison saves.
 //                    The blocker is the OUTPUT REPRESENTATION, not the arithmetic. Re-measuring a
-//                    closed question every run is what §3.1 calls a museum piece.
+//                    closed question every run would turn this file into a museum piece.
 //
-// Both figures stay in bench/BASELINE.md and in the commits that took them. What remains is the pair
-// that can still move:
+// Both results are settled and neither arm is measured any more. What remains is the pair that can
+// still move:
 //
 //   * HOISTED      - all three branches lifted out of the loop, still scalar, still one value at a
 //                    time. The FLOOR, and the baseline.
 //   * LIBRARY      - `ComparisonKernels.Compare` as it stands, through THE entry point the scan
 //                    calls, over an arena node built here from the same values the other arm sees.
-//                    It went through a second entry point, `CompareForBenchmark`, until 2026-09-14:
-//                    a shape that could drift from `Compare` without anything noticing, which is
-//                    the failure this arm exists to prevent (BENCH-AUDIT.md E3). Its
-//                    distance from HOISTED is what the library still pays, including the validity
-//                    resolution and the bounds checks the bare arm does not have. A benchmark whose
-//                    control is a hand-written copy of "the library shape" cannot say whether the
-//                    library still has that shape; this arm is why the 6x above could be confirmed
-//                    collected rather than assumed.
+//                    It used to go through a second entry point, `CompareForBenchmark`: a shape
+//                    that could drift from `Compare` without anything noticing, which is the
+//                    failure this arm exists to prevent. Its distance from HOISTED is what the
+//                    library still pays, including the validity resolution and the bounds checks
+//                    the bare arm does not have. A benchmark whose control is a hand-written copy
+//                    of "the library shape" cannot say whether the library still has that shape;
+//                    this arm is why the 6x above could be confirmed collected rather than
+//                    assumed.
 //
 // THE AUTO-VECTORIZATION CHECK the programme requires is meant to be `[DisassemblyDiagnoser]`, and
 // this project cannot run it: BenchmarkDotNet's disassembler needs the out-of-process toolchain that
@@ -63,10 +63,10 @@ public class FilterKernelBenchmarks
     private CanonicalArena? _arena;
     private int _node;
 
-    /// <summary>The same i64 column under a scattered validity bitmap. BENCH-AUDIT.md B27.</summary>
+    /// <summary>The same i64 column under a scattered validity bitmap.</summary>
     /// <remarks>
     /// EVERY OTHER NODE IN THIS CLASS IS NonNullable, so the four arms all take the `AllValid` fast
-    /// path -- and v2 F11 disassembled that path: seven instructions, one `cset`, and the only jump
+    /// path -- and its disassembly is seven instructions, one `cset`, and the only jump
     /// is the loop's own back-edge. There is nothing there to make branchless. The loop that DOES
     /// branch is the nullable fallback, one `cbz` on the validity bit per row plus an unconditional
     /// `b`, because the JIT will not speculate the load of `values[i]` for an invalid row. It had no
@@ -74,13 +74,12 @@ public class FilterKernelBenchmarks
     /// </remarks>
     private int _nullableNode;
 
-    // PERF-AUDIT-v2.md F-10. The four columns below exist so that the four kernels F-4 names are
-    // REACHED by something. Counted on the two `--ratio-check` filter axes, which are F-4's own
-    // closing criterion: 58 904 calls and 60,3 M rows, ALL of them through `CompareSigned`. `In`,
+    // The four columns below exist so that the four kernels the filter axes never call are
+    // REACHED by something. Counted on the two `--ratio-check` filter axes, the measure the kernel
+    // work is judged by: 58 904 calls and 60,3 M rows, ALL of them through `CompareSigned`. `In`,
     // `CompareBool`, `CompareFloat` and `CompareBytes` each saw zero. Their correctness is covered
     // -- `ScanFilterTests` exercises `In`, `f64` with NaN and `utf8` -- but a correctness test says
-    // nothing about cost, and eight points of this audit were written by reading a file rather than
-    // measuring one.
+    // nothing about cost, and a cost read off the source rather than measured is a guess.
     private int _floatNode;
     private int _boolNode;
     private int _utf8Node;
@@ -126,7 +125,7 @@ public class FilterKernelBenchmarks
             PType.I64,
             buffer);
 
-        // B27: the same values under a SCATTERED bitmap -- pseudo-random, not a run and not
+        // The same values under a SCATTERED bitmap -- pseudo-random, not a run and not
         // all-valid. The distribution is the measurement: a branch the predictor gets right is free,
         // so a tidy pattern would report that the nullable path costs nothing, which is the lie in
         // the other direction. One row in four is null, drawn from the same seeded generator.
@@ -178,7 +177,7 @@ public class FilterKernelBenchmarks
         _boolNode = _arena.AddBool(types.Bool(Nullability.NonNullable), Count, Validity.NonNullable, bits, 0);
 
         // Utf8, as views. Every value is short enough to live inline, which is the shape 65 % of a
-        // real VarBinView carries (PERF-AUDIT-v2.md R28) and the one `CompareBytes` sees most.
+        // real VarBinView carries and the one `CompareBytes` sees most.
         VortexBuffer views = _arena.AllocateUninitialized(Count * 16, 16, out Span<byte> viewBytes);
         viewBytes.Clear();
         for (int i = 0; i < Count; i++)
@@ -226,7 +225,7 @@ public class FilterKernelBenchmarks
         return _destination.Length;
     }
 
-    /// <summary>The same comparison on a nullable column: the branchy half. BENCH-AUDIT.md B27.</summary>
+    /// <summary>The same comparison on a nullable column: the branchy half.</summary>
     /// <remarks>
     /// Its only difference from <see cref="Library"/> is the validity, so the distance between the
     /// two arms IS what the per-row branch and the bit test cost -- the values, the operator and the
@@ -243,9 +242,9 @@ public class FilterKernelBenchmarks
     /// <summary>`i64 &lt; 3.5`: an integer column against a float literal, widened per row.</summary>
     /// <remarks>
     /// The same column and operator as <see cref="Library"/>, the literal a double instead of a
-    /// long. Its distance from that arm is what widening costs and nothing else, which is the
-    /// question CO-1 asks: the answer has to be in the same neighbourhood, because the kernel is
-    /// the same kernel with a wider accumulator type.
+    /// long. Its distance from that arm is what widening costs and nothing else, and the two have
+    /// to land in the same neighbourhood, because the kernel is the same kernel with a wider
+    /// accumulator type.
     /// </remarks>
     [Benchmark(Description = "library, i64 < float")]
     public int LibraryAgainstFloat()
@@ -257,7 +256,7 @@ public class FilterKernelBenchmarks
 
     /// <summary>`f64 &lt; literal`, through <c>CompareFloat</c>.</summary>
     /// <remarks>
-    /// PERF-AUDIT-v2.md F-10. Same values as the i64 arm, widened: the distance between the two is
+    /// Same values as the i64 arm, widened: the distance between the two is
     /// what the float kernel costs over the signed one, and nothing else.
     /// </remarks>
     [Benchmark(Description = "library, f64 <")]
@@ -291,7 +290,7 @@ public class FilterKernelBenchmarks
     /// One pass over the column against a set hashed beforehand, which is what a scan does: the
     /// candidates are prepared once for the whole file, so what this times is the row loop and not
     /// the table. Folding N equalities with <c>Trilean.Or</c> was the shape before, and it made the
-    /// reading N passes plus N-1 ORs; passing no set still reaches it.
+    /// reading N passes plus the ORs between them; passing no set still reaches it.
     /// </remarks>
     [Benchmark(Description = "library, i64 IN (8)")]
     public int LibraryIn()

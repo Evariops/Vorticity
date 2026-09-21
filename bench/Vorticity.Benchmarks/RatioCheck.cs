@@ -1,11 +1,11 @@
 // The ratio gate: our time over Rust's, held to a ceiling, as a command rather than a benchmark.
 //
-// docs/05-benchmarks.md separates the quantities that can be locked in CI from the ones that cannot,
-// and puts the ratio against Rust in a category of its own. Absolute microseconds depend on the
-// machine, the thermal state and the runner, so gating on them produces a test that fails for
-// reasons nobody caused. The RATIO does not: both implementations run in the same process on the
-// same bytes with the same clock, so a slower machine slows both sides and the quotient survives.
-// It is the only speed measurement in this repository that means the same thing on two machines.
+// Some quantities can be locked in CI and some cannot, and the ratio against Rust sits in a
+// category of its own. Absolute microseconds depend on the machine, the thermal state and the
+// runner, so gating on them produces a test that fails for reasons nobody caused. The RATIO
+// does not: both implementations run in the same process on the same bytes with the same clock,
+// so a slower machine slows both sides and the quotient survives. It is the only speed
+// measurement in this repository that means the same thing on two machines.
 //
 // WHY NOT A UNIT TEST, WHEN THE ALLOCATION CEILINGS ARE ONE. Allocations are exactly reproducible
 // and cost nothing to measure, so they belong in the suite. This needs a 36 MB cdylib that has to be
@@ -13,8 +13,8 @@
 // would make the suite slower and conditionally red, which is how a suite stops being run.
 //
 // WHY NOT A BENCHMARKDOTNET ASSERTION. BenchmarkDotNet runs one benchmark to completion and then
-// the next, which is precisely the shape docs/05 §5 warns about: "thermal drift over a long run
-// systematically favors whoever goes first." For a ratio that bias is not noise, it is a systematic
+// the next, which is precisely the wrong shape, because thermal drift over a long run
+// systematically favors whoever goes first. For a ratio that bias is not noise, it is a systematic
 // error in the quantity being gated. So the two sides are INTERLEAVED here - one iteration of ours,
 // one of theirs, alternating which goes first - and drift becomes common-mode instead of a result.
 // The median of each side is taken rather than the mean, so one GC or one scheduler preemption
@@ -98,16 +98,16 @@ internal static class RatioCheck
     /// </summary>
     /// <remarks>
     /// Under ~200 us a single `Stopwatch`-timed call is dominated by timer, cache and scheduler
-    /// jitter, and a median over rounds does not recover what no round resolved (BENCH-AUDIT.md
-    /// §4.4). Repeating k times inside one timed round is the same total work with the jitter
-    /// divided by k. The estimator changes with it -- k calls in a row measure a WARM path, where a
-    /// single call measured a cache-cold one -- which is the path a reader that opens ten files in
-    /// a row actually exercises.
+    /// jitter, and a median over rounds does not recover what no round resolved. Repeating k
+    /// times inside one timed round is the same total work with the jitter divided by k. The
+    /// estimator changes with it -- k calls in a row measure a WARM path, where a single call
+    /// measured a cache-cold one -- which is the path a reader that opens ten files in a row
+    /// actually exercises.
     /// </remarks>
     private const double MinRoundMicroseconds = 1_000;
 
     /// <summary>
-    /// The margin over the reference ratio, per docs/05's "failure beyond +15% of the reference".
+    /// The margin over the reference ratio: a ratio more than 15% above its reference fails.
     /// </summary>
     /// <remarks>
     /// The ratio is LARGELY deterministic, not entirely: the two sides do not share a page-cache
@@ -137,7 +137,7 @@ internal static class RatioCheck
     /// message what got slower and why that is acceptable.
     /// </summary>
     /// <remarks>
-    /// These are this harness's own numbers, not bench/BASELINE.md's, and on two of the four axes
+    /// These are this harness's own numbers, not BenchmarkDotNet's, and on two of the four axes
     /// they are not close to them. Setting a ceiling here from a figure measured there would be
     /// gating one estimator with another's answer, which is how the first version of this file came
     /// out red on every axis.
@@ -171,7 +171,7 @@ internal static class RatioCheck
     private static readonly Axis[] Axes =
     [
         // THE FIRST FOUR COME FROM `Scenarios`, which is what makes `--profile fullscan` a
-        // statement about THIS axis and not about a scan that resembles it (A2).
+        // statement about THIS axis and not about a scan that resembles it.
         FromScenario("fullscan"),
         new Axis(
             "full scan, upstream lazy",
@@ -209,8 +209,8 @@ internal static class RatioCheck
     /// A LANE AXIS IS ADDED, NOT SUBSTITUTED. The thirteen axes are ratchets measured at one lane;
     /// swapping one for a lane version would compare a number against a reference that does not
     /// describe it. This appends `full scan, N lanes` instead, with the thread count PINNED on both
-    /// sides (docs/05 §5) -- and it arrives without a reference, so the gate prints the line to
-    /// paste once the machine has been quiet enough to trust it.
+    /// sides -- and it arrives without a reference, so the gate prints the line to paste once the
+    /// machine has been quiet enough to trust it.
     /// </remarks>
     internal static int Lanes { get; set; }
 
@@ -235,9 +235,9 @@ internal static class RatioCheck
     /// The axes that read the generated tables, or nothing when they have not been generated.
     /// </summary>
     /// <remarks>
-    /// BENCH-AUDIT.md B6: every other axis reads ONE file -- 65 536 rows, five columns -- so the
-    /// projection measured "1 column of 5" where docs/05 §3 describes "1 of 50", and no axis had a
-    /// string column at all. `table_mixed` is what a reader actually meets (a key, a measure, a
+    /// Every other axis reads ONE file -- 65 536 rows, five columns -- so the projection measured
+    /// "1 column of 5" where the benchmark design calls for "1 of 50", and no axis had a string
+    /// column at all. `table_mixed` is what a reader actually meets (a key, a measure, a
     /// price, sixteen labels, a million distinct names, a timestamp) and `table_wide` is the fifty
     /// columns the projection sentence was written about.
     /// </remarks>
@@ -305,8 +305,8 @@ internal static class RatioCheck
     /// <para>
     /// This group replaces the `RewrittenComparison` BenchmarkDotNet class, which asked the same
     /// unique question with a worse estimator -- sequential arms cannot share a drift the way these
-    /// interleaved ones do -- and asked it against the lazy `ScanAll`, which is A1: a Rust side that
-    /// does not decompress is not the counterpart of a .NET scan that has no choice but to.
+    /// interleaved ones do -- and asked it against the lazy `ScanAll`: a Rust side that does not
+    /// decompress is not the counterpart of a .NET scan that has no choice but to.
     /// `ScanCanonical` is what the group is born on.
     /// </para>
     /// <para>
@@ -381,8 +381,8 @@ internal static class RatioCheck
     /// reference implementation reads our file nearly seven times faster than it reads its own".
     /// It did not: those 195 us were an open and a split of three chunks, against 64 in the
     /// reference's own file, which is why the number tracked the SPLIT COUNT and not the encoding.
-    /// Against a Rust that decodes, the axis reads 1.08. BENCH-AUDIT.md §5.A's finding rests on the
-    /// old number and is to be reread.
+    /// Against a Rust that decodes, the axis reads 1.08, so a conclusion drawn from the old number
+    /// has to be checked again.
     /// </para>
     /// </remarks>
     private static readonly Dictionary<string, Reference> References = new()
@@ -424,9 +424,9 @@ internal static class RatioCheck
     /// TIGHTER THAN `ThroughputCheck`'s 0.70, and the difference is measured rather than chosen.
     /// That gate's references are a max over three runs of encodings whose own run-to-run spread is
     /// 20-25%; these axes are longer and mostly steadier -- +-2% on `full scan` and `scattered take`
-    /// against +12 to +22% on the four short ones (BENCH-AUDIT.md annexe A.1). 0.85 is what the
-    /// steady axes leave comfortable; the short ones are why it is not tighter still, and why B2 --
-    /// deciding on an interval rather than a point -- is what actually fixes this gate's resolution.
+    /// against +12 to +22% on the four short ones. 0.85 is what the steady axes leave comfortable;
+    /// the short ones are why it is not tighter still, and why deciding on an interval rather than
+    /// a point is what actually fixes this gate's resolution.
     ///
     /// A ratio far BELOW its reference is reported rather than silently accepted: a ratchet that is
     /// never lowered stops being a ratchet. The state this was written to end had five axes of nine
@@ -457,9 +457,9 @@ internal static class RatioCheck
 
     /// <summary>Rows a scattered take asks for, and the gap between them.</summary>
     /// <remarks>
-    /// 64 rows one per 1024 is the shape `PathAllocationTests` uses and the shape docs/05 quotes its
-    /// "0.32x of a full scan" from: one row from each of the dataset's 64 splits, which is the
-    /// worst case for a reader that fetches by split.
+    /// 64 rows one per 1024 is the shape `PathAllocationTests` uses and the shape the "0.32x of a
+    /// full scan" figure for a take was measured on: one row from each of the dataset's 64 splits,
+    /// which is the worst case for a reader that fetches by split.
     /// </remarks>
     private const long TakeCount = 64;
 
@@ -504,7 +504,7 @@ internal static class RatioCheck
 
         string path = Corpus.Dataset("VORTICITY_BENCH_DATA", "containers/zoned_many_zones_nulls");
 
-        // THE GATE REFUSES A FILE OF ANOTHER SHAPE rather than deriving one (BENCH-AUDIT.md A4).
+        // THE GATE REFUSES A FILE OF ANOTHER SHAPE rather than deriving one.
         // The classes that only report can adapt to whatever file they are given; these thirteen
         // references cannot -- they are ratchets measured against this file's columns, its zones
         // and its splits, so the same numbers over another file would be a comparison with nothing.
@@ -750,7 +750,7 @@ internal static class RatioCheck
         Dictionary<string, int> grouped = [];
         for (int pass = 1; pass <= passes; pass++)
         {
-            // A PASS IS A PROCESS, and B2.5 is why. Measured over twenty runs of one axis each:
+            // A PASS IS A PROCESS. Measured over twenty runs of one axis each:
             // between-run variance is two to three times the within-run variance, and a 95%
             // within-run interval contains the grand median 11 or 12 times out of 20 instead of 19.
             // Passes inside one process sample the wrong distribution -- they share a JIT, a heap, a
@@ -776,16 +776,16 @@ internal static class RatioCheck
             // A RATCHET ONLY EVER COMES DOWN. When the passes peak above the reference the old value
             // is printed back, not the new one: this command exists to lower ceilings that the code
             // outran, and a recalibration that also raised them would launder run-to-run noise into
-            // a looser gate -- the one thing BENCH-AUDIT.md §8 forbids outright. If a measurement
-            // above the reference is REAL, it is a regression and belongs in the OVER column, not
-            // here.
+            // a looser gate -- the one thing a ratchet must never do. If a measurement above the
+            // reference is REAL, it is a regression and belongs in the OVER column, not here.
             // --rebase raises ONLY an axis whose k HAS MOVED SINCE ITS REFERENCE WAS SET, because
             // that move IS the estimator change: k calls in a row measure a warm path where a
             // single timed call measured a cache-cold one, and the two are not the same quantity.
             // An axis measured at the same k as its reference is measuring exactly what it always
             // did, so a higher number there is noise or a regression -- neither of which a rebase
-            // may absorb. The test was `k > 1` until B9 made k > 1 the ordinary case on nearly every
-            // axis, at which point it stopped discriminating and started rubber-stamping.
+            // may absorb. The test was `k > 1` until k came from the faster side, which made k > 1
+            // the ordinary case on nearly every axis, at which point it stopped discriminating and
+            // started rubber-stamping.
             bool changedEstimator = rebase && known && repeats != entry.Repeats;
 
             // THE SECOND WAY UP, and the only objective one. A measurement can move while the code
@@ -1035,7 +1035,7 @@ internal static class RatioCheck
 
     /// <summary>The key-order group's axes, in the order they are reported.</summary>
     /// <remarks>
-    /// docs/12-index-reads.md §11: `InKeyOrder` over a sorted column and over an uncorrelated one,
+    /// The index reads: `InKeyOrder` over a sorted column and over an uncorrelated one,
     /// and a count answered by the exact cover. The Rust side has no key order and no index, so
     /// each axis is held against the reference's answer to the same QUESTION of the file -- the
     /// band scanned, the scattered rows taken -- which is the cost a caller would otherwise pay.
@@ -1558,15 +1558,15 @@ internal static class RatioCheck
     /// <param name="source">The file to read.</param>
     /// <param name="destination">Where to write it.</param>
     /// <remarks>
-    /// EXPOSED FOR A5. The `rewritten` axes write this file into a temporary directory and delete
-    /// it, which is right for a gate and useless for the question A5 asks -- WHICH encoding our
-    /// writer puts where the reference puts another. `--rewrite <in> <out>` keeps the bytes so
+    /// EXPOSED FOR INSPECTION. The `rewritten` axes write this file into a temporary directory and
+    /// delete it, which is right for a gate and useless for asking WHICH encoding our writer puts
+    /// where the reference puts another. `--rewrite <in> <out>` keeps the bytes so
     /// `vxdump --encodings` and `--throughput` can be pointed at them.
     /// </remarks>
     /// <param name="edition">
     /// The edition the writer targets. Older editions exclude later encodings, which is how
     /// `--rewrite <in> <out> <edition>` isolates one of them: `Core20250500` has no
-    /// `vortex.zstd`, so the difference between the two rewrites IS zstd (BENCH-AUDIT.md A5).
+    /// `vortex.zstd`, so the difference between the two rewrites IS zstd.
     /// </param>
     /// <param name="rowBlock">
     /// `VortexWriteOptions.RowBlockSize`, or null for its default of 8192.
@@ -1576,12 +1576,12 @@ internal static class RatioCheck
     /// 1 MiB, or `Off` to disable the coalescing entirely.
     /// </param>
     /// <remarks>
-    /// THE TWO BLOCK KNOBS ARE HERE BECAUSE B12 COULD NOT BE MEASURED WITHOUT THEM. They decide the
-    /// file's chunking, a zone is a chunk, and a filter that keeps 219 rows out of a 24 576-row
-    /// chunk decodes all 24 576 -- so they decide what a selective scan costs, and nothing in this
-    /// bench could vary them. `Off` is spelled out rather than `0` because zero is a legal target
-    /// that means "no minimum", and the difference between that and "no coalescing at all" is
-    /// exactly what the point is about.
+    /// THE TWO BLOCK KNOBS ARE HERE BECAUSE CHUNKING COULD NOT BE PRICED WITHOUT THEM.
+    /// They decide the file's chunking, a zone is a chunk, and a filter that keeps 219 rows out of
+    /// a 24 576-row chunk decodes all 24 576 -- so they decide what a selective scan costs, and
+    /// nothing in this bench could vary them. `Off` is spelled out rather than `0` because zero is
+    /// a legal target that means "no minimum", and the difference between that and "no coalescing
+    /// at all" is exactly what is being measured.
     /// </remarks>
     internal static async Task RewriteAsync(
         string source,
@@ -1736,12 +1736,12 @@ internal static class RatioCheck
     /// <returns>Calls per timed round, at least one.</returns>
     /// <remarks>
     /// <para>
-    /// THE FASTER SIDE SETS k, and taking the slower one was BENCH-AUDIT.md B9: a round whose two
-    /// halves are 93 us and 1 223 us clears a millisecond on the strength of the slow half alone, so
+    /// THE FASTER SIDE SETS k, and taking the slower one was a mistake: a round whose two halves
+    /// are 93 us and 1 223 us clears a millisecond on the strength of the slow half alone, so
     /// `open to first batch` grouped k = 1 and OUR term stayed timed on a single 93 us call -- the
-    /// exact case §4.4 wanted grouped, and the worst mde of the axes. The ratio is a quotient of two
-    /// timings and it is no better resolved than its worse-resolved term, so the floor has to be met
-    /// by the term that is furthest from it.
+    /// exact case grouping exists for, and the worst mde of the axes. The ratio is a quotient of
+    /// two timings and it is no better resolved than its worse-resolved term, so the floor has to
+    /// be met by the term that is furthest from it.
     /// </para>
     /// <para>
     /// AND CAPPED BY THE BUDGET, because k multiplies the round and <see cref="MinRounds"/> of them
@@ -1848,8 +1848,8 @@ internal static class RatioCheck
     }
 
     /// <summary>
-    /// Reads a file and writes it back out, which is the write axis -- the one docs/05 never had a
-    /// reference for.
+    /// Reads a file and writes it back out, which is the write axis -- the one the benchmark design
+    /// never gave a timing reference.
     /// </summary>
     /// <remarks>
     /// The read is on both sides of the ratio and is therefore common-mode, but it is not small:
