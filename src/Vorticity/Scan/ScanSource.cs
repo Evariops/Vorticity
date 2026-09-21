@@ -29,6 +29,9 @@ internal sealed record ScanSpec
     internal bool Descending { get; init; }
 
     internal ScanOptions Options { get; init; } = ScanOptions.Default;
+
+    /// <summary>Whether the decoders may deliver dictionary and run-end columns in their encoded form, for a consumer that reads it.</summary>
+    internal bool KeepEncodings { get; init; }
 }
 
 /// <summary>
@@ -139,7 +142,7 @@ internal sealed class FileScanSource : ScanSource
         builder.WithPruning(options.Pruning).WithIndexes(options.UseIndexes);
         int degree = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : Session.Options.MaxDegreeOfParallelism;
         builder.WithDegreeOfParallelism(Math.Max(degree, 1));
-        builder.WithPrefetch(options.Prefetch).WithCompaction(options.Compact);
+        builder.WithPrefetch(options.Prefetch).WithCompaction(options.Compact).WithEncodings(spec.KeepEncodings);
         return builder;
     }
 }

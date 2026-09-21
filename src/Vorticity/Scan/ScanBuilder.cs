@@ -64,6 +64,18 @@ internal sealed class ScanBuilder
         return this;
     }
 
+    private bool _keepEncodings;
+
+    /// <summary>Whether the decoders may deliver dictionary and run-end columns encoded.</summary>
+    internal bool KeepEncodings => _keepEncodings;
+
+    /// <summary>Lets the decoders deliver dictionary and run-end columns in their encoded form.</summary>
+    internal ScanBuilder WithEncodings(bool keep)
+    {
+        _keepEncodings = keep;
+        return this;
+    }
+
     internal ScanBuilder(VortexFile file)
     {
         ArgumentNullException.ThrowIfNull(file);
