@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO.Hashing;
@@ -381,7 +382,7 @@ internal static class DatasetVerifier
                 {
                     using ObjectRange range = await store
                         .GetRangeAsync(key, at, (int)Math.Min(HashChunk, head.Length - at), cancellationToken).ConfigureAwait(false);
-                    range.Bytes.Span.CopyTo(bytes.AsSpan((int)at));
+                    range.Bytes.CopyTo(bytes.AsSpan((int)at));
                 }
 
                 try
@@ -402,7 +403,10 @@ internal static class DatasetVerifier
             {
                 using ObjectRange range = await store
                     .GetRangeAsync(key, at, (int)Math.Min(HashChunk, length - at), cancellationToken).ConfigureAwait(false);
-                hash.Append(range.Bytes.Span);
+                foreach (ReadOnlyMemory<byte> segment in range.Bytes)
+                {
+                    hash.Append(segment.Span);
+                }
             }
 
             return hash.GetCurrentHashAsUInt128();

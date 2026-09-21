@@ -69,6 +69,9 @@ internal sealed record DatasetOptions
     /// rules still build a correct tree, but not the same pages for the same keys.
     /// </summary>
     public IBoundaryRule? Rule { get; init; }
+
+    /// <summary>The clock a commit's creation time is read from; the system's by default.</summary>
+    public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 }
 
 /// <summary>One data object being written; its identity is minted before a byte is written.</summary>
@@ -713,6 +716,7 @@ internal sealed class VortexDataset : IAsyncDisposable
             Template = template,
             MaxAttempts = options.MaxAttempts,
             Rule = options.Rule ?? RuleOf(template.Chunker, seed),
+            TimeProvider = options.TimeProvider,
         };
     }
 

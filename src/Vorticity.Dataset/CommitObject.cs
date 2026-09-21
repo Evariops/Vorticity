@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.IO.Hashing;
 using System.Threading;
@@ -141,7 +142,7 @@ internal sealed class CommitObject
 
         // The read is the whole object exactly when it came back short of what was asked for.
         long length = range.Length < CommitFormat.OpenBytes ? range.Length : -1;
-        return Open(range.Bytes.Span, length);
+        return Open(range.Contiguous().Span, length);
     }
 
     /// <summary>
@@ -191,7 +192,7 @@ internal sealed class CommitObject
             throw new CommitFormatException($"'{key}' is {range.Length} bytes and holds no preamble.");
         }
 
-        ReadOnlySpan<byte> preamble = range.Bytes.Span;
+        ReadOnlySpan<byte> preamble = range.Contiguous().Span;
         if (!preamble[..8].SequenceEqual(CommitFormat.Magic))
         {
             throw new CommitFormatException($"'{key}' does not start with a commit object's magic.");
@@ -228,14 +229,15 @@ internal sealed class CommitObject
                 $"The page at {reference.Offset} is {reference.Length} bytes and {range.Length} were read.");
         }
 
-        UInt128 hash = XxHash128.HashToUInt128(range.Bytes.Span);
+        byte[] page = range.Bytes.ToArray();
+        UInt128 hash = XxHash128.HashToUInt128(page);
         if (hash != reference.Hash)
         {
             throw new CommitFormatException(
                 $"The page at {reference.Offset} hashes to {hash:x32} and its reference says {reference.Hash:x32}.");
         }
 
-        return range.Bytes.ToArray();
+        return page;
     }
 
     /// <summary>Whether the bytes end in a trailer that claims exactly their length.</summary>
