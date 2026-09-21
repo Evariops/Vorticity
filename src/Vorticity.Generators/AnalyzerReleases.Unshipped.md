@@ -1,0 +1,11 @@
+; Unshipped analyzer release
+; https://github.com/dotnet/roslyn-analyzers/blob/main/src/Microsoft.CodeAnalysis.Analyzers/ReleaseTrackingAnalyzers.Help.md
+
+### New Rules
+
+Rule ID | Category | Severity | Notes
+--------|----------|----------|-------
+VX1005 | Usage | Error | RecordGenerator
+VX1006 | Usage | Error | RecordGenerator
+VX1007 | Usage | Error | RecordGenerator
+VX1008 | Usage | Error | RecordGenerator
