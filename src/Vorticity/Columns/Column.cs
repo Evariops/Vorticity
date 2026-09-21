@@ -188,6 +188,12 @@ public readonly ref struct Columns<TRecord>
     /// </summary>
     private int Slot(int index) => _projected ? Binding.BatchIndex[index] : Binding.FileIndex[index];
 
+    /// <summary>The number of the record's members.</summary>
+    internal int MemberCount => Binding.Record.Count;
+
+    /// <summary>The arena node of member <paramref name="index"/>'s column, extension or not.</summary>
+    internal int ColumnNode(int index) => Arena.GetNode(StructNode()).GetFieldIndex(Slot(index));
+
     /// <summary>Copies the batch once into buffers the caller owns, to keep it past the enumeration.</summary>
     /// <returns>The owned batch; the caller disposes it.</returns>
     public RecordBatch ToOwned() => RecordBatch.Own(Arena, StructNode(), StartRow, Batch?.Schema, Batch?.Session);

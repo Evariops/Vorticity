@@ -10,6 +10,7 @@ namespace Vorticity;
 public readonly ref struct BatchView
 {
     private readonly ReadOnlySpan<ulong> _selection;
+    private readonly ReadOnlySpan<int> _columns;
     private readonly int _selected;
 
     internal BatchView(RecordBatch? batch, CanonicalArena arena, int node, VortexSchema schema, long startRow, ReadOnlySpan<ulong> selection, int selected)
@@ -21,6 +22,15 @@ public readonly ref struct BatchView
         StartRow = startRow;
         _selection = selection;
         _selected = selected;
+    }
+
+    /// <summary>A view over loose columns of one length, one node per field of <paramref name="schema"/>, with no struct above them.</summary>
+    internal BatchView(CanonicalArena arena, ReadOnlySpan<int> columns, VortexSchema schema)
+    {
+        Arena = arena;
+        Node = columns[0];
+        Schema = schema;
+        _columns = columns;
     }
 
     internal RecordBatch? Batch { get; }
@@ -57,9 +67,14 @@ public readonly ref struct BatchView
 
         VortexField field = Schema[index];
         ClrFit.Require<T>(field.Type, $"Column '{field.Name}'", Extensions);
-        int node = Schema.RootIsStruct ? Arena.GetNode(StructNode()).GetFieldIndex(index) : Node;
-        return new Column<T>(Arena, node, field.Type, Extensions);
+        return new Column<T>(Arena, ColumnNode(index), field.Type, Extensions);
     }
+
+    /// <summary>The arena node of column <paramref name="index"/>, extension or not.</summary>
+    internal int ColumnNode(int index) =>
+        !_columns.IsEmpty ? _columns[index]
+        : Schema.RootIsStruct ? Arena.GetNode(StructNode()).GetFieldIndex(index)
+        : Node;
 
     /// <summary>The column named <paramref name="name"/>.</summary>
     /// <typeparam name="T">A .NET type the column's dtype maps to.</typeparam>
@@ -82,7 +97,10 @@ public readonly ref struct BatchView
 
     /// <summary>Copies the batch once into buffers the caller owns.</summary>
     /// <returns>The owned batch; the caller disposes it.</returns>
-    public RecordBatch ToOwned() => RecordBatch.Own(Arena, Node, StartRow, Schema, Batch?.Session);
+    /// <exception cref="InvalidOperationException">The view is the key columns a writer lends a key encoder, which are not a batch.</exception>
+    public RecordBatch ToOwned() => _columns.IsEmpty
+        ? RecordBatch.Own(Arena, Node, StartRow, Schema, Batch?.Session)
+        : throw new InvalidOperationException("The key columns a writer lends an encoder are not a batch; encode them and keep the keys instead.");
 
     private int StructNode()
     {

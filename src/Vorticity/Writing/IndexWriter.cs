@@ -38,6 +38,9 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>For a composite key's slot, the columns it encodes in key order, each a field-index path.</summary>
     private readonly int[][]?[] _keyFields;
 
+    /// <summary>For a composite key's slot, the key columns as the encoder sees them.</summary>
+    private readonly VortexSchema?[] _keySchemas;
+
     /// <summary>
     /// For a nested column's slot, its field-index path from the root; <see langword="null"/> when
     /// the policy names no nested column, which is every default write.
@@ -87,6 +90,7 @@ internal sealed class IndexWriter : IDisposable
         _refusals = new string?[total];
         _columnBytes = new long[total];
         _keyFields = new int[][]?[total];
+        _keySchemas = new VortexSchema?[total];
         for (int n = 0; n < (nested?.Count ?? 0); n++)
         {
             int slot = fieldCount + keys + n;
@@ -114,7 +118,7 @@ internal sealed class IndexWriter : IDisposable
             _paths[field] = "(" + string.Join(", ", key.Paths) + ")";
             _columns[field] = key.Policy;
             _builders[field] = [];
-            _refusals[field] = Composite(key, schema, isTabular, keyEncoder, out _keyFields[field]);
+            _refusals[field] = Composite(key, schema, isTabular, keyEncoder, out _keyFields[field], out _keySchemas[field]);
             if (_refusals[field] is null)
             {
                 _builders[field].Add(new KeyIndexBuilder(
@@ -298,11 +302,12 @@ internal sealed class IndexWriter : IDisposable
     internal static bool Asks(WritePolicy policy) =>
         policy.Default.Kind != IndexPolicyKind.None || policy.Columns.Count > 0 || policy.Keys.Count > 0;
 
-    /// <summary>Why a composite key cannot be built, or null; and the columns it encodes, as field-index paths.</summary>
+    /// <summary>Why a composite key cannot be built, or null; and the columns it encodes, as field-index paths and as a schema.</summary>
     private static string? Composite(
-        CompositeKeyPolicy key, DType schema, bool isTabular, IKeyEncoder? encoder, out int[][]? fields)
+        CompositeKeyPolicy key, DType schema, bool isTabular, IKeyEncoder? encoder, out int[][]? fields, out VortexSchema? columns)
     {
         fields = null;
+        columns = null;
         if (!isTabular)
         {
             return "a composite key needs a file whose root is a struct of columns";
@@ -310,19 +315,23 @@ internal sealed class IndexWriter : IDisposable
 
         if (encoder is null)
         {
-            return "no key encoder: set VortexWriteOptions.KeyEncoder, which the Vorticity.RowEncoding package provides (RowKeyEncoder)";
+            return "no key encoder: declare the key with IndexPolicy.ForKey(columns, kind, encoder), e.g. with the RowKeyEncoder of Vorticity.RowEncoding";
         }
 
         int[][] resolved = new int[key.Paths.Count][];
+        VortexField[] named = new VortexField[resolved.Length];
         for (int i = 0; i < resolved.Length; i++)
         {
-            if (!TryResolve(schema, isTabular, key.Paths[i], out resolved[i], out _, out string? reason))
+            if (!TryResolve(schema, isTabular, key.Paths[i], out resolved[i], out DType leaf, out string? reason))
             {
                 return reason;
             }
+
+            named[i] = new VortexField(key.Paths[i], VortexTypes.FromDType(leaf));
         }
 
         fields = resolved;
+        columns = VortexSchema.Create(named);
         return null;
     }
 
@@ -382,7 +391,7 @@ internal sealed class IndexWriter : IDisposable
 
             try
             {
-                using IEncodedKeys keys = _keyEncoder!.Encode(slices, columns);
+                using IEncodedKeys keys = _keyEncoder!.Encode(new BatchView(slices, columns, _keySchemas[field]!));
                 builder.AccumulateEncoded(keys, include);
             }
             catch (Exception e) when (e is VortexUnsupportedException or ArgumentException)

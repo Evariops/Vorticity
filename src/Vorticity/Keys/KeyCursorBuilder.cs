@@ -138,7 +138,7 @@ internal sealed class KeyCursorBuilder
                 "unindexed column would have to hold the column to sort it, which this library " +
                 "refuses. Write the file with " +
                 (_composite is not null
-                    ? "WritePolicy.ForKey over these columns and a VortexWriteOptions.KeyEncoder"
+                    ? "IndexPolicy.ForKey over these columns with a key encoder"
                     : _distinct ? "IndexPolicy.Postings for that column" : "IndexPolicy.SortedRuns for that column") +
                 ", or add the index after the fact with VortexFileIndexer.");
         }

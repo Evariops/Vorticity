@@ -134,6 +134,26 @@ public sealed class IndexPolicy
             _policy.ForKey(paths, required ? spec.AsRequired() : spec), _paths.AddRange(paths), BudgetPerMille, KeyEncoder);
     }
 
+    /// <summary>An index of <paramref name="kind"/> on the tuple of <paramref name="columns"/>, its keys encoded by <paramref name="encoder"/>.</summary>
+    /// <param name="columns">The key's columns, in key order.</param>
+    /// <param name="kind">The index kind; a key of several columns is served by <see cref="IndexKind.SortedRuns"/>.</param>
+    /// <param name="encoder">What turns a tuple into bytes in tuple order, e.g. <c>RowKeyEncoder</c>; every composite key of a file shares one.</param>
+    /// <param name="required">Whether the write fails rather than abandon it.</param>
+    /// <returns>The policy with the index.</returns>
+    /// <exception cref="ArgumentException">The policy already encodes its keys in another format.</exception>
+    public IndexPolicy ForKey(ReadOnlySpan<string> columns, IndexKind kind, IKeyEncoder encoder, bool required = false)
+    {
+        ArgumentNullException.ThrowIfNull(encoder);
+        if (KeyEncoder is { } existing && existing.Format != encoder.Format)
+        {
+            throw new ArgumentException(
+                $"The composite keys of a file share one encoder: this policy encodes in '{existing.Format}', not '{encoder.Format}'.",
+                nameof(encoder));
+        }
+
+        return ForKey(columns, kind, required).WithKeyEncoder(encoder);
+    }
+
     /// <summary>The bytes the indexes may take together, per thousand bytes of data; 100 by default.</summary>
     /// <param name="perMille">The budget; 0 abandons every index that is not required.</param>
     /// <returns>The policy with the budget.</returns>
