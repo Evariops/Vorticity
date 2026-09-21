@@ -78,7 +78,7 @@ const FORGES: &[Forge] = &[
              array_specs is not itself an error",
             "scanning with a projection of only `strs` succeeds and returns the same values as \
              containers/uncompressed_canonical — this is the lazy-component-resolution test of \
-             docs/04-conformance.md §6",
+             docs/design/04-conformance.md §6",
             "scanning with `ints` projected fails with VortexUnsupportedException, and the message \
              names both the id `vortex.unknown01` and the component kind `array`",
         ],

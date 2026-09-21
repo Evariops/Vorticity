@@ -623,18 +623,6 @@ fn report(
             gate_failed.push((label, set.missing.clone()));
         }
     }
-    println!(
-        "  {:<11} {}/{} covered (the registry's late arrivals; not gating)",
-        "deferred",
-        coverage.deferred_arrays.covered.len(),
-        coverage.deferred_arrays.claimed
-    );
-    if !coverage.deferred_arrays.missing.is_empty() {
-        println!(
-            "      not present: {}",
-            coverage.deferred_arrays.missing.join(", ")
-        );
-    }
     if !coverage.unclaimed_observed.is_empty() {
         println!("  observed but listed nowhere in docs/design/90-registry.md:");
         for (label, ids) in [

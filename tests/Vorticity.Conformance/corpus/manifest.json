@@ -48,7 +48,7 @@
       "core2026.08.3"
     ],
     "arrays": {
-      "claimed": 30,
+      "claimed": 35,
       "covered": [
         "fastlanes.bitpacked",
         "fastlanes.for",
@@ -68,9 +68,12 @@
         "vortex.fsst",
         "vortex.list",
         "vortex.listview",
+        "vortex.map",
         "vortex.masked",
         "vortex.null",
         "vortex.onpair",
+        "vortex.parquet.variant",
+        "vortex.pco",
         "vortex.primitive",
         "vortex.runend",
         "vortex.sequence",
@@ -78,8 +81,10 @@
         "vortex.struct",
         "vortex.varbin",
         "vortex.varbinview",
+        "vortex.variant",
         "vortex.zigzag",
-        "vortex.zstd"
+        "vortex.zstd",
+        "vortex.zstd_buffers"
       ],
       "missing": []
     },
@@ -115,17 +120,6 @@
         "vortex.min",
         "vortex.nan_count",
         "vortex.null_count"
-      ],
-      "missing": []
-    },
-    "deferred_arrays": {
-      "claimed": 5,
-      "covered": [
-        "vortex.map",
-        "vortex.parquet.variant",
-        "vortex.pco",
-        "vortex.variant",
-        "vortex.zstd_buffers"
       ],
       "missing": []
     },
@@ -232,7 +226,7 @@
     "`vortex.dict` keys float values by bit pattern, not by IEEE equality: `distributions/float_specials_f64_*` dictionaries hold 15 distinct values even though 0.0 == -0.0 and NaN != NaN.",
     "An all-null column does not keep its values buffer. Vortex never serializes `Validity::AllInvalid` as a child, and the write pipeline folds an all-null column to a single `vortex.constant` node even with every compression scheme removed (`BtrBlocksCompressorBuilder::empty`). The shape \"nullable array whose values buffer is materialized and whose validity child is entirely zero\" is therefore reachable only by writing the array verbatim; `containers/all_null_i64_explicit_validity_r1025` and `encodings/masked_all_invalid` are the two files that have it.",
     "Zero-row chunks never reach a layout. The file writer filters them out of the write stream before any layout strategy sees them (`vortex-file-0.86.1/src/writer.rs:270`), and `ChunkedLayoutStrategy` collapses a single-child chunked layout into that child (`vortex-layout-0.86.1/src/layouts/chunked/writer.rs:86`). So no `vortex.chunked` LAYOUT in any Vortex file has one chunk or an empty one. Both shapes exist at the ARRAY level, in `encodings/chunked_one_chunk` and `encodings/chunked_empty_chunks`.",
-    "The row encoder of docs/06-row-encoding.md has NO golden vectors in this release. docs/04-conformance.md §7 assigns them to this crate via a `vortex-row` dependency; no such crate is published, and no crate in the 0.86.1 release exposes a row-encoding API. See the `rows/*` entry in `skipped`. Until it exists, the row encoder is anchored only by self-consistent property tests, which is exactly the failure mode docs/04-conformance.md opens by describing.",
+    "The row encoder of docs/design/06-row-encoding.md has NO golden vectors in this release. docs/design/04-conformance.md §7 assigns them to this crate via a `vortex-row` dependency; no such crate is published, and no crate in the 0.86.1 release exposes a row-encoding API. See the `rows/*` entry in `skipped`. Until it exists, the row encoder is anchored only by self-consistent property tests, which is exactly the failure mode docs/design/04-conformance.md opens by describing.",
     "The footer's `array_specs` over-reports. The writer pre-populates the array context with every id the enabled editions permit, for byte determinism (vortex-file-0.86.1/src/writer.rs:387), so `array_specs` names ids no array in the file uses — across this corpus its union is 40 ids against 36 actually serialized, including `vortex.union` and `fastlanes.transposed_bool`, which appear in no array anywhere. `array_ids` per file is the walked truth; `declared_array_ids` is the declared count."
   ],
   "files": [
@@ -7656,7 +7650,7 @@
     {
       "id": "encodings/chunked_bool",
       "dimension": "B",
-      "description": "vortex.chunked forced (4096 rows): four Bool chunks nested as a struct field (PERF-AUDIT-v2.md F1: ConcatBool)",
+      "description": "vortex.chunked forced (4096 rows): four Bool chunks nested as a struct field, so a reader concatenates Bool chunks",
       "path": "encodings/chunked_bool.vortex",
       "sidecar": "encodings/chunked_bool.jsonl",
       "vortex_version": "0.86.1",
@@ -7715,7 +7709,7 @@
     {
       "id": "encodings/chunked_bool_r0",
       "dimension": "B",
-      "description": "vortex.chunked forced (0 rows): four Bool chunks nested as a struct field (PERF-AUDIT-v2.md F1: ConcatBool)",
+      "description": "vortex.chunked forced (0 rows): four Bool chunks nested as a struct field, so a reader concatenates Bool chunks",
       "path": "encodings/chunked_bool_r0.vortex",
       "sidecar": "encodings/chunked_bool_r0.jsonl",
       "vortex_version": "0.86.1",
@@ -7760,7 +7754,7 @@
     {
       "id": "encodings/chunked_bool_r1",
       "dimension": "B",
-      "description": "vortex.chunked forced (1 rows): four Bool chunks nested as a struct field (PERF-AUDIT-v2.md F1: ConcatBool)",
+      "description": "vortex.chunked forced (1 rows): four Bool chunks nested as a struct field, so a reader concatenates Bool chunks",
       "path": "encodings/chunked_bool_r1.vortex",
       "sidecar": "encodings/chunked_bool_r1.jsonl",
       "vortex_version": "0.86.1",
@@ -7819,7 +7813,7 @@
     {
       "id": "encodings/chunked_bool_r1023",
       "dimension": "B",
-      "description": "vortex.chunked forced (1023 rows): four Bool chunks nested as a struct field (PERF-AUDIT-v2.md F1: ConcatBool)",
+      "description": "vortex.chunked forced (1023 rows): four Bool chunks nested as a struct field, so a reader concatenates Bool chunks",
       "path": "encodings/chunked_bool_r1023.vortex",
       "sidecar": "encodings/chunked_bool_r1023.jsonl",
       "vortex_version": "0.86.1",
@@ -7878,7 +7872,7 @@
     {
       "id": "encodings/chunked_bool_r1025",
       "dimension": "B",
-      "description": "vortex.chunked forced (1025 rows): four Bool chunks nested as a struct field (PERF-AUDIT-v2.md F1: ConcatBool)",
+      "description": "vortex.chunked forced (1025 rows): four Bool chunks nested as a struct field, so a reader concatenates Bool chunks",
       "path": "encodings/chunked_bool_r1025.vortex",
       "sidecar": "encodings/chunked_bool_r1025.jsonl",
       "vortex_version": "0.86.1",
@@ -12621,7 +12615,7 @@
       "env": {},
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
-        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/04-conformance.md §6), not a 1.0 conformance target."
+        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/design/04-conformance.md §6), not a 1.0 conformance target."
       ]
     },
     {
@@ -12667,7 +12661,7 @@
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
         "zero rows: the layout has no children and no segments, so `array_ids` is empty by construction and no encoding is claimed",
-        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/04-conformance.md §6), not a 1.0 conformance target."
+        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/design/04-conformance.md §6), not a 1.0 conformance target."
       ]
     },
     {
@@ -12722,7 +12716,7 @@
       "env": {},
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
-        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/04-conformance.md §6), not a 1.0 conformance target."
+        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/design/04-conformance.md §6), not a 1.0 conformance target."
       ]
     },
     {
@@ -12777,7 +12771,7 @@
       "env": {},
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
-        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/04-conformance.md §6), not a 1.0 conformance target."
+        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/design/04-conformance.md §6), not a 1.0 conformance target."
       ]
     },
     {
@@ -12832,7 +12826,7 @@
       "env": {},
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
-        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/04-conformance.md §6), not a 1.0 conformance target."
+        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/design/04-conformance.md §6), not a 1.0 conformance target."
       ]
     },
     {
@@ -17963,7 +17957,7 @@
     {
       "id": "encodings/table_wide",
       "dimension": "B",
-      "description": "vortex.struct forced (4096 rows): fifty i64 columns, for the projection axis docs/05 §3 describes",
+      "description": "vortex.struct forced (4096 rows): fifty i64 columns, for the projection axis of docs/design/05-benchmarks.md §3",
       "path": "encodings/table_wide.vortex",
       "sidecar": "encodings/table_wide.jsonl",
       "vortex_version": "0.86.1",
@@ -18067,7 +18061,7 @@
     {
       "id": "encodings/table_wide_r0",
       "dimension": "B",
-      "description": "vortex.struct forced (0 rows): fifty i64 columns, for the projection axis docs/05 §3 describes",
+      "description": "vortex.struct forced (0 rows): fifty i64 columns, for the projection axis of docs/design/05-benchmarks.md §3",
       "path": "encodings/table_wide_r0.vortex",
       "sidecar": "encodings/table_wide_r0.jsonl",
       "vortex_version": "0.86.1",
@@ -18112,7 +18106,7 @@
     {
       "id": "encodings/table_wide_r1",
       "dimension": "B",
-      "description": "vortex.struct forced (1 rows): fifty i64 columns, for the projection axis docs/05 §3 describes",
+      "description": "vortex.struct forced (1 rows): fifty i64 columns, for the projection axis of docs/design/05-benchmarks.md §3",
       "path": "encodings/table_wide_r1.vortex",
       "sidecar": "encodings/table_wide_r1.jsonl",
       "vortex_version": "0.86.1",
@@ -18160,7 +18154,7 @@
     {
       "id": "encodings/table_wide_r1023",
       "dimension": "B",
-      "description": "vortex.struct forced (1023 rows): fifty i64 columns, for the projection axis docs/05 §3 describes",
+      "description": "vortex.struct forced (1023 rows): fifty i64 columns, for the projection axis of docs/design/05-benchmarks.md §3",
       "path": "encodings/table_wide_r1023.vortex",
       "sidecar": "encodings/table_wide_r1023.jsonl",
       "vortex_version": "0.86.1",
@@ -18264,7 +18258,7 @@
     {
       "id": "encodings/table_wide_r1025",
       "dimension": "B",
-      "description": "vortex.struct forced (1025 rows): fifty i64 columns, for the projection axis docs/05 §3 describes",
+      "description": "vortex.struct forced (1025 rows): fifty i64 columns, for the projection axis of docs/design/05-benchmarks.md §3",
       "path": "encodings/table_wide_r1025.vortex",
       "sidecar": "encodings/table_wide_r1025.jsonl",
       "vortex_version": "0.86.1",
@@ -19503,7 +19497,7 @@
       "env": {},
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
-        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/04-conformance.md §6), not a 1.0 conformance target."
+        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/design/04-conformance.md §6), not a 1.0 conformance target."
       ]
     },
     {
@@ -19549,7 +19543,7 @@
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
         "zero rows: the layout has no children and no segments, so `array_ids` is empty by construction and no encoding is claimed",
-        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/04-conformance.md §6), not a 1.0 conformance target."
+        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/design/04-conformance.md §6), not a 1.0 conformance target."
       ]
     },
     {
@@ -19602,7 +19596,7 @@
       "env": {},
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
-        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/04-conformance.md §6), not a 1.0 conformance target."
+        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/design/04-conformance.md §6), not a 1.0 conformance target."
       ]
     },
     {
@@ -19655,7 +19649,7 @@
       "env": {},
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
-        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/04-conformance.md §6), not a 1.0 conformance target."
+        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/design/04-conformance.md §6), not a 1.0 conformance target."
       ]
     },
     {
@@ -19708,13 +19702,13 @@
       "env": {},
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
-        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/04-conformance.md §6), not a 1.0 conformance target."
+        "edition enforcement is off: this id belongs to no core edition, so the writer's per-kind allowlist rejects the write otherwise. A forward-compatibility fixture (docs/design/04-conformance.md §6), not a 1.0 conformance target."
       ]
     },
     {
       "id": "encodings/zstd_nullable",
       "dimension": "B",
-      "description": "vortex.zstd forced (4096 rows): Zstd::from_primitive over a nullable i64, nulls every seventh row (R3b: the scatter)",
+      "description": "vortex.zstd forced (4096 rows): Zstd::from_primitive over a nullable i64, nulls every seventh row, so the decoder's scatter around the nulls runs",
       "path": "encodings/zstd_nullable.vortex",
       "sidecar": "encodings/zstd_nullable.jsonl",
       "vortex_version": "0.86.1",
@@ -19768,7 +19762,7 @@
     {
       "id": "encodings/zstd_nullable_r0",
       "dimension": "B",
-      "description": "vortex.zstd forced (0 rows): Zstd::from_primitive over a nullable i64, nulls every seventh row (R3b: the scatter)",
+      "description": "vortex.zstd forced (0 rows): Zstd::from_primitive over a nullable i64, nulls every seventh row, so the decoder's scatter around the nulls runs",
       "path": "encodings/zstd_nullable_r0.vortex",
       "sidecar": "encodings/zstd_nullable_r0.jsonl",
       "vortex_version": "0.86.1",
@@ -19813,7 +19807,7 @@
     {
       "id": "encodings/zstd_nullable_r1",
       "dimension": "B",
-      "description": "vortex.zstd forced (1 rows): Zstd::from_primitive over a nullable i64, nulls every seventh row (R3b: the scatter)",
+      "description": "vortex.zstd forced (1 rows): Zstd::from_primitive over a nullable i64, nulls every seventh row, so the decoder's scatter around the nulls runs",
       "path": "encodings/zstd_nullable_r1.vortex",
       "sidecar": "encodings/zstd_nullable_r1.jsonl",
       "vortex_version": "0.86.1",
@@ -19867,7 +19861,7 @@
     {
       "id": "encodings/zstd_nullable_r1023",
       "dimension": "B",
-      "description": "vortex.zstd forced (1023 rows): Zstd::from_primitive over a nullable i64, nulls every seventh row (R3b: the scatter)",
+      "description": "vortex.zstd forced (1023 rows): Zstd::from_primitive over a nullable i64, nulls every seventh row, so the decoder's scatter around the nulls runs",
       "path": "encodings/zstd_nullable_r1023.vortex",
       "sidecar": "encodings/zstd_nullable_r1023.jsonl",
       "vortex_version": "0.86.1",
@@ -19921,7 +19915,7 @@
     {
       "id": "encodings/zstd_nullable_r1025",
       "dimension": "B",
-      "description": "vortex.zstd forced (1025 rows): Zstd::from_primitive over a nullable i64, nulls every seventh row (R3b: the scatter)",
+      "description": "vortex.zstd forced (1025 rows): Zstd::from_primitive over a nullable i64, nulls every seventh row, so the decoder's scatter around the nulls runs",
       "path": "encodings/zstd_nullable_r1025.vortex",
       "sidecar": "encodings/zstd_nullable_r1025.jsonl",
       "vortex_version": "0.86.1",
@@ -52416,7 +52410,7 @@
       "id": "containers/false_statistics",
       "dimension": "D",
       "description": "a file with deliberately false min/max statistics",
-      "reason": "By construction: docs/04-conformance.md §3 already states this one cannot come from the Rust writer and must be forged. The forged-fixture set now exists — tests/Vorticity.Conformance/forged/, with its own manifest.json — but this particular fixture is not in it: a zone's min/max live inside a compressed, encoded stats array, so inverting one is a re-encode rather than a byte patch. `negative/unknown_encoding_id` is the one forged fixture this release ships."
+      "reason": "By construction: docs/design/04-conformance.md §3 already states this one cannot come from the Rust writer and must be forged. The forged-fixture set now exists — tests/Vorticity.Conformance/forged/, with its own manifest.json — but this particular fixture is not in it: a zone's min/max live inside a compressed, encoded stats array, so inverting one is a re-encode rather than a byte patch. `negative/unknown_encoding_id` is the one forged fixture this release ships."
     },
     {
       "id": "containers/lz4_compressed_buffer",
@@ -52440,13 +52434,13 @@
       "id": "editions/preview2026.08.0",
       "dimension": "E",
       "description": "a file targeting the preview edition",
-      "reason": "Preview editions are not frozen, so a file written against one carries no read-forever guarantee and has no place in an interoperability-regression corpus. docs/04-conformance.md §8 asks for frozen core editions only."
+      "reason": "Preview editions are not frozen, so a file written against one carries no read-forever guarantee and has no place in an interoperability-regression corpus. docs/design/04-conformance.md §8 asks for frozen core editions only."
     },
     {
       "id": "editions/vortex_0_36_0_floor",
       "dimension": "E",
       "description": "files written by Vortex 0.36.0, the read-forever floor",
-      "reason": "This crate is pinned to exactly 0.86.1, which is a conformance decision recorded in docs/04-conformance.md §3, not a dependency choice. Files from the 0.36.0 floor have to come from a separately pinned generator; `editions/core2025.05.0` is the closest this one can get (the same component set, written by a modern writer)."
+      "reason": "This crate is pinned to exactly 0.86.1, which is a conformance decision recorded in docs/design/04-conformance.md §3, not a dependency choice. Files from the 0.36.0 floor have to come from a separately pinned generator; `editions/core2025.05.0` is the closest this one can get (the same component set, written by a modern writer)."
     },
     {
       "id": "encodings/alprd_r0",
@@ -52488,13 +52482,13 @@
       "id": "negative/unknown_encoding_id",
       "dimension": "D",
       "description": "a structurally valid file declaring an array encoding id that exists in no edition",
-      "reason": "Not producible by any writer, by definition: the writer's per-kind allowlist rejects an unregistered id, and `disable_editions()` only widens the allowlist to ids the session has registered. docs/04-conformance.md §6 needs one for two tests — projecting the column must fail with the id and kind named, and scanning without projecting it must succeed, which is what locks in lazy component resolution. It is produced by byte-patching instead, and ships in tests/Vorticity.Conformance/forged/ with its own manifest.json; see `--forged` in tools/conformance-gen/README.md."
+      "reason": "Not producible by any writer, by definition: the writer's per-kind allowlist rejects an unregistered id, and `disable_editions()` only widens the allowlist to ids the session has registered. docs/design/04-conformance.md §6 needs one for two tests — projecting the column must fail with the id and kind named, and scanning without projecting it must succeed, which is what locks in lazy component resolution. It is produced by byte-patching instead, and ships in tests/Vorticity.Conformance/forged/ with its own manifest.json; see `--forged` in tools/conformance-gen/README.md."
     },
     {
       "id": "rows/*",
       "dimension": "F",
-      "description": "byte-exact golden vectors for the row encoder of docs/06-row-encoding.md",
-      "reason": "docs/04-conformance.md §7 assigns these to this crate, on the basis that a small binary here would encode a generated table with `vortex-row` and dump the bytes. There is no such crate: `cargo info vortex-row` reports it is not in the crates.io index, and no crate in the 0.86.1 release exposes a row-encoding API — `RowSortField`, `row_encode` and `RowEncoding` appear nowhere in the sources of vortex-0.86.1 or any vortex-* crate at that version. The row encoder therefore has no cross-implementation anchor in this release and its property tests remain self-consistent only. Re-check when a `vortex-row` crate is published; the fixture shape §7 asks for (the adversarial set plus a randomized table, with the crate version recorded) is unchanged."
+      "description": "byte-exact golden vectors for the row encoder of docs/design/06-row-encoding.md",
+      "reason": "docs/design/04-conformance.md §7 assigns these to this crate, on the basis that a small binary here would encode a generated table with `vortex-row` and dump the bytes. There is no such crate: `cargo info vortex-row` reports it is not in the crates.io index, and no crate in the 0.86.1 release exposes a row-encoding API — `RowSortField`, `row_encode` and `RowEncoding` appear nowhere in the sources of vortex-0.86.1 or any vortex-* crate at that version. The row encoder therefore has no cross-implementation anchor in this release and its property tests remain self-consistent only. Re-check when a `vortex-row` crate is published; the fixture shape §7 asks for (the adversarial set plus a randomized table, with the crate version recorded) is unchanged."
     },
     {
       "id": "types/struct_flat_nullable, types/struct_nested_deep_nullable",

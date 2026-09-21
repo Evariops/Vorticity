@@ -924,7 +924,7 @@ fn encoding_entries() -> Vec<Entry> {
                 e.notes.push(
                     "edition enforcement is off: this id belongs to no core edition, so the \
                      writer's per-kind allowlist rejects the write otherwise. A \
-                     forward-compatibility fixture (docs/04-conformance.md §6), not a 1.0 \
+                     forward-compatibility fixture (docs/design/04-conformance.md §6), not a 1.0 \
                      conformance target."
                         .into(),
                 );
@@ -1857,7 +1857,7 @@ fn static_skips() -> Vec<SkipRecord> {
             dimension: "D".into(),
             description: "a file with deliberately false min/max statistics".into(),
             reason:
-                "By construction: docs/04-conformance.md §3 already states this one cannot come \
+                "By construction: docs/design/04-conformance.md §3 already states this one cannot come \
                  from the Rust writer and must be forged. The forged-fixture set now exists — \
                  tests/Vorticity.Conformance/forged/, with its own manifest.json — but this \
                  particular fixture is not in it: a zone's min/max live inside a compressed, \
@@ -1869,9 +1869,10 @@ fn static_skips() -> Vec<SkipRecord> {
             id: "rows/*".into(),
             dimension: "F".into(),
             description:
-                "byte-exact golden vectors for the row encoder of docs/06-row-encoding.md".into(),
+                "byte-exact golden vectors for the row encoder of docs/design/06-row-encoding.md"
+                    .into(),
             reason:
-                "docs/04-conformance.md §7 assigns these to this crate, on the basis that a small \
+                "docs/design/04-conformance.md §7 assigns these to this crate, on the basis that a small \
                  binary here would encode a generated table with `vortex-row` and dump the bytes. \
                  There is no such crate: `cargo info vortex-row` reports it is not in the \
                  crates.io index, and no crate in the 0.86.1 release exposes a row-encoding API — \
@@ -1919,7 +1920,7 @@ fn static_skips() -> Vec<SkipRecord> {
             reason:
                 "Not producible by any writer, by definition: the writer's per-kind allowlist \
                  rejects an unregistered id, and `disable_editions()` only widens the allowlist to \
-                 ids the session has registered. docs/04-conformance.md §6 needs one for two \
+                 ids the session has registered. docs/design/04-conformance.md §6 needs one for two \
                  tests — projecting the column must fail with the id and kind named, and scanning \
                  without projecting it must succeed, which is what locks in lazy component \
                  resolution. It is produced by byte-patching instead, and ships in \
@@ -1974,7 +1975,7 @@ fn static_skips() -> Vec<SkipRecord> {
             reason:
                 "Preview editions are not frozen, so a file written against one carries no \
                  read-forever guarantee and has no place in an interoperability-regression \
-                 corpus. docs/04-conformance.md §8 asks for frozen core editions only."
+                 corpus. docs/design/04-conformance.md §8 asks for frozen core editions only."
                     .into(),
         },
         SkipRecord {
@@ -1983,7 +1984,7 @@ fn static_skips() -> Vec<SkipRecord> {
             description: "files written by Vortex 0.36.0, the read-forever floor".into(),
             reason:
                 "This crate is pinned to exactly 0.86.1, which is a conformance decision recorded \
-                 in docs/04-conformance.md §3, not a dependency choice. Files from the 0.36.0 \
+                 in docs/design/04-conformance.md §3, not a dependency choice. Files from the 0.36.0 \
                  floor have to come from a separately pinned generator; `editions/core2025.05.0` \
                  is the closest this one can get (the same component set, written by a modern \
                  writer)."

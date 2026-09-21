@@ -24,11 +24,10 @@ pub const VORTEX_VERSION: &str = "0.86.1";
 pub const MANIFEST_FORMAT: &str = "vortex-conformance-corpus/2";
 
 /// The array encodings the registry puts **in 1.0 scope** — its three component tables
-/// (canonical and structural, compressed integer, float/string/temporal), and nothing else.
+/// (canonical and structural, compressed integer, float/string/temporal) and its late arrivals,
+/// five encodings first deferred to 1.1 and built inside 1.0 since.
 ///
-/// This is the list the corpus coverage gate runs against. The registry's late arrivals, five
-/// encodings it first deferred to 1.1 and that were built inside 1.0 since, are NOT in it: they
-/// are tracked separately in [`DEFERRED_ARRAYS`], so a miss among them does not fail the gate.
+/// This is the list the corpus coverage gate runs against: a miss here fails the build.
 pub const CLAIMED_ARRAYS: &[&str] = &[
     // canonical and structural
     "vortex.bool",
@@ -63,12 +62,7 @@ pub const CLAIMED_ARRAYS: &[&str] = &[
     "vortex.fsst",
     "vortex.onpair",
     "vortex.zstd",
-];
-
-/// The registry's late arrivals, first deferred to 1.1 and built inside 1.0 since. Not gating:
-/// a miss here is not a build failure, although all five are in 1.0 scope and the corpus carries
-/// each of them.
-pub const DEFERRED_ARRAYS: &[&str] = &[
+    // late arrivals
     "vortex.map",
     "vortex.parquet.variant",
     "vortex.pco",
@@ -143,11 +137,11 @@ pub const CAVEATS: &[&str] = &[
      (`vortex-layout-0.86.1/src/layouts/chunked/writer.rs:86`). So no `vortex.chunked` LAYOUT in \
      any Vortex file has one chunk or an empty one. Both shapes exist at the ARRAY level, in \
      `encodings/chunked_one_chunk` and `encodings/chunked_empty_chunks`.",
-    "The row encoder of docs/06-row-encoding.md has NO golden vectors in this release. \
-     docs/04-conformance.md §7 assigns them to this crate via a `vortex-row` dependency; no such \
+    "The row encoder of docs/design/06-row-encoding.md has NO golden vectors in this release. \
+     docs/design/04-conformance.md §7 assigns them to this crate via a `vortex-row` dependency; no such \
      crate is published, and no crate in the 0.86.1 release exposes a row-encoding API. See the \
      `rows/*` entry in `skipped`. Until it exists, the row encoder is anchored only by \
-     self-consistent property tests, which is exactly the failure mode docs/04-conformance.md \
+     self-consistent property tests, which is exactly the failure mode docs/design/04-conformance.md \
      opens by describing.",
     "The footer's `array_specs` over-reports. The writer pre-populates the array context with \
      every id the enabled editions permit, for byte determinism \
@@ -296,8 +290,6 @@ pub struct Coverage {
     pub layouts: CoverageSet,
     pub extension_dtypes: CoverageSet,
     pub aggregates: CoverageSet,
-    /// The registry's late arrivals, [`DEFERRED_ARRAYS`]. Informational: not part of the gate.
-    pub deferred_arrays: CoverageSet,
     /// Ids observed that the registry does not claim, per component kind. Not an error —
     /// the writer is free to emit an in-memory-only id we chose not to list — but it must be
     /// visible. Applied to layouts, aggregates and extension dtypes as well as arrays: through
@@ -453,9 +445,9 @@ pub fn summarize(files: &[FileRecord]) -> Coverage {
         total_rows += f.row_count;
     }
 
-    // "Unclaimed" means the registry lists it nowhere — deferred ids are listed, just not gating.
+    // "Unclaimed" means the registry lists it nowhere.
     let unclaimed_observed = UnclaimedObserved {
-        arrays: unlisted(&arrays, &[CLAIMED_ARRAYS, DEFERRED_ARRAYS]),
+        arrays: unlisted(&arrays, &[CLAIMED_ARRAYS]),
         layouts: unlisted(&layouts, &[CLAIMED_LAYOUTS, EXPERIMENTAL_LAYOUTS]),
         aggregates: unlisted(&aggregates, &[CLAIMED_AGGREGATES]),
         extension_dtypes: unlisted(&exts, &[CLAIMED_EXTENSION_DTYPES]),
@@ -471,7 +463,6 @@ pub fn summarize(files: &[FileRecord]) -> Coverage {
         layouts: CoverageSet::build(CLAIMED_LAYOUTS, &layouts),
         extension_dtypes: CoverageSet::build(CLAIMED_EXTENSION_DTYPES, &exts),
         aggregates: CoverageSet::build(CLAIMED_AGGREGATES, &aggregates),
-        deferred_arrays: CoverageSet::build(DEFERRED_ARRAYS, &arrays),
         unclaimed_observed,
         shapes: SHAPE_CHECKS
             .iter()

@@ -258,14 +258,14 @@ Result against [docs/design/90-registry.md](../../docs/design/90-registry.md):
 
 | kind | in 1.0 scope | covered | gap |
 |---|---|---|---|
-| array encodings | 30 | **30** | — |
+| array encodings | 35 | **35** | — |
 | layouts | 6 | 5 | `vortex.stats` |
 | extension dtypes | 4 | **4** | — |
 | zone-map aggregates | 6 | **6** | — |
 
-The registry's five deferred-to-1.1 arrays are tracked separately and do not gate; all five
-(`vortex.map`, `vortex.pco`, `vortex.variant`, `vortex.parquet.variant`, `vortex.zstd_buffers`)
-are in the corpus anyway, so that work starts with fixtures in hand.
+The 35 include the registry's five late arrivals (`vortex.map`, `vortex.pco`, `vortex.variant`,
+`vortex.parquet.variant`, `vortex.zstd_buffers`), first deferred to 1.1 and built inside 1.0
+since: they gate like the other thirty.
 
 Two ids appear that the registry lists nowhere: `fastlanes.delta` and `vortex.patched`. Both are
 deliberate forward-compatibility fixtures, written with edition enforcement off — see below. The

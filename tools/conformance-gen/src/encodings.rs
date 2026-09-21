@@ -892,7 +892,8 @@ pub fn encoding_cases() -> Vec<EncodingCase> {
         EncodingCase {
             id: "zstd_nullable",
             array_id: "vortex.zstd",
-            how: "Zstd::from_primitive over a nullable i64, nulls every seventh row (R3b: the scatter)",
+            how: "Zstd::from_primitive over a nullable i64, nulls every seventh row, so the \
+                  decoder's scatter around the nulls runs",
             build: b_zstd_nullable,
             disable_editions: false,
         },
@@ -1012,7 +1013,7 @@ pub fn encoding_cases() -> Vec<EncodingCase> {
         EncodingCase {
             id: "chunked_bool",
             array_id: "vortex.chunked",
-            how: "four Bool chunks nested as a struct field (PERF-AUDIT-v2.md F1: ConcatBool)",
+            how: "four Bool chunks nested as a struct field, so a reader concatenates Bool chunks",
             build: b_chunked_bool,
             disable_editions: false,
         },
@@ -1082,7 +1083,7 @@ pub fn encoding_cases() -> Vec<EncodingCase> {
         EncodingCase {
             id: "table_wide",
             array_id: "vortex.struct",
-            how: "fifty i64 columns, for the projection axis docs/05 §3 describes",
+            how: "fifty i64 columns, for the projection axis of docs/design/05-benchmarks.md §3",
             build: b_table_wide,
             disable_editions: false,
         },
