@@ -160,6 +160,20 @@ public readonly ref struct Columns<TRecord>
     /// <summary>Which rows passed the filter: all of them unless <c>ScanOptions.Compact</c> is false, or the batch is a take.</summary>
     public Selection Selection => _selection.IsEmpty ? new Selection(RowCount) : new Selection(_selection, RowCount, _selected);
 
+    /// <summary>Whether every row holds a record: always for a batch, and for a nested record whose column has no null.</summary>
+    public bool IsAllValid => Arena.RecordRef(StructNode()).Validity.IsAllValid;
+
+    /// <summary>
+    /// For a nullable nested record, which rows hold one, as the 64-bit words of
+    /// <see cref="Column{T}.ValidityWords"/>; empty when <see cref="IsAllValid"/>.
+    /// </summary>
+    public ReadOnlySpan<ulong> ValidityWords => ArenaWords.Validity(Arena, StructNode());
+
+    /// <summary>Whether row <paramref name="index"/> holds a record, rather than a null nested record.</summary>
+    /// <param name="index">A row of the batch.</param>
+    /// <returns>False for a null.</returns>
+    public bool IsValid(int index) => ArenaWords.IsValid(Arena, StructNode(), index);
+
     /// <summary>The column of member <paramref name="index"/>.</summary>
     /// <typeparam name="T">The member's .NET type.</typeparam>
     /// <param name="index">The member's position in the record.</param>
