@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
@@ -276,9 +277,17 @@ public ref struct FilterHandler
             ClrFit.Require<T>(column.Type, $"Column '{column.Name}'", null);
             ColumnSym target = new ColumnSym(new FieldExpr(column.Name), column.Type, null, null, -1, []);
             ClrShape shape = ClrShape.For<T>.Value;
-            _values.Add(shape.Kind is ClrKind.Decimal or ClrKind.VortexDecimal
-                ? ToolPaths.ExactDecimal(target, value)
-                : SymLowering.Literal(target, shape, value));
+            if (shape.Kind is ClrKind.Decimal or ClrKind.VortexDecimal)
+            {
+                // Refused here when it has more digits than the column keeps; the check of the
+                // whole filter then scales the exact text once, as it scales a number typed inline.
+                _ = ToolPaths.ExactDecimal(target, value);
+                _values.Add(FilterLiteral.From(value is decimal d ? d.ToString(CultureInfo.InvariantCulture) : value.ToString()!));
+            }
+            else
+            {
+                _values.Add(SymLowering.Literal(target, shape, value));
+            }
         }
 
         _text.Append('?').Append(_values.Count - 1);

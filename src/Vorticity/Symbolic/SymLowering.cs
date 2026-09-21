@@ -161,7 +161,14 @@ internal static class SymLowering
 
     private static Predicate CompareDecimal<T>(ColumnSym column, ComparisonOp op, T value)
     {
-        (BigInteger scaled, bool exact, int sign) = Rescale(column, value!);
+        (BigInteger mantissa, int scale) = MantissaOf(value!);
+        return CompareDecimal(column, op, mantissa, scale);
+    }
+
+    /// <summary>A decimal column compared with <paramref name="mantissa"/> × 10^-<paramref name="scale"/>, lowered as a typed value is.</summary>
+    internal static Predicate CompareDecimal(ColumnSym column, ComparisonOp op, BigInteger mantissa, int scale)
+    {
+        (BigInteger scaled, bool exact, int sign) = Rescale(column, mantissa, scale);
         if (exact)
         {
             return new Predicate(new ComparisonExpr(column.Field, op, WideLiteral(scaled)));
@@ -182,25 +189,26 @@ internal static class SymLowering
 
     private static bool TryExactDecimal<T>(ColumnSym column, T value, out FilterLiteral literal)
     {
-        (BigInteger scaled, bool exact, _) = Rescale(column, value!);
+        (BigInteger mantissa, int scale) = MantissaOf(value!);
+        (BigInteger scaled, bool exact, _) = Rescale(column, mantissa, scale);
         literal = exact ? WideLiteral(scaled) : default;
         return exact;
     }
 
+    private static (BigInteger Mantissa, int Scale) MantissaOf(object value) => value switch
+    {
+        decimal d => Mantissa(d),
+        VortexDecimal v => (Int256Big(v), v.Scale),
+        _ => throw new VortexSchemaException($"{value.GetType()} is not a decimal."),
+    };
+
     /// <summary>The value as an unscaled integer at the column's scale, truncated toward zero, and whether that is exact.</summary>
-    private static (BigInteger Scaled, bool Exact, int Sign) Rescale(ColumnSym column, object value)
+    private static (BigInteger Scaled, bool Exact, int Sign) Rescale(ColumnSym column, BigInteger mantissa, int scale)
     {
         if (column.Type.Kind != VortexTypeKind.Decimal)
         {
             throw new VortexSchemaException($"'{column.Field.Path}' is {column.Type}, not a decimal.");
         }
-
-        (BigInteger mantissa, int scale) = value switch
-        {
-            decimal d => Mantissa(d),
-            VortexDecimal v => (Int256Big(v), v.Scale),
-            _ => throw new VortexSchemaException($"{value.GetType()} is not a decimal."),
-        };
 
         int target = column.Type.Scale;
         if (scale <= target)
