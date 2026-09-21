@@ -60,6 +60,8 @@ RS[0-9]{4}
 
 [reference]
 \.md\b
+# A vendored specification file. The word boundary keeps a namespace such as google.protobuf out.
+\.(fbs|proto|toml)\b
 §
 \bdocs/[0-9]
 \b(PERF|BENCH|WRITE|IMPL|AUDIT)-[A-Za-z]

@@ -3,7 +3,7 @@ using Vorticity.Serialization.FlatBuffers;
 
 namespace Vorticity.Serialization.Schemas;
 
-/// <summary>Reader for <c>table Layout</c> in spec/flatbuffers/layout.fbs.</summary>
+/// <summary>Reader for the format's <c>table Layout</c>.</summary>
 /// <remarks>
 /// The layout tree comes from the file and two parents may legally share one child, so its depth
 /// bounds nothing: <see cref="Root"/> carries a table budget that the whole walk spends from.

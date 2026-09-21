@@ -1397,7 +1397,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     }
 
     /// <summary>
-    /// The <c>FileStatistics</c> table (footer.fbs): one <c>ArrayStats</c> per top-level field of
+    /// The format's <c>FileStatistics</c> table: one <c>ArrayStats</c> per top-level field of
     /// a struct root, one for any other root, each the merge of the column's closed blocks.
     /// </summary>
     /// <remarks>

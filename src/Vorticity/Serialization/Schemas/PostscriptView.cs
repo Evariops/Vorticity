@@ -3,7 +3,7 @@ using Vorticity.Serialization.FlatBuffers;
 
 namespace Vorticity.Serialization.Schemas;
 
-/// <summary>Reader for <c>table Postscript</c> in spec/flatbuffers/footer.fbs.</summary>
+/// <summary>Reader for the format's <c>table Postscript</c>.</summary>
 /// <remarks>
 /// The postscript is the first thing a reader parses, and the format caps its size, so everything
 /// here is bounded by construction. Its one file-supplied vector, the user metadata list, is
@@ -29,7 +29,7 @@ public readonly ref struct PostscriptView
     /// </param>
     /// <exception cref="VortexFormatException">
     /// The buffer is not a well-formed FlatBuffer, or the user metadata list violates the
-    /// count/key rules of spec/flatbuffers/footer.fbs.
+    /// format's rules on its count and its keys.
     /// </exception>
     public static PostscriptView Root(ReadOnlySpan<byte> buffer, ref int tableBudget)
     {
@@ -110,7 +110,7 @@ public readonly ref struct PostscriptView
     }
 }
 
-/// <summary>Reader for <c>table PostscriptMetadata</c> in spec/flatbuffers/footer.fbs.</summary>
+/// <summary>Reader for the format's <c>table PostscriptMetadata</c>.</summary>
 public readonly ref struct PostscriptMetadataView
 {
     private readonly FlatBufferTable _table;
@@ -164,7 +164,7 @@ public readonly ref struct PostscriptMetadataView
 }
 
 /// <summary>
-/// Reader for <c>table PostscriptSegment</c> in spec/flatbuffers/footer.fbs.
+/// Reader for the format's <c>table PostscriptSegment</c>.
 /// </summary>
 /// <remarks>
 /// A <em>table</em>, not the 16-byte <see cref="SegmentSpec"/> <em>struct</em>, even though the two

@@ -7,7 +7,7 @@ using Vorticity.Serialization.Protobuf;
 namespace Vorticity.Types.Serialization;
 
 /// <summary>
-/// Reads and writes <c>vortex.dtype.DType</c> Protobuf messages (spec/proto/dtype.proto).
+/// Reads and writes <c>vortex.dtype.DType</c> Protobuf messages.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -159,8 +159,8 @@ public static class DTypeProtobuf
         // corrupt, and draining is the only way to notice.
         DrainUnknown(body);
 
-        // spec/flatbuffers/dtype.fbs `table Null {}` carries no `nullable`, and the arena forces
-        // Nullable, so the argument is only for call-site symmetry.
+        // A Null dtype carries no `nullable` on the wire, and the arena forces Nullable, so the
+        // argument is only for call-site symmetry.
         return arena.Null(Nullability.Nullable);
     }
 

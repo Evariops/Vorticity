@@ -9,14 +9,14 @@ namespace Vorticity.Serialization.Schemas;
 /// </summary>
 internal static class SchemaFieldIds
 {
-    // table Postscript { dtype; layout; statistics; footer; metadata; }   footer.fbs
+    // table Postscript { dtype; layout; statistics; footer; metadata; }
     internal const int PostscriptDType = 0;
     internal const int PostscriptLayout = 1;
     internal const int PostscriptStatistics = 2;
     internal const int PostscriptFooter = 3;
     internal const int PostscriptMetadata = 4;
 
-    // table PostscriptMetadata { key (required); segment (required); }   footer.fbs
+    // table PostscriptMetadata { key (required); segment (required); }
     internal const int PostscriptMetadataKey = 0;
     internal const int PostscriptMetadataSegment = 1;
 
@@ -28,7 +28,7 @@ internal static class SchemaFieldIds
     internal const int PostscriptSegmentCompression = 3;
     internal const int PostscriptSegmentEncryption = 4;
 
-    // table FileStatistics { field_stats; }                              footer.fbs
+    // table FileStatistics { field_stats; }
     internal const int FileStatisticsFieldStats = 0;
 
     // table Footer { array_specs; layout_specs; segment_specs; compression_specs; encryption_specs; }
@@ -41,14 +41,14 @@ internal static class SchemaFieldIds
     // table ArraySpec { id (required); }   table LayoutSpec { id (required); }
     internal const int SpecId = 0;
 
-    // table CompressionSpec { scheme; }                                  footer.fbs
+    // table CompressionSpec { scheme; }
     internal const int CompressionSpecScheme = 0;
 
-    // table Array { root; buffers; }                                     array.fbs
+    // table Array { root; buffers; }
     internal const int ArrayRoot = 0;
     internal const int ArrayBuffers = 1;
 
-    // table ArrayNode { encoding; metadata; children; buffers; stats; }  array.fbs
+    // table ArrayNode { encoding; metadata; children; buffers; stats; }
     internal const int ArrayNodeEncoding = 0;
     internal const int ArrayNodeMetadata = 1;
     internal const int ArrayNodeChildren = 2;
@@ -69,7 +69,7 @@ internal static class SchemaFieldIds
     internal const int ArrayStatsUncompressedSizeInBytes = 9;
     internal const int ArrayStatsNanCount = 10;
 
-    // table Layout { encoding; row_count; metadata; children; segments; }  layout.fbs
+    // table Layout { encoding; row_count; metadata; children; segments; }
     internal const int LayoutEncoding = 0;
     internal const int LayoutRowCount = 1;
     internal const int LayoutMetadata = 2;

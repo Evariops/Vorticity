@@ -5,7 +5,7 @@ namespace Vorticity.Types;
 
 /// <summary>
 /// Physical type of a <see cref="DTypeKind.Primitive"/> dtype. The numeric values are the wire
-/// tags shared by <c>dtype.fbs</c> and <c>dtype.proto</c>, and they group by family — unsigned
+/// tags the FlatBuffers and Protobuf dtype encodings share, and they group by family — unsigned
 /// 0..3, signed 4..7, floats 8..10 — which is what the range tests in
 /// <see cref="PTypeExtensions"/> rely on.
 /// </summary>

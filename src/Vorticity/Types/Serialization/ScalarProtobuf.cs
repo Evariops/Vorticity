@@ -7,7 +7,7 @@ namespace Vorticity.Types.Serialization;
 
 /// <summary>
 /// Reads and writes <c>vortex.scalar.Scalar</c> and <c>vortex.scalar.ScalarValue</c> Protobuf
-/// messages (spec/proto/scalar.proto).
+/// messages.
 /// </summary>
 /// <remarks>
 /// <para>

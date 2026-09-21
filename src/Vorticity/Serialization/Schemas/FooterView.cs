@@ -3,7 +3,7 @@ using Vorticity.Serialization.FlatBuffers;
 
 namespace Vorticity.Serialization.Schemas;
 
-/// <summary>Reader for <c>table Footer</c> in spec/flatbuffers/footer.fbs.</summary>
+/// <summary>Reader for the format's <c>table Footer</c>.</summary>
 /// <remarks>
 /// The footer is a dictionary, not a tree: five flat vectors. Only <c>segment_specs</c> is
 /// reinterpreted in place; the others are walked one element at a time and never allocate.
@@ -99,8 +99,8 @@ public readonly ref struct FooterView
 
     /// <summary>Number of entries in <c>compression_specs</c>. Absent means empty.</summary>
     /// <exception cref="VortexFormatException">
-    /// The count exceeds <see cref="VortexLimits.MaxCompressionSpecs"/>, the ceiling
-    /// spec/flatbuffers/footer.fbs states for this vector.
+    /// The count exceeds <see cref="VortexLimits.MaxCompressionSpecs"/>, the ceiling the format
+    /// states for this vector.
     /// </exception>
     public int CompressionSpecCount
     {
@@ -144,7 +144,7 @@ public readonly ref struct FooterView
     }
 }
 
-/// <summary>Reader for <c>table FileStatistics</c> in spec/flatbuffers/footer.fbs.</summary>
+/// <summary>Reader for the format's <c>table FileStatistics</c>.</summary>
 public readonly ref struct FileStatisticsView
 {
     private readonly FlatBufferTable _table;
@@ -162,7 +162,7 @@ public readonly ref struct FileStatisticsView
 
     /// <summary>
     /// Number of per-field statistics entries. One per field of a struct root schema, otherwise
-    /// one entry in total (spec/flatbuffers/footer.fbs). Absent means empty.
+    /// one entry in total. Absent means empty.
     /// </summary>
     public int FieldStatsCount => _table.GetVector(SchemaFieldIds.FileStatisticsFieldStats).Count;
 

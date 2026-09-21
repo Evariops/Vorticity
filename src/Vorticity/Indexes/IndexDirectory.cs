@@ -39,7 +39,7 @@ public readonly record struct IndexSegment(ulong Offset, uint Length, byte Align
 /// <param name="BlockCount">How many consecutive blocks.</param>
 /// <param name="Payload">The file regions, in kind-defined order.</param>
 /// <param name="PayloadDTypes">
-/// The serialized <c>DType</c> (dtype.fbs) of each payload array, parallel to
+/// The FlatBuffers-serialized <c>DType</c> of each payload array, parallel to
 /// <paramref name="Payload"/>; empty for a kind whose payload is not an array.
 /// </param>
 /// <param name="EntryCount">

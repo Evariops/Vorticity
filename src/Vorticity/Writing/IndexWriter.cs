@@ -881,11 +881,11 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     /// <param name="dataBytes">The file's data bytes, the index regions excluded.</param>
     /// <remarks>
-    /// <see cref="Close"/> asks the same question and used to be the only one asking it, which was
-    /// one flush too late: everything it abandoned had already been written. It also asked only
-    /// once a payload had been placed, so a file whose indexes all fit between two chunks was never
-    /// judged at all while it was being written. Asked here, over the living bytes rather than the
-    /// placed ones, the verdict lands before the bytes do.
+    /// Asking only at <see cref="Close"/> would be one flush too late, since everything it
+    /// abandoned would already be written; asking only once a payload has been placed would leave a
+    /// file whose indexes all fit between two chunks unjudged while it is being written. Asked
+    /// here, over the living bytes rather than the placed ones, the verdict lands before the bytes
+    /// do.
     /// </remarks>
     internal void SettleBudget(long dataBytes)
     {
@@ -933,10 +933,10 @@ internal sealed class IndexWriter : IDisposable
     /// <returns><see langword="false"/> when nothing is to be written between chunks this time.</returns>
     /// <remarks>
     /// <para>
-    /// Asked before a byte goes out, where the budget used to be asked after. The order is the
-    /// whole difference: an index the budget refuses used to be abandoned having already written
-    /// itself, and what it wrote stayed in the file -- up to a mebibyte of it, because that is how
-    /// much data has to arrive before the share of it means anything.
+    /// Asked before a byte goes out, and the order is the whole difference: asked after, an index
+    /// the budget refuses would be abandoned having already written itself, and what it wrote would
+    /// stay in the file -- up to a mebibyte of it, because that is how much data has to arrive
+    /// before the share of it means anything.
     /// </para>
     /// <para>
     /// Below that threshold the payloads are held rather than judged. Judging them there would

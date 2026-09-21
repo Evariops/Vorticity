@@ -6,8 +6,8 @@ namespace Vorticity.Serialization.Schemas;
 
 /// <summary>
 /// A FlatBuffers <c>struct</c> (8 bytes, inline) describing one data buffer inside an array blob.
-/// It is the <c>Buffer</c> struct of spec/flatbuffers/array.fbs, named <c>BufferSpec</c> here so it
-/// does not collide with <c>Vorticity.Buffers.VortexBuffer</c>.
+/// It is the format's <c>Buffer</c> struct, named <c>BufferSpec</c> here so it does not collide
+/// with <c>Vorticity.Buffers.VortexBuffer</c>.
 /// </summary>
 /// <remarks>
 /// Its natural alignment is 4, not 8: the widest member is a <c>uint32</c>. A reader that demanded
@@ -43,7 +43,7 @@ public readonly struct BufferSpec
     }
 }
 
-/// <summary>Per-buffer compression, <c>enum Compression : uint8</c> in spec/flatbuffers/array.fbs.</summary>
+/// <summary>Per-buffer compression, the format's <c>enum Compression : uint8</c>.</summary>
 public enum BufferCompression : byte
 {
     /// <summary>The buffer is stored verbatim.</summary>
@@ -58,7 +58,7 @@ public enum BufferCompression : byte
 }
 
 /// <summary>
-/// Per-segment compression, <c>enum CompressionScheme : uint8</c> in spec/flatbuffers/footer.fbs.
+/// Per-segment compression, the format's <c>enum CompressionScheme : uint8</c>.
 /// </summary>
 /// <remarks>
 /// A value outside this set is <em>not</em> rejected by the schema accessors. Compression is a
@@ -82,7 +82,7 @@ public enum CompressionScheme : byte
 }
 
 /// <summary>
-/// Statistic exactness, <c>enum Precision : uint8</c> in spec/flatbuffers/array.fbs.
+/// Statistic exactness, the format's <c>enum Precision : uint8</c>.
 /// </summary>
 /// <remarks>
 /// Like <see cref="CompressionScheme"/>, an out-of-domain value is returned as read rather than

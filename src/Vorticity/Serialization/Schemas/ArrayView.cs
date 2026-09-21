@@ -3,7 +3,7 @@ using Vorticity.Serialization.FlatBuffers;
 
 namespace Vorticity.Serialization.Schemas;
 
-/// <summary>Reader for <c>table Array</c> in spec/flatbuffers/array.fbs.</summary>
+/// <summary>Reader for the format's <c>table Array</c>.</summary>
 /// <remarks>
 /// The array blob's FlatBuffer is finished without a file identifier, so nothing here looks for
 /// one at offset 4. Its node tree is a directed acyclic graph rather than a tree — forward-only
@@ -84,7 +84,7 @@ public readonly ref struct ArrayView
     }
 }
 
-/// <summary>Reader for <c>table ArrayNode</c> in spec/flatbuffers/array.fbs.</summary>
+/// <summary>Reader for the format's <c>table ArrayNode</c>.</summary>
 /// <remarks>
 /// An <c>ArrayNode</c> carries neither its DType nor its length; both are supplied top-down by the
 /// parent.
@@ -138,7 +138,7 @@ public readonly ref struct ArrayNodeView
     public ArrayStatsView Stats => new(_table.GetTable(SchemaFieldIds.ArrayNodeStats));
 }
 
-/// <summary>Reader for <c>table ArrayStats</c> in spec/flatbuffers/array.fbs.</summary>
+/// <summary>Reader for the format's <c>table ArrayStats</c>.</summary>
 /// <remarks>
 /// Six of the eleven fields are FlatBuffers <c>= null</c> fields: <em>absent means unknown, not
 /// <see langword="false"/> or 0</em>. They are exposed only through the <c>TryGet</c> accessors so

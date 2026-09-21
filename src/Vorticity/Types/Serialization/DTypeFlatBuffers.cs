@@ -8,7 +8,7 @@ using Vorticity.Serialization.FlatBuffers;
 namespace Vorticity.Types.Serialization;
 
 /// <summary>
-/// Reads and writes the <c>vortex.dtype.DType</c> FlatBuffers table (spec/flatbuffers/dtype.fbs).
+/// Reads and writes the <c>vortex.dtype.DType</c> FlatBuffers table.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -54,7 +54,7 @@ public static class DTypeFlatBuffers
     /// <summary>The uoffset to the union's value table: the second of the union's two slots.</summary>
     private const int DTypeTypeValue = 1;
 
-    // ---- field ids inside each case table, in .fbs declaration order ----
+    // ---- field ids inside each case table, in schema declaration order ----
 
     /// <summary><c>Bool</c>, <c>Utf8</c>, <c>Binary</c> and <c>Variant</c> all declare only <c>nullable</c>.</summary>
     private const int LeafNullable = 0;
@@ -280,8 +280,8 @@ public static class DTypeFlatBuffers
     /// <summary><c>table Decimal { precision: uint8; scale: int8; nullable: bool; }</c></summary>
     private static DType ReadDecimal(in FlatBufferTable table, DTypeArena arena)
     {
-        // Unlike the Protobuf side there is nothing to narrow: the .fbs widths already match the
-        // model's. The range rules (1 <= precision <= MAX_PRECISION, scale <= precision when
+        // Unlike the Protobuf side there is nothing to narrow: the schema's widths already match
+        // the model's. The range rules (1 <= precision <= MAX_PRECISION, scale <= precision when
         // positive) belong to DTypeArena.Decimal and throw VortexFormatException from there.
         byte precision = table.GetUInt8(DecimalPrecision);
         sbyte scale = table.GetInt8(DecimalScale);
@@ -367,7 +367,7 @@ public static class DTypeFlatBuffers
     /// <summary><c>table Extension { id: string; storage_dtype: DType; metadata: [ubyte]; }</c></summary>
     private static DType ReadExtension(in FlatBufferTable table, DTypeArena arena, int depth, ref DTypeWalk walk)
     {
-        // `id` is not marked required in the .fbs; an absent one reads as the empty string, which
+        // `id` is not marked required in the schema; an absent one reads as the empty string, which
         // is what the Protobuf codec does with an absent `string id = 1` too. Keeping the two
         // codecs identical here is what makes the equivalence property meaningful.
         ReadOnlySpan<byte> id = table.GetStringUtf8(ExtensionId);
@@ -406,7 +406,7 @@ public static class DTypeFlatBuffers
             ThrowParallelLengths("Union", names.Count, count);
         }
 
-        // spec/flatbuffers/dtype.fbs: "length must equal dtypes.len()".
+        // The format requires one type id per member dtype.
         if (typeIds.Length != count)
         {
             ThrowTypeIdLength(typeIds.Length, count);
