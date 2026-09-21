@@ -14,7 +14,7 @@ namespace Vorticity.Tests.IO;
 
 /// <summary>
 /// The I/O layer against real files written by Vortex 0.86.1. Value-by-value conformance belongs
-/// to the conformance component (PHASE1-CONTRACTS.md §14); what is proved here is narrower and is
+/// to the conformance component; what is proved here is narrower and is
 /// the I/O layer's own claim: the three sources return the same bytes as the file itself, for
 /// ranges shaped and aligned the way a real footer's <c>segment_specs</c> are.
 /// </summary>
@@ -47,8 +47,7 @@ public sealed class CorpusSegmentIoTests
 
     /// <summary>
     /// Deterministically spreads segment-shaped ranges over a file, using the alignment exponents
-    /// the corpus actually contains (PHASE1-CONTRACTS.md §0a C4 measured 3 and 4 in the footers,
-    /// 0 and 3 in the postscripts).
+    /// the corpus contains (3 and 4 in the footers, 0 and 3 in the postscripts).
     /// </summary>
     private static SegmentSpec[] SyntheticSegments(long fileLength)
     {
@@ -219,7 +218,7 @@ public sealed class CorpusSegmentIoTests
         await source.ReadManyAsync(set, CancellationToken.None);
 
         // Every gap here is well under the 1 MiB default, so the whole file is one round trip -
-        // the object-storage property docs/03-architecture.md §3.5 says makes or breaks things.
+        // the property that makes or breaks reading from object storage.
         Assert.Equal(1, transport.RequestCount);
         Assert.True(set.Count > 3);
     }

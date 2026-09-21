@@ -1,4 +1,4 @@
-// The filter tree - docs/13-dataset.md §6.2, step 24 of IMPL-PLAN.md.
+// The filter tree: per-block Bloom filters gathered under nodes of fan-out sixteen.
 //
 // WHAT IS HELD: a node reads back as written and nothing else reads as one; the tree has the shape
 // its blocks call for, and no filter anywhere in it misses a value beneath it; a point probe reads
@@ -236,8 +236,9 @@ public sealed class BloomTreeTests
     [Fact]
     public async Task AutoGivesUpAColumnWhoseFirstGenerationPassesANode()
     {
-        // 13 §6.5's symmetric rule. Wide unique strings keep a block filter under Auto's share, and
-        // fourteen blocks of them hold more values than a node of 4 096 blocks holds at 1 %.
+        // Under Auto, a column whose first generation passes a node's capacity is given up. Wide
+        // unique strings keep a block filter under Auto's share, and fourteen blocks of them hold
+        // more values than a node of 4 096 blocks holds at 1 %.
         Decoders.EnsureRegistered();
         DType schema = Types.Struct(["s"], [Types.Utf8(Nullability.NonNullable)], Nullability.NonNullable);
         const int rowsPerBlock = 8_192;

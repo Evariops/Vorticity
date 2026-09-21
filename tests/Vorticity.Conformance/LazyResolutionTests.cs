@@ -1,4 +1,4 @@
-// THE LAZY-RESOLUTION PAIR - docs/04-conformance.md §6, locking in docs/08-semantics.md §4.
+// THE LAZY-RESOLUTION PAIR: an unknown component fails at use, not at open.
 //
 // Both halves matter, and the second one is the one that gets deleted:
 //
@@ -82,7 +82,7 @@ public sealed class LazyResolutionTests
             }
         });
 
-        // docs/03-architecture.md §5: the id AND the kind, in the message.
+        // An unsupported component is reported with the id AND the kind, in the message.
         Assert.Equal(ForgedId, error.ComponentId);
         Assert.Equal("array", error.Kind);
         Assert.Contains(ForgedId, error.Message, StringComparison.Ordinal);
@@ -130,7 +130,7 @@ public sealed class LazyResolutionTests
         int rows = batch.RowCount;
 
         // The projected schema is the file's schema minus the unprojected fields, not the whole
-        // schema with a hole in it (PHASE1-CONTRACTS.md §13.2).
+        // schema with a hole in it.
         if (batch.FieldCount != 1 || !string.Equals(batch.GetFieldName(0), "strs", StringComparison.Ordinal))
         {
             log.Add(string.Empty, batch.StartRow, "projected schema",

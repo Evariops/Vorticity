@@ -164,7 +164,7 @@ public sealed class AlignedBufferPoolTests
     [InlineData(64)]
     public unsafe void Every_pooled_block_is_64_byte_aligned(int alignment)
     {
-        // docs/03-architecture.md §3.5: the pool allocates at the 64-byte cap whatever the caller
+        // The pool allocates at the 64-byte cap whatever the caller
         // asked for, which is what makes blocks interchangeable across size classes and what
         // makes coalesced reads preserve each segment's own alignment.
         AlignedBufferPool pool = new AlignedBufferPool();
@@ -260,7 +260,7 @@ public sealed class AlignedBufferPoolTests
             pool.Return(owner);
 
             // A second holder still has it: recycling here would hand live memory to another
-            // batch. docs/03-architecture.md §3.5, "Ownership".
+            // batch.
             Assert.Equal(0, pool.ParkedCount(2048));
             Assert.Equal(1, owner.RefCount);
 

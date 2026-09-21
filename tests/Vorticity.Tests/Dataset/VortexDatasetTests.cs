@@ -1,5 +1,4 @@
-// The acceptance of docs/13-dataset.md §14, applied to what step 39 delivers: "every answer equals
-// that of a single file".
+// What a dataset is accepted on: every answer equals that of a single file.
 //
 // SO EVERY TEST HERE IS A COMPARISON, not an assertion about a number someone chose. The same rows
 // go into a dataset of several objects and into one file written in one go; the dataset's answer
@@ -82,7 +81,8 @@ public sealed class VortexDatasetTests
             await file.Scan().Where(filter).CountAsync(),
             await dataset.Scan().Where(filter).CountAsync());
 
-        // With the per-file index chain off, as 08 §1's equivalence asks.
+        // With the per-file index chain off, which must not change the answer: an index only
+        // skips work.
         Assert.Equal(
             await KeysAsync(file.Scan().Where(filter).WithIndexes(false)),
             await KeysAsync(dataset.Scan().Where(filter).WithIndexes(false)));
@@ -91,8 +91,7 @@ public sealed class VortexDatasetTests
     [Fact]
     public async Task AFileAlreadyInTheStoreIsImportedWithoutACopy()
     {
-        // §3: "A single existing Vortex file becomes a dataset of one leaf: one commit object, no
-        // copy."
+        // A single existing Vortex file becomes a dataset of one leaf: one commit object, no copy.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -138,8 +137,8 @@ public sealed class VortexDatasetTests
     [Fact]
     public async Task AFileOfAnotherSchemaIsRefusedAtImportAndNothingIsCommitted()
     {
-        // §15.4: "an object with another [schema] is refused" — at the import that would add it,
-        // not at the first scan that would trip over it. A nullable key is another schema.
+        // An object with another schema is refused at the import that would add it, not at the
+        // first scan that would trip over it. A nullable key is another schema.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -166,7 +165,7 @@ public sealed class VortexDatasetTests
     [Fact]
     public async Task AnAppendMintsAnIdentityAndRecordsWhatItWrote()
     {
-        // §7: the entry carries the uid the postscript holds and the hash the writer computed, so a
+        // The entry carries the uid the postscript holds and the hash the writer computed, so a
         // fragment bound to an old version of the bytes is refused before anything is read.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -233,7 +232,7 @@ public sealed class VortexDatasetTests
 
         await writer.AppendAsync(Batches(types, schema, 0, 2_000));
 
-        // The reader holds its own version until it asks for another (§8.2, row 7).
+        // The reader holds its own version until it asks for another.
         Assert.Equal(0, reader.RowCount);
         Assert.Equal(writer.Version, await reader.RefreshAsync());
         Assert.Equal(2_000, reader.RowCount);

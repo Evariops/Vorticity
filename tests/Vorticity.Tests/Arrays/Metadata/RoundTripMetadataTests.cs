@@ -415,7 +415,7 @@ public sealed class RoundTripMetadataTests
     [Fact]
     public void DecimalBytePartsRejectsANonZeroLowerPartCount()
     {
-        // spec/METADATA.md: "Readers must require lower_part_count == 0".
+        // The format requires a reader to reject a non-zero lower_part_count.
         byte[] bytes = new WireBuilder().VarintField(1, (ulong)PType.I64).VarintField(2, 1).ToArray();
         Assert.Throws<VortexFormatException>(() => { _ = DecimalBytePartsMetadata.Read(bytes); });
     }

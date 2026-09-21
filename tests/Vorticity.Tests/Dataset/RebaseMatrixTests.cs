@@ -1,10 +1,10 @@
-// The rebase matrix of docs/13-dataset.md §8.2, row by row, and the request counts of §8.1.
+// The rebase matrix, row by row, and the request counts of a commit.
 //
-// WHY A MATRIX AND NOT A HANDFUL OF CASES. §8.2 makes a claim that is easy to state and easy to get
-// wrong: a writer that loses a commit re-applies its LOGICAL operations to the winner's tree, and
-// each operation knows what to do when the ground moved. The seven rows are the seven ways the
-// ground moves. A test per row is the only way to know that the branch for that row exists and
-// says what the table says.
+// WHY A MATRIX AND NOT A HANDFUL OF CASES. The rebase makes a claim that is easy to state and easy
+// to get wrong: a writer that loses a commit re-applies its LOGICAL operations to the winner's
+// tree, and each operation knows what to do when the ground moved. The seven rows are the seven
+// ways the ground moves. A test per row is the only way to know that the branch for that row
+// exists and does what the row says.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -48,7 +48,7 @@ public sealed class RebaseMatrixTests
         return bytes;
     }
 
-    /// <summary>A compaction at level 0, which is where these rows of §8.2 all happen.</summary>
+    /// <summary>A compaction at level 0, which is where these rebase cases all happen.</summary>
     /// <param name="inputs">The objects it consumes.</param>
     /// <param name="outputs">The objects it produces.</param>
     private static DatasetOperation Replace(int[] inputs, params (int Key, int Version)[] outputs)
@@ -71,7 +71,7 @@ public sealed class RebaseMatrixTests
     [Fact]
     public async Task AnUncontendedCommitIsThreeDependentRequests()
     {
-        // §8.1: "the List, the read of N's header, the creation".
+        // The List, the read of the latest commit's header, the creation.
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
 
@@ -93,7 +93,7 @@ public sealed class RebaseMatrixTests
     [Fact]
     public async Task AppendAndAppendBothLand()
     {
-        // §8.2, row 1: "both objects land in level 0; order by commit".
+        // Both objects land in level 0, ordered by commit.
         await using MemoryObjectStore store = new MemoryObjectStore();
         await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), default);
 
@@ -126,8 +126,8 @@ public sealed class RebaseMatrixTests
     [Fact]
     public async Task TheSecondIndexerOfOneFragmentWritesNothingForIt()
     {
-        // §8.2, row 3: "the second finds the fragment present in the winner's leaf, drops its own
-        // and writes nothing for it".
+        // The second indexer finds the fragment present in the winner's leaf, drops its own and
+        // writes nothing for it.
         await using MemoryObjectStore store = new MemoryObjectStore();
         await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), default);
 
@@ -154,7 +154,7 @@ public sealed class RebaseMatrixTests
     [Fact]
     public async Task AFragmentWhoseObjectIsGoneIsDropped()
     {
-        // §8.2, row 4: "the fragment's object is gone; the fragment is dropped and never written".
+        // The fragment's object is gone; the fragment is dropped and never written.
         await using MemoryObjectStore store = new MemoryObjectStore();
         await DatasetCommitter.CommitAsync(store, [Add(1), Add(2)], Options(), default);
 
@@ -177,7 +177,7 @@ public sealed class RebaseMatrixTests
     [Fact]
     public async Task ACompactionWhoseInputIsGoneAbandons()
     {
-        // §8.2, row 5: "the second finds an input missing and abandons; its outputs are garbage".
+        // The second compaction finds an input missing and abandons; its outputs are garbage.
         await using MemoryObjectStore store = new MemoryObjectStore();
         await DatasetCommitter.CommitAsync(store, [Add(1), Add(2), Add(3)], Options(), default);
 
@@ -197,8 +197,8 @@ public sealed class RebaseMatrixTests
     [Fact]
     public async Task AnAppendIsNotSweptUpByACompactionThatDidNotSeeIt()
     {
-        // §8.2, row 2: "the compaction took a snapshot of <= 8 objects; the new append is not among
-        // them and stays in level 0".
+        // The compaction took a snapshot of <= 8 objects; the new append is not among them and
+        // stays in level 0.
         await using MemoryObjectStore store = new MemoryObjectStore();
         await DatasetCommitter.CommitAsync(store, [Add(1), Add(2)], Options(), default);
 
@@ -217,7 +217,7 @@ public sealed class RebaseMatrixTests
     [Fact]
     public async Task AReaderHoldsARootAndSeesOneVersion()
     {
-        // §8.2, row 7: "the reader holds a root; everything it references is immutable".
+        // The reader holds a root, and everything it references is immutable.
         await using MemoryObjectStore store = new MemoryObjectStore();
         CommitResult first = await DatasetCommitter.CommitAsync(
             store, [.. Enumerable.Range(0, 200).Select(i => Add(i))], Options(), default);
@@ -249,7 +249,7 @@ public sealed class RebaseMatrixTests
     [Fact]
     public async Task ARebaseCostsTheHeaderTheTouchedLeavesAndTheCreation()
     {
-        // §8.2: "an iteration costs depth + 2 dependent requests".
+        // An iteration of the commit loop costs depth + 2 dependent requests.
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
         await DatasetCommitter.CommitAsync(
@@ -263,10 +263,11 @@ public sealed class RebaseMatrixTests
         Assert.Equal(1, store.CountOf(ObjectOperation.List));
         Assert.Equal(1, store.CountOf(ObjectOperation.PutIfAbsent));
 
-        // ONE read, not `depth + 2`: §3's inlining pays for itself here. The previous commit's
-        // header carried the whole tree of 400 objects -- the pages it wrote and the ones it had
-        // read on the way -- so this commit's descent and rewrite found every page it needed in
-        // the header it had already read, and the three steps are the List, that header, the put.
+        // ONE read, not `depth + 2`: inlining pages in the header pays for itself here. The
+        // previous commit's header carried the whole tree of 400 objects -- the pages it wrote and
+        // the ones it had read on the way -- so this commit's descent and rewrite found every page
+        // it needed in the header it had already read, and the three steps are the List, that
+        // header, the put.
         Assert.Equal(1, store.CountOf(ObjectOperation.GetRange));
         Assert.Equal(3, store.DependentSteps);
     }

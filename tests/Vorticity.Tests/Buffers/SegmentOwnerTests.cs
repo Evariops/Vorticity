@@ -26,7 +26,7 @@ public sealed class FinalizerCollection
 [Collection(nameof(FinalizerCollection))]
 public sealed class SegmentOwnerTests
 {
-    /// <summary>A no-memory owner used to observe exactly when <c>FreeCore</c> runs.</summary>
+    /// <summary>A no-memory owner that observes exactly when <c>FreeCore</c> runs.</summary>
     private sealed class CountingOwner : SegmentOwner
     {
         private int _frees;
@@ -189,7 +189,7 @@ public sealed class SegmentOwnerTests
     [InlineData(-64)]
     [InlineData(int.MinValue)]
     public void Native_allocation_rejects_an_alignment_outside_the_cap(int alignment) =>
-        // docs/08-semantics.md §6 caps alignment at 64 bytes.
+        // Alignment is capped at 64 bytes.
         Assert.Throws<VortexFormatException>(() => NativeSegmentOwner.Allocate(64, alignment));
 
     [Theory]
@@ -312,10 +312,8 @@ public sealed class SegmentOwnerTests
         Assert.Equal(101, owner.WritableSpan.Length);
     }
 
-    // The zero this used to assert is the allocator's, not the owner's: a pinned array arrives
-    // zeroed, a native block and a recycled pool block do not, and all three are interchangeable
-    // behind SegmentOwner. Asserting it here turned an accident into a contract that two of the
-    // three origins break.
+    // No zero is asserted: a pinned array arrives zeroed but a native block and a recycled pool
+    // block do not, and all three are interchangeable behind SegmentOwner.
     [Fact]
     public void A_pinned_segment_round_trips_the_bytes_written_through_it()
     {

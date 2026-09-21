@@ -1,8 +1,8 @@
 // Byte-exactness against Rust, for the row encoding.
 //
-// docs/04-conformance.md §7: "Being merely order-compatible is not enough - two implementations
+// Being merely order-compatible is not enough - two implementations
 // could each be internally consistent and still disagree, which would silently break any
-// cross-language comparison." The vectors in row-vectors/vectors.jsonl were produced by
+// cross-language comparison. The vectors in row-vectors/vectors.jsonl were produced by
 // vortex-row itself (tools/row-vectors); this test rebuilds the same columns and compares the
 // encoded bytes one case at a time.
 //

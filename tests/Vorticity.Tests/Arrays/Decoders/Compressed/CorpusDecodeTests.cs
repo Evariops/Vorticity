@@ -2,12 +2,13 @@
 // proves nothing; these are real files written by Vortex 0.86.1.
 //
 // Every file here is a single-column `vortex.flat` layout over segment 0, so the layout reader
-// (contract §11, another component) is not needed: the root layout's `segments[0]` names the
+// (another component) is not needed: the root layout's `segments[0]` names the
 // array blob directly. The `_r0` variants are `vortex.chunked` layouts with no segments at all and
 // are left to the conformance component.
 //
-// The full value-by-value conformance sweep belongs to §14; this is the narrow preview of it that
-// covers the nine compressed encodings, and it is the only thing that proves the kernels.
+// The full value-by-value conformance sweep belongs to the conformance component; this is the
+// narrow preview of it that covers the nine compressed encodings, and it is the only thing that
+// proves the kernels.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -30,7 +31,7 @@ public sealed class CorpusDecodeTests
 {
     [Theory]
     // fastlanes.for over a bit-packed child: 75 corpus files contain a FoR node and every one of
-    // them decodes to garbage if the metadata is read as empty (contract §0a C2).
+    // them decodes to garbage if the metadata is read as empty.
     [InlineData("encodings/fastlanes_for")]
     [InlineData("encodings/fastlanes_for_r1")]
     [InlineData("encodings/fastlanes_for_r1023")]
@@ -101,7 +102,7 @@ public sealed class CorpusDecodeTests
         byte[] fileBytes = await System.IO.File.ReadAllBytesAsync(dataPath).ConfigureAwait(true);
 
         // 64-aligned, not merely pinned. The pinned object heap promises 8 bytes; the real segment
-        // sources hand a decoder a 64-aligned base (contract §5.4) and the canonical decoders check
+        // sources hand a decoder a 64-aligned base and the canonical decoders check
         // a buffer's REAL address - a varbinview views buffer at file offset 16k lands on an odd
         // multiple of 8 if the copy starts on one, and vortex.varbinview then rejects it.
         int pinnedOffset;

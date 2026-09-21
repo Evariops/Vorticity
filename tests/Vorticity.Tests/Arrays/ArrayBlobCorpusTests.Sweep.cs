@@ -1,7 +1,7 @@
 // One sweep over the whole corpus. The per-entry theory above is the readable oracle; this is the
 // one that would catch a systematic blob bug that happens to miss the seventeen sampled files.
-// Value-by-value comparison against the sidecars belongs to the conformance component (contract
-// §14); this compares structure only, which is all the blob spine produces.
+// Value-by-value comparison against the sidecars belongs to the conformance component; this
+// compares structure only, which is all the blob spine produces.
 using System;
 using System.Collections.Generic;
 using System.IO;

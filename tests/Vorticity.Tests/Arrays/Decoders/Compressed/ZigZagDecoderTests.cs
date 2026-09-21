@@ -11,7 +11,7 @@ public sealed class ZigZagDecoderTests
     [Fact]
     public void DecodesTheSignedBoundaryValues()
     {
-        // zigzag(n) = (n << 1) ^ (n >> 63): 0 -> 0, -1 -> 1, 1 -> 2, i64::MIN -> u64::MAX.
+        // zigzag(n) = (n << 1) ^ (n >> 63): 0, -1, 1 and i64::MIN encode as 0, 1, 2 and u64::MAX.
         byte[] encoded = TestBuffers.UInt64(0, 1, 2, 3, ulong.MaxValue, ulong.MaxValue - 1);
         TestNode root = new TestNode("vortex.zigzag")
             .WithChild(new TestNode("vortex.primitive").WithBuffer(0));
@@ -37,7 +37,7 @@ public sealed class ZigZagDecoderTests
     {
         int width = signed.ByteWidth();
         byte[] encoded = new byte[3 * width];
-        // 0 -> 0, 1 -> -1, 2 -> 1
+        // The encoded 0, 1 and 2 decode to 0, -1 and 1.
         encoded[width] = 1;
         encoded[2 * width] = 2;
 

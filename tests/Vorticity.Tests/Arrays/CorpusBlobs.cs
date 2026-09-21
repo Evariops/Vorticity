@@ -2,7 +2,7 @@
 // Phase 0 spine plus fb-schemas alone. It exists because the sidecar's `layout` line carries each
 // vortex.flat node's `array_tree` - the (id, nchildren, nbuffers, metadata_len) shape of the
 // serialized array - and that is a free oracle for the blob parser that nothing else in Phase 1
-// has. `file-open` (contract §7) and `layouts` (§11) do this properly; this does just enough of it
+// has. The real file opener and layout readers do this properly; this does just enough of it
 // to reach the segments, and never claims to validate anything.
 using System;
 using System.Collections.Generic;

@@ -9,8 +9,8 @@ using static Vorticity.Tests.IO.IoTestData;
 namespace Vorticity.Tests.IO;
 
 /// <summary>
-/// The request set is where "exactly one refcount per segment per batch" (PHASE1-CONTRACTS.md
-/// §2.2 rule 3) is actually enforced, so the refcounts are asserted directly and not inferred.
+/// The request set is where "exactly one refcount per segment per batch" is actually
+/// enforced, so the refcounts are asserted directly and not inferred.
 /// </summary>
 public sealed class SegmentRequestSetTests
 {
@@ -454,8 +454,8 @@ public sealed class SegmentRequestSetTests
 
         set.Release();
 
-        // docs/07-dotnet-mapping.md §4: spans borrowed from a batch are invalid after it is
-        // disposed, and the set refuses to hand one out rather than returning a dangling view.
+        // Spans borrowed from a batch are invalid after it is disposed, and the set refuses to
+        // hand one out rather than returning a dangling view.
         Assert.Throws<ArgumentOutOfRangeException>(() => set.GetBuffer(slot));
         set.Dispose();
     }

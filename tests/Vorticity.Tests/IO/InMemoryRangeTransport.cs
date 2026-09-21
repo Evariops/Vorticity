@@ -6,8 +6,8 @@ namespace Vorticity.Tests.IO;
 
 /// <summary>
 /// A deterministic <see cref="IRangeTransport"/> over a byte array, with injectable latency,
-/// failures and cancellation — the harness for the open-latency metric of
-/// docs/03-architecture.md §3.5 and for the seam's failure contract.
+/// failures and cancellation — the harness for the open-latency metric and for the seam's
+/// failure contract.
 /// </summary>
 public sealed class InMemoryRangeTransport : IRangeTransport
 {

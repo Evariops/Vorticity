@@ -1,5 +1,5 @@
 // Metadata and buffer builders for the compressed-decoder tests. Everything goes through the
-// Phase 0 ProtoWriter and the §6 metadata codecs' own Write methods, so a test never hand-rolls a
+// ProtoWriter and the metadata codecs' own Write methods, so a test never hand-rolls a
 // protobuf body and a codec change cannot leave the tests asserting a stale encoding.
 using System;
 using System.Buffers.Binary;
@@ -128,7 +128,7 @@ internal static class TestMetadata
     /// <summary>
     /// <c>vortex.decimal</c> metadata. It is never optional in practice: the storage width is the
     /// stride of the values buffer, and an absent field means <c>I8</c>, which the decoder rejects
-    /// for any precision wider than two digits (contract §9.1).
+    /// for any precision wider than two digits.
     /// </summary>
     internal static byte[] Decimal(DecimalStorageType valuesType)
     {

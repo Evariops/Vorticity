@@ -1,6 +1,6 @@
-// The compaction of docs/13-dataset.md §5.3, and the two acceptances §14 asks of it: "the invariant
-// of §5.2 after every compaction step of a randomised append stream", and "a compaction reading
-// level 0 through its runs produces the same object as one reading inputs sorted beforehand".
+// The dataset's compaction, held to two acceptances: the levels' invariant after every compaction
+// step of a randomised append stream, and a compaction reading level 0 through its runs producing
+// the same object as one reading inputs sorted beforehand.
 //
 // THE DATA IS THE ONE THAT BREAKS A LAZY MERGE, deliberately the same shape as the clustering
 // tests': the objects' key ranges INTERLEAVE (object i holds the keys congruent to i modulo four),
@@ -10,7 +10,7 @@
 //
 // AND THE ORACLE IS ALWAYS THE SAME ROWS WRITTEN ANOTHER WAY, never a number typed into the test: a
 // dataset compacted from four interleaved objects is compared against one file written from the
-// same rows already sorted, which is §14's sentence read literally.
+// same rows already sorted, which is the second acceptance read literally.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -41,8 +41,8 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task ACompactionOfLevelZeroProducesTheObjectASortedInputWouldHave()
     {
-        // §14: "a compaction reading level 0 through its runs produces the same object as one
-        // reading inputs sorted beforehand".
+        // A compaction reading level 0 through its runs produces the same object as one reading
+        // inputs sorted beforehand.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -80,7 +80,7 @@ public sealed class DatasetCompactionTests
         Assert.Equal(expected, produced);
 
         // And the output says what it is: a sorted key column, which is what lets a lookup inside it
-        // be a seek without reading the run at all (§6.1).
+        // be a seek without reading the run at all.
         ObjectEntry compacted = Assert.Single(await ObjectsAsync(dataset));
         await using ObjectSegmentSource bytes = new ObjectSegmentSource(store, compacted.Key);
         await using VortexFile output = await VortexFile.OpenAsync(bytes, new VortexOpenOptions(), default);
@@ -93,9 +93,9 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task TheInvariantHoldsAfterEveryStepOfARandomisedAppendStream()
     {
-        // §14's other acceptance. The stream appends a random number of rows at a random offset,
-        // and compaction is run to exhaustion at random moments — so level 0 is sometimes over its
-        // ceiling and sometimes empty, and the invariant is checked after every single step.
+        // The stream appends a random number of rows at a random offset, and compaction is run to
+        // exhaustion at random moments — so level 0 is sometimes over its ceiling and sometimes
+        // empty, and the invariant is checked after every single step.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -140,7 +140,7 @@ public sealed class DatasetCompactionTests
             await AssertInvariantAsync(dataset, options, appended);
         }
 
-        // Drained: §5.2's ceiling holds, and the lag it would have reported is gone.
+        // Drained: level 0's ceiling holds, and the lag it would have reported is gone.
         Assert.True(dataset.Levels[0].Entries <= options.LevelZeroCeiling);
         Assert.Equal(0, dataset.Lag);
         Assert.True(compactions >= 10, $"the stream must exercise compaction; it ran {compactions} time(s)");
@@ -155,7 +155,7 @@ public sealed class DatasetCompactionTests
     [InlineData(false)]
     public async Task TheWriteAmplificationIsMeasuredOverAStreamThatReachesSeveralLevels(bool leveled)
     {
-        // §5.4, "the price, stated": leveled rewrites a row about F/2 times per level it crosses,
+        // The price of each style: leveled rewrites a row about F/2 times per level it crosses,
         // tiered about once. Measured in ROWS, which is what the sentence counts: the rows every
         // compaction rewrote, over the rows appended, with compaction drained after every append —
         // the steady state of a dataset whose compactor keeps up.
@@ -200,8 +200,7 @@ public sealed class DatasetCompactionTests
         // The bounds are the design's, not chosen: a tiered crossing rewrites a row exactly once,
         // so no row is rewritten more often than there are levels above level 0; a leveled crossing
         // rewrites the level's overlapping objects, F/2 on average (the spec's number) and at most
-        // F + 1 times the rows that arrived. Measured on 2026-09-18: 7.58x leveled, 2.87x tiered,
-        // over three crossings at F = 4.
+        // F + 1 times the rows that arrived.
         int crossings = levels - 1;
         Assert.True(
             leveled ? amplification <= (fanout + 1) * crossings : amplification <= crossings,
@@ -211,10 +210,10 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task ASeekOpensLevelZeroAndOneObjectPerLevelAbove()
     {
-        // Debt 11 of the closing plan: §6.6's "≤ 8 + L cursors" for the key cursor, not only for
-        // `InKeyOrder`. A multi-level dataset from a randomised stream; a fresh cursor per sought
-        // key, whose seek must open no more than level 0's objects and one per level above it, and
-        // whose walk from there must be every key at or after it, in order.
+        // The key cursor is held to the bound `InKeyOrder` is held to. A multi-level dataset from
+        // a randomised stream; a fresh cursor per sought key, whose seek must open no more than
+        // level 0's objects and one per level above it, and whose walk from there must be every
+        // key at or after it, in order.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -251,9 +250,9 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task ACountOnTheKeyOpensOnlyTheObjectsTheRangeCuts()
     {
-        // Debt 12 of the closing plan: §6.6's fourth row. The objects wholly inside the range are
-        // counted from their entries; only the ones the range cuts are opened -- at most two per
-        // level above 0, plus level 0's. The oracle is the keys appended.
+        // A count over a key range: the objects wholly inside the range are counted from their
+        // entries; only the ones the range cuts are opened -- at most two per level above 0, plus
+        // level 0's. The oracle is the keys appended.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -298,8 +297,8 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task OutputsAreRolledAtTheDestinationSizeAndStayKeyDisjoint()
     {
-        // §5.3 writes "one or more, at the target size of the destination level"; §5.2 asks that
-        // level's objects to be key-disjoint. A target below one object's size forces both.
+        // A compaction writes one or more outputs at the target size of the destination level,
+        // whose objects must stay key-disjoint. A target below one object's size forces both.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -338,9 +337,9 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task ATieredCompactionConcatenatesAndKeepsTheDatasetsRowOrder()
     {
-        // §5.4: "the default is leveled when a clustering key is declared and tiered otherwise". A
+        // The default style is leveled when a clustering key is declared and tiered otherwise. A
         // tiered compaction is a concatenation, and without a clustering key the dataset's order is
-        // the first row position (§4.1) — so the rows must come out in exactly the same sequence.
+        // the first row position — so the rows must come out in exactly the same sequence.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -373,7 +372,7 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task ALevelAboveItsSizeIsCompactedIntoTheOneAbove()
     {
-        // §5.3's second trigger. Level 0 goes up first; then level 1 is over the size its fan-out
+        // The level-size trigger. Level 0 goes up first; then level 1 is over the size its fan-out
         // allows, and the next step moves it to level 2 — the lowest level over its size first.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -439,7 +438,7 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task APlanReadsEntriesAndChangesNothing()
     {
-        // §5.3 makes compaction "the user's background job", so planning must be pure: a caller
+        // Compaction is the user's background job, so planning must be pure: a caller
         // reads what it would cost and decides. The version does not move and no object is written.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -474,10 +473,9 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task ACompositeClusteringKeyIsMergedThroughItsRun()
     {
-        // Debt 1 of the closing plan, closed: a composite key's objects are read by
-        // `InKeyOrder(paths)` over the mandatory composite run (12 §4.6, 13 §6.1) and merged on the
-        // tuple. Four interleaved, shuffled objects; the output is one object in tuple order, and
-        // the dataset reads back in that order.
+        // A composite key's objects are read by `InKeyOrder(paths)` over the mandatory composite
+        // run and merged on the tuple. Four interleaved, shuffled objects; the output is one
+        // object in tuple order, and the dataset reads back in that order.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -664,7 +662,10 @@ public sealed class DatasetCompactionTests
         await Task.CompletedTask;
     }
 
-    /// <summary>§5.2's invariant, asked of a version rather than assumed of it.</summary>
+    /// <summary>
+    /// The invariant the levels keep, asked of a version rather than assumed of it: every level
+    /// above 0 key-disjoint, level 0 inside its ceiling, and every appended row held.
+    /// </summary>
     private static async Task AssertInvariantAsync(
         VortexDataset dataset, CompactionOptions options, List<long> appended)
     {

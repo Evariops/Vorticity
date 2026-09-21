@@ -1,7 +1,7 @@
 // DTypeImport copies a dtype from one DTypeArena into another. Its walk has to be bounded, because
 // a DTypeArena deduplicates: Struct(["a","b"], [d, d]) stores one child index twice, so a dtype
 // nested that way 64 deep is a 65-node DAG with 2^64 root-to-leaf paths and the depth cap bounds
-// only the stack (docs/03-architecture.md §6).
+// only the stack.
 //
 // But a FLAT visit budget bounds the wrong dimension. The same dedup means a struct of N
 // identically-typed fields is one shared child node - four distinct nodes for any N - while costing

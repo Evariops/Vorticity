@@ -1,6 +1,6 @@
-// Verify and tampering - docs/13-dataset.md §10 and the rows §14 asks of it: "an object replaced out
-// of band at equal size -- nothing sees it but verify, which says so; a page, a root, a fragment
-// torn at every byte; a fragment of another object, refused".
+// Verify and tampering: an object replaced out of band at equal size, which nothing sees but
+// verify, and verify says so; a page, a root, a fragment torn at every byte; a fragment of another
+// object, refused.
 //
 // TWO QUESTIONS PER TEAR, ALWAYS BOTH. Does a reader give a wrong answer -- it may fail, it may
 // answer right, it may not answer wrong -- and does verify name the tear. A tear readers cannot see
@@ -8,7 +8,8 @@
 // the case where the second question is the only one that finds it.
 //
 // THE TAMPERING IS OUT OF BAND: the object is deleted and created again under its key with the
-// bytes changed, which is the only way bytes change in a store this library writes (§11).
+// bytes changed, which is the only way bytes change in a store this library writes: it never
+// overwrites an object.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -65,7 +66,7 @@ public sealed class DatasetVerifyTests
             await ReplaceAsync(store, victim.Key, bytes);
 
             // Everything a reader checks still holds: the length, and the identity in the tail it
-            // parses. No reader computes the content hash (§7), so no reader can tell.
+            // parses. No reader computes the content hash, so no reader can tell.
             Assert.Equal(victim.Bytes, (await store.HeadAsync(victim.Key, default))!.Value.Length);
             await using (Vorticity.File.VortexFile reopened = await Vorticity.File.VortexFile.OpenAsync(
                 new ObjectSegmentSource(store, victim.Key), new Vorticity.File.VortexOpenOptions(), default))
@@ -89,7 +90,7 @@ public sealed class DatasetVerifyTests
         await using (store)
         await using (dataset)
         {
-            // The first leaf: written by an early commit and referenced from there ever since (§3).
+            // The first leaf: written by an early commit and referenced from there ever since.
             // Every header since inlines it too -- a tree this small fits the header's 192 KiB -- so
             // a reader takes the inlined copy and the stored one is verify's alone, which disabling
             // verify's store-only reads proves: this test fails with the root's. A reader that does
@@ -125,8 +126,8 @@ public sealed class DatasetVerifyTests
         await using (dataset)
         {
             PageReference fragment = (await EntriesAsync(dataset)).Single(entry => entry.Fragments.Count > 0).Fragments[0];
-            // Left out, not refused: the object answers without its index (§7's rule for a region
-            // that fails), so no tear stops a reader.
+            // Left out, not refused: the object answers without its index, as it does for any
+            // region that fails, so no tear stops a reader.
             Assert.Equal(0, await TearEveryByteAsync(store, dataset, fragment, "the fragment in version"));
         }
     }
@@ -144,7 +145,8 @@ public sealed class DatasetVerifyTests
             ReadOnlyMemory<byte> theirs = await dataset.ReadFragmentAsync(indexed.Entry.Fragments[0], default);
 
             // A caller that lies: the operation names the other object, its uid included, and carries
-            // bytes built against the indexed one. The commit cannot tell; the binding can (§7).
+            // bytes built against the indexed one. The commit cannot tell; the fragment's binding
+            // to the object it was built from can.
             await dataset.ApplyAsync([new DatasetOperation.AddFragment(other.TreeKey, other.Entry.Uid, theirs)]);
 
             await using (VortexDataset reader = await VortexDataset.OpenAsync(store, Options()))

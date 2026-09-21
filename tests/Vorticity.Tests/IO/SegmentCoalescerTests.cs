@@ -8,9 +8,9 @@ using static Vorticity.Tests.IO.IoTestData;
 namespace Vorticity.Tests.IO;
 
 /// <summary>
-/// The planner in isolation. PHASE1-CONTRACTS.md §5.4 calls its rounding rule "the single most
-/// likely thing to be simplified into <c>Start = specs[first].Offset</c>", so it is tested here
-/// directly rather than only through a source.
+/// The planner in isolation. Its rounding rule is the single most likely thing to be simplified
+/// into <c>Start = specs[first].Offset</c>, so it is tested here directly rather than only through
+/// a source.
 /// </summary>
 public sealed class SegmentCoalescerTests
 {
@@ -61,7 +61,7 @@ public sealed class SegmentCoalescerTests
     [Fact]
     public void Alignment_survives_coalescing_for_every_segment_in_the_run()
     {
-        // The list PHASE1-CONTRACTS.md §5.4's test requirement names, verbatim.
+        // Segments of mixed alignment that coalesce into a single run.
         SegmentSpec[] specs =
         [
             Spec(64, 8, 6), Spec(65, 3, 0), Spec(127, 1, 0), Spec(128, 64, 6), Spec(4096, 32, 4),
@@ -120,8 +120,8 @@ public sealed class SegmentCoalescerTests
     public void A_run_that_would_exceed_the_size_budget_is_split()
     {
         // A 1 MiB gap is well inside the default gap budget, but the resulting run would be
-        // 1 MiB + 128 bytes, past a 1 MiB ceiling. This is the trap in PHASE1-CONTRACTS.md §5:
-        // "MaxCoalescedReadBytes bounds an allocation sized by file content."
+        // 1 MiB + 128 bytes, past a 1 MiB ceiling. This is the trap MaxCoalescedReadBytes guards:
+        // it bounds an allocation sized by file content.
         SegmentSpec[] specs = [Spec(0, 64), Spec(1 << 20, 64)];
         CoalescedRun[] runs = new CoalescedRun[specs.Length];
 

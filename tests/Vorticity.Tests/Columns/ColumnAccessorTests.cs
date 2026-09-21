@@ -1,4 +1,4 @@
-// Phase 1 contract §12.2/§12.3: the typed views, their exact-type rule, and the four validity
+// The typed views, their exact-type rule, and the four validity
 // kinds at row 0, a middle row and the last row.
 using System;
 using System.Buffers.Binary;
@@ -159,7 +159,7 @@ public sealed class ColumnAccessorTests
 
         Assert.Equal(7, batch.Root.AsPrimitive<int>()[0]);
 
-        // Same width, different signedness: still refused (contract §12.3).
+        // Same width, different signedness: still refused.
         Assert.Throws<InvalidOperationException>(() => { _ = batch.Root.AsPrimitive<uint>().Length; });
         Assert.Throws<InvalidOperationException>(() => { _ = batch.Root.AsPrimitive<long>().Length; });
         Assert.Throws<InvalidOperationException>(() => { _ = batch.Root.AsPrimitive<float>().Length; });

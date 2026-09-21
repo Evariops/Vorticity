@@ -141,8 +141,8 @@ public sealed class ArrayBlobReaderTests
     /// A compressed buffer is refused, and this is the whole of our LZ4 story.
     /// </summary>
     /// <remarks>
-    /// docs/08-semantics.md §7 used to promise a ~200-line LZ4 block decoder. It was dropped for a
-    /// reason no amount of effort fixes: nothing in Vortex 0.86.1 reads or writes
+    /// There is no LZ4 block decoder, for a reason no amount of effort fixes: nothing in
+    /// Vortex 0.86.1 reads or writes
     /// <c>Buffer.compression</c> - the only four files in the tree mentioning lz4 are the two
     /// schemas and their generated code - and the schema records neither a framing nor a
     /// decompressed length, so a decoder could only be written by inventing both.
@@ -162,8 +162,8 @@ public sealed class ArrayBlobReaderTests
             Assert.Throws<VortexUnsupportedException>(() => Load(blob));
         Assert.Equal(VortexComponentKind.Compression, error.Kind);
 
-        // The id as well as the kind: docs/03-architecture.md §5 says the message always names
-        // both, because that pair is what the upstream troubleshooting procedure asks for.
+        // The id as well as the kind: the message always names both, because that pair is what
+        // the upstream troubleshooting procedure asks for.
         Assert.Equal("lz4", error.ComponentId);
     }
 
@@ -199,7 +199,7 @@ public sealed class ArrayBlobReaderTests
     [Fact]
     public void AnUnknownEncodingIdIsNotAnErrorAtLoadTime()
     {
-        // Contract §2.3: parsing an array blob never throws for an unknown array id.
+        // Parsing an array blob never throws for an unknown array id.
         ForgedNode root = new ForgedNode(0);
         byte[] blob = BlobBuilder.Build(root, []);
 

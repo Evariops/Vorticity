@@ -1,6 +1,5 @@
-// The corpus coverage gate of docs/04-conformance.md §3: "the union of `array_specs` and
-// `layout_specs` across the corpus must cover every component we claim to support. A
-// claimed-but-untested encoding fails the build."
+// The corpus coverage gate: the union of `array_specs` and `layout_specs` across the corpus must
+// cover every component we claim to support, and a claimed-but-untested encoding fails the build.
 //
 // Sharpened here to the union across the IN-SCOPE files, because that is the set the value
 // comparison actually reads. An encoding that appears only in files we refuse is claimed and

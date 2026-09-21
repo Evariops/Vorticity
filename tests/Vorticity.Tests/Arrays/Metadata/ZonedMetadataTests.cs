@@ -108,8 +108,7 @@ public sealed class ZonedMetadataTests
     {
         // prost's `string id` has implicit presence, so absent and "" are the same bytes, and
         // upstream resolves an id it does not recognise to Ok(None) and disables that aggregate's
-        // pruning. docs/08-semantics.md §4 makes degrading mandatory: a pruning hint may never
-        // fail a read.
+        // pruning. Degrading is mandatory: a pruning hint may never fail a read.
         AggregateSpecList specs = new AggregateSpecList();
         byte[] metadata = Zoned(1, 1024, Array.Empty<byte>());
         ZonedMetadata value = ZonedMetadata.Read(metadata, specs);

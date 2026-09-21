@@ -3,7 +3,7 @@
 // Every compressed encoding has children, and every child goes through
 // ArrayDecodeContext.DecodeChild -> ArrayDecoderTable.Get, so the table must hold a decoder for
 // vortex.primitive, vortex.bool, vortex.varbinview and vortex.constant before any of these tests
-// can run. Those belong to the `canonical-decoders` component (contract §9), so this file
+// can run. Those belong to the `canonical-decoders` component, so this file
 // registers deliberately minimal stand-ins - but ONLY into slots the real table has left empty.
 // After integration ArrayDecoderTable's own static constructor fills every slot, IsImplemented
 // returns true for all of them, and these tests exercise the real decoders unchanged.
@@ -106,15 +106,14 @@ internal static class TestBlob
 
     /// <summary>
     /// Lays out <c>[pad][buffer 0][pad][buffer 1]...[Array flatbuffer][u32 length]</c> exactly as
-    /// the writer does (spec/REFERENCE.md, "The array blob"): every data buffer is preceded by the
+    /// the writer does: every data buffer is preceded by the
     /// padding that carries it to its own alignment, and that padding is recorded in the buffer's
     /// <c>Buffer.padding</c> field so the reader just accumulates it. The exponent is 4 because 16
     /// is the strictest alignment any canonical decoder demands
     /// (<c>CanonicalSupport.MaxRequiredAlignment</c>) - a <c>varbinview</c> views buffer or an
-    /// <c>i256</c> decimal. Packing the buffers back to back instead, as this used to, hands
+    /// <c>i256</c> decimal. Packing the buffers back to back would hand
     /// <c>vortex.primitive</c> a misaligned values buffer the moment a preceding buffer's length is
-    /// not a multiple of the element width, and the real decoder rejects that rather than copying
-    /// (Phase 1 contract §9.1).
+    /// not a multiple of the element width, and the real decoder rejects that rather than copying.
     /// </summary>
     internal static byte[] Build(TestNode root, IReadOnlyList<byte[]> buffers, out string[] specs)
     {

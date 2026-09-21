@@ -1,6 +1,6 @@
-// Phase 1 contract §12.2/§12.3 and docs/07-dotnet-mapping.md §3. The expectations here were
-// computed independently (a Python date calculation), not by running the code under test, so a
-// sign or epoch error cannot agree with itself.
+// The extension columns' conversions to DateOnly, TimeOnly, DateTime and Guid. The expectations
+// here were computed independently (a Python date calculation), not by running the code under
+// test, so a sign or epoch error cannot agree with itself.
 using System;
 using System.Buffers.Binary;
 using System.Text;
@@ -36,8 +36,8 @@ public sealed class ExtensionColumnTests
     {
         using ColumnFixture f = new ColumnFixture();
 
-        // 1641600000000 is types/date_ms row 0. -1 is the trap: truncating division would round a
-        // pre-epoch instant UP to 1970-01-01.
+        // The first value is midnight on 8 January 2022. -1 is the trap: truncating division would
+        // round a pre-epoch instant UP to 1970-01-01.
         RecordBatch batch = DateColumn(f, VortexTimeUnit.Milliseconds, PType.I64, [1641600000000L, -1L, 0L]);
 
         Assert.Equal(new DateOnly(2022, 1, 8), batch.Root.AsExtension().ToDateOnly(0));
@@ -117,8 +117,8 @@ public sealed class ExtensionColumnTests
     }
 
     // The same rounding decides whether ToTimeOnly's `ticks < 0` guard ever sees the value. -1 µs
-    // is already rejected (TimeOutsideADayIsMalformed); -1 ns must be too, and used to slip through
-    // as 00:00:00 because truncation lifted it to tick 0 first.
+    // is already rejected (TimeOutsideADayIsMalformed); -1 ns must be too, which holds only if the
+    // nanoseconds floor: truncation would lift it to tick 0 and read it as 00:00:00.
     [Theory]
     [InlineData(-1L)]
     [InlineData(-99L)]
@@ -152,8 +152,8 @@ public sealed class ExtensionColumnTests
     {
         using ColumnFixture f = new ColumnFixture();
 
-        // types/timestamp_ns_tz row 1: 1700000000001000001 ns, i.e. .001000001 s. The tick floor
-        // is .0010000, and the remaining single nanosecond is unrepresentable.
+        // The value is one millisecond and one nanosecond past a whole second. The tick floor
+        // keeps the millisecond, and the remaining single nanosecond is unrepresentable.
         RecordBatch batch = TimestampColumn(
             f, VortexTimeUnit.Nanoseconds, "Europe/Paris", [1700000000001000001L]);
 
@@ -232,9 +232,9 @@ public sealed class ExtensionColumnTests
     {
         using ColumnFixture f = new ColumnFixture();
 
-        // types/uuid row 0 is the bytes 00..0f, and RFC 4122 network order makes that
-        // 00010203-0405-0607-0809-0a0b0c0d0e0f. Reading it little-endian would give
-        // 03020100-0504-0706-... - plausible, and wrong on every row.
+        // types/uuid row 0 is the bytes 00..0f, and RFC 4122 network order keeps them in that
+        // order in the string asserted below. Reading it little-endian would reverse the first
+        // three groups (03 02 01 00, then 05 04, then 07 06) - plausible, and wrong on every row.
         byte[] bytes = new byte[32];
         for (int i = 0; i < 32; i++)
         {
@@ -297,8 +297,7 @@ public sealed class ExtensionColumnTests
         DType ext = f.Types.Extension("acme.quaternion", storage, default);
         RecordBatch batch = f.Batch(f.Arena.AddExtension(ext, 1, values));
 
-        // Resolving is free and never throws; reading through it is what fails, with kind "dtype"
-        // (contract §2.3).
+        // Resolving is free and never throws; reading through it is what fails, with kind "dtype".
         Assert.Equal(ExtensionKind.Unknown, batch.Root.AsExtension().Kind);
         VortexUnsupportedException error =
             Assert.Throws<VortexUnsupportedException>(() => { _ = batch.Root.AsExtension().TimeUnit; });

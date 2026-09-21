@@ -1,7 +1,7 @@
 // Builds array blobs byte-for-byte the way the writer does, so the adversarial cases can be
 // expressed as "this file, with this one field wrong" rather than as a mocked ArrayNode.
 //
-// Layout, from spec/REFERENCE.md and vortex-array-0.86.1/src/serde.rs:
+// Layout, as upstream's vortex-array 0.86.1 writes it in src/serde.rs:
 //     [pad][buffer 0][pad][buffer 1]...[Array flatbuffer][u32 LE flatbuffer length]
 // The FlatBuffer is located from the END on read, because the padding in front of it is recorded
 // nowhere.

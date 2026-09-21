@@ -46,7 +46,7 @@ public sealed class EncodingMetadataTests
     {
         // encodings/fastlanes_for_r1: metadata_b64 "GICo1rkH", a bare ScalarValue whose only field
         // is int64_value (tag 3, zigzag sint64). The file has one row and its sidecar says that row
-        // is "1000000000", which is exactly the frame of reference a single-row FoR array carries -
+        // is 10^9, which is exactly the frame of reference a single-row FoR array carries -
         // so this asserts the decoded reference against a value the corpus states independently.
         byte[] metadata = Convert.FromBase64String("GICo1rkH");
         ScalarValue value = EncodingMetadata.ReadReferenceScalar(metadata, new ScalarStore(), new DTypeArena());
@@ -57,7 +57,7 @@ public sealed class EncodingMetadataTests
     [Fact]
     public void ForReferenceScalarReadsANegativeCorpusValue()
     {
-        // types/decimal18_4_nullable_r8193: "GP3/n/b0rNvgGw==".
+        // types/decimal18_4_nullable_r8193 carries a negative frame of reference.
         byte[] metadata = Convert.FromBase64String("GP3/n/b0rNvgGw==");
         ScalarValue value = EncodingMetadata.ReadReferenceScalar(metadata, new ScalarStore(), new DTypeArena());
         Assert.Equal(ScalarValueKind.Int64, value.Kind);
@@ -113,7 +113,7 @@ public sealed class EncodingMetadataTests
     [Fact]
     public void ChunkedLayoutTreatsTheFirstByteAsTheStatsTableFlag()
     {
-        // Phase 1 contract §6.4. Note that Vortex 0.86.1 itself declares this layout's metadata as
+        // Note that Vortex 0.86.1 itself declares this layout's metadata as
         // EmptyMetadata and rejects a non-empty payload outright, so every flag-set case below is
         // untestable against a real file - see the remarks on ChunkedLayoutMetadata.
         Assert.False(ChunkedLayoutMetadata.Read(Array.Empty<byte>()).HasStatsTable);

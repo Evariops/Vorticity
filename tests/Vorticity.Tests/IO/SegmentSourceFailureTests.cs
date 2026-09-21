@@ -14,7 +14,7 @@ using static Vorticity.Tests.IO.IoTestData;
 namespace Vorticity.Tests.IO;
 
 /// <summary>
-/// The four contract points of docs/03-architecture.md §3.5 under adversity: partial failure,
+/// The four points of the segment source contract under adversity: partial failure,
 /// ownership, cache consistency and cancellation. Failures are injected rather than waited for.
 /// </summary>
 public sealed class SegmentSourceFailureTests

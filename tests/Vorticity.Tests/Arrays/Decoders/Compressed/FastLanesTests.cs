@@ -1,4 +1,4 @@
-// The transposition table is asserted LITERALLY, against spec/REFERENCE.md's copy of the crate's
+// The transposition table is asserted LITERALLY, against the known values of the crate's
 // `test_transpose_known_indices` - never against our own implementation. Writing
 // `untranspose(x) = transpose(x)` survives a round-trip test written the same wrong way in both
 // directions, and these known values are the only thing that catches it.

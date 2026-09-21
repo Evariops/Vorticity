@@ -3,7 +3,7 @@
 //
 // The set is every corpus entry whose layout tree uses only the three encodings the test walker
 // understands (vortex.flat, vortex.struct, vortex.zoned), whose array encodings this build decodes,
-// and whose root dtype is in Phase 1 scope. dict and chunked layouts belong to §11 and are read there.
+// and whose root dtype is in scope. dict and chunked layouts are read by the layout tests.
 using System;
 using System.Text;
 using System.Threading.Tasks;
@@ -57,7 +57,7 @@ public sealed class CorpusColumnTests
     [Fact]
     public async Task ANonStructRootIsExposedAsItself()
     {
-        // docs/07-dotnet-mapping.md §5: FieldCount == 1, a null field name, Root is the column.
+        // FieldCount == 1, a null field name, and Root is the column.
         await using CorpusColumns corpus = await CorpusColumns.LoadAsync("types/non_struct_root_i64");
 
         Assert.False(corpus.Batch.IsTabular);
@@ -111,7 +111,7 @@ public sealed class CorpusColumnTests
     public async Task NestedStructsNavigateByIndexAndByName()
     {
         // types/struct_nested_deep is shaped {a: i32, b: {c: utf8?, d: {e: bool, f: list(i64)}}?}.
-        // Only its 1-row file avoids the dict layout and the compressed encodings §11 owns, so it
+        // Only its 1-row file avoids the dict layout and the compressed encodings, so it
         // is the deepest REAL nesting reachable from this component; the 1024-row synthetic
         // equivalent is in RecordBatchTests.
         await using CorpusColumns corpus = await CorpusColumns.LoadAsync("types/struct_nested_deep_nonnull_r1");
@@ -252,7 +252,7 @@ public sealed class CorpusColumnTests
     public async Task DecimalsCarryTheFullPrecision76Range()
     {
         // decimal(40,10) is i256-backed: precision 39-76 is exactly why VortexDecimal exists and
-        // why System.Decimal is not the mapping (docs/07-dotnet-mapping.md §2).
+        // why System.Decimal is not the mapping.
         await using CorpusColumns corpus = await CorpusColumns.LoadAsync("types/decimal40_10_nonnull_r1024");
         DecimalColumn column = corpus.Batch.Root.AsDecimal();
 
@@ -324,7 +324,7 @@ public sealed class CorpusColumnTests
     public async Task AListOfNullableElementsKeepsTheElementValidity()
     {
         // types/list_utf8_nullable_elems: the LIST rows and the ELEMENT rows have independent
-        // validity, and only the r1 file avoids the compressed encodings §11 owns.
+        // validity, and only the r1 file avoids the compressed encodings.
         await using CorpusColumns corpus = await CorpusColumns.LoadAsync("types/list_utf8_nullable_elems_nullable_r1");
         ListColumn list = corpus.Batch.Root.AsList();
 
@@ -341,9 +341,9 @@ public sealed class CorpusColumnTests
     public async Task AMaterializedAllZeroValidityChildCollapsesToAllInvalid()
     {
         // containers/all_null_i64_explicit_validity is one of only two corpus files that carry a
-        // materialized all-zero validity child rather than a folded vortex.constant node. Contract
-        // §2.6 rule 3 requires it to reach the caller as AllInvalid so a per-row check can be
-        // skipped - the whole reason ValidityKind is public (docs/07-dotnet-mapping.md §1).
+        // materialized all-zero validity child rather than a folded vortex.constant node. An
+        // all-false bitmap must reach the caller as AllInvalid so a per-row check can be
+        // skipped - the whole reason ValidityKind is public.
         await using CorpusColumns corpus =
             await CorpusColumns.LoadAsync("containers/all_null_i64_explicit_validity_r1025");
         RecordBatch batch = corpus.Batch;

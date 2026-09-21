@@ -16,7 +16,7 @@ namespace Vorticity.Tests.Arrays;
 
 public sealed class ArrayBlobCorpusTests
 {
-    // Ten entries spanning the shapes contract §8 names, plus the extras that exercise a distinct
+    // Ten entries spanning the usual array shapes, plus the extras that exercise a distinct
     // code path: an inlined array tree, a zero-row file, and the two forced-unsupported encodings.
     public static TheoryData<string> Entries =>
     [
@@ -117,7 +117,7 @@ public sealed class ArrayBlobCorpusTests
     public void EveryDeclaredArrayIdEitherResolvesOrIsDeliberatelyUnknown()
     {
         // The writer pre-populates every id its edition permits, so a declared-but-unresolvable id
-        // must never be an error (contract §2.3 and the corpus manifest's last caveat).
+        // must never be an error.
         //
         // AND THERE ARE NONE LEFT, which is what this now asserts and is a stronger statement than
         // the one it replaces. The corpus file declares all 34 ids `core2026.08.3` permits, and

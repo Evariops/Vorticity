@@ -1,17 +1,17 @@
-// The two oracles of docs/13-dataset.md §14, which are the reason §13.J chose a prolly tree:
+// The two oracles that are the reason the dataset's tree is a prolly tree:
 //
-//   "incremental edits against a rebuild from scratch, byte for byte, on randomised batches of adds,
-//    removes and descriptor updates; the same operations in two orders against one root hash."
+//   incremental edits against a rebuild from scratch, byte for byte, on randomised batches of adds,
+//   removes and descriptor updates; the same operations in two orders against one root hash.
 //
 // WHAT "BYTE FOR BYTE" CAN MEAN HERE, and it is worth being exact. A page reference carries
-// PLACEMENT as well as content (§3: version, offset, length, hash), and an incremental commit
+// PLACEMENT as well as content (version, offset, length, hash), and an incremental commit
 // leaves untouched pages where they are, in older objects, while a rebuild writes every page into
 // one new object. Their bytes therefore differ by construction. What must be identical is the
 // CONTENT: the same entries, cut into pages at the same places, at every level -- which is exactly
 // what the boundary rule promises and what `ContentHashAsync` reduces to one number.
 //
 // So the oracle is: same entries, same page boundaries, same content hash. That is strictly
-// stronger than the entry-set equality §14 asks of the B+tree rule, and it is the property that
+// stronger than the entry-set equality asked of the B+tree rule, and it is the property that
 // fails the moment a boundary depends on anything but the key set and the parameters.
 using System;
 using System.Collections.Generic;
@@ -26,7 +26,7 @@ namespace Vorticity.Tests.Dataset;
 
 public sealed class DatasetTreeTests
 {
-    /// <summary>A seed that is the dataset's, as §4.1 says, and not the test's mood.</summary>
+    /// <summary>A seed that is the dataset's, and not the test's mood.</summary>
     private const ulong Seed = 0x5EED_0000_5EED_0000;
 
     /// <summary>Small pages, so a few hundred entries make a tree of real depth.</summary>
@@ -72,7 +72,7 @@ public sealed class DatasetTreeTests
     [Fact]
     public async Task RelocatingAPageMovesItAndItsAncestorsAndChangesNoContent()
     {
-        // §10's repack, at the tree: a leaf copied elsewhere takes the pages above it along, since
+        // A repack, at the tree: a leaf copied elsewhere takes the pages above it along, since
         // their references named its old placement, and nothing else; the content hash, which
         // ignores placement, does not move.
         MemoryPageStore store = new MemoryPageStore();
@@ -111,7 +111,7 @@ public sealed class DatasetTreeTests
     [InlineData(987_654)]
     public async Task IncrementalEditsEqualARebuild(int seed)
     {
-        // Oracle one of §14, on randomised batches of adds, removes and value updates.
+        // Oracle one, on randomised batches of adds, removes and value updates.
         Random random = new Random(seed);
         MemoryPageStore store = new MemoryPageStore();
         SortedDictionary<string, TreeEntry> truth = new SortedDictionary<string, TreeEntry>(StringComparer.Ordinal);
@@ -175,7 +175,7 @@ public sealed class DatasetTreeTests
     [Fact]
     public async Task TheSameOperationsInTwoOrdersGiveOneContentHash()
     {
-        // Oracle two of §14: history independence. The same key set reached by two different
+        // Oracle two: history independence. The same key set reached by two different
         // sequences of commits must be one tree.
         MemoryPageStore first = new MemoryPageStore();
         MemoryPageStore second = new MemoryPageStore(2);
@@ -214,8 +214,8 @@ public sealed class DatasetTreeTests
     [Fact]
     public async Task AValueUpdateMovesNoBoundary()
     {
-        // §4.1's first bullet: "Values never move a boundary, so an indexer that updates an
-        // object's descriptor rewrites exactly `depth` pages."
+        // Values never move a boundary, so an indexer that updates an object's descriptor rewrites
+        // exactly `depth` pages.
         MemoryPageStore store = new MemoryPageStore();
         List<TreeEntry> entries = [.. Enumerable.Range(0, 1_000).Select(i => Entry(i))];
         DatasetTree tree = DatasetTree.Build(entries, Rule(), store);
@@ -239,9 +239,9 @@ public sealed class DatasetTreeTests
     [Fact]
     public async Task WhatACommitWritesAndReads()
     {
-        // The cost this implementation actually pays, measured rather than claimed (§4.3 wants the
-        // writes independent of the object count; the reads of the levels above the leaves are this
-        // implementation's, and the number is here so the next one has something to beat).
+        // What a one-entry commit costs: its writes stay within the depth whatever the object
+        // count, and its reads of the levels above the leaves, this implementation's own cost, are
+        // held to a bound so that any growth shows.
         foreach (int size in new[] { 500, 2_000, 8_000 })
         {
             MemoryPageStore store = new MemoryPageStore();
@@ -289,7 +289,7 @@ public sealed class DatasetTreeTests
         Assert.Equal(50, tree.Rows);
 
         // Fifty entries of about thirty bytes are over this rule's 1 024-byte cap, so the tree is
-        // two levels: the cap forces a boundary whatever the hash says (§4.1).
+        // two levels: the cap forces a boundary whatever the hash says.
         Assert.Equal(2, tree.Depth);
     }
 
@@ -313,7 +313,7 @@ public sealed class DatasetTreeTests
     [Fact]
     public async Task TheFillRuleBuildsTheSameEntriesAndAnotherShape()
     {
-        // §13.J's other implementation, behind the same seam: the entries are the tree's content and
+        // The other boundary rule, behind the same seam: the entries are the tree's content and
         // must not change; the shape is the rule's and does.
         MemoryPageStore prolly = new MemoryPageStore();
         MemoryPageStore fill = new MemoryPageStore(2);
@@ -334,7 +334,7 @@ public sealed class DatasetTreeTests
     [Fact]
     public async Task TheProllyRuleCutsBetweenItsFloorAndItsCap()
     {
-        // §4.1: no boundary before the floor, a forced one at the cap, a mean near the target.
+        // No boundary before the floor, a forced one at the cap, a mean near the target.
         MemoryPageStore store = new MemoryPageStore();
         DatasetTree tree = DatasetTree.Build(
             [.. Enumerable.Range(0, 20_000).Select(i => Entry(i))],

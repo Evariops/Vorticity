@@ -1,4 +1,4 @@
-// The Patches class I rules of contract §10.4. Every one of them is exercised through
+// The rules Patches enforces on a patch set. Every one of them is exercised through
 // vortex.sparse, which is the shortest path to Patches.Create with a real decoded indices child.
 using System;
 using Vorticity.Arrays;
@@ -117,7 +117,7 @@ public sealed class PatchesTests
     {
         // Phase 1 never slices patches, so the chunk offsets have nothing to accelerate. They must
         // still be present and well formed, because their presence is what moves the validity
-        // child of a bit-packed node to index 3 (contract §10.2).
+        // child of a bit-packed node to index 3.
         BitPackedTestShapes.AssertChunkOffsetsShapeDecodes();
     }
 

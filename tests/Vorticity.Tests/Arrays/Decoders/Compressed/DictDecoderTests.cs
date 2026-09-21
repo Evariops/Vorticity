@@ -53,7 +53,7 @@ public sealed class DictDecoderTests
     public void IsNullableCodesDecidesTheCodesChildDType(
         bool? isNullableCodes, Nullability arrayNullability, Nullability expectedCodesNullability)
     {
-        // Contract §10.5: absent is a back-compat fallback to the ARRAY's nullability and is not
+        // Absent is a back-compat fallback to the ARRAY's nullability and is not
         // the same as `false`. Getting it wrong changes the codes child's dtype, which changes how
         // its own validity child is interpreted, which silently changes values.
         TestNode root = Node(TestMetadata.Dict(2, PType.U8, isNullableCodes));

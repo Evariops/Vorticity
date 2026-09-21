@@ -1,8 +1,8 @@
 // What this build actually implements, asked of the build itself.
 //
 // The registration below is now a NO-OP, and `ScopeSplitTests.TheShippedDecoderTableIsWiredUp`
-// asserts that it is. `ArrayDecoderTable`'s static constructor names all twenty-three decoders
-// (PHASE1-CONTRACTS.md §15.1), so every slot is already filled by the time anything here looks, and
+// asserts that it is. `ArrayDecoderTable`'s static constructor names all twenty-three decoders,
+// so every slot is already filled by the time anything here looks, and
 // `ShippedTableWasEmpty` reads false. It is kept, still guarded by IsImplemented, for exactly one
 // reason: it is the measurement that proves the corpus numbers below are the library's and not the
 // harness's. Delete it and a regression that empties the static constructor again turns 616
@@ -51,8 +51,8 @@ internal static class Phase1Components
 
     /// <summary>
     /// <see langword="true"/> when <see cref="ArrayDecoderTable"/> held no decoder at all before the
-    /// harness registered any. Expected to be <see langword="false"/>: it is the observable form of
-    /// the §15.1 integration gap, and the gap is closed.
+    /// harness registered any. Expected to be <see langword="false"/>: the library registers its
+    /// own decoders, so a caller with no test harness in the process can still decode a file.
     /// </summary>
     internal static bool ShippedTableWasEmpty
     {

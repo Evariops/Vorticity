@@ -1,5 +1,4 @@
-// The read-side kernel docs/11-write-strategy.md §4.3 names: a sorted merge-join for `IN (...)`
-// against a run's keys.
+// The read-side kernel for `IN (...)`: a sorted merge-join against a run's keys.
 //
 // WHAT THE MEASUREMENT FOUND, and why this test is about answers rather than time: the comparisons
 // were never the cost. A thousand-key `IN` spent its planning merging the slices it had found so

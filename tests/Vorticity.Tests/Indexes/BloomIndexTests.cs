@@ -1,11 +1,11 @@
-// `vorticity.bloom.sbbf.v1` end to end (docs/10-indexes.md §5.1, §4.3, §5.4, §6.6): written by the
-// streaming builder, listed in the directory, probed by the scan's block-mask chain.
+// `vorticity.bloom.sbbf.v1` end to end: written by the streaming builder, listed in the
+// directory, probed by the scan's block-mask chain.
 //
 // THE FIXTURE DEFEATS THE ZONE MAP ON PURPOSE. Every block of `key` spans the whole value range, so
 // min/max prune nothing and whatever is pruned is the filter's doing -- which `Explain` then
-// credits to the right structure. And the acceptance test is 10 §6.6's: the same query with the
-// indexes on and off returns the same rows, over equalities, IN lists, ANDs, ORs, both float zeros,
-// literals of every comparison domain, and values that are absent everywhere.
+// credits to the right structure. And it passes any index's acceptance test: the same query
+// with the indexes on and off returns the same rows, over equalities, IN lists, ANDs, ORs, both
+// float zeros, literals of every comparison domain, and values that are absent everywhere.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -69,7 +69,7 @@ public sealed class BloomIndexTests
             Assert.True(report.Outcome == IndexOutcome.Built, column + ": " + report.Reason);
             Assert.Null(report.Reason);
 
-            // One tree (13 §6.2): four generation nodes under a root that holds the file's filter.
+            // One tree: four generation nodes under a root that holds the file's filter.
             Assert.Equal(1, report.Runs);
             Assert.Equal((Blocks / BloomBuilder.GenerationBlocks) + 1, report.Generations);
             Assert.True(report.Bytes > 0);
@@ -215,7 +215,7 @@ public sealed class BloomIndexTests
     [Fact]
     public async Task TheFileFilterAnswersTheMultiFileQuestion()
     {
-        // 10 §5.4: an engine skips a file before opening a scan. The statistics cannot say anything
+        // An engine skips a file before opening a scan. The statistics cannot say anything
         // about `name = nope`; the file-level filter can.
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
@@ -258,7 +258,7 @@ public sealed class BloomIndexTests
     [Fact]
     public async Task AMalformedPayloadCostsPruningAndNeverRows()
     {
-        // 10 §6.6: a lying index can only slow a scan down. A payload that does not decode to the
+        // A lying index can only slow a scan down. A payload that does not decode to the
         // array its entry declares is ignored for the blocks it covers.
         Decoders.EnsureRegistered();
         byte[] bytes;
@@ -317,11 +317,9 @@ public sealed class BloomIndexTests
     /// A refused index costs the file nothing but the footer that records there is none.
     /// </summary>
     /// <remarks>
-    /// The verdict used to be reached after the payloads had been written, and abandoning dropped
-    /// the directory entry rather than the bytes: a file of 1,582,812 bytes carried 1,048,797 more
-    /// for indexes nothing could use, two thirds of itself. The budget is asked before a byte goes
-    /// out now, on the write path and on the indexer's alike, which is what this measures -- a
-    /// count of entries would have passed throughout.
+    /// The budget is asked before a byte goes out, on the write path and on the indexer's alike,
+    /// so the file length is what is measured: dropping the directory entry but not the payloads
+    /// would still pass a count of entries.
     /// </remarks>
     [Fact]
     public async Task AnIndexTheBudgetRefusedLeavesNoBytesBehind()
@@ -335,7 +333,7 @@ public sealed class BloomIndexTests
         Assert.Equal(IndexOutcome.Abandoned, key.Outcome);
 
         // The footer names one fewer segment and says the directory is empty; nothing else may
-        // differ. The bound is the footer's own order of magnitude, not a measured slack.
+        // differ. The bound is the footer's own order of magnitude; anything past it is payload.
         Assert.InRange(refused.Length - none.Length, 0, 1_024);
 
         // The same question of the indexer, which walks a written file and appends to it.
@@ -358,10 +356,10 @@ public sealed class BloomIndexTests
     public async Task TheBudgetDoesNotAbandonAnIndexTheCallerRequired()
     {
         // The budget is a guard against `Auto`'s enthusiasm, not an override of an instruction:
-        // docs/13-dataset.md §6.1's mandatory run is an index a structure DEPENDS on, and on a
-        // narrow table it is intrinsically comparable in size to the column it indexes, so no file
-        // is ever large enough to bring it under a share of the data. `AsRequired` says so, and the
-        // optional filters around it are still the first thing the budget takes.
+        // a dataset's mandatory run on its clustering key is an index a structure DEPENDS on,
+        // and on a narrow table it is intrinsically comparable in size to the column it indexes,
+        // so no file is ever large enough to bring it under a share of the data. `AsRequired`
+        // says so, and the optional filters around it are still the first thing the budget takes.
         Decoders.EnsureRegistered();
         WritePolicy policy = Policy().For("key", IndexPolicy.Bloom(resolutions: 3).AsRequired());
         await using Written written = await Written.CreateAsync(policy, budgetPerMille: 1);
@@ -403,7 +401,7 @@ public sealed class BloomIndexTests
     [Fact]
     public async Task ARequiredPolicySurvivesTheDirectoryRoundTrip()
     {
-        // An append reuses the directory's policy rather than being told one again (11 §3.8), so a
+        // An append reuses the directory's policy rather than being told one again, so a
         // requirement that did not survive the round trip would hold for the first write and
         // quietly stop holding for every one after it.
         Decoders.EnsureRegistered();

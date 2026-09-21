@@ -7,7 +7,7 @@ namespace Vorticity.Tests.Indexes;
 
 /// <summary>
 /// <see cref="FilterLiteral"/> is a dictionary key: the pruner puts the literals of an <c>IN</c>
-/// into one to find each one's slot (docs/10-indexes.md §6.6), and the collector puts them into a
+/// into one to find each one's slot, and the collector puts them into a
 /// set to drop the repeats. Both degrade to a linear scan when the hash cannot separate them, and a
 /// key column's literals are identifiers, all of one width.
 /// </summary>

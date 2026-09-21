@@ -1,5 +1,5 @@
-// Contract §8.4 and §2.2. The arena is the only place a decoder gets writable memory and the only
-// thing standing between a decoder's arithmetic and a buffer that is one element short.
+// The arena is the only place a decoder gets writable memory and the only thing standing between
+// a decoder's arithmetic and a buffer that is one element short.
 using System;
 using Vorticity;
 using Vorticity.Arrays;
@@ -315,7 +315,7 @@ public sealed class CanonicalArenaTests
             () => arena.AddNull(_types.Null(Nullability.Nullable), -1));
     }
 
-    /// <summary>The bound moves with the enum: 9 is `Constant` since Z1b-c2a, 10 is still nothing.</summary>
+    /// <summary>The bound moves with the enum: 9 is `Constant`, 10 is nothing.</summary>
     [Fact]
     public void AnUndefinedCanonicalKindIsMalformed()
     {
@@ -436,13 +436,10 @@ public sealed class CanonicalArenaTests
 
     /// <summary>
     /// A constant node stores its element once and reports the row count it stands for.
-    /// PERF-AUDIT-v2.md Z1b-c2a.
     /// </summary>
     /// <remarks>
     /// THE WHOLE CLAIM OF THE FORM IS THE ASYMMETRY between the two numbers below: eight bytes held
-    /// against a million rows. Nothing produces this kind yet -- Z1b-c2b does -- so this is what
-    /// makes the storage exercised rather than merely compiled, which is the difference between a
-    /// step that can be marked done and one that cannot.
+    /// against a million rows.
     /// </remarks>
     [Fact]
     public void AConstantNodeHoldsOneElementForAnyNumberOfRows()

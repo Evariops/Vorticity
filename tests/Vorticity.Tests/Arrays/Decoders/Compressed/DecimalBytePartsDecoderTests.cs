@@ -130,7 +130,7 @@ public sealed class DecimalBytePartsDecoderTests
     public void ANonZeroLowerPartCountIsRejected()
     {
         // Hand-rolled, because TestMetadata deliberately cannot express it: field 2 varint 1.
-        // spec/METADATA.md pins lower_part_count to zero - a non-zero one means a wide decimal
+        // The format pins lower_part_count to zero - a non-zero one means a wide decimal
         // whose lower limbs we would silently drop, producing a plausible but wrong number.
         byte[] metadata = [0x08, (byte)PType.I64, 0x10, 0x01];
         byte[] encoded = TestBuffers.Int64(1, 2);

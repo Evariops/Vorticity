@@ -1,16 +1,16 @@
-// The interleaving fuzzer of docs/13-dataset.md §14: "seeded schedules of readers, writers,
-// indexers, compactors and vacuum, crashes between any two store calls; every read equals a scan
-// with indexes off on the same version; every retained root references only existing objects".
+// The dataset's interleaving fuzzer: seeded schedules of readers, writers, indexers, compactors
+// and vacuum, crashes between any two store calls; every read equals a scan with indexes off on
+// the same version; every retained root references only existing objects.
 //
 // WHAT THE STALENESS IS, and it is the whole point. A writer PREPARES its operations against the
-// version it read and COMMITS them later, after other writers have moved the ground under it. §8.2
-// says each operation then knows what to do, and `RebaseMatrixTests` holds each of those answers
+// version it read and COMMITS them later, after other writers have moved the ground under it.
+// Each operation then knows what to do, and `RebaseMatrixTests` holds each of those answers
 // one row at a time. What no row can hold is the composition: a hundred operations prepared at
 // scattered versions, landing in a seeded order, some of them through a store that stored the
 // commit and then threw. So the schedule here separates prepare from commit and lets the seed
 // decide which happens next.
 //
-// THE ORACLE IS A MODEL, NOT THE IMPLEMENTATION. `Model` re-derives §8.2's rules over a plain
+// THE ORACLE IS A MODEL, NOT THE IMPLEMENTATION. `Model` re-derives the rebase rules over a plain
 // dictionary, and the tree must equal it entry for entry after every schedule. That does not prove
 // the rules are right -- the rebase matrix does that, row by row, against the spec's own table --
 // it proves that the TREE, the rebase loop and the crash handling deliver what the rules say, under
@@ -147,8 +147,8 @@ public sealed class DatasetFuzzTests
             Assert.Equal(expected[i].Entry, ByContent(held[i].Entry));
         }
 
-        // And every leaf points at an object the store holds (§14's second invariant), for every
-        // version still there, not only the latest.
+        // And every leaf points at an object the store holds, for every version still there, not
+        // only the latest.
         await EveryRootReferencesOnlyExistingObjectsAsync(store, version);
 
         Console.Out.Write(FormattableString.Invariant(
@@ -160,8 +160,9 @@ public sealed class DatasetFuzzTests
     [Fact]
     public async Task ACrashAfterThePutIsNotASecondObject()
     {
-        // §8.2, row 1, under the state the rebase exists for: the commit landed and the writer was
-        // told it had not. Retrying must add nothing, because the uid is the same bytes.
+        // A rebased add of an object already there, under the state the rebase exists for: the
+        // commit landed and the writer was told it had not. Retrying must add nothing, because
+        // the uid is the same bytes.
         await using MemoryObjectStore store = new MemoryObjectStore();
         List<DatasetOperation> batch = [Add(1, 0), Add(2, 0)];
 
@@ -184,8 +185,8 @@ public sealed class DatasetFuzzTests
     [Fact]
     public async Task EveryVersionsRootStillReferencesOnlyExistingObjects()
     {
-        // The reader of §8.2's last row "holds a root; everything it references is immutable". This
-        // is that sentence as an invariant over every version a run left behind.
+        // A reader holds a root, and everything it references is immutable. This is that sentence
+        // as an invariant over every version a run left behind.
         await using MemoryObjectStore store = new MemoryObjectStore();
         Random random = new Random(99);
         for (int i = 0; i < 12; i++)
@@ -205,9 +206,9 @@ public sealed class DatasetFuzzTests
     [Fact]
     public async Task AScheduleOfRealAppendsAnswersAsOneFile()
     {
-        // §14's first invariant, end to end: "every read equals a scan with indexes off on the same
-        // version". Real data objects this time, because there is nothing to scan in a synthetic
-        // leaf -- and the single file is the same rows written once, which is §14's acceptance.
+        // The first invariant, end to end: every read equals a scan with indexes off on the same
+        // version. Real data objects this time, because there is nothing to scan in a synthetic
+        // leaf -- and the single file is the same rows written once.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = types.Struct(
@@ -256,10 +257,10 @@ public sealed class DatasetFuzzTests
     [Fact]
     public async Task AScheduleOfRealAppendsAndIndexersAnswersAsWithoutIndexes()
     {
-        // §14 names indexers among what the schedule interleaves, and since step 42b they are the
-        // real one: two handles, each appending or indexing a block range of an object AS IT LAST
-        // SAW THE DATASET, in a seeded order. A stale indexer rebases like any writer (§8.2); every
-        // read after every step must equal the scan with indexes and summaries off.
+        // Indexers are among what the schedule interleaves, and here they are the real one: two
+        // handles, each appending or indexing a block range of an object AS IT LAST SAW THE
+        // DATASET, in a seeded order. A stale indexer rebases like any writer; every read after
+        // every step must equal the scan with indexes and summaries off.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = types.Struct(
@@ -343,7 +344,7 @@ public sealed class DatasetFuzzTests
     [InlineData(29)]
     public async Task AScheduleWithTheCompactorAndVacuumLosesNothingARetainedVersionNeeds(int seed)
     {
-        // The rest of §14's cast since step 43: compactors and vacuum, with repack after it, under
+        // The rest of the schedule's cast: compactors and vacuum, with repack after it, under
         // one clock the schedule moves. Two handles, each acting on the version it last saw half of
         // the time: an append, an indexing, a compaction, a vacuum. Two invariants after every
         // step: the answers are the scan's with indexes and summaries off, and after a vacuum every
@@ -650,8 +651,8 @@ public sealed class DatasetFuzzTests
     }
 
     /// <summary>
-    /// §8.2's rules over a plain dictionary, written from the spec's table rather than from the
-    /// committer: the oracle the schedule is checked against.
+    /// The rebase rules over a plain dictionary, written from the rules as stated rather than
+    /// from the committer: the oracle the schedule is checked against.
     /// </summary>
     private sealed class Model
     {

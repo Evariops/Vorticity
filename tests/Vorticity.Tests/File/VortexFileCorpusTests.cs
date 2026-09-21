@@ -1,8 +1,8 @@
 // All 819 golden files, opened. That is 819 real postscripts and footers written by Vortex 0.86.1
 // and it is the only oracle in Phase 1 that can tell the open path it is wrong about a real file.
 //
-// The I/O-count assertion in OpensEveryCorpusFile is the headline promise of PHASE1-CONTRACTS.md
-// §7.1 made measurable: one length probe plus one tail read, for every one of them.
+// The I/O-count assertion in OpensEveryCorpusFile makes the open's headline promise measurable:
+// one length probe plus one tail read, for every one of them.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -42,7 +42,7 @@ public sealed class VortexFileCorpusTests
             if (!entry.HasDTypeSegment)
             {
                 // has_dtype_segment is not a property of the open file; it is observable as the
-                // one behaviour that depends on it (PHASE1-CONTRACTS.md §7.4 row 4).
+                // one behaviour that depends on it: an open without a supplied DType fails.
                 filesWithoutDTypeSegment++;
                 await Assert.ThrowsAsync<VortexFormatException>(async () => await VortexFile.OpenAsync(
                     new TestSegmentSource(bytes), VortexOpenOptions.Default, CancellationToken.None));
@@ -134,7 +134,7 @@ public sealed class VortexFileCorpusTests
                 continue;
             }
 
-            // PHASE1-CONTRACTS.md §7.1: one length probe plus one read. Not a single golden file
+            // One length probe plus one read. Not a single golden file
             // places a footer segment before the 65535-byte tail window, so not one of them costs
             // the second read.
             if (source.LengthProbes != 1 || source.TotalReads != 1)
@@ -150,8 +150,8 @@ public sealed class VortexFileCorpusTests
         Assert.Equal(2, filesWithMetadata);
         Assert.Equal(1, filesWithoutDTypeSegment);
 
-        // PHASE1-CONTRACTS.md §1.8: 1024 is the FastLanes block and 8192 the default row block,
-        // and that is where the bugs are. The corpus covers every one of the eight.
+        // 1024 is the FastLanes block and 8192 the default row block, and that is where the
+        // bugs are. The corpus covers every one of the eight.
         foreach (long boundary in new long[] { 0, 1, 1023, 1024, 1025, 8191, 8192, 8193 })
         {
             Assert.Contains(boundary, rowCounts);
@@ -252,7 +252,7 @@ public sealed class VortexFileCorpusTests
 
         // Every metadata segment of this file sits inside the initial tail window, so reading a
         // value costs nothing beyond the open. Metadata values are lazy but already-covered ones
-        // are free (docs/02-format.md §2).
+        // are free.
         int before = source.TotalReads;
         for (int i = 0; i < 16; i++)
         {
@@ -352,17 +352,15 @@ public sealed class VortexFileCorpusTests
     [Fact]
     public async Task UnknownEncodingIdsResolveToUnknownWithoutFailingTheOpen()
     {
-        // §2.3: an id we do not implement maps to Unknown and that is NOT an error at open. The
+        // An id we do not implement maps to Unknown and that is NOT an error at open. The
         // writer pre-populates array_specs with every id its editions permit, so an unused and
         // unresolvable entry is the normal case, not the exceptional one.
         //
-        // EVERY DECLARED ID NOW RESOLVES, so this test has no unresolvable one to point at. It
-        // used to name encodings/fastlanes_delta, then encodings/map, then encodings/pco, then
-        // encodings/variant -- each replaced when the id gained a decoder, and the variants were
-        // the last. What it asserts now is the half that is still checkable HERE: the open reads
-        // the whole table and resolves each entry, and the resolution is addressable by the wire
-        // index. The tolerance for an id from a future edition is tested in `ScanContextTests`,
-        // over a forged id, which is the only way left to have one.
+        // EVERY DECLARED ID RESOLVES, so this test has no unresolvable one to point at. What it
+        // asserts is the half that is checkable HERE: the open reads the whole table and
+        // resolves each entry, and the resolution is addressable by the wire index. The
+        // tolerance for an id from a future edition is tested in `ScanContextTests`, over a
+        // forged id, which is the only way to have one.
         CorpusEntry entry = CorpusManifest.Find("encodings/variant");
         await using VortexFile file = await VortexFile.OpenAsync(
             new TestSegmentSource(CorpusManifest.Bytes(entry.Id)),

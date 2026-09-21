@@ -1,4 +1,4 @@
-// The sidecar's value grammar (corpus/SIDECAR.md), turned into an oracle for the column accessors.
+// The sidecar's value grammar, turned into an oracle for the column accessors.
 //
 // The two rules that catch readers: integers are decimal STRINGS, because JSON numbers are f64 in
 // most parsers and u64::MAX does not survive one; and a float's `bits` is NORMATIVE - the hex of
@@ -67,7 +67,7 @@ internal static class SidecarValues
     /// two constructs differently from the reference: an extension is <c>ext(vortex.date, i32)</c>
     /// rather than <c>vortex.date[days](i32)</c>, and a fixed-size list is <c>fsl(i32, 3)</c>
     /// rather than <c>fixed_size_list(i32)[3]</c>. Both are Phase 0 gaps, reported rather than
-    /// patched (contract §15 item 9), and the manifest-dtype comparison belongs to §14 anyway.
+    /// patched, and comparing against the manifest's dtype is the conformance suite's job anyway.
     /// </summary>
     internal static string RootKind(string entry)
     {
@@ -94,7 +94,7 @@ internal static class SidecarValues
     internal static bool IsWalkable(string entry)
     {
         // types/no_dtype_segment deliberately omits the dtype segment; opening it needs a
-        // caller-supplied schema through VortexOpenOptions, which is file-open's story (§7).
+        // caller-supplied schema through VortexOpenOptions, which is file-open's story.
         if (entry == "types/no_dtype_segment")
         {
             return false;
@@ -172,9 +172,8 @@ internal static class SidecarValues
     /// <summary>
     /// Whether every array encoding in one <c>vortex.flat</c> leaf's tree has a decoder in this
     /// build. vortex.fsst, vortex.alp, vortex.zstd, vortex.onpair, vortex.decimal_byte_parts,
-    /// fastlanes.delta and vortex.patched are all out of Phase 1 scope (contract §2.8 and
-    /// docs/90-registry.md), and the files carrying them belong to the conformance suite's
-    /// expected-failure list rather than here.
+    /// fastlanes.delta and vortex.patched are all out of Phase 1 scope, and the files carrying
+    /// them belong to the conformance suite's expected-failure list rather than here.
     /// </summary>
     private static bool ArrayIsDecodable(JsonElement node)
     {

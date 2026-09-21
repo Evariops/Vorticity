@@ -1,5 +1,5 @@
-// The compacted fragment of docs/13-dataset.md §6.4: containers carried byte for byte, each on its
-// own alignment, behind a table -- and split back into exactly what went in.
+// The compacted fragment: containers carried byte for byte, each on its own alignment, behind a
+// table -- and split back into exactly what went in.
 using System;
 using System.Collections.Generic;
 using Vorticity.Dataset;

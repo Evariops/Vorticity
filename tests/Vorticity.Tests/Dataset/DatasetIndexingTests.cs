@@ -1,15 +1,15 @@
-// The indexer of docs/13-dataset.md §6.4 and the acceptance §14 names for it: "Progressive
-// indexing: at every intermediate commit, answers equal those without indexes".
+// The dataset's indexer and its acceptance, progressive indexing: at every intermediate commit,
+// answers equal those without indexes.
 //
-// THE DATASET IS CLUSTERED, SO EVERY OBJECT ALREADY HAS AN INDEX: the mandatory run on its key
-// (§6.1). The fragments add two more beside it -- a Bloom filter on `tag`, a sorted run on `id` --
-// which is the case that made step 42a put an origin on every run: a fragment is read next to the
-// file's own directory, never instead of it.
+// THE DATASET IS CLUSTERED, SO EVERY OBJECT ALREADY HAS AN INDEX: the mandatory run on its key.
+// The fragments add two more beside it -- a Bloom filter on `tag`, a sorted run on `id` -- which
+// is why every run carries an origin: a fragment is read next to the file's own directory, never
+// instead of it.
 //
 // EVERY OBJECT IS INDEXED IN TWO HALVES, ONE COMMIT EACH, and after every commit the same questions
 // are asked with the indexes and without them, with the summaries and without them. The answers
 // never move; what moves is what the objects can answer by an index, and the key-ordered read on
-// `id` shows the rule of 10 §8 end to end: refused while any object's fragments leave a block
+// `id` shows the coverage rule end to end: refused while any object's fragments leave a block
 // uncovered, and exact once they all cover their objects.
 using System;
 using System.Collections.Generic;
@@ -131,7 +131,7 @@ public sealed class DatasetIndexingTests
     [Fact]
     public async Task ARebuildSwapsAnObjectsFragmentsForOneInOneCommit()
     {
-        // §10: "Rebuild an index: drop the entry's fragments in a commit and index again". Three
+        // A rebuild drops the entry's fragments and indexes again, in one commit. Three
         // partial fragments become one over the whole object, and no version in between holds the
         // object with neither.
         Decoders.EnsureRegistered();
@@ -168,8 +168,8 @@ public sealed class DatasetIndexingTests
     [Fact]
     public async Task MoreThanKFragmentsAreBundledIntoOneAndAnswerTheSame()
     {
-        // §6.4: "An entry with more than K fragments is compacted by merging them (index bytes only)
-        // into one fragment in a new commit". Eight one-block fragments on one object, K = 4.
+        // An entry with more than K fragments is compacted by merging them (index bytes only)
+        // into one fragment in a new commit. Eight one-block fragments on one object, K = 4.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -235,8 +235,8 @@ public sealed class DatasetIndexingTests
     [Fact]
     public async Task TwoIndexersOfOneRangeWriteOneFragment()
     {
-        // §8.2, row 3, with the real indexer: the same rows under the same policy are the same
-        // bytes, and the second commit finds them in the winner's leaf.
+        // The rebase of a duplicate fragment, with the real indexer: the same rows under the same
+        // policy are the same bytes, and the second commit finds them in the winner's leaf.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -257,8 +257,8 @@ public sealed class DatasetIndexingTests
     [Fact]
     public async Task AFragmentOfAnObjectACompactionReplacedIsDropped()
     {
-        // §8.2, row 4, and the second half of §6.4: a data compaction rewrites the object, embeds
-        // its index and drops every fragment; an indexer that built against the old object loses.
+        // A data compaction rewrites the object, embeds its index and drops every fragment; an
+        // indexer that built against the old object loses.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);

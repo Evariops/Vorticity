@@ -1,10 +1,10 @@
-// A list's elements, indexed and asked - docs/10-indexes.md §5.1's "list elements", step 28b.
+// A list's elements, indexed and asked.
 //
 // The Bloom builder hashes each element of a valid row into the row's block, `ListContains` asks
 // whether a row's list holds a value, and the scan answers it the same with the filters as without:
-// 10 §6.6's acceptance test, over values present in one block, absent everywhere, held only by a
+// any index's acceptance test, over values present in one block, absent everywhere, held only by a
 // null element, or held only by the list of a null row. The predicate's own semantics come first,
-// because every equivalence below is measured against it.
+// because every equivalence below is checked against it.
 using System;
 using System.Collections.Generic;
 using System.IO;

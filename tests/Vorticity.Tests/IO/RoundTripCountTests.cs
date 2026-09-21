@@ -1,16 +1,16 @@
 // How many round trips an open costs, which is the format's headline claim and was unmeasured.
 //
-// docs/01-scope.md promises "1-2 round trips to first data" and docs/05-benchmarks.md §3 lists the
-// axis that would show it. Neither existed, and the reason is worth stating: A ROUND TRIP IS FREE ON
-// A LOCAL FILE. Every benchmark here memory-maps the corpus, where a read is a page fault and an
-// extra one costs microseconds, so the number that matters over object storage - how many separate
-// fetches the reader issues before it can hand over a row - never appears in any timing.
+// The format promises one or two round trips to first data, and no timing can show it: A ROUND
+// TRIP IS FREE ON A LOCAL FILE. Every benchmark here memory-maps the corpus, where a read is a
+// page fault and an extra one costs microseconds, so the number that matters over object storage
+// - how many separate fetches the reader issues before it can hand over a row - never appears in
+// any timing.
 //
 // The fix is not to time it but to COUNT it. The count is deterministic, which makes it the same
 // kind of quantity as an allocation: a hard barrier rather than a barrier with margin, and one that
-// means the same thing on a laptop and on S3. The latency multiplier is then arithmetic - a source
-// with a 50 ms first-byte time costs round-trips x 50 ms, and no benchmark needs to simulate it to
-// know that.
+// means the same thing on a laptop and on an object store. The latency multiplier is then
+// arithmetic - a source with a 50 ms first-byte time costs round-trips x 50 ms, and no benchmark
+// needs to simulate it to know that.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -37,13 +37,12 @@ public sealed class RoundTripCountTests
     /// </summary>
     /// <remarks>
     /// A RATCHET, like every other number in this repository that can be counted rather than timed,
-    /// and set AT the measured value rather than above it: the count is exact, so there is no
-    /// machine variance for a margin to absorb and a margin would only hide the first regression.
+    /// and set AT the count rather than above it: the count is exact, so there is no machine
+    /// variance for a margin to absorb and a margin would only hide the first regression.
     ///
-    /// The measured values are 1 and 2, which is docs/01-scope.md's "1-2 round trips to first data"
-    /// exactly. That claim has been in the scope document from the start and this is the first thing
-    /// that checks it. Raising either number means the format's central promise got worse: say in
-    /// the commit message which extra fetch was added and why it cannot be coalesced into the set
+    /// The ceilings of 1 and 2 are exactly the format's promise of one or two round trips to first
+    /// data. Raising either number means the format's central promise got worse: say in the commit
+    /// message which extra fetch was added and why it cannot be coalesced into the set
     /// `ReadManyAsync` already receives.
     /// </remarks>
     private static readonly (string Entry, int OpenCeiling, int FirstBatchCeiling)[] Files =

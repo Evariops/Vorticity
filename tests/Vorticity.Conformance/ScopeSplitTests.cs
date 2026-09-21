@@ -1,4 +1,4 @@
-// PHASE1-CONTRACTS.md §14.1: the in-scope split, and the guard that keeps it honest.
+// The in-scope split, and the guard that keeps it honest.
 //
 // The split is computed from the library's own registries (see Phase1Components), so these numbers
 // are a MEASUREMENT of what this build claims, not a configuration of what it should claim. That is
@@ -85,7 +85,7 @@ public sealed class ScopeSplitTests
     }
 
     /// <summary>
-    /// PHASE1-CONTRACTS.md §15.1, as a measurement rather than a comment:
+    /// The library's own decoder registration, as a measurement rather than a comment:
     /// <see cref="Vorticity.Arrays.ArrayDecoderTable"/>'s static constructor must name every
     /// decoder the build owns, so that a caller who opens a file and scans it from an application -
     /// no test harness in the process - decodes something. While that constructor was empty the

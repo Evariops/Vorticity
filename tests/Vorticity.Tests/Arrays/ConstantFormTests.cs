@@ -1,10 +1,8 @@
 // The constant form: a column stored as one element and a row count.
 //
-// There used to be two forms behind a switch, and these tests read a file both ways and compared
-// them to each other. With one form left that question cannot be asked, so the assertions are
-// against things outside the form instead: the corpus files' own values, the values the same rows
-// have after being written back and read again, and the promise that no caller can see the form at
-// all.
+// A form checked against itself proves nothing, so the assertions are against things outside it:
+// the corpus files' own values, the values the same rows have after being written back and read
+// again, and the promise that no caller can see the form at all.
 //
 // The corpus-wide value oracle is not here. `CorpusValueTests` in the conformance project checks
 // every shipped file against its sidecar, which is an independent record of what the file holds;

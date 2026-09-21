@@ -1,12 +1,12 @@
 // The mutations, and why they are these and not bit flips.
 //
-// docs/04-conformance.md §5 is blunt about it: "a naive mutator on an offset-based format spends
+// A naive mutator on an offset-based format spends
 // 99% of its budget producing files rejected at the first bounds check, giving almost no coverage
-// past the postscript parser". A Vortex file is a tail of FlatBuffers offsets over a body of
+// past the postscript parser. A Vortex file is a tail of FlatBuffers offsets over a body of
 // segments; flip a byte at random and you almost always land in a data buffer, where nothing
 // validates anything and the file reads back with one wrong value -- which is not a parser bug.
 //
-// So the mutator targets the four things the doc names, each of which reaches a different validator:
+// So the mutator targets four things, each of which reaches a different validator:
 //
 //   * FLATBUFFERS OFFSETS -- the uoffset/soffset arithmetic the verifier bounds in both directions,
 //     including the DAG-sharing case where a naive recursive reader is exponential.
@@ -14,11 +14,11 @@
 //     pointing anywhere, which is the shape "validate before you read" exists for.
 //   * PROTOBUF TAGS in encoding metadata -- where a varint can claim a length longer than the
 //     message, and where the unknown-field skip rule lives.
-//   * CLASS I SEMANTIC FIELDS -- the ones docs/08-semantics.md §5 says memory safety depends on.
+//   * CLASS I SEMANTIC FIELDS -- the ones memory safety depends on.
 //     These are the only way to produce a STRUCTURALLY VALID file with, say, an out-of-range
 //     values_len, and they are the mutations a bounds-check-only fuzzer never reaches.
 //
-// Plus the one docs/04 §5 singles out because no seed can contain it: an unknown protobuf field
+// Plus the one no seed can contain: an unknown protobuf field
 // injected into metadata, since the skip rule is load-bearing for read-forever and no reference
 // writer will ever emit one.
 using System;

@@ -7,8 +7,8 @@
 //
 // The row count reaches a decoder from far away - the layout's row_count, or a chunked parent's
 // chunk_offsets - and nothing between there and the allocation bounds the product, so the guard
-// has to live here. It is docs/08-semantics.md §6's MaxDecompressedSize, not a number invented at
-// the call site, and a caller with a genuinely larger column raises it.
+// has to live here. It is the read options' MaxDecompressedSize, not a number invented at the call
+// site, and a caller with a genuinely larger column raises it.
 using System;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;

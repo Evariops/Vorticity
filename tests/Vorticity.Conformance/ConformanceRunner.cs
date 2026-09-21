@@ -111,7 +111,7 @@ internal static class ConformanceRunner
         {
             using SidecarReader sidecar = SidecarReader.Open(sidecarPath);
 
-            // SIDECAR.md: hash the .vortex and compare it against the header before trusting
+            // Hash the .vortex and compare it against the header before trusting
             // anything else in the file.
             if (checkPairing)
             {
@@ -128,7 +128,7 @@ internal static class ConformanceRunner
             NullCountAccumulator nulls = new NullCountAccumulator();
 
             // types/no_dtype_segment has no dtype segment, so opening it without one is a
-            // VortexFormatException by contract §7.4 and the caller is expected to supply the
+            // VortexFormatException and the caller is expected to supply the
             // schema. It reached this runner only when vortex.map gained a decoder and the file
             // became in-scope; the donor is a real corpus file with the identical schema.
             await using VortexFile file = await VortexFile
@@ -253,11 +253,10 @@ internal static class ConformanceRunner
         {
             seen.Add(entry.Path);
 
-            // SIDECAR.md: for a file whose field names contain a '.' or are empty, "these paths are
-            // ambiguous for that file by construction; use the dtype tree and index-based access
-            // there". The VALUES of those columns are compared by index and are unaffected; it is
-            // only this aggregate that cannot be attributed, so the path is named and skipped
-            // rather than matched against a number two different columns contributed to.
+            // A file whose field names contain a '.' or are empty makes these paths ambiguous by
+            // construction. The VALUES of those columns are compared by index and are unaffected;
+            // it is only this aggregate that cannot be attributed, so the path is named and
+            // skipped rather than matched against a number two different columns contributed to.
             if (nulls.AmbiguousPaths.Contains(entry.Path))
             {
                 log.SkippedNullCountPaths.Add(entry.Path);

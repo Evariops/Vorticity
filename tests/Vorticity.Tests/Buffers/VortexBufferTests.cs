@@ -10,9 +10,9 @@ namespace Vorticity.Tests.Buffers;
 public sealed class VortexBufferTests
 {
     /// <summary>
-    /// The 16-byte inline struct of docs/02-format.md §3, the exact shape
+    /// The 16-byte inline <c>SegmentSpec</c> struct of the footer, the exact shape
     /// <c>VortexBuffer.Cast</c> exists to serve. Field order and widths are transcribed from
-    /// spec/flatbuffers/footer.fbs.
+    /// the footer's FlatBuffers schema.
     /// </summary>
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     private struct SegmentSpecLike
@@ -24,7 +24,7 @@ public sealed class VortexBufferTests
         public ushort Encryption;         // 14..16
     }
 
-    /// <summary>The 8-byte <c>Buffer</c> struct of spec/flatbuffers/array.fbs.</summary>
+    /// <summary>The 8-byte <c>Buffer</c> struct of the array FlatBuffers schema.</summary>
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     private struct BufferLike
     {
@@ -37,8 +37,7 @@ public sealed class VortexBufferTests
     [Fact]
     public void The_wire_structs_are_the_sizes_the_format_promises()
     {
-        // docs/09-contracts.md §7: "A static assert verifies sizeof(SegmentSpec) == 16 and
-        // sizeof(BufferSpec) == 8."
+        // The wire format fixes SegmentSpec at 16 bytes and BufferSpec at 8.
         Assert.Equal(16, Unsafe.SizeOf<SegmentSpecLike>());
         Assert.Equal(8, Unsafe.SizeOf<BufferLike>());
     }
@@ -47,7 +46,7 @@ public sealed class VortexBufferTests
     public void VortexBuffer_stays_a_pointer_plus_two_ints()
     {
         // A fat view would be copied into every array node of every batch. If this grows, the
-        // arena design of docs/03-architecture.md §3.3 pays for it on every column.
+        // arena design pays for it on every column.
         if (IntPtr.Size == 8)
         {
             Assert.Equal(16, Unsafe.SizeOf<VortexBuffer>());
@@ -88,7 +87,7 @@ public sealed class VortexBufferTests
     [InlineData(int.MaxValue)]
     public unsafe void FromPointer_rejects_an_alignment_exponent_past_the_cap(int exponent)
     {
-        // docs/08-semantics.md §6: alignment_exponent is a u8 on the wire, so an unchecked file
+        // alignment_exponent is a u8 on the wire, so an unchecked file
         // can demand 2^255 and 1 << 255 would silently be 1 << 31 after the shift is masked.
         Assert.Throws<VortexFormatException>(() => VortexBuffer.FromPointer(null, 0, exponent));
     }
@@ -235,7 +234,7 @@ public sealed class VortexBufferTests
         using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(32, 64);
         ReadOnlySpan<SegmentSpecLike> specs = owner.Buffer.Cast<SegmentSpecLike>();
 
-        // Performance invariant #2 of docs/03-architecture.md §4, checked by pointer identity.
+        // Zero-copy is a performance invariant, checked by pointer identity.
         Assert.True(Unsafe.AreSame(
             ref MemoryMarshal.GetReference(owner.Buffer.Span),
             ref Unsafe.As<SegmentSpecLike, byte>(ref MemoryMarshal.GetReference(specs))));
@@ -311,7 +310,7 @@ public sealed class VortexBufferTests
 
         Assert.Equal(0xDEADBEEFu, owner.Buffer.Cast<uint>()[0]);
 
-        // Little-endian, as docs/02-format.md §1 mandates and VortexRuntimeChecks asserts.
+        // Little-endian, as the format mandates and VortexRuntimeChecks asserts.
         Assert.Equal(0xEF, owner.Buffer.Span[0]);
         Assert.Equal(0xDE, owner.Buffer.Span[3]);
     }

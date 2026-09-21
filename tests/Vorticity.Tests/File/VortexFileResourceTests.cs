@@ -5,9 +5,9 @@
 //
 // A FlatBuffers string may be referenced by any number of tables. `array_specs` is a vector of
 // tables each holding one string offset, so a footer of F bytes can declare F/8 spec entries that
-// all point at one string of nearly F bytes - and interning them at open, as PHASE1-CONTRACTS.md
-// §2.3 asks for, allocates F squared over eight. At F = 300 KB that is 1.6 GB from a file that
-// costs a single read. The ids are therefore located at open and materialized on demand.
+// all point at one string of nearly F bytes - and interning them at open allocates F squared
+// over eight. At F = 300 KB that is 1.6 GB from a file that costs a single read. The ids are
+// therefore located at open and materialized on demand.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -140,7 +140,7 @@ public sealed class VortexFileResourceTests
     [Fact]
     public async Task ConcurrentReadersOfOneOpenFileSeeTheSameAnswers()
     {
-        // docs/09-contracts.md §1: concurrent scans on one open file are supported and expected.
+        // Concurrent scans on one open file are supported and expected.
         CorpusEntry entry = CorpusManifest.Find("types/user_metadata_segments");
         await using VortexFile file = await VortexFile.OpenAsync(
             new TestSegmentSource(CorpusManifest.Bytes(entry.Id)),

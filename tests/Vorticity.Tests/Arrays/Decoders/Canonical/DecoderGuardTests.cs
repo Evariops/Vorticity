@@ -60,7 +60,7 @@ public sealed class DecoderGuardTests
     [Fact]
     public void AnUnimplementedEncodingThrowsUnsupportedWithItsId()
     {
-        // Contract §2.3: resolution is lazy, and the failure names the id and the kind.
+        // Resolution is lazy, and the failure names the id and the kind.
         using DecodeHarness h = new DecodeHarness();
         BlobBuilder b = new BlobBuilder();
         BlobNode node = new BlobNode("acme.nonesuch").WithBuffers(b.AddBuffer(I32(1, 2)));
@@ -104,7 +104,7 @@ public sealed class DecoderGuardTests
     [Fact]
     public void AnUnknownMetadataFieldNumberIsSkipped()
     {
-        // Read-forever (docs/02-format.md §5.3): a metadata message may gain an optional field
+        // Files are read forever: a metadata message may gain an optional field
         // without a new encoding id, and an unrecognized field number is tolerated.
         using DecodeHarness h = new DecodeHarness();
         BlobBuilder b = new BlobBuilder();

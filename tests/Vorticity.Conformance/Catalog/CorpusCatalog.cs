@@ -1,4 +1,4 @@
-// The corpus manifest, and the in-scope / out-of-scope split of PHASE1-CONTRACTS.md §14.1.
+// The corpus manifest, and its split into in-scope and out-of-scope files.
 //
 // THE SPLIT IS COMPUTED, NOT LISTED. A hand-maintained list of the 616 files Phase 1 can read would
 // be wrong the first time a decoder lands and nobody would notice; worse, it is the exact mechanism
@@ -8,7 +8,7 @@
 // LayoutReaderTable.IsImplemented, every extension dtype id through ExtensionDTypeRegistry.Resolve.
 // A file is in scope when the build claims every component it uses, and out of scope otherwise.
 //
-// The 616/203 numbers of §14.1 are then asserted as a GUARD (ScopeSplitTests), not used as an
+// The expected counts are then asserted as a GUARD (ScopeSplitTests), not used as an
 // input: if a decoder is registered or dropped, the split moves and the guard says so.
 using System;
 using System.Collections.Generic;

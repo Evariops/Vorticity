@@ -1,4 +1,4 @@
-// The 1-2 round-trip guarantee of docs/02-format.md §1 and PHASE1-CONTRACTS.md §7.1, measured.
+// Opening a file costs one or two round trips; these tests count them.
 //
 // No golden corpus file reaches the second-read branch - the largest is 688 KB and its footer
 // segments all sit inside the last 65535 bytes - so the synthetic file below is the only thing
@@ -46,8 +46,8 @@ public sealed class VortexFileRoundTripTests
     public async Task AFooterOutsideTheTailWindowCostsExactlyOneExtraRead()
     {
         // 70000 bytes of filler between the layout and the footer pushes the layout and dtype
-        // segments before `fileLength - 65535`, which is precisely the condition
-        // `R < fileLength - buffer.Length` of §7.1.
+        // segments before `fileLength - 65535`, which is precisely the second-read condition
+        // `R < fileLength - buffer.Length`, R being the lowest offset the open must read.
         DTypeArena arena = new DTypeArena();
         byte[] bytes = FileWithFooterOutsideTheTailWindow(arena, filler: 70_000);
         Assert.True(bytes.Length > VortexFileFormat.InitialReadSize);
@@ -119,8 +119,8 @@ public sealed class VortexFileRoundTripTests
     [Fact]
     public async Task ASuppliedDTypeRemovesTheDTypeSegmentFromTheSecondReadDecision()
     {
-        // §7.1: "A supplied DType removes the dtype segment from R. That is the whole point of
-        // WithDType, and it means the same file needs one read with it and two without."
+        // A supplied DType removes the dtype segment from R, the lowest offset the open must
+        // read, so the same file needs one read with it and two without.
         DTypeArena arena = new DTypeArena();
         DType schema = SyntheticVortexFile.SmallSchema(arena);
 

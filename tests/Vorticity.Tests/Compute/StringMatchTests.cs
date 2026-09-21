@@ -1,4 +1,4 @@
-// The three byte-pattern predicates of docs/12-index-reads.md §7, tested the way §11 asks for.
+// The three byte-pattern predicates: StartsWith, Contains and Like.
 //
 // TWO ORACLES, BECAUSE THE TWO HALVES FAIL DIFFERENTLY. `Like` is a backtracking matcher and its
 // failure mode is a wrong ANSWER on an awkward pattern, so it is compared against a naive recursive
@@ -7,7 +7,7 @@
 // `x >= p AND x < succ(p)`, and its failure mode is a DROPPED ROW, so it is tested end to end with
 // pruning on and off over a real file, the shape `ScanFilterTests` uses for every comparison.
 //
-// The adversarial patterns are §11's list: empty, longer than the value, all 0xFF, non-ASCII,
+// The adversarial patterns: empty, longer than the value, all 0xFF, non-ASCII,
 // escapes, and `_` across a multi-byte code point — which matches one BYTE of it, and the test says
 // so rather than pretending the operator is text-aware.
 using System;
@@ -173,8 +173,8 @@ public sealed class StringMatchTests
     /// <remarks>
     /// THE TWO RUNS ARE THE POINT. Pruning rewrites `StartsWith` into a range over the zone map's
     /// string bounds, and the one failure that rewrite can have is dropping a row a full scan would
-    /// return — docs/08-semantics.md §1's invariant. Comparing the pruned run against the unpruned
-    /// one is the only test that sees it.
+    /// return, and pruning must never change a scan's answer. Comparing the pruned run against the
+    /// unpruned one is the only test that sees it.
     /// </remarks>
     [Theory]
     [InlineData(StringMatchOp.StartsWith, "a")]

@@ -1,5 +1,5 @@
 // A byte-level FastLanes packer for building bit-packed blobs. Written bit by bit from the layout
-// definition in spec/REFERENCE.md, independently of the decoder's kernel: the value at logical
+// definition, independently of the decoder's kernel: the value at logical
 // index `index(row, lane)` occupies bits [row * W, (row + 1) * W) of lane `lane`'s stream, and
 // that stream is the words packed[LANES * w + lane] concatenated LSB first.
 using System;

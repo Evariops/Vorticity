@@ -147,7 +147,7 @@ public sealed class AlignmentTests
     }
 
     /// <summary>
-    /// The proof written out in docs/03-architecture.md §3.5, "Coalescing versus alignment": if a
+    /// Coalescing versus alignment: if a
     /// coalesced read starts at <c>start &amp; ~63</c> and a segment's file offset <c>o</c> is a
     /// multiple of <c>2^k</c> with <c>k &lt;= 6</c>, then the segment's offset inside the buffer,
     /// <c>o - alignedStart</c>, is still a multiple of <c>2^k</c>. Alignment survives coalescing.

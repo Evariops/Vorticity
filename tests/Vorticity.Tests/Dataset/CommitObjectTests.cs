@@ -1,8 +1,8 @@
-// The commit object of docs/13-dataset.md §3: header, pages, fragments, table, XXH3-64, and the
-// promise that opening it is ONE ranged read.
+// The commit object of a dataset: header, pages, fragments, table, XXH3-64, and the promise that
+// opening it is ONE ranged read.
 //
-// THE TEAR TEST IS THE POINT OF THIS FILE. §7 says a torn or corrupt header "makes its version
-// unreadable with the reason", and a store cannot tell a truncated object from a short one -- it
+// THE TEAR TEST IS THE POINT OF THIS FILE. A torn or corrupt header must make its version
+// unreadable with the reason, and a store cannot tell a truncated object from a short one -- it
 // hands back what it has. So the test builds a real commit object and truncates it at EVERY byte,
 // requiring a CommitFormatException each time: never a wrong answer, never an index out of range,
 // never a silent success. A format whose reader is bounds-checked only where someone thought to
@@ -40,7 +40,7 @@ public sealed class CommitObjectTests
         PageReference fragment = builder.AddFragment(Page(3, 64));
 
         // A page an older commit wrote and this one did not change: absolute already, and it must
-        // come back exactly as it went in (§4.3).
+        // come back exactly as it went in.
         PageReference foreign = new PageReference(3, 4_096, 250, (UInt128)0xDEADBEEF << 64 | 0x1234);
 
         CommitHeader header = new CommitHeader
@@ -175,7 +175,7 @@ public sealed class CommitObjectTests
             Assert.ThrowsAny<Exception>(() => CommitObject.Open(flipped, flipped.Length));
         }
 
-        // In the table: the checksum covers it, which is what §7 asks for.
+        // In the table: the checksum covers it as well as the header.
         long tableOffset = commit.Trailer!.Value.TableOffset;
         for (int at = 0; at < commit.Trailer.Value.TableLength; at++)
         {
@@ -189,7 +189,7 @@ public sealed class CommitObjectTests
     public void AByteChangedInAPageIsCaughtWhenThePageIsRead()
     {
         // NOT at open, and that is the design: the checksum covers the header and the table, and a
-        // page is checked against the reference that sent the reader there (§7). Re-hashing every
+        // page is checked against the reference that sent the reader there. Re-hashing every
         // page at open would make opening cost the whole object.
         (byte[] bytes, _, _, _, _, _) = Build();
         CommitObject commit = CommitObject.Open(bytes);
@@ -228,7 +228,7 @@ public sealed class CommitObjectTests
     [Fact]
     public async Task OpeningACommitCostsOneRequest()
     {
-        // §3: "A reader opens a commit with one ranged read of its first 256 KiB."
+        // A reader opens a commit with one ranged read of its first 256 KiB.
         (byte[] bytes, _, _, _, _, _) = Build();
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
@@ -248,8 +248,8 @@ public sealed class CommitObjectTests
     [Fact]
     public async Task ACommitLargerThanTheOpenReadOpensOnItsHeaderAlone()
     {
-        // The other shape of §3's promise: the header is still covered, the table is not, and a
-        // page is read by the reference that names it rather than by scanning.
+        // The other shape of the one-read promise: the header is still covered, the table is
+        // not, and a page is read by the reference that names it rather than by scanning.
         CommitObjectBuilder builder = new CommitObjectBuilder(11);
         List<PageReference> references = [];
         for (int i = 0; i < 40; i++)

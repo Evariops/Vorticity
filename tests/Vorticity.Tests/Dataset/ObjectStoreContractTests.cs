@@ -1,7 +1,7 @@
-// The contract every IObjectStore owes its callers - docs/13-dataset.md §11.
+// The contract every IObjectStore owes its callers.
 //
-// ONE SUITE, EVERY STORE, and that is the point rather than a convenience. §11 lists four
-// requirements "a store must document": an atomic PutIfAbsent, a strongly consistent List, a token
+// ONE SUITE, EVERY STORE, and that is the point rather than a convenience. The contract is four
+// requirements a store must document: an atomic PutIfAbsent, a strongly consistent List, a token
 // that changes whenever the bytes under a key change, and GetRange on objects of any size. A
 // requirement stated in prose is a requirement each implementer reads differently; a requirement
 // with a test is one an S3 library can RUN against its own store before shipping. So these tests
@@ -95,7 +95,7 @@ public sealed class ObjectStoreContractTests : IDisposable
             Assert.Equal(Bytes("3456"), middle.Bytes.ToArray());
         }
 
-        // A tail read asks for more than the object holds by design (02 §1), so a short answer is
+        // A tail read asks for more than the object holds by design, so a short answer is
         // the normal case and not an error.
         using (ObjectRange tail = await store.GetRangeAsync("data/range", 6, 64 << 10, default))
         {
@@ -123,8 +123,9 @@ public sealed class ObjectStoreContractTests : IDisposable
     [MemberData(nameof(Stores))]
     public async Task TheTokenChangesWhenTheBytesUnderAKeyDo(string kind)
     {
-        // §11's third requirement, and the one §7's binding rests on: an object is immutable, so the
-        // only way its bytes change is a delete and a new object under the same key.
+        // The third requirement, and the one binding a reader to one version of an object rests
+        // on: an object is immutable, so the only way its bytes change is a delete and a new
+        // object under the same key.
         await using IObjectStore store = Open(kind);
         await store.PutIfAbsentAsync("data/token", Bytes("first"), default);
         string first = (await store.HeadAsync("data/token", default))!.Value.Token;
@@ -145,7 +146,7 @@ public sealed class ObjectStoreContractTests : IDisposable
     [MemberData(nameof(Stores))]
     public async Task AHeadSaysWhenTheStoreCreatedTheObject(string kind)
     {
-        // §10's vacuum ages an unreferenced object by the store's timestamp: a store that could not
+        // The vacuum ages an unreferenced object by the store's timestamp: a store that could not
         // say when it created an object would have every orphan look like a writer in flight.
         await using IObjectStore store = Open(kind);
         DateTimeOffset before = DateTimeOffset.UtcNow.AddSeconds(-5);
@@ -188,7 +189,7 @@ public sealed class ObjectStoreContractTests : IDisposable
 
         Assert.Equal(keys, await store.ListAsync(string.Empty, null, 100, default));
 
-        // §8.3: one List of the commit prefix returns the newest commit, because the key inverts
+        // One List of the commit prefix returns the newest commit, because the key inverts
         // the version. Nothing here knows that rule -- it is ordinal order doing the work.
         IReadOnlyList<string> newest = await store.ListAsync("commit/", null, 1, default);
         Assert.Equal(["commit/99999999999999999997.vxc"], newest);
@@ -217,8 +218,8 @@ public sealed class ObjectStoreContractTests : IDisposable
     [MemberData(nameof(Stores))]
     public async Task OnlyOneOfManyConcurrentPutsCreatesTheKey(string kind)
     {
-        // §11's first requirement, and the one the whole commit protocol rests on (§8.1): a commit
-        // is a conditional creation, so a store whose PutIfAbsent is a get-then-put loses commits.
+        // The first requirement, and the one the whole commit protocol rests on: a commit is a
+        // conditional creation, so a store whose PutIfAbsent is a get-then-put loses commits.
         await using IObjectStore store = Open(kind);
         const int writers = 16;
         using Barrier barrier = new Barrier(writers);
@@ -261,7 +262,7 @@ public sealed class ObjectStoreContractTests : IDisposable
     [MemberData(nameof(Stores))]
     public async Task AnObjectOfManyMegabytesIsReadInPieces(string kind)
     {
-        // §11's fourth requirement: "ranged GetRange on objects of any size".
+        // The fourth requirement: a ranged GetRange on objects of any size.
         await using IObjectStore store = Open(kind);
         byte[] content = new byte[4 << 20];
         for (int i = 0; i < content.Length; i++)

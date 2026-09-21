@@ -1,6 +1,6 @@
-// The clustering key of docs/13-dataset.md §4.1, the mandatory run of §6.1, and the k-way merge of
-// §6.6 -- all three under §14's acceptance, "every answer it gives must equal the answer a single
-// file would give".
+// The clustering key, the mandatory run on it, and the k-way merge across objects -- all three
+// under one acceptance rule: every answer the dataset gives must equal the answer a single file
+// would give.
 //
 // THE DATA IS BUILT TO BREAK A LAZY IMPLEMENTATION, and every choice here is one of those breaks.
 // The objects' key ranges INTERLEAVE -- object i holds the keys congruent to i modulo four -- so a
@@ -8,7 +8,7 @@
 // order on the very first two keys. They are APPENDED OUT OF ORDER -- 3, 1, 0, 2 -- so a tree that
 // kept insertion order rather than key order would be caught by the first assertion. And within an
 // object the keys are SHUFFLED, so the column is not sorted and `file.Keys(...)` can only be served
-// by the run §6.1 makes mandatory: a test that wrote sorted keys would pass with no index at all.
+// by the mandatory run: a test that wrote sorted keys would pass with no index at all.
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -67,7 +67,7 @@ public sealed class DatasetClusteringTests
     [Fact]
     public async Task EveryAppendedObjectCarriesTheMandatoryRun()
     {
-        // §6.1. The keys inside an object are shuffled, so nothing but the run can serve a cursor.
+        // The keys inside an object are shuffled, so nothing but the run can serve a cursor.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -90,7 +90,8 @@ public sealed class DatasetClusteringTests
     [Fact]
     public async Task TheMergedCursorWalksEveryKeyInOrder()
     {
-        // §6.6: "a k-way merge of the level-0 objects, through their runs", at "≤ 8 + L cursors".
+        // A k-way merge of the level-0 objects, through their runs, at no more than 8 + L cursors:
+        // eight level-0 objects and one per level below.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -210,7 +211,7 @@ public sealed class DatasetClusteringTests
     [Fact]
     public async Task TheKeysColumnsAreSummarisedWhateverTheLimitSays()
     {
-        // §4.2 bounds an entry's summaries to the first 32 columns. The column the dataset is
+        // An entry's summaries are bounded to the first 32 columns. The column the dataset is
         // ORDERED by is not one a limit may drop: without it there is nothing to order a cursor-less
         // object by, and nothing to prune with on the column a reader filters by most.
         Decoders.EnsureRegistered();
@@ -249,8 +250,8 @@ public sealed class DatasetClusteringTests
     [Fact]
     public async Task TheTerminalsAcrossObjectsAnswerAsOneFileDoes()
     {
-        // 12 §5: the terminals, one level up. The summaries let an object that cannot beat the best
-        // so far be skipped whole -- §6.6's third answer at k = 1.
+        // A single file's terminals, one level up. The summaries let an object that cannot beat
+        // the best so far be skipped whole -- the pruning of an ordered LIMIT k, at k = 1.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);

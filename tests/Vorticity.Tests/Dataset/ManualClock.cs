@@ -1,5 +1,5 @@
 // A clock a test moves by hand, so that an object can be older than a retention window without a
-// test waiting for one (docs/13-dataset.md §10).
+// test waiting for one.
 using System;
 
 namespace Vorticity.Tests.Dataset;

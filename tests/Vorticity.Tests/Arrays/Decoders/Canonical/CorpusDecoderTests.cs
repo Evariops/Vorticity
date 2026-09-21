@@ -4,8 +4,7 @@
 // The set is exactly the corpus entries whose root layout is a single `vortex.flat` leaf and whose
 // array tree uses only the fourteen encodings this component owns, so the blob is reachable without
 // a layout reader. Each row count the corpus uses - 1, 1023, 1025 and the 4096 default - appears
-// here, which covers the FastLanes block (1024) and row block (8192) boundaries the contract's
-// §1.8 list is about.
+// here, which covers the FastLanes block (1024) and row block (8192) boundaries.
 using System.Text.Json;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -50,8 +49,8 @@ public sealed class CorpusDecoderTests
     public async Task AllNullColumnCollapsesToAllInvalid()
     {
         // containers/all_null_i64_explicit_validity_r1025 is one of the two corpus files that carry
-        // a materialized all-zero validity child rather than a folded vortex.constant node
-        // (contract §2.6 rule 4). It must still report AllInvalid, not Bitmap.
+        // a materialized all-zero validity child rather than a folded vortex.constant node. It
+        // must still report AllInvalid, not Bitmap.
         const string Entry = "containers/all_null_i64_explicit_validity_r1025";
         Sidecar? sidecar = Sidecar.TryLoad(Entry);
         Assert.NotNull(sidecar);
@@ -79,8 +78,8 @@ public sealed class CorpusDecoderTests
         CanonicalNode root = file.Scan.Canonical.GetNode(file.RootIndex);
         Assert.Equal(CanonicalKind.Bool, root.Kind);
 
-        // The bitmap is never shifted: the offset travels with it (contract §2.6 rule 5), so a
-        // non-zero offset here is the whole point of the fixture.
+        // The bitmap is never shifted: the offset travels with it, so a non-zero offset here is
+        // the whole point of the fixture.
         Assert.InRange(root.BitOffset, 0, 7);
         Assert.NotEqual(0, root.BitOffset);
     }
@@ -88,8 +87,8 @@ public sealed class CorpusDecoderTests
     [Fact]
     public async Task ConstantNodeCarriesExactlyOneBufferAndNoMetadata()
     {
-        // Contract §0a C1: the scalar is buffer 0 and the metadata is empty. The sidecar records
-        // metadata_len 0 for every constant node in the corpus; this asserts the shape we decode.
+        // The scalar is buffer 0 and the metadata is empty. The sidecar records metadata_len 0 for
+        // every constant node in the corpus; this asserts the shape we decode.
         const string Entry = "encodings/constant";
         Sidecar? sidecar = Sidecar.TryLoad(Entry);
         Assert.NotNull(sidecar);

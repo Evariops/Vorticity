@@ -1,5 +1,5 @@
-// The counter of docs/13-dataset.md §9.2, on its own: what it counts, and the one number a total
-// of requests cannot give.
+// The counter behind the dataset's request budget, on its own: what it counts, and the one
+// number a total of requests cannot give.
 using System;
 using System.Text;
 using System.Threading.Tasks;

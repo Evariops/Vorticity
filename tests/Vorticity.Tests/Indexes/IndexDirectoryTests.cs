@@ -1,6 +1,6 @@
-// The directory of docs/10-indexes.md §4.1 as bytes, and the reader rules it is held to.
+// The index directory as bytes, and the reader rules it is held to.
 //
-// EVERY REFUSAL HERE IS A SUCCESSFUL CALL. An index is a hint (docs/08-semantics.md §5): a stale,
+// EVERY REFUSAL HERE IS A SUCCESSFUL CALL. An index is a hint: a stale,
 // malformed or foreign directory must read as "no index" and never as an exception, and a bad entry
 // must cost that entry and nothing else. So each test below asks `TryParse` a question whose honest
 // answer is "not usable", and checks it said so without throwing.
@@ -75,7 +75,7 @@ public sealed class IndexDirectoryTests
     [Fact]
     public void VersionTwoChecksItsTrailerAndCarriesARegionsChecksum()
     {
-        // 13 §7 (step 21): `[2][message][XXH3-64 of both]`, and a checksum per region.
+        // Version two is `[2][message][XXH3-64 of both]`, with a checksum per region.
         byte[] region = [1, 2, 3, 4, 5, 6, 7, 8, 9];
         IndexSegment checksummed = IndexSegment.Of(512, region, 6);
         IndexDirectory written = new IndexDirectory(

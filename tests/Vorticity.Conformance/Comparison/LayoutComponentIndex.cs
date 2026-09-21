@@ -2,10 +2,10 @@
 //
 // The manifest's `array_ids` pools every encoding a file contains, wherever it sits. Four corpus
 // files (types/decimal18_4_{nonnull,nullable}_r8193 and types/timestamp_ms_{nonnull,nullable}_r8193)
-// used an encoding Phase 1 did not decode - vortex.decimal_byte_parts, vortex.datetimeparts - and
-// use it ONLY inside the zone map of their vortex.zoned layout. Both are decoded today; the split
-// stays because it is a property of the READ PATH, not of the decoder table: ZonedLayoutReader never
-// reads the zones child, which only pruning reads, through its own path.
+// use an encoding - vortex.decimal_byte_parts, vortex.datetimeparts - ONLY inside the zone map of
+// their vortex.zoned layout. That distinction is a property of the READ PATH, not of the decoder
+// table: ZonedLayoutReader never reads the zones child, which only pruning reads, through its own
+// path.
 //
 // So "out of scope" splits in two, and the acceptance criterion - "fails with a named component
 // rather than a wrong answer" - is met by both halves:

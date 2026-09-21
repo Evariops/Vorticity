@@ -14,7 +14,7 @@ namespace Vorticity.Conformance;
 
 public sealed class CorpusValueTests
 {
-    /// <summary>Every file whose every component this build implements - PHASE1-CONTRACTS.md §14.1.</summary>
+    /// <summary>Every file whose every component this build implements.</summary>
     public static TheoryData<string> InScopeFiles()
     {
         TheoryData<string> data = new TheoryData<string>();

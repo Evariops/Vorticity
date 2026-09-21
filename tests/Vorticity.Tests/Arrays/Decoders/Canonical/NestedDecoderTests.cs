@@ -1,5 +1,5 @@
 // vortex.struct, vortex.list, vortex.listview, vortex.fixed_size_list, vortex.ext and
-// vortex.masked: child order, the derived dtypes and lengths of §9.1, and the range checks that
+// vortex.masked: child order, each child's derived dtype and length, and the range checks that
 // keep a bad offset from becoming an out-of-bounds read.
 using System;
 using System.Buffers.Binary;

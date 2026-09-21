@@ -1,4 +1,4 @@
-// Malformed input. The promise of docs/09-contracts.md §4 is absolute: every one of these must
+// Malformed input. The promise here is absolute: every one of these must
 // produce a VortexFormatException and nothing else - never an IndexOutOfRange, never an
 // unbounded allocation, never a hang, never a plausible wrong answer.
 //
@@ -77,7 +77,7 @@ public sealed class VortexFileMalformedTests
     {
         // The file is cut to `postscript_length + 8 - 1` bytes: the EOF marker survives, its
         // declared length does not fit, and the length must be rejected BEFORE it is used to
-        // slice. That ordering is the whole point of PHASE1-CONTRACTS.md §7.3.
+        // slice. That ordering is the whole point of the test.
         byte[] bytes = Original();
         int postscriptLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(bytes.Length - 6, 2));
         byte[] truncated = bytes.AsSpan(bytes.Length - (postscriptLength + 7)).ToArray();
@@ -89,7 +89,7 @@ public sealed class VortexFileMalformedTests
     [Fact]
     public async Task EverySingleByteMutationOfTheFooterRegionIsRejectedOrOpensCleanly()
     {
-        // The blunt instrument that backs the absolute promise of docs/09-contracts.md §4: a
+        // The blunt instrument that backs the absolute promise on malformed input: a
         // deterministic sweep of single-byte mutations over the last 4 KB - postscript, footer,
         // layout and statistics - asserting that the ONLY two outcomes are a clean open and a
         // VortexFormatException. No IndexOutOfRange, no OverflowException, no hang.

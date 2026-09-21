@@ -1,5 +1,4 @@
-// A torn tail opens at the last whole version - docs/13-dataset.md §12, docs/11-write-strategy.md
-// §3.8, step 25 of IMPL-PLAN.md.
+// A torn tail opens at the last whole version.
 //
 // WHAT IS HELD: a file an append tore anywhere -- one byte short, in the postscript, in the footer,
 // half way through the appended data -- opens at the version before the append, says so, and

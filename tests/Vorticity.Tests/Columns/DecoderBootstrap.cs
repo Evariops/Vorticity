@@ -1,10 +1,9 @@
 // TEST SCAFFOLDING, and it is now a no-op.
 //
-// ArrayDecoderTable's static constructor is the wave-C integration point of Phase 1 contract §8.2
-// and §15 item 1, and it names all twenty-three decoders. IsImplemented is therefore true for every
-// slot below and Fill installs nothing; the call remains as the one place the column tests reach for
-// "the decoders exist", and as the guard that would refill the table if that constructor ever lost
-// a line.
+// ArrayDecoderTable's static constructor names all twenty-three decoders. IsImplemented is
+// therefore true for every slot below and Fill installs nothing; the call remains as the one place
+// the column tests reach for "the decoders exist", and as the guard that would refill the table if
+// that constructor ever lost a line.
 using System.Threading;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;

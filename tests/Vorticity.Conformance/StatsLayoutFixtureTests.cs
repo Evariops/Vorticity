@@ -209,7 +209,7 @@ public sealed class StatsLayoutFixtureTests
         }
 
         // Dispatched on the physical type rather than widened to i64: AsPrimitive<T> requires the
-        // exactly matching .NET type by contract §12.3, and the point here is to render whatever the
+        // exactly matching .NET type, and the point here is to render whatever the
         // file holds, not to assume a width.
         return column.DType.PType switch
         {

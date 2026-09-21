@@ -1,6 +1,6 @@
 // The rule "no ReadInteger/ReadUnsigned/WriteInteger inside a per-row loop", made executable.
 //
-// PERF-AUDIT-v2.md F3. The three helpers take a `PType` and an index and switch on the type to
+// The three helpers take a `PType` and an index and switch on the type to
 // decide how to read one value; calling them per row pays that switch per row, for a property of
 // the CALL, not of the row. `ComparisonKernels` is the measurement that makes the rule worth
 // having: hoisting the type switch, the validity switch and the operator switch out of the loop was
@@ -42,7 +42,7 @@ using Xunit;
 
 namespace Vorticity.Tests.Compute;
 
-/// <summary>Holds the per-row type dispatch of PERF-AUDIT-v2.md annexe A at a descending count.</summary>
+/// <summary>Holds the library's per-row type dispatch at a descending count.</summary>
 public sealed partial class PerRowDispatchTests
 {
     /// <summary>A call to one of the three, not a mention of one.</summary>
@@ -99,70 +99,17 @@ public sealed partial class PerRowDispatchTests
 
     /// <summary>The grand totals, which are annexe A's two headline numbers.</summary>
     /// <remarks>
-    /// 66 when this test was written; **64 since R7** removed both calls from
-    /// <c>ListViewDecoder.ValidateRanges</c>, which no longer appears here at all — the file went
-    /// to zero calls and its row went with it, which is the shape a wired site is supposed to make.
-    ///
-    /// **62 since W-9**, which did the same to <c>SequencePlan</c>: its `Read` helper was the two
-    /// calls, and typing the walk removed the helper.
-    ///
-    /// **60 since stage 1 of docs/11-write-strategy.md §8**, which deleted <c>ZoneStatistics</c>
-    /// outright. Its replacement, <c>BlockStatsPass</c>, resolves the physical type once into a
-    /// generic instantiation and reads the constant form's single element through
-    /// <c>BinaryPrimitives</c>, so the file does not appear in this table at all — the shape W-12
-    /// asked for.
-    ///
-    /// **59 since stage 2g**: <c>BitPackPlan.Collect</c> counted the values a width cannot hold by
-    /// walking the column, to size the arrays it was about to fill by walking it again. The count
-    /// was already in the histogram the chooser had just priced the width from, so the first walk
-    /// went — and with it the last site in this file that was not the encode itself.
-    ///
-    /// **58 with the same stage's second commit**: the width histogram, the one walk of that file
-    /// that reads every row of every integer column of every chunk, resolves the physical type
-    /// before it starts instead of switching on it per value. Same shape as R7, W-9 and W-33, and
-    /// the last dispatching site in `BitPackPlan` that is not `Minimum` or the patch gather.
-    ///
-    /// **57 since stage R5b-2**: the patch gather is gone from `BitPackPlan` altogether. The pack
-    /// transforms every row anyway and sees each exception as it goes, so the plan carries the
-    /// count and the pack finds the rows — one walk where there were two, and the same transform
-    /// applied once instead of twice. What is left in the file is `Minimum`, already skipped
-    /// whenever the ingest pass has the reference.
+    /// A wired site resolves the physical type once, before its walk; the shape it is supposed to
+    /// make is its file going to zero calls.
     /// </remarks>
-    ///
-    /// **55 since CO-1**: the two integer-against-float kernels were the last pair in
-    /// `ComparisonKernels` that read a value through a type switch, and they now go through the
-    /// same `CompareOp` every other comparison goes through. The file leaves the table.
     private const int TotalCalls = 55;
 
     /// <summary>Calls annexe A classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
-    /// 27 when this test was written; **26 since R6** wired `DictLayoutReader.Gather` onto
-    /// `RowKernels`. The file still has one call and the ceiling is still 1, but its COMPOSITION
-    /// changed -- what is left is `ThrowCode`, an error path -- and that is the change this column
-    /// exists to record. A total that only ever moved with the ceiling would have missed it.
-    ///
-    /// **24 since R7**: `ListViewDecoder.ValidateRanges` resolves both physical types before its
-    /// loop, so its two per-row calls went away with its ceiling.
-    ///
-    /// **22 since W-9**: `SequencePlan.TryBuild` resolves its physical type before the walk, and
-    /// its two calls went the same way. This is the first WRITE-side site the ratchet has seen
-    /// leave.
-    ///
-    /// **20 since stage 1 of docs/11-write-strategy.md §8**: `ZoneStatistics` was two per-row calls
-    /// in a two-pass summariser, and the whole file is gone. W-12 is closed.
-    ///
-    /// **19 since stage 2g**: the counting walk of `BitPackPlan.Collect` was one of them.
-    ///
-    /// **18 with the same stage's second commit**: the width histogram is typed, so its read is
-    /// resolved once per column and not once per row.
-    ///
-    /// **17 since stage R5b-2**: the patch gather's read went with the gather. The pack's own
-    /// per-row read (`Writing/ArrayBlobWriter.cs`, W-13) now finds the patches too, so the count
-    /// of walks over a bit-packed column dropped without a new site appearing.
+    /// It can drop while a file's ceiling stays put, when a per-row call is wired and the call
+    /// left in the file is an error path: that change of COMPOSITION is what this column exists
+    /// to record.
     /// </remarks>
-    ///
-    /// **15 since CO-1**, the same two: they were per-row by the strictest reading, one read of one
-    /// value per row of the column.
     private const int TotalPerRow = 15;
 
     [Fact]

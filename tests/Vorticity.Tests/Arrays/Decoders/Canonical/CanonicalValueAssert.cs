@@ -1,4 +1,4 @@
-// Compares a decoded canonical node against the sidecar's `rows` values, per corpus/SIDECAR.md.
+// Compares a decoded canonical node against the sidecar's `rows` values.
 //
 // The value grammar is normative and travels with each file: integers are decimal STRINGS (a JSON
 // number is an f64 in most parsers and u64::MAX does not survive one), floats are {bits, dec} with

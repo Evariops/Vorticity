@@ -1,5 +1,5 @@
-// An in-memory ISegmentSource that counts every call. Counting is the point: PHASE1-CONTRACTS.md
-// §7.1 promises 1-2 round trips on open, and nothing else in the test suite measures that number.
+// An in-memory ISegmentSource that counts every call. Counting is the point: opening a file
+// promises one or two round trips, and nothing else in the test suite measures that number.
 // It is also the only way to feed VortexFile a byte-for-byte mutation of a corpus file without
 // writing to disk.
 using System;
@@ -44,7 +44,7 @@ internal sealed class TestSegmentSource : ISegmentSource
     /// <summary>Number of <see cref="ReadManyAsync"/> calls.</summary>
     internal int BatchReads { get; private set; }
 
-    /// <summary>Total round trips of every kind, the number §7.1 bounds at two.</summary>
+    /// <summary>Total round trips of every kind; an open costs at most two.</summary>
     internal int TotalReads => RangeReads + SegmentReads + BatchReads;
 
     /// <summary>Whether <see cref="DisposeAsync"/> ran.</summary>

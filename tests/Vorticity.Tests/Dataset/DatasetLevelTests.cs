@@ -1,15 +1,15 @@
-// The levels of docs/13-dataset.md §5.2, and the reporting §5.1 asks of them.
+// The dataset's levels, and the lag they must report.
 //
-// WHAT A LEVEL IS FOR, in one sentence from §5.1: "without a merge policy, the number of objects a
-// lookup touches is the number of appends". Levels are how that stops being true. What this file
+// WHAT A LEVEL IS FOR, in one sentence: without a merge policy, the number of objects a
+// lookup touches is the number of appends. Levels are how that stops being true. What this file
 // holds is the MACHINERY, apart from the policy (`DatasetCompactionTests`): a tree per level, a
-// commit that writes several of them, a walk that merges them into one key order, and the lag §5.1
-// requires to be reported rather than refused.
+// commit that writes several of them, a walk that merges them into one key order, and a lag that
+// is reported rather than refused.
 //
-// THE ACCEPTANCE IS §14's. Moving an object from level 0 to level 1 is what a compaction does; the
-// rows it holds must not change because of where its entry sits. So the tests below move objects
-// between levels by hand, through the same `ReplaceObjects` the compactor uses, and compare the
-// answers against the same rows in one file.
+// THE ACCEPTANCE IS A SINGLE FILE'S ANSWER. Moving an object from level 0 to level 1 is what a
+// compaction does; the rows it holds must not change because of where its entry sits. So the
+// tests below move objects between levels by hand, through the same `ReplaceObjects` the
+// compactor uses, and compare the answers against the same rows in one file.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -93,8 +93,9 @@ public sealed class DatasetLevelTests
     [Fact]
     public async Task ACompactionMovesObjectsBetweenLevelsInOneOperation()
     {
-        // §5.3's shape: a leveled compaction reads level 0 and the overlapping objects of level 1,
-        // and writes level 1. One operation, because §8.2's row 5 has to abandon all of it at once.
+        // A leveled compaction reads level 0 and the overlapping objects of level 1, and writes
+        // level 1. One operation, because a compaction that lost its input to a race must abandon
+        // all of it at once.
         await using MemoryObjectStore store = new MemoryObjectStore();
         await DatasetCommitter.CommitAsync(store, [Add(1), Add(2), Add(3)], Options(), default);
         await DatasetCommitter.CommitAsync(store, [Add(50, level: 1)], Options(), default);
@@ -118,8 +119,9 @@ public sealed class DatasetLevelTests
     [Fact]
     public async Task ACompactionWhoseInputMovedLevelAbandons()
     {
-        // §8.2, row 5, across levels: a compactor that planned against level 0 and lost the race to
-        // one that already moved the object finds its input missing, and its outputs are garbage.
+        // Across levels too, a compaction whose input is gone abandons: a compactor that planned
+        // against level 0 and lost the race to one that already moved the object finds its input
+        // missing, and its outputs are garbage.
         await using MemoryObjectStore store = new MemoryObjectStore();
         await DatasetCommitter.CommitAsync(store, [Add(1), Add(2)], Options(), default);
 
@@ -140,8 +142,8 @@ public sealed class DatasetLevelTests
     [Fact]
     public async Task AScanOverSeveralLevelsAnswersAsOneFile()
     {
-        // The acceptance of §14, with the objects spread over levels: where an entry SITS changes
-        // nothing about the rows it holds.
+        // The answers equal one file's with the objects spread over levels: where an entry SITS
+        // changes nothing about the rows it holds.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -202,8 +204,8 @@ public sealed class DatasetLevelTests
     [Fact]
     public async Task ExplainReportsTheLagAndRefusesNothing()
     {
-        // §5.1: "`Explain` reports every violation of it as a lag, with the count", and §5.3: "a
-        // level-0 count above 8 degrades the read bound and is reported, never refused".
+        // `Explain` reports every violation of the level-0 ceiling as a lag, with the count: a
+        // level-0 count above 8 degrades the read bound and is reported, never refused.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);

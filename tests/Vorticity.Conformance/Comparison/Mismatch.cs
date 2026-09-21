@@ -56,7 +56,8 @@ internal sealed class MismatchLog
 
     /// <summary>
     /// Paths whose null_count could not be checked because the file's own field names make the
-    /// `.`-joined path ambiguous (SIDECAR.md, "null_counts paths"). Named, never silent.
+    /// `.`-joined path ambiguous, a field name being free to contain a '.' or to be empty. Named,
+    /// never silent.
     /// </summary>
     internal List<string> SkippedNullCountPaths { get; } = new List<string>();
 

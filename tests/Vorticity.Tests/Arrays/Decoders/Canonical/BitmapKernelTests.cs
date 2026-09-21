@@ -1,5 +1,5 @@
-// The two kernels PERF-AUDIT §4.2 moved out of bit-at-a-time loops, checked against the bit-at-a-
-// time loops they replace.
+// The two bitmap kernels that avoid bit-at-a-time loops, checked against the bit-at-a-time loops
+// they stand in for.
 //
 // A bitmap kernel is exactly the kind of code where a fast path is right for 4094 of 4096
 // alignments: the head, the tail and the single-byte range are each a different shape, and the

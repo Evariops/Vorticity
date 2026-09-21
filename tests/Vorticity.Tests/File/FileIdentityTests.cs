@@ -1,4 +1,4 @@
-// The identity of a version of a file's bytes - docs/13-dataset.md §7, step 20 of IMPL-PLAN.md.
+// The identity of a version of a file's bytes.
 //
 // WHAT IS HELD: every postscript this library writes names sixteen bytes that change with every
 // write, append and post-hoc indexing; a caller can pin them; the entry sits right before the

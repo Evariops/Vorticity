@@ -1,6 +1,4 @@
-// An index fragment bound to one version of one file - docs/13-dataset.md §7 and §6.4. These were
-// the sidecar's binding tests (step 26); step 42d retired the sidecar and kept its container, which
-// is the fragment, so they hold the same promises of the fragment.
+// An index fragment bound to one version of one file.
 //
 // WHAT IS HELD: a fragment records the file's length, identity, store token and XXH3-128; reading it
 // reads no byte of the file beyond the tail the open already took; a file rewritten at the same
@@ -162,7 +160,7 @@ public sealed class FragmentBindingTests
     [Fact]
     public async Task AByteChangedUnderTheIdentityPassesTheReaderAndFailsTheRecordedHash()
     {
-        // 13 §7: no reader computes the hash. A byte of data changed in place keeps the length and
+        // No reader computes the hash. A byte of data changed in place keeps the length and
         // the identity, so the fragment still binds; only the offline check sees it.
         Decoders.EnsureRegistered();
         using Temp temp = new Temp();

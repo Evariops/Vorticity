@@ -1,5 +1,5 @@
-// The summaries of docs/13-dataset.md §4.2 and the positional access of §6.6, under §14's one
-// acceptance: "every answer it gives must equal the answer a single file would give".
+// The dataset's summaries and its positional access, under one acceptance: every answer the
+// dataset gives must equal the answer a single file would give.
 //
 // SO EVERY PRUNING TEST HERE IS TWO ASSERTIONS, never one. The first is the acceptance: the rows the
 // scan returns with the summaries consulted are exactly the rows it returns with `WithSummaries
@@ -34,8 +34,8 @@ public sealed class DatasetSummaryTests
     [Fact]
     public async Task AFilterInsideOneObjectOpensOnlyThatObject()
     {
-        // §4.2: "a predicate that the node's summaries refute skips the whole subtree" -- here, at
-        // the leaf, the object itself.
+        // A predicate that a node's summaries refute skips the whole subtree -- here, at the leaf,
+        // the object itself.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -102,8 +102,8 @@ public sealed class DatasetSummaryTests
     [Fact]
     public async Task ANodeThatRefutesThePredicateCostsItsSubtreeNoRead()
     {
-        // The claim of §4.2 that only a deep tree can show: the walk stops at an INTERNAL entry, so
-        // the leaf pages under it are never read and their objects are never even considered.
+        // The summaries' claim that only a deep tree can show: the walk stops at an INTERNAL entry,
+        // so the leaf pages under it are never read and their objects are never even considered.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -140,8 +140,8 @@ public sealed class DatasetSummaryTests
     [Fact]
     public async Task RowsAcrossObjectsAreTheSameRowsOfOneFile()
     {
-        // §6.6, "access by position, `Rows(a, b)`: the insertion-order tree, nodes carrying row
-        // sums". The ranges below are chosen to fall inside one object, to straddle two, and to run
+        // Access by position, `Rows(a, b)`, walks the insertion-order tree, whose nodes carry row
+        // sums. The ranges below are chosen to fall inside one object, to straddle two, and to run
         // past the end -- the three cases an off-by-one lives in.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -186,7 +186,7 @@ public sealed class DatasetSummaryTests
     [Fact]
     public async Task AnObjectOpenedOnceStaysOpen()
     {
-        // §3: a data object is immutable, so the second scan's opens are pure waste and the cache
+        // A data object is immutable, so the second scan's opens are pure waste and the cache
         // is what removes them. The counters are the claim; the rows are the acceptance.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -220,7 +220,8 @@ public sealed class DatasetSummaryTests
             new ColumnSummary("name", FilterLiteral.From("a"), true, FilterLiteral.From("z"), true, false, 0, false),
         ]);
 
-        // Sorted by path, so that one set of bounds has one encoding (§4.1's byte-identical pages).
+        // Sorted by path, so that one set of bounds has one encoding and a key set's pages stay
+        // byte-identical.
         Assert.Equal(["key", "measure", "name"], [.. Paths(summaries)]);
 
         byte[] bytes = summaries.ToBytes();
@@ -240,8 +241,8 @@ public sealed class DatasetSummaryTests
     [Fact]
     public void OneSetOfBoundsHasOneEncoding()
     {
-        // §4.1 promises "byte-identical pages and one root hash" for a key set, so a summary that
-        // says nothing must not be writable: two encodings of one meaning are two trees.
+        // A key set has byte-identical pages and one root hash, so a summary that says nothing
+        // must not be writable: two encodings of one meaning are two trees.
         ColumnSummary silent = new ColumnSummary("x", default, false, default, false, true, 0, false);
         Assert.True(silent.IsEmpty);
         Assert.Equal(0, ObjectSummaries.From([silent]).Count);

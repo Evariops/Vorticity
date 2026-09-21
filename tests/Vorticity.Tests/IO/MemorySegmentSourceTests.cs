@@ -9,10 +9,9 @@ using static Vorticity.Tests.IO.IoTestData;
 namespace Vorticity.Tests.IO;
 
 /// <summary>
-/// The in-memory source held to the all-or-nothing rule the other sources follow
-/// (docs/03-architecture.md §3.5): a batch either fills every slot or leaves the set as it found
-/// it. It is the source tests and small readers run on, so a set it half-fills is a set every
-/// caller after it inherits.
+/// The in-memory source held to the all-or-nothing rule the other sources follow: a batch either
+/// fills every slot or leaves the set as it found it. It is the source tests and small readers run
+/// on, so a set it half-fills is a set every caller after it inherits.
 /// </summary>
 public sealed class MemorySegmentSourceTests
 {

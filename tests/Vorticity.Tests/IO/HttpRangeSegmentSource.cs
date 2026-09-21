@@ -1,6 +1,5 @@
-// docs/03-architecture.md §3.5: "A reference HttpRangeSegmentSource with injectable latency ships
-// in the test project, not in the core. It costs nothing in dependencies and it is the executable
-// proof that the seam holds."
+// A reference HttpRangeSegmentSource with injectable latency ships in the test project, not in the
+// core. It costs nothing in dependencies and it is the executable proof that the seam holds.
 //
 // It is written the way an external implementer would have to write it: PUBLIC API ONLY. Nothing
 // here touches an internal member of Vorticity, and no rule it obeys was learned anywhere but
@@ -25,7 +24,7 @@ namespace Vorticity.Tests.IO;
 /// The object-storage shape, and it differs from the local ones on purpose. A response body is a
 /// stream, so segmentation happens during the copy off the socket: this source stages a coalesced
 /// run in a pooled managed array and copies each segment into its own aligned buffer. That is the
-/// "one unavoidable copy, accepted" of docs/03-architecture.md §3.5, and it exercises
+/// one copy a streamed body cannot avoid, accepted as such, and it exercises
 /// <see cref="SegmentRequestSet.SetResult"/> — the owner-per-slot half of the API that the
 /// zero-copy local sources never touch.
 /// </para>
@@ -292,7 +291,7 @@ public sealed class HttpRangeSegmentSource : ISegmentSource
     /// </summary>
     private static void Validate(in SegmentSpec spec, long fileLength, out long offset, out int length)
     {
-        // Never a local cap: PHASE1-CONTRACTS.md §0a C4.
+        // The library's own cap, never a local one tuned to what the corpus happens to contain.
         VortexLimits.CheckAlignmentExponent(spec.AlignmentExponent);
 
         if (spec.Length > int.MaxValue)

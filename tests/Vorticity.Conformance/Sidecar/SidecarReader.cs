@@ -1,6 +1,6 @@
-// The sidecar reader, written against corpus/SIDECAR.md and nothing else.
+// The sidecar reader, written against the sidecar grammar and nothing else.
 //
-// Two properties of that document drive the shape of this class:
+// Two properties of that grammar drive the shape of this class:
 //
 //   * "Dispatch on the top-level `kind`" - `kind` is ALSO the discriminator inside dtype trees, so
 //     the only correct reader parses each line and looks at the top-level member. This one does,
@@ -13,7 +13,7 @@
 //     the order a scan produces its batches in.
 //
 // The header's sha256 is checked against the .vortex before anything else is trusted, as the
-// document requires: a sidecar regenerated against a different file is otherwise undetectable.
+// grammar requires: a sidecar regenerated against a different file is otherwise undetectable.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -120,8 +120,8 @@ internal sealed class SidecarReader : IDisposable
     }
 
     /// <summary>
-    /// Verifies the header's `sha256` against the actual bytes of the <c>.vortex</c>, as SIDECAR.md
-    /// requires before anything else in the sidecar is trusted.
+    /// Verifies the header's `sha256` against the actual bytes of the <c>.vortex</c>, which must
+    /// happen before anything else in the sidecar is trusted.
     /// </summary>
     /// <param name="vortexPath">Absolute path of the paired <c>.vortex</c>.</param>
     /// <exception cref="SidecarFormatException">The hashes differ.</exception>
@@ -284,7 +284,7 @@ internal sealed class SidecarReader : IDisposable
             JsonValue segment = segments.Items[i];
             string key = segment.RequireString("key");
 
-            // SIDECAR.md: `b64` is "" for a present-but-empty segment, and the key is simply absent
+            // `b64` is "" for a present-but-empty segment, and the key is simply absent
             // when there is no such segment. Those are different states and neither is null.
             JsonValue? b64 = segment.Find("b64");
             byte[] value = b64 is null || b64.IsNull ? [] : Convert.FromBase64String(b64.Text);
@@ -381,8 +381,7 @@ internal sealed class SidecarReader : IDisposable
         }
 
         // Deliberately the TOP-LEVEL member, by name, from the parsed object: `kind` also
-        // discriminates dtype nodes, and a reader that scans the text for it mis-dispatches
-        // (SIDECAR.md, "Line order").
+        // discriminates dtype nodes, and a reader that scans the text for it mis-dispatches.
         return line.RequireString("kind");
     }
 }

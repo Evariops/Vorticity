@@ -1,5 +1,5 @@
-// `vorticity.postings.blocks.v1` and `vorticity.sorted.runs.v1` end to end (docs/10-indexes.md
-// §6.1, §6.2, §4.2, §6.6): written chunk by chunk, blocked into segments, probed after the zone maps.
+// `vorticity.postings.blocks.v1` and `vorticity.sorted.runs.v1` end to end: written chunk by
+// chunk, blocked into segments, probed after the zone maps.
 //
 // THE BATCHES DO NOT LINE UP WITH THE CHUNKS, on purpose: 5 000 rows at a time into 1 024-row
 // blocks, so every chunk close finds carried rows in the builder's log and has to cut it. And the
@@ -65,7 +65,7 @@ public sealed class LocatingIndexTests
     [Fact]
     public async Task TheWriterMergesTheChunkRunsIntoOneRunAndCountsItsEntries()
     {
-        // 13 §6.1 (step 22): a run per chunk is how the builders work, one run per entry is what
+        // A run per chunk is how the builders work, one run per entry is what
         // they write. The rows are a whole number of blocks, so no chunk keeps a run of its own.
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
@@ -98,7 +98,7 @@ public sealed class LocatingIndexTests
                 Assert.Equal(block, run.FirstBlock);
                 block = run.EndBlock;
 
-                // Inline or in fence pages past 64 segments (13 §6.3): the same segments either way.
+                // Inline or in fence pages past 64 segments: the same segments either way.
                 FenceTable table = Table(written.File, entry, run);
                 if (!table.Paged)
                 {

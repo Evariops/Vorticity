@@ -1,4 +1,4 @@
-// The forged fixtures, and the malformed-input invariant of docs/09-contracts.md §4.1:
+// The forged fixtures, and the malformed-input invariant:
 //
 //   "a file that violates the format - bad offsets, truncation, out-of-range Class I fields,
 //    exceeded caps - is guaranteed to produce a clean VortexFormatException or

@@ -1,4 +1,4 @@
-// The split-block Bloom filter against the reference's own, byte for byte (docs/10-indexes.md §5.1).
+// The split-block Bloom filter against the reference's own, byte for byte.
 //
 // `tools/conformance-gen/examples/gen_bloom_vectors.rs` builds each filter through vortex 0.86.1's
 // public `Accumulator` over a typed array, so the vectors carry upstream's hash, seed, block
@@ -294,8 +294,9 @@ public sealed class BloomVectorTests
     }
 
     /// <summary>
-    /// The probe against §5.1's rule spelled out, on a filter dense enough that both answers are
-    /// common, and every bit a lane can name among the probes.
+    /// The probe against the split-block rule spelled out -- the block from the hash's upper
+    /// half, one salted bit in each of its eight words -- on a filter dense enough that both
+    /// answers are common, and every bit a lane can name among the probes.
     /// </summary>
     [Fact]
     public void TheProbeAnswersTheRuleWordByWord()

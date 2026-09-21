@@ -2,9 +2,9 @@
 //
 // `ArenaLifetimeTests` shows the problem: an index captured in batch 1 reads batch 2's values,
 // because `BatchAsyncEnumerable` resets and refills ONE arena per batch. Anything that wants
-// canonical data to outlive the batch that produced it -- a dictionary shared across chunks (§3a),
-// `CanonicalConcat` across arenas (§3c), a chunk decoded once instead of once per batch (the scan
-// quadratic) -- needs the bytes materialized, not the record copied.
+// canonical data to outlive the batch that produced it -- a dictionary shared across chunks,
+// `CanonicalConcat` across arenas, a chunk decoded once instead of once per batch -- needs the
+// bytes materialized, not the record copied.
 //
 // SO THE TEST IS THE LIFETIME, NOT THE EQUALITY. Copying a node and comparing it to its source
 // passes just as well when the copy is a view onto the source's storage, which is the bug. Every

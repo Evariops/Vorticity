@@ -1,4 +1,4 @@
-// `IndexPolicy.Auto` (docs/10-indexes.md §5.5): every cheap builder starts at block 0, and the
+// `IndexPolicy.Auto`: every cheap builder starts at block 0, and the
 // statistics and the budget decide what survives.
 //
 // ONE COLUMN PER VERDICT, and the verdicts are arithmetic. A Bloom filter at 1 % costs about 1,2
@@ -43,7 +43,7 @@ public sealed class AutoIndexTests
     /// <summary>
     /// Wide enough that a Bloom filter pays: at 1 % a block's filter is 2 KiB after the power-of-two
     /// rounding, its generation's the same again per block, and the root of the three generations
-    /// two thirds of that again (13 §6.2: a level costs what the one below it costs when the values
+    /// two thirds of that again (a level costs what the one below it costs when the values
     /// do not repeat). 384 incompressible bytes a row make that 1,4 % of the column, under `Auto`'s
     /// 2 %; 256 made it 2,1 % once the root was built, and 1,6 % before.
     /// </summary>

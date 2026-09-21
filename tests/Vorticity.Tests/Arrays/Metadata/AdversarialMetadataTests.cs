@@ -1,5 +1,5 @@
 // Sweeps that run over every message in MetadataCatalog, so a codec added later cannot quietly
-// skip them. Phase 1 contract §6 "Tests must cover".
+// skip them.
 using System;
 using System.Collections.Generic;
 using Vorticity.Arrays.Metadata;

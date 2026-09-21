@@ -126,7 +126,7 @@ public sealed class ByteBoolDecoderTests
     [Fact]
     public void AnAllFalseConstantValidityChildCollapsesToAllInvalid()
     {
-        // Contract §2.6 rule 4: AllInvalid reaches the wire as vortex.constant(false).
+        // AllInvalid reaches the wire as vortex.constant(false).
         ScalarStore store = new();
         byte[] falseScalar = TestMetadata.Scalar(store.Bool(false));
         TestNode root = new TestNode("vortex.bytebool")

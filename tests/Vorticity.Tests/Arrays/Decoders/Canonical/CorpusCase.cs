@@ -2,7 +2,7 @@
 //
 // The 819 golden files are the only oracle in Phase 1 that was not written by us, so every decoder
 // in this component is pointed at real bytes. What this file does NOT do is the value-by-value
-// conformance sweep of contract §14 - that belongs to the conformance component. It reads exactly
+// conformance sweep - that belongs to the conformance component. It reads exactly
 // the files whose root layout is a single `vortex.flat` leaf covering the whole schema, which makes
 // the array blob reachable without a layout reader -- these tests hold the decoders apart from the
 // layouts -- and compares the decoded rows against the sidecar.

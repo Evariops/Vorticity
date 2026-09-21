@@ -1,7 +1,7 @@
 // The value comparison itself: one decoded row against one sidecar value, recursively.
 //
-// THE RULE THAT SHAPES EVERY LINE BELOW. SIDECAR.md encodes a float as `{bits, dec}` and says
-// "`bits` is normative", precisely so that -0.0 read as +0.0, or a NaN whose payload was
+// THE RULE THAT SHAPES EVERY LINE BELOW. The sidecar encodes a float as `{bits, dec}` and makes
+// `bits` normative, precisely so that -0.0 read as +0.0, or a NaN whose payload was
 // canonicalized on the way through, fails the comparison. So nothing here goes through a decimal
 // rendering, a `double` compare, or `Equals`: the f16/f32/f64 paths compare RAW IEEE BITS, and
 // `NaN == NaN` never enters the picture. The same reasoning applies to the other three encodings
@@ -52,7 +52,7 @@ internal static class ValueComparer
         log.CountValue();
         bool valid = column.IsValid(index);
 
-        // SIDECAR.md: "`null` is JSON null and nothing else ever is."
+        // `null` is JSON null and nothing else ever is.
         if (expected.IsNull)
         {
             if (valid)
@@ -117,8 +117,8 @@ internal static class ValueComparer
                 return;
 
             case DTypeKind.Extension:
-                // SIDECAR.md: "extension: the storage value; the extension id and metadata are in
-                // the dtype line." The dtype line is checked by SchemaComparer.
+                // An extension row is its storage value; the extension id and metadata are in
+                // the dtype line, which SchemaComparer checks.
                 CompareExtension(expected, column, index, path, fileRow, log);
                 return;
 
@@ -357,7 +357,7 @@ internal static class ValueComparer
     }
 
     /// <summary>
-    /// The normative float comparison: raw IEEE bits, big-endian hex, exactly as SIDECAR.md defines
+    /// The normative float comparison: raw IEEE bits, big-endian hex, as the sidecar encodes
     /// them. <paramref name="hexDigits"/> is 4, 8 or 16 - a bit pattern of the wrong width is a
     /// mismatch, not a value to be widened into agreement.
     /// </summary>
@@ -558,8 +558,8 @@ internal static class ValueComparer
 
         for (int i = 0; i < fields.FieldCount; i++)
         {
-            // Positional, not by name: SIDECAR.md says the object is "keyed by field name, in
-            // schema order", and a Vortex field name may be empty, contain a '.', or repeat.
+            // Positional, not by name: the sidecar object is keyed by field name in schema
+            // order, and a Vortex field name may be empty, contain a '.', or repeat.
             string name = fields.GetFieldName(i);
             string child = path.Length == 0 ? name : path + "." + name;
 

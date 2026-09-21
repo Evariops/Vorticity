@@ -1,4 +1,4 @@
-// Contract §8.5, one test per row of its mapping table plus the ways each row can be violated.
+// One test per row of the typed scalar mapping table, plus the ways each row can be violated.
 // The wire bytes are produced by Phase 0's ScalarProtobuf writer, so these exercise the typed
 // interpreter and not a hand-rolled encoder.
 using System;

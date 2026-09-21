@@ -10,9 +10,9 @@ using static Vorticity.Tests.IO.IoTestData;
 namespace Vorticity.Tests.IO;
 
 /// <summary>
-/// "Implementations MUST be thread-safe" (docs/09-contracts.md §1): concurrent splits read through
-/// one source. Nothing here depends on an interleaving, only on every reader getting its own
-/// correct bytes whatever the interleaving turns out to be.
+/// A segment source must be thread-safe: concurrent splits read through one source. Nothing here
+/// depends on an interleaving, only on every reader getting its own correct bytes whatever the
+/// interleaving turns out to be.
 /// </summary>
 public sealed class SegmentSourceConcurrencyTests
 {

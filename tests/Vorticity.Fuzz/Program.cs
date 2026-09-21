@@ -1,9 +1,9 @@
-// L4 of docs/04-conformance.md: the parser meets input nobody wrote on purpose.
+// The fuzzer: the parser meets input nobody wrote on purpose.
 //
 // THE INVARIANT, quoted: "only VortexFormatException or VortexUnsupportedException may escape. Any
 // AccessViolation, IndexOutOfRange, OutOfMemory, hang, or silently wrong value is a bug."
 //
-// Two additions the doc makes that a naive fuzzer skips, and that are the reason this is a program
+// Two additions that a naive fuzzer skips, and that are the reason this is a program
 // rather than a loop over File.ReadAllBytes:
 //
 //   * RESOURCE CAPS ARE FUZZING INVARIANTS, not just constants. "A file declaring 2^255 alignment
@@ -197,7 +197,7 @@ internal static class Program
 
     private static void Save(byte[] bytes, int seed, int iteration)
     {
-        // Minimized by hand afterwards and checked in as a regression test, per docs/04 §5.
+        // Minimized by hand afterwards and checked in as a regression test.
         string directory = Path.Combine("fuzz", "artifacts");
         Directory.CreateDirectory(directory);
         System.IO.File.WriteAllBytes(

@@ -1,4 +1,4 @@
-// The key bytes every value index shares: their order is docs/12-index-reads.md §4.4's total order,
+// The key bytes every value index shares: their order is the total order `KeyOrder.Total` defines,
 // and a literal becomes a key only when the conversion is exact.
 using System;
 using System.Buffers.Binary;

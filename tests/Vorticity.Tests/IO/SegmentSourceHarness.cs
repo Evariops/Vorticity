@@ -21,7 +21,7 @@ public enum SegmentSourceKind
 /// <summary>
 /// Builds any of the three sources over the same bytes, so one suite can assert that all three
 /// honour the same contract. That the test double passes the identical suite is the executable
-/// proof docs/03-architecture.md §3.5 asks for.
+/// proof that the seam holds for an implementation outside the core.
 /// </summary>
 internal sealed class SegmentSourceHarness : IAsyncDisposable
 {

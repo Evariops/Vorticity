@@ -1,7 +1,7 @@
-// The order acceptances of docs/13-dataset.md §14 — "`InKeyOrder` across levels equals the sorted
-// scan; `ORDER BY x LIMIT k` through the summaries equals the first `k` of the full sort" — and the
-// two claims of §6.6 they rest on: the merge holds "≤ 8 + L cursors", and an object whose minimum
-// lies past the k-th key is never opened.
+// The dataset's key-order guarantees — `InKeyOrder` across levels equals the sorted scan, and
+// `ORDER BY x LIMIT k` through the summaries equals the first `k` of the full sort — and the two
+// claims they rest on: the merge holds at most 8 + L cursors, and an object whose minimum lies
+// past the k-th key is never opened.
 //
 // THE DATA IS THE CLUSTERING TESTS' SHAPE, FOR THE SAME REASON. Objects whose keys INTERLEAVE,
 // appended OUT OF ORDER, shuffled INSIDE each object: a merge that chained objects instead of
@@ -42,7 +42,7 @@ public sealed class DatasetKeyOrderTests
     [Fact]
     public async Task InKeyOrderAcrossInterleavedObjectsEqualsTheSortedRows()
     {
-        // §14, first bullet, at level 0: four objects whose keys interleave modulo four.
+        // At level 0: four objects whose keys interleave modulo four.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -65,7 +65,7 @@ public sealed class DatasetKeyOrderTests
                 await RowsAsync(dataset.Scan().WithSummaries(summaries).WithMetrics(metrics).InKeyOrder("key")));
 
             // Every object reaches down to the smallest keys, so all four are held at once: level 0
-            // is the part of §6.6's bound that §5.2's ceiling is there to keep small.
+            // is the part of the merge's bound that the level-0 ceiling is there to keep small.
             Assert.Equal(Objects, metrics.Cursors);
             Assert.Equal(Objects, metrics.ObjectsOpened);
 
@@ -78,9 +78,9 @@ public sealed class DatasetKeyOrderTests
     [Fact]
     public async Task InKeyOrderAcrossLevelsEqualsTheSortedRowsBeforeAndAfterCompaction()
     {
-        // §14, first bullet, "across levels": level 1 after a compaction, then level 0 on top of it
-        // again — and §6.6's bound, "≤ 8 + L cursors", stated by Explain before the read and
-        // measured by it.
+        // Across levels: level 1 after a compaction, then level 0 on top of it again — and the
+        // merge's bound of at most 8 + L cursors, stated by Explain before the read and counted
+        // during it.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -132,9 +132,10 @@ public sealed class DatasetKeyOrderTests
     [Fact]
     public async Task OrderByKeyLimitKOpensOnlyTheObjectsThatCouldHoldTheFirstKRows()
     {
-        // §14, second bullet, and §6.6: "an object whose min exceeds the current k-th best is
-        // skipped". Four DISJOINT quarters appended out of order: the first ten keys live in one
-        // object, and it is the tree that has to find it, not the arrival order.
+        // `ORDER BY key LIMIT k` equals the first k of the full sort, and an object whose min
+        // exceeds the current k-th best is skipped. Four DISJOINT quarters appended out of order:
+        // the first ten keys live in one object, and it is the tree that has to find it, not the
+        // arrival order.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -185,7 +186,7 @@ public sealed class DatasetKeyOrderTests
     [Fact]
     public async Task AFilterOnTheKeyNarrowsEveryObjectsOwnWalk()
     {
-        // 12 §6: a conjunct on the key bounds each object's walk as it bounds a file's; one on
+        // A conjunct on the key bounds each object's walk as it bounds a file's; one on
         // another column prunes as it always does. The summaries skip what the range refutes.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -263,8 +264,8 @@ public sealed class DatasetKeyOrderTests
     [Fact]
     public async Task AnotherColumnIsMergedToo_WithEveryKeptObjectAsABound()
     {
-        // §6.6: "An order on another column costs, at best, one cursor per object the summaries
-        // cannot refute, with a sorted run per object: proportional to the output, not bounded."
+        // An order on another column costs, at best, one cursor per object the summaries cannot
+        // refute, with a sorted run per object: proportional to the output, not bounded.
         // A dataset with no clustering key, whose objects carry a run on `key` by their own policy.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -308,8 +309,8 @@ public sealed class DatasetKeyOrderTests
     [Fact]
     public async Task AFloatKeyIsMergedInTheKeyOrderNaNsIncluded()
     {
-        // 12 §4.4 orders a float key negative NaN first and positive NaN last, while a zone's min and
-        // max exclude NaN (08 §2): a float's summary is no bound in the key order. A merge that used
+        // A float key is ordered negative NaN first and positive NaN last, while a zone's min and
+        // max exclude NaN: a float's summary is no bound in the key order. A merge that used
         // one downward would deliver the positive NaN after the largest number, and upward the tree's
         // own minimum — the run's first key, NaN included — is the bound, not the summary.
         Decoders.EnsureRegistered();
@@ -368,7 +369,7 @@ public sealed class DatasetKeyOrderTests
     public async Task AConsumerThatDisposesItsBatchesStillGetsEveryRow()
     {
         // A run that is a whole batch is handed out as that very batch, and a consumer may dispose
-        // what it is given (07 §4). Disjoint objects make every run a whole batch: stepping past one
+        // what it is given. Disjoint objects make every run a whole batch: stepping past one
         // must not read it again.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();

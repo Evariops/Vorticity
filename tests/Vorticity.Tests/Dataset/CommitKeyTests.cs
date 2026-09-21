@@ -1,5 +1,5 @@
-// The key that makes docs/13-dataset.md §8.3 possible: "one List(prefix: "commit/", max: 1) returns
-// the newest with no hint and no probe".
+// The commit key, built so that one List(prefix: "commit/", max: 1) returns the newest commit
+// with no hint and no probe.
 using System;
 using System.Collections.Generic;
 using System.Linq;

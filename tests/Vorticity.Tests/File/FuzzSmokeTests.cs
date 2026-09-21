@@ -1,6 +1,6 @@
 // A short, deterministic fuzz campaign inside the normal suite.
 //
-// docs/04-conformance.md §5 says the real campaign "runs nightly, not per-commit", and it is right:
+// The real campaign runs nightly, not per-commit, and that is right:
 // tens of thousands of mutations do not belong in a build. But nightly-only means a parser
 // regression lives for up to a day and is then found by a job nobody is watching, so a few hundred
 // mutations run here with a FIXED SEED -- cheap enough to ignore, deterministic enough that a

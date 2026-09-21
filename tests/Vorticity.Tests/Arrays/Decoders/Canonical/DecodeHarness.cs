@@ -1,6 +1,6 @@
 // One decode of one synthetic blob, with the segment kept rooted for as long as the canonical
-// nodes that point into it. Contract §2.2 rule 3: spans borrowed from a batch are invalid once the
-// batch is disposed, and these tests honour that by keeping the harness alive around every read.
+// nodes that point into it. Spans borrowed from a batch are invalid once the batch is disposed,
+// and these tests honour that by keeping the harness alive around every read.
 using System;
 using System.Collections.Generic;
 using Vorticity.Arrays;

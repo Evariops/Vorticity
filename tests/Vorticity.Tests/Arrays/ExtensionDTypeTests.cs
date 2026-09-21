@@ -1,4 +1,4 @@
-// Contract §8.7 and §9.5. The metadata is hand-rolled, not Protobuf, and every one of these cases
+// Extension dtype metadata is hand-rolled, not Protobuf, and every one of these cases
 // is a byte layout a careless reader gets wrong in a way that reads plausibly.
 using System;
 using Vorticity;

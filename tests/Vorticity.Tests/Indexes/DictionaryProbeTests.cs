@@ -1,5 +1,5 @@
-// The dictionary probe of docs/10-indexes.md §5.3, from the read side: "a reader answers `x = v` by
-// decoding the values child alone and never the codes".
+// The dictionary probe, from the read side: a reader answers `x = v` by decoding the values
+// child alone and never the codes.
 //
 // WHAT THESE TESTS PIN, and why the shapes look the way they do: the writer's entry says which
 // chunks are dictionaries and carries no payload, so every claim the pruner makes comes from the

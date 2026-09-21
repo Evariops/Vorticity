@@ -1,5 +1,6 @@
-// File-level statistics: the shape rule of PHASE1-CONTRACTS.md §7.5 and the per-statistic DType
-// rule that upstream has a regression test for because it was once wrong.
+// File-level statistics: the shape rule - one entry per top-level field of a struct root, one
+// for any other root - and the per-statistic DType rule that upstream has a regression test for
+// because it was once wrong.
 //
 // 573 of the 819 golden files carry statistics, so the shape rule is exercised on real bytes by
 // VortexFileCorpusTests; what is left for here is the values, the widened sum DType, the tri-state

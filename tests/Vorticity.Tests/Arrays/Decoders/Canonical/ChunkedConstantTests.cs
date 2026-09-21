@@ -1,6 +1,6 @@
 // vortex.chunked and vortex.constant: the two decoders whose failure modes are silent rather than
 // loud. Chunked underflows an unchecked subtraction upstream if its offsets are not monotone, and
-// constant is the encoding whose scalar the vendored spec puts in the wrong place (contract §0a C1).
+// constant is the encoding whose scalar the vendored spec puts in the wrong place.
 using System;
 using System.Buffers.Binary;
 using System.Text;
@@ -299,7 +299,7 @@ public sealed class ChunkedConstantTests
         // The arena holds the element, not five copies of it.
         Assert.Equal(CanonicalKind.Constant, node.Kind);
 
-        // And answers for it without expanding: these three used to require a Decimal record.
+        // And answers for it without expanding, though the record is not a Decimal one.
         Assert.Equal(expected, node.Storage);
         Assert.Equal(precision, node.Precision);
         Assert.Equal(2, node.Scale);
@@ -312,8 +312,8 @@ public sealed class ChunkedConstantTests
     [Fact]
     public void ConstantIgnoresItsMetadataEntirely()
     {
-        // Contract §0a C1: upstream names the parameter `_metadata`. Rejecting a stray byte would
-        // reject a file upstream reads.
+        // Upstream names the parameter `_metadata` and never reads it. Rejecting a stray byte
+        // would reject a file upstream reads.
         using DecodeHarness h = new DecodeHarness();
         int index = Constant(
             h,

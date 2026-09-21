@@ -1,9 +1,9 @@
-// The counting matrix of docs/13-dataset.md §9.2, over a dataset instead of over one file.
+// The counting matrix of the read budget, over a dataset instead of over one file.
 //
-// WHAT §9.2 CLAIMS, and it is a claim about CONSTANTS, not about speed: "a clustering-key point
+// WHAT THE DESIGN CLAIMS is about CONSTANTS, not about speed: a clustering-key point
 // lookup costs at most R requests and B bytes, constants of the design, asserted equal across data
 // objects of 1 GiB, 10 GiB and 100 GiB (sparse, only the bytes read matter) and across datasets of
-// 1, 10³ and 10⁶ objects (synthetic leaves)". Two axes, and they fail differently: the SIZE axis
+// 1, 10³ and 10⁶ objects (synthetic leaves). Two axes, and they fail differently: the SIZE axis
 // catches anything on the read path that scales with an object's length, which step 27 already
 // proved for one file and which a dataset must not reintroduce; the COUNT axis catches a descent
 // that walks a level instead of descending it, which no single-file test can see at all.
@@ -14,7 +14,7 @@
 // third test puts a latency on the store and reads a clock: it is the only assertion here that is
 // about time, and it is about time because the thing it measures is a DEPTH.
 //
-// THE LEAVES ARE SYNTHETIC ON THE COUNT AXIS, as §9.2 says they must be: a million real data
+// THE LEAVES ARE SYNTHETIC ON THE COUNT AXIS, and they must be: a million real data
 // objects is a million files, and the thing under test is the tree above them, not the files below.
 // An entry is the bytes an entry is; the tree cannot tell the difference and neither can the budget.
 using System;
@@ -43,11 +43,11 @@ public sealed class DatasetBudgetTests
 
     /// <summary>
     /// The chunker at its own defaults — 64 / 128 / 256 KiB — because that is the parameterisation
-    /// §4.1 and §9.1 state their numbers for. A smaller cap makes a deeper tree out of fewer
-    /// entries, which is convenient and measures something else: a fan-out the design does not
-    /// have. The entries below are sized to §4.1's own worked assumption instead, "entries of about
-    /// 200 bytes and pages of about 128 KiB", which is what makes its "fan-out is about 650" the
-    /// thing under test.
+    /// the design states its fan-out, depth and request counts for. A smaller cap makes a
+    /// deeper tree out of fewer entries, which is convenient and measures something else: a
+    /// fan-out the design does not have. The entries below are sized to the design's own worked
+    /// assumption instead, entries of about 200 bytes and pages of about 128 KiB, which is what
+    /// makes its fan-out of about 650 the thing under test.
     /// </summary>
     private static CommitOptions Options() => new CommitOptions
     {
@@ -65,7 +65,7 @@ public sealed class DatasetBudgetTests
 
     private static ReadOnlyMemory<byte> Key(int i) => Encoding.UTF8.GetBytes($"k{i:D9}");
 
-    /// <summary>Four summarised columns, which is what brings an entry to §4.1's ~200 bytes.</summary>
+    /// <summary>Four summarised columns, enough to bring an entry to about 200 bytes.</summary>
     private static ObjectSummaries Summaries(int i) => ObjectSummaries.From(
     [
         new ColumnSummary("k", FilterLiteral.From((long)i), true, FilterLiteral.From(i + 999L), true, true, 0, true),
@@ -86,9 +86,9 @@ public sealed class DatasetBudgetTests
     [InlineData(1_000_000)]
     public async Task APointLookupCostsTheSameWhateverTheObjectCount(int objects)
     {
-        // §9.2, invariant 1, on the axis a single-file test cannot see. The numbers are printed
-        // rather than pinned one by one: what the assertion holds is that they do not GROW, which
-        // is the claim, and a ceiling nobody derived would be a number somebody chose.
+        // The point-lookup constant, on the axis a single-file test cannot see. The numbers are
+        // printed rather than pinned one by one: what the assertion holds is that they do not
+        // GROW, which is the claim, and a ceiling nobody derived would be a number somebody chose.
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
 
@@ -101,7 +101,7 @@ public sealed class DatasetBudgetTests
         CommitResult built = await DatasetCommitter.CommitAsync(store, operations, Options(), default);
         Assert.Equal(objects, built.Tree.Entries);
 
-        // Cold: nothing is known, so this is §9.1's first two rows plus the descent.
+        // Cold: nothing is known, so this is the list and the header read plus the descent.
         store.Reset();
         (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, default);
         CommitObject found = Assert.IsType<CommitObject>(commit);
@@ -121,7 +121,7 @@ public sealed class DatasetBudgetTests
             $"DATASET BUDGET: {objects} objects, depth {tree.Depth}: a cold point lookup cost {requests} requests in {steps} dependent steps and {bytes} bytes, {pages.Reads} page read(s).\n"));
 
         // THE CONSTANT: the list, the header, and at most two pages below what the header inlined
-        // (§4.1's "0 up to ~650 objects, 1 up to ~400 000, 2 up to ~280 million"). Four is the
+        // (0 up to ~650 objects, 1 up to ~400 000, 2 up to ~280 million). Four is the
         // ceiling the design states; a descent that walked a level would blow past it at 100 000.
         Assert.InRange(requests, 2, 4);
         Assert.InRange(steps, 2, 4);
@@ -129,7 +129,7 @@ public sealed class DatasetBudgetTests
 
         // Warm, the same key on the same handle: the pages are immutable, so nothing is re-read.
         // A DIFFERENT key is a different page and is not warm, which is the honest half of
-        // "cacheable, forever" (§9.1): the cache holds what was read, not what could be.
+        // pages being cacheable forever: the cache holds what was read, not what could be.
         store.Reset();
         Assert.True((await tree.FindAsync(Key(objects / 2), pages, default)).HasValue);
         Assert.Equal(0, store.Requests);
@@ -138,10 +138,10 @@ public sealed class DatasetBudgetTests
     [Fact]
     public async Task AWalkPrefetchesItsSiblingsAWindowAtATime()
     {
-        // §6.6's first row, "an in-order walk of a level's tree, children prefetched in parallel"
-        // (debt 4 of the closing plan). A cold walk over every leaf of a two-level tree: the leaves
-        // are read a window ahead, so the dependent steps are about one per window, not one per
-        // leaf -- while the requests, which a total counts, are still one per leaf.
+        // An in-order walk of a level's tree, children prefetched in parallel. A cold walk over
+        // every leaf of a two-level tree: the leaves are read a window ahead, so the dependent
+        // steps are about one per window, not one per leaf -- while the requests, which a total
+        // counts, are still one per leaf.
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
         List<DatasetOperation> operations = new List<DatasetOperation>(40_000);
@@ -183,9 +183,10 @@ public sealed class DatasetBudgetTests
     [Fact]
     public async Task TheDependentStepsAreTheCriticalPathAndNotTheRequestCount()
     {
-        // §9.2, invariant 3: "the in-memory store injects a latency λ and no CPU cost; a cold
-        // clustering-key lookup completes within D × λ, D the count of §9.1, which no total of
-        // requests can prove, since parallel requests hide in a total". So this one reads a clock.
+        // The third invariant: the in-memory store injects a latency λ and no CPU cost, and a
+        // cold clustering-key lookup completes within D × λ, D its count of dependent requests,
+        // which no total of requests can prove, since parallel requests hide in a total. So this
+        // one reads a clock.
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
 
@@ -226,7 +227,7 @@ public sealed class DatasetBudgetTests
             clock.Elapsed.TotalMilliseconds >= (steps - 1) * latency.TotalMilliseconds,
             $"{steps} dependent steps at {latency.TotalMilliseconds} ms each cannot take {clock.ElapsedMilliseconds} ms");
 
-        // And warm costs no round trip at all, which is the other half of "2 to 3 warm" (§9.1).
+        // And warm costs no round trip at all: every page the cold lookup read stays cached.
         store.Reset();
         Assert.True((await tree.FindAsync(Key(1_000), pages, default)).HasValue);
         Assert.Equal(0, store.Requests);
@@ -235,9 +236,9 @@ public sealed class DatasetBudgetTests
     [Fact]
     public async Task ACommitCostsThreeRequestsAndOneMoreWhenItOutgrowsTheInlining()
     {
-        // §8.1 says a commit is "three dependent requests: the List, the read of N's header, the
-        // creation", and §8.2 says an iteration is "depth + 2: the header of N+1, the touched
-        // leaves, the creation". BOTH ARE TRUE, and what decides which is §3's inlining: while the
+        // A commit costs three dependent requests: the List, the read of N's header, the
+        // creation. An iteration costs depth + 2: the header of N+1, the touched leaves, the
+        // creation. BOTH ARE TRUE, and what decides which is the header's inlining: while the
         // header carries the pages the commit will touch, the touched leaves cost nothing and the
         // total is three. Once the tree outgrows the 192 KiB the header inlines, the touched leaf
         // is a read of its own and the total is four. That is the whole story of this number, and
@@ -279,9 +280,9 @@ public sealed class DatasetBudgetTests
     [Fact]
     public async Task AnEqualityOnANonClusteringColumnCostsAConstantPlusOneTermPerUnrefutedObject()
     {
-        // §9.2, invariant 2: "an equality lookup through a Bloom or a sorted run on a non-clustering
+        // Second invariant: an equality lookup through a Bloom or sorted run on a non-clustering
         // column costs at most R′ requests plus a term proportional to the objects the summaries
-        // could not refute", with the constant part asserted across object counts. REAL objects
+        // could not refute, with the constant part asserted across object counts. REAL objects
         // here, because the term is what opening an object and asking its Bloom costs, which no
         // synthetic leaf has. Two layouts of the same values: DISJOINT, where every object's
         // `measure` range is its own and the summaries refute all but the one that holds the key;
@@ -292,7 +293,7 @@ public sealed class DatasetBudgetTests
         // WHAT THIS DOES NOT SHOW: these objects are smaller than an open's first read, so the term
         // is the open's cost and says nothing about the bytes a Bloom saves inside an object. That
         // is the single-file half of the matrix, ReadBudgetTests, on sparse files of 1.31 and
-        // 13.1 GiB (§9.2's step 27 note).
+        // 13.1 GiB.
         Decoders.EnsureRegistered();
         int[] counts = [4, 16, 48];
         long[] constant = new long[counts.Length];

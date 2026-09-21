@@ -15,8 +15,7 @@ internal static class CorpusEntries
     /// <summary>
     /// The 137 single-flat-leaf corpus entries. 85 of them need only the fourteen canonical
     /// encodings; the other 52 also reach a compressed one. Every single-flat-leaf entry of the
-    /// corpus decodes: the list of those that did not emptied as the decoders landed, and went with
-    /// the cleanup of 2026-09-18.
+    /// corpus decodes, so there is no list of entries that do not.
     /// </summary>
     internal static readonly string[] All =
     [

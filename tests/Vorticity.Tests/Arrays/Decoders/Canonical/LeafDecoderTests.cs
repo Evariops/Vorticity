@@ -148,8 +148,8 @@ public sealed class LeafDecoderTests
     [InlineData(false, ValidityKind.AllInvalid)]
     public void AConstantValidityChildCollapses(bool value, ValidityKind expected)
     {
-        // Contract §2.6 rule 3/4: AllInvalid reaches the wire as vortex.constant(false), and the
-        // collapse back into the enum is required, not an optimization.
+        // AllInvalid reaches the wire as vortex.constant(false), and the collapse back into the
+        // enum is required, not an optimization.
         using DecodeHarness h = new DecodeHarness();
         BlobBuilder b = new BlobBuilder();
         int bits = b.AddBuffer([0b0000_1010]);

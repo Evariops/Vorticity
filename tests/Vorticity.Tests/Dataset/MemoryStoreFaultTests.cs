@@ -1,11 +1,12 @@
-// The three injections of docs/13-dataset.md §11 — latency, failures, crashes — and what each one
+// The three injections of the in-memory store — latency, failures, crashes — and what each one
 // is for.
 //
-// THE LATENCY IS NOT A TEST HELPER: §9.2's third invariant is stated in units of λ. "The in-memory
-// store injects a latency λ and no CPU cost; a cold clustering-key lookup completes within D × λ,
-// D the count of §9.1, which no total of requests can prove, since parallel requests hide in a
-// total." So the store must be able to be slow, and the first test here is the smallest possible
-// instance of that invariant: ten requests issued together cost one λ, ten issued in a row cost ten.
+// THE LATENCY IS NOT A TEST HELPER: the dataset's lookup invariant is stated in units of λ. The
+// in-memory store injects a latency λ and no CPU cost; a cold clustering-key lookup completes
+// within D × λ, D the number of dependent requests it makes, which no total of requests can
+// prove, since parallel requests hide in a total. So the store must be able to be slow, and the
+// first test here is the smallest possible instance of that invariant: ten requests issued
+// together cost one λ, ten issued in a row cost ten.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -86,7 +87,7 @@ public sealed class MemoryStoreFaultTests
     [Fact]
     public async Task ACrashLeavesTheObjectAndNeverTellsItsWriter()
     {
-        // The state §8.2's rebase exists for: the put succeeded, the writer saw an exception, and
+        // The state the rebase exists for: the put succeeded, the writer saw an exception, and
         // the key is now taken by bytes it wrote itself. A test that cannot produce this state
         // tests the easy half of the commit protocol.
         await using MemoryObjectStore store = new MemoryObjectStore();

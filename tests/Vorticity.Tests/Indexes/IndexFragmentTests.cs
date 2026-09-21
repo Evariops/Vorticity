@@ -1,8 +1,8 @@
-// Index fragments attached to a file - docs/13-dataset.md §6.4 and §12, docs/10-indexes.md §8.
+// Index fragments attached to a file: an index built over a block range after the write.
 //
-// WHAT IS HELD. A fragment over a block range prunes those blocks and no other (10 §8: "a pruner uses
-// the blocks it covers"), and a key source refuses it until fragments cover the file ("an exact
-// source waits for full coverage"). A fragment is read BESIDE the file's own index, from its own
+// WHAT IS HELD. A fragment over a block range prunes those blocks and no other, as a pruner uses
+// the blocks it covers, and a key source refuses it until fragments cover the file, as an exact
+// source waits for full coverage. A fragment is read BESIDE the file's own index, from its own
 // bytes and its own encoding table. Two fragments of one entry join when their blocks are disjoint;
 // an entry the file already has, a fragment of another file, and a fragment overlapping another's
 // blocks are each left out with the reason, and the scan answers the same.
@@ -172,7 +172,7 @@ public sealed class IndexFragmentTests
     [Fact]
     public async Task AKeySourceWaitsUntilFragmentsCoverTheFile()
     {
-        // 10 §8: "an exact source waits for full coverage". One fragment over the first half is a
+        // An exact source waits for full coverage. One fragment over the first half is a
         // pruner's and not a cursor's; with the second half the two join into one entry, and the
         // walk crosses from one fragment's run into the other's.
         Decoders.EnsureRegistered();
@@ -220,7 +220,7 @@ public sealed class IndexFragmentTests
     [Fact]
     public async Task AFragmentOfAnotherVersionOfTheFileIsRefusedWithItsReason()
     {
-        // The same rows written twice are two versions (13 §7): a fragment of one is not the other's.
+        // The same rows written twice are two versions: a fragment of one is not the other's.
         Decoders.EnsureRegistered();
         byte[] indexed = await WriteAsync(Guid.NewGuid(), WritePolicy.None);
         byte[] other = await WriteAsync(Guid.NewGuid(), WritePolicy.None);

@@ -90,8 +90,8 @@ public sealed class MalformedMetadataTests
     [InlineData("fastlanes.for")]
     public void AGroupWireTypeIsRejected(string encoding)
     {
-        // Wire types 3 and 4 are proto2 groups, which docs/02-format.md §5.3's read-forever rule
-        // does NOT ask us to tolerate.
+        // Wire types 3 and 4 are proto2 groups, which the read-forever rule for metadata does NOT
+        // ask us to tolerate.
         AssertRejects(encoding, [0x0B, 0x0C]);
     }
 
@@ -113,7 +113,7 @@ public sealed class MalformedMetadataTests
     [Fact]
     public void AnUnknownFieldNumberIsTolerated()
     {
-        // Read-forever (docs/02-format.md §5.3): a metadata message may gain an optional field
+        // Files are read forever: a metadata message may gain an optional field
         // without a new encoding id, so an unrecognized field number is SKIPPED - the mirror image
         // of the domain checks above, which reject.
         byte[] metadata = TestMetadata.RunEnd(PType.U32, 1, 0);

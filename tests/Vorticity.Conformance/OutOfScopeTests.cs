@@ -1,11 +1,10 @@
 // The other half of the acceptance test: "every file outside scope fails with a named component
 // rather than a wrong answer."
 //
-// docs/03-architecture.md §5 makes the message a requirement, not a courtesy: the exception must
+// The message is a requirement, not a courtesy: the exception must
 // name BOTH the component id as the file spells it and the component kind. A reader that throws
 // "unsupported encoding" tells a user nothing about which encoding, which edition introduced it, or
-// which of the three registries refused it - and a requirement no test checks is a wish
-// (docs/04-conformance.md §6).
+// which of the three registries refused it - and a requirement no test checks is a wish.
 //
 // "Rather than a wrong answer" is the other half of that sentence and it is enforced here too. Four
 // of the 203 out-of-scope files carry their unsupported encoding ONLY inside a zone map, which an
@@ -30,7 +29,7 @@ public sealed class OutOfScopeTests
     private static readonly string[] Kinds = ["array", "layout", "dtype"];
 
     /// <summary>
-    /// Every file that uses at least one component this build does not implement. EMPTY today.
+    /// Every file that uses at least one component this build does not implement.
     /// </summary>
     /// <remarks>
     /// A `vortex.acme.future_codec` placeholder keeps the theory non-empty, because xunit fails a
@@ -97,7 +96,7 @@ public sealed class OutOfScopeTests
         if (!entry.HasDTypeSegment)
         {
             // A file that embeds no DType and is given none cannot be opened at all: that is
-            // malformed input, not an unsupported component (PHASE1-CONTRACTS.md §7.4 row 4). It is
+            // malformed input, not an unsupported component. It is
             // the only such file in the corpus and it is out of scope for other reasons too.
             await Assert.ThrowsAsync<VortexFormatException>(async () =>
                 await VortexFile.OpenAsync(entry.FullPath, TestContext.Current.CancellationToken));
@@ -114,7 +113,7 @@ public sealed class OutOfScopeTests
         }
 
         // Opening must succeed whatever the file uses: ids are classified at open and refused at
-        // use (PHASE1-CONTRACTS.md §2.3). An open that throws here is a lazy-resolution regression.
+        // use. An open that throws here is a lazy-resolution regression.
         await using VortexFile file = await VortexFile.OpenAsync(entry.FullPath, TestContext.Current.CancellationToken);
         Assert.Equal(entry.RowCount, file.RowCount);
 
@@ -130,7 +129,7 @@ public sealed class OutOfScopeTests
         Assert.Contains(error.ComponentId, unsupportedOnTheDataPath);
         Assert.Contains(error.Kind, Kinds);
 
-        // docs/03-architecture.md §5: both, in the message a user actually sees.
+        // Both, in the message a user actually sees.
         Assert.Contains(error.ComponentId, error.Message, StringComparison.Ordinal);
         Assert.Contains(error.Kind, error.Message, StringComparison.Ordinal);
     }

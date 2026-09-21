@@ -1,4 +1,4 @@
-// Contract §2.2, §2.6 and §8.3: arena ownership, the validity rule and lazy resolution at the
+// Arena ownership, the validity rule and lazy resolution at the
 // dispatch site.
 //
 // End-to-end DecodeValidity coverage - decoding a real vortex.bool or vortex.constant validity

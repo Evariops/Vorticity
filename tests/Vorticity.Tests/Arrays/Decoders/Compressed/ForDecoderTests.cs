@@ -28,8 +28,8 @@ public sealed class ForDecoderTests
     [Fact]
     public void EmptyMetadataIsRejectedBecauseItDecodesToANullReference()
     {
-        // Contract §0a C2: spec/METADATA.md once listed fastlanes.for under "Empty metadata".
-        // An empty ScalarValue message carries no kind at all.
+        // fastlanes.for carries its reference scalar in the metadata, and an empty ScalarValue
+        // message carries no kind at all.
         byte[] encoded = TestBuffers.Int32(1, 2);
         TestNode root = new TestNode("fastlanes.for")
             .WithChild(new TestNode("vortex.primitive").WithBuffer(0));

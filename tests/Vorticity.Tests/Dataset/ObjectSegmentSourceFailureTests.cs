@@ -1,4 +1,4 @@
-// A coalesced batch issues its reads together (docs/13-dataset.md §11), so one of them failing
+// A coalesced batch issues its reads together, so one of them failing
 // leaves the others running. Each carries an ObjectRange holding a pooled array, and a range
 // nobody disposes is a buffer that reaches the finalizer instead of the pool.
 using System;
@@ -22,7 +22,7 @@ public sealed class ObjectSegmentSourceFailureTests
     {
         // Two runs, because the gap is wider than the coalescer is allowed to bridge. The first
         // fails at once; the second is held open, so at the moment the batch gives up it is still
-        // in flight -- the case that used to be skipped outright.
+        // in flight.
         using Held held = new Held();
         ObjectSegmentSource source = new ObjectSegmentSource(
             held, Key, new SegmentReadOptions { CoalesceGapBytes = 0 });

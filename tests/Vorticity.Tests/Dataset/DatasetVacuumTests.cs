@@ -1,6 +1,5 @@
-// Vacuum - docs/13-dataset.md §10 and the rows §14 asks of it: "an orphan younger than the window is
-// kept, older is deleted, and a reader on a swept version reports the missing object with its
-// version".
+// Vacuum: an orphan younger than the window is kept, older is deleted, and a reader on a swept
+// version reports the missing object with its version.
 //
 // THE CLOCK IS THE STORE'S, moved by hand. Every age vacuum compares is a store timestamp, so the
 // store and the vacuum share one manual clock, and "two hours later" is one line rather than a wait.
@@ -155,7 +154,7 @@ public sealed class DatasetVacuumTests
     [Fact]
     public async Task ACommitHeldOnlyByAFragmentIsKept()
     {
-        // An indexing commit writes its fragment into its own commit object (§6.4). Every later
+        // An indexing commit writes its fragment into its own commit object. Every later
         // append rewrites the leaf, so that object's PAGES die, and only the entry's fragment
         // reference keeps it: a vacuum that marked pages alone would delete the index under a
         // live object.
@@ -191,8 +190,8 @@ public sealed class DatasetVacuumTests
     [Fact]
     public async Task ACommitWhosePagesTheLatestStillReferencesIsKept()
     {
-        // §3: "a commit references the pages it did not change where they already are, in older
-        // commit objects". On a tree of small pages, appends in key order leave the first leaves
+        // A commit references the pages it did not change where they already are, in older
+        // commit objects. On a tree of small pages, appends in key order leave the first leaves
         // where the first commits wrote them, and those commits outlive the window through them.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -231,9 +230,9 @@ public sealed class DatasetVacuumTests
     [Fact]
     public async Task ARepackEmptiesTheSparseCommitsSoTheNextVacuumCanTakeThem()
     {
-        // §10: "when vacuum finds a commit object kept alive by a few live pages among many dead
-        // ones, a metadata-only commit rewrites those pages into itself, so the old object can go at
-        // the next pass". Old leaves and a fragment keep early commits alive after the window.
+        // When vacuum finds a commit object kept alive by a few live pages among many dead ones, a
+        // metadata-only commit rewrites those pages into itself, so the old object can go at the
+        // next pass. Old leaves and a fragment keep early commits alive after the window.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);

@@ -5,10 +5,10 @@
 // feeds the comparison something it MUST reject, and asserts it rejects it, at the right column and
 // the right row.
 //
-// The two float cases are the ones SIDECAR.md is built around. `bits` is normative "so that a wrong
-// NaN payload or a -0.0 read as +0.0 fails the comparison"; here that claim is exercised against
-// real decoded values from distributions/float_specials_f64_r1024, whose row 1 is -0.0 and whose
-// rows 2-4 are three different NaN bit patterns.
+// The two float cases are the ones the sidecar format is built around: `bits` is normative so
+// that a wrong NaN payload or a -0.0 read as +0.0 fails the comparison. Here that claim is
+// exercised against real decoded values from distributions/float_specials_f64_r1024, whose row 1
+// is -0.0 and whose rows 2-4 are three different NaN bit patterns.
 using System;
 using System.Globalization;
 using System.Threading;

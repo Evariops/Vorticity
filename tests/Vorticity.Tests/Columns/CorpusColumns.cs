@@ -1,13 +1,14 @@
-// A deliberately minimal, test-only path from a .vortex file to a RecordBatch. `layouts` (Phase 1
-// contract §11) and `scan` (§13) do this properly; this walks the three layout encodings that get
+// A deliberately minimal, test-only path from a .vortex file to a RecordBatch. The layout
+// readers and the scan do this properly; this walks the three layout encodings that get
 // us to real decoded values in 496 of the corpus's 819 files - vortex.zoned, vortex.struct and
 // vortex.flat - and refuses everything else. It exists because agreeing with our own fixtures
 // proves nothing: these values were written by Vortex 0.86.1 and the expectations come from the
 // sidecar.
 //
 // Deliberately NOT supported: vortex.chunked (needs concatenation across chunks) and vortex.dict
-// (needs a take). Both belong to §11, and SidecarValues.IsWalkable filters out every file that
-// would reach one, along with every file whose array encodings this build does not decode.
+// (needs a take). Both are left to the layout readers, and SidecarValues.IsWalkable filters out
+// every file that would reach one, along with every file whose array encodings this build does
+// not decode.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -72,8 +73,8 @@ internal sealed class CorpusColumns : IAsyncDisposable
             }
 
             // A LayoutView is a ref struct and cannot cross an await (CS4007), so the register
-            // and decode walks each open their own root - which is also exactly the shape §13.3
-            // prescribes: register, one ReadManyAsync, then a fully synchronous execute.
+            // and decode walks each open their own root - which is also exactly the shape a scan
+            // follows: register, one ReadManyAsync, then a fully synchronous execute.
             RegisterAll(file, context, layoutIds, layoutBytes);
             await file.Segments.ReadManyAsync(context.Segments, CancellationToken.None).ConfigureAwait(false);
             context.Segments.Complete();
@@ -179,8 +180,8 @@ internal sealed class CorpusColumns : IAsyncDisposable
 
             case "vortex.struct":
             {
-                // Validity FIRST when the struct dtype is nullable, then the fields in dtype order
-                // (contract §11.3). The validity child's dtype is Bool NON-nullable.
+                // Validity FIRST when the struct dtype is nullable, then the fields in dtype
+                // order. The validity child's dtype is Bool NON-nullable.
                 bool nullable = dtype.Nullability == Nullability.Nullable;
                 int offset = nullable ? 1 : 0;
                 int fields = dtype.FieldCount;
@@ -227,7 +228,7 @@ internal sealed class CorpusColumns : IAsyncDisposable
         }
     }
 
-    /// <summary>Contract §2.6 rule 3: an all-true or all-false bitmap collapses to the enum.</summary>
+    /// <summary>An all-true or all-false bitmap collapses to the enum.</summary>
     private static Validity Collapse(ScanContext context, int boolNode, int rows)
     {
         if (rows == 0)

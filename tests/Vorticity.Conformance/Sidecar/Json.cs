@@ -1,7 +1,6 @@
 // A JSON reader written by hand, on purpose.
 //
-// docs/04-conformance.md §3 makes the sidecar the oracle for every value in the corpus, and
-// tests/Vorticity.Conformance/corpus/SIDECAR.md is its grammar. Parsing it with a serializer
+// The sidecar is the oracle for every value in the corpus. Parsing it with a serializer
 // would put a third implementation between the two we are comparing, and the one property this
 // harness cannot afford to lose is that `null`, `"0"`, `{"bits": "0x8000"}` and `{"b64": ""}` are
 // four different things: a JSON binder that maps them onto CLR types decides, silently, that
@@ -240,7 +239,7 @@ internal sealed class JsonValue
     }
 }
 
-/// <summary>A sidecar - or the JSON inside it - that does not match SIDECAR.md.</summary>
+/// <summary>A sidecar - or the JSON inside it - that does not match the sidecar grammar.</summary>
 internal sealed class SidecarFormatException : Exception
 {
     internal SidecarFormatException(string message)

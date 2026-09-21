@@ -1,7 +1,7 @@
 // Builds well-formed - and deliberately malformed - Vortex file containers from the Phase 0
 // writers. The corpus proves the open path reads real files; this proves it rejects the shapes no
-// real writer produces, and it is the only way to reach the second-read branch of §7.1, which no
-// golden file exercises.
+// real writer produces, and it is the only way to reach the open's second read, taken when the
+// footer segments fall outside the first tail read, which no golden file exercises.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;

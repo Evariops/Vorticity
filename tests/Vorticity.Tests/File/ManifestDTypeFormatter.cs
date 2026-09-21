@@ -5,7 +5,7 @@
 // truncates at 2048 characters, all of which are right for a diagnostic and wrong for a
 // byte-for-byte comparison against 819 manifest strings. This renderer exists so the corpus test
 // can compare the whole schema exactly - including the extension dtypes, whose rendering needs
-// their metadata decoded (`id[metadata](storage)`, PHASE1-CONTRACTS.md §9.5).
+// their metadata decoded (`id[metadata](storage)`).
 //
 // It is test-only. The library's public rendering stays DType.ToString().
 using System;

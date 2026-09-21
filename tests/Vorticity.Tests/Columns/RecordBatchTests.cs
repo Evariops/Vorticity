@@ -1,5 +1,5 @@
-// Phase 1 contract §12.1 and §12.3, plus the §1.8 floor: the boundary row counts, and every
-// malformed shape throwing VortexFormatException and only that.
+// RecordBatch and the columns it hands out: the boundary row counts, and every malformed shape
+// throwing VortexFormatException and only that.
 using System;
 using System.Text;
 using Vorticity.Arrays;
@@ -161,8 +161,8 @@ public sealed class RecordBatchTests
 
         batch.Dispose();
 
-        // The contract of §13.3 step 5: disposing the batch resets the context so the next batch
-        // reuses the same arenas. A stale column view therefore must not reach the arena at all.
+        // Disposing the batch resets the context so the next batch reuses the same arenas. A stale
+        // column view therefore must not reach the arena at all.
         Assert.Equal(0, context.Canonical.NodeCount);
         Assert.Throws<ObjectDisposedException>(() => { _ = batch.Column(0).Length; });
     }
@@ -262,8 +262,8 @@ public sealed class RecordBatchTests
     [Fact]
     public void WindowIsTheSameRowsWithTheirOwnStartRow()
     {
-        // The seam docs/13-dataset.md §4.2 named and §5.3's merge needs: "these rows of that
-        // batch", so that a k-way merge can emit a run without writing a second gather.
+        // The seam a dataset's k-way merge needs: "these rows of that batch", so that the merge
+        // can emit a run without writing a second gather.
         using ColumnFixture f = new ColumnFixture();
         int keys = f.Int64Node([10L, 20L, 30L, 40L, 50L], Validity.NonNullable);
         int flags = f.BoolNode([true, false, true, false, true]);
@@ -314,9 +314,9 @@ public sealed class RecordBatchTests
     [Fact]
     public void ProjectKeepsTheNamedColumnsAndCopiesNoValue()
     {
-        // The seam a dataset's key-ordered merge needs (docs/13-dataset.md §6.6): it compares rows
-        // by a key column the caller may not have selected, and drops that column before handing
-        // the batch on — the step the scan performs for a filter's columns, from outside the scan.
+        // The seam a dataset's key-ordered merge needs: it compares rows by a key column the
+        // caller may not have selected, and drops that column before handing the batch on — the
+        // step the scan performs for a filter's columns, from outside the scan.
         using ColumnFixture f = new ColumnFixture();
         DType i64 = f.Types.Primitive(PType.I64, Nullability.NonNullable);
         DType i32 = f.Types.Primitive(PType.I32, Nullability.NonNullable);

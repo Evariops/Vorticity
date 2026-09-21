@@ -1,13 +1,13 @@
-// The two adapters of docs/13-dataset.md §11, end to end: a Vortex file written through the store's
-// sink and read back through the store's source.
+// The two adapters of an object store, end to end: a Vortex file written through the store's sink
+// and read back through the store's source.
 //
 // WHAT THIS PROVES that a unit test of either half cannot: the seam holds. The writer above the
 // sink is the ordinary `VortexFileWriter` and the reader above the source is the ordinary
 // `VortexFile` — neither knows an object store exists — so a file that round-trips here is a file
-// an S3 library's users would get. The counting store then says what the read COST, which is the
-// axis §9 is about: a scan that asked for forty segments and paid three requests is coalescing
-// working (03 §3.5), and the same scan asking forty times would be the bug this test exists to
-// catch.
+// an S3 library's users would get. The counting store then says what the read COST, which is what
+// matters against an object store, where each request pays a round trip: a scan that asked for
+// forty segments and paid three requests is coalescing working, and the same scan asking forty
+// times would be the bug this test exists to catch.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -134,8 +134,9 @@ public sealed class ObjectAdapterTests
     [Fact]
     public async Task ASourceRefusesAnObjectThatChangedUnderIt()
     {
-        // §7's binding, at the seam: an object is immutable, so a token that changes mid-read means
-        // the key was deleted and created again. Carrying on would mix two objects' bytes.
+        // A read bound to one object, at the seam: an object is immutable, so a token that changes
+        // mid-read means the key was deleted and created again. Carrying on would mix two objects'
+        // bytes.
         Decoders.EnsureRegistered();
         await using MemoryObjectStore store = new MemoryObjectStore();
         await WriteAsync(store, Key);
@@ -145,7 +146,7 @@ public sealed class ObjectAdapterTests
         string? first = source.Token;
         Assert.NotNull(first);
 
-        // The same bytes under the same key, created again: a new object by §11's token rule.
+        // The same bytes under the same key, created again: a new object, so a new token.
         using (ObjectRange range = await store.GetRangeAsync(Key, 0, int.MaxValue / 2, default))
         {
             await store.DeleteAsync(Key, default);

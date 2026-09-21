@@ -77,8 +77,8 @@ public sealed class PublicSurfaceTests
     }
 
     /// <summary>
-    /// A count per assembly, printed on every run. The totals are what the release plan quotes, and
-    /// a number that has to be re-measured by hand is a number that goes stale.
+    /// A count per assembly, printed on every run so the totals come from the test output rather
+    /// than from a count made by hand.
     /// </summary>
     [Fact]
     [RequiresUnreferencedCode(NotTrimmable)]

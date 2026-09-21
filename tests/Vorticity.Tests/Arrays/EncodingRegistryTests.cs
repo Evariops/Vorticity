@@ -1,4 +1,4 @@
-// Contract §2.3: classification at open, failure at use. These lock in both halves - every id the
+// Classification at open, failure at use. These lock in both halves - every id the
 // frozen editions declare resolves the way the registry says it does, and an id we do not decode
 // resolves to Unknown WITHOUT throwing.
 using System;
@@ -53,10 +53,7 @@ public sealed class EncodingRegistryTests
     /// THERE ARE NO DEFERRED ARRAY IDS LEFT, which is what this test asserts.
     /// </summary>
     /// <remarks>
-    /// It used to be a theory over `vortex.variant` and `vortex.parquet.variant`, and before that
-    /// over `fastlanes.delta`, `vortex.patched`, `vortex.map`, `vortex.zstd_buffers` and
-    /// `vortex.pco` -- each one leaving the list when it gained a decoder. The variants were the
-    /// last: every id docs/90-registry.md names now resolves. A file carrying a shredded variant is
+    /// Every array id the frozen editions declare resolves. A file carrying a shredded variant is
     /// still refused, but by the DECODER, with a message naming the child rather than a table entry
     /// naming the id.
     /// </remarks>

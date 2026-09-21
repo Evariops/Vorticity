@@ -7,9 +7,9 @@
 // and then they share an answer -- which is the limit any engine comparing an i64 against a double
 // lands on, and is worth pinning rather than discovering.
 //
-// 9007199254740993 is the first integer a double cannot hold. It sits exactly halfway between
-// 9007199254740992 and 9007199254740994, so it rounds to even and becomes the first of them. The
-// equality below therefore keeps two rows, and that is not a defect of the kernel.
+// 2^53 + 1 is the first integer a double cannot hold. It sits exactly halfway between 2^53 and
+// 2^53 + 2, so it rounds to even and becomes the first of them. The equality below therefore
+// keeps two rows, and that is not a defect of the kernel.
 using System;
 using System.Collections.Generic;
 using System.Threading;

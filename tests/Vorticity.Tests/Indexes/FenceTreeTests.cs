@@ -1,4 +1,4 @@
-// Hierarchical fences - docs/13-dataset.md §6.3, step 23 of IMPL-PLAN.md.
+// Hierarchical fences: a long run's segment table written as a tree of fence pages.
 //
 // WHAT IS HELD: a fence's size is computed as its page writes it; a synthetic run of 10⁸ entries is
 // found through one fence page and one of 10¹⁰ through two, and the fan-out of the default pages
@@ -38,7 +38,7 @@ public sealed class FenceTreeTests
 {
     private const int Block = 256;
 
-    /// <summary>A sorted run's segment in the synthetic runs: 10 §4.2's default.</summary>
+    /// <summary>A sorted run's segment in the synthetic runs, at the default size.</summary>
     private const int SegmentEntries = 65_536;
 
     private static readonly DTypeArena Types = new DTypeArena();
@@ -458,7 +458,10 @@ public sealed class FenceTreeTests
         MemorySegmentSource Source, IndexRun Run, FencePage Root, KeySegment[] Bounds, IndexSegment[][] Regions,
         int Pages, KeyLayout Layout, int Stride)
     {
-        /// <summary><paramref name="segments"/> segments of 65 536 entries, keys 0-999 then 2000-2999...</summary>
+        /// <summary>
+        /// <paramref name="segments"/> segments of 65 536 entries: keys 0 to 999 in the first,
+        /// 2 000 to 2 999 in the second, and so on.
+        /// </summary>
         internal static Synthetic Build(int segments, int stride, FenceShape shape)
         {
             List<KeySegment> bounds = new List<KeySegment>(segments);

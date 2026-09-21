@@ -12,7 +12,7 @@ namespace Vorticity.Tests.IO;
 
 /// <summary>
 /// One suite, three implementations. Everything asserted here is a rule of
-/// docs/03-architecture.md §3.5 rather than a property of any one source, and the reference
+/// the segment source contract rather than a property of any one source, and the reference
 /// <see cref="HttpRangeSegmentSource"/> is held to exactly the same bar as the two built-ins.
 /// </summary>
 public sealed class SegmentSourceContractTests
@@ -136,9 +136,9 @@ public sealed class SegmentSourceContractTests
     [InlineData(SegmentSourceKind.HttpRange)]
     public async Task Every_buffer_satisfies_its_own_declared_alignment(SegmentSourceKind kind)
     {
-        // PHASE1-CONTRACTS.md §5 "Tests must cover": offsets {64, 65, 127, 128, 4096} with
-        // exponents {6, 0, 0, 6, 4}, asserting every buffer's base address satisfies its own
-        // alignment. This is the coalescing-versus-alignment proof, end to end.
+        // Offsets {64, 65, 127, 128, 4096} with exponents {6, 0, 0, 6, 4}, asserting every
+        // buffer's base address satisfies its own alignment: the coalescing-versus-alignment
+        // proof, end to end.
         SegmentSpec[] specs =
         [
             Spec(64, 8, 6), Spec(65, 3, 0), Spec(127, 1, 0), Spec(128, 64, 6), Spec(4096, 32, 4),
@@ -176,9 +176,9 @@ public sealed class SegmentSourceContractTests
     public async Task A_run_whose_first_offset_is_not_64_aligned_still_aligns_its_members(
         SegmentSourceKind kind)
     {
-        // The list above happens to start at 64. This one does not, so `Start = specs[0].Offset`
-        // - the simplification PHASE1-CONTRACTS.md §5.4 warns about - would put the 64-aligned
-        // segment at 128 onto a byte-63 boundary.
+        // The list above happens to start at 64. This one does not, so the tempting
+        // simplification `Start = specs[0].Offset` would put the 64-aligned segment at 128 onto
+        // a byte-63 boundary.
         SegmentSpec[] specs = [Spec(65, 1, 0), Spec(128, 64, 6), Spec(256, 16, 4)];
 
         await using SegmentSourceHarness harness = new SegmentSourceHarness(kind, Content());
@@ -542,8 +542,8 @@ public sealed class SegmentSourceContractTests
     [Fact]
     public async Task A_mapping_outlives_the_source_while_a_batch_still_holds_a_slice()
     {
-        // docs/03-architecture.md §3.5: "returned buffers are owned by the source until the batch
-        // that requested them is disposed." Disposing the source early must not unmap.
+        // Returned buffers are owned by the source until the batch that requested them is
+        // disposed, so disposing the source early must not unmap.
         byte[] content = Content();
         using TempFile file = new TempFile(content);
 

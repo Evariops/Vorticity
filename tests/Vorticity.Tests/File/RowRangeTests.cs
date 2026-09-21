@@ -1,7 +1,7 @@
-// RowRange lives in the root Vorticity namespace (PHASE1-CONTRACTS.md §11.1, §15.5) and is
-// consumed by both the layout readers and the scan, so its edges are worth pinning: it is long-
-// based because a file may hold more rows than an int can address, and an inverted or negative
-// range is a CALLER error and therefore Argument*, never VortexFormatException (§1.4).
+// RowRange lives in the root Vorticity namespace and is consumed by both the layout readers and
+// the scan, so its edges are worth pinning: it is long-based because a file may hold more rows
+// than an int can address, and an inverted or negative range is a CALLER error and therefore
+// Argument*, never VortexFormatException.
 using System;
 using Xunit;
 
@@ -123,8 +123,7 @@ public sealed class RowRangeTests
     [Fact]
     public void RowRangeAddressesMoreRowsThanAnIntCan()
     {
-        // docs/03-architecture.md §3.4: System.Range is int-based and cannot address a file of
-        // three billion rows.
+        // System.Range is int-based and cannot address a file of three billion rows.
         RowRange range = RowRange.FromLength(3_000_000_000L, 1_000_000_000L);
         Assert.Equal(4_000_000_000L, range.End);
         Assert.True(range.Contains(3_500_000_000L));

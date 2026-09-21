@@ -895,7 +895,7 @@ public sealed class CorpusExhaustiveMetadataTests
     [Fact]
     public void EveryForReferenceScalarRoundTripsExactly()
     {
-        // fastlanes.for carries a bare ScalarValue, not a message (Phase 1 contract §0a C2).
+        // fastlanes.for carries a bare ScalarValue, not a message.
         ScalarStore store = new ScalarStore();
         DTypeArena arena = new DTypeArena();
         foreach (string base64 in ForReferencePayloads)

@@ -1,10 +1,10 @@
-// The lazy-resolution rule of PHASE1-CONTRACTS.md §2.3, on a real file.
+// The lazy resolution of component ids, on a real file.
 //
 // Opening a file must NEVER fail because of an unknown component id: resolution happens at open,
 // failure happens at use, and the three throw sites are all downstream of this component. The
 // fixture is forged in memory by a LENGTH-PRESERVING byte patch of one `array_specs` id, so every
 // offset in the file stays valid and the only thing that changed is a name the registry cannot
-// resolve - the same trick §2.7 uses to turn a `vortex.zoned` layout into a `vortex.stats` one.
+// resolve - the same trick that turns a `vortex.zoned` layout into a `vortex.stats` one.
 using System;
 using System.Buffers.Binary;
 using System.Text;
