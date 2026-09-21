@@ -1006,7 +1006,14 @@ internal static class ThroughputCheck
     {
         string? configured = Environment.GetEnvironmentVariable(Variable);
         string root = string.IsNullOrEmpty(configured) ? DefaultRoot : configured;
-        if (!Directory.Exists(root))
+
+        // The files, not the directory: the generator creates the directory before it writes
+        // anything, so one that failed or was interrupted leaves it behind empty, and that needs
+        // the same command as no directory at all.
+        string[] files = Directory.Exists(root)
+            ? Directory.GetFiles(root, "*.vortex", SearchOption.AllDirectories)
+            : [];
+        if (files.Length == 0)
         {
             Console.Error.WriteLine(
                 $"No throughput inputs at {root}.\n" +
@@ -1025,7 +1032,6 @@ internal static class ThroughputCheck
             return 2;
         }
 
-        string[] files = Directory.GetFiles(root, "*.vortex", SearchOption.AllDirectories);
         Array.Sort(files, StringComparer.Ordinal);
         if (only.Length > 0)
         {
@@ -1051,7 +1057,7 @@ internal static class ThroughputCheck
 
         if (files.Length == 0)
         {
-            Console.Error.WriteLine($"no .vortex files under {root}");
+            Console.Error.WriteLine($"no input under {root} matches {string.Join(", ", only)}");
             return 2;
         }
 
